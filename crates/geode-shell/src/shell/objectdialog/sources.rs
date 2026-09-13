@@ -183,6 +183,8 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                 value: polls,
                 min: 1,
                 max: 100,
+                step: 1,
+                wrap: false,
             },
         ),
         field(
@@ -430,7 +432,8 @@ mod tests {
             FieldKind::Number {
                 value: 4,
                 min: 1,
-                max: 100
+                max: 100,
+                ..
             }
         ));
         assert!(

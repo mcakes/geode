@@ -60,6 +60,7 @@ use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::schema::SchemaSpec;
+use geode_core::view::ColumnPresentation;
 
 use super::{Destination, Draft, Field, FieldKind, ListItem, Step};
 
@@ -126,7 +127,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .map(|name| ListItem {
             name: name.clone(),
             included: true,
-            width: None,
+            presentation: ColumnPresentation::default(),
             // No column-kind concept on this list at all — `kind` exists
             // only for Views' `columns_for` to fill in a brand new
             // `[[columns]]` entry, and a grouping slot's value is a bare
@@ -141,7 +142,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         items.push(ListItem {
             name: column.column,
             included: false,
-            width: None,
+            presentation: ColumnPresentation::default(),
             kind: None,
         });
     }

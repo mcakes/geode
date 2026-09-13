@@ -2617,21 +2617,34 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 if !entry.included {
                     name_row = name_row.text_color(theme.muted_foreground);
                 }
-                let name = name_row
-                    .child(highlighted_text(&entry.name, &m.indices, theme.primary))
-                    .into_any_element();
-                let width = match entry.width {
-                    Some(width) => format!("{width:.0}px"),
-                    None => "auto".to_string(),
-                };
+                name_row = name_row.child(highlighted_text(&entry.name, &m.indices, theme.primary));
+                // The compact per-column summary (Part 2c §5.4) is painted
+                // after the name, muted, on a member row only — an
+                // available row's presentation is always the empty
+                // default (nothing has ever overridden a column not yet
+                // in the view), so `column_summary` would paint nothing
+                // for one anyway, but `own` says so rather than relying
+                // on that coincidence. It is deliberately part of the
+                // NAME element, not `row_label` — `Draft::row_label`
+                // stays the name alone, so the filter still matches only
+                // what it always matched.
+                if own {
+                    let summary =
+                        views::column_summary(&views::kind_default(entry), &entry.presentation);
+                    if !summary.is_empty() {
+                        name_row = name_row.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(summary),
+                        );
+                    }
+                }
+                let name = name_row.into_any_element();
                 (
                     format!("objectdialog-item-{}", entry.name),
                     name,
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(width)
-                        .into_any_element(),
+                    div().into_any_element(),
                 )
             }
         };

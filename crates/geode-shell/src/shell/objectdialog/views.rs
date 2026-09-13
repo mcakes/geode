@@ -17,7 +17,9 @@ use std::collections::BTreeMap;
 
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
 use geode_core::schema::{ColumnRole, DatasetSpec, SchemaSpec};
-use geode_core::view::{ViewColumn, ViewSpec};
+use geode_core::view::{
+    Colour, ColumnFormat, ColumnPresentation, Negative, Scale, ViewColumn, ViewSpec,
+};
 
 use super::{Destination, Draft, Field, FieldKind, ListItem};
 
@@ -165,7 +167,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                     ListItem {
                         name: column.name().to_string(),
                         included: !presentation.hidden.unwrap_or(false),
-                        width: presentation.width,
+                        presentation,
                         kind: Some(view_column_kind(column).to_string()),
                     }
                 })
@@ -287,7 +289,7 @@ fn dataset_catalogue(items: &[ListItem], dataset: &DatasetSpec) -> Vec<ListItem>
         available.push(ListItem {
             name: column.name.clone(),
             included: false,
-            width: None,
+            presentation: ColumnPresentation::default(),
             kind: Some(kind.to_string()),
         });
     }
@@ -418,88 +420,139 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
     out
 }
 
-/// The trader's personal view of the view, for `view_presentation.toml`:
-/// the column order, which are hidden, and any widths.
+/// The trader's personal view of the view, for `view_presentation.toml`
+/// (Part 2c §4.3): the column order, and one `[columns.<name>]` table per
+/// column whose presentation the trader has actually changed.
 ///
 /// Rendered fresh from the draft rather than merged into whatever is on
-/// disk, because this table is replaced whole (see [`to_table`]). Empty
-/// `hidden`/`width` are omitted rather than written as empty containers —
-/// a file that says nothing is easier to hand-edit than one full of `[]`.
+/// disk, because this table is replaced whole (see [`to_table`]). A
+/// column with nothing to say gets no table at all — a file that says
+/// nothing is easier to hand-edit than one full of empty `[...]`
+/// headers, and it is also what keeps a save from ever writing the
+/// LEGACY `hidden`/`width` spelling this function superseded: every key
+/// this writes lands inside `[columns.<name>]`, never a top-level
+/// `hidden` array or `width` table.
 ///
 /// **Only what the trader actually changed is written.** `order` and
-/// `width` both arrive here off the *effective* view, which already
-/// carries whatever `views.toml` declared — so writing every column's
-/// position and every declared width back would pin the desk's layout
-/// for this trader against the desk's later changes. That is the same
-/// freeze [`Destination`] exists to prevent, one field-granularity down,
-/// and it would fire on the commonest edit there is: hiding one column
-/// would silently adopt the desk's order and widths forever. Both are
-/// therefore compared against [`doc_baseline`] — what this same save
-/// leaves in `views.toml` — and omitted when they still match it.
-/// `hidden` needs no such comparison: nothing but this file can set it.
+/// every per-column key arrive here off the *effective* presentation
+/// (`ListItem::presentation`), which already carries whatever
+/// `views.toml` declared — so writing every column's position and every
+/// declared format key back would pin the desk's layout for this trader
+/// against the desk's later changes. That is the same freeze
+/// [`Destination`] exists to prevent, one field-granularity down, and it
+/// would fire on the commonest edit there is: hiding one column would
+/// silently adopt the desk's order and every other column's format
+/// forever. Every key is therefore compared, one at a time, against
+/// [`desk_baseline`] — what the SAME save leaves in `views.toml` — and
+/// omitted when it still matches. `hidden` needs no such comparison:
+/// nothing but this file can ever set it, so a column is either
+/// unhidden (the universal desk default) or explicitly hidden here.
+///
+/// Each of the seven format-key comparisons below is deliberately a
+/// nested `if item.presentation.<key> != desk.<key> { if let Some(v) = …
+/// }` rather than clippy's preferred `if … && let Some(v) = … {}`
+/// single-line collapse: the mutation harness anchors one entry on the
+/// OUTER condition's own line, and collapsing the two would fold that
+/// line into a different one the moment a sibling key's comparison
+/// changed — `#[allow]` below, not the suggested rewrite.
+#[allow(clippy::collapsible_if)]
 fn presentation_table(draft: &Draft) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
     // Only the view's own columns are presented at all — a column still
     // in the available catalogue is not part of the view, so it has no
-    // order, no hidden state and no width to write here either.
+    // order and no format to write here either.
     let items: Vec<&ListItem> = draft
         .list_items("columns")
         .unwrap_or_default()
         .iter()
         .collect();
-    let (doc_order, doc_widths) = doc_baseline(draft);
+    let order = doc_order(draft);
+    let baseline = desk_baseline(draft);
 
     let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
-    if names != doc_order {
-        let mut order = toml_edit::Array::new();
+    if names != order {
+        let mut ord = toml_edit::Array::new();
         for name in &names {
-            order.push(*name);
+            ord.push(*name);
         }
-        table["order"] = toml_edit::value(order);
+        table["order"] = toml_edit::value(ord);
     }
 
-    let mut hidden = toml_edit::Array::new();
-    for item in items.iter().filter(|i| !i.included) {
-        hidden.push(item.name.as_str());
-    }
-    if !hidden.is_empty() {
-        table["hidden"] = toml_edit::value(hidden);
-    }
+    let mut columns = toml_edit::Table::new();
+    for item in &items {
+        let desk = baseline
+            .get(item.name.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let mut t = toml_edit::Table::new();
 
-    let mut widths = toml_edit::Table::new();
-    for item in items {
-        let Some(width) = item.width else { continue };
-        if doc_widths.get(item.name.as_str()) == Some(&width) {
-            continue; // the desk's own width, not the trader's
+        if item.presentation.precision != desk.precision {
+            if let Some(v) = item.presentation.precision {
+                t["precision"] = toml_edit::value(i64::from(v));
+            }
         }
-        widths[item.name.as_str()] = toml_edit::value(f64::from(width));
+        if item.presentation.thousands != desk.thousands {
+            if let Some(v) = item.presentation.thousands {
+                t["thousands"] = toml_edit::value(v);
+            }
+        }
+        if item.presentation.negative != desk.negative {
+            if let Some(v) = item.presentation.negative {
+                t["negative"] = toml_edit::value(negative_key(v));
+            }
+        }
+        if item.presentation.colour != desk.colour {
+            if let Some(v) = &item.presentation.colour {
+                t["colour"] = toml_edit::value(colour_key(v));
+            }
+        }
+        if item.presentation.scale != desk.scale {
+            if let Some(v) = item.presentation.scale {
+                t["scale"] = toml_edit::value(scale_key(v));
+            }
+        }
+        if item.presentation.label != desk.label {
+            if let Some(v) = &item.presentation.label {
+                t["label"] = toml_edit::value(v.as_str());
+            }
+        }
+        if item.presentation.width != desk.width {
+            if let Some(v) = item.presentation.width {
+                t["width"] = width_value(v);
+            }
+        }
+        if !item.included {
+            t["hidden"] = toml_edit::value(true);
+        }
+
+        if !t.is_empty() {
+            columns[item.name.as_str()] = toml_edit::Item::Table(t);
+        }
     }
-    if !widths.is_empty() {
-        table["width"] = toml_edit::Item::Table(widths);
+    if !columns.is_empty() {
+        table["columns"] = toml_edit::Item::Table(columns);
     }
 
     table
 }
 
-/// The column order and the per-column widths **the view's own doc will
-/// hold after this same save** — read back out of [`columns_for`] rather
-/// than off `draft.source` directly, so the two halves of one save cannot
+/// The column order **the view's own doc will hold after this same
+/// save** — read back out of [`columns_for`] rather than off
+/// `draft.source` directly, so the two halves of one save cannot
 /// disagree about what the doc says.
 ///
 /// This is the "pre-presentation view" [`presentation_table`] compares
 /// against. Using the post-write doc rather than the raw source is what
 /// keeps a change to the column set honest: adding or dropping one
-/// rewrites
-/// `views.toml`'s column list, and the trader has not reordered anything
-/// merely by doing so.
-fn doc_baseline(draft: &Draft) -> (Vec<&str>, BTreeMap<String, f32>) {
+/// rewrites `views.toml`'s column list, and the trader has not reordered
+/// anything merely by doing so.
+fn doc_order(draft: &Draft) -> Vec<&str> {
     let wanted: Vec<&ListItem> = draft
         .list_items("columns")
         .unwrap_or_default()
         .iter()
         .collect();
     let mut order = Vec::with_capacity(wanted.len());
-    let mut widths = BTreeMap::new();
     for column in columns_for(&draft.source, &wanted).iter() {
         let Some(name) = column.get("name").and_then(|item| item.as_str()) else {
             continue;
@@ -509,24 +562,160 @@ fn doc_baseline(draft: &Draft) -> (Vec<&str>, BTreeMap<String, f32>) {
         let Some(item) = wanted.iter().find(|w| w.name == name) else {
             continue;
         };
-        if let Some(width) = doc_width(column) {
-            widths.insert(item.name.clone(), width);
-        }
         order.push(item.name.as_str());
     }
-    (order, widths)
+    order
 }
 
-/// One column table's declared `width`, read exactly as
-/// `ViewSpec::from_doc` reads it — an integer or a float, positive, cast
-/// to `f32`. Anything else is not a width the loader would have applied,
-/// so it is not one this can be compared against either.
-fn doc_width(column: &toml_edit::Table) -> Option<f32> {
-    let value = column.get("width")?.as_value()?;
-    let width = value
-        .as_float()
-        .or_else(|| value.as_integer().map(|i| i as f64))?;
-    (width > 0.0).then_some(width as f32)
+/// Each column's presentation **as the view's own doc already declares
+/// it** — one column, one `format` sub-table plus `label`/`width`, read
+/// directly off `draft.source`'s own `[[columns]]` tables (never through
+/// [`columns_for`]'s `toml_edit` rendering: a bare `toml_edit::Table`
+/// with no document to hang a header path off loses a nested table
+/// entirely when printed — `object_text`'s own doc comment has the same
+/// warning about `Table::to_string` — so a column's `format` sub-table
+/// would silently vanish on the very round trip meant to read it back).
+/// `draft.source` is already a plain `toml::Table`, which is exactly the
+/// shape [`ColumnPresentation`]'s readers want, so no conversion is
+/// needed at all.
+///
+/// A column `columns_for` would synthesise fresh (one `wanted` names but
+/// `draft.source` does not yet have — a column just promoted out of the
+/// available catalogue) has no entry here, and [`presentation_table`]'s
+/// `.unwrap_or_default()` treats that exactly as "no desk baseline yet",
+/// which is correct: nothing has published a presentation for a column
+/// that does not exist in `views.toml` yet either.
+///
+/// `read_hidden: false`, always: `hidden` is never a view's own key —
+/// only the overlay this function's caller writes ever sets it — so a
+/// column's baseline `hidden` is always `None`, which is exactly why
+/// [`presentation_table`] compares `included` against the desk's default
+/// (unhidden) directly rather than against a baseline field for it. The
+/// `warn` callback is a no-op: a column's table here already passed
+/// through the loader once as `views.toml` itself, so a key it could not
+/// parse would already have been reported there — reporting it again
+/// while rendering a save would be noise about the SAME problem from a
+/// second place.
+fn desk_baseline(draft: &Draft) -> BTreeMap<String, ColumnPresentation> {
+    let noop_warn = |_: &str, _: String| {};
+    let mut baseline = BTreeMap::new();
+    let source_columns: Vec<&toml::Table> = draft
+        .source
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_table()).collect())
+        .unwrap_or_default();
+    for column in source_columns {
+        let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let mut presentation = ColumnPresentation::default();
+        if let Some(format) = column.get("format").and_then(|v| v.as_table()) {
+            presentation.parse_format_keys(format, &noop_warn);
+        }
+        presentation.parse_column_keys(column, false, &noop_warn);
+        baseline.insert(name.to_string(), presentation);
+    }
+    baseline
+}
+
+/// `negative`'s two written spellings — the same two [`ColumnPresentation
+/// ::parse_format_keys`] reads back.
+fn negative_key(n: Negative) -> &'static str {
+    match n {
+        Negative::Minus => "minus",
+        Negative::Parens => "parens",
+    }
+}
+
+/// `scale`'s three written spellings — the same three the reader accepts.
+fn scale_key(s: Scale) -> &'static str {
+    match s {
+        Scale::None => "none",
+        Scale::Thousands => "k",
+        Scale::Millions => "M",
+    }
+}
+
+/// `colour`'s written spelling: the two built-ins, or a name into
+/// `colours.toml` verbatim.
+fn colour_key(c: &Colour) -> String {
+    match c {
+        Colour::None => "none".to_string(),
+        Colour::Sign => "sign".to_string(),
+        Colour::Named(name) => name.clone(),
+    }
+}
+
+/// A whole-number width is written as an integer (`width = 140`), never
+/// `140.0` — the common case by far, and the plain integer is what a
+/// trader hand-editing the file would type.
+fn width_value(width: f32) -> toml_edit::Item {
+    if width.fract() == 0.0 {
+        toml_edit::value(width as i64)
+    } else {
+        toml_edit::value(f64::from(width))
+    }
+}
+
+/// The default format a column's kind implies before any presentation is
+/// applied — [`ColumnFormat::TEXT`] for a dimension, [`ColumnFormat::
+/// MEASURE`] for everything else (a measure or a derived column). Used by
+/// [`column_summary`] so a member row's summary states only what the
+/// trader has actually overridden, never the kind's own defaults.
+pub fn kind_default(item: &ListItem) -> ColumnFormat {
+    if item.kind.as_deref() == Some("dimension") {
+        ColumnFormat::TEXT
+    } else {
+        ColumnFormat::MEASURE
+    }
+}
+
+/// The compact summary painted after a member row's name (Part 2c §5.4):
+/// only the presentation keys that differ from `kind_default`, joined by
+/// " · ", or the empty string when the column carries no override at
+/// all — the common case, so most rows paint nothing here.
+///
+/// `width` and `label` are read off `p` directly rather than off the
+/// resolved format, because neither has a "default" a `ColumnFormat`
+/// could compare against — a width is either declared or it isn't, and
+/// the same is true of a label. Every other part reads the RESOLVED
+/// value (`kind_default.with(p)`) against the kind default, not `p`
+/// directly, because `p` being `None` on a key still has a real,
+/// meaningful value once the kind default fills it in — precision 0 is
+/// not "no precision", it is the dimension default, and there is nothing
+/// to call out about it.
+pub fn column_summary(kind_default: &ColumnFormat, p: &ColumnPresentation) -> String {
+    let effective = kind_default.clone().with(p);
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(width) = p.width {
+        parts.push(format!("{width:.0} px"));
+    }
+    match effective.scale {
+        Scale::None => {}
+        Scale::Thousands => parts.push("k".to_string()),
+        Scale::Millions => parts.push("M".to_string()),
+    }
+    if effective.precision != kind_default.precision {
+        parts.push(format!("{} dp", effective.precision));
+    }
+    if effective.negative != Negative::Minus {
+        parts.push("parens".to_string());
+    }
+    if kind_default.thousands && !effective.thousands {
+        parts.push("no thousands".to_string());
+    }
+    if effective.colour != kind_default.colour {
+        parts.push(match &effective.colour {
+            Colour::None => "none".to_string(),
+            Colour::Sign => "sign".to_string(),
+            Colour::Named(name) => name.clone(),
+        });
+    }
+    if let Some(label) = &p.label {
+        parts.push(format!("→ {label}"));
+    }
+    parts.join(" · ")
 }
 
 /// Everything wrong with the draft as it stands (spec §7.2).
@@ -625,6 +814,40 @@ mod tests {
             desk: None,
             user: None,
         })
+    }
+
+    /// A `views` doc of `views_text` verbatim, over a `risk` dataset
+    /// declaring exactly the two columns the writer tests below need:
+    /// `npv` (a measure, grain instrument) and `book` (a dimension) —
+    /// the smallest schema `presentation_table`'s desk-baseline
+    /// comparison can exercise without a third column's presentation
+    /// muddying an assertion about the other two.
+    fn config_with_view(views_text: &str) -> Config {
+        config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (Layer::Desk, "views", views_text),
+        ])
+    }
+
+    /// The `columns` field's own list, mutable — for a test that pokes at
+    /// a `ListItem`'s presentation or inclusion directly rather than
+    /// through a verb, the way `presentation_table`'s desk-comparison
+    /// tests need to.
+    fn items_mut(draft: &mut Draft) -> &mut Vec<ListItem> {
+        let field = draft
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "columns")
+            .expect("the draft has a columns field");
+        match &mut field.kind {
+            FieldKind::OrderedList { items, .. } => items,
+            _ => panic!("columns is not an ordered list"),
+        }
     }
 
     /// `tree` selects `npv` out of a `risk` dataset that also has `book`
@@ -1309,5 +1532,47 @@ mod tests {
             Some(EditRow::Field(0)),
             "the cursor followed the dataset field through the rebuild"
         );
+    }
+
+    /// Part 2c §4.3: the overlay writer emits one `[view.columns.<col>]`
+    /// table per column with an override, carrying only the keys that
+    /// differ from the desk's own baseline — never the legacy `hidden`
+    /// array or `width` table `presentation_table` wrote before this
+    /// task.
+    #[test]
+    fn the_writer_emits_only_keys_that_differ_from_the_desk() {
+        // desk: npv has scale k, precision 2; the trader sets precision 0 and a colour, and hides book.
+        let config = config_with_view(
+            "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { scale = \"k\", precision = 2 }\n[[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+        );
+        let mut draft = Domain::Views.draft(&config, "tree");
+        {
+            let items = items_mut(&mut draft);
+            items[0].presentation.precision = Some(0);
+            items[0].presentation.colour = Some(Colour::Named("delta".to_string()));
+            items[1].included = false;
+        }
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(text.contains("[tree.columns.npv]"), "{text}");
+        assert!(
+            text.contains("precision = 0") && text.contains("colour = \"delta\""),
+            "{text}"
+        );
+        assert!(
+            !text.contains("scale"),
+            "the desk's own scale is not copied: {text}"
+        );
+        assert!(
+            text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("\nwidth = {") && !text.contains("hidden = ["),
+            "no legacy spelling: {text}"
+        );
+        // Setting precision back to the desk's value drops the key.
+        items_mut(&mut draft)[0].presentation.precision = Some(2);
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(!text.contains("precision"), "{text}");
     }
 }

@@ -4336,7 +4336,7 @@ run_mutation "plan: a hidden column is planned anyway" \
 # reordered can see it.
 run_mutation "views: a presentation save pins the desk's column order" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '    if names != doc_order {' \
+  '    if names != order {' \
   '    if true {' \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
@@ -4346,12 +4346,20 @@ run_mutation "views: a presentation save pins the desk's column order" \
 # desk declared cannot tell "kept the trader's" from "copied the desk's".
 # The fixture has to declare a width in `views.toml` and change something
 # else entirely.
+#
+# Re-anchored for 2c §4.3: the flat `doc_widths` map this compared
+# against became `desk_baseline`'s per-column `ColumnPresentation`, and
+# every key (not just `width`) now goes through this same
+# compare-then-emit shape — this entry keeps its original width-specific
+# anchor rather than the shared one `views: the overlay writer omits keys
+# equal to the desk` uses (`precision`), so the two entries are isolated
+# from each other.
 run_mutation "views: a presentation save copies the desk's widths into the user's file" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if doc_widths.get(item.name.as_str()) == Some(&width) {' \
+  '        if item.presentation.width != desk.width {' \
   '        if false {' \
   geode-shell \
-  a_presentation_save_writes_only_what_the_trader_changed
+  the_presentation_table_holds_order_hidden_and_width
 
 # ---- Phase 4c: the reload keeps the app's own builtin layer ----------
 
@@ -6027,10 +6035,16 @@ run_mutation "dialogmode: shift+space maps to nothing (forward-only restored)" \
 # backward arm always refuse (`return false`) is the old defect, and only
 # a test asserting the value actually moves down — not just that the row
 # is steppable — can see it.
+# Re-anchored for 2c §5.4: `step_selected`'s Number arm no longer
+# special-cases each `StepDirection` with its own early return — a single
+# `wrap`-aware clamp handles both directions now (see `a wrapping number
+# wraps`, above). The behaviour this entry pins is the non-wrapping
+# backward clamp: without the `next < *min` guard, stepping back from the
+# bound would walk the value below `min` instead of stopping at it.
 run_mutation "objectdialog: Number refuses to step down" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                        StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),' \
-  '                        StepDirection::Backward => return false,' \
+  '                        } else if next < *min {' \
+  '                        } else if false {' \
   geode-shell a_number_steps_both_ways_and_stops_at_each_end
 
 # ---- Phase 4c part 2a, Task 4: the Groupings adapter -------------------
@@ -7898,6 +7912,34 @@ run_mutation "load_views: an unknown colour in the overlay warns with its path" 
   '                if false {' \
   geode-core \
   a_presentation_naming_an_unknown_colour_warns_with_its_path
+
+# 2c §5.4: a wrapping Number goes round; a plain one lands on the bound.
+run_mutation "objectdialog: a wrapping number wraps" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                        let landed = if *wrap {' \
+  '                        let landed = if false {' \
+  geode-shell \
+  a_number_steps_by_its_step_and_wraps_only_when_asked
+
+# 2c §4.3: the writer omits a key equal to the desk baseline.
+run_mutation "views: the overlay writer omits keys equal to the desk" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        if item.presentation.precision != desk.precision {' \
+  '        if item.presentation.precision != desk.precision || true {' \
+  geode-shell \
+  the_writer_emits_only_keys_that_differ_from_the_desk
+
+# 2c §4.3: a demoted column (`d`/space) is written `hidden = true` in its
+# own [columns.<name>] table — the guard this task's writer replaced the
+# legacy `hidden = [...]` array with. Mutating it true unconditionally
+# would hide EVERY column, member or not, the moment any one of them had
+# something else to say.
+run_mutation "views: hidden is written whenever a member is excluded" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        if !item.included {' \
+  '        if false {' \
+  geode-shell \
+  hiding_a_column_writes_presentation_and_does_not_fork_the_view
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

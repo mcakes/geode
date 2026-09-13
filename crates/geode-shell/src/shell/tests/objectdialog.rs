@@ -501,7 +501,7 @@ fn the_reload_an_edit_triggers_leaves_the_views_and_the_hidden_column_intact(
     let presentation = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("view_presentation.toml should have been written");
     assert!(
-        presentation.contains("hidden = [\"book\"]"),
+        presentation.contains("[tree.columns.book]") && presentation.contains("hidden = true"),
         "the hidden column must survive the reload the edit triggered:\n{presentation}"
     );
 }
@@ -585,7 +585,7 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
     let presentation = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("view_presentation.toml should have been written");
     assert!(
-        presentation.contains("hidden = [\"book\"]"),
+        presentation.contains("[tree.columns.book]") && presentation.contains("hidden = true"),
         "the hidden column has to actually be in the file:\n{presentation}"
     );
     assert!(
@@ -984,7 +984,10 @@ fn an_edit_with_only_warnings_still_joins_the_batch(cx: &mut gpui::TestAppContex
     flush_config_write(&mut cx);
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("a warning must not have stopped the write");
-    assert!(text.contains("hidden = [\"book\"]"), "{text}");
+    assert!(
+        text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+        "{text}"
+    );
 }
 
 /// **The requirement, in one test.** Changing a config field is INSTANT:
@@ -1037,15 +1040,19 @@ fn a_field_edit_shows_instantly_and_the_config_and_file_follow_together(
         .expect("the debounced flush has to reach the merged config");
     assert_eq!(
         applied
-            .get("hidden")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len()),
-        Some(1),
+            .get("columns")
+            .and_then(|v| v.get("book"))
+            .and_then(|v| v.get("hidden"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
         "hiding a column has to reach the merged config, got {applied:?}"
     );
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("and the file, on the same timer");
-    assert!(text.contains("hidden = [\"book\"]"), "{text}");
+    assert!(
+        text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+        "{text}"
+    );
 }
 
 /// **Applying stays singular, and the fan-out rides the write's timer.**
@@ -1252,7 +1259,10 @@ fn a_stale_write_completion_does_not_erase_a_newer_edit(cx: &mut gpui::TestAppCo
 
     let text = std::fs::read_to_string(&file)
         .expect("the batch a stale completion left alone still has to be written");
-    assert!(text.contains("hidden = [\"book\"]"), "{text}");
+    assert!(
+        text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+        "{text}"
+    );
     assert!(
         presentation_of(&shell, &cx, "tree").is_some(),
         "and it has to have been applied, not just written"
@@ -1428,18 +1438,24 @@ fn edits_inside_the_debounce_window_coalesce_into_one_write(cx: &mut gpui::TestA
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("the coalesced write has to land");
     assert!(
-        text.contains("hidden = [\"npv\"]"),
+        text.contains("[tree.columns.npv]") && text.contains("hidden = true"),
         "and it has to be the FINAL state, not the first edit of the run:\n{text}"
+    );
+    assert!(
+        !text.contains("[tree.columns.book]"),
+        "book ended the run unhidden, its desk default, so it needs no \
+         table at all:\n{text}"
     );
     // Memory and the file agree, which is the only thing a coalesced
     // write is allowed to change about the result.
     let applied = presentation_of(&shell, &cx, "tree").expect("still personalised");
     assert_eq!(
         applied
-            .get("hidden")
-            .and_then(|v| v.as_array())
-            .map(Vec::len),
-        Some(1)
+            .get("columns")
+            .and_then(|v| v.get("npv"))
+            .and_then(|v| v.get("hidden"))
+            .and_then(|v| v.as_bool()),
+        Some(true)
     );
 }
 
@@ -4116,7 +4132,10 @@ fn clicking_a_tick_hides_the_column_and_parks_the_cursor_there(cx: &mut gpui::Te
     cx.run_until_parked();
     let text =
         std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap_or_default();
-    assert!(text.contains("hidden = [\"npv\"]"), "{text}");
+    assert!(
+        text.contains("[tree.columns.npv]") && text.contains("hidden = true"),
+        "{text}"
+    );
 }
 
 /// On an available row the tick adds — `space`'s add — which is a `Doc`

@@ -77,6 +77,7 @@ mod views;
 use std::collections::{BTreeMap, BTreeSet};
 
 use geode_core::config::{Config, Diagnostic, Layer, Severity};
+use geode_core::view::ColumnPresentation;
 
 use crate::dialogmode::DialogMode;
 
@@ -742,10 +743,16 @@ impl Destination {
 /// [`FieldKind::OrderedList`] documents, and nothing has to keep a flag
 /// and a position agreeing with each other.
 ///
-/// `width` is `Option<f32>` and not the spec sketch's `u32` because
-/// `ColumnPresentation::width` — the thing it round-trips through — is
-/// `Option<f32>`. `None` means "no width declared", which is not the
-/// same as zero: a declared zero would be a column of no width.
+/// `presentation` is the column's presentation as the trader sees it —
+/// the kind default with the desk's and the overlay's keys applied, i.e.
+/// `ViewSpec::presentation_of` after `load_views` (Part 2c §4.3) — not a
+/// bare `width` (the shape this field carried before Part 2c): a
+/// picker's `column_summary` needs precision, colour and scale too, and
+/// carrying the whole `ColumnPresentation` is what lets it read them off
+/// one value rather than growing a field per format key. A domain with
+/// no presentation concept at all (Groupings' `dimensions`) carries
+/// `ColumnPresentation::default()`, which is indistinguishable from "no
+/// override of anything" — exactly what such a domain means to say.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListItem {
     pub name: String,
@@ -754,7 +761,7 @@ pub struct ListItem {
     /// column set: a hidden column stays in `ViewSpec::columns`, so the
     /// compiler still selects it and unhiding costs nothing.
     pub included: bool,
-    pub width: Option<f32>,
+    pub presentation: ColumnPresentation,
     /// The `[[columns]]` `kind` a first-time write of this item needs —
     /// `"dimension"` or `"measure"` for Views (`views::fields`'s own doc
     /// has the schema-role mapping and why a `key`/`attribute` column
@@ -782,10 +789,18 @@ pub struct ListItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldKind {
     Text(String),
+    /// `step` is the distance one `space` moves; `wrap` makes the range
+    /// circular — a hue — so a step past `max` lands at `min + overshoot`
+    /// rather than pinning at `max`. Every existing `Number` is
+    /// `step: 1, wrap: false` — the vocabulary Sources' `stable_polls`
+    /// and Groupings' display-only `slot` both use — until a colour
+    /// field (Part 2c) needs the wrap.
     Number {
         value: i64,
         min: i64,
         max: i64,
+        step: i64,
+        wrap: bool,
     },
     Bool(bool),
     Choice {
@@ -1430,7 +1445,9 @@ impl Draft {
         let field = &mut self.fields[index];
         let label = field.label.clone();
         let outcome = match &mut field.kind {
-            FieldKind::Number { value, min, max } => match typed.parse::<i64>() {
+            FieldKind::Number {
+                value, min, max, ..
+            } => match typed.parse::<i64>() {
                 Err(_) => return Step::Refused(format!("{label} must be a whole number")),
                 Ok(n) if n < *min || n > *max => {
                     return Step::Refused(format!("{label} must be between {min} and {max}"));
@@ -1512,7 +1529,13 @@ impl Draft {
                         };
                         Step::Changed
                     }
-                    FieldKind::Number { value, min, max } => {
+                    FieldKind::Number {
+                        value,
+                        min,
+                        max,
+                        step,
+                        wrap,
+                    } => {
                         // A value outside [min, max] can arise entirely
                         // outside this dialog's own bounds — Sources' reader
                         // accepts any positive `stable_mtime` while the
@@ -1526,12 +1549,32 @@ impl Draft {
                                 "{label} is {value}, outside {min}–{max} — type a value with i"
                             ));
                         }
-                        match direction {
-                            StepDirection::Forward if *value >= *max => return Step::Inert,
-                            StepDirection::Backward if *value <= *min => return Step::Inert,
-                            StepDirection::Forward => *value = (*value + 1).clamp(*min, *max),
-                            StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),
+                        // `span` is the count of representable values —
+                        // `max - min + 1`, not `max - min` — so a value
+                        // that steps exactly one span past `max` wraps
+                        // back to itself rather than to its neighbour.
+                        // `wrap` is what makes the range circular (a hue:
+                        // 359 + 15 lands at 14, not clamped at 359);
+                        // without it a step past either bound clamps to
+                        // that bound instead.
+                        let span = *max - *min + 1;
+                        let next = match direction {
+                            StepDirection::Forward => *value + *step,
+                            StepDirection::Backward => *value - *step,
+                        };
+                        let landed = if *wrap {
+                            (next - *min).rem_euclid(span) + *min
+                        } else if next > *max {
+                            *max
+                        } else if next < *min {
+                            *min
+                        } else {
+                            next
+                        };
+                        if landed == *value {
+                            return Step::Inert;
                         }
+                        *value = landed;
                         Step::Changed
                     }
                     // See `FieldKind`: `Text` is `i`'s and `MultiChoice`
@@ -2187,8 +2230,8 @@ pub(super) fn set_object(document: &mut toml_edit::DocumentMut, name: &str, item
 /// Goes through a `DocumentMut` rather than `Table::to_string`, which is
 /// not the same thing and quietly loses work: a bare table renders only
 /// its own key-value pairs, so an array of tables (`[[tree.columns]]`)
-/// and a sub-table (`[tree.width]`) both need the document's header path
-/// to appear at all.
+/// and a sub-table (`[tree.columns.npv]`) both need the document's
+/// header path to appear at all.
 pub fn object_text(name: &str, item: toml_edit::Item) -> String {
     let mut document = toml_edit::DocumentMut::new();
     set_object(&mut document, name, item);
@@ -3190,6 +3233,8 @@ mod tests {
             value: 0,
             min: 0,
             max: 2,
+            step: 1,
+            wrap: false,
         });
         assert!(
             !draft.toggle_selected_back().changed(),
@@ -3200,7 +3245,9 @@ mod tests {
             FieldKind::Number {
                 value: 0,
                 min: 0,
-                max: 2
+                max: 2,
+                step: 1,
+                wrap: false,
             }
         );
         assert!(draft.toggle_selected().changed());
@@ -3209,7 +3256,9 @@ mod tests {
             FieldKind::Number {
                 value: 1,
                 min: 0,
-                max: 2
+                max: 2,
+                step: 1,
+                wrap: false,
             }
         );
 
@@ -3218,6 +3267,8 @@ mod tests {
             value: 2,
             min: 0,
             max: 2,
+            step: 1,
+            wrap: false,
         });
         assert!(
             !draft.toggle_selected().changed(),
@@ -3228,7 +3279,9 @@ mod tests {
             FieldKind::Number {
                 value: 2,
                 min: 0,
-                max: 2
+                max: 2,
+                step: 1,
+                wrap: false,
             }
         );
         assert!(draft.toggle_selected_back().changed());
@@ -3237,8 +3290,54 @@ mod tests {
             FieldKind::Number {
                 value: 1,
                 min: 0,
-                max: 2
+                max: 2,
+                step: 1,
+                wrap: false,
             }
+        );
+    }
+
+    /// 2c §5.4: a `Number` with `wrap: true` steps past its bound and
+    /// lands on the other side rather than clamping — the hue field's
+    /// own behaviour — while a plain (`wrap: false`) field still clamps
+    /// to the bound, exactly as `a_number_steps_both_ways_and_stops_at_
+    /// each_end` pins for `step: 1`.
+    #[test]
+    fn a_number_steps_by_its_step_and_wraps_only_when_asked() {
+        let mut draft = single_field_draft(FieldKind::Number {
+            value: 350,
+            min: 0,
+            max: 359,
+            step: 15,
+            wrap: true,
+        });
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        assert!(
+            matches!(draft.fields[0].kind, FieldKind::Number { value: 5, .. }),
+            "wraps: {:?}",
+            draft.fields[0].kind
+        );
+        assert_eq!(draft.toggle_selected_back(), Step::Changed);
+        assert!(matches!(
+            draft.fields[0].kind,
+            FieldKind::Number { value: 350, .. }
+        ));
+        let mut draft = single_field_draft(FieldKind::Number {
+            value: 355,
+            min: 0,
+            max: 359,
+            step: 15,
+            wrap: false,
+        });
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        assert!(
+            matches!(draft.fields[0].kind, FieldKind::Number { value: 359, .. }),
+            "lands on the bound without wrap"
+        );
+        assert_eq!(
+            draft.toggle_selected(),
+            Step::Inert,
+            "at the bound, no wrap: inert"
         );
     }
 
@@ -3253,6 +3352,8 @@ mod tests {
             value: 500,
             min: 1,
             max: 100,
+            step: 1,
+            wrap: false,
         });
         assert!(matches!(draft.toggle_selected(), Step::Refused(_)));
         assert_eq!(
@@ -3260,7 +3361,9 @@ mod tests {
             FieldKind::Number {
                 value: 500,
                 min: 1,
-                max: 100
+                max: 100,
+                step: 1,
+                wrap: false,
             },
             "forward must not clamp the value"
         );
@@ -3270,7 +3373,9 @@ mod tests {
             FieldKind::Number {
                 value: 500,
                 min: 1,
-                max: 100
+                max: 100,
+                step: 1,
+                wrap: false,
             },
             "backward must not clamp the value either"
         );
@@ -3385,7 +3490,7 @@ mod tests {
             .find(|f| f.key == "columns")
             .map(|f| &mut f.kind)
         {
-            items[1].width = Some(120.0);
+            items[1].presentation.width = Some(120.0);
         }
         draft.toggle_selected(); // hide `book`
         draft.move_item(1); // and move it below `npv`
@@ -3397,8 +3502,14 @@ mod tests {
             text.contains("order = [\"npv\", \"book\", \"delta01\"]"),
             "{text}"
         );
-        assert!(text.contains("hidden = [\"book\"]"), "{text}");
-        assert!(text.contains("npv = 120.0"), "{text}");
+        assert!(
+            text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[tree.columns.npv]") && text.contains("width = 120"),
+            "{text}"
+        );
     }
 
     /// **A presentation save must not freeze the desk's own values.**
@@ -3425,7 +3536,7 @@ mod tests {
             .position(|r| matches!(r, EditRow::Item { .. }))
             .expect("the fixture view has columns");
         assert_eq!(
-            draft.list_items("columns").map(|i| i[1].width),
+            draft.list_items("columns").map(|i| i[1].presentation.width),
             Some(Some(140.0)),
             "the desk's width reaches the draft — that is why it can be copied back"
         );
@@ -3435,7 +3546,10 @@ mod tests {
             "tree",
             Domain::Views.to_table(&draft, Destination::Presentation),
         );
-        assert!(text.contains("hidden = [\"book\"]"), "{text}");
+        assert!(
+            text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+            "{text}"
+        );
         assert!(
             !text.contains("order"),
             "nothing was reordered, so pinning the desk's order is a freeze:\n{text}"
@@ -3483,7 +3597,7 @@ mod tests {
         ]);
         let mut draft = Domain::Views.draft(&config, "tree");
         assert_eq!(
-            draft.list_items("columns").map(|i| i[1].width),
+            draft.list_items("columns").map(|i| i[1].presentation.width),
             Some(Some(140.0)),
             "the draft has to read the width back before it can keep it"
         );
@@ -3499,8 +3613,12 @@ mod tests {
             Domain::Views.to_table(&draft, Destination::Presentation),
         );
         assert!(
-            text.contains("npv = 140.0"),
+            text.contains("[tree.columns.npv]") && text.contains("width = 140"),
             "the width was dropped:\n{text}"
+        );
+        assert!(
+            !text.contains("[tree.columns.book]"),
+            "book returned to its desk default (not hidden) and needs no table:\n{text}"
         );
         assert!(!text.contains("hidden"), "{text}");
     }
@@ -3959,7 +4077,7 @@ mod tests {
         ListItem {
             name: name.to_string(),
             included: false,
-            width: None,
+            presentation: ColumnPresentation::default(),
             kind: None,
         }
     }
@@ -4327,6 +4445,8 @@ mod tests {
                         value: 3,
                         min: 1,
                         max: 100,
+                        step: 1,
+                        wrap: false,
                     },
                     dest: Destination::Doc,
                     layer: None,
@@ -4484,6 +4604,8 @@ mod tests {
                         value: 3,
                         min: 1,
                         max: 100,
+                        step: 1,
+                        wrap: false,
                     },
                     dest: Destination::Doc,
                     layer: None,
@@ -4571,20 +4693,20 @@ mod tests {
                             ListItem {
                                 name: "npv".into(),
                                 included: true,
-                                width: None,
+                                presentation: ColumnPresentation::default(),
                                 kind: None,
                             },
                             ListItem {
                                 name: "delta".into(),
                                 included: true,
-                                width: None,
+                                presentation: ColumnPresentation::default(),
                                 kind: None,
                             },
                         ],
                         available: Some(vec![ListItem {
                             name: "vega".into(),
                             included: false,
-                            width: None,
+                            presentation: ColumnPresentation::default(),
                             kind: None,
                         }]),
                     },
@@ -4672,13 +4794,13 @@ mod tests {
                         ListItem {
                             name: "delta".into(),
                             included: true,
-                            width: None,
+                            presentation: ColumnPresentation::default(),
                             kind: None,
                         },
                         ListItem {
                             name: "npv".into(),
                             included: true,
-                            width: None,
+                            presentation: ColumnPresentation::default(),
                             kind: None,
                         },
                     ],
@@ -4757,6 +4879,8 @@ mod tests {
                 value: 3,
                 min: 1,
                 max: 100,
+                step: 1,
+                wrap: false,
             },
             dest: Destination::Doc,
             layer: None,
