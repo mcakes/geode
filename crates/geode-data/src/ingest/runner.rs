@@ -1,6 +1,24 @@
 //! The ingest runner (spec §5.4–§5.7, Phase 3 §2.5). One thread owning
-//! the writer connection for **every** dataset, working a
-//! priority-ordered queue, never taking the app down.
+//! the writer connection for **every** dataset, working two queues —
+//! parsed documents and a priority-ordered queue of files — never taking
+//! the app down.
+//!
+//! A queued document is taken **ahead of** any file, whatever the file's
+//! priority (market-data spec §5.4, amended in Task 11: the rung wording
+//! there predates this ruling). Two reasons. A document publish is
+//! milliseconds — the rows are already parsed and already coalesced to
+//! the latest per key upstream (`ingest::coalescer`), so there is nothing
+//! to read, split or scan — and so it cannot starve a file load however
+//! many arrive: the file it jumps is delayed by the length of one
+//! appender pass. And a single rule spares the runner a second priority
+//! vocabulary: documents carry no `Priority`, and interleaving them with
+//! files by one would mean inventing and maintaining a comparison between
+//! two things that are never actually competing for the same time.
+//!
+//! `Queue::in_flight` belongs to the file arm alone — it is the dedupe
+//! key discovery's own polls are checked against, and a document has no
+//! file, no `stat` and no poll, so nothing on the document path reads or
+//! writes it.
 //!
 //! One thread, not a pool, and one for all datasets rather than one per
 //! dataset: DuckDB is single-writer, so every publish serializes anyway
@@ -25,9 +43,14 @@ use crate::ingest::load::{LoadError, LoadOutcome, LoadRequest, load_file};
 use crate::ingest::plan::{WorkItem, WorkPlan};
 use crate::source::discovery::is_unchanged;
 use crate::source::{CandidateState, Priority};
-use crate::store::{Catalog, Store};
+use crate::store::document::{
+    DocumentPublishRequest, DocumentPublished, document_path, publish_document,
+};
+use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
+use geode_core::document::{DocumentRows, join_key};
 use geode_core::schema::SchemaSpec;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -69,8 +92,39 @@ pub enum IngestEvent {
 /// so a sink must not block indefinitely — a channel send is fine.
 pub type IngestSink = Arc<dyn Fn(IngestEvent) -> bool + Send + Sync>;
 
+/// A parsed document waiting to publish (market-data spec §5.4 step 3).
+/// The rows are **owned**: the receiver thread parses into
+/// struct-of-arrays and hands the columns over, keeping nothing, so the
+/// publish reads no buffer another thread could still be writing and
+/// nothing here is cloned per row (PHILOSOPHY §6).
+///
+/// `source` is the `[sources.<name>]` name and `dataset` the dataset it
+/// feeds — two separate fields for the reason `IngestEvent::Published`
+/// records (Phase 4b's MAJ-1), not one name used twice.
+///
+/// `bytes` and `received_at` are what a document has instead of a file's
+/// length and mtime: a message carries no `stat`, but provenance still
+/// wants both, and `source_time` — the time *the feed* stamped, not the
+/// time we saw it — is what the backfill guard and as-of order by.
+#[derive(Debug)]
+pub struct DocumentJob {
+    pub source: String,
+    pub dataset: String,
+    pub rows: DocumentRows,
+    pub source_time: DateTime<Utc>,
+    pub received_at: DateTime<Utc>,
+    pub bytes: u64,
+}
+
 #[derive(Default)]
 struct Queue {
+    /// Parsed documents, taken ahead of `items` (see the module doc for
+    /// why). A `VecDeque`, and popped from the front, so two documents
+    /// for *different* keys publish in the order they arrived: the
+    /// coalescer upstream has already collapsed repeats of the same key,
+    /// so everything still in here is distinct work, and a LIFO would
+    /// reorder unrelated keys for no gain.
+    documents: VecDeque<DocumentJob>,
     items: Vec<WorkItem>,
     shutdown: bool,
     /// The file the runner has popped and is loading (or is about to skip
@@ -99,22 +153,31 @@ pub struct IngestRunner;
 /// in the reported `Failed.reason`) is the property worth testing here.
 type LoadFn = fn(&Store, &LoadRequest) -> Result<LoadOutcome, LoadError>;
 
+/// The work a document publish does, injectable for exactly the reason
+/// [`LoadFn`] is: no document makes [`publish_document`] itself panic
+/// (`DocumentRows::validate` turns every malformed one into an `Err`
+/// before a byte is written), so containment — the property spec §5.7
+/// actually asks for on this path — is only testable through an injected
+/// publish that does.
+type PublishFn = fn(&Store, &DocumentPublishRequest) -> Result<DocumentPublished, StoreError>;
+
 impl IngestRunner {
     pub fn spawn(store: Store, schema: SchemaSpec, sink: IngestSink) -> IngestHandle {
-        Self::spawn_with_load(store, schema, sink, load_file)
+        Self::spawn_with(store, schema, sink, load_file, publish_document)
     }
 
-    fn spawn_with_load(
+    fn spawn_with(
         store: Store,
         schema: SchemaSpec,
         sink: IngestSink,
         load: LoadFn,
+        publish: PublishFn,
     ) -> IngestHandle {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_queue = Arc::clone(&queue);
         let thread = std::thread::Builder::new()
             .name("geode-ingest".into())
-            .spawn(move || run(store, schema, worker_queue, sink, load))
+            .spawn(move || run(store, schema, worker_queue, sink, load, publish))
             .expect("spawning the ingest thread");
         IngestHandle {
             queue,
@@ -166,6 +229,24 @@ impl IngestHandle {
         });
         cvar.notify_all();
         enqueued
+    }
+
+    /// Hand a parsed document to the runner. Returns nothing, and refuses
+    /// nothing: unlike `submit`, there is no dedupe to report on — the
+    /// coalescer upstream already keeps at most one pending document per
+    /// key, so the deduplication this queue would otherwise need has
+    /// already happened where it can also *replace* a pending document
+    /// rather than merely drop a duplicate.
+    ///
+    /// Cheap enough to call from a receiver thread on every message
+    /// (spec's "nothing blocks a producer"): it moves the already-parsed
+    /// columns into a `VecDeque` under the queue lock and wakes the
+    /// runner. It never blocks on the runner itself.
+    pub fn submit_document(&self, job: DocumentJob) {
+        let (lock, cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        q.documents.push_back(job);
+        cvar.notify_all();
     }
 
     pub fn shutdown(&self) {
@@ -251,12 +332,158 @@ fn clear_in_flight(queue: &(Mutex<Queue>, Condvar)) {
     q.in_flight = None;
 }
 
+/// One unit of work the runner popped.
+#[derive(Debug)]
+enum Work {
+    Document(DocumentJob),
+    File(WorkItem),
+}
+
+/// Takes the next unit of work, **documents first** (module doc). A free
+/// function for the reason `enqueue` is one: the ordering rule is the
+/// whole point and a test can only state it without a race by driving a
+/// bare `Queue` synchronously — through the runner thread, whether a
+/// document beat a file is a matter of when the submit landed.
+///
+/// Only the file arm sets `in_flight`: it is the file dedupe's key, and a
+/// document is not a file. `None` means *both* queues are empty, which is
+/// what makes it the `PlanComplete` condition.
+fn take_work(q: &mut Queue) -> Option<Work> {
+    if let Some(job) = q.documents.pop_front() {
+        return Some(Work::Document(job));
+    }
+    if q.items.is_empty() {
+        return None;
+    }
+    let it = q.items.remove(0);
+    q.in_flight = Some((
+        it.candidate.csv_path.clone(),
+        it.candidate.size,
+        it.source_time,
+    ));
+    Some(Work::File(it))
+}
+
+/// Publishes one queued document, reporting the outcome as the same
+/// `IngestEvent`s a file load reports — a document *is* a file to
+/// everything downstream (generations, as-of, retention, the freshness
+/// catalog), so a second event vocabulary would only make the service
+/// and the diagnostics tile handle the same publish twice.
+///
+/// A free function, like the log helpers below, so its own behaviour is
+/// reachable from a test without a runner thread; and it takes `job` by
+/// value because the rows die with the publish.
+fn publish_one_document(
+    store: &Store,
+    schema: &SchemaSpec,
+    sink: &IngestSink,
+    publish: PublishFn,
+    refusal_logged: &AtomicBool,
+    job: DocumentJob,
+) {
+    // The batch is the document's key, joined — computed here, before the
+    // dataset is even resolved, because every failure below must name it:
+    // a feed's broken key is the one thing a diagnostics row for this
+    // failure is filed under (`HealthTracker`'s load lane is keyed by
+    // batch), and an undeclared dataset would otherwise report a failure
+    // against no key at all.
+    let batch = join_key(&job.rows.key);
+    // Resolved per document, exactly as the file arm resolves per item: a
+    // `[sources.<name>]` can name a dataset a later `datasets.toml` edit
+    // removed, and that is this document's failure, named, not a panic.
+    let Some(dataset) = schema.dataset(&job.dataset) else {
+        let failed = sink(IngestEvent::Failed {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            batch: batch.clone(),
+            reason: format!("dataset '{}' is not declared", job.dataset),
+        });
+        if !failed {
+            log_refused_event(
+                refusal_logged,
+                &format!(
+                    "the undeclared-dataset failure for document {}/{batch}",
+                    job.dataset
+                ),
+            );
+        }
+        return;
+    };
+
+    // The same boundary the file arm uses (spec §5.7): a panicking publish
+    // degrades its own document and the runner keeps working. `contained`
+    // is what tells the process-wide panic hook this one is handled, so it
+    // logs at `error` instead of writing a crash file.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| {
+            publish(
+                store,
+                &DocumentPublishRequest {
+                    dataset,
+                    source: &job.source,
+                    rows: &job.rows,
+                    source_time: job.source_time,
+                    received_at: job.received_at,
+                    bytes: job.bytes,
+                },
+            )
+            .map_err(|e| e.to_string())
+        })
+    }));
+
+    let event = match outcome {
+        Ok(Ok(published)) => IngestEvent::Published {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            // The publish's own batch, not the one computed above: they
+            // agree by construction, and reading it back from the publish
+            // keeps the event describing what was actually written.
+            batch: published.batch,
+            gen_id: published.gen_id,
+            // A document has no book column: the one partition written is
+            // the bookless one, spelled `None`. Not an empty list, which
+            // is how a load that wrote *nothing* reads.
+            books: vec![None],
+            rows: published.rows,
+            health: Health::Ok,
+        },
+        Ok(Err(reason)) => IngestEvent::Failed {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            batch: batch.clone(),
+            reason,
+        },
+        Err(payload) => {
+            let message = panic_payload_message(payload.as_ref());
+            // There is no file to name, so the synthetic
+            // `document://source/dataset/batch` path stands in — the same
+            // string `file_generations.path` records for this publish, so
+            // the log line and the catalog row can be matched up.
+            let path = document_path(&job.source, &job.dataset, &batch);
+            log_ingest_panic(&path, &message);
+            IngestEvent::Failed {
+                source: job.source.clone(),
+                dataset: job.dataset.clone(),
+                batch: batch.clone(),
+                reason: format!("document publish panicked at {}: {message}", path.display()),
+            }
+        }
+    };
+    if !sink(event) {
+        log_refused_event(
+            refusal_logged,
+            &format!("the document publish outcome for {}/{batch}", job.dataset),
+        );
+    }
+}
+
 fn run(
     store: Store,
     schema: SchemaSpec,
     queue: Arc<(Mutex<Queue>, Condvar)>,
     sink: IngestSink,
     load: LoadFn,
+    publish: PublishFn,
 ) {
     // PlanComplete is announced once per drain, on the transition from
     // working to idle — not on every wakeup. An idle runner would otherwise
@@ -272,22 +499,18 @@ fn run(
     let refusal_logged = AtomicBool::new(false);
 
     loop {
-        let item = {
+        let work = {
             let (lock, cvar) = &*queue;
             let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if q.shutdown {
                     return;
                 }
-                if !q.items.is_empty() {
+                // Documents first; `None` means both queues are empty,
+                // which is the only state that announces a drain.
+                if let Some(work) = take_work(&mut q) {
                     announced_idle = false;
-                    let it = q.items.remove(0);
-                    q.in_flight = Some((
-                        it.candidate.csv_path.clone(),
-                        it.candidate.size,
-                        it.source_time,
-                    ));
-                    break it;
+                    break work;
                 }
                 if !announced_idle {
                     announced_idle = true;
@@ -310,6 +533,18 @@ fn run(
                     .unwrap_or_else(|e| e.into_inner());
                 q = guard;
             }
+        };
+
+        // A document is published here and the loop starts over: none of
+        // the file machinery below applies to it — no pop-time change
+        // detection (there is no file to re-`stat`), no `in_flight` to
+        // clear (it was never set), no sentinel.
+        let item = match work {
+            Work::Document(job) => {
+                publish_one_document(&store, &schema, &sink, publish, &refusal_logged, job);
+                continue;
+            }
+            Work::File(item) => item,
         };
 
         // Pop-time re-check, the other half of the dedupe: the queue can
@@ -520,6 +755,7 @@ fn log_ingest_panic(path: &std::path::Path, message: &str) {
 mod tests {
     use super::*;
     use crate::source::Priority;
+    use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc};
     use geode_core::schema::DatasetSpec;
     use std::time::Duration;
 
@@ -1040,7 +1276,10 @@ mod tests {
     ) -> (IngestHandle, Receiver<IngestEvent>) {
         let (tx, rx) = channel();
         let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
-        (IngestRunner::spawn_with_load(store, schema, sink, load), rx)
+        (
+            IngestRunner::spawn_with(store, schema, sink, load, publish_document),
+            rx,
+        )
     }
 
     fn boom(_store: &Store, _req: &LoadRequest) -> Result<LoadOutcome, LoadError> {
@@ -1371,5 +1610,266 @@ mod tests {
             "fail-open means \"not stale\": the poisoned item's own load \
              still proceeds rather than being silently skipped: {events:?}"
         );
+    }
+
+    // ---- documents (market-data spec §5.4 step 3) ----------------------
+
+    /// A store that can hold the spec's own document dataset: the schema
+    /// applied and the catalog tables created, exactly as
+    /// `store::document`'s own fixture builds one. Separate from
+    /// `harness()` because a document needs no source directory and no
+    /// generated CSV at all.
+    fn document_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        store.apply_schema(&cvi_dataset()).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        (dir, store)
+    }
+
+    /// The next outcome event, skipping the idle announcements a runner
+    /// legitimately emits before and between work — `PlanComplete` fires
+    /// once when the runner starts on an empty queue, which races any
+    /// submit, so no test may treat it as positional.
+    fn next_event(rx: &Receiver<IngestEvent>) -> IngestEvent {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(IngestEvent::PlanComplete) => continue,
+                Ok(e) => return e,
+                Err(e) => panic!("no outcome event: {e}"),
+            }
+        }
+    }
+
+    fn job(dataset: &str, rows: geode_core::document::DocumentRows) -> DocumentJob {
+        DocumentJob {
+            source: "cvi".into(),
+            dataset: dataset.into(),
+            rows,
+            source_time: ts("2026-09-12T14:00:00Z"),
+            received_at: ts("2026-09-12T14:00:00Z"),
+            bytes: 10,
+        }
+    }
+
+    /// The fixture document every test below publishes, spelled once.
+    fn spx() -> geode_core::document::DocumentRows {
+        cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.])
+    }
+
+    #[test]
+    fn a_submitted_document_publishes_and_reports_its_batch() {
+        let (dir, store) = document_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+        handle.submit_document(job("cvi_params", spx()));
+        match next_event(&rx) {
+            IngestEvent::Published {
+                source,
+                dataset,
+                batch,
+                books,
+                rows,
+                health,
+                ..
+            } => {
+                assert_eq!(
+                    (source.as_str(), dataset.as_str(), batch.as_str()),
+                    ("cvi", "cvi_params", "SPX.Z")
+                );
+                // The bookless partition, spelled as the one `None` the
+                // publish actually wrote: a document has no book column,
+                // so an empty list would tell a subscriber nothing was
+                // written at all.
+                assert_eq!((books, rows, health), (vec![None], 6, Health::Ok));
+            }
+            other => panic!("{other:?}"),
+        }
+        handle.shutdown();
+        let _ = dir;
+    }
+
+    #[test]
+    fn an_invalid_document_fails_by_batch_and_the_runner_lives() {
+        let (dir, store) = document_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+
+        // Zero rows: refused by `DocumentRows::validate` before anything is
+        // written (publishing one is silently destructive — see its doc).
+        let mut empty = spx();
+        empty.axes = vec![
+            ("term".into(), geode_core::document::Column::Date(vec![])),
+            ("node".into(), geode_core::document::Column::F64(vec![])),
+        ];
+        empty.values = vec![("param".into(), geode_core::document::Column::F64(vec![]))];
+        handle.submit_document(job("cvi_params", empty));
+
+        match next_event(&rx) {
+            IngestEvent::Failed {
+                source,
+                dataset,
+                batch,
+                reason,
+            } => {
+                // The batch is the document's own key, joined: a failure
+                // with no batch could not be filed against the key whose
+                // feed is broken.
+                assert_eq!(
+                    (source.as_str(), dataset.as_str(), batch.as_str()),
+                    ("cvi", "cvi_params", "SPX.Z")
+                );
+                assert!(reason.contains("document has no rows"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // And the runner is still working.
+        handle.submit_document(job("cvi_params", spx()));
+        assert!(
+            matches!(next_event(&rx), IngestEvent::Published { batch, .. } if batch == "SPX.Z"),
+            "a rejected document must not end the runner"
+        );
+        handle.shutdown();
+        let _ = dir;
+    }
+
+    #[test]
+    fn a_document_for_an_undeclared_dataset_fails_naming_it() {
+        let (dir, store) = document_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+        handle.submit_document(job("nonesuch", spx()));
+        match next_event(&rx) {
+            IngestEvent::Failed {
+                dataset,
+                batch,
+                reason,
+                ..
+            } => {
+                assert_eq!((dataset.as_str(), batch.as_str()), ("nonesuch", "SPX.Z"));
+                assert!(reason.contains("not declared"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        handle.shutdown();
+        let _ = dir;
+    }
+
+    #[test]
+    fn take_work_prefers_a_document_over_a_queued_file() {
+        // The ordering rule, driven synchronously against a bare `Queue` —
+        // no runner thread and no timing, the same way the `enqueue` tests
+        // reach the dedupe. The end-to-end test below observes the same
+        // rule through events, but only this one can state it without a
+        // race.
+        let mut q = Queue::default();
+        q.items.push(work_item(
+            "/src/a.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::LatestRisk,
+        ));
+        q.documents.push_back(job("cvi_params", spx()));
+        match take_work(&mut q) {
+            Some(Work::Document(d)) => assert_eq!(d.rows.key, vec!["SPX.Z".to_string()]),
+            other => panic!("a document outranks a file, even a LatestRisk one: {other:?}"),
+        }
+        // The file is still queued — a document takes no file's turn away,
+        // it only goes first.
+        assert_eq!(q.items.len(), 1);
+        assert!(
+            q.in_flight.is_none(),
+            "`in_flight` is the file dedupe's key; a document must not touch it"
+        );
+        assert!(matches!(take_work(&mut q), Some(Work::File(_))));
+    }
+
+    #[test]
+    fn a_document_is_popped_ahead_of_a_queued_file() {
+        // End to end: with several files queued, a document submitted
+        // afterwards must not wait for them all to drain. Asserted the way
+        // `a_newly_submitted_current_file_preempts_remaining_backfill`
+        // asserts preemption — by position, not by "the first event" —
+        // because the runner may already have popped file one by the time
+        // the document is submitted.
+        let (_db, _src, store, ds, plan) = harness();
+        assert!(plan.items.len() >= 3, "need several files to observe order");
+        let files = plan.items.len();
+        store.apply_schema(&cvi_dataset()).unwrap();
+        let mut schema = schema_of(ds);
+        schema.datasets.push(cvi_dataset());
+
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        handle.submit(plan);
+        handle.submit_document(job("cvi_params", spx()));
+
+        let events = drain(&rx, files + 1);
+        handle.shutdown();
+
+        let outcomes: Vec<&IngestEvent> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    IngestEvent::Published { .. } | IngestEvent::Failed { .. }
+                )
+            })
+            .collect();
+        let position = outcomes
+            .iter()
+            .position(
+                |e| matches!(e, IngestEvent::Published { dataset, .. } if dataset == "cvi_params"),
+            )
+            .unwrap_or_else(|| panic!("the document never published: {events:?}"));
+        assert!(
+            position < files,
+            "a document must not wait behind every queued file: {position} of {files}"
+        );
+    }
+
+    /// A runner delivering into a channel with an injected *publish* —
+    /// `spawn_channel_with_load`'s sibling, for the same reason: no
+    /// document makes `publish_document` itself panic, and containment is
+    /// the property worth testing.
+    fn spawn_channel_with_publish(
+        store: Store,
+        schema: geode_core::schema::SchemaSpec,
+        publish: PublishFn,
+    ) -> (IngestHandle, Receiver<IngestEvent>) {
+        let (tx, rx) = channel();
+        let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
+        (
+            IngestRunner::spawn_with(store, schema, sink, load_file, publish),
+            rx,
+        )
+    }
+
+    fn boom_publish(
+        _store: &Store,
+        _req: &DocumentPublishRequest,
+    ) -> Result<DocumentPublished, crate::store::StoreError> {
+        panic!("injected publish panic");
+    }
+
+    #[test]
+    fn a_panicking_publish_is_contained_and_reported() {
+        let (dir, store) = document_store();
+        let (handle, rx) =
+            spawn_channel_with_publish(store, schema_of(cvi_dataset()), boom_publish);
+        handle.submit_document(job("cvi_params", spx()));
+        match next_event(&rx) {
+            IngestEvent::Failed { batch, reason, .. } => {
+                assert_eq!(batch, "SPX.Z");
+                assert!(reason.contains("panicked"), "{reason}");
+                assert!(reason.contains("injected publish panic"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The thread survived its own panic: the next document still runs.
+        handle.submit_document(job("cvi_params", spx()));
+        assert!(
+            matches!(next_event(&rx), IngestEvent::Failed { reason, .. } if reason.contains("panicked")),
+            "a contained panic must not end the ingest thread"
+        );
+        handle.shutdown();
+        let _ = dir;
     }
 }
