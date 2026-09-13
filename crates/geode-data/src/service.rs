@@ -537,9 +537,12 @@ pub struct DataService {
     /// Field order is drop order. The subscriptions stop receiving first
     /// (each one's thread submits documents into the runner, so it has to
     /// stop before the runner does); the pool joins its workers next; the
-    /// scheduler stops submitting after that; the runner drains its queue
-    /// and drops the `Store` before `conn` — the field listed last —
-    /// drops after everything else.
+    /// scheduler stops submitting after that; then the runner stops, which
+    /// it does by RETURNING on its stop flag at the top of its loop —
+    /// whatever is still queued is dropped unstarted, never drained, which
+    /// is the whole reason everything that submits into it is stopped
+    /// before it — and drops the `Store` on its way out. `conn`, the field
+    /// listed last, drops after everything else.
     ///
     /// `conn` dropping last is harmless, not accidental correctness:
     /// duckdb-rs holds the database as `Arc<Mutex<DatabaseHandle>>`, and

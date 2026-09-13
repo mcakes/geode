@@ -722,7 +722,13 @@ pub fn is_preemptible(item: &WorkItem) -> bool {
 /// are always `&'static str` or `String`; anything else (a custom
 /// `panic_any` payload) falls back to a named placeholder rather than
 /// losing the event.
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+///
+/// `pub(crate)` for the receiver thread's own boundary
+/// (`ingest::subscribe`), which reports a panicking parse the same way
+/// this one reports a panicking load: one spelling of a payload, so two
+/// `Failed.reason`s a trader reads side by side in the diagnostics tile
+/// cannot describe the same panic differently.
+pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {

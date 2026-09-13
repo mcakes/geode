@@ -39,7 +39,7 @@
 
 use crate::adapter::{AdapterError, HealthSink, MESSAGE_BOUND, Message, MessageSink, Subscription};
 use crate::ingest::coalesce::Coalescer;
-use crate::ingest::runner::{DocumentJob, IngestHandle};
+use crate::ingest::runner::{DocumentJob, IngestHandle, panic_payload_message};
 use chrono::{DateTime, NaiveTime, Utc};
 use geode_core::document::{DocumentKind, DocumentRows, Value, join_key};
 use geode_core::schema::{ColumnType, DatasetSpec};
@@ -100,6 +100,14 @@ struct Pending {
 pub struct SubscriptionWorker {
     subscription: Box<dyn Subscription>,
     stop: Arc<AtomicBool>,
+    /// A clone of the sink handed to the adapter, kept for one reason:
+    /// [`MessageSink::refused`] is the only record of a message this
+    /// source DROPPED, and the counter lives on the sink. Moving the sole
+    /// copy into `subscribe` made a refusal — a receiver that fell behind
+    /// its feed, which is data silently missing from every query — a
+    /// number nothing in the process could read. Clones share the counter,
+    /// so this one reads the subscription's own total (fix round 1).
+    sink: MessageSink,
     /// `None` once joined, so `shutdown` is idempotent and `Drop` can call
     /// it again with nothing to do.
     thread: Option<JoinHandle<()>>,
@@ -129,7 +137,7 @@ impl SubscriptionWorker {
         on_connection: HealthSink,
     ) -> Result<SubscriptionWorker, AdapterError> {
         let (sink, rx) = MessageSink::bounded(MESSAGE_BOUND);
-        subscription.subscribe(&spec.topics, sink, on_connection)?;
+        subscription.subscribe(&spec.topics, sink.clone(), on_connection)?;
         let stop = Arc::new(AtomicBool::new(false));
         let mut receiving = Receiving {
             source: spec.name.clone(),
@@ -149,6 +157,7 @@ impl SubscriptionWorker {
             Ok(thread) => Ok(SubscriptionWorker {
                 subscription,
                 stop,
+                sink,
                 thread: Some(thread),
             }),
             Err(e) => {
@@ -164,6 +173,20 @@ impl SubscriptionWorker {
                 })
             }
         }
+    }
+
+    /// How many messages this source's feed sent that the receiver could
+    /// not take, over the subscription's whole life.
+    ///
+    /// Non-zero means data was DROPPED: the receiver fell far enough
+    /// behind that the bounded queue in front of it overflowed, and the
+    /// dropped snapshots are simply gone (the coalescer's rule — newest
+    /// per key wins — makes that survivable, not invisible). Exposed
+    /// rather than merely counted because a source whose numbers are
+    /// stale for this reason looks identical to a healthy one from a
+    /// query, and the count is the only way to tell the two apart.
+    pub fn refused(&self) -> u64 {
+        self.sink.refused()
     }
 
     /// Stops delivery, then the thread. Idempotent.
@@ -221,7 +244,7 @@ impl Receiving {
                 due.saturating_duration_since(now).min(MAX_WAIT)
             });
             match rx.recv_timeout(wait) {
-                Ok(message) => self.on_message(message, &mut coalescer),
+                Ok(message) => self.handle_message(&message, &mut coalescer),
                 Err(RecvTimeoutError::Timeout) => {}
                 // Every clone of our sink is gone, so no message can ever
                 // arrive again: the subscription was dropped or
@@ -238,10 +261,59 @@ impl Receiving {
         }
     }
 
+    /// One message, inside a panic boundary — the same one every other
+    /// background boundary in this crate uses (spec §5.7: an ingest load,
+    /// a pop-time catalog recheck, a discovery poll, a query worker, a
+    /// document publish).
+    ///
+    /// It is needed HERE more than at any of those, because the foreign
+    /// code is a parser over bytes a broker sent: an index into a
+    /// truncated body or an `unwrap` on an element the feed stopped
+    /// sending is a panic, not an `Err`, and there is no version of a
+    /// vendor parser this process can promise never panics. Without the
+    /// boundary one such message ends the receiver thread for the session
+    /// — the source then latches at whatever health it last reported,
+    /// nothing ever arrives again, and `contained` being false makes the
+    /// process-wide hook write a `crash-<ts>.log` for a failure that cost
+    /// one document.
+    ///
+    /// With it, the panic is reported exactly as an `Err` from the same
+    /// parse would be (the load lane, keyed by topic, with the payload as
+    /// the reason) and the thread takes the next message. `contained` is
+    /// what tells the panic hook this one is handled, so it logs at
+    /// `error` and writes no crash file.
+    ///
+    /// The whole of `on_message` is inside, not just the parse: a panic
+    /// anywhere on the path is the same failure of the same message, and a
+    /// boundary drawn around one step would leave the others uncovered
+    /// for no reason. `AssertUnwindSafe` is the same assertion the runner
+    /// makes and rests on the same fact — nothing here holds a lock, and
+    /// the two pieces of state a panic could leave mid-update (the
+    /// coalescer's map, the unknown-path set) are at worst a stale entry
+    /// that the next message for that key supersedes.
+    ///
+    /// `message` is borrowed rather than moved so the topic is still
+    /// readable after a panic unwound out of `on_message`, without
+    /// cloning one `String` per message to have it.
+    fn handle_message(&mut self, message: &Message, coalescer: &mut Coalescer<Pending>) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| self.on_message(message, coalescer))
+        }));
+        if let Err(payload) = outcome {
+            // Named "parse panicked" because the parser is the only
+            // foreign code inside and every panic seen here in practice is
+            // its; a panic in the steps after it reads the same way, which
+            // is a mild imprecision rather than a wrong report — the
+            // payload and its location name the real site.
+            let panicked = panic_payload_message(payload.as_ref());
+            (self.on_parse_failure)(&message.topic, format!("parse panicked: {panicked}"));
+        }
+    }
+
     /// Parse, validate, stamp, offer. Every failure is reported and
     /// dropped: a broken message must not stop a source, and there is
     /// nothing to retry — the feed will send the key again.
-    fn on_message(&mut self, message: Message, coalescer: &mut Coalescer<Pending>) {
+    fn on_message(&mut self, message: &Message, coalescer: &mut Coalescer<Pending>) {
         let parsed = match self.kind.parse(&message.bytes) {
             Ok(parsed) => parsed,
             // Keyed by TOPIC: bytes that did not parse yielded no key, and
@@ -374,12 +446,16 @@ mod tests {
     use crate::ingest::runner::{IngestEvent, IngestRunner};
     use crate::store::Store;
     use crate::store::catalog::Catalog;
-    use crate::store::ddl::tests_support::{FakeKind, cvi_dataset, cvi_doc, d, ts};
-    use geode_core::document::{DocumentKind, DocumentRows, Value};
-    use geode_core::schema::SchemaSpec;
+    use crate::store::ddl::tests_support::{
+        FakeKind, PARSE_PANIC, PanickingKind, cvi_dataset, cvi_doc, d, ts,
+    };
+    use geode_core::document::{
+        DocumentKind, DocumentRows, ParseError, ParsedDocument, Value, WriteError,
+    };
+    use geode_core::schema::{ColumnType, SchemaSpec};
     use geode_core::source_config::{SourceSpec, SourceTime};
     use std::sync::mpsc::Receiver;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     // ---- source_time_of (pure) -----------------------------------------
@@ -766,5 +842,110 @@ mod tests {
             2,
             "an unsubscribed worker hears no more state either"
         );
+    }
+
+    #[test]
+    fn a_panicking_parse_is_contained_and_the_receiver_thread_carries_on() {
+        let mut h = harness(
+            Duration::ZERO,
+            Arc::new(PanickingKind::new()),
+            SourceTime::Receive,
+        );
+        h.feed.publish("cvi/SPX.Z", b"anything".to_vec());
+        wait_until("the contained panic to be reported", || {
+            !h.failures.lock().unwrap().is_empty()
+        });
+        {
+            let failures = h.failures.lock().unwrap();
+            assert_eq!(
+                failures[0].0, "cvi/SPX.Z",
+                "keyed by topic: a panicking parse yielded no key, exactly as an Err does"
+            );
+            assert!(
+                failures[0].1.contains("panicked") && failures[0].1.contains(PARSE_PANIC),
+                "the payload a trader needs to see is the panic's own message: {:?}",
+                failures[0].1
+            );
+        }
+        // The thread is still there. A second message handled is the only
+        // honest evidence: an unwinding receiver thread ends, and its
+        // source then latches at whatever health it last reported with
+        // nothing ever arriving again.
+        h.feed.publish("cvi/NDX.Z", b"anything".to_vec());
+        wait_until("the second message to be handled too", || {
+            h.failures.lock().unwrap().len() == 2
+        });
+        assert_eq!(h.failures.lock().unwrap()[1].0, "cvi/NDX.Z");
+        nothing_more(&h.events, Duration::from_millis(100));
+        h.worker.shutdown();
+    }
+
+    /// A kind that holds the receiver inside `parse` until a test lets it
+    /// go, so the subscription's queue can be filled while nothing is
+    /// draining it. Everything but `parse` is [`FakeKind`]'s.
+    struct GateKind {
+        inner: FakeKind,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl DocumentKind for GateKind {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+
+        fn columns(&self) -> &[(&'static str, ColumnType)] {
+            self.inner.columns()
+        }
+
+        fn parse(&self, bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
+            let (lock, opened) = &*self.gate;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = opened.wait(open).unwrap();
+            }
+            drop(open);
+            self.inner.parse(bytes)
+        }
+
+        fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
+            self.inner.write(rows)
+        }
+    }
+
+    #[test]
+    fn a_subscription_whose_queue_fills_counts_what_it_could_not_take() {
+        // A long coalescing window: this test is about the queue in front
+        // of the receiver, and nothing the flood eventually parses should
+        // reach the publish path.
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let kind = Arc::new(GateKind {
+            inner: FakeKind::new(),
+            gate: Arc::clone(&gate),
+        });
+        let mut h = harness(Duration::from_secs(60), kind, SourceTime::Receive);
+        assert_eq!(
+            h.worker.refused(),
+            0,
+            "nothing has been refused before anything was sent"
+        );
+        let body = FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]);
+        // The receiver is parked inside `parse` on the first message, so
+        // the MESSAGE_BOUND-deep queue behind it fills and the
+        // dispatcher's pushes start being refused. Published in a loop
+        // rather than a fixed count because the bus's own inbound queue is
+        // the same depth: some publishes are refused a hop earlier and
+        // never reach this sink at all.
+        wait_until("a message the subscription could not take", || {
+            h.feed.publish("cvi/SPX.Z", body.clone());
+            h.worker.refused() > 0
+        });
+        // Let the thread out of `parse` before joining it: `shutdown`
+        // joins, and a receiver still waiting on this gate never returns.
+        {
+            let (lock, opened) = &*gate;
+            *lock.lock().unwrap() = true;
+            opened.notify_all();
+        }
+        h.worker.shutdown();
     }
 }

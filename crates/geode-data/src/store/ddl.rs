@@ -785,6 +785,55 @@ role = "attribute"
         }
     }
 
+    /// The message a [`PanickingKind`] parser panics with. A constant so
+    /// the test asserting the payload reached the health lane and the
+    /// panic that produced it cannot drift apart.
+    pub(crate) const PARSE_PANIC: &str = "the parser fell over";
+
+    /// A [`DocumentKind`] whose `parse` PANICS rather than answering
+    /// `Err` — the failure a real vendor parser has that a `Result` does
+    /// not describe (an index out of range on a truncated body, an
+    /// `unwrap` on an element a schema promised).
+    ///
+    /// It exists because the receiver thread's panic boundary is not
+    /// testable any other way: a boundary is only observable through the
+    /// panic it contains, so the fixture has to be the thing that panics.
+    /// Everything but `parse` delegates to [`FakeKind`], so a source
+    /// wired to this kind is identical to one wired to that one right up
+    /// to the panic.
+    pub(crate) struct PanickingKind {
+        inner: FakeKind,
+    }
+
+    impl PanickingKind {
+        pub(crate) fn new() -> PanickingKind {
+            PanickingKind {
+                inner: FakeKind::new(),
+            }
+        }
+    }
+
+    impl DocumentKind for PanickingKind {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+
+        fn columns(&self) -> &[(&'static str, ColumnType)] {
+            self.inner.columns()
+        }
+
+        /// Panics with a `String` payload (a formatted `panic!`), which is
+        /// the shape `panic_payload_message` reads second — the `&str`
+        /// arm is already covered by the runner's own panic tests.
+        fn parse(&self, _bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
+            panic!("{PARSE_PANIC}");
+        }
+
+        fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
+            self.inner.write(rows)
+        }
+    }
+
     #[test]
     fn the_fake_kind_round_trips_its_own_byte_format() {
         let kind = FakeKind::new();

@@ -8996,6 +8996,27 @@ run_mutation "subscribe: the coalescer is bypassed -- every message submits its 
         let _ = (coalescer, key);' \
   geode-data two_messages_for_one_key_inside_the_window_publish_once_with_the_latest
 
+# ---- Task 9 fix round 1: the receiver's panic boundary and its refusal count ----
+
+run_mutation "subscribe: a panicking parse is NOT contained -- the receiver thread dies with it" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| self.on_message(message, coalescer))
+        }));' \
+  '        let outcome: Result<(), Box<dyn std::any::Any + Send>> =
+            Ok(self.on_message(message, coalescer));' \
+  geode-data a_panicking_parse_is_contained_and_the_receiver_thread_carries_on
+
+run_mutation "subscribe: a subscription's refusal count reads zero rather than its sink's counter" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '    pub fn refused(&self) -> u64 {
+        self.sink.refused()
+    }' \
+  '    pub fn refused(&self) -> u64 {
+        0
+    }' \
+  geode-data a_subscription_whose_queue_fills_counts_what_it_could_not_take
+
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
