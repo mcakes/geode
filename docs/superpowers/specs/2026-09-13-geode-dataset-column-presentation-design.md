@@ -176,6 +176,16 @@ order, first match wins** — the order the compiler resolves names in.
 A column no dataset of the view declares (a derived column) takes
 nothing from this layer.
 
+> **Corrected (as built): ownership is resolved by NAME, so a derived
+> column whose name a dataset ALSO declares does take that dataset's
+> entry.** `owner_of` asks each dataset in turn whether it has a column
+> of that name; it never asks what kind the view's own column is. So
+> `[[v.columns]] name = "npv" kind = "derived"` over a dataset that also
+> declares `npv` inherits `[<ds>.columns.npv]`'s presentation — which is
+> presentation only, and arguably what a trader who set a label for
+> `npv` would want. Only a derived column NO dataset of the view names
+> takes nothing (the final whole-branch review's Minor 7).
+
 ### 3.3 What a cleared key falls to
 
 Removing a dataset-level key exposes the desk view's own key, per view.
@@ -419,16 +429,33 @@ reads `user` or nothing (§4.3) — it has no desk value to name.
 > `ColumnPresentation::default()` and never reads it. The Schema stage's
 > chip reads `dataset`, not `user`.
 
-> **Amended (as built): `ColumnLayers.view` is captured at door open.**
-> `views::column_layers` reads the view overlay off the config once,
-> when the stage opens; it is not re-read per keystroke. The fields'
-> own values are compared against `below_view()` at paint, which is what
-> makes a just-stepped field read `view` on the same frame rather than
-> 250 ms later — but the consequence is that a field stepped **back** to
-> the value the layer below already gives still reads `view` until the
-> stage is closed and reopened, because the captured `view` layer still
-> holds the key the write has yet to remove. §1.3's done-state item 4
-> describes the reopened state.
+> **Amended (as built): `ColumnLayers` holds TWO layers, and the chip's
+> `view` means "differs from desk + dataset".** The first cut captured
+> the view overlay as a third `ColumnLayers` field and read it as
+> `differs_from(below) || set_in(&ctx.layers.view)`, which made a field
+> stepped **back** to the value the layer below already gives keep
+> reading `view` until the stage was closed and reopened — the captured
+> layer still held the key the write had yet to remove (the final
+> whole-branch review's named risk 4). The clause is gone and, with its
+> one reader, so is the field: `ColumnLayers` is `desk` + `dataset`, and
+> `views::column_layers` no longer reads `view_presentation.toml` at
+> all.
+>
+> **Ruling:** the chip reads `View` when, and only when, the field
+> differs from the desk + dataset baseline. A view key EQUAL to the
+> layer below is unobservable — the resolved value is identical with or
+> without it, and `views::presentation_table` omits every such key, so
+> the writer cannot produce one; the only sources are a hand-edited
+> `view_presentation.toml` or a desk/dataset change that happened to
+> coincide with an existing override, and in both cases the next
+> keystroke in this stage removes it. Naming `dataset`/`desk` there is
+> therefore not merely defensible, it is what the file will say 250 ms
+> later. **Cost if wrong:** a field showing exactly the value below
+> would be badged `dataset`/`desk` while a stale equal key sat in the
+> overlay until the next keystroke swept it — advisory only; nothing is
+> written differently. This satisfies §1.3's done-state item 4 on the
+> same frame rather than on reopen, and supersedes this section's
+> literal "`View` when the view overlay sets the key".
 
 ### 5.4 Everything else
 
@@ -582,6 +609,35 @@ overlay between `ViewSpec::from_doc` and `ViewPresentationSpec::apply`;
   rather than per dataset: a dataset that declares a column but says
   nothing about it still OWNS it there, and a later join's table for the
   same name must not stand in.
+- **`apply` runs BELOW the desk views' own `format.colour` cross-check**
+  (the final whole-branch review's Important 1, fixed before merge). The
+  first cut ran it directly after the overlay was read, above that
+  loop — and the loop reads `view.presentation_of(column.name())`, so
+  with the dataset level merged over the desk's keys it reported the
+  DATASET's colour once per view carrying the column, each at a
+  `views.<v>.columns.<i>.format.colour` path into a file holding no
+  colour key at all (one mistake, N+1 diagnostics, and `Draft::row_for_path`
+  paints the glyph on an innocent view's column row), while a desk
+  view's own broken `format.colour` under a VALID dataset-level colour
+  went unreported entirely — a regression to an existing check. The
+  `apply` call now sits immediately above the `view_presentation` block.
+  Resolution order is untouched (the loop mutates nothing), so the merge
+  is still kind default → desk → dataset → view.
+  `load_views_merges_the_dataset_overlay_under_the_view_overlay_and_reports_its_colours`
+  asserts the dataset path is the ONLY colour diagnostic, and
+  `the_desk_views_own_colour_check_reads_the_desk_value` is case 2. The
+  fixture that let both halves through used `find`, which cannot see a
+  spurious extra.
+- **A key inside `[<ds>.columns.<col>]` that the reader does not
+  recognise now warns** — `column '<col>': unknown key '<key>' —
+  ignored` at `dataset_presentation.<ds>.columns.<col>.<key>`, §2.2's
+  requirement (the same review's Minor 2). `parse_format_keys`/
+  `parse_column_keys` report only keys they recognise and mis-read, so a
+  typo (`precison`) was accepted in silence. `color` is
+  `parse_format_keys`' own American alias and does NOT warn; `hidden`
+  keeps its own view_presentation-naming message.
+  `ViewPresentationSpec::from_doc` still has the gap — deliberately out
+  of this branch's scope.
 - One fixture in the task brief's own test spelled a scale `"units"`,
   which the reader does not accept, so the view-level override it was
   meant to establish never existed and the assertion passed for no
@@ -800,7 +856,33 @@ pending-aware config.
 
 **Task 1.** The "applied before the view overlay" harness mutation
 removes the `apply` rather than reordering it — a truer order-swap
-mutation if revisited.
+mutation if revisited. The final review's fix wave added the companion
+entry that DOES reorder it (`load: the dataset overlay is applied after
+the desk view's own colour cross-check`, duplicating the `apply` back
+above the loop), so the position is now guarded from both sides.
+
+**Final whole-branch review, fixed rather than deferred.** Important 1
+(the merge point relative to the desk colour loop — §9.1), named risk 4
+(the provenance chip's liveness — §5.3), Minor 2 (unknown keys inside a
+column table — §9.1), Minor 3 (the `(Presentation, Schema)` arm's stated
+reason, which was §9.7's own "a gate's doc and its domain's header"
+pattern recurring one file over), Minor 4 (`render::maybe_refresh_available`
+now reads `apply::config_with_pending`, like every other read of this
+layer on this branch — covered by
+`a_dataset_switch_inside_the_debounce_seeds_the_catalogue_from_the_pending_write`),
+Minor 6 (`render::actions` returns nothing while `Draft::column()` is
+`Some`, so neither door advertises a verb a column stage can only
+refuse — `a_column_stage_offers_no_destructive_action`) and Minor 7
+(§3.2's correction). **Still deferred: Minor 5**, the ~20 small
+allocations per painted frame while a column stage is open
+(`provenance_of`'s per-field `kind.clone().with(p)`, `colour_key`,
+`width_text`, and `provenance_chip`'s `format!`ed id) — modal-bounded
+and consistent with `build_edit`'s own per-row `format!`s; if the chip
+ever moves onto a non-modal surface, `differs_from` should take the
+resolved `ColumnFormat` once per call instead of once per key. And
+`ViewPresentationSpec::from_doc` still accepts an unknown key inside a
+column table in silence — the same gap Minor 2 closed for the dataset
+overlay, left alone as out of this branch's scope.
 
 **Task 3, all since closed** — recorded because each names a shape a
 later task had to honour. `fold_into`'s new pre-fold-value guard had no
@@ -846,8 +928,18 @@ neither; `owner_of`'s own ordering is tested in `geode-core`.
 
 ### 9.8 Harness
 
-**768 entries** (747 at the branch point, 21 added over the six tasks,
-none removed); `--anchors-only` reports 0 stale, 0 ambiguous. The 21:
+**772 entries** (747 at the branch point, 21 added over the six tasks
+and 4 more in the final review's fix wave, none removed);
+`--anchors-only` reports 0 stale, 0 ambiguous. The fix wave's four:
+`load: the dataset overlay is applied after the desk view's own colour
+cross-check` (the companion to the position entry below — it duplicates
+the `apply` back above the loop rather than removing it), `view: an
+unknown key inside a dataset-presentation column table warns`,
+`objectdialog: the refreshed catalogue reads the pending config` and
+`objectdialog: a column stage offers no destructive action`. One more
+was re-anchored there: `objectdialog: a diverged field's provenance is
+the view level`, whose line lost its `|| set_in(&ctx.layers.view)`
+clause. The 21:
 three for the core merge, ownership and order plus one for the hoisted
 colour cross-check (Task 1); one for the reload predicate (Task 2);
 three for the stage-aware gate, provenance and the fold's layer (Task
