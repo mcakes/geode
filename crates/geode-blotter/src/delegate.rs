@@ -1676,6 +1676,7 @@ mod tests {
             chart: [grey; 5],
             bullish: grey,
             bearish: grey,
+            background: grey,
         };
         let mut colours = NamedColours::default();
         // A token definition, so the expected value is exactly the

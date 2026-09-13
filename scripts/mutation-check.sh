@@ -8129,6 +8129,33 @@ run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
   geode-core \
   contrast_ratio_is_wcag
 
+# 2c §7 fix round 2: the readability floor's own early return — disabling
+# it (forcing the "already readable" branch unconditionally) must leave
+# an unreadable colour unreadable, caught at both the unit-test level
+# and, now that the theme test reads through `resolve` with no
+# exceptions, at the bundled-theme level too.
+run_mutation "colour: the readability floor pulls lightness until 3:1" \
+  crates/geode-core/src/colour/mod.rs \
+  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+        return rgb;
+    }' \
+  '    if true {
+        return rgb;
+    }' \
+  geode-core \
+  readable_on_pulls_a_faint_colour_darker_until_it_clears
+
+run_mutation "theme: bundled themes clear 3:1 through the resolver" \
+  crates/geode-core/src/colour/mod.rs \
+  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+        return rgb;
+    }' \
+  '    if true {
+        return rgb;
+    }' \
+  geode-shell \
+  every_bundled_theme_keeps_generated_hues_readable
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

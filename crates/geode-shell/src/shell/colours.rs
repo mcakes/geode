@@ -73,7 +73,10 @@ pub fn anchors_from_theme(theme: &Theme) -> Anchors {
 /// The theme's semantic tokens, spec §2.3's table: `muted` reads the
 /// theme's `muted_foreground` (there is no bare `muted` colour on
 /// gpui-component's own `Theme` — its `muted` is a background tint, not
-/// a foreground token, and §2.3 names the foreground one).
+/// a foreground token, and §2.3 names the foreground one). `background`
+/// is not one of §2.3's named tokens — it is the surface
+/// `geode_core::colour::readable_on` measures every generated hue
+/// against (2c §2.2, §7).
 pub fn tokens_from_theme(theme: &Theme) -> Tokens {
     Tokens {
         foreground: to_rgb(theme.foreground),
@@ -94,6 +97,7 @@ pub fn tokens_from_theme(theme: &Theme) -> Tokens {
         .map(to_rgb),
         bullish: to_rgb(theme.chart_bullish),
         bearish: to_rgb(theme.chart_bearish),
+        background: to_rgb(theme.background),
     }
 }
 

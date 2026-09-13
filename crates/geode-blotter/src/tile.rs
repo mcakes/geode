@@ -3607,6 +3607,7 @@ mod tests {
             chart: [grey; 5],
             bullish: grey,
             bearish: grey,
+            background: grey,
         };
         let resolved = h.tile.update(&mut cx, |t, cx| {
             t.table().update(cx, |table, _| {

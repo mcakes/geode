@@ -128,6 +128,11 @@ mod tests {
             chart: [grey; 5],
             bullish: grey,
             bearish: grey,
+            background: Rgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+            },
         }
     }
 

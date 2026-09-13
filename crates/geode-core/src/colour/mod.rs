@@ -292,6 +292,11 @@ pub struct Tokens {
     pub chart: [Rgb; 5],
     pub bullish: Rgb,
     pub bearish: Rgb,
+    /// The theme's own background — not a [`Token`] a `colours.toml`
+    /// definition can name (there is no `token = "background"`); it is
+    /// the surface [`readable_on`] measures every generated `Definition::Hue`
+    /// against.
+    pub background: Rgb,
 }
 
 impl Tokens {
@@ -314,8 +319,14 @@ impl Tokens {
 
 /// The hue's two bracketing anchors in the requested tone, interpolated
 /// in OKLCH: lightness and chroma linearly, hue along the shorter arc
-/// (§2.2). `t == 0` returns the anchor itself, untouched, so a trader who
-/// asks for 240 gets the theme's own blue.
+/// (§2.2). `t == 0` returns the anchor itself, untouched — this
+/// function's own identity guarantee is unconditional and pure, with no
+/// theme background in sight. [`resolve`] is what a `hue` definition's
+/// outward contract actually lives on: an anchor hue resolves to the
+/// theme's own colour exactly — unless that colour is unreadable on the
+/// theme's background, in which case only its lightness moves (see
+/// [`readable_on`]). The arc/anchor tests below exercise this function
+/// directly so that guarantee keeps its old, unconditional meaning.
 pub fn interpolate_hue(degrees: f32, tone: Tone, anchors: &Anchors) -> Rgb {
     let ring = match tone {
         Tone::Normal => &anchors.normal,
@@ -339,9 +350,55 @@ pub fn interpolate_hue(degrees: f32, tone: Tone, anchors: &Anchors) -> Rgb {
     to_srgb_in_gamut(lch)
 }
 
+/// The WCAG contrast ratio every resolved `Definition::Hue` must clear
+/// against the theme's background (spec §7), enforced by [`readable_on`].
+pub const READABLE_RATIO: f32 = 3.0;
+
+/// Pull `rgb`'s OKLCH lightness toward `toward`'s until it clears
+/// `READABLE_RATIO` against `background`, keeping hue and chroma (re-clipped
+/// to gamut). The smallest such move, found by bisection over `t` in
+/// `0..=1` (16 steps); `rgb` unchanged when it already clears.
+pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
+    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+        return rgb;
+    }
+    let lch = lab_to_lch(srgb_to_oklab(rgb));
+    let target_l = lab_to_lch(srgb_to_oklab(toward)).l;
+    let at = |t: f32| {
+        to_srgb_in_gamut(Lch {
+            l: lch.l + (target_l - lch.l) * t,
+            c: lch.c,
+            h: lch.h,
+        })
+    };
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..16 {
+        let mid = (lo + hi) / 2.0;
+        if contrast_ratio(at(mid), background) >= READABLE_RATIO {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    at(hi)
+}
+
+/// A named colour's `hue`/`token` definition, resolved against a theme's
+/// [`Anchors`]/[`Tokens`]. §2.2's identity rule: an anchor hue resolves
+/// to the theme's own colour exactly — unless that colour is unreadable
+/// on the theme's background, in which case only its lightness moves,
+/// via [`readable_on`]. `Definition::Token` is never floored: a token
+/// names one of the theme author's own deliberate semantic colours
+/// (danger, a chart series, …), not a generated point on the hue wheel
+/// that might land anywhere — the floor exists to guard the generated
+/// case, not to second-guess a theme's own design.
 pub fn resolve(def: &Definition, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     match def {
-        Definition::Hue { degrees, tone } => interpolate_hue(*degrees, *tone, anchors),
+        Definition::Hue { degrees, tone } => readable_on(
+            interpolate_hue(*degrees, *tone, anchors),
+            tokens.background,
+            tokens.foreground,
+        ),
         Definition::Token(token) => tokens.get(*token),
     }
 }
@@ -426,6 +483,7 @@ mod tests {
                 g: 0.0,
                 b: 0.0,
             },
+            background: grey(0.1),
         }
     }
 
@@ -587,6 +645,143 @@ mod tests {
             },
         );
         assert!((ratio - 21.0).abs() < 0.01, "{ratio}");
+    }
+
+    #[test]
+    fn readable_on_pulls_a_faint_colour_darker_until_it_clears() {
+        let background = Rgb {
+            r: 0.95,
+            g: 0.95,
+            b: 0.95,
+        };
+        let toward = Rgb {
+            r: 0.05,
+            g: 0.05,
+            b: 0.05,
+        };
+        let faint = Rgb {
+            r: 0.92,
+            g: 0.88,
+            b: 0.7,
+        };
+        assert!(
+            contrast_ratio(faint, background) < READABLE_RATIO,
+            "fixture check: starts unreadable"
+        );
+
+        let result = readable_on(faint, background, toward);
+
+        assert!(
+            contrast_ratio(result, background) >= READABLE_RATIO,
+            "{result:?}"
+        );
+        let orig = lab_to_lch(srgb_to_oklab(faint));
+        let got = lab_to_lch(srgb_to_oklab(result));
+        assert!(
+            (got.h - orig.h).abs() < 0.02,
+            "hue kept: {got:?} vs {orig:?}"
+        );
+        assert!(
+            got.c <= orig.c + 1e-4,
+            "chroma not increased: {got:?} vs {orig:?}"
+        );
+        assert!(got.l < orig.l, "pulled darker: {got:?} vs {orig:?}");
+    }
+
+    #[test]
+    fn readable_on_returns_an_already_clearing_colour_unchanged() {
+        let background = Rgb {
+            r: 0.95,
+            g: 0.95,
+            b: 0.95,
+        };
+        let toward = Rgb {
+            r: 0.05,
+            g: 0.05,
+            b: 0.05,
+        };
+        let dark_blue = Rgb {
+            r: 0.1,
+            g: 0.1,
+            b: 0.6,
+        };
+        assert!(
+            contrast_ratio(dark_blue, background) >= READABLE_RATIO,
+            "fixture check: already clears"
+        );
+
+        assert_eq!(readable_on(dark_blue, background, toward), dark_blue);
+    }
+
+    #[test]
+    fn resolve_of_an_anchor_hue_equals_the_anchor_when_readable_and_only_lightness_moves_when_not()
+    {
+        let background = Rgb {
+            r: 0.95,
+            g: 0.95,
+            b: 0.95,
+        };
+        let readable_anchor = Rgb {
+            r: 0.1,
+            g: 0.1,
+            b: 0.6,
+        };
+        let faint_anchor = Rgb {
+            r: 0.92,
+            g: 0.88,
+            b: 0.7,
+        };
+        let mut normal = [readable_anchor; 6];
+        normal[1] = faint_anchor; // ANCHOR_DEGREES[1] == 60.0
+        let a = Anchors {
+            normal,
+            light: normal,
+        };
+        let mut t = tokens();
+        t.background = background;
+        t.foreground = Rgb {
+            r: 0.05,
+            g: 0.05,
+            b: 0.05,
+        };
+
+        // Already readable: resolve is the anchor itself, exactly.
+        assert_eq!(
+            resolve(
+                &Definition::Hue {
+                    degrees: 0.0,
+                    tone: Tone::Normal
+                },
+                &a,
+                &t
+            ),
+            readable_anchor
+        );
+
+        // Not readable: resolve clears the floor and differs only in
+        // lightness — hue and chroma (within the gamut clip's own
+        // tolerance) are kept, unlike the raw anchor.
+        let floored = resolve(
+            &Definition::Hue {
+                degrees: 60.0,
+                tone: Tone::Normal,
+            },
+            &a,
+            &t,
+        );
+        assert_ne!(floored, faint_anchor);
+        assert!(contrast_ratio(floored, background) >= READABLE_RATIO);
+        let orig = lab_to_lch(srgb_to_oklab(faint_anchor));
+        let got = lab_to_lch(srgb_to_oklab(floored));
+        assert!(
+            (got.h - orig.h).abs() < 0.02,
+            "hue kept: {got:?} vs {orig:?}"
+        );
+        assert!(
+            got.c <= orig.c + 1e-4,
+            "chroma not increased: {got:?} vs {orig:?}"
+        );
+        assert!(got.l < orig.l, "lightness moved: {got:?} vs {orig:?}");
     }
 
     #[test]
