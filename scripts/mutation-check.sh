@@ -7708,6 +7708,65 @@ run_mutation "tablepair: table_pairs sends a document dataset down the grain pat
   '    if false {' \
   geode-data a_document_dataset_has_one_pair_named_document_and_no_grain_pairs
 
+# ---- publish_document: a document publishes as a generation (market-data §4.1)
+
+# The validation gate is the whole of "a malformed message changes
+# nothing". Without it the staging loop reads a short value column at the
+# axes' length, so the store is touched -- ids spent, a staging table
+# written, possibly a panic -- by a message that should have been refused
+# before any of it.
+run_mutation "document: an invalid document is refused before staging" \
+  crates/geode-data/src/store/document.rs \
+  '    req.rows
+        .validate(req.dataset)
+        .map_err(StoreError::Document)?;' \
+  '    let _ = req.rows.validate(req.dataset);' \
+  geode-data an_invalid_document_is_refused_before_anything_is_written
+
+# The backfill guard (§4.4) on the document path. `None` reads as "nothing
+# is live yet", so a late-arriving older document would overwrite the
+# current one instead of becoming history -- last Tuesday's surface over
+# this morning's.
+run_mutation "document: the backfill guard reads the live source time" \
+  crates/geode-data/src/store/document.rs \
+  '    let live_source_time = catalog.live_source_time(&ds.name, &batch, None)?;' \
+  '    let live_source_time = None;' \
+  geode-data an_older_document_is_archived_only_and_live_is_untouched
+
+# The key IS the partition (§4.1). A constant batch in the publish request
+# no longer matches the batch the staged rows carry, so the replacement
+# delete hits nothing and live accumulates a copy per publish -- while
+# every key's document claims to be the same partition.
+run_mutation "document: the key is the batch" \
+  crates/geode-data/src/store/document.rs \
+  '            partitions: vec![Partition {
+                batch: batch.clone(),
+                book: None,
+            }],' \
+  '            partitions: vec![Partition {
+                batch: "doc".into(),
+                book: None,
+            }],' \
+  geode-data two_keys_are_two_partitions_that_do_not_disturb_each_other
+
+# Without the refresh the dataset has no ENUM type at all, so the query
+# path cannot cast the key dimension to a dictionary and the text filter's
+# rewrite has nothing to read (§3.5, §3.6).
+run_mutation "document: the key dimension enum is refreshed" \
+  crates/geode-data/src/store/document.rs \
+  '        ddl::refresh_enum(conn, &ds.name, col, &tables.live, &tables.archive)?;' \
+  '        let _ = (col, &tables);' \
+  geode-data the_key_dimension_enum_is_refreshed_after_publish
+
+# `archived_only` is what keeps a generation that was never live out of
+# freshness (§4.5). Hardcoded false, provenance claims a backfilled
+# document as the batch's current state while live holds something newer.
+run_mutation "document: archived_only is recorded from the outcome" \
+  crates/geode-data/src/store/document.rs \
+  '        archived_only: matches!(outcome, PublishOutcome::ArchivedOnly { .. }),' \
+  '        archived_only: false,' \
+  geode-data an_older_document_is_archived_only_and_live_is_untouched
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
