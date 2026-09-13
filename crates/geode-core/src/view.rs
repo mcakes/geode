@@ -6,7 +6,8 @@
 //! A view is data, not code — it names columns and expressions, and the
 //! compiler (geode-data) turns it into one statement.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::dimensions::DerivedDimensions;
@@ -153,14 +154,151 @@ pub struct ColumnPresentation {
     pub scale: Option<Scale>,
     pub label: Option<String>,
     pub width: Option<f32>,
-    /// Set only by `ViewPresentationSpec` (spec §5.6). It lives here
-    /// rather than on `ViewColumn` — which spec §1.2 sketched — because
-    /// `ViewColumn` is an enum with no shared fields, while this struct
-    /// is already per-column, already carries `width`, and is already
-    /// merged into `ViewSpec.presentation`. A hidden column stays in
+    /// Set only by `ViewPresentationSpec`'s `[view.columns.<col>]` table
+    /// (Part 2c §4) or its legacy `hidden` array — never by the views
+    /// reader itself (`parse_column_keys` is called with
+    /// `read_hidden: false` there). It lives here rather than on
+    /// `ViewColumn` — which spec §1.2 sketched — because `ViewColumn` is
+    /// an enum with no shared fields, while this struct is already
+    /// per-column, already carries `width`, and is already merged into
+    /// `ViewSpec.presentation`. A hidden column stays in
     /// `ViewSpec.columns`: the compiler still selects it, so unhiding is
     /// free and no query changes shape when a trader hides a column.
     pub hidden: Option<bool>,
+}
+
+impl ColumnPresentation {
+    /// `precision`, `thousands`, `negative`, `colour`, `scale` — from a
+    /// `format` sub-table (the views reader, `views.toml`) or directly
+    /// from a column's own table (the overlay's `[view.columns.<col>]`,
+    /// Part 2c §4: there is no nested `format` table there, since a
+    /// column's presentation IS the table). `warn` is called with the key
+    /// within `table` ("precision", "colour", …) and the message; each
+    /// caller decides how to turn that into a `Diagnostic` and where to
+    /// file it (the views reader prefixes `format.`, the overlay does
+    /// not, since its keys sit at the column table's own top level).
+    pub fn parse_format_keys(&mut self, table: &toml::Table, warn: &dyn Fn(&str, String)) {
+        match table.get("precision") {
+            None => {}
+            Some(v) => match v.as_integer() {
+                Some(n) if (0..=12).contains(&n) => self.precision = Some(n as u8),
+                _ => warn(
+                    "precision",
+                    format!("'precision' must be an integer 0–12 (got {v})"),
+                ),
+            },
+        }
+        match table.get("thousands") {
+            None => {}
+            Some(v) => match v.as_bool() {
+                Some(b) => self.thousands = Some(b),
+                None => warn(
+                    "thousands",
+                    format!("'thousands' must be true or false (got {v})"),
+                ),
+            },
+        }
+        match table.get("negative").and_then(|v| v.as_str()) {
+            None if table.get("negative").is_none() => {}
+            Some("minus") => self.negative = Some(Negative::Minus),
+            Some("parens") => self.negative = Some(Negative::Parens),
+            other => warn(
+                "negative",
+                format!("'negative' must be \"minus\" or \"parens\" (got {other:?})"),
+            ),
+        }
+        // "none" and "sign" are the two built-in spellings; anything else
+        // is a name into `colours.toml` — the reader takes it on faith
+        // and `load_views`'s cross-check (§3, and its overlay-side
+        // counterpart, §4) warns if the name is not defined there, since
+        // this doc alone (no access to the `colours` doc) cannot tell.
+        match table.get("colour").or_else(|| table.get("color")) {
+            None => {}
+            Some(v) => match v.as_str() {
+                Some("none") => self.colour = Some(Colour::None),
+                Some("sign") => self.colour = Some(Colour::Sign),
+                Some(name) => self.colour = Some(Colour::Named(name.to_string())),
+                None => warn("colour", format!("'colour' must be a string (got {v})")),
+            },
+        }
+        match table.get("scale").and_then(|v| v.as_str()) {
+            None if table.get("scale").is_none() => {}
+            Some("none") => self.scale = Some(Scale::None),
+            Some("k") => self.scale = Some(Scale::Thousands),
+            Some("M") => self.scale = Some(Scale::Millions),
+            other => warn(
+                "scale",
+                format!("'scale' must be \"none\", \"k\" or \"M\" (got {other:?})"),
+            ),
+        }
+    }
+
+    /// `label`, `width` (and `hidden` when `read_hidden`) — from a
+    /// column's table. The views reader passes `read_hidden: false`
+    /// (`hidden` is never a view's own key — only the overlay sets it);
+    /// `ViewPresentationSpec::from_doc` passes `true`.
+    pub fn parse_column_keys(
+        &mut self,
+        table: &toml::Table,
+        read_hidden: bool,
+        warn: &dyn Fn(&str, String),
+    ) {
+        if let Some(l) = table.get("label") {
+            match l.as_str() {
+                Some(s) => self.label = Some(s.to_string()),
+                None => warn("label", "'label' must be a string".into()),
+            }
+        }
+        if let Some(w) = table.get("width") {
+            match w.as_float().or_else(|| w.as_integer().map(|i| i as f64)) {
+                Some(x) if x > 0.0 => self.width = Some(x as f32),
+                _ => warn(
+                    "width",
+                    format!("'width' must be a positive number (got {w})"),
+                ),
+            }
+        }
+        if read_hidden && let Some(h) = table.get("hidden") {
+            match h.as_bool() {
+                Some(b) => self.hidden = Some(b),
+                None => warn(
+                    "hidden",
+                    format!("'hidden' must be true or false (got {h})"),
+                ),
+            }
+        }
+    }
+
+    /// Merge `other` over `self`: every field `other` set wins, every
+    /// field it left `None` keeps `self`'s own value. Used to fold a
+    /// `[view.columns.<col>]` table over whatever the view itself already
+    /// declared for that column (Part 2c §4.4).
+    pub fn merge_over(&mut self, other: &ColumnPresentation) {
+        if other.precision.is_some() {
+            self.precision = other.precision;
+        }
+        if other.thousands.is_some() {
+            self.thousands = other.thousands;
+        }
+        if other.negative.is_some() {
+            self.negative = other.negative;
+        }
+        if other.colour.is_some() {
+            self.colour = other.colour.clone();
+        }
+        if other.scale.is_some() {
+            self.scale = other.scale;
+        }
+        if other.label.is_some() {
+            self.label = other.label.clone();
+        }
+        if other.width.is_some() {
+            self.width = other.width;
+        }
+        if other.hidden.is_some() {
+            self.hidden = other.hidden;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -464,98 +602,30 @@ impl ViewSpec {
                     // row it named, not just the `columns` field header
                     // (the mutation harness's "views reader: column
                     // diagnostics carry the column index" entry pins this).
+                    // `warn` collects into `col_diags` (a `RefCell`,
+                    // rather than `diags` itself) purely so it can stay a
+                    // `Fn` and be handed to `parse_format_keys`/
+                    // `parse_column_keys` (which take `&dyn Fn`, shared
+                    // with both readers) without borrowing `diags`
+                    // mutably twice over; the collected diagnostics are
+                    // folded into `diags` right after.
+                    let col_diags = RefCell::new(Vec::new());
                     let warn = |key: &str, m: String| {
-                        bad(
+                        col_diags.borrow_mut().push(bad(
                             &format!("columns.{i}.{key}"),
                             format!("column '{col_name}': {m}"),
-                        )
+                        ));
                     };
                     if let Some(f) = c.get("format") {
                         match f.as_table() {
-                            None => diags.push(warn("format", "'format' is not a table".into())),
+                            None => warn("format", "'format' is not a table".into()),
                             Some(f) => {
-                                match f.get("precision") {
-                                    None => {}
-                                    Some(v) => match v.as_integer() {
-                                        Some(n) if (0..=12).contains(&n) => {
-                                            p.precision = Some(n as u8)
-                                        }
-                                        _ => diags.push(warn(
-                                            "format.precision",
-                                            format!(
-                                                "'precision' must be an integer 0–12 (got {v})"
-                                            ),
-                                        )),
-                                    },
-                                }
-                                match f.get("thousands") {
-                                    None => {}
-                                    Some(v) => match v.as_bool() {
-                                        Some(b) => p.thousands = Some(b),
-                                        None => diags.push(warn(
-                                            "format.thousands",
-                                            format!("'thousands' must be true or false (got {v})"),
-                                        )),
-                                    },
-                                }
-                                match f.get("negative").and_then(|v| v.as_str()) {
-                                    None if f.get("negative").is_none() => {}
-                                    Some("minus") => p.negative = Some(Negative::Minus),
-                                    Some("parens") => p.negative = Some(Negative::Parens),
-                                    other => diags.push(warn(
-                                        "format.negative",
-                                        format!("'negative' must be \"minus\" or \"parens\" (got {other:?})"),
-                                    )),
-                                }
-                                // "none" and "sign" are the two built-in
-                                // spellings; anything else is a name into
-                                // `colours.toml` — the reader takes it on
-                                // faith and `load_views`'s cross-check
-                                // (§3) warns if the name is not defined
-                                // there, since this doc alone (no access
-                                // to the `colours` doc) cannot tell.
-                                match f.get("colour").or_else(|| f.get("color")) {
-                                    None => {}
-                                    Some(v) => match v.as_str() {
-                                        Some("none") => p.colour = Some(Colour::None),
-                                        Some("sign") => p.colour = Some(Colour::Sign),
-                                        Some(name) => {
-                                            p.colour = Some(Colour::Named(name.to_string()))
-                                        }
-                                        None => diags.push(warn(
-                                            "format.colour",
-                                            format!("'colour' must be a string (got {v})"),
-                                        )),
-                                    },
-                                }
-                                match f.get("scale").and_then(|v| v.as_str()) {
-                                    None if f.get("scale").is_none() => {}
-                                    Some("none") => p.scale = Some(Scale::None),
-                                    Some("k") => p.scale = Some(Scale::Thousands),
-                                    Some("M") => p.scale = Some(Scale::Millions),
-                                    other => diags.push(warn(
-                                        "format.scale",
-                                        format!("'scale' must be \"none\", \"k\" or \"M\" (got {other:?})"),
-                                    )),
-                                }
+                                p.parse_format_keys(f, &|key, m| warn(&format!("format.{key}"), m))
                             }
                         }
                     }
-                    if let Some(l) = c.get("label") {
-                        match l.as_str() {
-                            Some(s) => p.label = Some(s.to_string()),
-                            None => diags.push(warn("label", "'label' must be a string".into())),
-                        }
-                    }
-                    if let Some(w) = c.get("width") {
-                        match w.as_float().or_else(|| w.as_integer().map(|i| i as f64)) {
-                            Some(x) if x > 0.0 => p.width = Some(x as f32),
-                            _ => diags.push(warn(
-                                "width",
-                                format!("'width' must be a positive number (got {w})"),
-                            )),
-                        }
-                    }
+                    p.parse_column_keys(c, false, &warn);
+                    diags.extend(col_diags.into_inner());
                     if p != ColumnPresentation::default() {
                         view.presentation.insert(col_name.to_string(), p);
                     }
@@ -606,8 +676,9 @@ impl ViewSpec {
     }
 }
 
-/// One view's personalisation: what order its columns are shown in,
-/// which are hidden, and how wide each is.
+/// One view's personalisation: what order its columns are shown in, and
+/// everything else about how each one looks — hidden, width, and (Part
+/// 2c §4) the same format keys a view itself can set.
 ///
 /// Deliberately a *separate* doc from the view (spec §4.1): dragging a
 /// column's width is the commonest edit a trader makes, and writing it
@@ -621,8 +692,14 @@ pub struct ViewPresentation {
     /// order behind the ones it names (`preserve_order` is on
     /// workspace-wide, so a view's file order is meaningful).
     pub order: Vec<String>,
-    pub hidden: BTreeSet<String>,
-    pub width: BTreeMap<String, f32>,
+    /// One `[view.columns.<col>]` table per personalised column (Part 2c
+    /// §4.1) — every presentation key a view itself can set, plus
+    /// `hidden`. `from_doc` also folds the legacy top-level `hidden`
+    /// array and `width` table in here (§4.2), so this is the *only*
+    /// place a caller needs to look regardless of which spelling a given
+    /// `view_presentation.toml` still uses; a column set in both wins by
+    /// the table, with a warning.
+    pub columns: BTreeMap<String, ColumnPresentation>,
 }
 
 /// `view_presentation.toml`, user layer — one table per view name,
@@ -685,13 +762,67 @@ impl ViewPresentationSpec {
                     )),
                 }
             }
+            // The table is read FIRST, before either legacy spelling
+            // below, so the conflict rule ("a column set in both wins by
+            // the table") can see what the table already holds — folding
+            // the legacy keys in ahead of it would have nothing to lose
+            // to.
+            if let Some(v) = table.get("columns") {
+                match v.as_table() {
+                    Some(cols) => {
+                        for (col, cv) in cols {
+                            let Some(ct) = cv.as_table() else {
+                                diags.push(bad(
+                                    &format!("columns.{col}"),
+                                    format!("column '{col}': not a table"),
+                                ));
+                                continue;
+                            };
+                            let mut cp = ColumnPresentation::default();
+                            // Shared with `parse_column_keys`'s `warn`
+                            // below (see the reader's own `col_diags` for
+                            // why this collects rather than pushing
+                            // straight into `diags`): a `[view.columns.
+                            // <col>]` table has no nested `format`
+                            // sub-table — its keys sit at the column
+                            // table's own top level — so, unlike the
+                            // views reader, nothing here prefixes `key`.
+                            let col_diags = RefCell::new(Vec::new());
+                            let warn = |key: &str, m: String| {
+                                col_diags.borrow_mut().push(bad(
+                                    &format!("columns.{col}.{key}"),
+                                    format!("column '{col}': {m}"),
+                                ));
+                            };
+                            cp.parse_format_keys(ct, &warn);
+                            cp.parse_column_keys(ct, true, &warn);
+                            diags.extend(col_diags.into_inner());
+                            p.columns.insert(col.clone(), cp);
+                        }
+                    }
+                    None => diags.push(bad(
+                        "columns",
+                        "'columns' must be a table of column tables".into(),
+                    )),
+                }
+            }
             if let Some(v) = table.get("hidden") {
                 match v.as_array() {
                     Some(a) => {
                         for item in a {
                             match item.as_str() {
-                                Some(s) => {
-                                    p.hidden.insert(s.to_string());
+                                Some(col) => {
+                                    let entry = p.columns.entry(col.to_string()).or_default();
+                                    if entry.hidden.is_some() {
+                                        diags.push(bad(
+                                            &format!("columns.{col}.hidden"),
+                                            format!(
+                                                "column '{col}': 'hidden' is also set in the legacy 'hidden' array — the table wins"
+                                            ),
+                                        ));
+                                        continue;
+                                    }
+                                    entry.hidden = Some(true);
                                 }
                                 None => diags.push(bad(
                                     "hidden",
@@ -710,9 +841,19 @@ impl ViewPresentationSpec {
                 match v.as_table() {
                     Some(t) => {
                         for (col, w) in t {
+                            let entry = p.columns.entry(col.clone()).or_default();
+                            if entry.width.is_some() {
+                                diags.push(bad(
+                                    &format!("columns.{col}.width"),
+                                    format!(
+                                        "column '{col}': 'width' is also set in the legacy 'width' map — the table wins"
+                                    ),
+                                ));
+                                continue;
+                            }
                             match w.as_float().or_else(|| w.as_integer().map(|i| i as f64)) {
                                 Some(x) if x > 0.0 => {
-                                    p.width.insert(col.clone(), x as f32);
+                                    entry.width = Some(x as f32);
                                 }
                                 _ => diags.push(bad(
                                     &format!("width.{col}"),
@@ -799,30 +940,23 @@ impl ViewPresentationSpec {
                 .map(|i| slots[i].take().expect("each index appears once"))
                 .collect();
 
-            for name in &p.hidden {
-                if !view.columns.iter().any(|c| c.name() == name) {
+            // One merge per personalised column, regardless of which
+            // spelling `from_doc` read it from — `columns` already holds
+            // the legacy `hidden`/`width` keys folded in (§4.2).
+            for (col, cp) in &p.columns {
+                if !view.columns.iter().any(|c| c.name() == col) {
                     diags.push(warn(
-                        "hidden",
+                        &format!("columns.{col}"),
                         format!(
-                            "'hidden' names column '{name}', which the view does not have — ignored"
+                            "'columns' names column '{col}', which the view does not have — ignored"
                         ),
                     ));
                     continue;
                 }
-                view.presentation.entry(name.clone()).or_default().hidden = Some(true);
-            }
-
-            for (name, width) in &p.width {
-                if !view.columns.iter().any(|c| c.name() == name) {
-                    diags.push(warn(
-                        &format!("width.{name}"),
-                        format!(
-                            "'width' names column '{name}', which the view does not have — ignored"
-                        ),
-                    ));
-                    continue;
-                }
-                view.presentation.entry(name.clone()).or_default().width = Some(*width);
+                view.presentation
+                    .entry(col.clone())
+                    .or_default()
+                    .merge_over(cp);
             }
         }
         diags
@@ -1272,8 +1406,65 @@ npv = 120
         assert!(diags.is_empty(), "{diags:?}");
         let tree = spec.views.get("tree").expect("tree");
         assert_eq!(tree.order, vec!["book", "npv", "delta01"]);
-        assert!(tree.hidden.contains("cross_gamma02"));
-        assert_eq!(tree.width.get("npv").copied(), Some(120.0));
+        assert_eq!(tree.columns["cross_gamma02"].hidden, Some(true));
+        assert_eq!(tree.columns["npv"].width, Some(120.0));
+    }
+
+    fn overlay(text: &str) -> (ViewPresentationSpec, Vec<Diagnostic>) {
+        let doc = merge_docs(
+            "view_presentation",
+            &[LayerDoc::builtin("view_presentation", text).unwrap()],
+        );
+        ViewPresentationSpec::from_doc(&doc)
+    }
+
+    #[test]
+    fn the_overlay_reads_a_column_table_with_every_presentation_key() {
+        let (spec, diags) = overlay(
+            "[tree]\norder = [\"npv\"]\n[tree.columns.npv]\nscale = \"k\"\nprecision = 0\nthousands = false\nnegative = \"parens\"\ncolour = \"delta\"\nlabel = \"NPV\"\nwidth = 120\nhidden = true\n",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let p = &spec.views["tree"].columns["npv"];
+        assert_eq!(p.scale, Some(Scale::Thousands));
+        assert_eq!(p.precision, Some(0));
+        assert_eq!(p.thousands, Some(false));
+        assert_eq!(p.negative, Some(Negative::Parens));
+        assert_eq!(p.colour, Some(Colour::Named("delta".to_string())));
+        assert_eq!(p.label.as_deref(), Some("NPV"));
+        assert_eq!(p.width, Some(120.0));
+        assert_eq!(p.hidden, Some(true));
+        assert_eq!(spec.views["tree"].order, vec!["npv".to_string()]);
+    }
+
+    #[test]
+    fn the_legacy_hidden_and_width_keys_still_load_and_the_table_wins_a_conflict() {
+        let (spec, diags) = overlay(
+            "[tree]\nhidden = [\"book\"]\n[tree.width]\nnpv = 140\nbook = 90\n[tree.columns.npv]\nwidth = 120\n",
+        );
+        let cols = &spec.views["tree"].columns;
+        assert_eq!(cols["book"].hidden, Some(true));
+        assert_eq!(cols["book"].width, Some(90.0));
+        assert_eq!(cols["npv"].width, Some(120.0), "the table wins");
+        assert!(
+            diags.iter().any(|d| d.path.as_deref()
+                == Some("view_presentation.tree.columns.npv.width")
+                && d.message.contains("table wins")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn apply_merges_a_column_table_over_the_view() {
+        let views_doc = merge_docs("views", &[LayerDoc::builtin("views",
+            "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { scale = \"k\", precision = 2 }\n").unwrap()]);
+        let (mut views, _) = ViewSpec::from_doc(&views_doc);
+        let (spec, _) = overlay("[tree.columns.npv]\nprecision = 0\ncolour = \"delta\"\n");
+        let diags = spec.apply(&mut views);
+        assert!(diags.is_empty(), "{diags:?}");
+        let p = views[0].presentation_of("npv");
+        assert_eq!(p.scale, Some(Scale::Thousands), "the desk's key survives");
+        assert_eq!(p.precision, Some(0), "the trader's key wins");
+        assert_eq!(p.colour, Some(Colour::Named("delta".to_string())));
     }
 
     /// A desk that renames a column must not break a personal file. The

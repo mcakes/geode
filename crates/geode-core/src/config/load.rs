@@ -90,13 +90,17 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
 /// A missing `views` doc is an empty list, not an error: callers that
 /// need to distinguish "no views configured" ask `Config::doc` first.
 ///
-/// Cross-checks a column's named colour (Part 2c §3) against the
-/// `colours` doc right here, between the two reads above: the index in
-/// the diagnostic's path must be the FILE's own column order, which is
-/// what `views` still is at this point — the overlay's `apply` below
-/// reorders, hides and resizes but is not consulted for `colour` yet
-/// (the overlay has no `colour` key of its own until Task 2 adds one;
-/// that check lands beside this one, once it does).
+/// Cross-checks a column's named colour (Part 2c §3–§4) against the
+/// `colours` doc at both of the two places a colour can be named, since
+/// neither reader has access to the `colours` doc to check it itself.
+/// The view's own `format.colour` is checked right here, between the two
+/// reads above: the index in the diagnostic's path must be the FILE's
+/// own column order, which is what `views` still is at this point — the
+/// overlay's `apply` below reorders, hides and resizes it. The overlay's
+/// own `[view.columns.<col>].colour` (Part 2c §4) is checked just below,
+/// against `presentation.views` directly rather than the merged result —
+/// it is keyed by column name, not file position, so it needs no such
+/// ordering care.
 pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     let Some(views_doc) = config.doc("views") else {
         return (Vec::new(), Vec::new());
@@ -130,6 +134,26 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     if let Some(doc) = config.doc("view_presentation") {
         let (presentation, d) = ViewPresentationSpec::from_doc(doc);
         diags.extend(d);
+        for (view_name, p) in &presentation.views {
+            for (col, cp) in &p.columns {
+                let Some(Colour::Named(name)) = &cp.colour else {
+                    continue;
+                };
+                if colours.get(name).is_none() {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        layer: None,
+                        file: None,
+                        message: format!(
+                            "view presentation '{view_name}': column '{col}' names colour '{name}', which colours.toml does not define — painted in foreground"
+                        ),
+                        path: Some(format!(
+                            "view_presentation.{view_name}.columns.{col}.colour"
+                        )),
+                    });
+                }
+            }
+        }
         diags.extend(presentation.apply(&mut views));
     }
     (views, diags)
@@ -276,6 +300,38 @@ mod tests {
                 |d| d.path.as_deref() == Some("views.tree.columns.1.format.colour")
                     && d.message.contains("ghost")
             ),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_presentation_naming_an_unknown_colour_warns_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "views.toml",
+            "config_version = 1\n[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+        );
+        write(
+            dir.path(),
+            "colours.toml",
+            "config_version = 1\n[delta]\nhue = 240\n",
+        );
+        write(
+            dir.path(),
+            "view_presentation.toml",
+            "config_version = 1\n[tree.columns.npv]\ncolour = \"ghost\"\n",
+        );
+        let config = Config::load(&ConfigSources {
+            builtin: vec![],
+            desk: Some(dir.path().to_path_buf()),
+            user: None,
+        });
+        let (_views, diags) = load_views(&config);
+        assert!(
+            diags.iter().any(|d| d.path.as_deref()
+                == Some("view_presentation.tree.columns.npv.colour")
+                && d.message.contains("ghost")),
             "{diags:?}"
         );
     }
