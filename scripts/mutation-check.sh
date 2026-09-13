@@ -3068,10 +3068,14 @@ run_mutation "schema: a dimension carried by an uncarriable grain is dropped" \
 
 # ---- text filter / ENUM dictionary rewrite, distinct (Phase 4 §3.4-3.5)
 
+# Re-anchored (market-data Part 2 Task 1): the per-column term building
+# moved out of `compile_scope_cached`'s text block into
+# `scope_sql::text_column_term`, so `compile_distinct`'s document arm can
+# reuse it grain-free. Same site, same meaning, one nesting level shallower.
 run_mutation "text: a categorical column matches the dictionary, not the rows" \
   crates/geode-data/src/query/scope_sql.rs \
-  '            let test = if col.categorical && enum_types.contains(&ty) {' \
-  '            let test = if false {' \
+  '    let test = if col.categorical && enum_types.contains(&ty) {' \
+  '    let test = if false {' \
   geode-data a_text_filter_over_a_categorical_column_matches_the_dictionary_not_the_rows
 
 # Root cause of the as-of slowdown (2026-09-07 fix): the rewrite is now
@@ -3116,7 +3120,7 @@ run_mutation "text: a needle matching no dictionary value collapses to false" \
 run_mutation "text: the literal list binds the matching values, not the pattern" \
   crates/geode-data/src/query/scope_sql.rs \
   'bound = Value::Text(matches.join(SELECTION_DELIMITER));' \
-  'bound = pattern.clone();' \
+  'bound = Value::Text(pattern_text.to_string());' \
   geode-data a_dictionary_match_binds_the_matching_values_not_the_pattern
 
 # DictionaryCache (dictionary resolves once per statement, 2026-09-07):

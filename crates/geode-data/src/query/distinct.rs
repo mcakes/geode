@@ -4,7 +4,10 @@
 
 use crate::query::as_of::{generation_predicate, resolve_generations};
 use crate::query::compile::{CompiledColumn, CompiledQuery, era_for};
-use crate::query::scope_sql::{DictionaryCache, compile_scope_cached, selection_clause};
+use crate::query::scope_sql::{
+    DictionaryCache, compile_scope_cached, conjuncts, like_pattern, render_expr, selection_clause,
+    text_column_term,
+};
 use crate::store::StoreError;
 use crate::store::ddl::TablePair;
 use duckdb::Connection;
@@ -51,7 +54,9 @@ pub(crate) fn compile_distinct_with_cache(
         // a document-only dimension nothing at all (market-data spec
         // §3.3).
         if ds.is_document() {
-            if let Some((select, select_params)) = document_select(conn, ds, dims, params, base)? {
+            if let Some((select, select_params)) =
+                document_select(conn, ds, dims, params, base, cache)?
+            {
                 selects.push(select);
                 all_params.extend(select_params);
             }
@@ -123,25 +128,43 @@ pub(crate) fn compile_distinct_with_cache(
 /// categorical-and-any-role: a categorical *attribute* no grain can group
 /// by is likewise not offered by the measure arms.
 ///
-/// **Only the dimension selections of the scope are applied.** The text
-/// and expression filters are not, and that is a deliberate gap rather
-/// than an oversight: `compile_scope` is the one place either is lowered,
-/// and every routing decision it makes (`route`, `evaluable_at`,
-/// `membership`, `Era::relation`) is defined in terms of a `Grain` this
-/// family does not have. So a document dataset's counts here are as of
-/// the dimension selections and the era alone; under an active text or
-/// expression filter its values can be over-counted relative to the
-/// measure datasets beside them in the same union. The honest fix is a
-/// grain-free scope lowering, which belongs with Part 2's panel — faking
-/// it (dropping the dataset, or pretending the filter applied) would
-/// either hide a document-only dimension from the picker entirely or
-/// report a number that is wrong with no way to tell.
+/// **The whole scope is applied, lowered grain-free** (market-data spec
+/// §4.5, Part 2 Task 1): the dimension selections `applicable_to` keeps,
+/// the text filter, and the expression filter. `compile_scope` is still the
+/// only place a *grain* routes one of them — `route`, `evaluable_at`,
+/// `membership` and `Era::relation` all speak of a `Grain` this family does
+/// not have — but routing is only ever the question of *where* a term is
+/// evaluated, and a document dataset is one table, so every one of those
+/// steps is a no-op here. What is left is the term itself, and the term is
+/// shared rather than restated: `selection_clause` for a selection,
+/// `scope_sql::text_column_term` for a textual column, `scope_sql::
+/// render_expr` for an expression conjunct.
+///
+/// Two rules carry over from the measure path because the direction of the
+/// error matters more than the rule:
+///
+/// * A text filter with no term surviving — every categorical column's
+///   dictionary dropped the needle, or the dataset declares no textual
+///   column at all — compiles to a literal `false`. A needle over a dataset
+///   that cannot be searched matches **nothing**, never everything;
+///   widening there is exactly the over-count Part 1 disclosed, and it
+///   widens hardest at the moment the trader has narrowed hardest.
+/// * A selection or expression conjunct naming a column this dataset has no
+///   storage for is **dropped**, not compiled and not collapsed to `false`
+///   (`Scope::applicable_to` for selections, the `stored` check below for
+///   conjuncts). A frame-wide `:filter book = 'BK001'` must not fail the
+///   whole picker query with a binder error on the one dataset that has no
+///   `book`, and `false` would claim the document dataset holds no such rows
+///   rather than that the question never reaches it. The widening that
+///   leaves is the disclosed, deliberate one `ScopeSemantics::
+///   NotApplicable` exists to report once Part 2's panel produces it.
 fn document_select(
     conn: &Connection,
     ds: &DatasetSpec,
     dims: &DerivedDimensions,
     params: &DistinctParams,
     base: &str,
+    cache: &mut DictionaryCache,
 ) -> Result<Option<(String, Vec<Value>)>, StoreError> {
     if !ds
         .column(base)
@@ -181,6 +204,12 @@ fn document_select(
     let (scope, _dropped) = params.scope.applicable_to(ds, dims);
     let mut clauses: Vec<String> = Vec::new();
     let mut sql_params: Vec<Value> = Vec::new();
+    // Whether anything past the dimension selections is worth compiling.
+    // Correctness does not need it — `false and <anything>` is still false —
+    // but the text filter's dictionary rewrite costs real catalog
+    // round-trips, and buying them for a predicate already known to select
+    // nothing is a cost with no answer attached.
+    let mut nothing_matches = scope.impossible;
     // A contradiction selects nothing and must say so in SQL, exactly as
     // `compile_scope` does: the contradicted dimension has already been
     // dropped from `dimensions`, so compiling the rest would produce a
@@ -203,11 +232,80 @@ fn document_select(
                     clauses.clear();
                     sql_params.clear();
                     clauses.push("false".to_string());
+                    nothing_matches = true;
                     break;
                 }
             }
         }
     }
+
+    // The text filter, lowered grain-free. Every per-column decision is
+    // `scope_sql::text_column_term`'s — the dictionary `IN` for a
+    // categorical column whose ENUM type exists, a row-scanning `ILIKE`
+    // otherwise — so the two paths cannot drift into searching different
+    // things. `textual_columns()` is safe to read straight through here:
+    // `validate_document` clears `textual` on anything but a dimension, and
+    // a document dataset's dimensions are all key columns, so every column
+    // this yields really is in the table `document_columns()` builds.
+    //
+    // No term surviving means a literal `false`, the measure path's own
+    // rule: a needle over a dataset that cannot be searched matches
+    // nothing, never everything.
+    if !nothing_matches && let Some(text) = &scope.text {
+        let pattern_text = like_pattern(text);
+        // Resolved once and owned, not held as the cache's borrow: the loop
+        // below needs `&mut cache` for the dictionary itself.
+        let enum_types: Vec<String> = cache.enum_types(conn, &ds.name)?.to_vec();
+        let mut terms: Vec<String> = Vec::new();
+        let mut term_params: Vec<Value> = Vec::new();
+        for col in ds.textual_columns() {
+            if let Some((test, bound)) =
+                text_column_term(conn, ds, col, &enum_types, &pattern_text, cache)?
+            {
+                terms.push(test);
+                term_params.push(bound);
+            }
+        }
+        if terms.is_empty() {
+            clauses.push("false".to_string());
+            nothing_matches = true;
+        } else {
+            clauses.push(format!("({})", terms.join(" or ")));
+            sql_params.extend(term_params);
+        }
+    }
+
+    // The expression filter, one top-level `and` term at a time — the same
+    // split the measure path makes so each term can route on its own, kept
+    // here because it is also the unit a document dataset can *drop*.
+    // `render_expr` is the same lowering, derived dimensions translated back
+    // to their source column and every literal bound.
+    if !nothing_matches && let Some(expr) = &scope.expression {
+        let stored: Vec<&str> = ds
+            .document_columns()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        for term in conjuncts(expr) {
+            // `document_columns()`, not `ds.column()`: it is the projection
+            // the DDL was built from, so it is the exact set a predicate can
+            // name. A conjunct over anything else is this dataset's
+            // not-applicable, dropped for the reason in the doc comment
+            // above.
+            if term
+                .columns()
+                .iter()
+                .any(|c| !stored.contains(&dims.base_column(c)))
+            {
+                continue;
+            }
+            let mut expr_params = Vec::new();
+            let sql = render_expr(term, &mut expr_params, dims)?;
+            clauses.push(sql);
+            sql_params.extend(expr_params);
+        }
+    }
+
     let predicate = if clauses.is_empty() {
         "true".to_string()
     } else {
@@ -666,6 +764,10 @@ role = "dimension"
 type = "f64"
 role = "measure"
 grain = "underlying"
+[risk.columns.spot_ref]
+type = "f64"
+role = "attribute"
+grain = "underlying"
 
 [cvi_params]
 family = "document"
@@ -674,6 +776,7 @@ axes = ["term", "node"]
 [cvi_params.columns.underlying_ref]
 type = "utf8"
 role = "dimension"
+textual = true
 [cvi_params.columns.curve_id]
 type = "utf8"
 role = "dimension"
@@ -686,16 +789,26 @@ role = "axis"
 [cvi_params.columns.param]
 type = "f64"
 role = "value"
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
 "#;
 
     /// Six rows (two terms x three nodes) for one `(underlying, curve)`
-    /// document.
-    fn cvi_doc(underlying: &str, curve: &str) -> geode_core::document::DocumentRows {
-        use geode_core::document::{Column, DocumentRows};
+    /// document, carrying `spot_ref` as its one document-level attribute.
+    ///
+    /// The attribute exists so an expression filter has something to
+    /// narrow *by* that is not the key itself: a document dataset's
+    /// dimensions are all key columns (`validate_document`), so without an
+    /// attribute the only expression this fixture could express would
+    /// duplicate a dimension selection. Each document gets its own value,
+    /// so `spot_ref > 7000` really separates SPX.Z from NDX.Z.
+    fn cvi_doc(underlying: &str, curve: &str, spot: f64) -> geode_core::document::DocumentRows {
+        use geode_core::document::{Column, DocumentRows, Value as DocValue};
         let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
         DocumentRows {
             key: vec![underlying.into(), curve.into()],
-            attributes: Vec::new(),
+            attributes: vec![("spot_ref".into(), DocValue::F64(spot))],
             axes: vec![
                 (
                     "term".into(),
@@ -721,6 +834,15 @@ role = "value"
     /// RTY.Z row in BK001. `cvi_params` holds one six-row document per
     /// `(SPX.Z, EQ1)` and `(NDX.Z, EQ1)`, published at 14:00 and 14:01 —
     /// `between` sits after the first and before the second.
+    ///
+    /// `spot_ref` is declared on both sides — a document-level attribute on
+    /// `cvi_params`, an underlying-grain attribute on `risk` — and carries
+    /// 7100 for SPX.Z, 5200 for NDX.Z and 2400 for RTY.Z, so one expression
+    /// (`spot_ref > 7000`) narrows both datasets and separates the two
+    /// documents. It is declared on `risk` as well because `route` refuses a
+    /// column no grain carries: an expression naming a document-only column
+    /// would fail the measure arm, and with it the whole union, before the
+    /// document arm was ever reached.
     fn document_fixture() -> Fixture {
         let doc = merge_docs(
             "datasets",
@@ -748,24 +870,24 @@ role = "value"
             .execute_batch(
                 "insert into risk_underlying_live
                    (book, lhu, position_ref, counterparty, instrument_ref, underlying_ref,
-                    delta01, batch, source_file_id, gen_id, source_time) values
-                   ('BK000','L','P1','C','I1','SPX.Z', 1.0, 'b', 1, 1, now()),
-                   ('BK000','L','P2','C','I2','SPX.Z', 1.0, 'b', 1, 1, now()),
-                   ('BK000','L','P3','C','I3','NDX.Z', 1.0, 'b', 1, 1, now()),
-                   ('BK001','L','P4','C','I4','RTY.Z', 1.0, 'b', 1, 1, now());",
+                    delta01, spot_ref, batch, source_file_id, gen_id, source_time) values
+                   ('BK000','L','P1','C','I1','SPX.Z', 1.0, 7100.0, 'b', 1, 1, now()),
+                   ('BK000','L','P2','C','I2','SPX.Z', 1.0, 7100.0, 'b', 1, 1, now()),
+                   ('BK000','L','P3','C','I3','NDX.Z', 1.0, 5200.0, 'b', 1, 1, now()),
+                   ('BK001','L','P4','C','I4','RTY.Z', 1.0, 2400.0, 'b', 1, 1, now());",
             )
             .unwrap();
         let ds = f.schema.dataset("cvi_params").unwrap().clone();
-        for (underlying, at) in [
-            ("SPX.Z", "2026-09-12T14:00:00Z"),
-            ("NDX.Z", "2026-09-12T14:01:00Z"),
+        for (underlying, spot, at) in [
+            ("SPX.Z", 7100.0, "2026-09-12T14:00:00Z"),
+            ("NDX.Z", 5200.0, "2026-09-12T14:01:00Z"),
         ] {
             crate::store::document::publish_document(
                 &f.store,
                 &crate::store::document::DocumentPublishRequest {
                     dataset: &ds,
                     source: "cvi",
-                    rows: &cvi_doc(underlying, "EQ1"),
+                    rows: &cvi_doc(underlying, "EQ1", spot),
                     source_time: ts(at),
                     received_at: ts(at),
                     bytes: 0,
@@ -916,6 +1038,142 @@ role = "value"
                 ("SPX.Z".to_string(), 6),
             ],
             "risk narrowed to BK001's one row; both documents unnarrowed: {rows:?}"
+        );
+    }
+
+    /// Part 2 Task 1 (the item Part 1 parked): the text filter is lowered
+    /// grain-free over the document table, so a text-filtered picker no
+    /// longer counts every document regardless of the needle.
+    ///
+    /// `cvi_params.underlying_ref` is textual and categorical, so the
+    /// needle goes through its ENUM dictionary rather than a row scan —
+    /// the same rewrite the measure path uses. `risk` declares no textual
+    /// column at all, so it contributes nothing under the same
+    /// `false`-if-nothing-searchable rule `compile_scope` has always
+    /// applied: the whole answer is the one document the needle keeps.
+    #[test]
+    fn a_text_filter_narrows_a_document_datasets_contribution() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "underlying_ref".into(),
+            scope: Scope {
+                text: Some("spx".into()),
+                ..Scope::default()
+            },
+            ..base_params()
+        };
+        let compiled = compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap();
+        // The needle really went through the ENUM dictionary rather than a
+        // row scan: `publish_document` refreshes the type for every
+        // categorical column, so the rewrite is available here and taking it
+        // is the §7.1 half of this change (Phase 4a measured the row-scan
+        // form at 63ms where the dictionary form is 20.6ms). Both forms
+        // return the same rows, so only the statement text can tell them
+        // apart.
+        assert!(
+            compiled.sql.contains("string_split"),
+            "the document arm's text term must be the dictionary IN, not an ILIKE row scan: {}",
+            compiled.sql
+        );
+        assert!(
+            !compiled.sql.contains("ilike"),
+            "no row-scanning term should survive: {}",
+            compiled.sql
+        );
+        let rows = f.run(&compiled);
+        assert_eq!(
+            rows,
+            vec![("SPX.Z".to_string(), 6)],
+            "NDX.Z is dropped by the needle, and `risk` has nothing to search: {rows:?}"
+        );
+    }
+
+    /// The other half of the rule, and the direction that matters: a
+    /// needle over a dataset that cannot be searched matches NOTHING, never
+    /// everything. Without it a document dataset would widen to its full
+    /// row count exactly when the trader has narrowed hardest — the
+    /// over-count Part 1 disclosed.
+    #[test]
+    fn a_text_filter_on_a_document_dataset_with_no_textual_column_contributes_nothing() {
+        let mut f = document_fixture();
+        let ds = f
+            .schema
+            .datasets
+            .iter_mut()
+            .find(|d| d.name == "cvi_params")
+            .expect("the fixture declares cvi_params");
+        for c in ds.columns.iter_mut() {
+            c.textual = false;
+        }
+        let params = DistinctParams {
+            column: "underlying_ref".into(),
+            scope: Scope {
+                text: Some("spx".into()),
+                ..Scope::default()
+            },
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert!(
+            rows.is_empty(),
+            "neither dataset has a searchable column, so neither contributes: {rows:?}"
+        );
+    }
+
+    /// The expression filter is lowered over the same relation, with no
+    /// grain to route it through. `spot_ref` is the document's own
+    /// attribute — one value per document — so `spot_ref > 7000` keeps
+    /// SPX.Z's six rows and drops NDX.Z's, and narrows `risk` to its two
+    /// SPX.Z rows by the same predicate.
+    #[test]
+    fn an_expression_filter_narrows_a_document_datasets_contribution() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "underlying_ref".into(),
+            scope: Scope {
+                expression: Some(geode_core::scope::parse_expr("spot_ref > 7000").unwrap()),
+                ..Scope::default()
+            },
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert_eq!(
+            rows,
+            vec![("SPX.Z".to_string(), 8)],
+            "2 risk rows + SPX.Z's six document rows; the rest are below 7000: {rows:?}"
+        );
+    }
+
+    /// An expression conjunct naming a column the document dataset has no
+    /// storage for is DROPPED, exactly as `applicable_to` drops such a
+    /// dimension selection (market-data spec §3.4) — not compiled into a
+    /// binder error that would fail the whole picker query, and not
+    /// collapsed to `false`, which would claim the document dataset holds
+    /// no such rows rather than that the question does not reach it.
+    ///
+    /// `:filter book = 'BK001'` is the standing case: a frame-wide filter
+    /// on a measure-side column, with the picker open on a column the
+    /// document dataset shares.
+    #[test]
+    fn an_expression_the_document_dataset_lacks_a_column_for_is_dropped_not_an_error() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "underlying_ref".into(),
+            scope: Scope {
+                expression: Some(geode_core::scope::parse_expr("book = 'BK001'").unwrap()),
+                ..Scope::default()
+            },
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert_eq!(
+            rows,
+            vec![
+                ("NDX.Z".to_string(), 6),
+                ("RTY.Z".to_string(), 1),
+                ("SPX.Z".to_string(), 6),
+            ],
+            "risk narrowed to BK001; both documents unnarrowed, having no `book`: {rows:?}"
         );
     }
 

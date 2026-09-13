@@ -273,19 +273,32 @@ records the archive growth rate at the demo cadence.
   resolved **dataset-wide**, because distinct spans every key by
   definition — the narrowing `compile_document` does to one batch would
   be wrong here. Only `Dimension` columns are offered, never an axis
-  (§3.3) and never a value. Its scope is `Scope::applicable_to`'s kept
-  **dimension selections** alone, bound through
-  `scope_sql::selection_clause` (extracted so the derived-value
-  translation and the `string_split` binding form are spelled once).
-  **The text and expression filters are not applied**: `compile_scope`
-  is the only place either is lowered and every routing decision it
-  makes is defined in terms of a `Grain` this family has none of, so
-  under an active text filter a document dataset's counts can be
-  over-counted relative to the measure datasets beside them. A
-  grain-free scope lowering belongs with Part 2's panel; dropping the
-  dataset instead would hide a document-only dimension from the picker
-  entirely, and pretending the filter applied would report a number
-  that is wrong with no way to tell.
+  (§3.3) and never a value.
+- **The whole scope reaches that arm, lowered grain-free** (Part 2 Task 1,
+  closing the item Part 1 parked): `Scope::applicable_to`'s kept dimension
+  selections through `scope_sql::selection_clause` (extracted so the
+  derived-value translation and the `string_split` binding form are
+  spelled once), the text filter through `scope_sql::text_column_term`
+  (extracted from `compile_scope_cached`'s own text block, so the
+  dictionary `IN` for a categorical column and the row-scanning `ILIKE`
+  for everything else are likewise spelled once), and the expression
+  filter through `scope_sql::render_expr`, one top-level `and` conjunct at
+  a time. `compile_scope` is still the only place a *grain* routes any of
+  them — `route`, `evaluable_at`, `membership`, `Era::relation` — but
+  routing only ever decides *where* a term is evaluated, and a document
+  dataset is one table, so every one of those steps is a no-op here. Two
+  rules carry over from the measure path because the direction of the
+  error matters more than the rule: a text filter with no surviving term
+  (every dictionary dropped the needle, or the dataset declares no textual
+  column at all) compiles to a literal `false`, because a needle over a
+  dataset that cannot be searched matches nothing, never everything; and a
+  selection or expression conjunct naming a column the dataset has no
+  storage for is **dropped** — neither compiled, since a binder error
+  would fail the whole picker query on the one dataset with no `book`, nor
+  collapsed to `false`, which would claim the document holds no such rows
+  rather than that the question never reaches it. The widening that leaves
+  is the disclosed one `ScopeSemantics::NotApplicable` exists to report,
+  once the panel produces it.
 - **No query produces `ScopeSemantics::NotApplicable` yet.** The type
   and `Scope::applicable_to` exist, and the blotter paints the marker,
   but the one caller that drops selections today (`document_select`) has
