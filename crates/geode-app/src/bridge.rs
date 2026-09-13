@@ -1513,7 +1513,8 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        let setup =
+            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
         let v = setup.views.iter().find(|v| v.name == "v").unwrap();
         let w = setup.views.iter().find(|v| v.name == "w").unwrap();
         assert_eq!(v.presentation_of("npv").label.as_deref(), Some("NPV"));
