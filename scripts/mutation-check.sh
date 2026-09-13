@@ -8978,6 +8978,85 @@ run_mutation "objectdialog: a cleared view key falls to the dataset level before
   geode-shell \
   a_cleared_view_key_falls_to_the_dataset_level_before_the_desk
 
+# dataset-presentation spec §4.5: the writer keeps the dataset's OTHER
+# personalised columns — dropping them would erase every other column's
+# settings on any one column's edit.
+run_mutation "dataset_columns: the writer keeps the other columns' tables" \
+  crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
+  '            if name != open' \
+  '            if false' \
+  geode-shell \
+  the_writer_keeps_other_columns_verbatim_and_emits_only_keys_off_the_kind_default
+
+# §4.5: an empty object is REMOVED, never written as a bare `[risk]`.
+run_mutation "objectdialog: an empty dataset-overlay object is removed" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '            Destination::Presentation | Destination::DatasetPresentation => ObjectWrite::Remove,' \
+  '            Destination::Presentation => ObjectWrite::Remove,
+            Destination::DatasetPresentation => ObjectWrite::Nothing,' \
+  geode-shell \
+  an_emptied_column_leaves_the_table_and_an_empty_object_is_removed
+
+# §4.1: a schema column row is a member of the column stage by its
+# `columns.<col>` key — without this arm the Schema door cannot open.
+run_mutation "objectdialog: a schema column row can enter the column stage" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        let is_member = listed || self.fields.iter().any(|f| f.key == row_key);' \
+  '        let is_member = listed;' \
+  geode-shell \
+  the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay
+
+# §4.5: the Schema adapter's `to_table` must branch on the DESTINATION.
+# Rendering the source for a `DatasetPresentation` write puts the whole
+# `datasets` object — types, roles, grains — into the personalisation
+# file under the dataset's name, and the column's own keys nowhere.
+run_mutation "objectdialog: the schema adapter renders the overlay, not the datasets doc" \
+  crates/geode-shell/src/shell/objectdialog/schema.rs \
+  '        Destination::DatasetPresentation => toml_edit::Item::Table(dataset_columns::table(draft)),' \
+  '        Destination::DatasetPresentation => {
+            toml_edit::Item::Table(super::toml_table_to_edit(&draft.source))
+        }' \
+  geode-shell \
+  the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay
+
+# §4.1 / 4c §18.9: a click on a row `enter` would open opens it. Without
+# this the mouse and the key disagree about which rows are doors, which
+# is the defect the mouse-parity rule exists to remove.
+run_mutation "objectdialog: a click on a column row opens its stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if let Some(name) = column_stage_target(shell) {
+        enter_column_stage(shell, &name, cx);
+    }' \
+  '    if false {
+        enter_column_stage(shell, "", cx);
+    }' \
+  geode-shell \
+  a_click_on_a_schema_column_row_opens_the_column_stage
+
+# §4.7: `escape` out of a column stage lands the cursor back on the
+# column's own row. The Schema door's rows are FIELDS keyed
+# `columns.<col>`, not list items, so without the fallback the cursor
+# resets to the top of the list.
+run_mutation "objectdialog: the cursor returns to a schema column's own row" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            .or_else(|| {
+                let key = format!("columns.{name}");' \
+  '            .or_else(|| {
+                let key = format!("no-such-key.{name}");' \
+  geode-shell \
+  leaving_a_schema_column_stage_puts_the_cursor_back_on_its_row
+
+# §4.7: the Schema row the stage returns to carries the overlay summary,
+# and the overlay is what the stage just changed — so the rows are
+# re-derived on the way out or the row keeps painting the value the stage
+# was opened with.
+run_mutation "objectdialog: leaving a schema column stage re-derives its rows" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let reseed = (domain == Domain::Schema).then(|| {' \
+  '    let reseed = (domain != Domain::Schema).then(|| {' \
+  geode-shell \
+  the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
