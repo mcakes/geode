@@ -1961,14 +1961,13 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                name: "risk".into(),
-                dataset: "risk_snapshot".into(),
-                paths: vec![format!("{}/*.csv", src.path().display())],
-                readiness: crate::source::Readiness::Sentinel,
-                priority: crate::source::Priority::LatestRisk,
-                poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
             }],
         })
         .unwrap();
@@ -2023,14 +2022,13 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                name: "eod_risk".into(),
-                dataset: "risk_snapshot".into(),
-                paths: vec![format!("{}/*.csv", src.path().display())],
-                readiness: crate::source::Readiness::Sentinel,
-                priority: crate::source::Priority::LatestRisk,
-                poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "eod_risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
             }],
         })
         .unwrap();
@@ -2149,14 +2147,13 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                name: "eod_risk".into(),
-                dataset: "risk_snapshot".into(),
-                paths: vec![format!("{}/*.csv", src.path().display())],
-                readiness: crate::source::Readiness::Sentinel,
-                priority: crate::source::Priority::LatestRisk,
-                poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "eod_risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
             }],
         })
         .unwrap();
@@ -2237,11 +2234,6 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                name: "eod_risk".into(),
-                dataset: "risk_snapshot".into(),
-                paths: vec![format!("{}/*.csv", src.path().display())],
-                readiness: crate::source::Readiness::Sentinel,
-                priority: crate::source::Priority::LatestRisk,
                 // Short, and deliberately so — several more polls MUST
                 // fire during this test's run, each one discovering the
                 // same still-bad file as `Unchanged` (not `Ready`, not
@@ -2249,6 +2241,11 @@ source_name = "NPV"
                 poll_interval: Duration::from_millis(30),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "eod_risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
             }],
         })
         .unwrap();
@@ -2296,14 +2293,14 @@ source_name = "NPV"
     /// The `carried_schema` source, over `src`, polling at `poll`.
     fn carried_source(src: &std::path::Path, poll: Duration) -> crate::source::SourceSpec {
         crate::source::SourceSpec {
-            name: "eod_risk".into(),
-            dataset: "risk_snapshot".into(),
-            paths: vec![format!("{}/*.csv", src.display())],
-            readiness: crate::source::Readiness::Sentinel,
-            priority: crate::source::Priority::LatestRisk,
             poll_interval: poll,
             pending_timeout: Duration::from_secs(3600),
             batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            ..crate::source::SourceSpec::directory(
+                "eod_risk",
+                "risk_snapshot",
+                vec![format!("{}/*.csv", src.display())],
+            )
         }
     }
 
@@ -3215,17 +3212,17 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                name: "eod_risk".into(),
-                dataset: "risk_snapshot".into(),
-                paths: vec![format!("{}/*.csv", src.path().display())],
-                readiness: crate::source::Readiness::Sentinel,
-                priority: crate::source::Priority::LatestRisk,
                 // Long enough that the cold-start poll is the only one
                 // to ever run within this test — see the doc comment
                 // above for why that matters.
                 poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "eod_risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
             }],
         })
         .unwrap();
@@ -3321,14 +3318,14 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                name: "eod_risk".into(),
-                dataset: "risk_snapshot".into(),
-                paths: vec![format!("{}/*.csv", src.path().display())],
-                readiness: crate::source::Readiness::Sentinel,
-                priority: crate::source::Priority::LatestRisk,
                 poll_interval: Duration::from_millis(30),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "eod_risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
             }],
         })
         .unwrap();
@@ -3420,14 +3417,14 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                name: "eod_risk".into(),
-                dataset: "risk_snapshot".into(),
-                paths: vec![format!("{}/*.csv", src.path().display())],
-                readiness: crate::source::Readiness::Sentinel,
-                priority: crate::source::Priority::LatestRisk,
                 poll_interval: Duration::from_millis(50),
                 pending_timeout: Duration::ZERO,
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "eod_risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
             }],
         })
         .unwrap();
@@ -3539,14 +3536,14 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                name: "eod_risk".into(),
-                dataset: "risk_snapshot".into(),
-                paths: vec![format!("{}/*.csv", src.path().display())],
-                readiness: crate::source::Readiness::Sentinel,
-                priority: crate::source::Priority::LatestRisk,
                 poll_interval: Duration::from_millis(30),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "eod_risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
             }],
         })
         .unwrap();

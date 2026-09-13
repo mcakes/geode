@@ -22,7 +22,8 @@ use super::{Destination, Draft, Field, FieldKind};
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::schema::SchemaSpec;
 use geode_core::source_config::{
-    DEFAULT_PENDING_TIMEOUT, DEFAULT_POLL, SourceSpec, check_batch_pattern, parse_duration,
+    CSV_DIR_ADAPTER, DEFAULT_COALESCE, DEFAULT_PENDING_TIMEOUT, DEFAULT_POLL, SourceSpec,
+    check_batch_pattern, parse_duration,
 };
 use std::time::Duration;
 
@@ -74,10 +75,14 @@ pub fn prefix(value: &toml::Value) -> Option<String> {
 /// reader's own grammar (`parse_duration`) spelled back out. A field
 /// shows the value that will actually apply, so an omitted key is
 /// spelled from `DEFAULT_POLL`/`DEFAULT_PENDING_TIMEOUT` rather than
-/// left blank.
+/// left blank. A sub-second remainder (a subscribed source's `coalesce`,
+/// default 500ms) spells in `ms` — `as_secs()` alone would round it away
+/// to "0s", the one unit `parse_duration` would read back as zero.
 pub fn spell_duration(d: Duration) -> String {
     let s = d.as_secs();
-    if s > 0 && s.is_multiple_of(3600) {
+    if d.subsec_millis() > 0 {
+        format!("{}ms", d.as_millis())
+    } else if s > 0 && s.is_multiple_of(3600) {
         format!("{}h", s / 3600)
     } else if s > 0 && s.is_multiple_of(60) {
         format!("{}m", s / 60)
@@ -204,6 +209,47 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             "batch_pattern",
             "Batch pattern",
             get_str("batch_pattern").unwrap_or("").to_string(),
+        ),
+        // The five subscribed-source fields (market-data-documents plan,
+        // Task 5) are read-only here — `to_table` never writes them back
+        // and `text_editable` never offers `i` on them — so a subscribed
+        // source is at least visibly one, not silently painted as a
+        // directory source missing its `paths`. A real editing surface
+        // for these (a topic-pattern list, an adapter picker) is future
+        // work; this dialog's own vocabulary predates the adapter.
+        text(
+            "adapter",
+            "Adapter",
+            get_str("adapter").unwrap_or(CSV_DIR_ADAPTER).to_string(),
+        ),
+        text(
+            "document",
+            "Document",
+            get_str("document").unwrap_or("").to_string(),
+        ),
+        text(
+            "topics",
+            "Topics",
+            table
+                .and_then(|t| t.get("topics"))
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(&format!("{PATH_SEPARATOR} "))
+                })
+                .unwrap_or_default(),
+        ),
+        text(
+            "coalesce",
+            "Coalesce",
+            duration("coalesce", DEFAULT_COALESCE),
+        ),
+        text(
+            "source_time",
+            "Source time",
+            get_str("source_time").unwrap_or("receive").to_string(),
         ),
     ]
 }
@@ -449,6 +495,56 @@ mod tests {
                 .iter()
                 .all(|f| f.dest == Destination::Doc && f.layer.is_none())
         );
+    }
+
+    /// A subscribed source's five adapter fields (market-data-documents
+    /// plan, Task 5) are painted, not silently dropped — so this dialog
+    /// never paints one as a directory source missing its `paths` — but
+    /// stay `!text_editable`: `to_table` never writes any of them back,
+    /// so an editable row here would look live and do nothing.
+    #[test]
+    fn subscribed_source_fields_are_painted_as_read_only_text() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[cvi_params]\nfamily = \"document\"\nkey = [\"underlying_ref\"]\n\
+                     axes = [\"term\"]\n[cvi_params.columns.underlying_ref]\n\
+                     type = \"utf8\"\nrole = \"dimension\"\n[cvi_params.columns.term]\n\
+                     type = \"date\"\nrole = \"axis\"\n[cvi_params.columns.param]\n\
+                     type = \"f64\"\nrole = \"value\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "sources",
+                    "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\n\
+                     document = \"cvi_params\"\ntopics = [\"a/>\", \"b/>\"]\n\
+                     coalesce = \"250ms\"\nsource_time = \"document:anchor_date\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let fields = fields(&config, Some("cvi"));
+        let by_key = |k: &str| fields.iter().find(|f| f.key == k).unwrap();
+        assert_eq!(by_key("adapter").kind, FieldKind::Text("demo_bus".into()));
+        assert_eq!(
+            by_key("document").kind,
+            FieldKind::Text("cvi_params".into())
+        );
+        assert_eq!(
+            by_key("topics").kind,
+            FieldKind::Text(format!("a/>{PATH_SEPARATOR} b/>"))
+        );
+        assert_eq!(by_key("coalesce").kind, FieldKind::Text("250ms".into()));
+        assert_eq!(
+            by_key("source_time").kind,
+            FieldKind::Text("document:anchor_date".into())
+        );
+        for key in ["adapter", "document", "topics", "coalesce", "source_time"] {
+            assert!(!text_editable(key), "{key}");
+        }
     }
 
     #[test]

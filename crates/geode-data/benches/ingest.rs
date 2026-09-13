@@ -8,7 +8,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::config::{LayerDoc, merge_docs};
 use geode_core::schema::{DatasetSpec, SchemaSpec};
 use geode_data::ingest::{LoadRequest, build_plan, load_file};
-use geode_data::source::{CandidateState, Priority, Readiness, SourceSpec, discover};
+use geode_data::source::{CandidateState, SourceSpec, discover};
 use geode_data::store::{Catalog, Store};
 use geode_demo_data::{EmitOptions, GeneratorConfig, emit_directory, generate};
 use std::hint::black_box;
@@ -103,14 +103,13 @@ source_name = "ModelCode"
 
 fn source_spec(root: &Path) -> SourceSpec {
     SourceSpec {
-        name: "risk".into(),
-        dataset: "risk_snapshot".into(),
-        paths: vec![format!("{}/*.csv", root.display())],
-        readiness: Readiness::Sentinel,
-        priority: Priority::LatestRisk,
-        poll_interval: Duration::from_secs(30),
         pending_timeout: Duration::from_secs(3600),
         batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+        ..SourceSpec::directory(
+            "risk",
+            "risk_snapshot",
+            vec![format!("{}/*.csv", root.display())],
+        )
     }
 }
 

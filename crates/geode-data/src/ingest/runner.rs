@@ -559,14 +559,13 @@ mod tests {
     ) {
         let (db_dir, src_dir, store, ds, _emitted) = crate::ingest::load::tests_support::fixture();
         let spec = crate::source::SourceSpec {
-            name: "risk".into(),
-            dataset: "risk_snapshot".into(),
-            paths: vec![format!("{}/*.csv", src_dir.path().display())],
-            readiness: crate::source::Readiness::Sentinel,
-            priority: Priority::LatestRisk,
-            poll_interval: Duration::from_secs(30),
             pending_timeout: Duration::from_secs(3600),
             batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            ..crate::source::SourceSpec::directory(
+                "risk",
+                "risk_snapshot",
+                vec![format!("{}/*.csv", src_dir.path().display())],
+            )
         };
         let cat = crate::store::Catalog::new(store.writer());
         let found = crate::source::discover(&spec, &cat, std::time::SystemTime::now()).unwrap();

@@ -593,7 +593,7 @@ mod tests {
     use geode_core::config::{ConfigSources, LayerDoc};
     use geode_core::log::Ring;
     use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot};
-    use geode_data::source::{Priority, Readiness, SourceSpec};
+    use geode_data::source::SourceSpec;
     use geode_diagnostics::DiagnosticsFactory;
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
@@ -1222,14 +1222,8 @@ role = "key"
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: vec![SourceSpec {
-                name: "risk".into(),
-                dataset: "risk".into(),
-                paths: vec!["/data/risk/*.csv".into()],
-                readiness: Readiness::Sentinel,
-                priority: Priority::LatestRisk,
-                poll_interval: Duration::from_secs(30),
                 pending_timeout: Duration::from_secs(120),
-                batch_pattern: None,
+                ..SourceSpec::directory("risk", "risk", vec!["/data/risk/*.csv".into()])
             }],
         };
         cx.update(|cx| attach(&bridge, window, cx));

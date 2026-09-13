@@ -73,7 +73,7 @@ pub fn build_plan(discovered: &[(SourceSpec, Vec<Candidate>)]) -> WorkPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{Candidate, CandidateState, Priority, Readiness, SourceSpec};
+    use crate::source::{Candidate, CandidateState, Priority, SourceSpec};
     use chrono::{DateTime, Datelike, Utc};
     use std::time::{Duration, SystemTime};
 
@@ -84,14 +84,9 @@ mod tests {
 
     fn spec(name: &str, priority: Priority) -> SourceSpec {
         SourceSpec {
-            name: name.into(),
-            dataset: format!("{name}_dataset"),
-            paths: vec![],
-            readiness: Readiness::Sentinel,
             priority,
-            poll_interval: Duration::from_secs(30),
             pending_timeout: Duration::from_secs(60),
-            batch_pattern: None,
+            ..SourceSpec::directory(name, format!("{name}_dataset"), vec![])
         }
     }
 

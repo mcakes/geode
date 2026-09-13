@@ -17,18 +17,29 @@ use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::schema::SchemaSpec;
 use std::path::Path;
 use std::time::Duration;
+use toml::Table;
 
 /// `pub` (4c §19.3): the Sources dialog's `fields` spells these back as
 /// text (`sources::spell_duration`) when a source omits the key, so the
 /// row shows the value that will actually apply rather than a blank.
 pub const DEFAULT_POLL: Duration = Duration::from_secs(30);
 pub const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(600);
+/// A subscribed source's default `coalesce`: at most one publish per key
+/// every 500ms rather than one per message — "0" opts a source back into
+/// publishing every message.
+pub const DEFAULT_COALESCE: Duration = Duration::from_millis(500);
 
 /// §19.3 (ruling 2026-09-12): a source with nothing to poll is idle, not
 /// broken — a warning, and skipped, so the dialog's `n` can create one
 /// and let the trader type the globs in afterwards. One line, so the
 /// mutation harness can flip its severity by anchoring on it.
 pub const IDLE_PATHS: &str = "no 'paths' — the source is idle until one is set";
+
+/// The reader's own default `adapter` (market-data-documents plan, Task
+/// 5): a bare `[sources.<name>]` table with no `adapter` key is a
+/// directory-of-CSVs source exactly as it always was — every subscribed
+/// field below is meaningless for one and warned away if present.
+pub const CSV_DIR_ADAPTER: &str = "csv_dir";
 
 /// How a source decides a file is complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +61,21 @@ pub enum Priority {
     Backfill,
 }
 
+/// Which timestamp a subscribed source's publish is stamped with — the
+/// same "as-of routing needs one honest clock" question a directory
+/// source answers with the CSV's own mtime/sentinel, a subscribed one
+/// has no file for. `"receive"` is the default: the moment this process
+/// received the message. `"document:<field>"` names an attribute column
+/// on the document itself (an `anchor_date`, say) whose value is used
+/// instead — the field is validated against the dataset's own columns no
+/// earlier than the adapter that reads it, not here, since this reader
+/// has no document rows to check it against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceTime {
+    Receive,
+    Document(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct SourceSpec {
     pub name: String,
@@ -64,6 +90,25 @@ pub struct SourceSpec {
     /// strips the date component so business dates share a partition
     /// (spec §4.3). Without one the whole stem is the batch.
     pub batch_pattern: Option<String>,
+    /// Which channel implementation feeds this source. `CSV_DIR_ADAPTER`
+    /// (the default) is the reader's own directory-of-CSVs path above;
+    /// anything else is a subscribed source (`is_subscribed`) and the
+    /// fields below govern it instead of `paths`/`readiness`/
+    /// `poll_interval`/`pending_timeout`/`batch_pattern`, which a
+    /// subscribed source's table may still carry (a hand-edit, a
+    /// half-migrated source) but which are warned and ignored.
+    pub adapter: String,
+    /// The document kind this source publishes (`DocumentRegistry`'s own
+    /// key) — required when `adapter != CSV_DIR_ADAPTER`, since a
+    /// subscribed source has no CSV header to infer a shape from.
+    pub document: Option<String>,
+    /// Topic patterns (this plan's one grammar: `>` trailing-levels,
+    /// `*` one level, else literal, `/`-separated) this source
+    /// subscribes to. Required non-empty when subscribed.
+    pub coalesce: Duration,
+    /// Which timestamp a publish is stamped with. See [`SourceTime`].
+    pub source_time: SourceTime,
+    pub topics: Vec<String>,
 }
 
 impl SourceSpec {
@@ -83,12 +128,62 @@ impl SourceSpec {
             .map(|m| m.as_str().to_string())
             .unwrap_or(stem)
     }
+
+    /// Is this a subscribed source (a channel adapter) rather than the
+    /// directory-of-CSVs path? The one door every other crate uses to
+    /// tell the two apart — never a direct `adapter != "csv_dir"` string
+    /// compare, so `CSV_DIR_ADAPTER` stays the one spelling of the
+    /// default.
+    pub fn is_subscribed(&self) -> bool {
+        self.adapter != CSV_DIR_ADAPTER
+    }
+
+    /// A directory-of-CSVs source with every optional field at its
+    /// default. The shape most call sites want; override with
+    /// struct-update syntax (`..SourceSpec::directory(..)`) where a site
+    /// needs a non-default `priority`, `poll_interval` or similar — six
+    /// sites across the workspace build one of these by hand, so a
+    /// shared constructor is the one place that fills the five
+    /// subscribed-source fields with their defaults.
+    pub fn directory(
+        name: impl Into<String>,
+        dataset: impl Into<String>,
+        paths: Vec<String>,
+    ) -> SourceSpec {
+        SourceSpec {
+            name: name.into(),
+            dataset: dataset.into(),
+            paths,
+            readiness: Readiness::Sentinel,
+            priority: Priority::LatestRisk,
+            poll_interval: DEFAULT_POLL,
+            pending_timeout: DEFAULT_PENDING_TIMEOUT,
+            batch_pattern: None,
+            adapter: CSV_DIR_ADAPTER.to_string(),
+            document: None,
+            topics: Vec::new(),
+            coalesce: DEFAULT_COALESCE,
+            source_time: SourceTime::Receive,
+        }
+    }
 }
 
-/// `30s`, `10m`, `2h` — integers with one of three units. Nothing else:
-/// a bare number has no unit and a fraction has no convention.
+/// `30s`, `10m`, `2h`, `500ms` — integers with one of four units. Nothing
+/// else: a bare number has no unit and a fraction has no convention,
+/// except a bare `"0"` alone, which needs no unit to be unambiguous (a
+/// subscribed source's `coalesce = "0"` — publish every message).
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
+    if s == "0" {
+        return Some(Duration::ZERO);
+    }
+    if let Some(digits) = s.strip_suffix("ms") {
+        return if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            digits.parse().ok().map(Duration::from_millis)
+        } else {
+            None
+        };
+    }
     let (idx, unit) = s.char_indices().last()?;
     let digits = &s[..idx];
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -102,6 +197,18 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
         _ => return None,
     };
     Some(Duration::from_secs(secs))
+}
+
+/// `500ms` where the value has a sub-second remainder, `Ns` otherwise —
+/// the inverse of [`parse_duration`], used only to spell a duration back
+/// into a diagnostic's "using X" tail so the unit it reports is one
+/// `parse_duration` itself would accept.
+fn spell_duration(d: Duration) -> String {
+    if d.subsec_millis() > 0 {
+        format!("{}ms", d.as_millis())
+    } else {
+        format!("{}s", d.as_secs())
+    }
 }
 
 /// Is `pattern` a `batch_pattern` the reader would accept — a regex that
@@ -142,6 +249,40 @@ fn diag(
     }
 }
 
+/// Reads a duration-with-unit key, warning and falling back to `default`
+/// only when the key is present but unparseable — never when it is
+/// simply absent, which is the ordinary "use the default" case with
+/// nothing to warn about. Shared by `poll_interval`/`pending_timeout`
+/// (directory sources) and `coalesce` (subscribed sources) so the
+/// grammar and its error message live in exactly one place.
+fn read_duration_or_warn(
+    table: &Table,
+    diags: &mut Vec<Diagnostic>,
+    name: &str,
+    key: &str,
+    default: Duration,
+) -> Duration {
+    match table.get(key) {
+        None => default,
+        Some(v) => match v.as_str().and_then(parse_duration) {
+            Some(d) => d,
+            None => {
+                diags.push(diag(
+                    Severity::Warning,
+                    name,
+                    Some(key),
+                    format!(
+                        "'{key}' must be an integer with unit s, m, h or ms \
+                         (got {v}); using {}",
+                        spell_duration(default)
+                    ),
+                ));
+                default
+            }
+        },
+    }
+}
+
 impl SourceSpec {
     pub fn from_doc(doc: &MergedDoc, schema: &SchemaSpec) -> (Vec<SourceSpec>, Vec<Diagnostic>) {
         let mut out = Vec::new();
@@ -178,6 +319,65 @@ impl SourceSpec {
                 }
             };
 
+            let adapter = table
+                .get("adapter")
+                .and_then(|v| v.as_str())
+                .unwrap_or(CSV_DIR_ADAPTER)
+                .to_string();
+            let subscribed = adapter != CSV_DIR_ADAPTER;
+
+            // A subscribed source has no CSV row to infer a shape from —
+            // it publishes `DocumentRows` straight into a document-family
+            // table, never a measures one (market-data-documents plan).
+            if subscribed && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {
+                diags.push(diag(
+                    Severity::Error,
+                    name,
+                    Some("dataset"),
+                    format!(
+                        "adapter '{adapter}' needs a document family dataset; \
+                         '{dataset}' is not one"
+                    ),
+                ));
+                continue;
+            }
+
+            // Directory-only keys, meaningful for `csv_dir` alone: warned
+            // (and never read for their value below) on a subscribed
+            // source rather than silently half-applied.
+            for key in [
+                "readiness",
+                "poll_interval",
+                "pending_timeout",
+                "batch_pattern",
+            ] {
+                if subscribed && table.contains_key(key) {
+                    diags.push(diag(
+                        Severity::Warning,
+                        name,
+                        Some(key),
+                        format!(
+                            "'{key}' is ignored by a subscribed source \
+                             (adapter != \"{CSV_DIR_ADAPTER}\")"
+                        ),
+                    ));
+                }
+            }
+            // The subscribed-only keys, the same rule the other way.
+            for key in ["document", "topics", "coalesce", "source_time"] {
+                if !subscribed && table.contains_key(key) {
+                    diags.push(diag(
+                        Severity::Warning,
+                        name,
+                        Some(key),
+                        format!(
+                            "'{key}' is ignored by a directory source \
+                             (adapter == \"{CSV_DIR_ADAPTER}\")"
+                        ),
+                    ));
+                }
+            }
+
             let paths: Vec<String> = table
                 .get("paths")
                 .and_then(|v| v.as_array())
@@ -188,37 +388,54 @@ impl SourceSpec {
                         .collect()
                 })
                 .unwrap_or_default();
-            if paths.is_empty() {
+            if subscribed {
+                if !paths.is_empty() {
+                    diags.push(diag(
+                        Severity::Warning,
+                        name,
+                        Some("paths"),
+                        format!(
+                            "'paths' is ignored by a subscribed source \
+                             (adapter != \"{CSV_DIR_ADAPTER}\")"
+                        ),
+                    ));
+                }
+            } else if paths.is_empty() {
                 // §19.3 (ruling 2026-09-12): a source with nothing to poll
                 // is idle, not broken — a warning, and skipped, so the
                 // dialog's `n` can create one and let the trader type the
                 // globs in afterwards. One line, so the harness can flip
-                // its severity by anchoring on it.
+                // its severity by anchoring on it. Directory sources only
+                // — a subscribed source has nothing to be idle about.
                 diags.push(diag(Severity::Warning, name, Some("paths"), IDLE_PATHS));
                 continue;
             }
 
-            let readiness = match table.get("readiness") {
-                None => Readiness::Sentinel,
-                Some(v) if v.as_str() == Some("sentinel") => Readiness::Sentinel,
-                Some(v) => match v
-                    .as_table()
-                    .and_then(|t| t.get("stable_mtime"))
-                    .and_then(|p| p.as_integer())
-                {
-                    Some(polls) if polls > 0 => Readiness::StableMtime {
-                        polls: polls as u32,
+            let readiness = if subscribed {
+                Readiness::Sentinel
+            } else {
+                match table.get("readiness") {
+                    None => Readiness::Sentinel,
+                    Some(v) if v.as_str() == Some("sentinel") => Readiness::Sentinel,
+                    Some(v) => match v
+                        .as_table()
+                        .and_then(|t| t.get("stable_mtime"))
+                        .and_then(|p| p.as_integer())
+                    {
+                        Some(polls) if polls > 0 => Readiness::StableMtime {
+                            polls: polls as u32,
+                        },
+                        _ => {
+                            diags.push(diag(
+                                Severity::Warning,
+                                name,
+                                Some("readiness"),
+                                format!("unrecognised readiness {v}; using \"sentinel\""),
+                            ));
+                            Readiness::Sentinel
+                        }
                     },
-                    _ => {
-                        diags.push(diag(
-                            Severity::Warning,
-                            name,
-                            Some("readiness"),
-                            format!("unrecognised readiness {v}; using \"sentinel\""),
-                        ));
-                        Readiness::Sentinel
-                    }
-                },
+                }
             };
 
             let priority = match table.get("priority").and_then(|v| v.as_str()) {
@@ -236,44 +453,91 @@ impl SourceSpec {
                 }
             };
 
-            let mut duration = |key: &str, default: Duration| -> Duration {
-                match table.get(key) {
-                    None => default,
-                    Some(v) => match v.as_str().and_then(parse_duration) {
-                        Some(d) => d,
+            let (poll_interval, pending_timeout, batch_pattern) = if subscribed {
+                (DEFAULT_POLL, DEFAULT_PENDING_TIMEOUT, None)
+            } else {
+                let poll_interval =
+                    read_duration_or_warn(table, &mut diags, name, "poll_interval", DEFAULT_POLL);
+                let pending_timeout = read_duration_or_warn(
+                    table,
+                    &mut diags,
+                    name,
+                    "pending_timeout",
+                    DEFAULT_PENDING_TIMEOUT,
+                );
+                let batch_pattern = match table.get("batch_pattern").and_then(|v| v.as_str()) {
+                    None => None,
+                    Some(p) => match check_batch_pattern(p) {
+                        Ok(()) => Some(p.to_string()),
+                        Err(e) => {
+                            diags.push(diag(
+                                Severity::Warning,
+                                name,
+                                Some("batch_pattern"),
+                                format!("{e}; ignoring it"),
+                            ));
+                            None
+                        }
+                    },
+                };
+                (poll_interval, pending_timeout, batch_pattern)
+            };
+
+            let (document, topics, coalesce, source_time) = if subscribed {
+                let document = match table.get("document").and_then(|v| v.as_str()) {
+                    Some(d) => Some(d.to_string()),
+                    None => {
+                        diags.push(diag(
+                            Severity::Error,
+                            name,
+                            Some("document"),
+                            format!(
+                                "adapter '{adapter}' needs 'document' \
+                                 (the document kind this source publishes)"
+                            ),
+                        ));
+                        continue;
+                    }
+                };
+                let topics: Vec<String> = table
+                    .get("topics")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if topics.is_empty() {
+                    diags.push(diag(
+                        Severity::Error,
+                        name,
+                        Some("topics"),
+                        format!("adapter '{adapter}' needs at least one topic pattern"),
+                    ));
+                    continue;
+                }
+                let coalesce =
+                    read_duration_or_warn(table, &mut diags, name, "coalesce", DEFAULT_COALESCE);
+                let source_time = match table.get("source_time").and_then(|v| v.as_str()) {
+                    None | Some("receive") => SourceTime::Receive,
+                    Some(s) => match s.strip_prefix("document:") {
+                        Some(field) => SourceTime::Document(field.to_string()),
                         None => {
                             diags.push(diag(
                                 Severity::Warning,
                                 name,
-                                Some(key),
-                                format!(
-                                    "'{key}' must be an integer with unit s, m or h \
-                                     (got {v}); using {}s",
-                                    default.as_secs()
-                                ),
+                                Some("source_time"),
+                                format!("unrecognised source_time '{s}'; using \"receive\""),
                             ));
-                            default
+                            SourceTime::Receive
                         }
                     },
-                }
-            };
-            let poll_interval = duration("poll_interval", DEFAULT_POLL);
-            let pending_timeout = duration("pending_timeout", DEFAULT_PENDING_TIMEOUT);
-
-            let batch_pattern = match table.get("batch_pattern").and_then(|v| v.as_str()) {
-                None => None,
-                Some(p) => match check_batch_pattern(p) {
-                    Ok(()) => Some(p.to_string()),
-                    Err(e) => {
-                        diags.push(diag(
-                            Severity::Warning,
-                            name,
-                            Some("batch_pattern"),
-                            format!("{e}; ignoring it"),
-                        ));
-                        None
-                    }
-                },
+                };
+                (document, topics, coalesce, source_time)
+            } else {
+                (None, Vec::new(), DEFAULT_COALESCE, SourceTime::Receive)
             };
 
             out.push(SourceSpec {
@@ -285,6 +549,11 @@ impl SourceSpec {
                 poll_interval,
                 pending_timeout,
                 batch_pattern,
+                adapter,
+                document,
+                topics,
+                coalesce,
+                source_time,
             });
         }
 
@@ -299,6 +568,10 @@ mod tests {
     use crate::schema::SchemaSpec;
 
     fn schema() -> SchemaSpec {
+        // `cvi_params` (copied from `examples/demo-config/datasets.toml`)
+        // sits beside the measure-family `risk_snapshot` so the
+        // "a subscribed source needs a document family dataset" rule has
+        // both a dataset that satisfies it and one that doesn't.
         let text = r#"
 [risk_snapshot.columns.book]
 type = "utf8"
@@ -306,12 +579,37 @@ role = "dimension"
 [risk_snapshot.columns.position_ref]
 type = "utf8"
 role = "key"
+
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
 "#;
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
         SchemaSpec::from_doc(&doc).0
     }
 
-    fn parse(text: &str) -> (Vec<SourceSpec>, Vec<Diagnostic>) {
+    fn from(text: &str) -> (Vec<SourceSpec>, Vec<Diagnostic>) {
         let doc = merge_docs("sources", &[LayerDoc::builtin("sources", text).unwrap()]);
         SourceSpec::from_doc(&doc, &schema())
     }
@@ -336,7 +634,7 @@ role = "key"
 
     #[test]
     fn a_full_declaration_round_trips() {
-        let (specs, diags) = parse(
+        let (specs, diags) = from(
             r#"
 [risk_files]
 dataset = "risk_snapshot"
@@ -366,7 +664,7 @@ batch_pattern = '^risk_\d{4}-\d{2}-\d{2}_(?P<batch>.+)$'
 
     #[test]
     fn defaults_fill_what_is_omitted() {
-        let (specs, diags) = parse(
+        let (specs, diags) = from(
             r#"
 [risk_files]
 dataset = "risk_snapshot"
@@ -384,7 +682,7 @@ paths = ["/mnt/risk/*.csv"]
 
     #[test]
     fn stable_mtime_readiness_is_a_table() {
-        let (specs, _) = parse(
+        let (specs, _) = from(
             r#"
 [vol]
 dataset = "risk_snapshot"
@@ -397,7 +695,7 @@ readiness = { stable_mtime = 3 }
 
     #[test]
     fn a_missing_or_unknown_dataset_is_an_error_and_the_source_is_skipped() {
-        let (specs, diags) = parse(
+        let (specs, diags) = from(
             r#"
 [a]
 paths = ["/x/*.csv"]
@@ -426,7 +724,7 @@ paths = ["/x/*.csv"]
     /// branch — both are idle, both are warnings, neither is an error.
     #[test]
     fn missing_or_empty_paths_is_idle_not_an_error() {
-        let (specs, diags) = parse(
+        let (specs, diags) = from(
             r#"
 [a]
 dataset = "risk_snapshot"
@@ -483,7 +781,7 @@ paths = []
 
     #[test]
     fn a_bad_duration_priority_or_readiness_warns_and_uses_the_default() {
-        let (specs, diags) = parse(
+        let (specs, diags) = from(
             r#"
 [a]
 dataset = "risk_snapshot"
@@ -512,7 +810,7 @@ readiness = "hope"
 
     #[test]
     fn an_uncompilable_batch_pattern_is_dropped_with_a_warning() {
-        let (specs, diags) = parse(
+        let (specs, diags) = from(
             r#"
 [a]
 dataset = "risk_snapshot"
@@ -531,7 +829,7 @@ batch_pattern = "(?P<batch>unclosed"
     fn a_pattern_without_a_batch_capture_is_dropped_with_a_warning() {
         // A pattern that compiles but never captures `batch` would make
         // every file's batch its whole stem — silently defeating §4.3.
-        let (specs, diags) = parse(
+        let (specs, diags) = from(
             r#"
 [a]
 dataset = "risk_snapshot"
@@ -548,7 +846,7 @@ batch_pattern = "^risk_.*$"
 
     #[test]
     fn a_missing_dataset_diagnostic_carries_its_field_path() {
-        let (_, diags) = parse("[live]\npaths = [\"/x/*.csv\"]\n");
+        let (_, diags) = from("[live]\npaths = [\"/x/*.csv\"]\n");
         assert_eq!(
             diags[0].path.as_deref(),
             Some("sources.live.dataset"),
@@ -558,7 +856,7 @@ batch_pattern = "^risk_.*$"
 
     #[test]
     fn a_bad_poll_interval_diagnostic_carries_its_field_path() {
-        let (_, diags) = parse(
+        let (_, diags) = from(
             r#"
 [live]
 dataset = "risk_snapshot"
@@ -575,14 +873,157 @@ poll_interval = "soon"
 
     #[test]
     fn a_non_table_entry_is_skipped_with_a_warning() {
-        let (specs, diags) = parse("config_version = 1\n");
+        let (specs, diags) = from("config_version = 1\n");
         assert!(specs.is_empty());
         assert!(
             diags.is_empty(),
             "config_version is not a source and not a complaint: {diags:?}"
         );
-        let (specs, diags) = parse("stray = 3\n");
+        let (specs, diags) = from("stray = 3\n");
         assert!(specs.is_empty());
         assert_eq!(diags.len(), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn parse_duration_accepts_milliseconds_and_a_bare_zero() {
+        assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration("0"), Some(Duration::ZERO));
+        assert_eq!(parse_duration("2s"), Some(Duration::from_secs(2)));
+        assert_eq!(
+            parse_duration("5"),
+            None,
+            "a bare non-zero number has no unit"
+        );
+        assert_eq!(parse_duration("ms"), None);
+    }
+
+    #[test]
+    fn a_subscribed_source_parses_its_adapter_fields() {
+        let (sources, diags) = from(
+            r#"
+[cvi]
+adapter = "demo_bus"
+dataset = "cvi_params"
+document = "cvi_params"
+topics = ["marketdata/cvi/>"]
+coalesce = "250ms"
+source_time = "receive"
+priority = "latest_other"
+"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let s = &sources[0];
+        assert!(s.is_subscribed());
+        assert_eq!(
+            (s.adapter.as_str(), s.document.as_deref()),
+            ("demo_bus", Some("cvi_params"))
+        );
+        assert_eq!(s.topics, vec!["marketdata/cvi/>".to_string()]);
+        assert_eq!(s.coalesce, Duration::from_millis(250));
+        assert_eq!(s.source_time, SourceTime::Receive);
+        assert!(s.paths.is_empty());
+    }
+
+    #[test]
+    fn a_directory_source_is_unchanged_and_defaults_its_adapter() {
+        let (sources, diags) = from(
+            r#"
+[demo]
+dataset = "risk_snapshot"
+paths = ["/tmp/*.csv"]
+"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(sources[0].adapter, CSV_DIR_ADAPTER);
+        assert!(!sources[0].is_subscribed());
+        assert_eq!(
+            sources[0].coalesce,
+            Duration::from_millis(500),
+            "the default, unused by a directory source"
+        );
+    }
+
+    #[test]
+    fn a_subscribed_source_needs_topics_and_a_document() {
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n",
+        );
+        assert!(sources.is_empty());
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.cvi.topics"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Error);
+        let (sources, diags) =
+            from("[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ntopics = [\"a/>\"]\n");
+        assert!(sources.is_empty());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path.as_deref() == Some("sources.cvi.document")
+                    && d.severity == Severity::Error)
+        );
+    }
+
+    #[test]
+    fn directory_keys_on_a_subscribed_source_warn_and_a_directory_source_still_needs_paths() {
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+             topics = [\"a/>\"]\npaths = [\"/x\"]\npoll_interval = \"1s\"\n",
+        );
+        assert_eq!(sources.len(), 1);
+        for key in ["paths", "poll_interval"] {
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.path.as_deref() == Some(&format!("sources.cvi.{key}"))
+                        && d.severity == Severity::Warning),
+                "{key}"
+            );
+        }
+        let (sources, diags) = from("[demo]\ndataset = \"risk_snapshot\"\n");
+        assert!(sources.is_empty());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path.as_deref() == Some("sources.demo.paths"))
+        );
+    }
+
+    #[test]
+    fn source_time_document_names_its_field_and_a_bad_value_warns_to_receive() {
+        let (sources, _) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+             topics = [\"a/>\"]\nsource_time = \"document:anchor_date\"\n",
+        );
+        assert_eq!(
+            sources[0].source_time,
+            SourceTime::Document("anchor_date".into())
+        );
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+             topics = [\"a/>\"]\nsource_time = \"yesterday\"\n",
+        );
+        assert_eq!(sources[0].source_time, SourceTime::Receive);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path.as_deref() == Some("sources.cvi.source_time")
+                    && d.severity == Severity::Warning)
+        );
+    }
+
+    #[test]
+    fn a_subscribed_source_on_a_measure_dataset_is_an_error() {
+        let (sources, diags) = from(
+            "[x]\nadapter = \"demo_bus\"\ndataset = \"risk_snapshot\"\ndocument = \"cvi_params\"\ntopics = [\"a/>\"]\n",
+        );
+        assert!(sources.is_empty());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path.as_deref() == Some("sources.x.dataset")
+                    && d.message.contains("document family"))
+        );
     }
 }
