@@ -166,9 +166,11 @@ set to the offending key:
   row identity inside a document, not something the frame groups by.
 - `grains()` is empty for a document dataset; every caller that
   iterates grains already handles an empty list.
-- The conflict detector (Phase 2 §3.5) applies to document-level
-  attributes: a value that varies within one document is a per-column
-  conflict count in diagnostics, the same signal a coarse measure gives.
+- A document-level attribute cannot vary within one document by
+  construction: `DocumentRows` carries one `Value` per attribute and
+  `publish_document` writes it onto every row (Part 1 ruling). The
+  §3.5 conflict detector therefore has nothing to detect here and is
+  not run on document tables.
 
 ### 3.4 Shared dimensions and scope applicability
 
@@ -225,6 +227,21 @@ document source at a 500 ms coalesce can mint a generation every half
 second per key; the demo layer's retention for `cvi_params` is set by
 count so the archive stays bounded, and the spec's perf section
 records the archive growth rate at the demo cadence.
+
+### 4.5 As built (Part 1)
+
+- A document table carries a `book VARCHAR` column, always NULL, between
+  `batch` and `source_file_id`, because every partition-keyed store
+  statement joins on `book`.
+- A document dataset's `Dimension` columns must all be listed in its
+  `key`; an unkeyed dimension is an error at load and the column is
+  dropped.
+- `DocumentRows::validate` refuses a document with zero rows, so no
+  generation is ever recorded against an empty table.
+- The document request's as-of arm pins the document's own resolved
+  generation and reports `resolved_as_of` as that document's own
+  `source_time`, never the dataset-wide fold; its live arm's freshness
+  is likewise per document, not per dataset.
 
 ## 5. The adapter tier
 

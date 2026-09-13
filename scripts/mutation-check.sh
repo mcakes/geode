@@ -10,8 +10,8 @@
 # suite could not see, and the fixture was the reason every time: reviews
 # find what the fixture makes reachable. Reading the tests never revealed
 # that; twenty minutes of mutation did. Run it after touching the
-# compiler, the scope lowering, as-of routing, publish, or the grain
-# vocabulary, and treat a SURVIVED line as a missing test rather than a
+# compiler, the scope lowering, as-of routing, publish, the grain
+# vocabulary, or the document family, and treat a SURVIVED line as a missing test rather than a
 # curiosity.
 #
 # The two source-time tie-break entries were described as "caught
