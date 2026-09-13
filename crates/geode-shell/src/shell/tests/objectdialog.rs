@@ -5481,6 +5481,106 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
     );
 }
 
+/// Dataset-presentation spec §5: the Views column stage with a layer
+/// under it. All three layers are filled by the door
+/// (`views::column_layers`), so the label a trader sees is the DATASET's
+/// (which beats the desk's own `NPV`), clearing it says it follows the
+/// dataset rather than the desk, the field re-seeds from that layer, and
+/// no `label` key reaches `view_presentation.toml` — the trader's own
+/// dataset-level opinion is not copied into this one view.
+///
+/// The provenance chip is asserted by existence (a `debug_bounds` id
+/// carries no text): `scale`, set at the dataset level, paints one;
+/// `width`, set at no layer and never touched, paints none. Which layer
+/// each chip NAMES is the pure half — `dataset_columns::provenance_of`'s
+/// own tests — over the layers this test proves the door fills.
+#[gpui::test]
+fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[(
+        "dataset_presentation",
+        "[risk_snapshot.columns.npv]\nlabel = \"NPV k\"\nscale = \"k\"\n",
+    )]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // `open_tree_edit_stage`'s own `j j` (past Dataset and Columns, onto
+    // `book`), then one more onto `npv` — the column the dataset overlay
+    // above speaks for.
+    cx.simulate_keystrokes("j j j enter");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| objectdialog::render::crumb_text(s)),
+        "tree › npv"
+    );
+
+    // The door filled all three layers, each as the keys that layer
+    // itself sets — the desk's own label is still nameable underneath
+    // the dataset's, which is what lets the fold notice choose.
+    let layers = edit_draft(&shell, &cx, |d| {
+        d.column_ctx.as_ref().map(|c| c.layers.clone())
+    })
+    .expect("the column stage carries its door's context");
+    assert_eq!(layers.desk.label.as_deref(), Some("NPV"));
+    assert_eq!(layers.dataset.label.as_deref(), Some("NPV k"));
+    assert_eq!(
+        layers.dataset.scale,
+        Some(geode_core::view::Scale::Thousands)
+    );
+    assert_eq!(layers.view, geode_core::view::ColumnPresentation::default());
+
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-scale")
+            .is_some(),
+        "scale is set at the dataset level, so the chip names a layer"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-width")
+            .is_none(),
+        "width is set at no layer and untouched, so there is nothing to name"
+    );
+
+    cx.simulate_keystrokes("i"); // label
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "NPV k",
+        "seeded with the dataset's label, which beats the desk's `NPV`"
+    );
+    cx.simulate_keystrokes("backspace backspace backspace backspace backspace");
+    cx.simulate_input("mine");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("backspace backspace backspace backspace enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("label follows the dataset again")
+    );
+    assert_eq!(dialog_input_text(&shell, &cx), "", "the field is closed");
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .fields
+            .iter()
+            .find(|f| f.key == "label")
+            .map(|f| match &f.kind {
+                objectdialog::FieldKind::Text(t) => t.clone(),
+                _ => String::new(),
+            })),
+        Some("NPV k".into()),
+        "re-seeded from the dataset level"
+    );
+    flush_config_write(&mut cx);
+    let written =
+        std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap_or_default();
+    assert!(
+        !written.contains("label"),
+        "a cleared key is not written — {written}"
+    );
+}
+
 /// §5.2: a failed write rebuilds the draft from the reverted config —
 /// the OBJECT's fields, with no column projection on them — so the stage
 /// has to come back with it rather than leaving the crumb naming a column

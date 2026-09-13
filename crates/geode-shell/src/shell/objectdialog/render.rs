@@ -884,27 +884,20 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
             else {
                 return;
             };
-            // The Views door's context (dataset-presentation spec §5.1).
-            // The dataset and view layers are Task 5's; today only the
-            // desk layer is filled, which is exactly what this stage
-            // compared against before the context existed, so the fold
-            // and the notice are unchanged. `item` is carried so
-            // `dataset_columns::provenance_of` reads the right kind
-            // default for the column being edited.
-            let layers = ColumnLayers {
-                desk: views::desk_baseline(draft)
-                    .remove(column)
-                    .unwrap_or_default(),
-                ..ColumnLayers::default()
-            };
+            // The layer between the desk view and this view's own
+            // overlay, refreshed from the PENDING-aware config before
+            // the context is built (dataset-presentation spec §5.1): a
+            // dataset-level edit made in the Schema dialog inside the
+            // 250 ms write debounce is otherwise invisible here, and a
+            // stage that cannot see it both hides that edit and, on its
+            // own next keystroke, writes the column back without it.
+            draft.dataset_layer = views::dataset_layer_for(config, &object);
             (
                 views::column_fields(&item, &colours, Destination::Presentation),
-                ColumnContext {
-                    door: ColumnDoor::View,
-                    layers,
-                    overlay_object: toml::Table::new(),
-                    item: Some(item),
-                },
+                // The one builder of this door's context — shared with
+                // the two test openers that mirror this function, so
+                // they cannot drift from it (`views::column_context`).
+                views::column_context(draft, config, &object, column, item),
             )
         }
         // §4.3: the dataset overlay is the only layer this door has, and

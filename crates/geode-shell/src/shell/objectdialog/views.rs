@@ -18,10 +18,13 @@ use std::collections::BTreeMap;
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
 use geode_core::schema::{ColumnRole, DatasetSpec, SchemaSpec};
 use geode_core::view::{
-    Colour, ColumnFormat, ColumnPresentation, Negative, Scale, ViewColumn, ViewSpec,
+    Colour, ColumnFormat, ColumnPresentation, DATASET_PRESENTATION_DOC, DatasetPresentationSpec,
+    Negative, Scale, ViewColumn, ViewPresentationSpec, ViewSpec,
 };
 
-use super::{Destination, Draft, Field, FieldKind, ListItem};
+use super::{
+    ColumnContext, ColumnDoor, ColumnLayers, Destination, Draft, Field, FieldKind, ListItem,
+};
 
 /// The config doc name (file stem), as `Config::layered_docs` keys it.
 pub const DOC: &str = "views";
@@ -451,8 +454,12 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
 /// would fire on the commonest edit there is: hiding one column would
 /// silently adopt the desk's order and every other column's format
 /// forever. Every key is therefore compared, one at a time, against
-/// [`desk_baseline`] — what the SAME save leaves in `views.toml` — and
-/// omitted when it still matches. The five `ColumnFormat` keys compare
+/// [`baseline_below`] — the layers this file sits ON: what the SAME save
+/// leaves in `views.toml`, with the trader's own dataset level merged
+/// over it (dataset-presentation spec §5.1) — and omitted when it still
+/// matches. Reading the desk alone here would copy every dataset-level
+/// key into this view's overlay as a spurious per-view override, which
+/// is the same freeze one layer down. The five `ColumnFormat` keys compare
 /// RESOLVED (each side through [`kind_default`], §4.3's own definition of
 /// the baseline), which is what keeps a key the desk never declared and
 /// the trader never moved out of the file; the loop body has the full
@@ -469,8 +476,8 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
 /// line into a different one the moment a sibling key's comparison
 /// changed — `#[allow]` below, not the suggested rewrite. The five
 /// `ColumnFormat` keys spell that outer condition `effective.<key> !=
-/// desk_format.<key>`, both sides resolved through [`kind_default`];
-/// `label` and `width` spell it `item.presentation.<key> != desk.<key>`,
+/// below_format.<key>`, both sides resolved through [`kind_default`];
+/// `label` and `width` spell it `item.presentation.<key> != below.<key>`,
 /// having no kind default to resolve against.
 ///
 /// **An item key `None` where the desk has `Some` still cannot arise
@@ -506,7 +513,7 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
         .iter()
         .collect();
     let order = doc_order(draft);
-    let baseline = desk_baseline(draft);
+    let baseline = baseline_below(draft);
 
     let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
     if names != order {
@@ -519,13 +526,15 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
 
     let mut columns = toml_edit::Table::new();
     for item in &items {
-        let desk = baseline
+        let below = baseline
             .get(item.name.as_str())
             .cloned()
             .unwrap_or_default();
-        // §4.3's baseline is "the kind's default with the desk's format
-        // and label applied" — RESOLVED, not the desk's raw `Option`s —
-        // so the five format keys are compared through `ColumnFormat`
+        // §4.3's baseline is "the kind's default with the layers BELOW
+        // this one applied" — the desk view's own format and label, then
+        // the trader's dataset level over it (dataset-presentation §5.1)
+        // — RESOLVED, not those layers' raw `Option`s, so the five
+        // format keys are compared through `ColumnFormat`
         // and only `label`/`width`, which have no kind default to
         // resolve against, compare as bare `Option`s.
         //
@@ -539,43 +548,47 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
         // desk" and copied them into the trader's overlay. That is the
         // freeze §4.3 names in so many words: "a trader who changes a
         // precision does not copy the desk's scale into their file and
-        // freeze it against the desk's next change".
+        // freeze it against the desk's next change". The dataset level
+        // reaches the same trap from the other side: a scale the trader
+        // set once for the whole dataset would be copied into every view
+        // they touch a precision in, and their next dataset-level change
+        // would then reach every view BUT those.
         let kind = kind_default(item);
-        let desk_format = kind.clone().with(&desk);
+        let below_format = kind.clone().with(&below);
         let effective = kind.with(&item.presentation);
         let mut t = toml_edit::Table::new();
 
-        if effective.precision != desk_format.precision {
+        if effective.precision != below_format.precision {
             if let Some(v) = item.presentation.precision {
                 t["precision"] = toml_edit::value(i64::from(v));
             }
         }
-        if effective.thousands != desk_format.thousands {
+        if effective.thousands != below_format.thousands {
             if let Some(v) = item.presentation.thousands {
                 t["thousands"] = toml_edit::value(v);
             }
         }
-        if effective.negative != desk_format.negative {
+        if effective.negative != below_format.negative {
             if let Some(v) = item.presentation.negative {
                 t["negative"] = toml_edit::value(negative_key(v));
             }
         }
-        if effective.colour != desk_format.colour {
+        if effective.colour != below_format.colour {
             if let Some(v) = &item.presentation.colour {
                 t["colour"] = toml_edit::value(colour_key(v));
             }
         }
-        if effective.scale != desk_format.scale {
+        if effective.scale != below_format.scale {
             if let Some(v) = item.presentation.scale {
                 t["scale"] = toml_edit::value(scale_key(v));
             }
         }
-        if item.presentation.label != desk.label {
+        if item.presentation.label != below.label {
             if let Some(v) = &item.presentation.label {
                 t["label"] = toml_edit::value(v.as_str());
             }
         }
-        if item.presentation.width != desk.width {
+        if item.presentation.width != below.width {
             if let Some(v) = item.presentation.width {
                 t["width"] = width_value(v);
             }
@@ -676,6 +689,150 @@ pub(super) fn desk_baseline(draft: &Draft) -> BTreeMap<String, ColumnPresentatio
         baseline.insert(name.to_string(), presentation);
     }
     baseline
+}
+
+/// This view's dataset-level entries, by column (dataset-presentation
+/// spec §5.1): the `dataset_presentation` doc's tables for whichever
+/// dataset OWNS each of the view's columns
+/// ([`DatasetPresentationSpec::owner_of`] — the view's own dataset
+/// first, then each join's in file order, the order the compiler
+/// resolves names in), read from the config the CALLER hands in.
+///
+/// Every path that reaches a stage hands in the pending-aware config
+/// (`apply::config_with_pending`), never `services.config` alone: inside
+/// the 250 ms write debounce the latter is the doc as it stood before
+/// the last keystroke, so a layer read from it would be one tick stale
+/// and the stage would both hide that tick and, outliving the flush,
+/// write the column back without it.
+///
+/// A column no dataset of the view declares — a derived column — takes
+/// nothing from this layer, and so has no entry here at all.
+pub(super) fn dataset_layer(
+    config: &Config,
+    view: &ViewSpec,
+) -> BTreeMap<String, ColumnPresentation> {
+    let Some(doc) = config.doc(DATASET_PRESENTATION_DOC) else {
+        return BTreeMap::new();
+    };
+    let (overlay, _) = DatasetPresentationSpec::from_doc(doc);
+    let schema = config
+        .doc("datasets")
+        .map(|d| SchemaSpec::from_doc(d).0)
+        .unwrap_or_default();
+    view.columns
+        .iter()
+        .filter_map(|c| {
+            let owner = DatasetPresentationSpec::owner_of(view, c.name(), &schema)?;
+            let p = overlay.datasets.get(owner)?.get(c.name())?.clone();
+            Some((c.name().to_string(), p))
+        })
+        .collect()
+}
+
+/// [`dataset_layer`] for a view named rather than held: the views are
+/// reloaded from the same config ([`load_views`], which every other
+/// reader here goes through too) and the named one looked up. An unknown
+/// name is an empty layer, not a panic — a draft can outlive the object
+/// it describes for exactly as long as one keystroke.
+///
+/// This is what [`super::Domain::draft`] and `render::enter_column_stage`
+/// call, because both know a name and neither is holding a [`ViewSpec`].
+pub(super) fn dataset_layer_for(
+    config: &Config,
+    view_name: &str,
+) -> BTreeMap<String, ColumnPresentation> {
+    let (views, _) = load_views(config);
+    views
+        .iter()
+        .find(|v| v.name == view_name)
+        .map(|view| dataset_layer(config, view))
+        .unwrap_or_default()
+}
+
+/// The layer a VIEW-level key sits over (§5.1): the desk's own keys
+/// ([`desk_baseline`]) with the trader's dataset level merged over,
+/// per column.
+///
+/// **Both the fold and the writer read this**, which is the whole point.
+/// Compared against the desk ALONE, every key the trader set at the
+/// dataset level would read as a divergence from the view's baseline and
+/// be copied into `view_presentation.toml` as a spurious per-view
+/// override — pinning this view against their own next dataset-level
+/// change, which is the same freeze [`Destination`] exists to prevent,
+/// one layer down. Equal to the layer below means "I have no opinion
+/// here", and the writer emits nothing.
+///
+/// The dataset layer travels on the draft ([`Draft::dataset_layer`])
+/// rather than being read here, because `to_table` — the writer's own
+/// entry point — has no `Config` to read it from.
+pub(super) fn baseline_below(draft: &Draft) -> BTreeMap<String, ColumnPresentation> {
+    let mut below = desk_baseline(draft);
+    for (col, dataset) in &draft.dataset_layer {
+        below.entry(col.clone()).or_default().merge_over(dataset);
+    }
+    below
+}
+
+/// The three layers under one column (§5.3), for the provenance chip and
+/// the fold notice — each as the keys that layer ITSELF sets, never
+/// merged, so a layer can be named.
+///
+/// `view` is the trader's view-overlay entry as the doc holds it. The
+/// fields' own values are compared against `below_view()` at paint
+/// (`dataset_columns::provenance_of`), so a just-stepped field already
+/// reads `view` on the same frame rather than 250 ms later when the
+/// write lands.
+///
+/// [`ColumnLayers::below_view`]: super::ColumnLayers::below_view
+pub(super) fn column_layers(
+    draft: &Draft,
+    config: &Config,
+    view: &str,
+    column: &str,
+) -> ColumnLayers {
+    let desk = desk_baseline(draft).remove(column).unwrap_or_default();
+    let dataset = draft.dataset_layer.get(column).cloned().unwrap_or_default();
+    let view_overlay = config
+        .doc(PRESENTATION_DOC)
+        .map(|doc| ViewPresentationSpec::from_doc(doc).0)
+        .and_then(|spec| {
+            spec.views
+                .get(view)
+                .and_then(|v| v.columns.get(column))
+                .cloned()
+        })
+        .unwrap_or_default();
+    ColumnLayers {
+        desk,
+        dataset,
+        view: view_overlay,
+    }
+}
+
+/// The Views door's [`ColumnContext`], whole — the one place it is built.
+///
+/// Three callers had a copy of this literal (the dialog's own
+/// `render::enter_column_stage` and two test openers that exist to
+/// mirror it), and a context is exactly the kind of value where a test
+/// that drifts from the door stops testing the door: a missing layer
+/// there is a fold that silently names the wrong one, with every
+/// assertion still green. `overlay_object` is empty and `item` is
+/// `Some`, both by the door's own definition — the view's list holds the
+/// item this stage folds into, so the scratch copy here is read only for
+/// the column's kind default.
+pub(super) fn column_context(
+    draft: &Draft,
+    config: &Config,
+    view: &str,
+    column: &str,
+    item: ListItem,
+) -> ColumnContext {
+    ColumnContext {
+        door: ColumnDoor::View,
+        layers: column_layers(draft, config, view, column),
+        overlay_object: toml::Table::new(),
+        item: Some(item),
+    }
 }
 
 /// `negative`'s two written spellings — the same two [`ColumnPresentation
@@ -1253,9 +1410,7 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 }
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        ColumnContext, ColumnDoor, ColumnLayers, Domain, EditRow, FellTo, Fold, Step,
-    };
+    use super::super::{Domain, EditRow, FellTo, Fold, Step};
     use super::*;
     use geode_core::config::ConfigSources;
 
@@ -1264,7 +1419,17 @@ mod tests {
     /// baseline to be honest about (dataset-presentation spec §5.1).
     /// A test that called `enter_column` alone would open a stage whose
     /// fold does nothing, which is not the stage the dialog opens.
-    fn open_column(draft: &mut Draft, column: &str, colours: &[String]) -> bool {
+    ///
+    /// The context comes from [`column_context`], the door's own builder,
+    /// rather than a literal here: a test opener with its own copy of
+    /// that literal is how a missing layer stays green.
+    fn open_column(
+        draft: &mut Draft,
+        config: &Config,
+        view: &str,
+        column: &str,
+        colours: &[String],
+    ) -> bool {
         let Some(item) = draft
             .list_items("columns")
             .and_then(|items| items.iter().find(|i| i.name == column))
@@ -1273,16 +1438,7 @@ mod tests {
             return false;
         };
         let fields = column_fields(&item, colours, Destination::Presentation);
-        let layers = ColumnLayers {
-            desk: desk_baseline(draft).remove(column).unwrap_or_default(),
-            ..ColumnLayers::default()
-        };
-        draft.column_ctx = Some(ColumnContext {
-            door: ColumnDoor::View,
-            layers,
-            overlay_object: toml::Table::new(),
-            item: Some(item),
-        });
+        draft.column_ctx = Some(column_context(draft, config, view, column, item));
         draft.enter_column(column, fields)
     }
 
@@ -2070,6 +2226,94 @@ mod tests {
         assert!(!text.contains("precision"), "{text}");
     }
 
+    /// Dataset-presentation spec §5.1: the view overlay's baseline is
+    /// desk + dataset, so a view field equal to the DATASET level writes
+    /// nothing at all — only the key the trader actually moved off that
+    /// baseline reaches `view_presentation.toml`.
+    ///
+    /// Compared against the desk alone (this task's whole point), every
+    /// dataset-level key would be copied into this view's overlay on the
+    /// first keystroke in the stage — a per-view override the trader
+    /// never made, pinned against their own next dataset-level change.
+    ///
+    /// Rendered through `object_text` rather than `Table::to_string`,
+    /// which prints a `toml_edit::Table`'s leaf values only and would
+    /// render this writer's sub-tables as the empty string (the same
+    /// departure `dataset_columns`'s writer tests record).
+    #[test]
+    fn a_view_field_equal_to_the_dataset_level_writes_nothing() {
+        // desk: npv width 50. dataset level: npv width 140, scale k.
+        // The trader steps scale to k in the VIEW stage — equal to the
+        // dataset level, so nothing is written; then width to 200 — only
+        // that key is written.
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\ngrouping = [\"book\"]\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+                 [[tree.columns]]\nname = \"npv\"\nkind = \"measure\"\nwidth = 50\n",
+            ),
+            (
+                Layer::User,
+                "dataset_presentation",
+                "[risk.columns.npv]\nwidth = 140\nscale = \"k\"\n",
+            ),
+        ]);
+        let mut draft = Domain::Views.draft(&config, "tree");
+        assert_eq!(draft.dataset_layer["npv"].width, Some(140.0));
+        let item = draft
+            .list_items("columns")
+            .unwrap()
+            .iter()
+            .find(|i| i.name == "npv")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            item.presentation.width,
+            Some(140.0),
+            "the member row shows the effective value"
+        );
+        // Simulate the stage: fields from the item, fold with scale = k
+        // (unchanged — the field was seeded with the value in force),
+        // width 200.
+        let mut fields = column_fields(&item, &[], Destination::Presentation);
+        for f in &mut fields {
+            if f.key == "width" {
+                f.kind = FieldKind::Text("200".into());
+            }
+        }
+        let below = baseline_below(&draft).remove("npv").unwrap();
+        assert_eq!(
+            below.width,
+            Some(140.0),
+            "the dataset level is merged over the desk's own 50"
+        );
+        let mut folded = item.clone();
+        fold_into(&mut folded, &fields, &below);
+        // Put the folded item back and render.
+        if let Some(FieldKind::OrderedList { items, .. }) = draft
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "columns")
+            .map(|f| &mut f.kind)
+        {
+            *items.iter_mut().find(|i| i.name == "npv").unwrap() = folded;
+        }
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(text.contains("width = 200"), "{text}");
+        assert!(
+            !text.contains("scale"),
+            "equal to the dataset level: not written — {text}"
+        );
+    }
+
     /// A bare `ListItem` of `kind`, for [`kind_default`]'s own test —
     /// nothing else about the item matters to it.
     fn item_of_kind(kind: Option<&str>) -> ListItem {
@@ -2254,7 +2498,13 @@ mod tests {
             Some("NPV"),
             "sanity: the item carries the desk's label"
         );
-        assert!(open_column(&mut draft, "npv", &[]));
+        assert!(open_column(
+            &mut draft,
+            &with_desk_label,
+            "tree",
+            "npv",
+            &[]
+        ));
         clear_text_field(&mut draft, "label");
         assert_eq!(
             draft.fold_column(),
@@ -2284,7 +2534,7 @@ mod tests {
         let bare =
             config_with_view("[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n");
         let mut draft = Domain::Views.draft(&bare, "tree");
-        assert!(open_column(&mut draft, "npv", &[]));
+        assert!(open_column(&mut draft, &bare, "tree", "npv", &[]));
         clear_text_field(&mut draft, "label");
         assert_eq!(
             draft.fold_column(),
@@ -2312,7 +2562,13 @@ mod tests {
         let mut draft = Domain::Views.draft(&with_desk_width, "tree");
         let item = draft.list_items("columns").unwrap()[0].clone();
         assert_eq!(item.presentation.width, Some(140.0), "sanity");
-        assert!(open_column(&mut draft, "npv", &[]));
+        assert!(open_column(
+            &mut draft,
+            &with_desk_width,
+            "tree",
+            "npv",
+            &[]
+        ));
         set_text_field(&mut draft, "width", AUTO);
         assert_eq!(
             draft.fold_column(),
@@ -2333,7 +2589,7 @@ mod tests {
         let bare =
             config_with_view("[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n");
         let mut draft = Domain::Views.draft(&bare, "tree");
-        assert!(open_column(&mut draft, "npv", &[]));
+        assert!(open_column(&mut draft, &bare, "tree", "npv", &[]));
         set_text_field(&mut draft, "width", AUTO);
         assert_eq!(draft.fold_column(), None, "already auto: nothing cleared");
         assert_eq!(
@@ -2375,7 +2631,7 @@ mod tests {
              [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
         );
         let mut draft = Domain::Views.draft(&config, "tree");
-        assert!(open_column(&mut draft, "npv", &[]));
+        assert!(open_column(&mut draft, &config, "tree", "npv", &[]));
         let scale = draft.fields.iter().position(|f| f.key == "scale").unwrap();
         draft.selected = scale;
         assert_eq!(draft.toggle_selected(), Step::Changed);

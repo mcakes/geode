@@ -4391,7 +4391,7 @@ run_mutation "views: a presentation save pins the desk's column order" \
 # from each other.
 run_mutation "views: a presentation save copies the desk's widths into the user's file" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if item.presentation.width != desk.width {' \
+  '        if item.presentation.width != below.width {' \
   '        if true {' \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
@@ -8594,8 +8594,8 @@ run_mutation "objectdialog: a wrapping number wraps" \
 # sides through the kind default, which is what §4.3 calls the baseline.
 run_mutation "views: the overlay writer omits keys equal to the desk" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if effective.precision != desk_format.precision {' \
-  '        if effective.precision != desk_format.precision || true {' \
+  '        if effective.precision != below_format.precision {' \
+  '        if effective.precision != below_format.precision || true {' \
   geode-shell \
   the_writer_emits_only_keys_that_differ_from_the_desk
 
@@ -8605,8 +8605,8 @@ run_mutation "views: the overlay writer omits keys equal to the desk" \
 # freeze the whole comparison exists to prevent.
 run_mutation "views: the writer's baseline carries the desk's own format keys" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        let desk_format = kind.clone().with(&desk);' \
-  '        let desk_format = kind.clone();' \
+  '        let below_format = kind.clone().with(&below);' \
+  '        let below_format = kind.clone();' \
   geode-shell \
   the_writer_emits_only_keys_that_differ_from_the_desk
 

@@ -1241,6 +1241,25 @@ pub struct Draft {
     /// `None` off the column stage, set by the door and dropped by
     /// [`Draft::leave_column`].
     pub column_ctx: Option<ColumnContext>,
+    /// The trader's DATASET-level presentation for this object's
+    /// columns, by column name (dataset-presentation spec §5.1) — the
+    /// layer between the desk view's own keys and this view's overlay.
+    ///
+    /// It lives on the draft because the writer's entry point,
+    /// [`Domain::to_table`], has no `Config` to read it from, and the
+    /// writer is exactly where getting it wrong is silent: compared
+    /// against the desk alone, every dataset-level key reads as a
+    /// divergence and is copied into `view_presentation.toml` as a
+    /// per-view override the trader never made
+    /// ([`views::baseline_below`]).
+    ///
+    /// **Filled for `Domain::Views` alone**, by [`Domain::draft`] from
+    /// the config it is handed and refreshed by
+    /// `render::enter_column_stage` from the pending-aware one. Empty
+    /// for every other domain — none of them has a view whose columns a
+    /// dataset could speak for, and the Schema door's own layer is the
+    /// one it writes, carried on [`ColumnContext`] instead.
+    pub dataset_layer: BTreeMap<String, ColumnPresentation>,
 }
 
 /// Which way [`Draft::step_selected`] moves the value under the cursor.
@@ -2503,6 +2522,9 @@ impl Draft {
             parent_fields: None,
             column: None,
             column_ctx: None,
+            // An object nothing defines yet has no columns for a dataset
+            // to speak for; `Domain::draft` is where the layer arrives.
+            dataset_layer: BTreeMap::new(),
         }
     }
 
@@ -2749,6 +2771,15 @@ impl Domain {
             parent_fields: None,
             column: None,
             column_ctx: None,
+            // §5.1: Views alone. Reloading the views a second time here
+            // (`fields` above already did once) is the price of the
+            // scaffold's one-`Domain`-match-per-function rule — the
+            // alternative is a `fields` that returns two things, which
+            // every other adapter would then have to answer for.
+            dataset_layer: match self {
+                Domain::Views => views::dataset_layer_for(config, object),
+                _ => BTreeMap::new(),
+            },
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -3978,6 +4009,7 @@ mod tests {
             parent_fields: None,
             column: None,
             column_ctx: None,
+            dataset_layer: BTreeMap::new(),
         }
     }
 
@@ -5710,18 +5742,16 @@ mod tests {
             .unwrap()
             .clone();
         // The context the door installs (dataset-presentation spec
-        // §5.1): without it the stage opens but folds nothing.
-        draft.column_ctx = Some(ColumnContext {
-            door: ColumnDoor::View,
-            layers: ColumnLayers {
-                desk: views::desk_baseline(&draft)
-                    .remove("npv")
-                    .unwrap_or_default(),
-                ..ColumnLayers::default()
-            },
-            overlay_object: toml::Table::new(),
-            item: Some(npv.clone()),
-        });
+        // §5.1): without it the stage opens but folds nothing. Through
+        // the door's OWN builder, so this mirror of
+        // `render::enter_column_stage` cannot drift from it.
+        draft.column_ctx = Some(views::column_context(
+            &draft,
+            &config,
+            "tree",
+            "npv",
+            npv.clone(),
+        ));
         assert!(draft.enter_column(
             "npv",
             views::column_fields(&npv, &[], Destination::Presentation)
