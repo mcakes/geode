@@ -534,10 +534,12 @@ pub struct DataService {
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
-    /// Field order is drop order. The pool joins its workers first; the
-    /// scheduler stops submitting next; the runner drains its queue and
-    /// drops the `Store` before `conn` — the field listed last — drops
-    /// after everything else.
+    /// Field order is drop order. The subscriptions stop receiving first
+    /// (each one's thread submits documents into the runner, so it has to
+    /// stop before the runner does); the pool joins its workers next; the
+    /// scheduler stops submitting after that; the runner drains its queue
+    /// and drops the `Store` before `conn` — the field listed last —
+    /// drops after everything else.
     ///
     /// `conn` dropping last is harmless, not accidental correctness:
     /// duckdb-rs holds the database as `Arc<Mutex<DatabaseHandle>>`, and
@@ -547,17 +549,14 @@ pub struct DataService {
     /// issue one `duckdb_disconnect` and close nothing. An earlier
     /// version of this comment wrongly called a different drop order a
     /// live bug on the strength of this same detail.
-    /// One receiver thread per subscribed source (market-data spec
-    /// §5.4), first in the field list because it must be first in drop
-    /// order: a worker submits documents into the ingest runner, so it
-    /// has to stop before the runner does.
     ///
-    /// A `Mutex` only because `DataService::shutdown` takes `&self` (as
-    /// every other stop door here does) while
-    /// `SubscriptionWorker::shutdown` takes `&mut self` — the same
-    /// reason `IngestHandle` holds its `JoinHandle` behind one. It is
-    /// never contended: only `shutdown` and `Drop` take it, and
-    /// `shutdown` is idempotent.
+    /// `subscriptions` is one receiver thread per subscribed source
+    /// (market-data spec §5.4), behind a `Mutex` only because
+    /// `DataService::shutdown` takes `&self` (as every other stop door
+    /// here does) while `SubscriptionWorker::shutdown` takes `&mut self`
+    /// — the same reason `IngestHandle` holds its `JoinHandle` behind
+    /// one. It is never contended: only `shutdown` and `Drop` take it,
+    /// and `shutdown` is idempotent.
     subscriptions: std::sync::Mutex<Vec<SubscriptionWorker>>,
     pool: QueryPool,
     scheduler: Scheduler,
