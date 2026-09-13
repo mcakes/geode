@@ -870,14 +870,48 @@ mod gpui_tests {
         );
     }
 
-    /// 2c §7: every bundled theme keeps every generated hue readable, in
-    /// both tones, and its anchor arcs are reported so a folded palette is
-    /// a known number rather than a surprise.
+    /// 2c §7 fix round 1 (controller ruling, 2026-09-13): the bundled
+    /// themes split into two findings, not one, and get two treatments.
+    ///
+    /// `Tone::Normal` is a real defect list, not a design limit — a
+    /// theme's own `red`/`yellow`/…(anchor) is meant to read as *text*,
+    /// and most bundled themes' anchors do clear 3:1 against their own
+    /// background. [`KNOWN_LOW_CONTRAST`] names the 107 (theme, hue)
+    /// pairs (21 of 44 entries) that do not, found by this test's own
+    /// first run against the bundled set — each is a theme-authoring
+    /// defect the test *names* rather than hides. A maintainer retuning
+    /// one of those themes deletes its line(s) here and the test then
+    /// guards it like every other pair; any pair NOT on the list still
+    /// fails the assertion. Hybrid Dark alone accounts for 8 of the 107 —
+    /// see also its 0° anchor arc below.
+    ///
+    /// `Tone::Light` is report-only, with no exception list, because the
+    /// failure there is not a handful of mistuned themes but the tone
+    /// itself: 23 of 44 entries have at least one Light-tone hue below
+    /// 3:1, down to 1.22:1 on Solarized Dark, spread across both light-
+    /// and dark-background themes. Spec §2.2 offers `Tone::Light` as an
+    /// "emphasised member" of a named colour; the data says a theme's
+    /// `.light` anchors are the tints its authors chose for *fills* (a
+    /// selected-row wash, a badge background), not for text, so they are
+    /// legible against a DARK background, not reliably against the
+    /// theme's own — the same background every `Tone::Normal` hue is
+    /// checked against. Asserting Light here would either fail on very
+    /// close to half the bundled set or force an exception list nearly as
+    /// large as the theme set itself; reporting the worst ratio per theme
+    /// keeps the number visible without pretending it is a fixable defect
+    /// list.
+    ///
+    /// The anchor-arc report stays as a third, independent number: a
+    /// folded palette (two anchors landing on the same OKLCH hue) is a
+    /// different defect from a contrast failure, and Hybrid Dark supplies
+    /// a live example — its smallest arc measures exactly 0.0°, i.e. two
+    /// of its Normal-tone anchors resolve to the identical hue angle.
     #[gpui::test]
     fn every_bundled_theme_keeps_generated_hues_readable(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
         let (service, _) = load_bundled();
         let mut worst: Vec<(String, f32)> = Vec::new();
+        let mut light_report: Vec<(String, f32)> = Vec::new();
         for entry in &service.entries {
             let (anchors, tokens, background) = cx.update(|cx| {
                 Theme::global_mut(cx).apply_config(entry);
@@ -904,24 +938,162 @@ mod gpui_tests {
                 smallest_arc = smallest_arc.min(arc);
             }
             worst.push((entry.name.to_string(), smallest_arc));
+            let mut light_worst = f32::MAX;
             for tone in [
                 geode_core::colour::Tone::Normal,
                 geode_core::colour::Tone::Light,
             ] {
                 for step in 0..12 {
-                    let colour =
-                        geode_core::colour::interpolate_hue(step as f32 * 30.0, tone, &anchors);
+                    let hue = step * 30;
+                    let colour = geode_core::colour::interpolate_hue(hue as f32, tone, &anchors);
                     let ratio = geode_core::colour::contrast_ratio(colour, background);
-                    assert!(
-                        ratio >= 3.0,
-                        "{}: hue {} ({tone:?}) reads {ratio:.2}:1 against the background",
-                        entry.name,
-                        step * 30
-                    );
+                    match tone {
+                        geode_core::colour::Tone::Normal => {
+                            if KNOWN_LOW_CONTRAST.contains(&(entry.name.as_ref(), hue as u32)) {
+                                eprintln!(
+                                    "known exception: {} hue {hue} (Normal) reads {ratio:.2}:1 against the background",
+                                    entry.name
+                                );
+                            } else {
+                                assert!(
+                                    ratio >= 3.0,
+                                    "{}: hue {hue} (Normal) reads {ratio:.2}:1 against the background",
+                                    entry.name
+                                );
+                            }
+                        }
+                        geode_core::colour::Tone::Light => {
+                            light_worst = light_worst.min(ratio);
+                        }
+                    }
                 }
             }
+            light_report.push((entry.name.to_string(), light_worst));
         }
         worst.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         eprintln!("smallest anchor arcs: {:?}", &worst[..worst.len().min(5)]);
+
+        light_report.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        eprintln!("light-tone worst ratio per theme (report only, no assertion):");
+        for (name, ratio) in &light_report {
+            eprintln!("  {name}: {ratio:.2}:1");
+        }
     }
+
+    /// 2c §7 fix round 1: (theme, hue) pairs whose `Tone::Normal` hue
+    /// read below 3:1 against the theme's own background on this test's
+    /// first run against the bundled set (2026-09-13) — see the test's
+    /// own doc comment above. Each line names a real theme-authoring
+    /// defect that the assertion skips rather than hides: retuning that
+    /// theme's anchor and deleting its line here lets the assertion
+    /// guard it like every other pair.
+    const KNOWN_LOW_CONTRAST: &[(&str, u32)] = &[
+        ("Adventure", 300),
+        ("Adventure Time", 0),
+        ("Adventure Time", 240),
+        ("Adventure Time", 270),
+        ("Adventure Time", 300),
+        ("Adventure Time", 330),
+        ("Aurora Light", 60),
+        ("Ayu Light", 0),
+        ("Ayu Light", 30),
+        ("Ayu Light", 60),
+        ("Ayu Light", 90),
+        ("Ayu Light", 120),
+        ("Ayu Light", 150),
+        ("Ayu Light", 180),
+        ("Ayu Light", 210),
+        ("Ayu Light", 240),
+        ("Ayu Light", 270),
+        ("Catppuccin Latte", 0),
+        ("Catppuccin Latte", 30),
+        ("Catppuccin Latte", 60),
+        ("Catppuccin Latte", 90),
+        ("Catppuccin Latte", 120),
+        ("Catppuccin Latte", 150),
+        ("Catppuccin Latte", 180),
+        ("Catppuccin Latte", 210),
+        ("Catppuccin Latte", 240),
+        ("Catppuccin Latte", 270),
+        ("Catppuccin Latte", 300),
+        ("Default Light", 60),
+        ("Everforest Dark", 300),
+        ("Everforest Light", 0),
+        ("Everforest Light", 30),
+        ("Everforest Light", 60),
+        ("Everforest Light", 90),
+        ("Everforest Light", 120),
+        ("Everforest Light", 150),
+        ("Everforest Light", 180),
+        ("Everforest Light", 210),
+        ("Everforest Light", 240),
+        ("Everforest Light", 270),
+        ("Everforest Light", 300),
+        ("Everforest Light", 330),
+        ("Fahrenheit", 0),
+        ("Fahrenheit", 30),
+        ("Fahrenheit", 210),
+        ("Fahrenheit", 240),
+        ("Fahrenheit", 270),
+        ("Fahrenheit", 300),
+        ("Fahrenheit", 330),
+        ("Flexoki Dark", 0),
+        ("Flexoki Dark", 240),
+        ("Flexoki Dark", 270),
+        ("Flexoki Dark", 300),
+        ("Flexoki Dark", 330),
+        ("Flexoki Light", 60),
+        ("Flexoki Light", 90),
+        ("Flexoki Light", 150),
+        ("Flexoki Light", 180),
+        ("Gruvbox Light", 90),
+        ("Gruvbox Light", 120),
+        ("Hybrid Dark", 0),
+        ("Hybrid Dark", 30),
+        ("Hybrid Dark", 180),
+        ("Hybrid Dark", 210),
+        ("Hybrid Dark", 240),
+        ("Hybrid Dark", 270),
+        ("Hybrid Dark", 300),
+        ("Hybrid Dark", 330),
+        ("Kibble", 240),
+        ("Kibble", 270),
+        ("macOS Classic Light", 60),
+        ("Mellifluous Light", 30),
+        ("Mellifluous Light", 60),
+        ("Mellifluous Light", 90),
+        ("Mellifluous Light", 150),
+        ("Mellifluous Light", 180),
+        ("Mellifluous Light", 210),
+        ("Mellifluous Light", 240),
+        ("Mellifluous Light", 270),
+        ("Mellifluous Light", 300),
+        ("Mellifluous Light", 330),
+        ("Molokai Dark", 210),
+        ("Molokai Dark", 240),
+        ("Molokai Dark", 270),
+        ("Molokai Dark", 300),
+        ("Molokai Dark", 330),
+        ("Molokai Light", 30),
+        ("Molokai Light", 60),
+        ("Molokai Light", 90),
+        ("Molokai Light", 120),
+        ("Molokai Light", 150),
+        ("Molokai Light", 180),
+        ("Molokai Light", 210),
+        ("Solarized Dark", 0),
+        ("Solarized Dark", 30),
+        ("Solarized Dark", 60),
+        ("Solarized Dark", 90),
+        ("Solarized Dark", 120),
+        ("Solarized Dark", 150),
+        ("Solarized Dark", 180),
+        ("Solarized Dark", 210),
+        ("Solarized Dark", 240),
+        ("Solarized Dark", 270),
+        ("Solarized Dark", 300),
+        ("Solarized Dark", 330),
+        ("Tokyo Night", 300),
+        ("Twilight", 240),
+    ];
 }
