@@ -1651,6 +1651,26 @@ impl Draft {
         self.text_entry.is_some_and(|entry| entry.completions)
     }
 
+    /// The write half of the query mirror for this draft —
+    /// `ObjectDialogState::set_query` routes an edit- or column-stage
+    /// keystroke here. A filter keystroke resets the cursor to the top
+    /// match, because the list just re-ranked and the old index points at
+    /// an unrelated row. An open PLAIN text field is not a filter: its rows
+    /// stay unfiltered with the edited row highlighted (§19.1), so the
+    /// cursor stays on that row. The chain field's rows ARE its completions
+    /// and keep the reset (§18.8). Found on a display 2026-09-13: every
+    /// keystroke after `i` sent the highlight back to the first row.
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+        match self.text_entry {
+            Some(TextEntry {
+                row: field,
+                completions: false,
+            }) => self.follow(field),
+            _ => self.selected = 0,
+        }
+    }
+
     /// `i` on a `Text` or `Number` row (§19.1): open the field seeded with
     /// the row's value, so appending is one keystroke away. Pure — the
     /// mode switch that hands the shared `Input` the keys is the
@@ -1675,26 +1695,6 @@ impl Draft {
     /// [`Self::revalidate`] or `apply::commit_or_confirm`, which read a
     /// step from a tick or a text commit, not from opening the field
     /// that will produce one.
-    /// The write half of the query mirror for this draft —
-    /// `ObjectDialogState::set_query` routes an edit- or column-stage
-    /// keystroke here. A filter keystroke resets the cursor to the top
-    /// match, because the list just re-ranked and the old index points at
-    /// an unrelated row. An open PLAIN text field is not a filter: its rows
-    /// stay unfiltered with the edited row highlighted (§19.1), so the
-    /// cursor stays on that row. The chain field's rows ARE its completions
-    /// and keep the reset (§18.8). Found on a display 2026-09-13: every
-    /// keystroke after `i` sent the highlight back to the first row.
-    pub fn set_query(&mut self, query: String) {
-        self.query = query;
-        match self.text_entry {
-            Some(TextEntry {
-                row: field,
-                completions: false,
-            }) => self.follow(field),
-            _ => self.selected = 0,
-        }
-    }
-
     pub fn begin_text_entry(&mut self) -> Step {
         let Some(row @ EditRow::Field(index)) = self.selected_row() else {
             return Step::Inert;
