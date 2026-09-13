@@ -119,8 +119,8 @@ enum Leaf {
 }
 
 /// The model as a path table. Matching on depth and the last two
-/// segments (rather than the joined string) keeps this allocation-free
-/// on the hot path — `stack.join("/")` happens once per *unknown*
+/// segments (rather than on a joined string) keeps this allocation-free
+/// on the hot path — `PathStack::joined` runs once per *unknown*
 /// element, which is the only place the whole path is needed.
 fn classify(path: &[String]) -> Shape {
     let seg = |i: usize| path[i].as_str();
@@ -173,20 +173,70 @@ fn date(what: &str, text: &str) -> Result<NaiveDate, ParseError> {
         .map_err(|_| parse_err(format!("{what} '{text}' is not a date (YYYY-MM-DD)")))
 }
 
-/// The element name, local part only: a desk document carrying a default
-/// or prefixed namespace (`<md:marketData>`) is the same document to us,
-/// and the reported unknown path reads the same either way.
-fn local(name: quick_xml::name::QName<'_>) -> Result<String, ParseError> {
-    std::str::from_utf8(name.local_name().into_inner())
-        .map(str::to_string)
-        .map_err(|e| parse_err(format!("element name is not UTF-8: {e}")))
+/// The open element path, holding each depth's name in a `String` it
+/// reuses across siblings rather than allocating one per element. That is
+/// not micro-optimisation: in this document a `<param>` element *is* a
+/// row, so an allocation per element name would be an allocation per row
+/// on the receiver thread, which the market-data constraint on
+/// per-message work forbids (PHILOSOPHY §6). `names` therefore grows to
+/// the deepest path ever seen — five for this model — and never again.
+#[derive(Default)]
+struct PathStack {
+    names: Vec<String>,
+    depth: usize,
+}
+
+impl PathStack {
+    /// Pushes an element's name, local part only: a desk document
+    /// carrying a default or prefixed namespace (`<md:marketData>`) is
+    /// the same document to us, and the reported unknown path reads the
+    /// same either way.
+    fn push(&mut self, name: quick_xml::name::QName<'_>) -> Result<(), ParseError> {
+        let text = std::str::from_utf8(name.local_name().into_inner())
+            .map_err(|e| parse_err(format!("element name is not UTF-8: {e}")))?;
+        if self.depth == self.names.len() {
+            self.names.push(String::new());
+        }
+        let slot = &mut self.names[self.depth];
+        slot.clear();
+        slot.push_str(text);
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Saturating, so a stray `End` cannot underflow — quick-xml refuses
+    /// an unmatched one before we see it (`allow_unmatched_ends` is off),
+    /// but a panic here would cost the receiver thread and this costs a
+    /// branch.
+    fn pop(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    fn path(&self) -> &[String] {
+        &self.names[..self.depth]
+    }
+
+    /// The one place the whole path is materialised: reporting an unknown
+    /// element (spec §6.3). Classification never needs it.
+    fn joined(&self) -> String {
+        self.path().join("/")
+    }
 }
 
 /// Everything a slice accumulates before its `</slice>` commits it.
+/// Reset with `restart` rather than replaced, so `params` keeps its
+/// buffer across the document's slices.
 #[derive(Default)]
 struct Slice {
     term: Option<NaiveDate>,
     params: Vec<f64>,
+}
+
+impl Slice {
+    fn restart(&mut self) {
+        self.term = None;
+        self.params.clear();
+    }
 }
 
 /// The event walk. One pass, no intermediate row objects: each slice's
@@ -200,7 +250,7 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
     // `<term></term>` hits.
     reader.config_mut().expand_empty_elements = true;
 
-    let mut stack: Vec<String> = Vec::new();
+    let mut stack = PathStack::default();
     let mut unknown_paths: Vec<String> = Vec::new();
     let mut saw_root = false;
 
@@ -228,26 +278,26 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
         match event {
             Event::Eof => break,
             Event::Start(e) => {
-                stack.push(local(e.name())?);
+                stack.push(e.name())?;
                 text.clear();
-                if stack.len() == 1 {
-                    if stack[0] != "marketData" {
+                if stack.path().len() == 1 {
+                    if stack.path()[0] != "marketData" {
                         return Err(parse_err(format!(
                             "root element '{}' is not 'marketData'",
-                            stack[0]
+                            stack.path()[0]
                         )));
                     }
                     saw_root = true;
                 }
-                match classify(&stack) {
+                match classify(stack.path()) {
                     Shape::Container | Shape::Leaf(_) => {}
-                    Shape::Slice => slice = Slice::default(),
+                    Shape::Slice => slice.restart(),
                     Shape::Unknown => {
                         // Reported by path, once per occurrence — the
                         // receiver dedupes per (source, path), so the
                         // parser's job is to say where, not how often
                         // (spec §6.3).
-                        unknown_paths.push(stack.join("/"));
+                        unknown_paths.push(stack.joined());
                         reader
                             .read_to_end(e.name())
                             .map_err(|err| parse_err(format!("malformed XML: {err}")))?;
@@ -261,50 +311,57 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                 // unknown element's End was already eaten by
                 // `read_to_end` above.
                 let trimmed = text.trim();
-                if let Shape::Leaf(leaf) = classify(&stack) {
-                    match leaf {
-                        Leaf::Underlying => {
-                            if trimmed.is_empty() {
-                                return Err(parse_err("underlying is empty"));
-                            }
-                            underlying = Some(trimmed.to_string());
+                match classify(stack.path()) {
+                    Shape::Leaf(Leaf::Underlying) => {
+                        if trimmed.is_empty() {
+                            return Err(parse_err("underlying is empty"));
                         }
-                        Leaf::AnchorDate => anchor_date = Some(date("anchorDate", trimmed)?),
-                        Leaf::SpotRef => spot_ref = Some(number("spotRef", trimmed)?),
-                        Leaf::Node => nodes.push(number("node", trimmed)?),
-                        Leaf::Term => slice.term = Some(date("term", trimmed)?),
-                        Leaf::Param => slice.params.push(number("param", trimmed)?),
+                        underlying = Some(trimmed.to_string());
                     }
-                } else if classify(&stack) == Shape::Slice {
-                    let term = slice
-                        .term
-                        .ok_or_else(|| parse_err(format!("slice {} has no term", slices + 1)))?;
-                    // Checked per slice rather than once at the end, so
-                    // the message can name the offending term; and before
-                    // the count comparison, so an absent `<nodes>` reads
-                    // as an absent `<nodes>` rather than as "nodes has 0".
-                    if nodes.is_empty() {
-                        return Err(parse_err(
-                            "nodes is missing or has no node (no node was read before the first slice)",
-                        ));
+                    Shape::Leaf(Leaf::AnchorDate) => {
+                        anchor_date = Some(date("anchorDate", trimmed)?)
                     }
-                    if slice.params.len() != nodes.len() {
-                        return Err(parse_err(format!(
-                            "slice {} has {} params, nodes has {}",
-                            term.format(DATE_FORMAT),
-                            slice.params.len(),
-                            nodes.len()
-                        )));
+                    Shape::Leaf(Leaf::SpotRef) => spot_ref = Some(number("spotRef", trimmed)?),
+                    Shape::Leaf(Leaf::Node) => nodes.push(number("node", trimmed)?),
+                    Shape::Leaf(Leaf::Term) => slice.term = Some(date("term", trimmed)?),
+                    Shape::Leaf(Leaf::Param) => slice.params.push(number("param", trimmed)?),
+                    Shape::Slice => {
+                        let term = slice.term.ok_or_else(|| {
+                            parse_err(format!("slice {} has no term", slices + 1))
+                        })?;
+                        // Checked per slice rather than once at the end,
+                        // so the message can name the offending term; and
+                        // before the count comparison, so an absent
+                        // `<nodes>` reads as an absent `<nodes>` rather
+                        // than as "nodes has 0".
+                        if nodes.is_empty() {
+                            return Err(parse_err(
+                                "nodes is missing or has no node (no node was read before the first slice)",
+                            ));
+                        }
+                        if slice.params.len() != nodes.len() {
+                            return Err(parse_err(format!(
+                                "slice {} has {} params, nodes has {}",
+                                term.format(DATE_FORMAT),
+                                slice.params.len(),
+                                nodes.len()
+                            )));
+                        }
+                        // Term-major, one row per (term, node) pair: the
+                        // alignment IS the document's meaning, so the
+                        // params keep their order against the nodes that
+                        // were read.
+                        for (node, param) in nodes.iter().zip(&slice.params) {
+                            term_col.push(term);
+                            node_col.push(*node);
+                            param_col.push(*param);
+                        }
+                        slices += 1;
                     }
-                    // Term-major, one row per (term, node) pair: the
-                    // alignment IS the document's meaning, so the params
-                    // keep their order against the nodes that were read.
-                    for (node, param) in nodes.iter().zip(&slice.params) {
-                        term_col.push(term);
-                        node_col.push(*node);
-                        param_col.push(*param);
-                    }
-                    slices += 1;
+                    // A container closing, and — with the stack empty, a
+                    // shape quick-xml refuses before we see it — nothing
+                    // at all.
+                    Shape::Container | Shape::Unknown => {}
                 }
                 stack.pop();
             }
@@ -340,7 +397,18 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
             // Declaration, comments, processing instructions and the
             // doctype carry nothing this model reads.
             Event::Decl(_) | Event::Comment(_) | Event::PI(_) | Event::DocType(_) => {}
-            Event::Empty(_) => unreachable!("expand_empty_elements is on"),
+            // Unreachable while `expand_empty_elements` is on above (a
+            // self-closing element arrives as Start + End instead). An
+            // error rather than a panic, because this runs on the
+            // receiver thread, where a panic costs the whole message
+            // pump and says less than a line naming the invariant.
+            Event::Empty(_) => {
+                return Err(parse_err(format!(
+                    "internal: a self-closing element under '{}' reached the walk \
+                     as an Empty event, but expand_empty_elements is on",
+                    stack.joined()
+                )));
+            }
         }
     }
 
@@ -464,15 +532,33 @@ fn grid_of<'a>(terms: &[NaiveDate], nodes: &'a [f64]) -> Result<Grid<'a>, WriteE
     })
 }
 
-/// A finite number in its shortest round-tripping form. `{}` is not a
-/// convenience here: it is the half of the round-trip contract that
-/// makes `str::parse::<f64>` exact, and a `{:.6}` "tidier" form would
-/// break §11's property for most doubles.
-fn num(what: &str, v: f64) -> Result<String, WriteError> {
+/// A finite number in its shortest round-tripping form, rendered into a
+/// buffer the caller reuses. `{}` is not a convenience here: it is the
+/// half of the round-trip contract that makes `str::parse::<f64>` exact,
+/// and a `{:.6}` "tidier" form would break §11's property for most
+/// doubles. Non-finite is refused rather than emitted: no XSD accepts
+/// `NaN`/`inf`, and a `NaN` written out compares unequal to itself, so
+/// the round trip could not verify it even in principle.
+///
+/// The shared buffer is why this takes `&mut String` instead of
+/// returning one: a `<param>` is a row, so a `String` per number would be
+/// an allocation per row (PHILOSOPHY §6).
+fn num_into(buf: &mut String, what: &str, v: f64) -> Result<(), WriteError> {
     if !v.is_finite() {
         return Err(write_err(format!("{what} {v} is not finite")));
     }
-    Ok(v.to_string())
+    buf.clear();
+    // Writing to a `String` is infallible; the `Result` exists only for
+    // the general `fmt::Write` shape.
+    let _ = std::fmt::Write::write_fmt(buf, format_args!("{v}"));
+    Ok(())
+}
+
+/// Same buffer discipline for a date — one per slice rather than one per
+/// row, but the same reason and the same shape.
+fn date_into(buf: &mut String, date: NaiveDate) {
+    buf.clear();
+    let _ = std::fmt::Write::write_fmt(buf, format_args!("{}", date.format(DATE_FORMAT)));
 }
 
 fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
@@ -526,6 +612,9 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
         w.write_event(Event::End(BytesEnd::new(name))).map_err(io)
     };
     let io = |e: std::io::Error| write_err(format!("writing the CVI document: {e}"));
+    // One text buffer for every number and date the document carries; see
+    // `num_into`.
+    let mut buf = String::new();
 
     w.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
         .map_err(io)?;
@@ -534,16 +623,15 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
     leaf(&mut w, "underlying", &rows.key[0])?;
     w.write_event(Event::Start(BytesStart::new("cviParams")))
         .map_err(io)?;
-    leaf(
-        &mut w,
-        "anchorDate",
-        &anchor_date.format(DATE_FORMAT).to_string(),
-    )?;
-    leaf(&mut w, "spotRef", &num("spot_ref", *spot_ref)?)?;
+    date_into(&mut buf, *anchor_date);
+    leaf(&mut w, "anchorDate", &buf)?;
+    num_into(&mut buf, "spot_ref", *spot_ref)?;
+    leaf(&mut w, "spotRef", &buf)?;
     w.write_event(Event::Start(BytesStart::new("nodes")))
         .map_err(io)?;
     for node in grid.nodes {
-        leaf(&mut w, "node", &num("node", *node)?)?;
+        num_into(&mut buf, "node", *node)?;
+        leaf(&mut w, "node", &buf)?;
     }
     w.write_event(Event::End(BytesEnd::new("nodes")))
         .map_err(io)?;
@@ -552,16 +640,14 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
     for (t, term) in grid.terms.iter().enumerate() {
         w.write_event(Event::Start(BytesStart::new("slice")))
             .map_err(io)?;
-        leaf(&mut w, "term", &term.format(DATE_FORMAT).to_string())?;
+        date_into(&mut buf, *term);
+        leaf(&mut w, "term", &buf)?;
         // One `<param>` per node, in node order: the document's whole
         // meaning is the positional alignment against `<nodes>`, so any
         // other order writes a different surface.
         for n in 0..grid.nodes.len() {
-            leaf(
-                &mut w,
-                "param",
-                &num("param", params[t * grid.nodes.len() + n])?,
-            )?;
+            num_into(&mut buf, "param", params[t * grid.nodes.len() + n])?;
+            leaf(&mut w, "param", &buf)?;
         }
         w.write_event(Event::End(BytesEnd::new("slice")))
             .map_err(io)?;
@@ -760,6 +846,50 @@ role = "attribute"
         assert_eq!(
             parsed.unknown_paths,
             vec!["marketData/cviParams/vendorBlock".to_string()]
+        );
+    }
+
+    /// The path stack reports local names, so a namespaced document is
+    /// the same document — and an unknown element deep inside a slice is
+    /// still reported by its whole path, which is what makes the
+    /// diagnostic say *where* the drift is rather than just that there is
+    /// one.
+    #[test]
+    fn namespaces_are_ignored_and_a_deep_unknown_path_is_reported_whole() {
+        let doc = DOC
+            .replace("<marketData>", r#"<md:marketData xmlns:md="urn:desk">"#)
+            .replace("</marketData>", "</md:marketData>")
+            .replace(
+                "<term>2026-10-16</term>",
+                "<term>2026-10-16</term><tag>x</tag>",
+            );
+        let parsed = CviKind.parse(doc.as_bytes()).unwrap();
+        assert_eq!(parsed.rows, expected());
+        assert_eq!(
+            parsed.unknown_paths,
+            vec!["marketData/cviParams/slices/slice/tag".to_string()]
+        );
+    }
+
+    /// The root is checked by name, so a document of some other shape
+    /// fails saying so rather than reporting every one of its elements as
+    /// unknown and then "underlying is missing".
+    #[test]
+    fn a_document_that_is_not_market_data_fails_naming_its_root() {
+        let err = CviKind
+            .parse(b"<vols><underlying>SPX.Z</underlying></vols>")
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("root element 'vols' is not 'marketData'"),
+            "{}",
+            err.message
+        );
+        let err = CviKind.parse(b"").unwrap_err();
+        assert!(
+            err.message.contains("no 'marketData' element"),
+            "{}",
+            err.message
         );
     }
 

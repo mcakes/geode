@@ -8573,7 +8573,7 @@ run_mutation "cvi: a ragged slice is refused" \
 # failure mode where the desk adds a field and nobody hears about it.
 run_mutation "cvi: an unknown element is reported, not swallowed" \
   crates/geode-documents/src/cvi.rs \
-  '                        unknown_paths.push(stack.join("/"));' \
+  '                        unknown_paths.push(stack.joined());' \
   '                        let _ = ();' \
   geode-documents an_unknown_element_is_skipped_and_reported_by_path
 
