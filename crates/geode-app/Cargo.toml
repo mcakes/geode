@@ -30,6 +30,16 @@ geode-data = { path = "../geode-data" }
 geode-blotter = { path = "../geode-blotter" }
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-demo-data = { path = "../geode-demo-data" }
+# The demo bus (`src/demo_bus.rs`, market-data-documents plan Task 10)
+# writes the CVI documents it generates onto a `ChannelAdapter` feed
+# through the same `DocumentKind::write` door a real subscribed source's
+# receiver thread reads through — `geode-app` is the one crate that
+# registers document kinds into the data service (§6.4), so it is the
+# one crate outside `geode-documents` itself that needs this dependency.
+geode-documents = { path = "../geode-documents" }
+# `demo_bus::run`'s cadence jitter — same version every other crate that
+# draws randomness (`geode-demo-data`) already pins.
+rand = "0.9"
 # `DataEvent::Published` carries no timestamp of its own; the bridge
 # stamps the arrival instant onto the `Publish` record a "recent
 # publishes" preset needs (Phase 4a §3.12).

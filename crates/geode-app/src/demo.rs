@@ -38,12 +38,18 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 
 /// The demo layer: every doc under `examples/demo-config`, compiled in,
 /// plus a `sources` doc over `source_dir` polled every two seconds so a
-/// file dropped into it shows up while you watch.
+/// file dropped into it shows up while you watch, and a `[cvi]` source
+/// subscribing to `geode_app::demo_bus`'s CVI documents (market-data-
+/// documents plan, Task 10) — a subscribed source, so none of the
+/// directory-only keys `[demo]` carries apply to it.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
          readiness = \"sentinel\"\npriority = \"latest_risk\"\npoll_interval = \"2s\"\n\
-         pending_timeout = \"1m\"\nbatch_pattern = '^risk_\\d{{4}}-\\d{{2}}-\\d{{2}}_(?P<batch>.+)$'\n",
+         pending_timeout = \"1m\"\nbatch_pattern = '^risk_\\d{{4}}-\\d{{2}}-\\d{{2}}_(?P<batch>.+)$'\n\
+         [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+         topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
+         priority = \"latest_other\"\n",
         source_dir.join("*.csv").to_string_lossy()
     );
     let docs = [
@@ -99,6 +105,41 @@ mod tests {
         assert_eq!(sources.table["demo"]["poll_interval"].as_str(), Some("2s"));
     }
 
+    /// Task 10 (the demo bus): the `[cvi]` source is declared with every
+    /// field a subscribed source needs, and — the reader's own
+    /// vocabulary, not just well-formed TOML — `SourceSpec::from_doc`
+    /// accepts both `[demo]` and `[cvi]` with no diagnostics at all.
+    #[test]
+    fn the_demo_layer_declares_the_cvi_source() {
+        let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
+        let sources = docs.iter().find(|d| d.name == "sources").unwrap();
+        let cvi = &sources.table["cvi"];
+        assert_eq!(cvi["adapter"].as_str(), Some("demo_bus"));
+        assert_eq!(cvi["dataset"].as_str(), Some("cvi_params"));
+        assert_eq!(cvi["document"].as_str(), Some("cvi_params"));
+        assert_eq!(
+            cvi["topics"].as_array().unwrap()[0].as_str(),
+            Some("marketdata/cvi/>")
+        );
+        assert_eq!(cvi["coalesce"].as_str(), Some("500ms"));
+        assert_eq!(cvi["priority"].as_str(), Some("latest_other"));
+
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(
+            d.is_empty(),
+            "SourceSpec::from_doc found diagnostics: {d:?}"
+        );
+        assert_eq!(sources.len(), 2);
+    }
+
     #[test]
     fn emitting_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
@@ -143,15 +184,22 @@ mod demo_config_integration {
             ..ConfigSources::default()
         });
         assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
-        let setup =
-            crate::bridge::data_setup(&config, "/tmp/geode-demo/100000-42/geode.duckdb".into())
-                .expect("datasets + views are both present in the demo layer");
+        let setup = crate::bridge::data_setup(
+            &config,
+            "/tmp/geode-demo/100000-42/geode.duckdb".into(),
+            geode_data::adapter::AdapterRegistry::default(),
+        )
+        .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
         let names: Vec<&str> = setup.views.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "spec §6.6's 100-column view");
-        assert_eq!(setup.config.sources.len(), 1);
+        // [demo] (a csv_dir source over risk_snapshot) and [cvi] (a
+        // subscribed source over cvi_params, Task 10) — both parse with
+        // no diagnostics, per this same fixture's own
+        // the_demo_layer_declares_the_cvi_source.
+        assert_eq!(setup.config.sources.len(), 2);
     }
 
     /// Task 1 (Phase 4 spec §3.3): `currency`, `model_code` and `expiry`
@@ -167,9 +215,12 @@ mod demo_config_integration {
             ..ConfigSources::default()
         });
         assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
-        let setup =
-            crate::bridge::data_setup(&config, "/tmp/geode-demo/100000-42/geode.duckdb".into())
-                .expect("datasets + views are both present in the demo layer");
+        let setup = crate::bridge::data_setup(
+            &config,
+            "/tmp/geode-demo/100000-42/geode.duckdb".into(),
+            geode_data::adapter::AdapterRegistry::default(),
+        )
+        .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
         let ds = setup
             .config

@@ -48,7 +48,20 @@ pub struct DataSetup {
 }
 
 /// `None` when there is nothing to serve: no datasets or no views.
-pub fn data_setup(config: &Config, db_path: PathBuf) -> Option<DataSetup> {
+///
+/// `adapters` is the caller's own roster (Task 10, the demo bus):
+/// `main.rs` passes an `AdapterRegistry` holding the `ChannelAdapter` it
+/// registered under `--demo` and `AdapterRegistry::default()` otherwise,
+/// so a non-demo build serves every `csv_dir` source and reports each
+/// subscribed one as unservable — the honest answer, never a silent
+/// no-op. `documents` is never a caller's choice: every build folds in
+/// `geode_documents::builtin_kinds()`, since a document kind carries no
+/// state and there is nothing a caller could sensibly leave out.
+pub fn data_setup(
+    config: &Config,
+    db_path: PathBuf,
+    adapters: AdapterRegistry,
+) -> Option<DataSetup> {
     let datasets = config.doc("datasets")?;
     // Presence only: the views themselves come from `load_views`, which
     // applies `view_presentation` over them. Nothing here may read the
@@ -78,13 +91,14 @@ pub fn data_setup(config: &Config, db_path: PathBuf) -> Option<DataSetup> {
             dimensions: dimensions.clone(),
             query_workers: 4,
             sources,
-            // Filled by the caller in the next task (the demo bus): a
-            // build with no adapter and no document kind serves every
-            // `csv_dir` source and reports each subscribed one as
-            // unservable, which is the honest answer rather than a
-            // silent no-op.
-            adapters: AdapterRegistry::default(),
-            documents: DocumentRegistry::default(),
+            adapters,
+            documents: {
+                let mut documents = DocumentRegistry::default();
+                for kind in geode_documents::builtin_kinds() {
+                    documents.register(kind);
+                }
+                documents
+            },
         },
         views,
         dimensions,
@@ -1306,7 +1320,7 @@ role = "key"
     #[test]
     fn data_setup_needs_datasets_and_views_and_carries_sources() {
         let none = Config::load(&ConfigSources::default());
-        assert!(data_setup(&none, "/tmp/x.duckdb".into()).is_none());
+        assert!(data_setup(&none, "/tmp/x.duckdb".into(), AdapterRegistry::default()).is_none());
         let config = Config::load(&ConfigSources {
             builtin: vec![
                 LayerDoc::builtin(
@@ -1319,7 +1333,8 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        let setup =
+            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
         assert_eq!(setup.config.sources.len(), 1);
         assert_eq!(setup.views.len(), 1);
         assert_eq!(setup.config.query_workers, 4);
@@ -1357,7 +1372,8 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        let setup =
+            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
         let view = &setup.views[0];
         let names: Vec<&str> = view.columns.iter().map(|c| c.name()).collect();
         assert_eq!(names, vec!["npv", "book"], "presentation order applied");
