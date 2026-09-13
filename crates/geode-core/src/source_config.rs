@@ -105,10 +105,13 @@ pub struct SourceSpec {
     /// Topic patterns (this plan's one grammar: `>` trailing-levels,
     /// `*` one level, else literal, `/`-separated) this source
     /// subscribes to. Required non-empty when subscribed.
+    pub topics: Vec<String>,
+    /// At most one publish per key within this window — `DEFAULT_COALESCE`
+    /// (500ms) unless overridden; `Duration::ZERO` ("0") opts back into
+    /// publishing every message.
     pub coalesce: Duration,
     /// Which timestamp a publish is stamped with. See [`SourceTime`].
     pub source_time: SourceTime,
-    pub topics: Vec<String>,
 }
 
 impl SourceSpec {
