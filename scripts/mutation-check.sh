@@ -8118,6 +8118,17 @@ run_mutation "blotter: an unknown colour name resolves to none" \
   geode-blotter \
   a_named_column_paints_its_resolved_colour
 
+# 2c §7: the theme check's own assertion survives by construction (real
+# bundled-theme failures already fail it before any mutation is applied —
+# see the Task 7 report), so the live entry guards the formula it reads
+# instead: `contrast_ratio` itself.
+run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
+  crates/geode-core/src/colour/mod.rs \
+  '    (hi + 0.05) / (lo + 0.05)' \
+  '    hi / lo' \
+  geode-core \
+  contrast_ratio_is_wcag
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

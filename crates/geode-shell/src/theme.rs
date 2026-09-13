@@ -809,6 +809,7 @@ mod gpui_tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
     use gpui::TestAppContext;
+    use gpui_component::ActiveTheme as _;
 
     fn config_from(app_toml: &str) -> Config {
         let doc = LayerDoc::builtin("app", app_toml).unwrap();
@@ -867,5 +868,60 @@ mod gpui_tests {
             "Gruvbox Light",
             "a family name is not a theme and must not pick a variant"
         );
+    }
+
+    /// 2c §7: every bundled theme keeps every generated hue readable, in
+    /// both tones, and its anchor arcs are reported so a folded palette is
+    /// a known number rather than a surprise.
+    #[gpui::test]
+    fn every_bundled_theme_keeps_generated_hues_readable(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (service, _) = load_bundled();
+        let mut worst: Vec<(String, f32)> = Vec::new();
+        for entry in &service.entries {
+            let (anchors, tokens, background) = cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(entry);
+                let theme = cx.theme();
+                (
+                    crate::shell::colours::anchors_from_theme(theme),
+                    crate::shell::colours::tokens_from_theme(theme),
+                    crate::shell::colours::to_rgb(theme.background),
+                )
+            });
+            let _ = tokens;
+            let mut smallest_arc = f32::MAX;
+            for i in 0..6 {
+                let a = geode_core::colour::oklab::lab_to_lch(
+                    geode_core::colour::oklab::srgb_to_oklab(anchors.normal[i]),
+                );
+                let b = geode_core::colour::oklab::lab_to_lch(
+                    geode_core::colour::oklab::srgb_to_oklab(anchors.normal[(i + 1) % 6]),
+                );
+                let arc = ((b.h - a.h + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI)
+                    .abs()
+                    .to_degrees();
+                smallest_arc = smallest_arc.min(arc);
+            }
+            worst.push((entry.name.to_string(), smallest_arc));
+            for tone in [
+                geode_core::colour::Tone::Normal,
+                geode_core::colour::Tone::Light,
+            ] {
+                for step in 0..12 {
+                    let colour =
+                        geode_core::colour::interpolate_hue(step as f32 * 30.0, tone, &anchors);
+                    let ratio = geode_core::colour::contrast_ratio(colour, background);
+                    assert!(
+                        ratio >= 3.0,
+                        "{}: hue {} ({tone:?}) reads {ratio:.2}:1 against the background",
+                        entry.name,
+                        step * 30
+                    );
+                }
+            }
+        }
+        worst.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        eprintln!("smallest anchor arcs: {:?}", &worst[..worst.len().min(5)]);
     }
 }
