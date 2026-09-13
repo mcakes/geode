@@ -8564,8 +8564,16 @@ run_mutation "overlay: apply merges Some keys only" \
 # unknown-colour cross-check as the view's own format.colour (§3, above).
 run_mutation "load_views: an unknown colour in the overlay warns with its path" \
   crates/geode-core/src/config/load.rs \
-  '                if colours.get(name).is_none() {' \
-  '                if false {' \
+  '            for (col, cp) in &p.columns {
+                let Some(Colour::Named(name)) = &cp.colour else {
+                    continue;
+                };
+                if colours.get(name).is_none() {' \
+  '            for (col, cp) in &p.columns {
+                let Some(Colour::Named(name)) = &cp.colour else {
+                    continue;
+                };
+                if false {' \
   geode-core \
   a_presentation_naming_an_unknown_colour_warns_with_its_path
 
@@ -8869,6 +8877,43 @@ run_mutation "objectdialog: a keystroke in a plain field keeps the cursor on its
   '            }) => self.selected = 0,' \
   geode-shell \
   a_keystroke_in_a_plain_field_keeps_the_cursor_on_the_edited_row
+
+# dataset-presentation spec §3.1: the dataset overlay must MERGE over the
+# desk's keys — replacing the entry would drop every desk key the
+# dataset table leaves unset (width, precision in the test).
+run_mutation "view: the dataset overlay merges over the desk keys rather than replacing them" \
+  crates/geode-core/src/view.rs \
+  '                    if owned_here {
+                        view.presentation
+                            .entry(col.clone())
+                            .or_default()
+                            .merge_over(cp);' \
+  '                    if owned_here {
+                        view.presentation.insert(col.clone(), cp.clone());' \
+  geode-core \
+  dataset_level_beats_the_desk_view_and_loses_to_the_view_level
+
+# §3.2: own dataset first, then the joins — a column both declare takes
+# the view's own dataset's entry, never the join's.
+run_mutation "view: a column's owner is the view's own dataset before any join" \
+  crates/geode-core/src/view.rs \
+  '        std::iter::once(view.dataset.as_str())
+            .chain(view.joins.iter().map(|j| j.dataset.as_str()))' \
+  '        view.joins.iter().map(|j| j.dataset.as_str())
+            .chain(std::iter::once(view.dataset.as_str()))' \
+  geode-core \
+  a_joined_column_takes_its_own_datasets_entry_and_the_view_dataset_wins_a_tie
+
+# §3.1: the dataset overlay is applied BEFORE the view overlay, so the
+# view level wins; applied after, the dataset level would win in `v`.
+run_mutation "load: the dataset overlay is applied before the view overlay" \
+  crates/geode-core/src/config/load.rs \
+  '    if let Some(overlay) = &dataset_overlay {
+        diags.extend(overlay.apply(&mut views, &schema));
+    }' \
+  '    let _ = &dataset_overlay;' \
+  geode-core \
+  load_views_merges_the_dataset_overlay_under_the_view_overlay_and_reports_its_colours
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
