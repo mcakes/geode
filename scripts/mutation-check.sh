@@ -7980,6 +7980,27 @@ run_mutation "objectdialog: revalidate folds the column stage first" \
   geode-shell \
   the_column_stage_writes_a_differing_key_to_the_overlay
 
+# 2c §5.2: `enter` means one thing in both modes — the browse stage's own
+# rule for the same key. Filtering to a column and pressing enter is how a
+# trader reaches one column of a thirty-column view.
+run_mutation "objectdialog: enter opens the column stage from filter mode too" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            commit_selected_row(shell, cx);' \
+  '            edit_commit_notice(shell);' \
+  geode-shell \
+  the_column_stage_writes_a_differing_key_to_the_overlay
+
+# 2c §5.3: `enter` on an editable Text names `i`, the verb that row
+# really has. Without the branch it falls through to "this row is
+# read-only", which is a lie about `label`/`width` (and was already one
+# about every Sources text row).
+run_mutation "objectdialog: enter names i on a row i can open" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    } else if typeable {' \
+  '    } else if false {' \
+  geode-shell \
+  the_column_stages_width_is_typed_and_refused_out_of_range
+
 # 2c §5.2: a failed write rebuilds the draft from the reverted config —
 # the object's, with no projection on it — so the stage has to step back
 # with it, or the crumb keeps naming a column whose fields are gone.

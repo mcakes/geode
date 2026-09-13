@@ -5202,6 +5202,23 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
         d.selected_row(),
         Some(objectdialog::EditRow::Item { .. })
     )));
+
+    // And `enter` means the same thing in filter mode, which is how a
+    // trader reaches one column of a thirty-column view.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("npv");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Normal,
+        "the stage opens in normal mode whatever mode enter arrived in"
+    );
 }
 
 /// §5.2: a failed write rebuilds the draft from the reverted config —
@@ -5246,6 +5263,16 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
     cx.simulate_keystrokes("j enter"); // npv's column stage
     cx.run_until_parked();
     cx.simulate_keystrokes("j"); // label → width
+    cx.run_until_parked();
+    // `enter` names the verb this row actually has — `i`, not `space`,
+    // and certainly not "read-only", which is what an editable `Text`
+    // used to be told it was.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("press i to type a value")
+    );
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));

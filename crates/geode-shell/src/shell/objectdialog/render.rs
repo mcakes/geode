@@ -895,15 +895,26 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
     enter_edit_stage(shell, &name, None, cx);
 }
 
-/// The edit stage's keys, in the one order they can be read in:
+/// The edit stage's keys — **and the column stage's**, which shares this
+/// whole table (Part 2c §5.2: it is the same draft with one column's
+/// seven fields installed, so every verb here means what it already
+/// meant). Two arms below read the projection rather than the stage:
+/// `Commit`, which opens the column stage from a member row and gives
+/// the ordinary notice everywhere else, and the `PreviousStage` rung,
+/// which goes back to the view rather than to the browse list. `enter` is
+/// therefore the only key whose behaviour the column stage changes, and
+/// it changes it by looking at the row under the cursor.
+///
+/// In the one order they can be read in:
 ///
 /// 1. an armed [`Confirm`] owns **every** keystroke until it is answered
 ///    (`enter`/`y`) or cancelled (`escape`/`n`). It replaces the action
 ///    bar rather than adding a row, so nothing above it moves;
 /// 2. in [`DialogMode::Filter`] (§18.3, entered by `/` the same as
-///    browse) `escape` leaves filter mode keeping the query, `enter`
-///    gives the same notice normal mode's `Commit` does (there is
-///    nothing here to open), navigation goes through
+///    browse) `escape` leaves filter mode keeping the query, `enter` goes
+///    through [`commit_selected_row`] exactly as normal mode's `Commit`
+///    does — one meaning for one key, and the way a trader reaches one
+///    column of a thirty-column view — navigation goes through
 ///    [`listfilter::nav_command`] against [`Draft::visible_rows`], and
 ///    `tab`/`shift+tab` are claimed and dropped — everything else is
 ///    unclaimed (`false`), reaching the focused `Input`;
@@ -1001,10 +1012,15 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             return true;
         }
         if ks.mods == Modifiers::NONE && ks.key == "enter" {
-            // Nothing here to open — the same notice normal mode's
-            // `Commit` gives, so `enter` says the same thing in either
-            // mode.
-            edit_commit_notice(shell);
+            // Exactly what normal mode's `Commit` does, so `enter` means
+            // one thing in either mode — the browse stage's own rule
+            // ("bare `enter` is claimed in both modes and opens the edit
+            // stage on the selected row"). Until Part 2c there was
+            // nothing here to open and both modes could only give the
+            // notice; now a member row opens its column stage, and it
+            // opens from the filtered list too — which is how a trader
+            // reaches one column of a thirty-column view.
+            commit_selected_row(shell, cx);
             cx.notify();
             return true;
         }
@@ -1235,42 +1251,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             shell.object_dialog_scroll.scroll_to_item(0);
         }
         NormalCommand::EditText => open_text_field(shell),
-        // Part 2c §5.2: `enter` on one of the view's OWN column rows
-        // opens that column's presentation. Gated on three things and no
-        // stage check: the domain (only Views has a column stage), that
-        // no column stage is open already (the stage has no item rows of
-        // its own, so this cannot fire twice — but reading it off the
-        // draft rather than the stage keeps the two from ever
-        // disagreeing), and that the cursor is on an `EditRow::Item` —
-        // never an `Available` one, which is a column the view does not
-        // have and so has no presentation to edit (§5.2 keeps 2b's notice
-        // there).
-        NormalCommand::Commit => {
-            let opens_column = shell.object_dialog.as_ref().is_some_and(|state| {
-                state.domain == Domain::Views
-                    && state.draft.as_ref().is_some_and(|draft| {
-                        draft.column().is_none()
-                            && matches!(draft.selected_row(), Some(EditRow::Item { .. }))
-                    })
-            });
-            if opens_column {
-                // An item row's label IS its column name
-                // (`Draft::row_label`), which is the identity every verb
-                // here and `Draft::enter_column`'s own membership check
-                // speak.
-                let name = shell
-                    .object_dialog
-                    .as_ref()
-                    .and_then(|state| state.draft.as_ref())
-                    .and_then(|draft| draft.selected_row().map(|row| draft.row_label(row)));
-                match name {
-                    Some(name) => enter_column_stage(shell, &name, cx),
-                    None => edit_commit_notice(shell),
-                }
-            } else {
-                edit_commit_notice(shell);
-            }
-        }
+        NormalCommand::Commit => commit_selected_row(shell, cx),
         // §18.8: from one slot's edit stage a digit jumps straight to
         // another's. On any other domain it is named like an unbound
         // letter would be — the edit stage's rule for a key that did
@@ -1296,18 +1277,66 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     true
 }
 
-/// `enter`/`i` in the edit stage — reachable from either mode
-/// (normal mode's own `Commit`/`EditText` match arm, and filter mode's
-/// `enter`, which gives the identical notice because there is nothing to
-/// open either way): say whether `space` would do anything on the
-/// selected row, since every field here is a choice, a list, or a
-/// read-only `Text`, and `space` only helps for the first two.
-fn edit_commit_notice(shell: &mut ShellView) {
-    let writable = shell
+/// `enter` in the edit stage, from either mode — the one door both
+/// spellings go through, so the two cannot drift about what `enter`
+/// means (the browse stage's own rule for the same key).
+///
+/// Part 2c §5.2: on one of the view's OWN column rows it opens that
+/// column's presentation; anywhere else it is [`edit_commit_notice`]'s
+/// answer. Gated on three things and **no stage check**: the domain (only
+/// Views has a column stage), that no column stage is open already (the
+/// stage installs no item rows, so this cannot fire twice — reading it
+/// off the draft rather than the stage is what keeps the two from ever
+/// disagreeing), and that the cursor is on an `EditRow::Item` — never an
+/// `Available` one, which is a column the view does not have and so has
+/// no presentation to edit (§5.2 keeps 2b's notice there).
+fn commit_selected_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let opens_column = shell.object_dialog.as_ref().is_some_and(|state| {
+        state.domain == Domain::Views
+            && state.draft.as_ref().is_some_and(|draft| {
+                draft.column().is_none()
+                    && matches!(draft.selected_row(), Some(EditRow::Item { .. }))
+            })
+    });
+    if !opens_column {
+        edit_commit_notice(shell);
+        return;
+    }
+    // An item row's label IS its column name (`Draft::row_label`), which
+    // is the identity every verb here and `Draft::enter_column`'s own
+    // membership check speak.
+    let name = shell
         .object_dialog
         .as_ref()
-        .is_some_and(|state| state.domain.writable());
-    if !writable {
+        .and_then(|state| state.draft.as_ref())
+        .and_then(|draft| draft.selected_row().map(|row| draft.row_label(row)));
+    match name {
+        Some(name) => enter_column_stage(shell, &name, cx),
+        None => edit_commit_notice(shell),
+    }
+}
+
+/// `enter`'s answer for a row with nothing to open
+/// ([`commit_selected_row`]'s fallback, in either mode), and `i`'s for a
+/// row it cannot open ([`open_text_field`]): name the verb that DOES
+/// change the selected row, or say the row has none.
+///
+/// Three answers, because there are three kinds of row here: `space` for
+/// a choice, a bool or a list entry; `i` for a `Number` or a `Text` the
+/// domain marks editable (`Domain::text_editable`); and "read-only" for
+/// the display-only `Text`s (Groupings' `slot`, Scopes' two summaries).
+/// The `i` answer arrived with the column stage's `label` and `width`
+/// (Part 2c §5.3), which are the first Views rows `i` can open — before
+/// them, every editable `Text` in this crate was a Sources row, where
+/// `enter` gave the read-only wording about a row `i` opens perfectly
+/// well. That was the two verbs disagreeing about the same row, which is
+/// exactly what [`open_text_field`]'s own doc says they must not do.
+fn edit_commit_notice(shell: &mut ShellView) {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return;
+    };
+    let domain = state.domain;
+    if !domain.writable() {
         // §19.4: agree with `i` and every other verb's refusal on a
         // read-only domain rather than falling back to the ordinary
         // "this row is read-only" wording, which names the ROW, not the
@@ -1316,13 +1345,21 @@ fn edit_commit_notice(shell: &mut ShellView) {
         set_notice(shell, READ_ONLY_NOTICE.to_string());
         return;
     }
-    let steppable = shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .is_some_and(selected_field_is_steppable);
-    let notice = if steppable {
+    let Some(draft) = state.draft.as_ref() else {
+        return;
+    };
+    let typeable = match draft.selected_row() {
+        Some(EditRow::Field(i)) => match &draft.fields[i].kind {
+            FieldKind::Number { .. } => true,
+            FieldKind::Text(_) => domain.text_editable(&draft.fields[i].key),
+            _ => false,
+        },
+        _ => false,
+    };
+    let notice = if selected_field_is_steppable(draft) {
         "press space to change the selected row"
+    } else if typeable {
+        "press i to type a value"
     } else {
         "this row is read-only — nothing here has a verb"
     };
