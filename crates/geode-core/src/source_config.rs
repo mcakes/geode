@@ -144,8 +144,8 @@ impl SourceSpec {
     /// A directory-of-CSVs source with every optional field at its
     /// default. The shape most call sites want; override with
     /// struct-update syntax (`..SourceSpec::directory(..)`) where a site
-    /// needs a non-default `priority`, `poll_interval` or similar — six
-    /// sites across the workspace build one of these by hand, so a
+    /// needs a non-default `priority`, `poll_interval` or similar —
+    /// fifteen sites across seven files build one of these by hand, so a
     /// shared constructor is the one place that fills the five
     /// subscribed-source fields with their defaults.
     pub fn directory(
