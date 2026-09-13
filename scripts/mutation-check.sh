@@ -8540,8 +8540,8 @@ run_mutation "load_views: an unknown colour name warns with its path" \
 # legacy fold's own guard is what defends the conflict rule.
 run_mutation "overlay: the column table wins over a legacy key" \
   crates/geode-core/src/view.rs \
-  '                            if entry.width.is_some() {' \
-  '                            if entry.width.is_none() {' \
+  '                            if p.columns.get(col).is_some_and(|e| e.width.is_some()) {' \
+  '                            if p.columns.get(col).is_some_and(|e| e.width.is_none()) {' \
   geode-core \
   the_legacy_hidden_and_width_keys_still_load_and_the_table_wins_a_conflict
 
@@ -8703,8 +8703,8 @@ run_mutation "objectdialog: enter_column refuses a non-member" \
 # 2c §6.1: to_table writes only the keys in force — no dead hue under a token.
 run_mutation "colours: to_table omits the hue under a token" \
   crates/geode-shell/src/shell/objectdialog/colours.rs \
-  '    table.remove("hue");' \
-  '    let _ = "hue";' \
+  '    let saved_hue = table.remove("hue");' \
+  '    let saved_hue: Option<toml_edit::Item> = None;' \
   geode-shell \
   fields_seed_from_the_definition_and_to_table_writes_only_the_keys_in_force
 
@@ -8808,6 +8808,44 @@ run_mutation "theme: bundled themes clear 3:1 through the resolver" \
     }' \
   geode-shell \
   every_bundled_theme_keeps_generated_hues_readable
+
+run_mutation "blotter: the theme-input memo re-derives on a changed theme" \
+  crates/geode-blotter/src/delegate.rs \
+  'Some((have, ..)) if *have == signature => {}' \
+  'Some((_have, ..)) if true => {}' \
+  geode-blotter \
+  the_theme_input_memo_re_derives_only_when_a_theme_colour_moves
+
+run_mutation "objectdialog: d and r are refused in the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if in_column_stage(shell) {
+        not_a_column_verb(shell, "r");
+        return;
+    }' \
+  '    if false {
+        not_a_column_verb(shell, "r");
+        return;
+    }' \
+  geode-shell \
+  delete_and_revert_are_refused_in_the_column_stage
+
+run_mutation "objectdialog: enter_column refuses re-entry" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.column.is_some() {
+            return false;
+        }' \
+  '        if false {
+            return false;
+        }' \
+  geode-shell \
+  enter_column_refuses_re_entry_and_keeps_the_objects_own_list
+
+run_mutation "colours: an unstepped hue is written back verbatim" \
+  crates/geode-shell/src/shell/objectdialog/colours.rs \
+  '.is_some_and(|saved| saved.round() as i64 == value);' \
+  '.is_some_and(|_saved| false);' \
+  geode-shell \
+  a_fractional_hue_survives_a_save_that_did_not_step_it
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

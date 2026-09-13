@@ -816,8 +816,11 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     // missing from this `Choice` for as long as that window is open. The
     // two doors into a stage now agree about what "the live config"
     // means.
-    let folded = apply::config_with_pending(shell);
-    let colours: Vec<String> = folded
+    // Named `pending` rather than `folded` (the spelling `enter_edit_stage`
+    // uses) only so the mutation harness's anchor on that line stays
+    // unambiguous — one entry, one site.
+    let pending = apply::config_with_pending(shell);
+    let colours: Vec<String> = pending
         .as_ref()
         .unwrap_or(&shell.services.config)
         .doc("colours")

@@ -228,8 +228,13 @@ impl BlotterDelegate {
         // any of them out into a `&self` method would borrow the whole
         // delegate and this would not compile.
         let name = named_colour_of(self.plan.as_ref(), col_ix)?;
-        let (_, anchors, tokens) = self.theme_inputs.as_ref().expect("set just above");
-        self.colour_cache.get(&self.colours, name, anchors, tokens)
+        // Bound under their own names, not `anchors`/`tokens`: the
+        // mutation harness anchors an entry on `cell_colour`'s otherwise
+        // identical call line, and two verbatim copies would make it
+        // ambiguous.
+        let (_, memo_anchors, memo_tokens) = self.theme_inputs.as_ref().expect("set just above");
+        self.colour_cache
+            .get(&self.colours, name, memo_anchors, memo_tokens)
     }
 
     /// Re-derive `theme_inputs` if and only if one of the twenty-eight
