@@ -7779,6 +7779,63 @@ run_mutation "document: a document with no rows is refused" \
   '        if false {' \
   geode-core validate_refuses_a_document_with_no_rows
 
+# ---- Task 8: the document request (market-data spec §7)
+#
+# `compile_document` deliberately resolves and pins the generation for
+# THIS document alone (its own batch), not the general multi-partition
+# `generation_predicate` a view query builds — see the doc comment on
+# `compile_document`'s as-of arm for why a document dataset holding many
+# unrelated documents makes that narrowing a correctness requirement, not
+# an optimisation.
+
+run_mutation "document query: as-of pins the resolved generation" \
+  crates/geode-data/src/query/document.rs \
+  '                    (relation, format!(" and gen_id = {}", g.gen_id))' \
+  '                    (relation, String::new())' \
+  geode-data an_as_of_document_query_reads_the_resolved_generation_from_the_archive
+
+run_mutation "document query: rows come back in axis order" \
+  crates/geode-data/src/query/document.rs \
+  '.map(|a| format!("\"{a}\""))' \
+  '.rev().map(|a| format!("\"{a}\""))' \
+  geode-data a_live_document_query_selects_one_key_in_axis_order
+
+run_mutation "document query: a value is DeterminedNonAdditive" \
+  crates/geode-data/src/query/document.rs \
+  '                ColumnRole::Value => Attribution::DeterminedNonAdditive,' \
+  '                ColumnRole::Value => Attribution::Additive,' \
+  geode-data a_live_document_query_selects_one_key_in_axis_order
+
+run_mutation "document query: the wrong family is refused" \
+  crates/geode-data/src/query/document.rs \
+  '    if !ds.is_document() {' \
+  '    if false {' \
+  geode-data the_wrong_family_or_arity_or_dataset_is_a_compile_error
+
+run_mutation "handle: a document compile error is that key's outcome" \
+  crates/geode-data/src/handle.rs \
+  '                    // `Document` shares `Query`'"'"'s outcome shape (there is
+                    // no `DataEvent::Document`), so a failed compile goes
+                    // out as `DataEvent::Query` exactly as `Request::
+                    // Query`'"'"'s own error arm does.
+                    sink(DataEvent::Query(QueryOutcome {
+                        key: params.key,
+                        tag: params.tag,
+                        snapshot: Err(e.to_string()),
+                        submitted: params.submitted,
+                    }));' \
+  '                    // `Document` shares `Query`'"'"'s outcome shape (there is
+                    // no `DataEvent::Document`), so a failed compile goes
+                    // out as `DataEvent::Query` exactly as `Request::
+                    // Query`'"'"'s own error arm does.
+                    let _ = DataEvent::Query(QueryOutcome {
+                        key: params.key,
+                        tag: params.tag,
+                        snapshot: Err(e.to_string()),
+                        submitted: params.submitted,
+                    });' \
+  geode-data a_document_compile_error_is_that_keys_outcome_on_the_real_service
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
