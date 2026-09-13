@@ -8800,6 +8800,50 @@ run_mutation "adapter: a refused publish is counted, not a successful one" \
   '        if queued {' \
   geode-data a_publish_onto_a_full_bus_is_refused_and_counted
 
+# Latest wins: a key already pending must take the NEWEST offer, not keep
+# whatever arrived first — otherwise a fast-repeating key's stale first
+# value is the one that eventually ships. Dropping the overwrite (`e.insert`
+# on the occupied entry) keeps the first value instead, a wrong-VALUE
+# mutation no marker-only assertion would see.
+run_mutation "coalesce: latest-wins replaces an already-pending item" \
+  crates/geode-data/src/ingest/coalesce.rs \
+  '                e.insert(item);
+                None
+            }
+            Entry::Vacant(e) => {' \
+  '                let _ = item;
+                None
+            }
+            Entry::Vacant(e) => {' \
+  geode-data within_the_window_the_latest_wins_and_is_released_on_the_deadline
+
+# A release must restart the key's own window from the release instant
+# (spec §5.4 step 2), so the very next offer for that key waits a fresh
+# `window` rather than going out immediately. Dropping the `last_release`
+# stamp `due` sets on release leaves the key looking never-released, so
+# the next offer wrongly goes out at once instead of being held.
+run_mutation "coalesce: a release restarts the key's window" \
+  crates/geode-data/src/ingest/coalesce.rs \
+  '                if let Some(item) = self.pending.remove(&key) {
+                    self.last_release.insert(key.clone(), now);
+                    out.push((key, item));
+                }' \
+  '                if let Some(item) = self.pending.remove(&key) {
+                    out.push((key, item));
+                }' \
+  geode-data within_the_window_the_latest_wins_and_is_released_on_the_deadline
+
+# Keys coalesce independently — each key's readiness is decided from its
+# OWN last release, never a shared/global one. Keying the lookup to a
+# fixed key literal couples every other key's timing to that one key's
+# history, exactly the failure mode of a window that is accidentally
+# global rather than per-key.
+run_mutation "coalesce: each key's readiness reads its own last_release" \
+  crates/geode-data/src/ingest/coalesce.rs \
+  'self.last_release.get(&key)' \
+  'self.last_release.get("SPX")' \
+  geode-data keys_coalesce_independently
+
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
