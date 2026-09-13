@@ -122,6 +122,7 @@ use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use super::apply;
 use super::colours;
 use super::dataset_columns;
+use super::schema;
 use super::scopes;
 use super::sources;
 use super::views;
@@ -785,8 +786,19 @@ fn enter_edit_stage(
     cx.notify();
 }
 
-/// **The one door into the column stage** (Part 2c §5.2) — `enter` on a
-/// member row of a Views draft.
+/// **The one door into the column stage** (Part 2c §5.2) — `enter`, or a
+/// click, on a member row of a Views draft or on a column row of the
+/// Schema inspector (dataset-presentation spec §4.1).
+///
+/// Two doors, one stage: the seven fields are `views::column_fields`
+/// either way and every verb in the stage means the same thing. What
+/// differs is entirely carried by the [`ColumnContext`] this function
+/// installs — which door, which layers sit under the column, and, for
+/// Schema, the dataset overlay table and the scratch item the fold
+/// writes into — so nothing below this function has to ask which dialog
+/// it is in. The Views door folds into the item its own `columns` list
+/// holds and writes `view_presentation.toml`; the Schema door folds into
+/// the context's item and writes `dataset_presentation.toml`.
 ///
 /// A pure mutation, like [`enter_edit_stage`]: the mode is set to
 /// `Normal` here and `dialog::sync_dialog_text` empties and blurs the
@@ -804,11 +816,14 @@ fn enter_edit_stage(
 /// name added to `colours.toml` shows up the next time a column is
 /// opened. That is the same freshness every other choice list here has.
 ///
-/// [`Draft::enter_column`] answers `false` for a name the view's list
-/// does not hold, and then nothing moves: no stage change, no cursor
-/// change, and the row keeps 2b's notice. That is the available-row case
-/// (the caller's own `EditRow::Item` guard already refuses it) and, more
-/// usefully, the case where a future caller aims at a stale name.
+/// [`Draft::enter_column`] answers `false` for a name neither the
+/// object's list nor its fields hold, and then nothing moves: no stage
+/// change, no cursor change, and the row keeps 2b's notice — with the
+/// context dropped again, so a refused open cannot leave a door's
+/// bookkeeping behind for the next fold to read. That is the
+/// available-row case (the caller's own `EditRow::Item` guard already
+/// refuses it) and, more usefully, the case where a future caller aims at
+/// a stale name.
 fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
     // Through the folded config, exactly as `enter_edit_stage` reads it
     // (the final review's M-6): inside the 250 ms write debounce
@@ -821,9 +836,8 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     // uses) only so the mutation harness's anchor on that line stays
     // unambiguous — one entry, one site.
     let pending = apply::config_with_pending(shell);
-    let colours: Vec<String> = pending
-        .as_ref()
-        .unwrap_or(&shell.services.config)
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    let colours: Vec<String> = config
         .doc("colours")
         .map(|doc| {
             geode_core::colour::NamedColours::from_doc(doc)
@@ -833,43 +847,101 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
                 .collect()
         })
         .unwrap_or_default();
-    let Some(state) = shell.object_dialog.as_mut() else {
+    let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
+    let domain = state.domain;
     let object = match &state.stage {
         Stage::Edit { object } | Stage::Column { object, .. } => object.clone(),
         _ => return,
     };
+    // Read here, while `config` is still borrowed, because everything
+    // below wants the draft mutably. Both halves come from the SAME
+    // pending-aware config the colours did — the Schema door's whole
+    // write is rendered from `overlay_object`, so seeding it from
+    // `services.config` inside the debounce would render the dataset's
+    // other columns as they stood before the last keystroke and undo it
+    // (§18.8's own Major, one layer over).
+    let schema_seed = (domain == Domain::Schema).then(|| {
+        let schema = config
+            .doc("datasets")
+            .map(|doc| geode_core::schema::SchemaSpec::from_doc(doc).0)
+            .unwrap_or_default();
+        (schema, dataset_columns::overlay_object(config, &object))
+    });
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
     let Some(draft) = state.draft.as_mut() else {
         return;
     };
-    let Some(item) = draft
-        .list_items("columns")
-        .and_then(|items| items.iter().find(|i| i.name == column))
-        .cloned()
-    else {
-        return;
+    let (fields, ctx) = match domain {
+        Domain::Views => {
+            let Some(item) = draft
+                .list_items("columns")
+                .and_then(|items| items.iter().find(|i| i.name == column))
+                .cloned()
+            else {
+                return;
+            };
+            // The Views door's context (dataset-presentation spec §5.1).
+            // The dataset and view layers are Task 5's; today only the
+            // desk layer is filled, which is exactly what this stage
+            // compared against before the context existed, so the fold
+            // and the notice are unchanged. `item` is carried so
+            // `dataset_columns::provenance_of` reads the right kind
+            // default for the column being edited.
+            let layers = ColumnLayers {
+                desk: views::desk_baseline(draft)
+                    .remove(column)
+                    .unwrap_or_default(),
+                ..ColumnLayers::default()
+            };
+            (
+                views::column_fields(&item, &colours, Destination::Presentation),
+                ColumnContext {
+                    door: ColumnDoor::View,
+                    layers,
+                    overlay_object: toml::Table::new(),
+                    item: Some(item),
+                },
+            )
+        }
+        // §4.3: the dataset overlay is the only layer this door has, and
+        // it is both the seed and the `dataset` layer — a Schema field
+        // therefore reads `dataset` or nothing, never `desk`, since the
+        // desk's own keys vary per view and sit BELOW this one.
+        Domain::Schema => {
+            let Some((schema, overlay_object)) = schema_seed else {
+                return;
+            };
+            let Some(dataset) = schema.dataset(&object) else {
+                return;
+            };
+            let Some(item) = dataset_columns::item_for(dataset, column, &overlay_object) else {
+                return;
+            };
+            (
+                views::column_fields(&item, &colours, Destination::DatasetPresentation),
+                ColumnContext {
+                    door: ColumnDoor::Dataset,
+                    layers: ColumnLayers {
+                        dataset: item.presentation.clone(),
+                        ..ColumnLayers::default()
+                    },
+                    overlay_object,
+                    item: Some(item),
+                },
+            )
+        }
+        // No other domain has a column stage: Groupings, Scopes, Sources
+        // and Colours have no per-column presentation to open, and
+        // `column_stage_target` never names a row on one.
+        _ => return,
     };
-    let fields = views::column_fields(&item, &colours, Destination::Presentation);
-    // The Views door's context (dataset-presentation spec §5.1). The
-    // dataset and view layers are Task 5's; today only the desk layer is
-    // filled, which is exactly what this stage compared against before
-    // the context existed, so the fold and the notice are unchanged.
-    // `item` is carried so `dataset_columns::provenance_of` reads the
-    // right kind default for the column being edited.
-    let layers = ColumnLayers {
-        desk: views::desk_baseline(draft)
-            .remove(column)
-            .unwrap_or_default(),
-        ..ColumnLayers::default()
-    };
-    draft.column_ctx = Some(ColumnContext {
-        door: ColumnDoor::View,
-        layers,
-        overlay_object: toml::Table::new(),
-        item: Some(item.clone()),
-    });
+    draft.column_ctx = Some(ctx);
     if !draft.enter_column(column, fields) {
+        draft.column_ctx = None;
         return;
     }
     state.stage = Stage::Column {
@@ -895,15 +967,40 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
 /// No mode is set, for [`leave_edit`]'s reason: this rung is reachable
 /// only from normal mode with an empty query, so the keys are already on
 /// the shell root.
+///
+/// **The Schema door re-derives the rows it returns to** (dataset-
+/// presentation §4.7): a Schema column row carries the dataset overlay's
+/// summary in its own text, and the stage the trader is leaving is what
+/// changed that overlay — so the restored rows are `schema::fields` over
+/// the pending-aware config, not the ones stashed on the way in, which
+/// would keep painting the summary as it stood before the edit.
+/// `Draft::reseed_fields` moves the baseline with them, so the restored
+/// stage is not dirty and no `datasets` write is queued. Views needs none
+/// of this: its member row is painted from the `ListItem` the fold has
+/// already written through.
 fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let Some(state) = shell.object_dialog.as_mut() else {
+    let pending = apply::config_with_pending(shell);
+    let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
+    let domain = state.domain;
     let Stage::Column { object, .. } = state.stage.clone() else {
+        return;
+    };
+    let reseed = (domain == Domain::Schema).then(|| {
+        schema::fields(
+            pending.as_ref().unwrap_or(&shell.services.config),
+            Some(&object),
+        )
+    });
+    let Some(state) = shell.object_dialog.as_mut() else {
         return;
     };
     if let Some(draft) = state.draft.as_mut() {
         draft.leave_column();
+        if let Some(fields) = reseed {
+            draft.reseed_fields(fields);
+        }
     }
     state.stage = Stage::Edit { object };
     state.notice = None;
@@ -1337,38 +1434,54 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
 /// spellings go through, so the two cannot drift about what `enter`
 /// means (the browse stage's own rule for the same key).
 ///
-/// Part 2c §5.2: on one of the view's OWN column rows it opens that
-/// column's presentation; anywhere else it is [`edit_commit_notice`]'s
-/// answer. Gated on three things and **no stage check**: the domain (only
-/// Views has a column stage), that no column stage is open already (the
-/// stage installs no item rows, so this cannot fire twice — reading it
-/// off the draft rather than the stage is what keeps the two from ever
-/// disagreeing), and that the cursor is on an `EditRow::Item` — never an
-/// `Available` one, which is a column the view does not have and so has
-/// no presentation to edit (§5.2 keeps 2b's notice there).
+/// Part 2c §5.2 and dataset-presentation §4.1: on one of the view's OWN
+/// column rows, or on a Schema column row, it opens that column's
+/// presentation; anywhere else it is [`edit_commit_notice`]'s answer.
 fn commit_selected_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let opens_column = shell.object_dialog.as_ref().is_some_and(|state| {
-        state.domain == Domain::Views
-            && state.draft.as_ref().is_some_and(|draft| {
-                draft.column().is_none()
-                    && matches!(draft.selected_row(), Some(EditRow::Item { .. }))
-            })
-    });
-    if !opens_column {
-        edit_commit_notice(shell);
-        return;
-    }
-    // An item row's label IS its column name (`Draft::row_label`), which
-    // is the identity every verb here and `Draft::enter_column`'s own
-    // membership check speak.
-    let name = shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .and_then(|draft| draft.selected_row().map(|row| draft.row_label(row)));
-    match name {
+    match column_stage_target(shell) {
         Some(name) => enter_column_stage(shell, &name, cx),
         None => edit_commit_notice(shell),
+    }
+}
+
+/// The column the row under the cursor would open a stage for, if any —
+/// the one answer [`commit_selected_row`] and [`on_edit_row_clicked`]
+/// both read, so `enter` and a click cannot disagree about which rows are
+/// doors (4c §18.9's mouse-parity rule).
+///
+/// Gated on three things and **no stage check**: the domain (only Views
+/// and Schema have a column stage), that no column stage is open already
+/// (neither door's stage installs a row this function would name, so it
+/// cannot fire twice — reading it off the draft rather than the stage is
+/// what keeps the two from ever disagreeing), and the shape of the row.
+///
+/// The two domains name a column differently, and each names it the way
+/// its own rows are built:
+///
+/// * Views — an `EditRow::Item`, whose label IS its column name
+///   (`Draft::row_label`). Never an `EditRow::Available`, which is a
+///   column the view does not have and so has no presentation to edit
+///   (§5.2 keeps 2b's notice there);
+/// * Schema — an `EditRow::Field` keyed `columns.<col>` (`schema::fields`),
+///   which is also exactly what `Draft::enter_column`'s membership check
+///   recognises. A `derived.<name>` row is not a dataset column at all,
+///   so it falls through to the read-only notice the rest of that dialog
+///   gives.
+fn column_stage_target(shell: &ShellView) -> Option<String> {
+    let state = shell.object_dialog.as_ref()?;
+    let draft = state.draft.as_ref()?;
+    if draft.column().is_some() {
+        return None;
+    }
+    match (state.domain, draft.selected_row()?) {
+        (Domain::Views, row @ EditRow::Item { .. }) => Some(draft.row_label(row)),
+        (Domain::Schema, EditRow::Field(i)) => draft
+            .fields
+            .get(i)?
+            .key
+            .strip_prefix("columns.")
+            .map(str::to_string),
+        _ => None,
     }
 }
 
@@ -2845,6 +2958,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // of the diagnostic list, and doing it once here keeps the per-row
     // work below to a single `Vec` lookup.
     let flagged = draft.flagged_rows(domain.doc());
+    // dataset-presentation §5.3: the column stage's layers, resolved once
+    // per render. `None` off the stage — see `provenance_chip`.
+    let provenance_inputs = draft
+        .column_ctx
+        .as_ref()
+        .map(dataset_columns::ProvenanceInputs::new);
     let mut list = v_flex()
         .id("objectdialog-fields")
         .w(px(WIDTH))
@@ -2907,7 +3026,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         // appear: Schema fills `layer` on its own rows
                         // (which are not column-stage rows), the column
                         // stage fills this.
-                        .children(provenance_chip(draft, field, theme, cx))
+                        .children(provenance_chip(
+                            provenance_inputs.as_ref(),
+                            field,
+                            theme,
+                            cx,
+                        ))
                         // §19.4: the layer a schema row's value came from
                         // — `None` on every writable domain (`Field::
                         // layer`'s own doc has the reasoning).
@@ -3711,15 +3835,18 @@ fn confirm_row(
 /// `view` (or `dataset`, from the Schema door) on the same frame.
 ///
 /// `None` off the column stage, where `Draft::column_ctx` is `None` and
-/// there are no layers to name.
+/// there are no layers to name — which is why `inputs` is an `Option`
+/// the caller builds ONCE before the row loop rather than a value this
+/// function derives per field: both halves of
+/// [`dataset_columns::ProvenanceInputs`] allocate, and seven clones per
+/// painted frame is per-frame heap churn on the render thread.
 fn provenance_chip(
-    draft: &Draft,
+    inputs: Option<&dataset_columns::ProvenanceInputs<'_>>,
     field: &Field,
     theme: &gpui_component::Theme,
     cx: &App,
 ) -> Option<AnyElement> {
-    let ctx = draft.column_ctx.as_ref()?;
-    let provenance = dataset_columns::provenance_of(ctx, field)?;
+    let provenance = dataset_columns::provenance_of(inputs?, field)?;
     Some(dialog::badge(
         provenance.name(),
         theme.muted_foreground,
@@ -3760,8 +3887,22 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
 }
 
 /// A click on an edit-stage row moves the draft's cursor there — the
-/// mouse's half of `j`/`k`, and the reason a click never also acts: the
-/// verb is a second, deliberate keystroke or button press.
+/// mouse's half of `j`/`k` — and, on a row `enter` would OPEN, opens it.
+///
+/// That last part is 4c §18.9's mouse-parity rule applied to the column
+/// stage's door (dataset-presentation §4.1): browse's own row click has
+/// opened an edit stage since §18.9, and a member row that only moved the
+/// cursor was the 2c ledger's standing minor — the one row in this dialog
+/// whose `enter` did something a click would not. Both now go through
+/// [`column_stage_target`], so there is no second rule about which rows
+/// are doors. Every other row still only moves the cursor: a verb there
+/// is a second, deliberate keystroke or button press.
+///
+/// The open runs regardless of mode, because `enter` opens in either mode
+/// too ([`commit_selected_row`] is the one door both spellings take). A
+/// click in filter mode on a member row therefore leaves filter mode —
+/// which is [`enter_column_stage`]'s own `DialogMode::Normal`, the same
+/// outcome the key gives.
 ///
 /// Focus follows the current mode, exactly as browse's [`on_row_clicked`]
 /// does and by the same means — [`dialog::sync_dialog_text`], which a
@@ -3796,6 +3937,12 @@ fn on_edit_row_clicked(
         draft.selected = position;
     }
     shell.object_dialog_scroll.scroll_to_item(position);
+    // After the cursor has moved, never before: the target is the row
+    // that was just clicked, which is what `enter` would be acting on had
+    // the trader pressed it instead.
+    if let Some(name) = column_stage_target(shell) {
+        enter_column_stage(shell, &name, cx);
+    }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }

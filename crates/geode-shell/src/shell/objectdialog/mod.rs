@@ -1577,12 +1577,27 @@ impl Draft {
     /// context folds nothing — there is no baseline to be honest about.
     pub fn fold_column(&mut self) -> Option<Fold> {
         let name = self.column.clone()?;
-        let ctx = self.column_ctx.clone()?;
-        let baseline = match ctx.door {
-            ColumnDoor::View => ctx.layers.below_view(),
+        // Both doors install one; a stage without it folds nothing, which
+        // is the honest answer but a silently inert one, so the debug
+        // build says so rather than leaving a future door to discover it
+        // by watching keystrokes vanish.
+        debug_assert!(
+            self.column_ctx.is_some(),
+            "a column stage always carries its door's context"
+        );
+        // The `door` is `Copy` and the `layers` are what the baseline and
+        // the fell-to decision below read — cloning the whole context
+        // would clone the overlay table and the scratch item on every
+        // keystroke, for two fields neither arm touches.
+        let (door, layers) = {
+            let ctx = self.column_ctx.as_ref()?;
+            (ctx.door, ctx.layers.clone())
+        };
+        let baseline = match door {
+            ColumnDoor::View => layers.below_view(),
             ColumnDoor::Dataset => ColumnPresentation::default(),
         };
-        let cleared = match ctx.door {
+        let cleared = match door {
             ColumnDoor::View => {
                 let parent = self.parent_fields.as_mut()?;
                 let field = parent.iter_mut().find(|f| f.key == "columns")?;
@@ -1607,7 +1622,7 @@ impl Draft {
             }
         };
         let key = cleared?;
-        let to = match ctx.door {
+        let to = match door {
             // §4.4: below the dataset level is the desk view's own key,
             // which varies per view — so the honest answer is "each
             // view", not one layer's name.
@@ -1620,9 +1635,9 @@ impl Draft {
                 };
                 // §5.2: the dataset level sits ABOVE the desk view, so a
                 // cleared view key meets it first.
-                if set(&ctx.layers.dataset) {
+                if set(&layers.dataset) {
                     Some(FellTo::Dataset)
-                } else if set(&ctx.layers.desk) {
+                } else if set(&layers.desk) {
                     Some(FellTo::Desk)
                 } else {
                     None
@@ -1701,29 +1716,66 @@ impl Draft {
         }
     }
 
-    /// Put the cursor on the row of the ordered-list item named `name`,
-    /// or on the first row when no list holds it.
+    /// Put the cursor on the row named `name` — an ordered-list item, or
+    /// (the Schema door) the field keyed `columns.<name>` — or on the
+    /// first row when neither exists.
     ///
     /// By NAME through the `visible_rows` index every verb speaks, never
-    /// by a carried index: the column stage's seven rows and the view's
+    /// by a carried index: the column stage's seven rows and the object's
     /// own list are different lists, so a number carried from one to the
     /// other lands wherever it happens to point. Shared by
     /// [`Draft::leave_column`] and `apply::revert_failed_write`, whose
     /// rebuilt draft has the same problem for the same reason.
+    ///
+    /// The field fallback is exactly [`Draft::enter_column`]'s own
+    /// membership rule read backwards (dataset-presentation spec §4.1):
+    /// the Schema door's column rows are `Field`s keyed `columns.<col>`,
+    /// not list items, so without it `escape` out of a column stage on a
+    /// thirty-column dataset would land the cursor back at the top of the
+    /// list rather than on the column just edited. No other domain can
+    /// reach it — a view's own list field is keyed `columns`, never
+    /// `columns.<something>`.
     pub(in crate::shell::objectdialog) fn select_item_named(&mut self, name: &str) {
         self.selected = 0;
-        let target = self.fields.iter().enumerate().find_map(|(field, f)| {
-            let FieldKind::OrderedList { items, .. } = &f.kind else {
-                return None;
-            };
-            items
-                .iter()
-                .position(|i| i.name == name)
-                .map(|item| EditRow::Item { field, item })
-        });
+        let target = self
+            .fields
+            .iter()
+            .enumerate()
+            .find_map(|(field, f)| {
+                let FieldKind::OrderedList { items, .. } = &f.kind else {
+                    return None;
+                };
+                items
+                    .iter()
+                    .position(|i| i.name == name)
+                    .map(|item| EditRow::Item { field, item })
+            })
+            .or_else(|| {
+                let key = format!("columns.{name}");
+                self.fields
+                    .iter()
+                    .position(|f| f.key == key)
+                    .map(EditRow::Field)
+            });
         if let Some(row) = target {
             self.follow(row);
         }
+    }
+
+    /// Replace the object's own fields with a freshly derived set and
+    /// treat them as applied (dataset-presentation spec §4.7).
+    ///
+    /// `render::leave_column_stage` uses it on the Schema door alone: the
+    /// column row it returns to carries the dataset overlay's summary in
+    /// its text, and the overlay has just changed, so the row must be
+    /// re-derived or it would keep painting the summary the stage was
+    /// opened with. `baseline` moves with it — these fields describe what
+    /// is already on the batch, so leaving the old baseline behind would
+    /// make the restored stage read as dirty and queue a `datasets` write
+    /// nobody asked for.
+    pub(in crate::shell::objectdialog) fn reseed_fields(&mut self, fields: Vec<Field>) {
+        self.fields = fields;
+        self.baseline = self.fields.clone();
     }
 
     /// The field keyed `key` — the installed ones first, then the

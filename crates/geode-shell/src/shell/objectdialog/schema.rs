@@ -1,14 +1,23 @@
 //! The read-only schema inspector (spec §9, §19.4) — `Domain::Schema`.
 //!
-//! Not an editor: a schema is the desk's contract with the data, a
-//! `datasets` change is restart-required, and the edit and its effect
-//! would be far apart. The other adapters read this doc to build their
-//! `Choice`s and catalogues; this dialog makes that vocabulary
-//! inspectable. Every field is a display-only `Text`, every row carries
-//! the layer it came from, and `Domain::writable()` answers `false`, so
-//! the scaffold refuses every verb with `READ_ONLY_NOTICE` in one place.
+//! Not an editor **of the schema**: a schema is the desk's contract with
+//! the data, a `datasets` change is restart-required, and the edit and
+//! its effect would be far apart. The other adapters read this doc to
+//! build their `Choice`s and catalogues; this dialog makes that
+//! vocabulary inspectable. Every field is a display-only `Text` and
+//! every row carries the layer it came from.
+//!
+//! It **writes only the dataset overlay, from its column stage**
+//! (dataset-presentation spec §4): `enter` — or a click — on a column row
+//! opens the same seven-field stage the Views dialog has, writing
+//! `dataset_presentation.toml` through [`Destination::DatasetPresentation`]
+//! and `dataset_columns::table`. Everywhere else `Domain::writable(stage)`
+//! answers `false`, so the scaffold refuses every verb with
+//! `READ_ONLY_NOTICE` in one place — the gate is stage-aware (§4.2), not
+//! domain-wide, and `to_table` below branches on the destination for the
+//! same reason: a column-stage edit must never render the `datasets` doc.
 
-use super::{Destination, Draft, Field, FieldKind};
+use super::{Destination, Draft, Field, FieldKind, dataset_columns};
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::schema::{Aggregate, ColumnRole, ColumnSpec, ColumnType, SchemaSpec};
@@ -117,7 +126,15 @@ pub fn describe_column(column: &ColumnSpec) -> String {
 /// layer) and on the `dimensions` doc for a derived row, which can
 /// differ. Keys are `columns.<name>` / `derived.<name>` so §19.5's
 /// path matching lands a `datasets.<ds>.columns.<name>.type` diagnostic
-/// on its column's row.
+/// on its column's row — and so `Draft::enter_column` can recognise a
+/// column row by its key alone (dataset-presentation spec §4.1).
+///
+/// A column the trader has personalised carries
+/// `dataset_columns::row_summary`'s suffix after its type/role text
+/// (§4.7): `f64 · measure (sum) · grain instrument · k · 0 dp`. The
+/// dataset's overlay table is read ONCE for the whole list rather than
+/// per column, since it is one `toml::Table` clone and there are as many
+/// columns as a dataset has.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let Some(name) = object else {
         return Vec::new();
@@ -130,15 +147,21 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         return Vec::new();
     };
     let dataset_layer = config.explain(DOC, name);
+    let overlay = dataset_columns::overlay_object(config, name);
     let mut out: Vec<Field> = dataset
         .columns
         .iter()
-        .map(|column| Field {
-            key: format!("columns.{}", column.name),
-            label: column.name.clone(),
-            kind: FieldKind::Text(describe_column(column)),
-            dest: Destination::Doc,
-            layer: dataset_layer,
+        .map(|column| {
+            let suffix = dataset_columns::item_for(dataset, &column.name, &overlay)
+                .map(|item| dataset_columns::row_summary(&item))
+                .unwrap_or_default();
+            Field {
+                key: format!("columns.{}", column.name),
+                label: column.name.clone(),
+                kind: FieldKind::Text(format!("{}{suffix}", describe_column(column))),
+                dest: Destination::Doc,
+                layer: dataset_layer,
+            }
         })
         .collect();
     let (dims, _) = config
@@ -162,10 +185,30 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     out
 }
 
-/// Unreachable behind `Domain::writable()`; the source, unchanged, so
-/// the exhaustive `Domain::to_table` has an honest arm.
-pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
-    toml_edit::Item::Table(super::toml_table_to_edit(&draft.source))
+/// What this domain writes, by destination — and the branch is the whole
+/// safety property (dataset-presentation spec §4.5).
+///
+/// [`Destination::DatasetPresentation`] is the column stage's own, and it
+/// renders the dataset's `[<ds>]` table of `dataset_presentation.toml`.
+/// The other two are unreachable behind `Domain::writable(stage)`, which
+/// answers `false` everywhere but the column stage, and they render the
+/// source unchanged so the exhaustive [`Domain::to_table`] has an honest
+/// arm.
+///
+/// Ignoring `dest` here — the shape this had before the column stage
+/// existed — would have `edits_for` render the whole `datasets` object
+/// and write it into `dataset_presentation.toml` under the dataset's
+/// name: a personalisation file holding a copy of the schema, and the
+/// column's own keys nowhere.
+///
+/// [`Domain::to_table`]: super::Domain::to_table
+pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
+    match dest {
+        Destination::DatasetPresentation => toml_edit::Item::Table(dataset_columns::table(draft)),
+        Destination::Doc | Destination::Presentation => {
+            toml_edit::Item::Table(super::toml_table_to_edit(&draft.source))
+        }
+    }
 }
 
 /// The dataset's own reader diagnostics, over this dataset alone (the
@@ -271,6 +314,46 @@ mod tests {
         );
         assert!(matches!(&fields[4].kind, FieldKind::Text(t) if t == "from book · 1 value"));
         assert_eq!(fields[4].label, "region (derived)");
+    }
+
+    /// §4.7: a column the dataset overlay personalises says so on its own
+    /// row, after the type/role text every column carries. `npv` alone is
+    /// personalised here, so the assertion that `book`'s row is unchanged
+    /// is what keeps this from passing on a suffix appended to every row.
+    #[test]
+    fn a_personalised_column_row_carries_its_summary() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("datasets", DATASETS).unwrap(),
+                LayerDoc::builtin(
+                    "dataset_presentation",
+                    "[risk.columns.npv]\nscale = \"k\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let fields = fields(&config, Some("risk"));
+        let text = |key: &str| {
+            fields
+                .iter()
+                .find(|f| f.key == key)
+                .map(|f| match &f.kind {
+                    FieldKind::Text(t) => t.clone(),
+                    _ => String::new(),
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            text("columns.npv"),
+            "f64 · measure (sum) · grain instrument · required · k"
+        );
+        assert_eq!(
+            text("columns.book"),
+            "utf8 · dimension · required · categorical",
+            "a column the overlay says nothing about carries no suffix"
+        );
     }
 
     #[test]

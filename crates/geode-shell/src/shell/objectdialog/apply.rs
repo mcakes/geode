@@ -148,8 +148,9 @@ pub(crate) const REJECTED_STATUS: &str = "saved to disk · rejected by the merge
 /// it: `Some(value)` to set it, `None` to remove it entirely.
 ///
 /// `None` is not an optimisation, and it does **not** mean "empty" —
-/// [`object_value`] decides which renderings become one, and only a
-/// [`Destination::Presentation`] one ever can. A presentation table that
+/// [`object_value`] decides which renderings become one, and only an
+/// OVERLAY destination ([`Destination::Presentation`] or
+/// [`Destination::DatasetPresentation`]) ever can. A presentation table that
 /// matches the view's own doc in every respect renders **empty**
 /// (`views::presentation_table` omits an `order` equal to the doc's, an
 /// empty `hidden`, and every width the doc already declares), and writing
@@ -176,8 +177,10 @@ pub enum ObjectWrite {
     /// Set the user-layer key to this value.
     Set(toml::Value),
     /// Remove the user-layer key. Only an overlay destination
-    /// ([`Destination::Presentation`]) ever renders this, where absence
-    /// IS the state being recorded.
+    /// ([`Destination::Presentation`], or
+    /// [`Destination::DatasetPresentation`] — dataset-presentation spec
+    /// §4.1) ever renders this, where absence IS the state being
+    /// recorded.
     Remove,
     /// Touch nothing: neither memory nor disk gains or loses a key, and
     /// the object keeps whatever it already had.
@@ -220,10 +223,12 @@ pub(crate) struct PendingConfigWrite {
 ///
 /// **`dest` is a parameter, not a convenience.** What an *empty*
 /// rendering means is not a property of the item — it is a property of
-/// the file it would be written to, and the two files these dialogs write
+/// the file it would be written to, and the files these dialogs write
 /// mean opposite things by an absent key:
 ///
-/// * `view_presentation.toml` is an **overlay** read over the object it
+/// * `view_presentation.toml` — and `dataset_presentation.toml`, which is
+///   the same kind of file one layer down (dataset-presentation spec
+///   §4.1) — is an **overlay** read over the object it
 ///   names, so an absent key is "I have no personalisation of this
 ///   object" (spec §16) — exactly what an empty rendering says, hence
 ///   [`ObjectWrite::Remove`];

@@ -3424,6 +3424,17 @@ fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::
 /// `Input` was blurred — every following keystroke went nowhere until
 /// `escape`. Browse's own `on_row_clicked` already reads the mode; this
 /// asserts the edit stage's does too.
+///
+/// The row clicked is the `Columns` FIELD row, not the `npv` item row it
+/// used to be: since dataset-presentation §4.1 a click on a member row
+/// opens that column's stage (see
+/// `clicking_a_member_row_opens_its_column_stage`), which sets normal
+/// mode by design and so cannot also carry this test's question. A field
+/// row opens nothing, which is what leaves the mode where the click found
+/// it — the property under test. The cursor is stepped down onto `npv`
+/// first (filter mode's own `down`, `listfilter::nav_command`), so
+/// landing on row 0 is a move the click made rather than where it already
+/// was.
 #[gpui::test]
 fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3434,13 +3445,20 @@ fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::
     // click below lands on a row the filter is still showing.
     cx.simulate_input("n");
     cx.run_until_parked();
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected),
+        1,
+        "the cursor is on npv, so the click below is a real move"
+    );
     let row = cx
-        .debug_bounds("objectdialog-item-npv")
-        .expect("npv matches the query and should paint");
+        .debug_bounds("objectdialog-field-columns")
+        .expect("the Columns field matches the query and should paint");
     // Just inside the row's top edge rather than its centre: the
-    // section header rides on this row's own element (§18.1), so the
-    // row's box extends past the bottom of the scrolled list viewport
-    // and a centre click would land outside it.
+    // section header rides on the following row's own element (§18.1), so
+    // a row's box can extend past the bottom of the scrolled list
+    // viewport and a centre click would land outside it.
     cx.simulate_click(
         gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(2.0)),
         gpui::Modifiers::default(),
@@ -3449,8 +3467,15 @@ fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::
 
     assert_eq!(
         edit_draft(&shell, &cx, |d| d.selected),
-        1,
-        "the click moved the cursor onto npv — the row it landed on"
+        0,
+        "the click moved the cursor onto Columns — the row it landed on"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "tree".to_string()
+        },
+        "a field row opens nothing"
     );
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.mode),
@@ -3467,6 +3492,36 @@ fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::
         edit_draft(&shell, &cx, |d| d.query.clone()),
         "np",
         "so the next character typed still reaches the filter"
+    );
+}
+
+/// Dataset-presentation §4.1's mouse-parity half on the VIEWS door: a
+/// click on a member row does what `enter` would and opens that column's
+/// stage. Before this, a member row was the one row in this dialog whose
+/// `enter` did something a click would not (the Part 2c ledger's standing
+/// minor).
+#[gpui::test]
+fn clicking_a_member_row_opens_its_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let row = cx
+        .debug_bounds("objectdialog-item-npv")
+        .expect("npv is one of tree's own columns");
+    cx.simulate_click(
+        gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(2.0)),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column {
+            object: "tree".to_string(),
+            column: "npv".to_string()
+        },
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| objectdialog::render::crumb_text(s)),
+        "tree › npv"
     );
 }
 
@@ -4653,6 +4708,16 @@ fn services_with_schema() -> ShellServices {
 /// §19.4: the inspector lists datasets, opens one to its column rows —
 /// each with the layer it came from — and refuses every verb with one
 /// notice; `n` is refused in browse and the footer never offers it.
+///
+/// `enter` is NOT in the refused list any more (dataset-presentation spec
+/// §4.1): on a column row it opens that column's stage, which is this
+/// dialog's one writable surface. Spec §1.3's done state names exactly
+/// which verbs still answer the read-only notice on these rows — `d`,
+/// `r`, `n`, ticks and drops — and `enter` is not among them.
+/// `the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay`
+/// is where that door is asserted, and it presses `d` again after
+/// `escape` so this dialog's own rows are still proved read-only once the
+/// stage has been in and out.
 #[gpui::test]
 fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
@@ -4683,7 +4748,7 @@ fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::Tes
         "no doc badge on a read-only row"
     );
 
-    for key in ["space", "i", "d", "shift-j", "enter"] {
+    for key in ["space", "i", "d", "shift-j"] {
         cx.simulate_keystrokes(key);
         cx.run_until_parked();
         assert_eq!(
@@ -4705,6 +4770,159 @@ fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::Tes
             .is_some()
     );
     assert!(cx.debug_bounds("objectdialog-field-columns.book").is_none());
+}
+
+/// `config::schema` on `risk`, with a writable user directory so a
+/// column-stage write lands on disk: the browse list, then `enter` into
+/// the dataset's column rows.
+fn open_risk_columns(
+    cx: &mut gpui::TestAppContext,
+    dir: &std::path::Path,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_schema(), dir, "config::schema");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    (shell, cx)
+}
+
+/// Dataset-presentation spec §4: `enter` on a schema column row opens
+/// the column stage crumbed `risk › book`; `i` types a width that lands
+/// under `[risk.columns.book]` and NOWHERE else; `d`/`r` are refused
+/// inside the stage; the row shows the summary after; the schema rows'
+/// own verbs still answer read-only.
+#[gpui::test]
+fn the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_risk_columns(cx, dir.path());
+    cx.simulate_keystrokes("enter"); // book
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { ref object, ref column } if object == "risk" && column == "book"
+    ));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| objectdialog::render::crumb_text(s)),
+        "risk › book"
+    );
+    assert!(cx.debug_bounds("objectdialog-field-width").is_some());
+    // §4.6: the two destructive verbs are refused in a column's stage —
+    // through `in_column_stage`, not the read-only gate, so the wording
+    // is the column stage's own and identical to the Views door's.
+    for key in ["d", "r"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.notice.clone()),
+            Some(format!("{key} is not a verb in a column's stage"))
+        );
+    }
+
+    cx.simulate_keystrokes("j i"); // width
+    cx.run_until_parked();
+    assert_eq!(dialog_input_text(&shell, &cx), "auto");
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    cx.simulate_input("160");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-width")
+            .is_some(),
+        "the stepped field reads `dataset`"
+    );
+
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("dataset_presentation.toml")).unwrap();
+    assert!(written.contains("[risk.columns.book]"), "{written}");
+    assert!(written.contains("width = 160"), "{written}");
+    assert!(!written.contains("hidden"), "{written}");
+    // §4.5 and `schema::to_table`'s branch: the write is the overlay and
+    // only the overlay — a `dest`-blind `to_table` would have rendered
+    // the whole `datasets` object into it, and a stage that forgot its
+    // destination would have forked the schema into the user layer.
+    assert!(
+        !dir.path().join("datasets.toml").exists(),
+        "the schema's own doc was never written"
+    );
+    assert!(
+        !written.contains("role") && !written.contains("utf8"),
+        "and the overlay holds no schema keys: {written}"
+    );
+
+    cx.simulate_keystrokes("escape"); // back to the column rows
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    let row_text = edit_draft(&shell, &cx, |d| {
+        d.fields
+            .iter()
+            .find(|f| f.key == "columns.book")
+            .map(|f| match &f.kind {
+                objectdialog::FieldKind::Text(t) => t.clone(),
+                _ => String::new(),
+            })
+    });
+    assert!(
+        row_text.as_deref().is_some_and(|t| t.ends_with("160 px")),
+        "{row_text:?}"
+    );
+    assert!(
+        !edit_draft(&shell, &cx, objectdialog::Draft::is_dirty),
+        "the re-derived rows describe what is already on the batch"
+    );
+
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some(objectdialog::READ_ONLY_NOTICE),
+        "the schema rows' own verbs stay read-only"
+    );
+}
+
+/// §4.1 mouse parity: a click on a schema column row opens the stage.
+#[gpui::test]
+fn a_click_on_a_schema_column_row_opens_the_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_risk_columns(cx, dir.path());
+    let bounds = cx
+        .debug_bounds("objectdialog-field-columns.book")
+        .expect("row painted");
+    cx.simulate_click(
+        gpui::point(
+            bounds.origin.x + gpui::px(8.0),
+            bounds.origin.y + gpui::px(2.0),
+        ),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { ref column, .. } if column == "book"
+    ));
+}
+
+/// §4.7: `escape` out of a column stage puts the cursor back on the
+/// column's OWN row, not at the top of a thirty-column list — the Schema
+/// door's mirror of the Views door's `select_item_named`. `position_ref`
+/// is the second row, so a cursor that merely reset to zero fails here.
+#[gpui::test]
+fn leaving_a_schema_column_stage_puts_the_cursor_back_on_its_row(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_risk_columns(cx, dir.path());
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { ref column, .. } if column == "position_ref"
+    ));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.selected), 1);
 }
 
 /// Review round 1's Important: `on_tick_clicked` and `on_row_dropped`

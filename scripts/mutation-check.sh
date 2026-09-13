@@ -6936,9 +6936,13 @@ run_mutation "objectdialog: the edit list sizes itself instead of the header it 
 # ambiguous.
 run_mutation "objectdialog: an edit-stage click takes the keyboard off the filter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    shell.object_dialog_scroll.scroll_to_item(position);
+  '    if let Some(name) = column_stage_target(shell) {
+        enter_column_stage(shell, &name, cx);
+    }
     dialog::sync_dialog_text(shell, window, cx);' \
-  '    shell.object_dialog_scroll.scroll_to_item(position);
+  '    if let Some(name) = column_stage_target(shell) {
+        enter_column_stage(shell, &name, cx);
+    }
     shell.focus_handle.focus(window, cx);' \
   geode-shell \
   clicking_an_edit_row_while_filtering_keeps_the_filter_focused
@@ -8655,8 +8659,10 @@ run_mutation "views: clearing a desk-set key restores the desk's value" \
 # 2c §5.2: every changed value folds into the item BEFORE validation and commit.
 run_mutation "objectdialog: revalidate folds the column stage first" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if draft.column().is_some() {' \
-  '    if draft.column().is_none() {' \
+  '    if draft.column().is_some() {
+        fold = draft.fold_column();' \
+  '    if draft.column().is_none() {
+        fold = draft.fold_column();' \
   geode-shell \
   the_column_stage_writes_a_differing_key_to_the_overlay
 
@@ -8954,7 +8960,7 @@ run_mutation "objectdialog: Schema's column stage is its one writable surface" \
 # before its write lands — otherwise the chip lies for 250 ms.
 run_mutation "objectdialog: a diverged field's provenance is the view level" \
   crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
-  '            if differs_from(&below, &kind) || set_in(&ctx.layers.view) {' \
+  '            if differs_from(&inputs.below) || set_in(&ctx.layers.view) {' \
   '            if set_in(&ctx.layers.view) {' \
   geode-shell \
   a_stepped_field_reads_view_before_its_write_lands
@@ -8963,12 +8969,12 @@ run_mutation "objectdialog: a diverged field's provenance is the view level" \
 # desk, since the dataset level sits above the desk view.
 run_mutation "objectdialog: a cleared view key falls to the dataset level before the desk" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                if set(&ctx.layers.dataset) {
+  '                if set(&layers.dataset) {
                     Some(FellTo::Dataset)
-                } else if set(&ctx.layers.desk) {' \
-  '                if set(&ctx.layers.desk) {
+                } else if set(&layers.desk) {' \
+  '                if set(&layers.desk) {
                     Some(FellTo::Desk)
-                } else if set(&ctx.layers.dataset) {' \
+                } else if set(&layers.dataset) {' \
   geode-shell \
   a_cleared_view_key_falls_to_the_dataset_level_before_the_desk
 
