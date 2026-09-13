@@ -4,7 +4,6 @@
 
 use crate::query::as_of::{AsOf, resolve_generations};
 use crate::store::StoreError;
-use crate::store::ddl::{TableKind, table_name};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use geode_core::query::{CatalogSnapshot, DatasetCatalog, GenerationInfo, PartitionCatalog};
@@ -80,17 +79,20 @@ fn dataset_catalog(
         }
     }
 
+    // Per TABLE, not per grain. A document dataset has no grain at all
+    // (`grains()` is empty for it), so summing over grains reported 0
+    // live and 0 archive rows however many rows the dataset held — the
+    // diagnostics data section painted `0` beside a real list of live
+    // partitions, which reads as "the partitions are empty" rather than
+    // "this counter cannot see them". `table_pairs` is the one place
+    // either family's table set is named (`store::ddl`), the same list
+    // `apply_schema` created and `history_of` resolves over, so this
+    // count cannot drift from what exists.
     let mut live_rows = 0u64;
     let mut archive_rows = 0u64;
-    for grain in ds.grains() {
-        live_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Live))
-            .copied()
-            .unwrap_or(0);
-        archive_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Archive))
-            .copied()
-            .unwrap_or(0);
+    for pair in crate::store::ddl::table_pairs(ds) {
+        live_rows += sizes.get(&pair.live).copied().unwrap_or(0);
+        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
     }
 
     Ok(DatasetCatalog {
@@ -752,8 +754,23 @@ role = "attribute"
 
         let mut schema = SchemaSpec::default();
         schema.datasets.push(ds);
+        // `estimated_size` equals `count(*)` on a freshly checkpointed
+        // table and is an estimate otherwise (see
+        // `the_row_counts_agree_with_duckdb_by_execution`), and
+        // `publish_document` does not checkpoint — so the row-count
+        // assertion below states its own precondition.
+        store.writer().execute_batch("checkpoint;").unwrap();
         let snap = build_catalog(store.writer(), &schema, &AsOf::Live).unwrap();
         let ds_catalog = &snap.datasets[0];
+        // Important 1 (final fix wave): the row counts are per table, not
+        // per grain, and a document dataset has no grain — summed over
+        // `grains()` this dataset reported 0 live rows beside two live
+        // partitions. Two keys x six rows, both live, nothing archived.
+        assert_eq!(
+            (ds_catalog.live_rows, ds_catalog.archive_rows),
+            (12, 0),
+            "two documents of six rows each, both still live"
+        );
         let mut keys: Vec<Vec<String>> = ds_catalog
             .partitions
             .iter()

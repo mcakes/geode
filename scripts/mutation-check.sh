@@ -4679,22 +4679,16 @@ run_mutation "build_catalog: resolved_gen is ignored under AsOf::At, always None
 # `ds.live_rows == 5`), so neither test was proven isolated. Mutating
 # `archive_rows` instead has exactly one defence: the `archive_rows`
 # assertion this fix round added here.
+#
+# Re-anchored by the final fix wave: the loop is over `table_pairs(ds)`
+# now, not `ds.grains()` (Important 1 -- a document dataset has no grain
+# and reported 0 rows), so the per-grain `table_name` calls this entry used
+# to mutate are gone.
 run_mutation "build_catalog: archive_rows sums the live tables too" \
   crates/geode-data/src/query/catalog.rs \
-  '        archive_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Archive))
-            .copied()
-            .unwrap_or(0);
-    }' \
-  '        archive_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Live))
-            .copied()
-            .unwrap_or(0);
-        archive_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Archive))
-            .copied()
-            .unwrap_or(0);
-    }' \
+  '        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);' \
+  '        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
+        archive_rows += sizes.get(&pair.live).copied().unwrap_or(0);' \
   geode-data the_row_counts_agree_with_duckdb_by_execution
 
 # Review round 1 MAJ-1: the fixture's `file_id`s (11, 12, 13) are
@@ -8019,6 +8013,110 @@ run_mutation "document: an attribute the dataset does not declare is refused" \
   '                .any(|c| &c.name == name && matches!(c.role, ColumnRole::Attribute { grain: None }))' \
   '                .any(|_| true)' \
   geode-core validate_refuses_an_attribute_the_dataset_does_not_declare
+
+# Important 1: the catalog's row counts are per TABLE. Summed over
+# `ds.grains()` a document dataset -- which has no grain -- reported 0
+# live and 0 archive rows beside a real list of live partitions, which
+# reads as "the partitions are empty" rather than "this counter cannot
+# see them".
+run_mutation "catalog: row counts are per table, not per grain" \
+  crates/geode-data/src/query/catalog.rs \
+  '    for pair in crate::store::ddl::table_pairs(ds) {
+        live_rows += sizes.get(&pair.live).copied().unwrap_or(0);
+        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
+    }' \
+  '    for grain in ds.grains() {
+        live_rows += sizes
+            .get(&crate::store::ddl::table_name(
+                &ds.name,
+                grain,
+                crate::store::ddl::TableKind::Live,
+            ))
+            .copied()
+            .unwrap_or(0);
+        archive_rows += sizes
+            .get(&crate::store::ddl::table_name(
+                &ds.name,
+                grain,
+                crate::store::ddl::TableKind::Archive,
+            ))
+            .copied()
+            .unwrap_or(0);
+    }' \
+  geode-data a_document_datasets_partitions_split_back_to_their_keys
+
+# Important 3: the picker's values for a document dataset. Without the
+# document arm a shared dimension shows only the measure datasets' values
+# (silently short) and a document-only dimension fails the whole query
+# with "no dataset carries".
+run_mutation "distinct: a document dataset contributes its values" \
+  crates/geode-data/src/query/distinct.rs \
+  '        if ds.is_document() {' \
+  '        if false {' \
+  geode-data distinct_over_a_document_only_dimension_returns_its_values
+
+# An axis is row identity WITHIN a document, never a frame dimension
+# (market-data spec §3.3): offering one here would paint every term of
+# every curve in the picker's value list, none of which the frame can
+# scope by.
+run_mutation "distinct: only a document dimension contributes, not an axis" \
+  crates/geode-data/src/query/distinct.rs \
+  '        .is_some_and(|c| matches!(c.role, ColumnRole::Dimension { .. }))' \
+  '        .is_some_and(|_| true)' \
+  geode-data distinct_over_a_document_dataset_offers_no_axis_values
+
+# The as-of arm must filter BOTH sides of the union by the resolved
+# generations. Without the predicate every generation is read at once, so
+# a document published after `t` leaks into a historical answer.
+run_mutation "distinct: a document dataset's as-of filters the generations" \
+  crates/geode-data/src/query/distinct.rs \
+  '                "(select * from {} where {predicate} \
+                 union all select * from {} where {predicate})",' \
+  '                "(select * from {} where true \
+                 union all select * from {} where true)",' \
+  geode-data distinct_over_a_document_dataset_under_as_of_reads_the_resolved_generation
+
+# ... and it must resolve them as of the REQUESTED instant. Resolving at
+# `now` instead compiles a predicate that looks exactly as historical and
+# answers with today's state.
+run_mutation "distinct: a document dataset's as-of resolves at t, not now" \
+  crates/geode-data/src/query/distinct.rs \
+  'let predicate = generation_predicate(&resolve_generations(conn, &ds.name, *t)?);' \
+  'let predicate = generation_predicate(&resolve_generations(conn, &ds.name, chrono::Utc::now())?);' \
+  geode-data distinct_over_a_document_dataset_under_as_of_reads_the_resolved_generation
+
+# ... and it must read the live side too: the generation a partition holds
+# NOW is in live and nowhere else, so an as-of read aimed at the archive
+# alone answers "no such document" for the common case.
+run_mutation "distinct: a document dataset's as-of reads the live side too" \
+  crates/geode-data/src/query/distinct.rs \
+  '                pair.live, pair.archive' \
+  '                pair.archive, pair.archive' \
+  geode-data distinct_over_a_document_dataset_under_as_of_reads_the_resolved_generation
+
+# `applicable_to` is what keeps a scope aimed at the measure datasets --
+# a book selection, say -- from compiling into a predicate on a column
+# the document table does not have: a binder error that would fail the
+# whole picker query, not just this dataset's branch.
+run_mutation "distinct: a selection the document dataset lacks is dropped" \
+  crates/geode-data/src/query/distinct.rs \
+  '    let (scope, _dropped) = params.scope.applicable_to(ds, dims);' \
+  '    let (scope, _dropped) = (params.scope.clone(), Vec::<String>::new());' \
+  geode-data a_selection_the_document_dataset_lacks_is_dropped_not_a_binder_error
+
+# The selections that DO apply must really bind. Dropping them counts
+# every document's rows under whatever the trader has narrowed to, which
+# is the picker's whole question answered wrongly.
+run_mutation "distinct: a document dataset applies its own dimension selections" \
+  crates/geode-data/src/query/distinct.rs \
+  '                Some((clause, clause_params)) => {
+                    clauses.push(clause);
+                    sql_params.extend(clause_params);
+                }' \
+  '                Some((clause, clause_params)) => {
+                    let _ = (clause, clause_params);
+                }' \
+  geode-data a_selection_on_a_document_dimension_narrows_its_contribution
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

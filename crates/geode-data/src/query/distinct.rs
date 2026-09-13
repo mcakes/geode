@@ -2,15 +2,17 @@
 //! how many rows the current scope would leave, over every dataset
 //! carrying the column, under the same era routing every query uses.
 
+use crate::query::as_of::{generation_predicate, resolve_generations};
 use crate::query::compile::{CompiledColumn, CompiledQuery, era_for};
-use crate::query::scope_sql::{DictionaryCache, compile_scope_cached};
+use crate::query::scope_sql::{DictionaryCache, compile_scope_cached, selection_clause};
 use crate::store::StoreError;
+use crate::store::ddl::TablePair;
 use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::query::DistinctParams;
-use geode_core::schema::SchemaSpec;
+use geode_core::query::{AsOf, DistinctParams};
+use geode_core::schema::{ColumnRole, DatasetSpec, SchemaSpec};
 
 pub fn compile_distinct(
     conn: &Connection,
@@ -44,6 +46,17 @@ pub(crate) fn compile_distinct_with_cache(
     // stays uniform with `compile_view` rather than special-casing the
     // one place a cache is not sharing anything.
     for ds in &schema.datasets {
+        // A document dataset has no grain, so the grain search below can
+        // never find it a table: it took its own arm or the picker showed
+        // a document-only dimension nothing at all (market-data spec
+        // §3.3).
+        if ds.is_document() {
+            if let Some((select, select_params)) = document_select(conn, ds, dims, params, base)? {
+                selects.push(select);
+                all_params.extend(select_params);
+            }
+            continue;
+        }
         // The coarsest grain carrying the column: the smallest table
         // that sees every value.
         let Some(grain) = ds
@@ -91,6 +104,126 @@ pub(crate) fn compile_distinct_with_cache(
         stalest_input: Vec::new(),
         resolved_as_of: Default::default(),
     })
+}
+
+/// One document dataset's contribution to the distinct-values union, or
+/// `None` if it does not carry `base` as a dimension at all.
+///
+/// Shaped exactly like the measure arms' contribution — `select <value> as
+/// value, count(*) as n from <relation> where <predicate> group by 1` —
+/// because the outer query unions them and every branch of a union has to
+/// agree on its column set.
+///
+/// Only a `Dimension` column counts. A document dataset's dimensions are
+/// its identity key (`schema::validate_document` refuses an unkeyed one),
+/// and an axis is row identity *within* one document rather than
+/// something the frame groups or scopes by — the same rule
+/// `groupable_columns` states (market-data spec §3.3). An axis or a value
+/// is therefore not offered here, even though the picker's own list is
+/// categorical-and-any-role: a categorical *attribute* no grain can group
+/// by is likewise not offered by the measure arms.
+///
+/// **Only the dimension selections of the scope are applied.** The text
+/// and expression filters are not, and that is a deliberate gap rather
+/// than an oversight: `compile_scope` is the one place either is lowered,
+/// and every routing decision it makes (`route`, `evaluable_at`,
+/// `membership`, `Era::relation`) is defined in terms of a `Grain` this
+/// family does not have. So a document dataset's counts here are as of
+/// the dimension selections and the era alone; under an active text or
+/// expression filter its values can be over-counted relative to the
+/// measure datasets beside them in the same union. The honest fix is a
+/// grain-free scope lowering, which belongs with Part 2's panel — faking
+/// it (dropping the dataset, or pretending the filter applied) would
+/// either hide a document-only dimension from the picker entirely or
+/// report a number that is wrong with no way to tell.
+fn document_select(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    dims: &DerivedDimensions,
+    params: &DistinctParams,
+    base: &str,
+) -> Result<Option<(String, Vec<Value>)>, StoreError> {
+    if !ds
+        .column(base)
+        .is_some_and(|c| matches!(c.role, ColumnRole::Dimension { .. }))
+    {
+        return Ok(None);
+    }
+
+    // Dataset-wide, not per document: distinct spans every key by
+    // definition, so every partition's newest generation as of `t` is in
+    // scope — the same resolution `era_for` performs for a measure
+    // dataset. (`query::document::compile_document` narrows to one batch
+    // because it answers for one document; this does not.)
+    let pair = TablePair::for_document(&ds.name);
+    let relation = match &params.as_of {
+        AsOf::Live => pair.live.clone(),
+        AsOf::At(t) => {
+            let predicate = generation_predicate(&resolve_generations(conn, &ds.name, *t)?);
+            // Both sides, each filtered: the generation a partition holds
+            // now is in live and nowhere else, so an as-of read aimed at
+            // the archive alone answers with the previous generation or
+            // with nothing — the same rule `Era::relation` follows for a
+            // grain table, and the same one `compile_document` follows.
+            format!(
+                "(select * from {} where {predicate} \
+                 union all select * from {} where {predicate})",
+                pair.live, pair.archive
+            )
+        }
+    };
+
+    // `applicable_to` drops the selections this dataset has no column for
+    // and names them (market-data spec §3.4). Dropping them is what keeps
+    // a scope aimed at the measure datasets — a book selection, say —
+    // from compiling into a predicate on a column the document table does
+    // not have.
+    let (scope, _dropped) = params.scope.applicable_to(ds, dims);
+    let mut clauses: Vec<String> = Vec::new();
+    let mut sql_params: Vec<Value> = Vec::new();
+    // A contradiction selects nothing and must say so in SQL, exactly as
+    // `compile_scope` does: the contradicted dimension has already been
+    // dropped from `dimensions`, so compiling the rest would produce a
+    // predicate *wider* than either layer asked for.
+    if scope.impossible {
+        clauses.push("false".to_string());
+    } else {
+        for sel in &scope.dimensions {
+            if sel.values.is_empty() {
+                continue;
+            }
+            match selection_clause(sel, dims) {
+                Some((clause, clause_params)) => {
+                    clauses.push(clause);
+                    sql_params.extend(clause_params);
+                }
+                // A derived value the map does not produce: nothing can
+                // match, and the whole contribution is that constant.
+                None => {
+                    clauses.clear();
+                    sql_params.clear();
+                    clauses.push("false".to_string());
+                    break;
+                }
+            }
+        }
+    }
+    let predicate = if clauses.is_empty() {
+        "true".to_string()
+    } else {
+        clauses.join(" and ")
+    };
+
+    let value_expr = match dims.get(&params.column) {
+        None => format!("\"{base}\"::varchar"),
+        Some(d) => crate::query::compile::derived_case(d),
+    };
+    Ok(Some((
+        format!(
+            "select {value_expr} as value, count(*) as n from {relation} where {predicate} group by 1"
+        ),
+        sql_params,
+    )))
 }
 
 fn meta(name: &str) -> CompiledColumn {
@@ -496,6 +629,293 @@ grain = "instrument"
         assert!(
             !rows.iter().any(|(v, _)| v == "USD"),
             "the live generation must not leak into an as-of read: {rows:?}"
+        );
+    }
+
+    /// A measure dataset and a document dataset sharing one dimension
+    /// column, with different spellings on each side, plus a dimension
+    /// only the document dataset has (market-data spec §3.3).
+    ///
+    /// `risk` carries `underlying_ref` as an underlying-grain dimension
+    /// key; `cvi_params` is a document dataset keyed on `(underlying_ref,
+    /// curve_id)`, so `underlying_ref` is shared and `curve_id` is the
+    /// document family's alone. `pickable_columns` offers both — every
+    /// categorical column of every dataset — so `compile_distinct` has to
+    /// answer for both or the picker paints a short list for one and an
+    /// error for the other.
+    const DOC_SCHEMA: &str = r#"
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+[risk.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+
+[cvi_params]
+family = "document"
+key = ["underlying_ref", "curve_id"]
+axes = ["term", "node"]
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[cvi_params.columns.curve_id]
+type = "utf8"
+role = "dimension"
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+"#;
+
+    /// Six rows (two terms x three nodes) for one `(underlying, curve)`
+    /// document.
+    fn cvi_doc(underlying: &str, curve: &str) -> geode_core::document::DocumentRows {
+        use geode_core::document::{Column, DocumentRows};
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        DocumentRows {
+            key: vec![underlying.into(), curve.into()],
+            attributes: Vec::new(),
+            axes: vec![
+                (
+                    "term".into(),
+                    Column::Date(vec![
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]),
+                ),
+                (
+                    "node".into(),
+                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
+                ),
+            ],
+            values: vec![("param".into(), Column::F64(vec![1.0; 6]))],
+        }
+    }
+
+    /// `risk` holds 2 SPX.Z + 1 NDX.Z underlying rows in BK000 and 1
+    /// RTY.Z row in BK001. `cvi_params` holds one six-row document per
+    /// `(SPX.Z, EQ1)` and `(NDX.Z, EQ1)`, published at 14:00 and 14:01 —
+    /// `between` sits after the first and before the second.
+    fn document_fixture() -> Fixture {
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", DOC_SCHEMA).unwrap()],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store.apply_schema(schema.dataset("risk").unwrap()).unwrap();
+        store
+            .apply_schema(schema.dataset("cvi_params").unwrap())
+            .unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        let f = Fixture {
+            _dir: dir,
+            store,
+            schema,
+            dims: DerivedDimensions::default(),
+            between: ts("2026-09-12T14:00:30Z"),
+        };
+        f.conn()
+            .execute_batch(
+                "insert into risk_underlying_live
+                   (book, lhu, position_ref, counterparty, instrument_ref, underlying_ref,
+                    delta01, batch, source_file_id, gen_id, source_time) values
+                   ('BK000','L','P1','C','I1','SPX.Z', 1.0, 'b', 1, 1, now()),
+                   ('BK000','L','P2','C','I2','SPX.Z', 1.0, 'b', 1, 1, now()),
+                   ('BK000','L','P3','C','I3','NDX.Z', 1.0, 'b', 1, 1, now()),
+                   ('BK001','L','P4','C','I4','RTY.Z', 1.0, 'b', 1, 1, now());",
+            )
+            .unwrap();
+        let ds = f.schema.dataset("cvi_params").unwrap().clone();
+        for (underlying, at) in [
+            ("SPX.Z", "2026-09-12T14:00:00Z"),
+            ("NDX.Z", "2026-09-12T14:01:00Z"),
+        ] {
+            crate::store::document::publish_document(
+                &f.store,
+                &crate::store::document::DocumentPublishRequest {
+                    dataset: &ds,
+                    source: "cvi",
+                    rows: &cvi_doc(underlying, "EQ1"),
+                    source_time: ts(at),
+                    received_at: ts(at),
+                    bytes: 0,
+                },
+            )
+            .unwrap();
+        }
+        f
+    }
+
+    /// Important 3 (final fix wave): `compile_distinct` located a column
+    /// through `ds.grains()` alone, so a document dataset — which has no
+    /// grain — contributed nothing. A shared column showed only the
+    /// measure dataset's values.
+    #[test]
+    fn distinct_unions_a_document_datasets_values_with_a_measure_datasets() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "underlying_ref".into(),
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert_eq!(
+            rows,
+            vec![
+                // 1 risk row + one six-row document
+                ("NDX.Z".to_string(), 7),
+                ("RTY.Z".to_string(), 1),
+                // 2 risk rows + one six-row document
+                ("SPX.Z".to_string(), 8),
+            ]
+        );
+    }
+
+    /// The other half of Important 3: a dimension only a document dataset
+    /// declares used to fail the whole query with "no dataset carries",
+    /// because no grain carried it anywhere.
+    #[test]
+    fn distinct_over_a_document_only_dimension_returns_its_values() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "curve_id".into(),
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert_eq!(
+            rows,
+            vec![("EQ1".to_string(), 12)],
+            "both documents' rows, and no error from the measure dataset that lacks the column"
+        );
+    }
+
+    /// An axis is row identity *within* one document, never a frame
+    /// dimension (market-data spec §3.3, `groupable_columns`), so it is
+    /// not a column the picker can offer values for — the same answer a
+    /// measure dataset gives for a measure. Unknown to every dataset, the
+    /// request is an error rather than an empty list.
+    #[test]
+    fn distinct_over_a_document_dataset_offers_no_axis_values() {
+        let f = document_fixture();
+        for column in ["term", "node", "param"] {
+            let params = DistinctParams {
+                column: column.into(),
+                ..base_params()
+            };
+            let e = compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap_err();
+            assert!(
+                e.to_string().contains(column),
+                "{column} must not be offered: {e}"
+            );
+        }
+    }
+
+    /// As-of over a document dataset resolves generations dataset-wide,
+    /// not per document: distinct spans every key, so every partition's
+    /// newest generation at `t` is in scope — and a document published
+    /// after `t` is not.
+    #[test]
+    fn distinct_over_a_document_dataset_under_as_of_reads_the_resolved_generation() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "curve_id".into(),
+            as_of: AsOf::At(f.between),
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert_eq!(
+            rows,
+            vec![("EQ1".to_string(), 6)],
+            "only the document published before `between`: {rows:?}"
+        );
+
+        let params = DistinctParams {
+            column: "underlying_ref".into(),
+            as_of: AsOf::At(f.between),
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert!(
+            rows.iter().any(|(v, n)| v == "SPX.Z" && *n == 6),
+            "the document that existed by then: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|(v, n)| v == "NDX.Z" && *n >= 6),
+            "the later document must not leak into an as-of read: {rows:?}"
+        );
+    }
+
+    /// A dimension selection the document dataset does have really binds:
+    /// narrowing to one underlying leaves that document's rows alone.
+    #[test]
+    fn a_selection_on_a_document_dimension_narrows_its_contribution() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "curve_id".into(),
+            scope: Scope {
+                dimensions: vec![DimensionSelection {
+                    column: "underlying_ref".into(),
+                    values: vec!["SPX.Z".into()],
+                }],
+                ..Scope::default()
+            },
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert_eq!(rows, vec![("EQ1".to_string(), 6)]);
+    }
+
+    /// A selection on a column the document dataset has no column for is
+    /// dropped (`Scope::applicable_to`, market-data spec §3.4) rather than
+    /// compiled into a predicate on a column that does not exist — the
+    /// dataset contributes its values unnarrowed, and the measure dataset
+    /// beside it is narrowed as always.
+    #[test]
+    fn a_selection_the_document_dataset_lacks_is_dropped_not_a_binder_error() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "underlying_ref".into(),
+            scope: book_scope("BK001"),
+            ..base_params()
+        };
+        let rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert_eq!(
+            rows,
+            vec![
+                ("NDX.Z".to_string(), 6),
+                ("RTY.Z".to_string(), 1),
+                ("SPX.Z".to_string(), 6),
+            ],
+            "risk narrowed to BK001's one row; both documents unnarrowed: {rows:?}"
         );
     }
 
