@@ -141,6 +141,62 @@ fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// dataset-presentation spec §6: `dataset_presentation.toml` is merged
+/// under the view overlay in `load_views`, exactly the seam
+/// `view_presentation` rides — so a change to it must fan out through
+/// `ConfigReloaded` the same way, or a dataset-level column edit sits
+/// on disk until the next restart.
+#[gpui::test]
+fn a_dataset_presentation_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = shell_of(&window, &mut cx);
+
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let sink = events.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
+    });
+
+    // The fixture's config has no docs at all, so this reload's ONLY
+    // difference from the running one is the `dataset_presentation` doc —
+    // `views`, `view_presentation` and `dimensions` are all absent before
+    // and after, which is what makes the emission attributable to
+    // `dataset_presentation`.
+    let new_config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("dataset_presentation", "[risk.columns.npv]\nwidth = 140\n").unwrap(),
+        ],
+        desk: None,
+        user: None,
+    });
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::ConfigReloaded)),
+        "a dataset_presentation-only reload must fire ConfigReloaded: {:?}",
+        events.borrow()
+    );
+}
+
 /// A clean reload (no error diagnostics) is applied: the mod alias
 /// (and therefore the keymap built from it) updates to match the new
 /// config, an open palette closes (brief: "must close on a successful

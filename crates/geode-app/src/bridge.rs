@@ -1465,6 +1465,41 @@ role = "key"
         assert_eq!(served, names);
     }
 
+    /// dataset-presentation spec §6: the dataset-level overlay is merged
+    /// *under* the view-level one, so a view's own `view_presentation.toml`
+    /// entry wins where both set the same key, and a view that never
+    /// touched a key still gets the dataset's value.
+    #[test]
+    fn data_setup_hands_out_views_with_the_dataset_level_merged_under_the_view_level() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "views",
+                    "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n[[v.columns]]\nname = \"npv\"\nkind = \"measure\"\n[w]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[w.columns]]\nname = \"npv\"\nkind = \"measure\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("dataset_presentation", "[risk.columns.npv]\nlabel = \"NPV k\"\nscale = \"k\"\n").unwrap(),
+                LayerDoc::builtin("view_presentation", "[v.columns.npv]\nlabel = \"NPV\"\n").unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        let v = setup.views.iter().find(|v| v.name == "v").unwrap();
+        let w = setup.views.iter().find(|v| v.name == "w").unwrap();
+        assert_eq!(v.presentation_of("npv").label.as_deref(), Some("NPV"));
+        assert_eq!(w.presentation_of("npv").label.as_deref(), Some("NPV k"));
+        assert_eq!(
+            v.presentation_of("npv").scale,
+            Some(geode_core::view::Scale::Thousands),
+            "an unset view key keeps the dataset's"
+        );
+    }
+
     /// 2c §6.2: the `colours` doc travels to the blotter through
     /// `DataSetup` like the views do, and its reader's own diagnostics
     /// travel with it — `load_views` (the only other place the doc is

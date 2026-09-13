@@ -278,8 +278,12 @@ impl ShellView {
             // factory the new definitions. Omitted, a trader's colour
             // edit would sit on disk until the next restart — the same
             // failure `view_presentation`'s inclusion just above fixed.
+            // dataset_presentation rides here for the same reason
+            // view_presentation does (dataset-presentation spec §6):
+            // load_views merges it into every ViewSpec of that dataset.
             let views_changed = changed("views")
                 || changed("view_presentation")
+                || changed("dataset_presentation")
                 || changed("dimensions")
                 || changed("colours");
             // The dimension pickers' column list (Phase 4a §3.3):
