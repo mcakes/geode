@@ -7633,6 +7633,12 @@ run_mutation "schema/document: document_columns follows the declared axes order"
   '        out.extend(self.columns.iter().filter(|c| c.role == ColumnRole::Axis));' \
   geode-core document_columns_are_key_then_axes_then_values_then_attributes
 
+run_mutation "schema/document: dimensions outside the key are dropped, not silent" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !unkeyed.contains(&c.name));' \
+  '    let _ = &unkeyed;' \
+  geode-core a_document_dimension_outside_the_key_is_dropped
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -543,6 +543,27 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     }
     ds.columns.retain(|c| !non_numeric.contains(&c.name));
 
+    // A dimension is the document's identity key. A per-row dimension within
+    // a document is an axis, not a grouping key. A dimension with no storage
+    // column in the key would be groupable (from `groupable_columns`) but
+    // unqueryable (omitted by `document_columns`), a broken invariant.
+    let unkeyed: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| matches!(c.role, ColumnRole::Dimension { .. }) && !ds.key.contains(&c.name))
+        .map(|c| c.name.clone())
+        .collect();
+    for c in &unkeyed {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column '{c}': a document dataset's dimensions are its key; \
+                 '{c}' is not listed in key — column dropped"
+            ),
+            format!("{name}.columns.{c}.role"),
+        ));
+    }
+    ds.columns.retain(|c| !unkeyed.contains(&c.name));
+
     let mut keep = true;
 
     if ds.key.is_empty() {
@@ -1529,5 +1550,22 @@ role = "attribute"
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(names[1..3], ["node", "term"]);
+    }
+
+    #[test]
+    fn a_document_dimension_outside_the_key_is_dropped() {
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.region]\ntype = \"utf8\"\nrole = \"dimension\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("cvi_params").unwrap();
+        assert!(
+            diags.iter().any(|d| {
+                d.path.as_deref() == Some("cvi_params.columns.region.role")
+                    && d.message.contains("dimensions are its key")
+            }),
+            "{diags:?}"
+        );
+        assert!(ds.column("region").is_none());
+        assert_eq!(ds.groupable_columns(), vec!["underlying_ref"]);
     }
 }
