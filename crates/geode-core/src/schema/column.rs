@@ -91,10 +91,11 @@ pub enum ColumnRole {
     /// `None` only for `Family::Document`, always `Some` for
     /// `Family::Measures` (a missing `grain` is a parse error there) — so
     /// the type still allows the two cross-family mistakes this doesn't
-    /// prevent: a stray `grain` key on a document attribute, or a
-    /// document-typed attribute on a measure dataset. Refusing those is
-    /// `validate_dataset`'s job, added alongside the rest of document
-    /// validation.
+    /// prevent by construction: a stray `grain` key on a document
+    /// attribute, or a document-typed attribute on a measure dataset.
+    /// `validate_dataset` refuses both, per column, dropping the column
+    /// (the document-family case in `validate_document`, its mirror in
+    /// `validate_dataset`'s own measure-family body).
     Attribute { grain: Option<Grain> },
     /// Document family only: identifies a row within a document, in the
     /// dataset's declared `axes` order (market-data spec §3.1).

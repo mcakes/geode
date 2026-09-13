@@ -3028,8 +3028,22 @@ run_mutation "schema: a bare dimension outside every key is dropped" \
 
 run_mutation "schema: textual on an unroutable column is cleared" \
   crates/geode-core/src/schema/mod.rs \
-  '        if unroutable.contains(&c.name) {' \
-  '        if false {' \
+  '    for c in &mut ds.columns {
+        if unroutable.contains(&c.name) {
+            c.textual = false;
+        }
+    }
+
+    diags
+}' \
+  '    for c in &mut ds.columns {
+        if false {
+            c.textual = false;
+        }
+    }
+
+    diags
+}' \
   geode-core textual_on_a_column_no_grain_can_route_is_an_error_and_textual_is_cleared
 
 run_mutation "schema: a dimension carried by an uncarriable grain is dropped" \
@@ -7538,6 +7552,56 @@ run_mutation "catalog: attribute_conflicts ignores a document-level attribute" \
   'matches!(c.role, ColumnRole::Attribute { .. })' \
   geode-data \
   attribute_conflicts_ignores_a_document_level_attribute
+
+# ---- schema: validating a document dataset (market-data spec §3.2)
+#
+# Task 2's load-time rules for the document family, dispatched from
+# `validate_dataset` into `validate_document`, plus the mirror refusal on
+# the measure family.
+
+run_mutation "schema/document: an empty key drops the dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.key.is_empty() {' \
+  '    if false {' \
+  geode-core a_document_dataset_needs_a_non_empty_key_and_axes
+
+run_mutation "schema/document: a key column must be a dimension" \
+  crates/geode-core/src/schema/mod.rs \
+  '            Some(c) if !matches!(c.role, ColumnRole::Dimension { grain: None }) => {' \
+  '            Some(c) if false && !matches!(c.role, ColumnRole::Dimension { grain: None }) => {' \
+  geode-core every_key_column_must_be_a_dimension
+
+run_mutation "schema/document: an axis role not listed in axes is refused" \
+  crates/geode-core/src/schema/mod.rs \
+  '        .filter(|c| c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))' \
+  '        .filter(|c| false && c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))' \
+  geode-core axes_and_axis_roles_must_agree_both_ways
+
+run_mutation "schema/document: measure vocabulary is dropped per column" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !foreign.contains(&c.name));
+
+    // A value is a number: it feeds the numeric cell of the document' \
+  '    let _ = &foreign;
+
+    // A value is a number: it feeds the numeric cell of the document' \
+  geode-core measure_vocabulary_on_a_document_dataset_is_refused_per_column
+
+run_mutation "schema/measures: document vocabulary is dropped per column" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !foreign.contains(&c.name));
+
+    // Every grain in use groups by its key columns' \
+  '    let _ = &foreign;
+
+    // Every grain in use groups by its key columns' \
+  geode-core document_vocabulary_on_a_measure_dataset_is_the_mirror_error
+
+run_mutation "schema/document: a refused dataset is not pushed" \
+  crates/geode-core/src/schema/mod.rs \
+  '            if dataset.is_document() && dataset.columns.is_empty() {' \
+  '            if false {' \
+  geode-core a_document_dataset_declares_at_least_one_value
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
