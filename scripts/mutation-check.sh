@@ -8651,7 +8651,7 @@ run_mutation "objectdialog: the list verbs name the column stage" \
 # back on the next rebuild with the trader's clear gone.
 run_mutation "views: clearing a desk-set key restores the desk's value" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '                    desk.label.clone()' \
+  '                    below.label.clone()' \
   '                    None' \
   geode-shell \
   clearing_a_desk_label_falls_back_to_the_desk
@@ -9088,7 +9088,7 @@ run_mutation "views: the overlay writer's baseline includes the dataset level" \
 # that reach it by join.
 run_mutation "views: the dataset layer follows the column's owning dataset" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '            let owner = DatasetPresentationSpec::owner_of(view, c.name(), &schema)?;' \
+  '            let owner = DatasetPresentationSpec::owner_of(view, name, &schema)?;' \
   '            let owner = view.dataset.as_str();' \
   geode-shell \
   a_joined_columns_dataset_layer_comes_from_the_join
@@ -9105,6 +9105,33 @@ run_mutation "views: a clear is what this keystroke emptied" \
   '                    if true {' \
   geode-shell \
   clearing_a_desk_label_falls_back_to_the_desk
+
+# §5.1, the promotion case: `space` on an available row hands the whole
+# ListItem to the view's own list and nothing re-derives it, so the
+# catalogue's rows carry the column's DATASET-level presentation. Seeded
+# unset, a promoted column opens its stage at the KIND default over a
+# baseline holding the trader's own dataset values, and the first
+# keystroke writes all seven keys as view-level overrides contradicting
+# the dataset level they set themselves.
+run_mutation "views: the available catalogue carries the dataset level" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            presentation: overlay.get(&column.name).cloned().unwrap_or_default(),' \
+  '            presentation: ColumnPresentation::default(),' \
+  geode-shell \
+  a_promoted_columns_stage_seeds_from_the_dataset_level
+
+# §5.1: the layer's candidates are every column the view's datasets
+# DECLARE, not only the ones it carries today — a column promoted out of
+# the catalogue joins the list mid-draft and the writer compares it
+# against this map on that very keystroke, before any reload could widen
+# it. Narrowed to `view.columns`, the promotion writes the trader's own
+# dataset-level value back as a view-level override.
+run_mutation "views: the dataset layer reaches a column the view has yet to carry" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        .flat_map(|spec| spec.columns.iter().map(|c| c.name.as_str()))' \
+  '        .flat_map(|_| view.columns.iter().map(|c| c.name()))' \
+  geode-shell \
+  a_promoted_columns_stage_seeds_from_the_dataset_level
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

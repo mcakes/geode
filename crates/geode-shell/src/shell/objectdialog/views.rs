@@ -183,8 +183,9 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     // `Some` even when the dataset is unknown or has nothing left to
     // offer — the catalogue exists on this domain; it is merely empty.
     // No derived dimensions in it — see this function's own doc for why.
+    let overlay = dataset_overlay(config, &current);
     let available = Some(match schema.dataset(&current) {
-        Some(dataset) => dataset_catalogue(&items, dataset),
+        Some(dataset) => dataset_catalogue(&items, dataset, &overlay),
         None => Vec::new(),
     });
 
@@ -261,8 +262,9 @@ pub fn refresh_available(draft: &mut Draft, config: &Config) {
         .doc("datasets")
         .map(|doc| SchemaSpec::from_doc(doc).0)
         .unwrap_or_default();
+    let overlay = dataset_overlay(config, &current);
     let rebuilt = match schema.dataset(&current) {
-        Some(dataset) => dataset_catalogue(items, dataset),
+        Some(dataset) => dataset_catalogue(items, dataset, &overlay),
         None => Vec::new(),
     };
     *available = Some(rebuilt);
@@ -280,7 +282,31 @@ pub fn refresh_available(draft: &mut Draft, config: &Config) {
 /// ([`schema_role_kind`]) — the catalogue builder [`fields`] and
 /// [`refresh_available`] share, so a dataset switch cannot populate a
 /// different catalogue than opening the view fresh would have.
-fn dataset_catalogue(items: &[ListItem], dataset: &DatasetSpec) -> Vec<ListItem> {
+///
+/// **Each row is seeded with the column's DATASET-level presentation**
+/// (`overlay`, this dataset's entries from `dataset_presentation.toml`),
+/// not the unset one, because `space` on a catalogue row hands the whole
+/// [`ListItem`] to the view's own list ([`Draft::step_selected`]'s
+/// `Available` arm moves it verbatim) and nothing re-derives it
+/// afterwards. Seeded unset, a column promoted and opened in the same
+/// draft lifetime paints seven fields at the KIND default while
+/// [`baseline_below`] — refreshed from the config — holds the trader's
+/// own dataset-level values: the first keystroke folds all seven and
+/// the writer emits every one of them as a view-level override
+/// contradicting the dataset level the trader set themselves.
+///
+/// A lookup by this dataset's name IS
+/// [`DatasetPresentationSpec::owner_of`]'s answer for these columns,
+/// since a catalogue is by construction the columns of exactly one
+/// dataset — the one whose schema declares them, which is what
+/// `owner_of` resolves to. `hidden` is never among the keys: the
+/// dataset overlay's reader refuses it outright (spec §2.1), membership
+/// and sequence belonging to a view.
+fn dataset_catalogue(
+    items: &[ListItem],
+    dataset: &DatasetSpec,
+    overlay: &BTreeMap<String, ColumnPresentation>,
+) -> Vec<ListItem> {
     let mut available = Vec::new();
     for column in &dataset.columns {
         if items.iter().any(|i| i.name == column.name) {
@@ -292,11 +318,24 @@ fn dataset_catalogue(items: &[ListItem], dataset: &DatasetSpec) -> Vec<ListItem>
         available.push(ListItem {
             name: column.name.clone(),
             included: false,
-            presentation: ColumnPresentation::default(),
+            presentation: overlay.get(&column.name).cloned().unwrap_or_default(),
             kind: Some(kind.to_string()),
         });
     }
     available
+}
+
+/// One dataset's own entries from `dataset_presentation.toml`, by column
+/// — [`dataset_layer`]'s per-dataset half, for the one caller that has a
+/// dataset name rather than a [`ViewSpec`] to resolve owners through
+/// ([`dataset_catalogue`], whose columns all belong to that dataset by
+/// construction). Empty when the doc is absent or says nothing about it.
+fn dataset_overlay(config: &Config, dataset: &str) -> BTreeMap<String, ColumnPresentation> {
+    config
+        .doc(DATASET_PRESENTATION_DOC)
+        .map(|doc| DatasetPresentationSpec::from_doc(doc).0)
+        .and_then(|spec| spec.datasets.get(dataset).cloned())
+        .unwrap_or_default()
 }
 
 /// The `[[columns]]` `kind` string a schema role maps to, or `None` when
@@ -691,9 +730,9 @@ pub(super) fn desk_baseline(draft: &Draft) -> BTreeMap<String, ColumnPresentatio
     baseline
 }
 
-/// This view's dataset-level entries, by column (dataset-presentation
-/// spec §5.1): the `dataset_presentation` doc's tables for whichever
-/// dataset OWNS each of the view's columns
+/// The dataset-level entries this view's columns resolve to, by column
+/// (dataset-presentation spec §5.1): the `dataset_presentation` doc's
+/// tables for whichever dataset OWNS each column
 /// ([`DatasetPresentationSpec::owner_of`] — the view's own dataset
 /// first, then each join's in file order, the order the compiler
 /// resolves names in), read from the config the CALLER hands in.
@@ -705,8 +744,24 @@ pub(super) fn desk_baseline(draft: &Draft) -> BTreeMap<String, ColumnPresentatio
 /// and the stage would both hide that tick and, outliving the flush,
 /// write the column back without it.
 ///
+/// **The candidates are every column the view's datasets declare, not
+/// only the ones it carries today.** A column PROMOTED out of the
+/// available catalogue joins the view's own list mid-draft
+/// ([`Draft::step_selected`]'s `Available` arm), and
+/// [`presentation_table`] compares it against [`baseline_below`] — this
+/// map — on that very keystroke, before any reload could widen it.
+/// Keyed off `view.columns` alone, that comparison found the dataset's
+/// own value on the promoted item and nothing under it, and wrote the
+/// trader's dataset-level opinion back as a view-level override on the
+/// keystroke that added the column.
+///
 /// A column no dataset of the view declares — a derived column — takes
-/// nothing from this layer, and so has no entry here at all.
+/// nothing from this layer, and so has no entry here at all; neither
+/// does one whose owner has no table for it, which is why the owner is
+/// resolved first and the overlay consulted second rather than the
+/// overlay simply being copied per dataset (a dataset that declares the
+/// column but says nothing about it still OWNS it, and a later join's
+/// table for the same name must not stand in).
 pub(super) fn dataset_layer(
     config: &Config,
     view: &ViewSpec,
@@ -719,12 +774,19 @@ pub(super) fn dataset_layer(
         .doc("datasets")
         .map(|d| SchemaSpec::from_doc(d).0)
         .unwrap_or_default();
-    view.columns
-        .iter()
-        .filter_map(|c| {
-            let owner = DatasetPresentationSpec::owner_of(view, c.name(), &schema)?;
-            let p = overlay.datasets.get(owner)?.get(c.name())?.clone();
-            Some((c.name().to_string(), p))
+    let mut candidates: Vec<&str> = std::iter::once(view.dataset.as_str())
+        .chain(view.joins.iter().map(|j| j.dataset.as_str()))
+        .filter_map(|ds| schema.dataset(ds))
+        .flat_map(|spec| spec.columns.iter().map(|c| c.name.as_str()))
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .filter_map(|name| {
+            let owner = DatasetPresentationSpec::owner_of(view, name, &schema)?;
+            let p = overlay.datasets.get(owner)?.get(name)?.clone();
+            Some((name.to_string(), p))
         })
         .collect()
 }
@@ -1156,42 +1218,50 @@ fn negative_keys() -> Vec<String> {
 ///
 /// **Every key becomes `Some`**, because [`column_fields`] seeded each
 /// field with the value in force and a field therefore always has one to
-/// give back. What keeps that from freezing the desk's presentation into
-/// the trader's overlay is [`presentation_table`], which compares each
-/// key against [`desk_baseline`] and omits the ones that still match —
-/// the one place that decision is made for the whole file.
+/// give back. What keeps that from freezing the layers below into the
+/// trader's overlay is [`presentation_table`], which compares each key
+/// against [`baseline_below`] — the desk view's own keys with the
+/// trader's dataset level merged over — and omits the ones that still
+/// match: the one place that decision is made for the whole file.
 ///
-/// **The two `Text` keys are the clear verb, and `desk` is what makes
+/// **The two `Text` keys are the clear verb, and `below` is what makes
 /// the clear honest.** An empty `label` and an [`AUTO`] `width` are how a
 /// trader says "I have nothing to say about this" — and what that means
 /// is *stop overriding*, never *delete*: this overlay cannot remove a key
-/// the desk's own `views.toml` sets, it can only decline to override it.
-/// So a cleared key resolves to the DESK's value — `None` where the desk
-/// sets none, the desk's own `label`/`width` where it sets one — and
+/// the layers under it set, it can only decline to override them. So a
+/// cleared key resolves to the value BELOW — `None` where nothing down
+/// there sets it, the dataset level's `label`/`width` where that sets
+/// one, the desk view's own where only it does — and
 /// [`presentation_table`] then sees equality and writes no key at all,
 /// which is exactly "this trader has no opinion here".
 ///
+/// `below` is [`super::ColumnLayers::below_view`] on the stage path, the
+/// same merge [`baseline_below`] performs per column for the writer: the
+/// fold and the writer must measure a clear against the SAME thing, or
+/// one decides a key is unchanged while the other writes it.
+///
 /// Writing a literal `None` instead is the bug this signature exists to
 /// prevent, and it is silent in the worst way: the writer's `if key !=
-/// desk.key { if let Some(v) = key { … } }` omits the key, the file reads
-/// back as "nothing to say", the desk's label returns on the next
+/// below.key { if let Some(v) = key { … } }` omits the key, the file
+/// reads back as "nothing to say", the layer below returns on the next
 /// rebuild, and the trader's clear has vanished with nothing said about
 /// it. The caller re-seeds the two fields from the item after the fold
-/// ([`super::Draft::fold_column`]), so the screen shows the desk's value
-/// coming back on the same keystroke rather than a blank that lies.
+/// ([`super::Draft::fold_column`]), so that value is on screen coming
+/// back on the same keystroke rather than a blank that lies.
 ///
 /// Returns the key the trader CLEARED this fold — the caller decides
 /// whether that is worth a notice, from what it fell to. Named whether
-/// or not `desk` sets it (dataset-presentation spec §5.2): the caller
-/// now has layers BELOW the one this baseline describes, so "the desk
-/// sets nothing" no longer means "nothing is down there" — deciding
-/// silence here would hide a key that fell to the dataset level.
+/// or not `below` sets it (dataset-presentation spec §5.2): the caller
+/// holds the layers SEPARATELY ([`super::ColumnLayers`]) and is the only
+/// one that can say which of them a cleared key landed on, so deciding
+/// silence here from the merged value would hide a key that fell to the
+/// dataset level.
 ///
 /// **What "cleared" is measured against is the ITEM, not the baseline.**
 /// A key is cleared when the field is empty (or [`AUTO`]) and the item
 /// still holds a value for it — which is exactly "this keystroke emptied
 /// it", since [`column_fields`] seeds both `Text`s from the item's own
-/// merged presentation. Measuring against `desk` instead would report a
+/// merged presentation. Measuring against `below` instead would report a
 /// clear on every fold of a column neither the field nor the item has a
 /// value for: the `width` arm runs after the `label` arm, so a genuinely
 /// cleared label would be overwritten by a `width` nobody touched, and
@@ -1207,7 +1277,7 @@ fn negative_keys() -> Vec<String> {
 pub fn fold_into(
     item: &mut ListItem,
     fields: &[Field],
-    desk: &ColumnPresentation,
+    below: &ColumnPresentation,
 ) -> Option<&'static str> {
     let mut cleared = None;
     for field in fields {
@@ -1218,7 +1288,7 @@ pub fn fold_into(
                     if item.presentation.label.is_some() {
                         cleared = Some("label");
                     }
-                    desk.label.clone()
+                    below.label.clone()
                 } else {
                     Some(text.to_string())
                 };
@@ -1229,7 +1299,7 @@ pub fn fold_into(
                     if item.presentation.width.is_some() {
                         cleared = Some("width");
                     }
-                    item.presentation.width = desk.width;
+                    item.presentation.width = below.width;
                 } else if let Ok(width) = text.parse::<f32>() {
                     item.presentation.width = Some(width);
                 }
@@ -2368,6 +2438,81 @@ mod tests {
         // neither, so it simply has no entry — the own-dataset-first rule
         // is about which one is asked, not about inventing a default.
         assert!(!draft.dataset_layer.contains_key("book"));
+    }
+
+    /// §5.1, the promotion case: a column moved out of the available
+    /// catalogue by `space` carries the trader's DATASET-level
+    /// presentation with it, so the column stage it opens next seeds
+    /// from that layer and the writer sees no divergence.
+    ///
+    /// Seeded unset, the promoted item paints seven fields at the KIND
+    /// default while the stage's baseline — refreshed from the config —
+    /// holds the dataset's values: the first keystroke folds all seven
+    /// and the overlay gains a view-level `scale = "none"` contradicting
+    /// the trader's own dataset level. The two halves are separate
+    /// defects and both are asserted here: the catalogue's seed (the
+    /// item and the field), and the baseline's reach over a column the
+    /// view did not carry when the draft was built (the writer).
+    #[test]
+    fn a_promoted_columns_stage_seeds_from_the_dataset_level() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\ngrouping = [\"book\"]\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+                 [[tree.columns]]\nname = \"npv\"\nkind = \"measure\"\n",
+            ),
+            (
+                Layer::User,
+                "dataset_presentation",
+                "[risk.columns.delta01]\nscale = \"M\"\n",
+            ),
+        ]);
+        let mut draft = Domain::Views.draft(&config, "tree");
+        // `space` on `delta01`'s available row — the row the catalogue
+        // built, stepped the way a keystroke steps it. Rows: dataset,
+        // columns, `book`, `npv`, then the catalogue's one entry.
+        draft.selected = 4;
+        assert_eq!(cursor_item(&draft).as_deref(), Some("delta01"));
+        assert!(matches!(
+            draft.selected_row(),
+            Some(EditRow::Available { .. })
+        ));
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+
+        let item = draft
+            .list_items("columns")
+            .unwrap()
+            .iter()
+            .find(|i| i.name == "delta01")
+            .expect("promoted onto the view's own list")
+            .clone();
+        assert_eq!(
+            item.presentation.scale,
+            Some(Scale::Millions),
+            "the promotion carries the dataset level with it"
+        );
+        let fields = column_fields(&item, &[], Destination::Presentation);
+        let scale = fields.iter().find(|f| f.key == "scale").unwrap();
+        assert!(
+            matches!(&scale.kind, FieldKind::Choice { options, selected }
+                if options.get(*selected).map(String::as_str) == Some(scale_key(Scale::Millions))),
+            "the stage seeds Scale from the dataset level, not the kind default: {:?}",
+            scale.kind
+        );
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(
+            !text.contains("scale"),
+            "equal to the layer below: the promotion writes no override — {text}"
+        );
     }
 
     /// A bare `ListItem` of `kind`, for [`kind_default`]'s own test —

@@ -5551,6 +5551,16 @@ fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppConte
     cx.simulate_input("mine");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
+    // Flushed here so the clear below is asserted against a file that
+    // HAS a `label` to lose: `!written.contains("label")` over a
+    // `view_presentation.toml` that was never written passes for the
+    // wrong reason, and would pass just as happily if the clear had
+    // never worked.
+    flush_config_write(&mut cx);
+    let path = dir.path().join("view_presentation.toml");
+    let written = std::fs::read_to_string(&path).expect("the diverging label reached disk");
+    assert!(written.contains("label = \"mine\""), "{written}");
+
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
     cx.simulate_keystrokes("backspace backspace backspace backspace enter");
@@ -5573,8 +5583,8 @@ fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppConte
         "re-seeded from the dataset level"
     );
     flush_config_write(&mut cx);
-    let written =
-        std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap_or_default();
+    assert!(path.exists(), "the overlay file is still there to be read");
+    let written = std::fs::read_to_string(&path).unwrap();
     assert!(
         !written.contains("label"),
         "a cleared key is not written — {written}"
