@@ -7865,6 +7865,40 @@ run_mutation "load_views: an unknown colour name warns with its path" \
   geode-core \
   a_column_naming_an_unknown_colour_warns_with_its_path
 
+# 2c §4.2: a column set in both a legacy key and its own [view.columns.
+# <col>] table takes the TABLE's value — the table is read first, so the
+# legacy fold's own guard is what defends the conflict rule.
+run_mutation "overlay: the column table wins over a legacy key" \
+  crates/geode-core/src/view.rs \
+  '                            if entry.width.is_some() {' \
+  '                            if entry.width.is_none() {' \
+  geode-core \
+  the_legacy_hidden_and_width_keys_still_load_and_the_table_wins_a_conflict
+
+# 2c §4.4: apply's ColumnPresentation::merge_over copies only the keys
+# `other` (the overlay) actually SET — a field it left `None` keeps the
+# view's own value. Mutating the `scale` guard specifically (not
+# `precision`, which the same test also sets on the overlay side, so a
+# missing guard there is not observable) is what the test's "the desk's
+# key survives" assertion catches.
+run_mutation "overlay: apply merges Some keys only" \
+  crates/geode-core/src/view.rs \
+  '        if other.scale.is_some() {
+            self.scale = other.scale;
+        }' \
+  '        self.scale = other.scale;' \
+  geode-core \
+  apply_merges_a_column_table_over_the_view
+
+# 2c §4: the overlay's own [view.columns.<col>].colour gets the same
+# unknown-colour cross-check as the view's own format.colour (§3, above).
+run_mutation "load_views: an unknown colour in the overlay warns with its path" \
+  crates/geode-core/src/config/load.rs \
+  '                if colours.get(name).is_none() {' \
+  '                if false {' \
+  geode-core \
+  a_presentation_naming_an_unknown_colour_warns_with_its_path
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
