@@ -358,6 +358,15 @@ pub const READABLE_RATIO: f32 = 3.0;
 /// `READABLE_RATIO` against `background`, keeping hue and chroma (re-clipped
 /// to gamut). The smallest such move, found by bisection over `t` in
 /// `0..=1` (16 steps); `rgb` unchanged when it already clears.
+///
+/// When NO `t` in `0..=1` clears — `toward` and `background` on the same
+/// side of `rgb`'s lightness, or equal, so moving toward one never
+/// escapes the other — the bisection's `hi = 1.0` endpoint is returned
+/// **untested**: maximally moved, still unreadable. That is the deliberate
+/// fallback, not an oversight; no bundled theme reaches it
+/// (`every_bundled_theme_keeps_generated_hues_readable` asserts all 44 ×
+/// 24 pairs past the floor), so it is latent for a user-authored theme
+/// alone.
 pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
     if contrast_ratio(rgb, background) >= READABLE_RATIO {
         return rgb;

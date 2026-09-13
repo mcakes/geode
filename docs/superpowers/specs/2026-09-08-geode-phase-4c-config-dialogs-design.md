@@ -2986,3 +2986,9 @@ it paints a column's **header and values** and does not combine with
 `sign`, definitions travel to modules like views and resolve at the
 paint site, and the overlay carries one `[view.columns.<col>]` table per
 column.
+
+**Built 2026-09-13** and reconciled as that spec's `## 9. As built`,
+which is also where §19.2's width ended up (the column stage's `width`
+field). None of §19's own text went stale; what did change is inside the
+2c spec, by user ruling — a readability floor inside the resolver, which
+amended 2c §2.2's identity rule and 2c §7's theme check in place.

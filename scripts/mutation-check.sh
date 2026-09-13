@@ -8118,10 +8118,14 @@ run_mutation "blotter: an unknown colour name resolves to none" \
   geode-blotter \
   a_named_column_paints_its_resolved_colour
 
-# 2c §7: the theme check's own assertion survives by construction (real
-# bundled-theme failures already fail it before any mutation is applied —
-# see the Task 7 report), so the live entry guards the formula it reads
-# instead: `contrast_ratio` itself.
+# 2c §7: the formula the theme check reads. Weakening the check's own
+# `ratio >= 3.0` comparison is not observable — `contrast_ratio` sorts its
+# two luminances, so the ratio is always >= 1.0 and any looser bound is
+# unconditionally true — so this entry guards the arithmetic underneath it.
+# The theme-level behaviour is guarded separately, by the
+# `theme: bundled themes clear 3:1 through the resolver` entry below,
+# which disables the readability floor and so reintroduces the original
+# Task 7 finding for the bundled-theme test to catch.
 run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
   crates/geode-core/src/colour/mod.rs \
   '    (hi + 0.05) / (lo + 0.05)' \
