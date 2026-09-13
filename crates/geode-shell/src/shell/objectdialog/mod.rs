@@ -1190,6 +1190,20 @@ impl Draft {
     /// The row the cursor is on, if the cursor is in range — indexed
     /// through [`Draft::visible_rows`], so every verb acts on the row the
     /// trader is actually looking at, filtered or not (§18.3).
+    /// Can `i` open a value field on some row of this draft? A `Number`
+    /// row on any domain, or a `Text` row the domain marks editable
+    /// (`Domain::text_editable`). What the edit footer reads to decide
+    /// whether to advertise `i` at all: a chip for a verb that only
+    /// refuses would teach a trader a key that does nothing on this
+    /// object — the same rule that keeps `x` off every non-Views footer.
+    pub fn offers_text_entry(&self, domain: Domain) -> bool {
+        self.fields.iter().any(|field| match &field.kind {
+            FieldKind::Number { .. } => true,
+            FieldKind::Text(_) => domain.text_editable(&field.key),
+            _ => false,
+        })
+    }
+
     pub fn selected_row(&self) -> Option<EditRow> {
         let rows = self.rows();
         self.visible_rows()
@@ -4721,5 +4735,46 @@ mod tests {
             vec![(EditRow::Field(0), Severity::Error)],
             "the row's severity is the worse of the two, regardless of order"
         );
+    }
+
+    /// The edit footer advertises `i` only where a row can take it
+    /// (user request 2026-09-12: "i for edit text isn't discoverable"):
+    /// a `Number` on any domain, a `Text` only where the domain marks
+    /// the key editable — never on a domain whose `i` merely refuses.
+    #[test]
+    fn offers_text_entry_needs_a_number_or_an_editable_text_row() {
+        let text = |key: &str| Field {
+            key: key.to_string(),
+            label: key.to_string(),
+            kind: FieldKind::Text("2s".to_string()),
+            dest: Destination::Doc,
+            layer: None,
+        };
+        let number = Field {
+            key: "polls".to_string(),
+            label: "polls".to_string(),
+            kind: FieldKind::Number {
+                value: 3,
+                min: 1,
+                max: 100,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        };
+        let sources = Draft::new_object("live", vec![text("poll_interval")], toml::Table::new());
+        assert!(sources.offers_text_entry(Domain::Sources));
+        assert!(
+            !sources.offers_text_entry(Domain::Views),
+            "the same key is read-only on Views"
+        );
+        let views = Draft::new_object("tree", vec![text("dataset")], toml::Table::new());
+        assert!(!views.offers_text_entry(Domain::Views));
+        let with_number = Draft::new_object("x", vec![number], toml::Table::new());
+        assert!(
+            with_number.offers_text_entry(Domain::Views),
+            "a Number types anywhere"
+        );
+        let empty = Draft::new_object("x", Vec::new(), toml::Table::new());
+        assert!(!empty.offers_text_entry(Domain::Sources));
     }
 }

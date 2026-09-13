@@ -2961,8 +2961,11 @@ the browse row and the edit header, and the drift note under the header.
 Everything else in this section is verified against window-test
 assertions, unit tests, the harness, and the code directly.
 
-**Harness.** 655 entries once main was merged back in (main had gained
-five groupings-vocabulary entries meanwhile); this branch's own count was
+**Harness.** 656 entries: 655 once main was merged back in (main had gained
+five groupings-vocabulary entries meanwhile), plus one for the edit footer's
+`i` chip (user request 2026-09-12, "i for edit text isn't discoverable":
+`Draft::offers_text_entry` decides whether the footer advertises `i` —
+Sources today; never a domain where `i` only refuses); this branch's own count was
 650 (619 at the branch point, 25 added over the seven tasks, 6 more added by the final review's fix wave above, none
 removed, plus several pre-existing entries re-anchored where these
 tasks — and the fix wave — moved their source lines; `--anchors-only`

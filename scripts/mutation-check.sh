@@ -7811,6 +7811,18 @@ run_mutation "objectdialog: the fork's own entry wins over its stale twin" \
   geode-shell \
   the_forks_own_entry_wins_over_its_stale_twin
 
+# User request 2026-09-12 ("i for edit text isn't discoverable"): the edit
+# footer advertises `i` only where a row can take it. Treating every Text
+# as editable would put the chip on Views, where `i` only refuses — the
+# Views window test asserts the chip is absent, the Sources one that it
+# is present, and the pure test pins the per-domain rule.
+run_mutation "objectdialog: the footer offers i only for an editable text or a number" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            FieldKind::Text(_) => domain.text_editable(&field.key),' \
+  '            FieldKind::Text(_) => true,' \
+  geode-shell \
+  offers_text_entry_needs_a_number_or_an_editable_text_row
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

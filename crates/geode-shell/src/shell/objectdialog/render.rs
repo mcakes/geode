@@ -2832,6 +2832,15 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         key_chip(&ks, chip_fg, chip_bg)
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
+    // The one chip a test can find by name: `i` is the verb this footer
+    // shows or withholds per draft, so it carries a selector the way a
+    // row does.
+    let hint_i = |chip: AnyElement| {
+        div()
+            .debug_selector(|| "objectdialog-hint-i".to_string())
+            .child(chip)
+            .into_any_element()
+    };
     // The hint row states this stage's vocabulary and only this stage's —
     // the same rule the browse footer keeps.
     let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = if draft.confirm.is_some() {
@@ -2933,12 +2942,19 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // work — the same rule that keeps `n` off Groupings' browse
         // footer and `x` off every non-Views edit footer.
         if state.domain == Domain::Groupings {
-            action.push(chip("i"));
+            action.push(hint_i(chip("i")));
             action.push(sep("type a chain ·"));
             action.push(chip("1"));
             action.push(sep("–"));
             action.push(chip("9"));
             action.push(sep("jump to slot ·"));
+        } else if draft.offers_text_entry(state.domain) {
+            // §19.1's `i`, advertised only where a row can take it
+            // (`Draft::offers_text_entry`): Sources' durations, paths and
+            // polls today. Views, Scopes and Schema have no such row, and
+            // a chip there would name a key that only refuses.
+            action.push(hint_i(chip("i")));
+            action.push(sep("type a value ·"));
         }
         action.extend([
             chip("/"),

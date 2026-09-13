@@ -5109,3 +5109,27 @@ fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppConte
         "the file was written regardless"
     );
 }
+
+/// The edit footer names `i` where a row can take it (Sources has editable
+/// text and a number) and stays silent where `i` only refuses (Views).
+#[gpui::test]
+fn the_edit_footer_offers_i_only_where_a_row_can_take_it(cx: &mut gpui::TestAppContext) {
+    let (_shell, mut cx) = dialog_test_shell_with(cx, services_with_sources(), "config::sources");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "Sources' footer advertises i"
+    );
+}
+
+#[gpui::test]
+fn the_edit_footer_hides_i_where_it_would_only_refuse(cx: &mut gpui::TestAppContext) {
+    let (_shell, mut cx) = open_views_dialog(cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_none(),
+        "Views has no row i can open, so the footer must not teach it"
+    );
+}
