@@ -1027,3 +1027,130 @@ its own footer hint line; and that stage's value-field label (which reads
 `tree · Width`, the deferred minor above). Everything else in this
 section is verified against window-test assertions, unit tests, the
 harness and the code directly.
+
+### 9.12 Final review
+
+The whole-branch review of `2a28214..9cd103b` (19 commits including the
+merge of main, 33 files, +7,455 / −367) found **no Criticals, two
+Importants (I-1, I-2) and eight Minors (M-1..M-8)**, and confirmed the
+branch correct on every property it could reach: the overlay writer
+cannot fork a desk view or freeze a desk key, the column stage's
+projection cannot leak into the view's own write, the colour cache
+cannot paint under a stale theme or stale definitions, and the merge of
+main is clean (harness arithmetic exact at 709 + 688 − 656 = 741, no
+duplicate names, every anchor unique). Verdict: **ready to merge with
+fixes**. One fix wave followed, carrying **I-1, I-2, M-1, M-2, M-3, M-4,
+M-6 and M-8 as code and M-5, M-7 as doc sentences** — the whole set.
+
+**Rulings**
+
+- **I-1 is fixed with the 28-value `[Hsla; 28]` theme signature, not the
+  two-sentinel sketch §9.9 recorded.** Two sentinels (`background` +
+  `foreground`) miss an anchor move that leaves those two equal, and the
+  stale derived pair *is* the `ColourCache`'s own key, so it could never
+  notice: the memo would keep painting the old colour with nothing in
+  the system able to see it. The full signature is exact and barely
+  larger — 28 field reads and no arithmetic — so the steady path is 28
+  `Hsla` copies plus 28 `Hsla` compares and **zero** conversions, which
+  is the "one comparison a frame" §6.3 asked for.
+- **I-2: `d` and `r` are refused in the column stage, through the same
+  `not_a_column_verb` notice `x`/`shift+j`/`shift+k` already use.** The
+  crumb has narrowed the object to one column, and a destructive verb
+  must not answer about the whole view — `d` deletes the user-layer view
+  outright, `r` reverts the trader's personalisation of every column of
+  it. Leaving two destructive verbs live where three navigational ones
+  were explicitly refused is the asymmetry that reads as an oversight.
+  **Cost: a trader presses `escape` first.**
+- **The one fix wave carries I-1, I-2, M-1, M-2, M-3, M-4, M-6 and M-8
+  as code and M-5, M-7 as doc sentences.**
+
+**What each fix changed**
+
+- **I-1** — `shell::colours::theme_signature(&Theme) -> [Hsla; 28]` (12
+  anchors then 16 token colours, in each derivation's own field order,
+  with a doc saying a colour added to either must be added here too).
+  `BlotterDelegate` gained `theme_inputs: Option<([Hsla; 28], Anchors,
+  Tokens)>` and `ensure_theme_inputs`, and both paint sites now go
+  through one door, `themed_cell_colour(col_ix, theme)`. The read stays
+  lazy — the memo is `None` until a named cell paints, so a blotter
+  naming no colour still builds nothing. `ColourCache`, its key,
+  `set_colours` and `invalidate` are untouched. The column-name lookup
+  moved into a free `named_colour_of(plan, col_ix)` so both methods can
+  hold it while the cache takes its `&mut`.
+- **I-2** — one `in_column_stage` guard at the top of `arm_delete` and of
+  `arm_revert` (`objectdialog/render.rs`). Guarded *inside* the two
+  functions rather than at the dispatch arm where `x`'s guard sits,
+  because each has two callers — the keystroke and `press_verb`'s
+  action-bar click (§18.9 made the bar the mouse form of these letters)
+  — and a keyboard-only guard would leave the stage destructible with a
+  mouse, the Part 2b review Major again.
+- **M-1** — `Draft::enter_column` returns `false` when `self.column.
+  is_some()`, making re-entry unrepresentable rather than merely
+  unreached: the membership test passes *through* `field_by_key`'s
+  parent fallback, so a second entry would stash the seven installed
+  column fields as `parent_fields` and drop the view's own list forever.
+- **M-2** — `colours::to_table` keeps the `hue` item it removed and
+  writes it back verbatim whenever the field's value still equals
+  `source["hue"].round()`, so a hand-edited `hue = 210.5` survives a step
+  of `tone` or `token`. Stepping the hue itself still writes the field.
+- **M-3** — `view.rs`'s legacy `width` fold validates before inserting:
+  the conflict check became a lookup and the entry is created only on a
+  positive number, so one invalid width is one diagnostic instead of two
+  (its own, plus `apply`'s spurious "the view does not have that
+  column").
+- **M-4** — `ViewPresentation` gained `legacy_keys: BTreeMap<String,
+  &'static str>`, recording the spelling each entry was created under
+  when it was not `columns`, and `apply`'s column-not-in-view warning now
+  names that spelling (`'hidden' names column 'ghost'`, path
+  `view_presentation.<view>.hidden`; `'width'` with path
+  `…width.<col>`; `'columns'` by omission).
+- **M-6** — `enter_column_stage` reads the `colours` doc through
+  `apply::config_with_pending`, so the two doors into a stage agree about
+  what "the live config" means inside the 250 ms write debounce.
+- **M-8** — the browse list hoists `anchors_from_theme`/
+  `tokens_from_theme` out of the row loop beside the `NamedColours` it
+  already hoisted, and resolves each row through
+  `geode_core::colour::resolve`. `colours::resolve_named` is now the
+  single-colour door and its doc says so.
+- **M-5** — `Draft::fold_column`'s doc names its coupling: it calls
+  `views::desk_baseline`/`views::fold_into` by name where `enter_column`
+  deliberately takes the fields in, and a second domain gaining a column
+  stage must be handed the fold rather than inheriting Views'
+  desk-fallback semantics.
+- **M-7** — `views::presentation_table`'s doc states that this writer
+  fully owns the overlay's `[view.columns.*]` block: built from `items`
+  rather than from `draft.source`, so a hand-written key the vocabulary
+  does not model is dropped on the next save — matching the reader, and
+  the pre-2c behaviour of `order`/`hidden`/`width`.
+
+**Deferred minors closed.** §9.9's Task 6 entry — "`Anchors`/`Tokens` are
+derived per visible **cell** … marked likely-to-fix before merge" — is
+closed by I-1, and its sketched two-sentinel fix is superseded by the
+ruling above. Nothing else in §9.9 is closed by this wave; the Task 1
+`Definition::summary` fractional-hue truncation stays open as a
+*display* (M-2 fixed only the *write*).
+
+**Tests and harness.** Four new tests, one per code finding that has an
+observable behaviour: `the_theme_input_memo_re_derives_only_when_a_
+theme_colour_moves` (blotter, asserted through a deliberately poisoned
+memo, since a re-derivation under an unchanged theme produces an equal
+pair and an assertion on the value would pass either way),
+`delete_and_revert_are_refused_in_the_column_stage` (window test; the
+fixture flushes a real presentation override first, so `r` would arm
+absent the guard), `enter_column_refuses_re_entry_and_keeps_the_objects_
+own_list`, `a_fractional_hue_survives_a_save_that_did_not_step_it`,
+plus `an_invalid_legacy_width_on_an_unknown_column_is_one_diagnostic`
+(M-3) and `the_column_not_in_view_warning_names_the_spelling_it_was_
+read_under` (M-4). Four harness entries were added (one each for I-1,
+I-2, M-1, M-2) and two re-anchored where this wave moved their lines —
+`overlay: the column table wins over a legacy key` (M-3) and `colours:
+to_table omits the hue under a token` (M-2); every one reports `caught`.
+Two source lines were deliberately spelled apart from their twins to
+keep an existing anchor unique: `enter_column_stage`'s `pending` local
+against `enter_edit_stage`'s `folded`, and `themed_cell_colour`'s cache
+call against `cell_colour`'s. **745 entries**, `--anchors-only`: 0 stale,
+0 ambiguous.
+
+**Display checks.** §9.11's list is unchanged by this wave — none of
+these fixes moves a pixel except I-1, which paints the same colour by a
+cheaper route.
