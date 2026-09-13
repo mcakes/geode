@@ -1,6 +1,7 @@
 //! Ingestion: discovery, readiness, the load pipeline, and the priority
 //! ladder (spec §5).
 
+pub mod coalesce;
 pub mod load;
 pub mod plan;
 pub mod runner;
