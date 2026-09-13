@@ -8528,6 +8528,34 @@ run_mutation "distinct/document: a conjunct on an absent column is dropped, not 
                 continue;' \
   geode-data an_expression_the_document_dataset_lacks_a_column_for_is_dropped_not_an_error
 
+# document kind: a column the kind produces that the dataset does not
+# declare must be reported, not silently accepted.
+run_mutation "document kind: a column the kind produces is checked against the dataset" \
+  crates/geode-core/src/document.rs \
+  '        if !declared.iter().any(|c| &c.name == name) {' \
+  '        if false {' \
+  geode-core check_kind_against_accepts_a_matching_dataset_and_names_each_mismatch
+
+# ... and the mirror direction: a column the dataset declares that the
+# kind does not produce must be reported too.
+run_mutation "document kind: a column the dataset declares is checked against the kind" \
+  crates/geode-core/src/document.rs \
+  '        if !kind.columns().iter().any(|(name, _)| name == &spec.name) {' \
+  '        if false {' \
+  geode-core check_kind_against_accepts_a_matching_dataset_and_names_each_mismatch
+
+# ... and a same-named column whose type differs between kind and
+# dataset must be reported, not treated as a match.
+run_mutation "document kind: a same-named column's type is compared, not just its name" \
+  crates/geode-core/src/document.rs \
+  '        if let Some(spec) = declared.iter().find(|c| &c.name == name)
+            && *ty != spec.ty
+        {' \
+  '        if let Some(spec) = declared.iter().find(|c| &c.name == name)
+            && false
+        {' \
+  geode-core check_kind_against_accepts_a_matching_dataset_and_names_each_mismatch
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
