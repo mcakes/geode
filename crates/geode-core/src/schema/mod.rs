@@ -292,7 +292,8 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     }
 
     if ds.is_document() {
-        return validate_document(ds);
+        diags.extend(validate_document(ds));
+        return diags;
     }
 
     // Document vocabulary on a measure dataset (market-data spec §3.2):
@@ -1428,6 +1429,28 @@ role = "attribute"
         assert!(
             ds.column("index_ref").unwrap().textual,
             "textual is routable through the key"
+        );
+    }
+
+    #[test]
+    fn a_reserved_column_name_on_a_document_dataset_is_still_a_diagnostic() {
+        // The reserved-column check runs before the document-family
+        // dispatch and must not be lost when `validate_dataset` returns
+        // early into `validate_document` — a document dataset naming a
+        // storage-layer column hits the very DDL collision the check
+        // exists to warn about.
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.batch]\ntype = \"utf8\"\nrole = \"attribute\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("name is reserved by the storage layer")),
+            "{diags:?}"
+        );
+        assert!(
+            schema.dataset("cvi_params").is_some(),
+            "reserved-column is a warning, not a reason to drop the dataset"
         );
     }
 }

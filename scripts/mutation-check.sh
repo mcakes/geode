@@ -7603,6 +7603,18 @@ run_mutation "schema/document: a refused dataset is not pushed" \
   '            if false {' \
   geode-core a_document_dataset_declares_at_least_one_value
 
+# The document-family dispatch must fold the reserved-column diagnostics
+# pushed above it into the return, not discard them by returning
+# `validate_document(ds)` directly -- a document dataset naming a
+# storage-layer column (`batch`, `source_file_id`, ...) would otherwise
+# load with no warning and hit the exact DDL collision the check exists
+# to prevent (review round 1's Important finding).
+run_mutation "schema: the document dispatch keeps the reserved-column diagnostics" \
+  crates/geode-core/src/schema/mod.rs \
+  '        diags.extend(validate_document(ds));' \
+  '        return validate_document(ds);' \
+  geode-core a_reserved_column_name_on_a_document_dataset_is_still_a_diagnostic
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
