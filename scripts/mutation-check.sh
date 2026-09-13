@@ -3950,10 +3950,17 @@ run_mutation "objectdialog: closing the modal leaves the dialog's state behind" 
 # and a forked view is frozen: the desk adds a column next week and this
 # trader never sees it. Only a test asserting that `views.toml` was NOT
 # created can see it.
+#
+# Re-anchored in Task 4: `views::column_fields` builds `Presentation`
+# fields of its own, so the bare `dest:` line matches three times now —
+# the anchor carries the `columns` field's own `kind` line above it,
+# which is unique.
 run_mutation "objectdialog: a presentation field is written to the view's own doc" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '            dest: Destination::Presentation,' \
-  '            dest: Destination::Doc,' \
+  '            kind: FieldKind::OrderedList { items, available },
+            dest: Destination::Presentation,' \
+  '            kind: FieldKind::OrderedList { items, available },
+            dest: Destination::Doc,' \
   geode-shell \
   hiding_a_column_writes_presentation_and_does_not_fork_the_view
 
@@ -6770,7 +6777,7 @@ run_mutation "objectdialog: reorder skips hidden rows" \
 # not tell the two apart.
 run_mutation "objectdialog: set_query mirrors into the open draft only in the edit stage" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if matches!(self.stage, Stage::Edit { .. })
+  '        if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
             && let Some(draft) = self.draft.as_mut()' \
   '        if false
             && let Some(draft) = self.draft.as_mut()' \
@@ -7015,8 +7022,8 @@ run_mutation "dialogmode: listening overrides the mode for focus" \
 # stage paints (and, after Task 3, WRITES into the Input) the browse query.
 run_mutation "objectdialog: effective_query reads the edit stage's draft" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            (Stage::Edit { .. }, Some(draft)) => draft.query.as_str(),' \
-  '            (Stage::Edit { .. }, Some(_draft)) => self.query.as_str(),' \
+  '            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),' \
+  '            (Stage::Edit { .. } | Stage::Column { .. }, Some(_draft)) => self.query.as_str(),' \
   geode-shell \
   the_effective_query_is_the_stages_own
 
@@ -7921,11 +7928,24 @@ run_mutation "objectdialog: a wrapping number wraps" \
   geode-shell \
   a_number_steps_by_its_step_and_wraps_only_when_asked
 
-# 2c §4.3: the writer omits a key equal to the desk baseline.
+# 2c §4.3: the writer omits a key equal to the desk baseline. Re-anchored
+# in Task 4 (same guard, same semantics): the comparison now resolves both
+# sides through the kind default, which is what §4.3 calls the baseline.
 run_mutation "views: the overlay writer omits keys equal to the desk" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if item.presentation.precision != desk.precision {' \
-  '        if item.presentation.precision != desk.precision || true {' \
+  '        if effective.precision != desk_format.precision {' \
+  '        if effective.precision != desk_format.precision || true {' \
+  geode-shell \
+  the_writer_emits_only_keys_that_differ_from_the_desk
+
+# 2c §4.3: the baseline is the kind default WITH THE DESK'S OWN KEYS over
+# it — drop the desk half and every key the desk declares reads as a
+# personalisation and is copied into the trader's overlay, which is the
+# freeze the whole comparison exists to prevent.
+run_mutation "views: the writer's baseline carries the desk's own format keys" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        let desk_format = kind.clone().with(&desk);' \
+  '        let desk_format = kind.clone();' \
   geode-shell \
   the_writer_emits_only_keys_that_differ_from_the_desk
 
@@ -7951,6 +7971,30 @@ run_mutation "views: the member summary omits keys at the kind default" \
   '    if effective.precision != kind_default.precision || true {' \
   geode-shell \
   column_summary_names_only_the_keys_in_force
+
+# 2c §5.2: every changed value folds into the item BEFORE validation and commit.
+run_mutation "objectdialog: revalidate folds the column stage first" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if draft.column().is_some() {' \
+  '    if draft.column().is_none() {' \
+  geode-shell \
+  the_column_stage_writes_a_differing_key_to_the_overlay
+
+# 2c §5.5: a path naming ANOTHER column lands nowhere in this stage.
+run_mutation "objectdialog: row_for_path in the column stage is scoped to the open column" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            if resolved_name != column {' \
+  '            if false && resolved_name != column {' \
+  geode-shell \
+  row_for_path_in_the_column_stage_lands_on_the_format_key
+
+# 2c §5.2: enter on a non-member is refused.
+run_mutation "objectdialog: enter_column refuses a non-member" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if !is_member {' \
+  '        if false && !is_member {' \
+  geode-shell \
+  entering_a_column_swaps_the_fields_and_leaving_restores_them_with_the_fold
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

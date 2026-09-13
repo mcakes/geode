@@ -5152,3 +5152,94 @@ fn the_edit_footer_hides_i_where_it_would_only_refuse(cx: &mut gpui::TestAppCont
         "Views has no row i can open, so the footer must not teach it"
     );
 }
+
+// ---- Part 2c Task 4: the column stage (2c §5) -------------------------
+
+/// §5: enter on a member opens the column stage; a step there writes
+/// one [view.columns.<col>] key to the overlay and never forks the view;
+/// escape returns to the view's stage with the cursor on the column.
+#[gpui::test]
+fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // `tree` is a DESK view of `book` and `npv`, with the cursor landing
+    // on `book`; one `j` puts it on `npv`, whose name the overlay
+    // assertions below read.
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| objectdialog::render::crumb_text(s)),
+        "tree › npv"
+    );
+    assert!(cx.debug_bounds("objectdialog-field-scale").is_some());
+    cx.simulate_keystrokes("j j space"); // label, width, scale → k
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "presentation never forks"
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(
+        written.contains("[tree.columns.npv]") && written.contains("scale = \"k\""),
+        "{written}"
+    );
+    assert!(
+        !dir.path().join("views.toml").exists(),
+        "the desk's view is untouched"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        d.selected_row(),
+        Some(objectdialog::EditRow::Item { .. })
+    )));
+}
+
+/// §5.3: `width` is a typed value, not a stepped one — `i` opens it
+/// seeded with `auto`, a pixel count inside the range applies and reaches
+/// the overlay, and anything else is refused with the range named and the
+/// field still open on the trader's own text.
+#[gpui::test]
+fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter"); // npv's column stage
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j"); // label → width
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "auto",
+        "seeded with the width in force"
+    );
+
+    // A word is not a width: refused, named, and the field stays open so
+    // the typed text can be corrected rather than retyped.
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    cx.simulate_input("wide");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("20–2000"), "{notice}");
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    cx.simulate_input("160");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(written.contains("width = 160"), "{written}");
+}

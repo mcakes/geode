@@ -227,8 +227,9 @@ pub fn open(
 }
 
 /// The title-row crumb (§18.1): a count in browse and naming, the slot's
-/// chord in a Groupings edit, nothing otherwise. Pure so a test can read
-/// it without laying out a window.
+/// chord in a Groupings edit, the object and column in the column stage
+/// (Part 2c §5.2), nothing otherwise. Pure so a test can read it without
+/// laying out a window.
 pub(crate) fn crumb_text(shell: &ShellView) -> String {
     let Some(state) = shell.object_dialog.as_ref() else {
         return String::new();
@@ -236,6 +237,11 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
     match &state.stage {
         Stage::Edit { object } if state.domain == Domain::Groupings => format!("ctrl+{object}"),
         Stage::Edit { .. } => String::new(),
+        // The one crumb that is a PATH rather than a count or a chord:
+        // the edit header still paints the object's name alone, so
+        // without this the stage would say nothing about which column it
+        // is editing. Same arrow the blotter's own rollup path uses.
+        Stage::Column { object, column } => format!("{object} › {column}"),
         Stage::Browse | Stage::Naming => {
             let n = derive_rows(shell).len();
             format!("{n} {}", state.domain.crumb_noun())
@@ -256,7 +262,13 @@ fn handle_key(
     cx: &mut Context<ShellView>,
 ) -> bool {
     match shell.object_dialog.as_ref().map(|s| &s.stage) {
-        Some(Stage::Edit { .. }) => handle_edit_key(shell, ks, cx),
+        // The column stage shares the edit stage's whole key table (Part
+        // 2c §5.2): it is the same draft with different fields installed,
+        // so `space`, `i`, `/`, `d`/`r`/`o` and the escape ladder all mean
+        // what they already mean — the only key that behaves differently
+        // is `enter`, and it branches inside the `Commit` arm on what the
+        // cursor is on rather than on the stage.
+        Some(Stage::Edit { .. } | Stage::Column { .. }) => handle_edit_key(shell, ks, cx),
         Some(Stage::Naming) => handle_naming_key(shell, ks, cx),
         _ => handle_browse_key(shell, ks, cx),
     }
@@ -760,6 +772,102 @@ fn enter_edit_stage(
     cx.notify();
 }
 
+/// **The one door into the column stage** (Part 2c §5.2) — `enter` on a
+/// member row of a Views draft.
+///
+/// A pure mutation, like [`enter_edit_stage`]: the mode is set to
+/// `Normal` here and `dialog::sync_dialog_text` empties and blurs the
+/// shared `Input` on the handler's return (spec §16.1). The stage opens
+/// in normal mode whatever mode `enter` arrived in — the same reason
+/// `enter_edit` gives for its own explicit set: a stage left reading
+/// `Filter` sends the next `escape` down a rung this handler does not
+/// claim, and the shell closes the whole dialog instead of stepping back
+/// to the view.
+///
+/// The colour names come from the live `colours` doc, read at open time
+/// rather than carried on the draft: the doc can be reloaded while the
+/// dialog stands, and the `Choice` is built once per stage — a name added
+/// to `colours.toml` shows up the next time a column is opened, which is
+/// the same freshness every other choice list here has.
+///
+/// [`Draft::enter_column`] answers `false` for a name the view's list
+/// does not hold, and then nothing moves: no stage change, no cursor
+/// change, and the row keeps 2b's notice. That is the available-row case
+/// (the caller's own `EditRow::Item` guard already refuses it) and, more
+/// usefully, the case where a future caller aims at a stale name.
+fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
+    let colours: Vec<String> = shell
+        .services
+        .config
+        .doc("colours")
+        .map(|doc| {
+            geode_core::colour::NamedColours::from_doc(doc)
+                .0
+                .names()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let object = match &state.stage {
+        Stage::Edit { object } | Stage::Column { object, .. } => object.clone(),
+        _ => return,
+    };
+    let Some(draft) = state.draft.as_mut() else {
+        return;
+    };
+    let Some(item) = draft
+        .list_items("columns")
+        .and_then(|items| items.iter().find(|i| i.name == column))
+        .cloned()
+    else {
+        return;
+    };
+    let fields = views::column_fields(&item, &colours);
+    if !draft.enter_column(column, fields) {
+        return;
+    }
+    state.stage = Stage::Column {
+        object,
+        column: column.to_string(),
+    };
+    state.mode = DialogMode::Normal;
+    state.notice = None;
+    // The row list is now seven fields with the cursor on the first, so
+    // the viewport goes with it — `enter_edit_stage`'s own reset.
+    shell.object_dialog_scroll.scroll_to_item(0);
+    cx.notify();
+}
+
+/// `escape` out of the column stage (Part 2c §5.2): fold, restore the
+/// view's fields, and put the cursor back on the column's own row.
+///
+/// The mirror of [`enter_column_stage`], and the reason the escape
+/// ladder's `PreviousStage` rung branches rather than the stage machine
+/// growing a second ladder: from here "the previous stage" is the view's
+/// own edit stage, not the browse list.
+///
+/// No mode is set, for [`leave_edit`]'s reason: this rung is reachable
+/// only from normal mode with an empty query, so the keys are already on
+/// the shell root.
+fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let Stage::Column { object, .. } = state.stage.clone() else {
+        return;
+    };
+    if let Some(draft) = state.draft.as_mut() {
+        draft.leave_column();
+    }
+    state.stage = Stage::Edit { object };
+    state.notice = None;
+    scroll_to_cursor(shell);
+    cx.notify();
+}
+
 /// A bare `1`–`9` on the Groupings dialog (§18.8): open that slot's edit
 /// stage, from the browse list or from another slot's edit stage alike.
 /// The slot number IS the object's name (`groupings.rs`'s own doc), so
@@ -954,7 +1062,20 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 // fork the user has not confirmed was taken back off the
                 // draft when they declined it. Leaving abandons exactly
                 // nothing.
-                leave_edit(shell, cx);
+                //
+                // Part 2c §5.2: from the column stage this rung goes back
+                // one stage, not all the way out — to the view whose
+                // fields `leave_column_stage` restores, cursor on the
+                // column just edited.
+                let in_column = shell
+                    .object_dialog
+                    .as_ref()
+                    .is_some_and(|state| matches!(state.stage, Stage::Column { .. }));
+                if in_column {
+                    leave_column_stage(shell, cx);
+                } else {
+                    leave_edit(shell, cx);
+                }
                 return true;
             }
             // `LeaveFilter` is unreachable at this match — the
@@ -1114,7 +1235,42 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             shell.object_dialog_scroll.scroll_to_item(0);
         }
         NormalCommand::EditText => open_text_field(shell),
-        NormalCommand::Commit => edit_commit_notice(shell),
+        // Part 2c §5.2: `enter` on one of the view's OWN column rows
+        // opens that column's presentation. Gated on three things and no
+        // stage check: the domain (only Views has a column stage), that
+        // no column stage is open already (the stage has no item rows of
+        // its own, so this cannot fire twice — but reading it off the
+        // draft rather than the stage keeps the two from ever
+        // disagreeing), and that the cursor is on an `EditRow::Item` —
+        // never an `Available` one, which is a column the view does not
+        // have and so has no presentation to edit (§5.2 keeps 2b's notice
+        // there).
+        NormalCommand::Commit => {
+            let opens_column = shell.object_dialog.as_ref().is_some_and(|state| {
+                state.domain == Domain::Views
+                    && state.draft.as_ref().is_some_and(|draft| {
+                        draft.column().is_none()
+                            && matches!(draft.selected_row(), Some(EditRow::Item { .. }))
+                    })
+            });
+            if opens_column {
+                // An item row's label IS its column name
+                // (`Draft::row_label`), which is the identity every verb
+                // here and `Draft::enter_column`'s own membership check
+                // speak.
+                let name = shell
+                    .object_dialog
+                    .as_ref()
+                    .and_then(|state| state.draft.as_ref())
+                    .and_then(|draft| draft.selected_row().map(|row| draft.row_label(row)));
+                match name {
+                    Some(name) => enter_column_stage(shell, &name, cx),
+                    None => edit_commit_notice(shell),
+                }
+            } else {
+                edit_commit_notice(shell);
+            }
+        }
         // §18.8: from one slot's edit stage a digit jumps straight to
         // another's. On any other domain it is named like an unbound
         // letter would be — the edit stage's rule for a key that did
@@ -1510,7 +1666,16 @@ fn scroll_to_cursor(shell: &mut ShellView) {
     shell.object_dialog_scroll.scroll_to_item(selected);
 }
 
-/// Re-run [`Domain::validate`] over the draft as it now stands.
+/// Re-run [`Domain::validate`] over the draft as it now stands — and,
+/// first, fold the column stage's fields back onto the item they came
+/// from.
+///
+/// The fold lives here because this is the one function every changed
+/// value passes through on its way to [`commit_or_confirm`]: the step
+/// arms (`space`/`shift+space`), a committed text field, `x`, and the
+/// tick click all call it, and none of them knows or should know that a
+/// projection is open. A fold anywhere else would be a fold each of those
+/// call sites had to remember.
 fn revalidate(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
@@ -1519,6 +1684,11 @@ fn revalidate(shell: &mut ShellView) {
     let Some(draft) = state.draft.as_mut() else {
         return;
     };
+    // 2c §5.2: the column stage is a projection; fold it into the item
+    // FIRST so the validator and the overlay writer see this keystroke.
+    if draft.column().is_some() {
+        draft.fold_column();
+    }
     // Validated, then stored: `validate` needs the draft immutably and
     // the config from a sibling field, which is exactly the disjoint
     // borrow the compiler allows here and a `&mut self` method would not.
@@ -1547,7 +1717,7 @@ fn revalidate(shell: &mut ShellView) {
 /// nothing else about the keyboard.
 fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-        Some(Stage::Edit { object }) => object.clone(),
+        Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
         _ => String::new(),
     };
     if let Some(state) = shell.object_dialog.as_mut() {
@@ -1572,7 +1742,10 @@ fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 /// derivation rather than by a second guess made here.
 fn editing_row(shell: &ShellView) -> Option<ObjectRow> {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-        Some(Stage::Edit { object }) => object.clone(),
+        // The column stage's verbs act on the OBJECT, not the column
+        // (Part 2c §5.2): `d`, `r` and `o` are the view's, and the row
+        // they are gated by is the view's row.
+        Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
         _ => return None,
     };
     derive_rows(shell).into_iter().find(|row| row.name == name)
@@ -1606,7 +1779,9 @@ fn removal_edits(
     docs: &[&'static str],
 ) -> Result<Vec<(&'static str, String)>, String> {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-        Some(Stage::Edit { object }) => object.clone(),
+        // Same rule `editing_row` states: a removal armed from the column
+        // stage removes the OBJECT, which is what `d`/`r` mean there too.
+        Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
         _ => return Err("nothing is open".to_string()),
     };
     let touched: Vec<&'static str> = docs
@@ -1852,7 +2027,9 @@ fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<Shell
                     // both files reads "views and view_presentation" the
                     // way it always has.
                     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-                        Some(Stage::Edit { object }) => object.clone(),
+                        Some(Stage::Edit { object } | Stage::Column { object, .. }) => {
+                            object.clone()
+                        }
                         _ => String::new(),
                     };
                     let files: Vec<String> = docs
@@ -1988,7 +2165,10 @@ fn build(
     let Some(state) = shell.object_dialog.as_ref() else {
         return div().into_any_element();
     };
-    if matches!(state.stage, Stage::Edit { .. }) {
+    // The column stage paints the edit stage's own chrome (Part 2c §5.2)
+    // — header, filter row, row list, action bar — over the seven fields
+    // it installed; only the crumb tells them apart.
+    if matches!(state.stage, Stage::Edit { .. } | Stage::Column { .. }) {
         return build_edit(shell, entity, cx);
     }
     // The same one derivation path `handle_key` uses — a second spelling
@@ -2926,6 +3106,40 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 } else {
                     "clear the filter"
                 }),
+            ],
+        )
+    } else if draft.column().is_some() {
+        // Part 2c §5.2: the column stage's own vocabulary. No
+        // `shift+j`/`shift+k` and no `x` — there is no list here to
+        // reorder or demote from, and this footer's standing rule is to
+        // name only the keys that act on THESE rows. `i` is always live
+        // (`label` and `width` are both editable `Text`s), so it is
+        // stated unconditionally rather than through
+        // `offers_text_entry`, which would answer the same thing one
+        // indirection later. `escape` names the object it goes back to,
+        // since "back to the list" would be a lie about a rung that
+        // stops at the view.
+        let back = format!("back to {}", draft.name);
+        (
+            vec![
+                chip("j"),
+                chip("k"),
+                sep("move ·"),
+                chip("space"),
+                chip("shift+space"),
+                sep("change"),
+            ],
+            vec![
+                hint_i(chip("i")),
+                sep("type a value ·"),
+                chip("/"),
+                sep("filter ·"),
+                chip("escape"),
+                if draft.query.is_empty() {
+                    div().child(back).into_any_element()
+                } else {
+                    sep("clear the filter")
+                },
             ],
         )
     } else {
