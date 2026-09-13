@@ -27,6 +27,7 @@ pub use distinct::compile_distinct;
 pub mod as_of;
 
 pub use as_of::{AsOf, generation_predicate, resolve_generations};
+pub mod document;
 pub mod pool;
 
 pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId};

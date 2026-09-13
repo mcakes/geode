@@ -647,4 +647,127 @@ grain = "position"
             .unwrap();
         assert_eq!(bookless.resolved_gen, Some(2));
     }
+
+    const CVI: &str = r#"
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
+"#;
+
+    fn cvi() -> DatasetSpec {
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", CVI).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("cvi_params").unwrap().clone()
+    }
+
+    fn cvi_doc(key: &str, params: [f64; 6]) -> geode_core::document::DocumentRows {
+        use geode_core::document::{Column, DocumentRows, Value};
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        DocumentRows {
+            key: vec![key.into()],
+            attributes: vec![
+                ("anchor_date".into(), Value::Date(d("2026-09-12"))),
+                ("spot_ref".into(), Value::F64(7650.0)),
+            ],
+            axes: vec![
+                (
+                    "term".into(),
+                    Column::Date(vec![
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]),
+                ),
+                (
+                    "node".into(),
+                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
+                ),
+            ],
+            values: vec![("param".into(), Column::F64(params.to_vec()))],
+        }
+    }
+
+    /// Step 6: `partitions_for` already lists one partition per document
+    /// batch with `book: None` (it reads the `generations` summary the
+    /// same way for both families) — this pins that against two real
+    /// documents published through `publish_document`, splitting each
+    /// partition's `batch` back to the key that produced it
+    /// (`geode_core::document::split_key`, `join_key`'s exact inverse).
+    #[test]
+    fn a_document_datasets_partitions_split_back_to_their_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        let ds = cvi();
+        store.apply_schema(&ds).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &cvi_doc("SPX.Z", [1.; 6]),
+                source_time: ts("2026-09-12T14:00:00Z"),
+                received_at: ts("2026-09-12T14:00:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &cvi_doc("NDX.Z", [2.; 6]),
+                source_time: ts("2026-09-12T14:01:00Z"),
+                received_at: ts("2026-09-12T14:01:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let snap = build_catalog(store.writer(), &schema, &AsOf::Live).unwrap();
+        let ds_catalog = &snap.datasets[0];
+        let mut keys: Vec<Vec<String>> = ds_catalog
+            .partitions
+            .iter()
+            .map(|p| {
+                assert_eq!(p.book, None, "a document partition is always bookless");
+                assert_eq!(p.generations.len(), 1);
+                assert!(p.generations[0].live, "the only generation is live");
+                geode_core::document::split_key(&p.batch)
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![vec!["NDX.Z".to_string()], vec!["SPX.Z".to_string()],]
+        );
+    }
 }
