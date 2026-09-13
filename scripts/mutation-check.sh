@@ -8694,6 +8694,69 @@ run_mutation "sources/adapter: document:<field> must be date or utf8, not just a
   '                                        && true =>' \
   geode-core source_time_document_field_is_validated_against_the_schema
 
+# Task 6 (2026-09-13): Solace's `>` matches one or more trailing levels,
+# never zero — `marketdata/cvi/>` is not a subscription to the parent
+# topic `marketdata/cvi` itself. Satisfying a trailing `>` with an
+# exhausted topic is MQTT's `#`, a plausible thing to write and a silent
+# over-subscription: a source would start ingesting a topic the desk
+# never asked it for.
+run_mutation "adapter: > needs at least one level, never zero" \
+  crates/geode-data/src/adapter/topic.rs \
+  '            // no pattern left that could match here.
+            return false;' \
+  '            // no pattern left that could match here.
+            return pat == ">" && last;' \
+  geode-data topic_patterns_follow_solace_rules
+
+# `*` matches EXACTLY one level. Letting it return like `>` does makes it
+# swallow every remaining level, so `marketdata/*/SPX.Z` would also match
+# `marketdata/cvi/x/SPX.Z` — the wildcard would still "work" on every
+# positive case, which is why the negative assertion is the one that
+# defends it.
+run_mutation "adapter: * matches exactly one level" \
+  crates/geode-data/src/adapter/topic.rs \
+  '            "*" => true,' \
+  '            "*" => return true,' \
+  geode-data topic_patterns_follow_solace_rules
+
+# The dispatcher's topic check is the whole of a subscription's interest:
+# every registration is handed every message without it. Not merely
+# wasteful — each subscription parses what it receives against its own
+# dataset, so a repo source would be fed cvi bodies and report parse
+# failures for documents that were never addressed to it.
+run_mutation "adapter: a non-matching subscription is not fed the message" \
+  crates/geode-data/src/adapter/channel.rs \
+  '                    .filter(|r| {
+                        r.topics
+                            .iter()
+                            .any(|pattern| topic_matches(pattern, &message.topic))
+                    })' \
+  '                    .filter(|_| true)' \
+  geode-data a_published_message_reaches_every_matching_subscription_and_no_other
+
+# `ChannelSubscription::remove` is the one remover behind `unsubscribe`,
+# `subscribe`'s replacement and `Drop`. Retaining everything leaves a
+# shut-down subscriber's sink registered, so the dispatcher keeps cloning
+# messages into a queue nobody drains for the life of the process.
+run_mutation "adapter: unsubscribe removes the registration" \
+  crates/geode-data/src/adapter/channel.rs \
+  '            .unwrap()
+            .retain(|r| r.id != self.id);' \
+  '            .unwrap()
+            .retain(|_| true);' \
+  geode-data a_published_message_reaches_every_matching_subscription_and_no_other
+
+# An upload echoes on the target it was written to (spec §5.5). A fixed
+# topic is the plausible slip and a wrong-VALUE one: the upload still
+# succeeds and a subscriber on the parent space still sees traffic, but
+# the document arrives under a key it does not belong to.
+run_mutation "adapter: egress publishes on the target topic" \
+  crates/geode-data/src/adapter/channel.rs \
+  '        if self.feed.publish(target, bytes) {' \
+  '        if self.feed.publish("marketdata/upload", bytes) {' \
+  geode-data an_upload_echoes_on_the_target_topic
+
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
