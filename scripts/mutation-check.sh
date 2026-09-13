@@ -6082,7 +6082,7 @@ run_mutation "groupings: fields duplicates a chain column instead of deduping ag
   '        if false {
             continue;
         }' \
-  geode-shell fields_offers_every_pickable_column_chain_first_then_the_rest
+  geode-shell fields_offers_every_groupable_column_chain_first_then_the_rest
 
 run_mutation "groupings: to_table writes every list item, ticked or not" \
   crates/geode-shell/src/shell/objectdialog/groupings.rs \
