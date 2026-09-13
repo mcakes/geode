@@ -7,6 +7,7 @@
 
 pub mod catalog;
 pub mod ddl;
+pub mod document;
 pub mod publish;
 pub mod retention;
 
@@ -34,6 +35,13 @@ pub enum StoreError {
     /// panicked, so the pool can shut down the workers it already spawned
     /// instead of leaving them detached.
     SpawnWorker { source: std::io::Error },
+    /// A document was refused before it reached SQL at all: the message
+    /// disagreed with the dataset it claims to be (`DocumentRows::validate`,
+    /// market-data spec §6.2). A variant of its own rather than a `Sql`
+    /// with a fabricated statement, because there is no statement — and a
+    /// caller that wants to report "the feed sent something malformed"
+    /// separately from "the database refused a statement" can match on it.
+    Document(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -48,6 +56,7 @@ impl std::fmt::Display for StoreError {
             StoreError::SpawnWorker { source } => {
                 write!(f, "starting a query worker: {source}")
             }
+            StoreError::Document(reason) => write!(f, "document: {reason}"),
         }
     }
 }
