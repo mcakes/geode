@@ -1013,6 +1013,165 @@ impl ViewPresentationSpec {
     }
 }
 
+/// `dataset_presentation.toml`, user layer — one table per DATASET name,
+/// atomic at depth one like `view_presentation` (`config::merge::
+/// atomic_depth`), holding one `[<dataset>.columns.<col>]` table per
+/// personalised column: the seven presentation keys and nothing else.
+/// `hidden` and `order` belong to a view and are refused here with a
+/// warning naming `view_presentation.toml` (dataset-presentation spec
+/// §2.1). Merged into every view of that dataset BETWEEN the view's own
+/// `[[columns]]` keys and the trader's view overlay (§3.1), so the
+/// resolved order per key is kind default → desk view column →
+/// dataset-level → view-level.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DatasetPresentationSpec {
+    /// dataset → column → presentation
+    pub datasets: BTreeMap<String, BTreeMap<String, ColumnPresentation>>,
+}
+
+pub const DATASET_PRESENTATION_DOC: &str = "dataset_presentation";
+
+impl DatasetPresentationSpec {
+    pub fn from_doc(doc: &MergedDoc) -> (DatasetPresentationSpec, Vec<Diagnostic>) {
+        let mut spec = DatasetPresentationSpec::default();
+        let mut diags = Vec::new();
+        for (dataset, value) in &doc.value {
+            if dataset == "config_version" {
+                continue;
+            }
+            let at = |suffix: &str| {
+                if suffix.is_empty() {
+                    format!("{DATASET_PRESENTATION_DOC}.{dataset}")
+                } else {
+                    format!("{DATASET_PRESENTATION_DOC}.{dataset}.{suffix}")
+                }
+            };
+            let bad = |suffix: &str, m: String| Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: format!("dataset presentation '{dataset}': {m}"),
+                path: Some(at(suffix)),
+            };
+            let Some(table) = value.as_table() else {
+                diags.push(bad("", "not a table".into()));
+                continue;
+            };
+            let mut columns = BTreeMap::new();
+            for (key, v) in table {
+                match key.as_str() {
+                    "columns" => {
+                        let Some(cols) = v.as_table() else {
+                            diags.push(bad(
+                                "columns",
+                                "'columns' must be a table of column tables".into(),
+                            ));
+                            continue;
+                        };
+                        for (col, cv) in cols {
+                            let Some(ct) = cv.as_table() else {
+                                diags.push(bad(
+                                    &format!("columns.{col}"),
+                                    format!("column '{col}': not a table"),
+                                ));
+                                continue;
+                            };
+                            let mut cp = ColumnPresentation::default();
+                            let col_diags = RefCell::new(Vec::new());
+                            let warn = |k: &str, m: String| {
+                                col_diags.borrow_mut().push(bad(
+                                    &format!("columns.{col}.{k}"),
+                                    format!("column '{col}': {m}"),
+                                ));
+                            };
+                            cp.parse_format_keys(ct, &warn);
+                            // `read_hidden: false`: the dataset overlay
+                            // never carries membership.
+                            cp.parse_column_keys(ct, false, &warn);
+                            if ct.contains_key("hidden") {
+                                warn(
+                                    "hidden",
+                                    "'hidden' belongs to a view — set it in view_presentation.toml"
+                                        .into(),
+                                );
+                            }
+                            diags.extend(col_diags.into_inner());
+                            columns.insert(col.clone(), cp);
+                        }
+                    }
+                    "order" => diags.push(bad(
+                        "order",
+                        "'order' belongs to a view — set it in view_presentation.toml".into(),
+                    )),
+                    other => diags.push(bad(other, format!("unknown key '{other}' — ignored"))),
+                }
+            }
+            spec.datasets.insert(dataset.clone(), columns);
+        }
+        (spec, diags)
+    }
+
+    /// The dataset whose schema declares `column` for this view: the
+    /// view's own dataset first, then each join's dataset in file order
+    /// — the order the compiler resolves names in (§3.2). `None` for a
+    /// column no dataset of the view declares (a derived column).
+    pub fn owner_of<'a>(view: &'a ViewSpec, column: &str, schema: &SchemaSpec) -> Option<&'a str> {
+        std::iter::once(view.dataset.as_str())
+            .chain(view.joins.iter().map(|j| j.dataset.as_str()))
+            .find(|ds| {
+                schema
+                    .dataset(ds)
+                    .is_some_and(|d| d.column(column).is_some())
+            })
+    }
+
+    /// Merge each dataset's column tables over the matching column of
+    /// every view that carries it (§3.1). Called by `load_views` AFTER
+    /// `ViewSpec::from_doc` (the desk's own keys are already in
+    /// `presentation`) and BEFORE `ViewPresentationSpec::apply` (the
+    /// view overlay must win). A dataset no schema declares, or a column
+    /// its dataset lacks, warns with its path and is skipped (§2.3).
+    pub fn apply(&self, views: &mut [ViewSpec], schema: &SchemaSpec) -> Vec<Diagnostic> {
+        let mut diags = Vec::new();
+        let warn = |path: String, m: String| Diagnostic {
+            severity: Severity::Warning,
+            layer: None,
+            file: None,
+            message: m,
+            path: Some(path),
+        };
+        for (dataset, columns) in &self.datasets {
+            let Some(spec) = schema.dataset(dataset) else {
+                diags.push(warn(
+                    format!("{DATASET_PRESENTATION_DOC}.{dataset}"),
+                    format!("dataset presentation '{dataset}': names dataset '{dataset}', which no schema declares — ignored"),
+                ));
+                continue;
+            };
+            for (col, cp) in columns {
+                if spec.column(col).is_none() {
+                    diags.push(warn(
+                        format!("{DATASET_PRESENTATION_DOC}.{dataset}.columns.{col}"),
+                        format!("dataset presentation '{dataset}': names column '{col}', which dataset '{dataset}' does not have — ignored"),
+                    ));
+                    continue;
+                }
+                for view in views.iter_mut() {
+                    let owned_here = view.columns.iter().any(|c| c.name() == col)
+                        && Self::owner_of(view, col, schema) == Some(dataset.as_str());
+                    if owned_here {
+                        view.presentation
+                            .entry(col.clone())
+                            .or_default()
+                            .merge_over(cp);
+                    }
+                }
+            }
+        }
+        diags
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1724,5 +1883,214 @@ npv = 120
             Some("view_presentation.tree.order"),
             "{diags:?}"
         );
+    }
+
+    fn dataset_doc(text: &str) -> crate::config::MergedDoc {
+        merge_docs(
+            "dataset_presentation",
+            &[LayerDoc::builtin("dataset_presentation", text).unwrap()],
+        )
+    }
+
+    #[test]
+    fn dataset_presentation_reads_one_table_per_column_with_paths() {
+        let (spec, diags) = DatasetPresentationSpec::from_doc(&dataset_doc(
+            "[risk.columns.delta01]\nlabel = \"Δ\"\nwidth = 90\nscale = \"k\"\nprecision = 0\n\
+             thousands = true\nnegative = \"parens\"\ncolour = \"delta\"\n\
+             [risk.columns.npv]\nwidth = \"wide\"\n",
+        ));
+        let delta = &spec.datasets["risk"]["delta01"];
+        assert_eq!(delta.label.as_deref(), Some("Δ"));
+        assert_eq!(delta.width, Some(90.0));
+        assert_eq!(delta.scale, Some(Scale::Thousands));
+        assert_eq!(delta.precision, Some(0));
+        assert_eq!(delta.thousands, Some(true));
+        assert_eq!(delta.negative, Some(Negative::Parens));
+        assert_eq!(delta.colour, Some(Colour::Named("delta".into())));
+        assert_eq!(
+            delta.hidden, None,
+            "the dataset overlay never carries hidden"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("dataset_presentation.risk.columns.npv.width")
+        );
+        assert!(
+            spec.datasets["risk"].contains_key("npv"),
+            "a bad key skips the key, not the column"
+        );
+    }
+
+    #[test]
+    fn dataset_presentation_refuses_hidden_and_order_naming_the_view_overlay() {
+        let (spec, diags) = DatasetPresentationSpec::from_doc(&dataset_doc(
+            "[risk]\norder = [\"npv\"]\n[risk.columns.delta01]\nhidden = true\nscale = \"k\"\n",
+        ));
+        assert_eq!(
+            spec.datasets["risk"]["delta01"].scale,
+            Some(Scale::Thousands)
+        );
+        assert_eq!(spec.datasets["risk"]["delta01"].hidden, None);
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(diags.len(), 2, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.contains("view_presentation.toml")),
+            "{messages:?}"
+        );
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("dataset_presentation.risk.order")
+        );
+        assert_eq!(
+            diags[1].path.as_deref(),
+            Some("dataset_presentation.risk.columns.delta01.hidden")
+        );
+    }
+
+    #[test]
+    fn dataset_presentation_skips_a_non_table_dataset_and_column() {
+        let (spec, diags) = DatasetPresentationSpec::from_doc(&dataset_doc(
+            "config_version = 1\nrisk = 3\n[vol.columns]\nstrike = \"no\"\n[vol.columns.spot]\nwidth = 80\n",
+        ));
+        assert!(!spec.datasets.contains_key("risk"));
+        assert_eq!(spec.datasets["vol"]["spot"].width, Some(80.0));
+        assert!(!spec.datasets["vol"].contains_key("strike"));
+        let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "dataset_presentation.risk",
+                "dataset_presentation.vol.columns.strike"
+            ]
+        );
+    }
+
+    fn schema_with(text: &str) -> SchemaSpec {
+        SchemaSpec::from_doc(&merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", text).unwrap()],
+        ))
+        .0
+    }
+
+    const RISK_SCHEMA: &str = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+        [risk.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+        [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n";
+
+    #[test]
+    fn dataset_level_beats_the_desk_view_and_loses_to_the_view_level() {
+        let schema = schema_with(RISK_SCHEMA);
+        let (mut views, _) = ViewSpec::from_doc(&doc(
+            "[tree]\ndataset = \"risk\"\ngrouping = [\"book\"]\n\
+             [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+             [[tree.columns]]\nname = \"delta01\"\nkind = \"measure\"\nlabel = \"desk\"\nwidth = 50\n\
+             format = { scale = \"m\", precision = 2 }\n",
+        ));
+        let (dataset, d) = DatasetPresentationSpec::from_doc(&dataset_doc(
+            "[risk.columns.delta01]\nlabel = \"dataset\"\nscale = \"k\"\ncolour = \"delta\"\n",
+        ));
+        assert!(d.is_empty(), "{d:?}");
+        assert!(dataset.apply(&mut views, &schema).is_empty());
+        let p = views[0].presentation_of("delta01");
+        assert_eq!(
+            p.label.as_deref(),
+            Some("dataset"),
+            "dataset beats the desk view"
+        );
+        assert_eq!(p.scale, Some(Scale::Thousands));
+        assert_eq!(p.colour, Some(Colour::Named("delta".into())));
+        assert_eq!(p.width, Some(50.0), "an unset dataset key keeps the desk's");
+        assert_eq!(p.precision, Some(2));
+
+        let view_doc = merge_docs(
+            "view_presentation",
+            &[LayerDoc::builtin(
+                "view_presentation",
+                "[tree.columns.delta01]\nlabel = \"view\"\nscale = \"none\"\n",
+            )
+            .unwrap()],
+        );
+        let (view_overlay, _) = ViewPresentationSpec::from_doc(&view_doc);
+        assert!(view_overlay.apply(&mut views).is_empty());
+        let p = views[0].presentation_of("delta01");
+        assert_eq!(
+            p.label.as_deref(),
+            Some("view"),
+            "the view level beats the dataset level"
+        );
+        assert_eq!(p.scale, Some(Scale::None));
+        assert_eq!(
+            p.colour,
+            Some(Colour::Named("delta".into())),
+            "an unset view key keeps the dataset's"
+        );
+    }
+
+    #[test]
+    fn a_joined_column_takes_its_own_datasets_entry_and_the_view_dataset_wins_a_tie() {
+        let schema = schema_with(
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [risk.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+             [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+             [ref.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+             [ref.columns.spot]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+             [ref.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n",
+        );
+        let (mut views, _) =
+            ViewSpec::from_doc(&doc("[j]\ndataset = \"risk\"\ngrouping = [\"book\"]\n\
+             [[j.joins]]\ndataset = \"ref\"\non = [\"instrument_ref\"]\n\
+             [[j.columns]]\nname = \"npv\"\nkind = \"measure\"\n\
+             [[j.columns]]\nname = \"spot\"\nkind = \"measure\"\n\
+             [[j.columns]]\nname = \"vega\"\nkind = \"derived\"\nsql = \"npv * 2\"\n"));
+        assert_eq!(
+            DatasetPresentationSpec::owner_of(&views[0], "spot", &schema),
+            Some("ref")
+        );
+        assert_eq!(
+            DatasetPresentationSpec::owner_of(&views[0], "npv", &schema),
+            Some("risk")
+        );
+        assert_eq!(
+            DatasetPresentationSpec::owner_of(&views[0], "vega", &schema),
+            None
+        );
+        let (dataset, _) = DatasetPresentationSpec::from_doc(&dataset_doc(
+            "[ref.columns.spot]\nwidth = 70\n[ref.columns.npv]\nwidth = 99\n[risk.columns.npv]\nwidth = 42\n",
+        ));
+        assert!(dataset.apply(&mut views, &schema).is_empty());
+        assert_eq!(
+            views[0].presentation_of("spot").width,
+            Some(70.0),
+            "a joined column takes the join's entry"
+        );
+        assert_eq!(
+            views[0].presentation_of("npv").width,
+            Some(42.0),
+            "the view's own dataset wins a tie"
+        );
+    }
+
+    #[test]
+    fn an_unknown_dataset_or_column_warns_with_its_path_and_is_skipped() {
+        let schema = schema_with(RISK_SCHEMA);
+        let (mut views, _) = ViewSpec::from_doc(&doc(
+            "[tree]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[tree.columns]]\nname = \"delta01\"\nkind = \"measure\"\n",
+        ));
+        let (dataset, _) = DatasetPresentationSpec::from_doc(&dataset_doc(
+            "[ghost.columns.x]\nwidth = 1\n[risk.columns.nope]\nwidth = 2\n[risk.columns.delta01]\nwidth = 3\n",
+        ));
+        let diags = dataset.apply(&mut views, &schema);
+        let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "dataset_presentation.ghost",
+                "dataset_presentation.risk.columns.nope"
+            ]
+        );
+        assert_eq!(views[0].presentation_of("delta01").width, Some(3.0));
     }
 }

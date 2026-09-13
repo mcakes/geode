@@ -19,8 +19,17 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         // table per view name, and a later layer's table for a view
         // replaces the earlier one whole rather than half-merging one
         // trader's column order into another's (spec §5.6).
-        "views" | "view_presentation" | "layouts" | "groupings" | "scopes" | "datasets"
-        | "sources" | "dimensions" => Some(1),
+        // dataset_presentation (dataset-presentation spec §2.1): one table
+        // per dataset name, like view_presentation.
+        "views"
+        | "view_presentation"
+        | "dataset_presentation"
+        | "layouts"
+        | "groupings"
+        | "scopes"
+        | "datasets"
+        | "sources"
+        | "dimensions" => Some(1),
         // colours (Part 2c §2.1): one named colour per table
         "colours" => Some(1),
         // `overrides` (4c §19.6): one entry per forked object, keyed

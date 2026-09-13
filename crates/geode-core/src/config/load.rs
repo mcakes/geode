@@ -1,5 +1,6 @@
 use super::{CONFIG_VERSION, Config, Diagnostic, Layer, LayerDoc, Severity};
-use crate::view::{Colour, ViewPresentationSpec, ViewSpec};
+use crate::schema::SchemaSpec;
+use crate::view::{Colour, DatasetPresentationSpec, ViewPresentationSpec, ViewSpec};
 use std::path::Path;
 
 /// Read every `*.toml` file in `root` (non-recursive, sorted by path).
@@ -107,6 +108,25 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     };
     let (mut views, mut diags) = ViewSpec::from_doc(views_doc);
 
+    // The dataset-level overlay merges BETWEEN the desk's own keys
+    // (already in `presentation` from `from_doc`) and the view overlay
+    // below, so the resolved order per key is kind default → desk view
+    // column → dataset-level → view-level (dataset-presentation spec §3.1).
+    let schema = config
+        .doc("datasets")
+        .map(|d| SchemaSpec::from_doc(d).0)
+        .unwrap_or_default();
+    let dataset_overlay = config
+        .doc(crate::view::DATASET_PRESENTATION_DOC)
+        .map(|doc| {
+            let (spec, d) = DatasetPresentationSpec::from_doc(doc);
+            diags.extend(d);
+            spec
+        });
+    if let Some(overlay) = &dataset_overlay {
+        diags.extend(overlay.apply(&mut views, &schema));
+    }
+
     let colours = config
         .doc("colours")
         .map(|d| crate::colour::NamedColours::from_doc(d).0)
@@ -134,6 +154,30 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     if let Some(doc) = config.doc("view_presentation") {
         let (presentation, d) = ViewPresentationSpec::from_doc(doc);
         diags.extend(d);
+
+        if let Some(overlay) = &dataset_overlay {
+            for (dataset, columns) in &overlay.datasets {
+                for (col, cp) in columns {
+                    let Some(Colour::Named(name)) = &cp.colour else {
+                        continue;
+                    };
+                    if colours.get(name).is_none() {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            layer: None,
+                            file: None,
+                            message: format!(
+                                "dataset presentation '{dataset}': column '{col}' names colour '{name}', which colours.toml does not define — painted in foreground"
+                            ),
+                            path: Some(format!(
+                                "dataset_presentation.{dataset}.columns.{col}.colour"
+                            )),
+                        });
+                    }
+                }
+            }
+        }
+
         for (view_name, p) in &presentation.views {
             for (col, cp) in &p.columns {
                 let Some(Colour::Named(name)) = &cp.colour else {
@@ -333,6 +377,59 @@ mod tests {
                 == Some("view_presentation.tree.columns.npv.colour")
                 && d.message.contains("ghost")),
             "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn load_views_merges_the_dataset_overlay_under_the_view_overlay_and_reports_its_colours() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "views",
+                    "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n[[v.columns]]\nname = \"npv\"\nkind = \"measure\"\nwidth = 50\n[w]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[w.columns]]\nname = \"npv\"\nkind = \"measure\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "dataset_presentation",
+                    "[risk.columns.npv]\nwidth = 140\ncolour = \"nope\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("view_presentation", "[v.columns.npv]\nwidth = 200\n").unwrap(),
+                LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let (views, diags) = load_views(&config);
+        let v = views.iter().find(|v| v.name == "v").unwrap();
+        let w = views.iter().find(|v| v.name == "w").unwrap();
+        assert_eq!(
+            v.presentation_of("npv").width,
+            Some(200.0),
+            "view overlay wins in v"
+        );
+        assert_eq!(
+            w.presentation_of("npv").width,
+            Some(140.0),
+            "dataset level reaches w"
+        );
+        assert_eq!(
+            w.presentation_of("npv").colour,
+            Some(Colour::Named("nope".into())),
+            "an unknown colour still merges; it is warned about, not dropped"
+        );
+        let colour_warning = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("dataset_presentation.risk.columns.npv.colour"))
+            .expect("the dataset overlay's colour is cross-checked");
+        assert!(
+            colour_warning.message.contains("nope"),
+            "{}",
+            colour_warning.message
         );
     }
 }
