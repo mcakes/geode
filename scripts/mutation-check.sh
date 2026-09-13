@@ -8941,6 +8941,37 @@ run_mutation "reload: a dataset_presentation change fires ConfigReloaded" \
   geode-shell \
   a_dataset_presentation_change_fires_config_reloaded
 
+# dataset-presentation spec §4.2: Schema is writable in its column stage
+# alone — every other stage keeps the read-only notice.
+run_mutation "objectdialog: Schema's column stage is its one writable surface" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. })' \
+  '        !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. } | Stage::Edit { .. })' \
+  geode-shell \
+  schema_is_writable_in_the_column_stage_alone
+
+# §5.3: a field the trader has stepped reads `view` on the same frame,
+# before its write lands — otherwise the chip lies for 250 ms.
+run_mutation "objectdialog: a diverged field's provenance is the view level" \
+  crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
+  '            if differs_from(&below, &kind) || set_in(&ctx.layers.view) {' \
+  '            if set_in(&ctx.layers.view) {' \
+  geode-shell \
+  a_stepped_field_reads_view_before_its_write_lands
+
+# §5.2: the fold names the layer a cleared key fell to — dataset before
+# desk, since the dataset level sits above the desk view.
+run_mutation "objectdialog: a cleared view key falls to the dataset level before the desk" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                if set(&ctx.layers.dataset) {
+                    Some(FellTo::Dataset)
+                } else if set(&ctx.layers.desk) {' \
+  '                if set(&ctx.layers.desk) {
+                    Some(FellTo::Desk)
+                } else if set(&ctx.layers.dataset) {' \
+  geode-shell \
+  a_cleared_view_key_falls_to_the_dataset_level_before_the_desk
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
