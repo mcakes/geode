@@ -1192,10 +1192,10 @@ The fix builds the plan from the incoming view on every delivery and
 replaces the installed one whenever the fresh plan differs
 (`ColumnPlan: PartialEq`, every field the paint reads); an unchanged
 redelivery still moves nothing. `apply_snapshot` answers whether it
-replaced the plan, and `BlotterTile::apply` calls
-`TableState::refresh_header_layout` on `true`, because the pinned
-gpui-component caches `column()`'s width in `col_groups` (the
-`on_ui_settings` gotcha). Pinned by
+replaced the plan (the test reads it); the tile needs no extra step,
+because its existing `TableState::refresh` on every delivery re-prepares
+the column groups from `column()` — the review's one Minor removed a
+redundant `refresh_header_layout` the first cut had added. Pinned by
 `a_presentation_change_rebuilds_the_plan_on_a_same_column_snapshot`
 (label, width, colour, then hidden, all on the same snapshot) and the
 harness entry `delegate: a presentation edit rebuilds the plan on a
