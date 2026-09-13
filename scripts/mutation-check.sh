@@ -5480,12 +5480,24 @@ run_mutation "crash file: write_crash_file never prunes old crash-*.log files" \
 
 run_mutation "service: an ingest failure is keyed by the source name, not the dataset" \
   crates/geode-data/src/service.rs \
-  '                            Some((worst, detail)) => sink(DataEvent::Health {
+  '                        &batch,
+                        Health::Failed {
+                            reason: reason.clone(),
+                        },
+                        format!("{batch}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => sink(DataEvent::Health {
                                 source: source.clone(),
                                 worst,
                                 detail,
                             }),' \
-  '                            Some((worst, detail)) => sink(DataEvent::Health {
+  '                        &batch,
+                        Health::Failed {
+                            reason: reason.clone(),
+                        },
+                        format!("{batch}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => sink(DataEvent::Health {
                                 source: dataset.clone(),
                                 worst,
                                 detail,
@@ -8927,6 +8939,62 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
         )
         .map_err(|e| e.to_string()));' \
   geode-data a_panicking_publish_is_contained_and_reported
+
+# ---- Task 9: subscribed sources (the receiver pipeline and the wiring) ----
+
+run_mutation "subscribe: a source naming an adapter this build lacks is skipped SILENTLY" \
+  crates/geode-data/src/service.rs \
+  "            let Some(adapter) = config.adapters.get(&spec.adapter) else {
+                report_unservable(format!(\"adapter '{}' is not in this build\", spec.adapter));
+                continue;
+            };" \
+  '            let Some(adapter) = config.adapters.get(&spec.adapter) else {
+                continue;
+            };' \
+  geode-data a_source_naming_an_adapter_this_build_lacks_is_reported_and_skipped
+
+run_mutation "subscribe: the kind/dataset column check (spec 6.4) runs and its verdict is dropped" \
+  crates/geode-data/src/service.rs \
+  '            if let Err(e) = check_kind_against(kind.as_ref(), dataset) {
+                report_unservable(e);
+                continue;
+            }' \
+  '            let _ = check_kind_against(kind.as_ref(), dataset);' \
+  geode-data a_kind_that_disagrees_with_its_dataset_is_reported_and_skipped
+
+run_mutation "subscribe: a parse failure is reported on the DISCOVERY lane, not the load lane" \
+  crates/geode-data/src/service.rs \
+  '                    health_tracker.report_load_and_emit(
+                        &source,
+                        batch,' \
+  '                    health_tracker.report_discovery_and_emit(
+                        &source,' \
+  geode-data a_lost_connection_is_discovery_health_and_a_parse_failure_outlives_a_reconnect
+
+run_mutation "subscribe: ConnectionState::Connected maps to Pending rather than Ok" \
+  crates/geode-data/src/service.rs \
+  '                        ConnectionState::Connected => (Health::Ok, String::new()),' \
+  '                        ConnectionState::Connected => (Health::Pending, String::new()),' \
+  geode-data a_lost_connection_is_discovery_health_and_a_parse_failure_outlives_a_reconnect
+
+run_mutation "subscribe: source_time_of's Receive policy stamps a fixed instant, not the arrival" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        SourceTime::Receive => return Ok(received),' \
+  '        SourceTime::Receive => {
+            return Ok(DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc));
+        }' \
+  geode-data the_receive_policy_stamps_the_moment_the_message_arrived
+
+run_mutation "subscribe: the coalescer is bypassed -- every message submits its own document" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if let Some((_key, released)) = coalescer.offer(Instant::now(), key, pending) {
+            self.submit(released);
+        }' \
+  '        self.submit(pending);
+        let _ = (coalescer, key);' \
+  geode-data two_messages_for_one_key_inside_the_window_publish_once_with_the_latest
 
 
 if [[ -n "$changed_ref" ]]; then
