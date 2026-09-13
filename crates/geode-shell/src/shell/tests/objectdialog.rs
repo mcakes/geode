@@ -4842,10 +4842,17 @@ fn the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay(
     // only the overlay — a `dest`-blind `to_table` would have rendered
     // the whole `datasets` object into it, and a stage that forgot its
     // destination would have forked the schema into the user layer.
-    assert!(
-        !dir.path().join("datasets.toml").exists(),
-        "the schema's own doc was never written"
-    );
+    for other in [
+        "datasets.toml",
+        "views.toml",
+        "view_presentation.toml",
+        "overrides.toml",
+    ] {
+        assert!(
+            !dir.path().join(other).exists(),
+            "{other} was written by a dataset-overlay edit"
+        );
+    }
     assert!(
         !written.contains("role") && !written.contains("utf8"),
         "and the overlay holds no schema keys: {written}"
