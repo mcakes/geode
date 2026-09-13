@@ -256,15 +256,19 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
 
 /// The document family's one table (market-data spec §4.1):
 /// `DatasetSpec::document_columns` in that order — key, axes, values,
-/// then grainless attributes — followed by the same four storage columns
-/// every grain table carries.
+/// then grainless attributes — followed by the storage columns every
+/// grain table carries, `book` included.
 ///
 /// The storage columns mean exactly what they mean for a grain table:
 /// `batch` is what a republish replaces on, `source_file_id` is
 /// provenance only, and `gen_id`/`source_time` ride on live as well as
 /// archive so archived rows keep the identity they had while live (see
 /// `create_table_sql` for the full argument — live still holds one
-/// generation per partition, so no query filters on `gen_id`).
+/// generation per partition, so no query filters on `gen_id`). `book` is
+/// the one a grain table gets from its grain key and this one declares
+/// itself: a document's book is *empty*, which is a NULL in a column that
+/// exists rather than a missing column, and every partition-keyed
+/// statement in `store` joins on it.
 ///
 /// An attribute repeats down every row of its document rather than
 /// living in a table of its own: a document is published, replaced and
@@ -276,7 +280,19 @@ pub fn create_document_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
         .iter()
         .map(|c| format!("  \"{}\" {}", c.name, c.ty.sql()))
         .collect();
+    // Partition key completion, same four columns and the same meanings as
+    // a grain table's (`create_table_sql`) -- plus `book`, which the
+    // document family gets *here* because no grain key supplies it. A
+    // document's book is empty (market-data spec §4.1), and empty means a
+    // NULL value in a column that exists, not an absent column: every
+    // partition-keyed statement in this module joins on `book`
+    // (retention's eviction, `generations_reconcile_sql`,
+    // `rebuild_generations`' union, `publish_file`'s own
+    // `partition_predicate` with its `book is null` term), so a table
+    // without the column could not be published into, swept, reconciled
+    // or summarised at all.
     cols.push("  \"batch\" VARCHAR".to_string());
+    cols.push("  \"book\" VARCHAR".to_string());
     cols.push("  \"source_file_id\" BIGINT".to_string());
     cols.push("  \"gen_id\" BIGINT".to_string());
     cols.push("  \"source_time\" TIMESTAMP WITH TIME ZONE".to_string());
@@ -353,10 +369,10 @@ fn generations_union_sql(tables: &[String]) -> String {
 ///
 /// Inside one transaction: delete every row currently recorded for
 /// `dataset`, then reinsert one row per generation found across `tables`
-/// (ordinarily `history_of(dataset, ds)` -- every grain's archive and
-/// live table, so a partition missing from one grain's history is not
-/// silently dropped from the rebuilt summary either). Returns how many
-/// rows the summary now holds for the dataset.
+/// (ordinarily `history_of(dataset, ds)` -- every pair's archive and live
+/// table, so a partition missing from one pair's history is not silently
+/// dropped from the rebuilt summary either). Returns how many rows the
+/// summary now holds for the dataset.
 pub fn rebuild_generations(
     conn: &Connection,
     dataset: &str,
@@ -798,6 +814,10 @@ mod tests {
             "\"anchor_date\" DATE",
             "\"spot_ref\" DOUBLE",
             "\"batch\" VARCHAR",
+            // A document's book is empty, not absent: the column exists
+            // and Task 7 writes NULL into it, because every
+            // partition-keyed statement in `store` joins on `book`.
+            "\"book\" VARCHAR",
             "\"source_file_id\" BIGINT",
             "\"gen_id\" BIGINT",
             "\"source_time\" TIMESTAMP WITH TIME ZONE",

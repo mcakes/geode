@@ -1198,19 +1198,18 @@ impl DataService {
     /// only generation in live, and as-of to any instant since then reads
     /// it (`Era::relation`), so the bound starts at the oldest generation
     /// anywhere rather than at the oldest one that has been superseded.
+    ///
+    /// The table list is `ddl::history_of`, the one place a dataset's
+    /// tables are named, so both families are covered: built from
+    /// `ds.grains()` here instead, a document dataset (which declares no
+    /// grain) scanned nothing and reported `None` — no bound, so no time
+    /// travel — however much history it held.
     pub fn as_of_bounds(&self, dataset: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
         let Some(ds) = self.config.schema.dataset(dataset) else {
             return Ok(None);
         };
         let mut oldest: Option<DateTime<Utc>> = None;
-        let tables = ds.grains().into_iter().flat_map(|grain| {
-            [
-                crate::store::ddl::TableKind::Archive,
-                crate::store::ddl::TableKind::Live,
-            ]
-            .map(|kind| crate::store::ddl::table_name(dataset, grain, kind))
-        });
-        for table in tables {
+        for table in crate::store::ddl::history_of(&ds.name, ds) {
             let sql = format!("select min(source_time) from {table}");
             let found: Option<DateTime<Utc>> = self
                 .conn

@@ -7694,6 +7694,20 @@ run_mutation "blotter: NotApplicable paints the same marker as SemiJoined" \
             };' \
   geode-blotter not_applicable_paints_the_same_marker_as_semi_joined
 
+# ---- TablePair: the two dataset families' table sets (market-data §4.1)
+
+# `table_pairs` is the one place a dataset's tables are named, and the
+# family test is the whole of it. Sent down the grain path, a document
+# dataset yields NO pairs at all (it declares no grain), so `apply_schema`
+# would create no table, `history_of` would name none, and the sweep's
+# reconciliation would delete every summary row for the dataset -- each of
+# them silently, since an empty table list is valid SQL everywhere here.
+run_mutation "tablepair: table_pairs sends a document dataset down the grain path" \
+  crates/geode-data/src/store/ddl.rs \
+  '    if ds.is_document() {' \
+  '    if false {' \
+  geode-data a_document_dataset_has_one_pair_named_document_and_no_grain_pairs
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
