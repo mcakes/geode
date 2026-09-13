@@ -888,6 +888,20 @@ mod tests {
         gate: Arc<(Mutex<bool>, Condvar)>,
     }
 
+    /// How long [`GateKind`] will hold the receiver before parsing anyway.
+    ///
+    /// A CAP, not a delay: the test opens the gate within a millisecond or
+    /// two of the queue filling, and this exists so that a test whose own
+    /// assertion FAILS still ends. A panicking test never reaches its
+    /// `opened.notify_all()`, the `Harness` then drops its
+    /// `SubscriptionWorker`, and `shutdown` JOINS — a thread parked in
+    /// `parse` for ever turns "this test fails" into "the process hangs",
+    /// which in the mutation harness is a run that never finishes and
+    /// never reports. The first version of this fixture parked without a
+    /// cap and wedged a filtered run for twenty minutes; five seconds is
+    /// three orders of magnitude more than the queue needs to fill.
+    const GATE_CAP: Duration = Duration::from_secs(5);
+
     impl DocumentKind for GateKind {
         fn name(&self) -> &'static str {
             self.inner.name()
@@ -900,8 +914,13 @@ mod tests {
         fn parse(&self, bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
             let (lock, opened) = &*self.gate;
             let mut open = lock.lock().unwrap();
+            let deadline = Instant::now() + GATE_CAP;
             while !*open {
-                open = opened.wait(open).unwrap();
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                let (guard, _) = opened.wait_timeout(open, left).unwrap();
+                open = guard;
             }
             drop(open);
             self.inner.parse(bytes)
@@ -940,7 +959,8 @@ mod tests {
             h.worker.refused() > 0
         });
         // Let the thread out of `parse` before joining it: `shutdown`
-        // joins, and a receiver still waiting on this gate never returns.
+        // joins, and a receiver still waiting on this gate would hold the
+        // join for as long as `GATE_CAP` allows.
         {
             let (lock, opened) = &*gate;
             *lock.lock().unwrap() = true;
