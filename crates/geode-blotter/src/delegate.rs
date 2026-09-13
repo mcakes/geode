@@ -725,7 +725,7 @@ impl TableDelegate for BlotterDelegate {
             .plan
             .as_ref()
             .and_then(|p| p.columns.get(col_ix))
-            .map(|c| c.format.colour);
+            .map(|c| c.format.colour.clone());
         let mut el = div()
             .size_full()
             .flex()

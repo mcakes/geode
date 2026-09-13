@@ -57,12 +57,18 @@ pub enum Negative {
     Parens,
 }
 
-/// Whether a number's sign colours the cell (`chart_bullish` /
-/// `chart_bearish` in the theme).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a cell's text is coloured. `Sign` paints by sign with
+/// `chart_bullish`/`chart_bearish`; a name is a named colour (Part 2c
+/// §3), painting the header and every additive value. Not `Copy` — a
+/// name carries a `String`, so `ColumnFormat` (which embeds this) loses
+/// `Copy` too; callers that used to copy a `ColumnFormat` around now
+/// clone it or take it by value from a fresh source (a `const`, or an
+/// owned local).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Colour {
     None,
     Sign,
+    Named(String),
 }
 
 /// Divide before display: `k` by a thousand, `M` by a million.
@@ -93,8 +99,9 @@ impl Scale {
     }
 }
 
-/// A resolved format: every field decided (Phase 3 §6.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A resolved format: every field decided (Phase 3 §6.2). Not `Copy` —
+/// `Colour` carries a `String` for a named colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnFormat {
     pub precision: u8,
     pub thousands: bool,
@@ -127,7 +134,7 @@ impl ColumnFormat {
             precision: p.precision.unwrap_or(self.precision),
             thousands: p.thousands.unwrap_or(self.thousands),
             negative: p.negative.unwrap_or(self.negative),
-            colour: p.colour.unwrap_or(self.colour),
+            colour: p.colour.clone().unwrap_or(self.colour),
             scale: p.scale.unwrap_or(self.scale),
         }
     }
@@ -500,17 +507,26 @@ impl ViewSpec {
                                         format!("'negative' must be \"minus\" or \"parens\" (got {other:?})"),
                                     )),
                                 }
-                                let colour = f.get("colour").or_else(|| f.get("color"));
-                                match colour.and_then(|v| v.as_str()) {
-                                    None if colour.is_none() => {}
-                                    Some("none") => p.colour = Some(Colour::None),
-                                    Some("sign") => p.colour = Some(Colour::Sign),
-                                    other => diags.push(warn(
-                                        "format.colour",
-                                        format!(
-                                            "'colour' must be \"none\" or \"sign\" (got {other:?})"
-                                        ),
-                                    )),
+                                // "none" and "sign" are the two built-in
+                                // spellings; anything else is a name into
+                                // `colours.toml` — the reader takes it on
+                                // faith and `load_views`'s cross-check
+                                // (§3) warns if the name is not defined
+                                // there, since this doc alone (no access
+                                // to the `colours` doc) cannot tell.
+                                match f.get("colour").or_else(|| f.get("color")) {
+                                    None => {}
+                                    Some(v) => match v.as_str() {
+                                        Some("none") => p.colour = Some(Colour::None),
+                                        Some("sign") => p.colour = Some(Colour::Sign),
+                                        Some(name) => {
+                                            p.colour = Some(Colour::Named(name.to_string()))
+                                        }
+                                        None => diags.push(warn(
+                                            "format.colour",
+                                            format!("'colour' must be a string (got {v})"),
+                                        )),
+                                    },
                                 }
                                 match f.get("scale").and_then(|v| v.as_str()) {
                                     None if f.get("scale").is_none() => {}
@@ -1188,7 +1204,7 @@ dataset = "risk_snapshot"
 grouping = ["lhu"]
 [[tree.columns]]
 name = "npv"
-format = { precision = 40, negative = "red", colour = "loud", thousands = "yes", scale = "bn" }
+format = { precision = 40, negative = "red", colour = 42, thousands = "yes", scale = "bn" }
 width = -5
 "#));
         let p = views[0].presentation_of("npv");
@@ -1209,6 +1225,26 @@ format = { color = "none" }
 "#));
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(views[0].presentation_of("npv").colour, Some(Colour::None));
+    }
+
+    #[test]
+    fn a_column_colour_may_name_a_named_colour() {
+        let doc = merge_docs(
+            "views",
+            &[
+                LayerDoc::builtin(
+                    "views",
+                    "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { colour = \"delta\" }\n",
+                )
+                .unwrap(),
+            ],
+        );
+        let (views, diags) = ViewSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            views[0].presentation_of("npv").colour,
+            Some(Colour::Named("delta".to_string()))
+        );
     }
     /// Presentation lives in its own doc, so its merged form must be
     /// built under its own name — `atomic_depth` keys off the doc name,

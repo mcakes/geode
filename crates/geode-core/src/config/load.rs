@@ -1,9 +1,6 @@
-use super::{CONFIG_VERSION, Config, Diagnostic, Layer, LayerDoc};
-use crate::view::{ViewPresentationSpec, ViewSpec};
+use super::{CONFIG_VERSION, Config, Diagnostic, Layer, LayerDoc, Severity};
+use crate::view::{Colour, ViewPresentationSpec, ViewSpec};
 use std::path::Path;
-
-#[cfg(test)]
-use super::Severity;
 
 /// Read every `*.toml` file in `root` (non-recursive, sorted by path).
 /// A missing directory is not an error — a layer may simply be absent.
@@ -92,11 +89,44 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
 /// Diagnostics are the readers' own plus the merge's mismatch warnings.
 /// A missing `views` doc is an empty list, not an error: callers that
 /// need to distinguish "no views configured" ask `Config::doc` first.
+///
+/// Cross-checks a column's named colour (Part 2c §3) against the
+/// `colours` doc right here, between the two reads above: the index in
+/// the diagnostic's path must be the FILE's own column order, which is
+/// what `views` still is at this point — the overlay's `apply` below
+/// reorders, hides and resizes but is not consulted for `colour` yet
+/// (the overlay has no `colour` key of its own until Task 2 adds one;
+/// that check lands beside this one, once it does).
 pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     let Some(views_doc) = config.doc("views") else {
         return (Vec::new(), Vec::new());
     };
     let (mut views, mut diags) = ViewSpec::from_doc(views_doc);
+
+    let colours = config
+        .doc("colours")
+        .map(|d| crate::colour::NamedColours::from_doc(d).0)
+        .unwrap_or_default();
+    for view in &views {
+        for (i, column) in view.columns.iter().enumerate() {
+            if let Some(Colour::Named(name)) = &view.presentation_of(column.name()).colour
+                && colours.get(name).is_none()
+            {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: format!(
+                        "view '{}': column '{}' names colour '{name}', which colours.toml does not define — painted in foreground",
+                        view.name,
+                        column.name()
+                    ),
+                    path: Some(format!("views.{}.columns.{i}.format.colour", view.name)),
+                });
+            }
+        }
+    }
+
     if let Some(doc) = config.doc("view_presentation") {
         let (presentation, d) = ViewPresentationSpec::from_doc(doc);
         diags.extend(d);
@@ -219,6 +249,34 @@ mod tests {
             config.explain("views", "tree"),
             Some(Layer::Desk),
             "presentation is a separate doc: it must not fork the view's own layer"
+        );
+    }
+
+    #[test]
+    fn a_column_naming_an_unknown_colour_warns_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "views.toml",
+            "config_version = 1\n[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"d\"\nformat = { colour = \"ghost\" }\n",
+        );
+        write(
+            dir.path(),
+            "colours.toml",
+            "config_version = 1\n[delta]\nhue = 240\n",
+        );
+        let config = Config::load(&ConfigSources {
+            builtin: vec![],
+            desk: Some(dir.path().to_path_buf()),
+            user: None,
+        });
+        let (_views, diags) = load_views(&config);
+        assert!(
+            diags.iter().any(
+                |d| d.path.as_deref() == Some("views.tree.columns.1.format.colour")
+                    && d.message.contains("ghost")
+            ),
+            "{diags:?}"
         );
     }
 }

@@ -7823,6 +7823,48 @@ run_mutation "objectdialog: the footer offers i only for an editable text or a n
   geode-shell \
   offers_text_entry_needs_a_number_or_an_editable_text_row
 
+# 2c §2.1: a colour with both hue and token is dropped, not merged.
+run_mutation "colour: both hue and token is refused" \
+  crates/geode-core/src/colour/mod.rs \
+  '                    refuse_both(&mut diags, &at, name);
+                    continue;' \
+  '                    let _ = &at;
+                    Definition::Token(Token::Danger)' \
+  geode-core \
+  reads_hue_tone_and_token_and_refuses_both_or_neither
+
+# 2c §2.2: an anchor hue is the theme's colour itself, never re-derived.
+run_mutation "colour: an anchor hue returns the anchor untouched" \
+  crates/geode-core/src/colour/mod.rs \
+  '    if t <= 0.0 {' \
+  '    if false && t <= 0.0 {' \
+  geode-core \
+  an_anchor_hue_is_the_themes_own_colour_exactly
+
+# 2c §2.2: hue interpolates along the SHORTER arc.
+run_mutation "colour: hue takes the shorter arc" \
+  crates/geode-core/src/colour/mod.rs \
+  '    let dh = (b.h - a.h + PI).rem_euclid(TAU) - PI; // the shorter arc' \
+  '    let dh = b.h - a.h;' \
+  geode-core \
+  a_hue_between_anchors_interpolates_along_the_shorter_arc
+
+# 2c §2.2: gamut overflow pulls chroma, never clamps channels.
+run_mutation "colour: gamut clip pulls chroma" \
+  crates/geode-core/src/colour/oklab.rs \
+  '    if in_gamut(direct) {' \
+  '    if true {' \
+  geode-core \
+  gamut_clip_pulls_chroma_and_keeps_lightness_and_hue
+
+# 2c §3: an unknown named colour warns with the column's file index.
+run_mutation "load_views: an unknown colour name warns with its path" \
+  crates/geode-core/src/config/load.rs \
+  '                && colours.get(name).is_none()' \
+  '                && false' \
+  geode-core \
+  a_column_naming_an_unknown_colour_warns_with_its_path
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
