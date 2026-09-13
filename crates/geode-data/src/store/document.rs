@@ -300,91 +300,15 @@ mod tests {
     use super::*;
     use crate::query::as_of::resolve_generations;
     use crate::store::catalog::Catalog;
-    use crate::store::ddl::{assert_generations_match_tables, table_pairs};
+    use crate::store::ddl::{
+        assert_generations_match_tables, table_pairs,
+        tests_support::{cvi_dataset, cvi_doc, ts},
+    };
     use crate::store::retention::{RetentionPolicy, sweep};
-    use chrono::{DateTime, NaiveDate, Utc};
-    use geode_core::config::{LayerDoc, merge_docs};
-    use geode_core::document::{Column, DocumentRows, Value};
-    use geode_core::schema::{DatasetSpec, SchemaSpec};
-
-    /// The Task 1 fixture, verbatim from `geode_core::document`'s own tests
-    /// (a `#[cfg(test)]` item in another crate is not importable).
-    const CVI: &str = r#"
-[cvi_params]
-family = "document"
-key = ["underlying_ref"]
-axes = ["term", "node"]
-[cvi_params.columns.underlying_ref]
-type = "utf8"
-role = "dimension"
-[cvi_params.columns.term]
-type = "date"
-role = "axis"
-[cvi_params.columns.node]
-type = "f64"
-role = "axis"
-[cvi_params.columns.param]
-type = "f64"
-role = "value"
-[cvi_params.columns.anchor_date]
-type = "date"
-role = "attribute"
-[cvi_params.columns.spot_ref]
-type = "f64"
-role = "attribute"
-"#;
-
-    fn cvi() -> DatasetSpec {
-        dataset_from(CVI)
-    }
-
-    fn dataset_from(text: &str) -> DatasetSpec {
-        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
-        let (schema, diags) = SchemaSpec::from_doc(&doc);
-        assert!(diags.is_empty(), "{diags:?}");
-        schema.dataset("cvi_params").unwrap().clone()
-    }
-
-    fn ts(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-    }
-
-    fn d(s: &str) -> NaiveDate {
-        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
-    }
-
-    /// Two terms x three nodes, term-major — the same shape Task 4's tests
-    /// validate, with the six `param` values the caller chooses.
-    fn doc(key: &str, params: [f64; 6]) -> DocumentRows {
-        DocumentRows {
-            key: vec![key.into()],
-            attributes: vec![
-                ("anchor_date".into(), Value::Date(d("2026-09-12"))),
-                ("spot_ref".into(), Value::F64(7650.0)),
-            ],
-            axes: vec![
-                (
-                    "term".into(),
-                    Column::Date(vec![
-                        d("2026-09-18"),
-                        d("2026-09-18"),
-                        d("2026-09-18"),
-                        d("2026-10-16"),
-                        d("2026-10-16"),
-                        d("2026-10-16"),
-                    ]),
-                ),
-                (
-                    "node".into(),
-                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
-                ),
-            ],
-            values: vec![("param".into(), Column::F64(params.to_vec()))],
-        }
-    }
+    use geode_core::schema::DatasetSpec;
 
     fn fixture() -> (tempfile::TempDir, Store, DatasetSpec) {
-        let (dir, store, ds) = fixture_for(cvi());
+        let (dir, store, ds) = fixture_for(cvi_dataset());
         (dir, store, ds)
     }
 
@@ -436,7 +360,7 @@ role = "attribute"
         let out = publish(
             &store,
             &ds,
-            &doc("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+            &cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.]),
             "2026-09-12T14:00:00Z",
         );
         assert_eq!(out.batch, "SPX.Z");
@@ -475,8 +399,18 @@ role = "attribute"
     #[test]
     fn a_republish_replaces_live_and_archives_the_previous_generation() {
         let (_d, store, ds) = fixture();
-        let first = publish(&store, &ds, &doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z");
-        let second = publish(&store, &ds, &doc("SPX.Z", [2.; 6]), "2026-09-12T14:05:00Z");
+        let first = publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [1.; 6]),
+            "2026-09-12T14:00:00Z",
+        );
+        let second = publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [2.; 6]),
+            "2026-09-12T14:05:00Z",
+        );
         assert_eq!(live_params(&store, "SPX.Z"), vec![2.; 6]);
         let archived: i64 = store
             .writer()
@@ -493,9 +427,24 @@ role = "attribute"
     #[test]
     fn two_keys_are_two_partitions_that_do_not_disturb_each_other() {
         let (_d, store, ds) = fixture();
-        publish(&store, &ds, &doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z");
-        publish(&store, &ds, &doc("NDX.Z", [9.; 6]), "2026-09-12T14:01:00Z");
-        publish(&store, &ds, &doc("SPX.Z", [2.; 6]), "2026-09-12T14:02:00Z");
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [1.; 6]),
+            "2026-09-12T14:00:00Z",
+        );
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("NDX.Z", [9.; 6]),
+            "2026-09-12T14:01:00Z",
+        );
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [2.; 6]),
+            "2026-09-12T14:02:00Z",
+        );
         assert_eq!(live_params(&store, "SPX.Z"), vec![2.; 6]);
         assert_eq!(live_params(&store, "NDX.Z"), vec![9.; 6]);
     }
@@ -503,8 +452,18 @@ role = "attribute"
     #[test]
     fn an_older_document_is_archived_only_and_live_is_untouched() {
         let (_d, store, ds) = fixture();
-        publish(&store, &ds, &doc("SPX.Z", [5.; 6]), "2026-09-12T14:05:00Z");
-        let out = publish(&store, &ds, &doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z");
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [5.; 6]),
+            "2026-09-12T14:05:00Z",
+        );
+        let out = publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [1.; 6]),
+            "2026-09-12T14:00:00Z",
+        );
         assert!(matches!(out.outcome, PublishOutcome::ArchivedOnly { .. }));
         assert_eq!(live_params(&store, "SPX.Z"), vec![5.; 6]);
         // Provenance says the generation happened and never went live, so
@@ -523,8 +482,18 @@ role = "attribute"
     #[test]
     fn as_of_resolves_the_generation_live_at_that_instant() {
         let (_d, store, ds) = fixture();
-        let first = publish(&store, &ds, &doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z");
-        publish(&store, &ds, &doc("SPX.Z", [2.; 6]), "2026-09-12T14:05:00Z");
+        let first = publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [1.; 6]),
+            "2026-09-12T14:00:00Z",
+        );
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [2.; 6]),
+            "2026-09-12T14:05:00Z",
+        );
         let resolved =
             resolve_generations(store.writer(), "cvi_params", ts("2026-09-12T14:02:00Z")).unwrap();
         assert_eq!(resolved.len(), 1);
@@ -539,7 +508,7 @@ role = "attribute"
             publish(
                 &store,
                 &ds,
-                &doc("SPX.Z", [i as f64; 6]),
+                &cvi_doc("SPX.Z", [i as f64; 6]),
                 &format!("2026-09-12T{at}:00Z"),
             );
         }
@@ -595,7 +564,7 @@ role = "attribute"
         // `received_at` deliberately later than `source_time`: a document's
         // receive time is what stands in for a file's mtime, and recording
         // the source time there instead would pass every other test here.
-        let rows_in = doc("SPX.Z", [1.; 6]);
+        let rows_in = cvi_doc("SPX.Z", [1.; 6]);
         let out = publish_document(
             &store,
             &DocumentPublishRequest {
@@ -642,8 +611,18 @@ role = "attribute"
     #[test]
     fn the_key_dimension_enum_is_refreshed_after_publish() {
         let (_d, store, ds) = fixture();
-        publish(&store, &ds, &doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z");
-        publish(&store, &ds, &doc("NDX.Z", [1.; 6]), "2026-09-12T14:00:00Z");
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [1.; 6]),
+            "2026-09-12T14:00:00Z",
+        );
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("NDX.Z", [1.; 6]),
+            "2026-09-12T14:00:00Z",
+        );
         let n: i64 = store
             .writer()
             .query_row(
@@ -659,7 +638,7 @@ role = "attribute"
     #[test]
     fn an_invalid_document_is_refused_before_anything_is_written() {
         let (_d, store, ds) = fixture();
-        let mut bad = doc("SPX.Z", [1.; 6]);
+        let mut bad = cvi_doc("SPX.Z", [1.; 6]);
         bad.values[0].1 = Column::F64(vec![1.; 5]);
         let err = publish_document(
             &store,
@@ -692,8 +671,13 @@ role = "attribute"
     #[test]
     fn an_empty_document_is_refused_and_the_live_generation_survives() {
         let (_d, store, ds) = fixture();
-        publish(&store, &ds, &doc("SPX.Z", [7.; 6]), "2026-09-12T14:00:00Z");
-        let mut empty = doc("SPX.Z", [1.; 6]);
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [7.; 6]),
+            "2026-09-12T14:00:00Z",
+        );
+        let mut empty = cvi_doc("SPX.Z", [1.; 6]);
         empty.axes[0].1 = Column::Date(Vec::new());
         empty.axes[1].1 = Column::F64(Vec::new());
         empty.values[0].1 = Column::F64(Vec::new());
@@ -739,12 +723,44 @@ role = "attribute"
     #[test]
     fn a_two_column_key_joins_with_the_separator() {
         // Correlation-shaped: key = [underlying_ref, underlying2_ref].
-        let text = CVI.replace(
-            "key = [\"underlying_ref\"]",
-            "key = [\"underlying_ref\", \"underlying2_ref\"]",
-        ) + "\n[cvi_params.columns.underlying2_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n";
-        let (_d, store, ds) = fixture_for(dataset_from(&text));
-        let mut rows = doc("SPX.Z", [1.; 6]);
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::schema::SchemaSpec;
+        let cvi_base = r#"
+[cvi_params]
+family = "document"
+key = ["underlying_ref", "underlying2_ref"]
+axes = ["term", "node"]
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[cvi_params.columns.underlying2_ref]
+type = "utf8"
+role = "dimension"
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
+"#;
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", cvi_base).unwrap()],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("cvi_params").unwrap().clone();
+        let (_d, store, _) = fixture_for(ds.clone());
+        let mut rows = cvi_doc("SPX.Z", [1.; 6]);
         rows.key.push("NDX.Z".into());
         let out = publish(&store, &ds, &rows, "2026-09-12T14:00:00Z");
         assert_eq!(

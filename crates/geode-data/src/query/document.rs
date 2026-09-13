@@ -172,82 +172,9 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use crate::store::catalog::Catalog;
+    use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc, ts};
     use crate::store::document::{DocumentPublishRequest, publish_document};
-    use chrono::{DateTime, NaiveDate, Utc};
-    use geode_core::config::{LayerDoc, merge_docs};
-    use geode_core::document::{Column, DocumentRows, Value as DocValue};
     use geode_core::query::{AsOf, QueryKey};
-    use geode_core::schema::{DatasetSpec, SchemaSpec};
-
-    const CVI: &str = r#"
-[cvi_params]
-family = "document"
-key = ["underlying_ref"]
-axes = ["term", "node"]
-[cvi_params.columns.underlying_ref]
-type = "utf8"
-role = "dimension"
-[cvi_params.columns.term]
-type = "date"
-role = "axis"
-[cvi_params.columns.node]
-type = "f64"
-role = "axis"
-[cvi_params.columns.param]
-type = "f64"
-role = "value"
-[cvi_params.columns.anchor_date]
-type = "date"
-role = "attribute"
-[cvi_params.columns.spot_ref]
-type = "f64"
-role = "attribute"
-"#;
-
-    fn cvi() -> DatasetSpec {
-        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", CVI).unwrap()]);
-        let (schema, diags) = SchemaSpec::from_doc(&doc);
-        assert!(diags.is_empty(), "{diags:?}");
-        schema.dataset("cvi_params").unwrap().clone()
-    }
-
-    fn ts(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-    }
-
-    fn d(s: &str) -> NaiveDate {
-        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
-    }
-
-    /// Two terms x three nodes, term-major — the same shape
-    /// `store::document`'s own tests use.
-    fn doc(key: &str, params: [f64; 6]) -> DocumentRows {
-        DocumentRows {
-            key: vec![key.into()],
-            attributes: vec![
-                ("anchor_date".into(), DocValue::Date(d("2026-09-12"))),
-                ("spot_ref".into(), DocValue::F64(7650.0)),
-            ],
-            axes: vec![
-                (
-                    "term".into(),
-                    Column::Date(vec![
-                        d("2026-09-18"),
-                        d("2026-09-18"),
-                        d("2026-09-18"),
-                        d("2026-10-16"),
-                        d("2026-10-16"),
-                        d("2026-10-16"),
-                    ]),
-                ),
-                (
-                    "node".into(),
-                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
-                ),
-            ],
-            values: vec![("param".into(), Column::F64(params.to_vec()))],
-        }
-    }
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -271,7 +198,7 @@ role = "attribute"
     fn fixture_with_two_generations() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
-        let ds = cvi();
+        let ds = cvi_dataset();
         store.apply_schema(&ds).unwrap();
         Catalog::new(store.writer()).ensure_tables().unwrap();
         let first = publish_document(
@@ -279,7 +206,7 @@ role = "attribute"
             &DocumentPublishRequest {
                 dataset: &ds,
                 source: "cvi",
-                rows: &doc("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+                rows: &cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.]),
                 source_time: ts("2026-09-12T14:00:00Z"),
                 received_at: ts("2026-09-12T14:00:00Z"),
                 bytes: 0,
@@ -291,7 +218,7 @@ role = "attribute"
             &DocumentPublishRequest {
                 dataset: &ds,
                 source: "cvi",
-                rows: &doc("NDX.Z", [100., 200., 300., 400., 500., 600.]),
+                rows: &cvi_doc("NDX.Z", [100., 200., 300., 400., 500., 600.]),
                 source_time: ts("2026-09-12T14:03:00Z"),
                 received_at: ts("2026-09-12T14:03:00Z"),
                 bytes: 0,
@@ -303,7 +230,7 @@ role = "attribute"
             &DocumentPublishRequest {
                 dataset: &ds,
                 source: "cvi",
-                rows: &doc("SPX.Z", [10., 20., 30., 40., 50., 60.]),
+                rows: &cvi_doc("SPX.Z", [10., 20., 30., 40., 50., 60.]),
                 source_time: ts("2026-09-12T14:05:00Z"),
                 received_at: ts("2026-09-12T14:05:00Z"),
                 bytes: 0,

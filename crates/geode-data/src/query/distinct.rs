@@ -337,15 +337,12 @@ fn meta(name: &str) -> CompiledColumn {
 mod tests {
     use super::*;
     use crate::query::pool::{QueryRequest, RequestKind, ViewId, run_one};
+    use crate::store::ddl::tests_support::ts;
     use chrono::{DateTime, Utc};
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::query::{AsOf, QueryKey};
     use geode_core::scope::{DimensionSelection, Scope};
     use geode_core::snapshot::Provenance;
-
-    fn ts(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-    }
 
     /// Two datasets both carrying `currency` at instrument grain: `risk`
     /// (which also has a position-grain measure, so `carries` at Position

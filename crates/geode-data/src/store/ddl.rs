@@ -453,7 +453,11 @@ pub(crate) fn assert_generations_match_tables(conn: &Connection, dataset: &str, 
 
 #[cfg(test)]
 pub(crate) mod tests_support {
+    use crate::store::Store;
+    use crate::store::document::{DocumentPublishRequest, DocumentPublished, publish_document};
+    use chrono::{DateTime, NaiveDate, Utc};
     use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::document::{Column, DocumentRows, Value};
     use geode_core::schema::{DatasetSpec, SchemaSpec};
 
     pub(crate) fn sample_dataset() -> DatasetSpec {
@@ -584,6 +588,91 @@ role = "attribute"
             .dataset("cvi_params")
             .unwrap()
             .clone()
+    }
+
+    pub(crate) fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    pub(crate) fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    /// Two terms x three nodes, term-major — the same shape Task 4's tests
+    /// validate, with the six `param` values the caller chooses.
+    pub(crate) fn cvi_doc(key: &str, params: [f64; 6]) -> DocumentRows {
+        DocumentRows {
+            key: vec![key.into()],
+            attributes: vec![
+                ("anchor_date".into(), Value::Date(d("2026-09-12"))),
+                ("spot_ref".into(), Value::F64(7650.0)),
+            ],
+            axes: vec![
+                (
+                    "term".into(),
+                    Column::Date(vec![
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]),
+                ),
+                (
+                    "node".into(),
+                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
+                ),
+            ],
+            values: vec![("param".into(), Column::F64(params.to_vec()))],
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn publish_cvi(
+        store: &Store,
+        ds: &DatasetSpec,
+        key: &str,
+        params: [f64; 6],
+        at: &str,
+    ) -> DocumentPublished {
+        publish_document(
+            store,
+            &DocumentPublishRequest {
+                dataset: ds,
+                source: "cvi",
+                rows: &cvi_doc(key, params),
+                source_time: ts(at),
+                received_at: ts(at),
+                bytes: 1234,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_cvi_fixture_is_term_major() {
+        let rows = cvi_doc("X", [1., 2., 3., 4., 5., 6.]);
+        // Axes are [term, node]; term is the first axis.
+        let term_axis = &rows.axes[0];
+        assert_eq!(term_axis.0, "term");
+        // Six rows, term-major: three rows at 2026-09-18, then three at 2026-10-16.
+        match &term_axis.1 {
+            Column::Date(dates) => {
+                assert_eq!(
+                    dates,
+                    &[
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]
+                );
+            }
+            _ => panic!("term axis should be a date column"),
+        }
     }
 }
 
