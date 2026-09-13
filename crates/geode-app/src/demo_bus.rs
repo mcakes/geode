@@ -216,50 +216,51 @@ mod tests {
         let underlyings = vec!["SPX".to_string(), "NDX".to_string(), "RUT".to_string()];
         let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
         let generator = CviGenerator::new(42, underlyings.clone(), anchor);
-        let mut bus = spawn(
-            feed,
-            Arc::new(CviKind),
-            generator,
-            Duration::from_millis(50),
-            Duration::from_millis(10),
-            42,
-        );
+        // Deliberately large next to the burst deadline below: a build
+        // that skipped the immediate burst and only ever published on
+        // its cadence could not satisfy that deadline by chance.
+        let cadence = Duration::from_millis(400);
+        let jitter = Duration::from_millis(50);
+        let mut bus = spawn(feed, Arc::new(CviKind), generator, cadence, jitter, 42);
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut received = Vec::new();
-        while received.len() < underlyings.len() * 2 && Instant::now() < deadline {
-            if let Ok(m) = rx.recv_timeout(Duration::from_millis(200)) {
-                received.push(m);
+        // Phase 1: every key published once, immediately — well inside
+        // one cadence-minus-jitter window, so this can only pass if the
+        // burst really runs before the first cadence wait.
+        let burst_deadline = Instant::now() + Duration::from_millis(200);
+        let mut burst: HashSet<String> = HashSet::new();
+        while burst.len() < underlyings.len() && Instant::now() < burst_deadline {
+            if let Ok(m) = rx.recv_timeout(Duration::from_millis(50)) {
+                let key = m
+                    .topic
+                    .strip_prefix("marketdata/cvi/")
+                    .unwrap_or_else(|| panic!("unexpected topic {:?}", m.topic))
+                    .to_string();
+                assert!(
+                    underlyings.contains(&key),
+                    "topic names an underlying this generator produces"
+                );
+                let parsed = CviKind.parse(&m.bytes).expect("a well-formed CVI document");
+                assert_eq!(parsed.rows.key, vec![key.clone()]);
+                burst.insert(key);
             }
         }
-        assert!(
-            received.len() >= underlyings.len() * 2,
-            "expected at least {} messages within 2s, got {}",
-            underlyings.len() * 2,
-            received.len()
+        assert_eq!(
+            burst,
+            underlyings.iter().cloned().collect::<HashSet<_>>(),
+            "every key must publish once immediately at start"
         );
 
-        // Every one of the initial burst's keys is represented, and
-        // every message parses back into the key its topic names.
-        let mut seen_in_first_burst: HashSet<String> = HashSet::new();
-        for m in &received {
-            let key = m
-                .topic
-                .strip_prefix("marketdata/cvi/")
-                .unwrap_or_else(|| panic!("unexpected topic {:?}", m.topic))
-                .to_string();
-            assert!(
-                underlyings.contains(&key),
-                "topic names an underlying this generator produces"
-            );
-            let parsed = CviKind.parse(&m.bytes).expect("a well-formed CVI document");
-            assert_eq!(parsed.rows.key, vec![key.clone()]);
-            seen_in_first_burst.insert(key);
-        }
-        assert_eq!(
-            seen_in_first_burst.len(),
-            underlyings.len(),
-            "the initial burst publishes every key once"
+        // Phase 2: the cadence loop keeps going after the burst.
+        let m = rx
+            .recv_timeout(cadence + jitter + Duration::from_millis(500))
+            .expect("the bus keeps publishing on its cadence after the initial burst");
+        assert!(
+            underlyings.contains(
+                &m.topic
+                    .strip_prefix("marketdata/cvi/")
+                    .unwrap_or_else(|| panic!("unexpected topic {:?}", m.topic))
+                    .to_string()
+            )
         );
 
         bus.stop();
