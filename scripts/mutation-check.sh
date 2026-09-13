@@ -7980,6 +7980,22 @@ run_mutation "objectdialog: revalidate folds the column stage first" \
   geode-shell \
   the_column_stage_writes_a_differing_key_to_the_overlay
 
+# 2c §5.2: a failed write rebuilds the draft from the reverted config —
+# the object's, with no projection on it — so the stage has to step back
+# with it, or the crumb keeps naming a column whose fields are gone.
+run_mutation "objectdialog: a reverted write leaves the column stage" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        if let Stage::Column { object, .. } = &state.stage {
+            state.stage = Stage::Edit {
+                object: object.clone(),
+            };
+        }' \
+  '        if let Stage::Column { object, .. } = &state.stage {
+            let _ = object;
+        }' \
+  geode-shell \
+  a_failed_write_in_the_column_stage_steps_back_to_the_view
+
 # 2c §5.5: a path naming ANOTHER column lands nowhere in this stage.
 run_mutation "objectdialog: row_for_path in the column stage is scoped to the open column" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \

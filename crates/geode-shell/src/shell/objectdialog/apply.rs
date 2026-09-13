@@ -106,7 +106,7 @@ use std::time::Duration;
 use geode_core::config::{CONFIG_VERSION, Config, Layer, LayerDoc, Severity};
 use gpui::Context;
 
-use super::{Destination, Domain};
+use super::{Destination, Domain, Stage};
 use crate::config_write;
 use crate::shell::ShellView;
 
@@ -987,6 +987,18 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
         let mut rebuilt = state.domain.draft(&shell.services.config, &name);
         rebuilt.selected = selected;
         state.draft = Some(rebuilt);
+        // Part 2c §5.2: a rebuilt draft is the OBJECT's, with no column
+        // projection on it, so the stage has to come back with it. Left
+        // at `Column` the crumb would keep naming a column whose seven
+        // fields are no longer installed — the one thing on screen still
+        // claiming the projection this revert just dropped. The rebuilt
+        // rows are the view's own and `escape` from here is the edit
+        // stage's, which is exactly what this says.
+        if let Stage::Column { object, .. } = &state.stage {
+            state.stage = Stage::Edit {
+                object: object.clone(),
+            };
+        }
         state.notice = Some(format!("could not save — change reverted ({message})"));
     }
     cx.notify();

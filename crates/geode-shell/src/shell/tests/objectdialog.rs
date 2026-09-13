@@ -5204,6 +5204,37 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
     )));
 }
 
+/// §5.2: a failed write rebuilds the draft from the reverted config —
+/// the OBJECT's fields, with no column projection on them — so the stage
+/// has to come back with it rather than leaving the crumb naming a column
+/// whose seven fields are no longer installed.
+///
+/// Same fixture trick `a_failed_removal_reverts_the_in_memory_change_and_
+/// says_so` uses: the file on disk will not parse, but the config in
+/// memory never read it, so only the write can discover the problem.
+#[gpui::test]
+fn a_failed_write_in_the_column_stage_steps_back_to_the_view(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter"); // npv's column stage
+    cx.run_until_parked();
+    std::fs::write(dir.path().join("view_presentation.toml"), "[tree\nhidden =").unwrap();
+    cx.simulate_keystrokes("j j space"); // scale → k
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    assert!(edit_draft(&shell, &cx, |d| d.column().is_none()));
+    let reported = shell.read_with(&cx, |s, _| s.config_write_error.clone());
+    assert!(
+        reported.as_deref().is_some_and(|m| m.contains("reverted")),
+        "{reported:?}"
+    );
+}
+
 /// §5.3: `width` is a typed value, not a stepped one — `i` opens it
 /// seeded with `auto`, a pixel count inside the range applies and reaches
 /// the overlay, and anything else is refused with the range named and the
