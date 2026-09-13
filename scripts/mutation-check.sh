@@ -7836,6 +7836,34 @@ run_mutation "handle: a document compile error is that key's outcome" \
                     });' \
   geode-data a_document_compile_error_is_that_keys_outcome_on_the_real_service
 
+# ---- Task 8 review (Important #1, #2): the document request, round 2
+#
+# The first fixture published one key only, so `compile_document`'s
+# batch-scoped resolve and its "nothing existed yet" branch could not be
+# told apart from a wrong implementation that just took the first
+# resolved generation regardless of which document it named. A second
+# key at a different source time makes the two implementations diverge —
+# each mutation below was run by hand and confirmed to fail its named
+# test before being committed.
+
+run_mutation "document query: the resolved generation is this document's own" \
+  crates/geode-data/src/query/document.rs \
+  '            let resolved = gens.into_iter().find(|g| g.batch == batch);' \
+  '            let resolved = gens.into_iter().next();' \
+  geode-data an_as_of_document_query_resolves_each_key_to_its_own_generation
+
+run_mutation "document query: no generation as of t is no rows, not every row" \
+  crates/geode-data/src/query/document.rs \
+  '                None => (relation, " and false".to_string()),' \
+  '                None => (relation, String::new()),' \
+  geode-data an_as_of_before_the_first_publish_compiles_and_returns_no_rows
+
+run_mutation "service: a live document's freshness is its own, not the dataset's stalest" \
+  crates/geode-data/src/service.rs \
+  '                    .live_source_time(&params.dataset, &join_key(&params.document_key), None)?' \
+  '                    .dataset_as_of(&params.dataset, &[])?' \
+  geode-data a_live_document_request_reports_its_own_documents_freshness
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
