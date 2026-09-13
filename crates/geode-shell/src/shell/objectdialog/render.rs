@@ -1172,6 +1172,14 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 "nothing on this row changes with shift+space".to_string(),
             ),
         },
+        NormalCommand::MoveItem(delta) if in_column_stage(shell) => {
+            // Part 2c §5.2: there is no list in this stage to reorder, so
+            // the ordinary "that is as far as this row goes" would answer
+            // about rows that are not on screen. Both directions get the
+            // same sentence, with the key they actually pressed in it.
+            let key = if delta < 0 { "shift+k" } else { "shift+j" };
+            not_a_column_verb(shell, key);
+        }
         NormalCommand::MoveItem(delta) => {
             let skipped = draft_mut(shell).and_then(|draft| draft.move_item(delta));
             match skipped {
@@ -1207,6 +1215,11 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // which was on screen before the keystroke and so still is — the
         // demoted row is the one that travels, and the cursor no longer
         // travels with it (`Draft::remove_selected`'s own comment).
+        // Part 2c §5.2: same reasoning as `MoveItem`'s own column-stage
+        // arm just above — `x` demotes a column into the catalogue, and
+        // neither list is on screen here, so the notice names the stage
+        // rather than a list the trader cannot see.
+        NormalCommand::Verb('x') if in_column_stage(shell) => not_a_column_verb(shell, "x"),
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
                 revalidate(shell);
@@ -1597,6 +1610,27 @@ fn selected_field_is_steppable(draft: &Draft) -> bool {
     }
 }
 
+/// Is the column stage open (Part 2c §5.2)? Read off the DRAFT, never
+/// the stage, for [`commit_selected_row`]'s reason: the projection is
+/// what the verbs below actually act on, so asking the thing that carries
+/// it keeps the two from ever disagreeing.
+fn in_column_stage(shell: &ShellView) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .is_some_and(|draft| draft.column().is_some())
+}
+
+/// The one answer for a list verb pressed in the column stage: `x`,
+/// `shift+j` and `shift+k` all reorder or demote rows of a list this
+/// stage does not install, so each says the same thing with its own key
+/// in it, rather than the edit stage's answer about rows that are not on
+/// screen.
+fn not_a_column_verb(shell: &mut ShellView, key: &str) {
+    set_notice(shell, format!("{key} is not a verb in a column's stage"));
+}
+
 /// Set the footer notice, if a dialog is open at all.
 fn set_notice(shell: &mut ShellView, notice: String) {
     if let Some(state) = shell.object_dialog.as_mut() {
@@ -1721,10 +1755,13 @@ fn revalidate(shell: &mut ShellView) {
     let Some(draft) = state.draft.as_mut() else {
         return;
     };
+    // The key a cleared `label`/`width` handed back to the desk, if any —
+    // see the notice at the end of this function.
+    let mut followed_desk = None;
     // 2c §5.2: the column stage is a projection; fold it into the item
     // FIRST so the validator and the overlay writer see this keystroke.
     if draft.column().is_some() {
-        draft.fold_column();
+        followed_desk = draft.fold_column();
     }
     // Validated, then stored: `validate` needs the draft immutably and
     // the config from a sibling field, which is exactly the disjoint
@@ -1732,6 +1769,17 @@ fn revalidate(shell: &mut ShellView) {
     let diagnostics = domain.validate(draft, &shell.services.config);
     if let Some(draft) = draft_mut(shell) {
         draft.diagnostics = diagnostics;
+    }
+    // §5.3's clear verb said out loud. The field under the cursor has
+    // just been re-seeded with the desk's own value (`Draft::fold_column`),
+    // so without this the trader would watch what they typed be replaced
+    // by something else with no explanation — a screen that appears to
+    // have ignored the keystroke rather than one that honoured it
+    // exactly. Set here, not in the arms: every path that changes a value
+    // comes through this function, and only this function knows the fold
+    // happened.
+    if let Some(key) = followed_desk {
+        set_notice(shell, format!("{key} follows the desk again"));
     }
 }
 

@@ -1378,23 +1378,48 @@ impl Draft {
     /// no-op outside the stage, and a no-op for a column the stashed list
     /// no longer holds, which [`Draft::enter_column`]'s membership check
     /// makes unreachable.
-    pub fn fold_column(&mut self) {
-        let Some(name) = self.column.as_deref() else {
-            return;
-        };
-        let Some(parent) = self.parent_fields.as_mut() else {
-            return;
-        };
-        let Some(field) = parent.iter_mut().find(|f| f.key == "columns") else {
-            return;
-        };
+    ///
+    /// **The desk baseline goes in and the two `Text` fields come back
+    /// out.** A cleared `label` or an `auto` width means "stop overriding
+    /// this", which resolves to whatever the desk's own `views.toml` says
+    /// (`views::fold_into` has the full statement, and why writing `None`
+    /// there would silently swallow the clear). The fold then re-seeds
+    /// those two fields from the item, so the desk's value is on screen
+    /// on the same keystroke rather than a blank the next rebuild
+    /// contradicts. Re-seeding is a no-op for every other value, since
+    /// the field and the item already agree.
+    ///
+    /// Returns the key that fell back, for the caller's notice — see
+    /// `views::fold_into` on why at most one can.
+    pub fn fold_column(&mut self) -> Option<&'static str> {
+        let name = self.column.clone()?;
+        // Read before the mutable borrow below: the baseline comes off
+        // `source`, which the column stage never touches, so one walk per
+        // fold describes the desk exactly.
+        let desk = views::desk_baseline(self)
+            .remove(name.as_str())
+            .unwrap_or_default();
+        let parent = self.parent_fields.as_mut()?;
+        let field = parent.iter_mut().find(|f| f.key == "columns")?;
         let FieldKind::OrderedList { items, .. } = &mut field.kind else {
-            return;
+            return None;
         };
-        let Some(item) = items.iter_mut().find(|i| i.name == name) else {
-            return;
-        };
-        views::fold_into(item, &self.fields);
+        let item = items.iter_mut().find(|i| i.name == name)?;
+        let followed_desk = views::fold_into(item, &self.fields, &desk);
+        // Copied out so the parent's borrow ends before the installed
+        // fields are written.
+        let (label, width) = (item.presentation.label.clone(), item.presentation.width);
+        for field in &mut self.fields {
+            let FieldKind::Text(text) = &mut field.kind else {
+                continue;
+            };
+            match field.key.as_str() {
+                "label" => *text = label.clone().unwrap_or_default(),
+                "width" => *text = views::width_text(width),
+                _ => {}
+            }
+        }
+        followed_desk
     }
 
     /// Close the column stage (Part 2c §5.2): fold one last time, restore
@@ -1433,20 +1458,42 @@ impl Draft {
         // cleared anyway because its `EditRow` indexes the fields being
         // replaced, and a stale one would point into the restored list.
         self.text_entry = None;
+        // Symmetric with `enter_column`'s own reset: a confirm armed over
+        // the seven installed fields has nothing to answer for once they
+        // are gone, and leaving it armed would hold the restored list's
+        // keystrokes hostage to a question about a stage that has closed.
+        // Unreachable today — the armed block claims `escape` before this
+        // rung is read — which is exactly why it is cleared rather than
+        // relied on.
+        self.confirm = None;
         self.selected = 0;
         if let Some(column) = column {
-            let target = self.fields.iter().enumerate().find_map(|(field, f)| {
-                let FieldKind::OrderedList { items, .. } = &f.kind else {
-                    return None;
-                };
-                items
-                    .iter()
-                    .position(|i| i.name == column)
-                    .map(|item| EditRow::Item { field, item })
-            });
-            if let Some(row) = target {
-                self.follow(row);
-            }
+            self.select_item_named(&column);
+        }
+    }
+
+    /// Put the cursor on the row of the ordered-list item named `name`,
+    /// or on the first row when no list holds it.
+    ///
+    /// By NAME through the `visible_rows` index every verb speaks, never
+    /// by a carried index: the column stage's seven rows and the view's
+    /// own list are different lists, so a number carried from one to the
+    /// other lands wherever it happens to point. Shared by
+    /// [`Draft::leave_column`] and `apply::revert_failed_write`, whose
+    /// rebuilt draft has the same problem for the same reason.
+    pub(in crate::shell::objectdialog) fn select_item_named(&mut self, name: &str) {
+        self.selected = 0;
+        let target = self.fields.iter().enumerate().find_map(|(field, f)| {
+            let FieldKind::OrderedList { items, .. } = &f.kind else {
+                return None;
+            };
+            items
+                .iter()
+                .position(|i| i.name == name)
+                .map(|item| EditRow::Item { field, item })
+        });
+        if let Some(row) = target {
+            self.follow(row);
         }
     }
 

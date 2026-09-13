@@ -7972,6 +7972,29 @@ run_mutation "views: the member summary omits keys at the kind default" \
   geode-shell \
   column_summary_names_only_the_keys_in_force
 
+# 2c §5.2: `x`, `shift+j` and `shift+k` reorder or demote rows of a list
+# the column stage does not install, so each names this stage rather than
+# giving the edit stage's answer about rows that are not on screen. One
+# guard feeds all three arms.
+run_mutation "objectdialog: the list verbs name the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .is_some_and(|draft| draft.column().is_some())' \
+  '        .is_some_and(|draft| draft.column().is_none())' \
+  geode-shell \
+  the_column_stages_width_is_typed_and_refused_out_of_range
+
+# 2c §5.3: an empty label / an `auto` width means "stop overriding", not
+# "delete" — the overlay cannot remove a key `views.toml` sets. Folding a
+# literal `None` instead is silent in the worst way: the writer omits the
+# key, the file reads back as "nothing to say", and the desk's label comes
+# back on the next rebuild with the trader's clear gone.
+run_mutation "views: clearing a desk-set key restores the desk's value" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '                    desk.label.clone()' \
+  '                    None' \
+  geode-shell \
+  clearing_a_desk_label_falls_back_to_the_desk
+
 # 2c §5.2: every changed value folds into the item BEFORE validation and commit.
 run_mutation "objectdialog: revalidate folds the column stage first" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
@@ -8006,14 +8029,9 @@ run_mutation "objectdialog: enter names i on a row i can open" \
 # with it, or the crumb keeps naming a column whose fields are gone.
 run_mutation "objectdialog: a reverted write leaves the column stage" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '        if let Stage::Column { object, .. } = &state.stage {
-            state.stage = Stage::Edit {
-                object: object.clone(),
-            };
-        }' \
-  '        if let Stage::Column { object, .. } = &state.stage {
-            let _ = object;
-        }' \
+  '                rebuilt.select_item_named(&column);
+                state.stage = Stage::Edit { object };' \
+  '                rebuilt.select_item_named(&column);' \
   geode-shell \
   a_failed_write_in_the_column_stage_steps_back_to_the_view
 

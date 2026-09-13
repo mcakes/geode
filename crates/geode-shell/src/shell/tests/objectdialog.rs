@@ -315,9 +315,13 @@ fn desk_view_docs() -> Vec<LayerDoc> {
         layer: Layer::Desk,
         name: "views".to_string(),
         file: "<test:desk>".into(),
+        // `npv` carries a desk `label` — the one column key Part 2c's
+        // column stage can CLEAR (§5.3), and a clear is only meaningful
+        // against a desk that set something. Nothing else here reads it;
+        // it simply gives the stage a key to hand back.
         table: "[tree]\ndataset = \"risk_snapshot\"\ngrouping = [\"book\"]\n\
                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
-                [[tree.columns]]\nname = \"npv\"\n"
+                [[tree.columns]]\nname = \"npv\"\nlabel = \"NPV\"\n"
             .parse()
             .unwrap(),
     };
@@ -5192,6 +5196,37 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
         !dir.path().join("views.toml").exists(),
         "the desk's view is untouched"
     );
+
+    // §5.3's clear verb, end to end: `i` on `Label`, typed empty,
+    // `enter`. An empty label means "stop overriding", never "delete" —
+    // this overlay cannot remove a key `views.toml` sets — so the field
+    // comes back reading the desk's own label, the trader is told why,
+    // and no `label` key reaches the file.
+    cx.simulate_keystrokes("k k"); // scale → width → label
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "NPV",
+        "seeded with the label in force — the desk's"
+    );
+    cx.simulate_keystrokes("backspace backspace backspace enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        &d.fields[0].kind,
+        objectdialog::FieldKind::Text(t) if t == "NPV"
+    )));
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("label follows the desk again")
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(
+        !written.contains("label"),
+        "the overlay has no opinion about the label: {written}"
+    );
+
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(matches!(
@@ -5264,6 +5299,16 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
     cx.run_until_parked();
     cx.simulate_keystrokes("j"); // label → width
     cx.run_until_parked();
+    // §5.2: the list verbs answer about THIS stage, not about a column
+    // list that is not on screen — one sentence, whichever key.
+    for (key, pressed) in [("x", "x"), ("shift-j", "shift+j"), ("shift-k", "shift+k")] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.notice.clone()),
+            Some(format!("{pressed} is not a verb in a column's stage"))
+        );
+    }
     // `enter` names the verb this row actually has — `i`, not `space`,
     // and certainly not "read-only", which is what an editable `Text`
     // used to be told it was.
