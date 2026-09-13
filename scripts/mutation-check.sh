@@ -8748,12 +8748,16 @@ run_mutation "adapter: unsubscribe removes the registration" \
 
 # An upload echoes on the target it was written to (spec §5.5). A fixed
 # topic is the plausible slip and a wrong-VALUE one: the upload still
-# succeeds and a subscriber on the parent space still sees traffic, but
-# the document arrives under a key it does not belong to.
+# succeeds and the subscriber still receives it — `marketdata/upload/other`
+# matches the same `marketdata/upload/>` pattern the test subscribes to —
+# but the document arrives under a key it does not belong to, which is the
+# whole point of the topic assertion rather than a delivery assertion. A
+# topic matching NO pattern would be caught too, by the 5 s receive
+# timeout, and would say nothing about whether `target` was honoured.
 run_mutation "adapter: egress publishes on the target topic" \
   crates/geode-data/src/adapter/channel.rs \
   '        if self.feed.publish(target, bytes) {' \
-  '        if self.feed.publish("marketdata/upload", bytes) {' \
+  '        if self.feed.publish("marketdata/upload/other", bytes) {' \
   geode-data an_upload_echoes_on_the_target_topic
 
 
@@ -8767,6 +8771,30 @@ run_mutation "adapter: an empty topic list is refused, not reported connected" \
   '        if topics.is_empty() {' \
   '        if false {' \
   geode-data subscribing_to_no_topic_at_all_is_refused_rather_than_reported_connected
+
+
+# Review finding 1 (2026-09-13): a closed bus must REFUSE a subscription.
+# `ensure_dispatcher` answers `Ok` whenever the dispatcher slot is filled,
+# and the slot outlives the thread, so without this check a subscribe
+# after the last feed was dropped would report `Connected` and deliver
+# nothing for the session — a source reading `Ok` in the discovery lane
+# with zero rows behind it, the false-clean shape. `if false` is exactly
+# the state before the fix.
+run_mutation "adapter: subscribing to a closed bus is refused" \
+  crates/geode-data/src/adapter/channel.rs \
+  '        if self.bus.feed.lock().unwrap().upgrade().is_none() {' \
+  '        if false {' \
+  geode-data subscribing_after_every_feed_is_dropped_is_refused
+
+# A refused publish is counted, so a producer outrunning the dispatcher is
+# visible at all. Counting the SUCCESSES instead is the wrong-VALUE
+# mutation, not a marker: `refused()` still moves, still looks like a live
+# counter, and reads 256 where the truth is 2.
+run_mutation "adapter: a refused publish is counted, not a successful one" \
+  crates/geode-data/src/adapter/channel.rs \
+  '        if !queued {' \
+  '        if queued {' \
+  geode-data a_publish_onto_a_full_bus_is_refused_and_counted
 
 
 if [[ -n "$changed_ref" ]]; then

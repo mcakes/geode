@@ -35,10 +35,12 @@
 //! **Lifetime.** The adapter holds the inbound sender only WEAKLY, so
 //! dropping the last strong holder — every `ChannelFeed` and every
 //! outstanding egress — closes the channel, ends the dispatcher, and frees
-//! the adapter even if the registry still holds its `Arc`. That is why
-//! [`ChannelAdapter::egress`] returns `None` once every feed is gone: with
-//! nothing left to keep the bus open, there is no honest way to publish on
-//! it.
+//! the adapter even if the registry still holds its `Arc`. A closed bus
+//! never reopens: no new strong sender can be made once the last one is
+//! gone. Both capability doors therefore refuse rather than pretend —
+//! [`ChannelAdapter::egress`] answers `None`, and `subscribe` answers
+//! `Err` — because a subscription on a closed bus would report `Connected`
+//! and deliver nothing, which reads as a healthy source with no data.
 
 use super::{
     Adapter, AdapterError, ConnectionState, Egress, HealthSink, MESSAGE_BOUND, Message,
@@ -83,11 +85,24 @@ struct Bus {
     inbound: Mutex<Option<Receiver<Message>>>,
     registrations: Mutex<Vec<Registration>>,
     next_id: AtomicU64,
+    /// Messages [`ChannelFeed::publish`] could not put on the bus, over the
+    /// bus's whole life. Shared by every feed and read through
+    /// [`ChannelFeed::refused`], for the same reason
+    /// [`MessageSink::refused`] exists: a dropped message must be countable
+    /// somewhere, or a producer outrunning the dispatcher is invisible.
+    refused: AtomicU64,
     /// `Some` once the dispatcher is running. Never joined: nothing in the
     /// app has a thread it may block on, and the dispatcher ends by itself
     /// when the channel closes. Holding the handle is what makes "started"
     /// a single check-and-set under one lock, so two concurrent
     /// `subscribe`s cannot start two dispatchers.
+    ///
+    /// Deliberately NOT cleared when the dispatcher exits, and it does not
+    /// need to be: the thread only ends when the channel closes, and a
+    /// closed channel can never reopen (no new strong sender can be made
+    /// from a `Weak` with no strong holders left). `subscribe` therefore
+    /// asks whether the BUS is alive rather than whether this slot is
+    /// filled — see its own closed-bus check.
     dispatcher: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -203,6 +218,7 @@ impl ChannelAdapter {
             inbound: Mutex::new(Some(inbound)),
             registrations: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
             dispatcher: Mutex::new(None),
         });
         let feed = ChannelFeed {
@@ -251,17 +267,33 @@ pub struct ChannelFeed {
 }
 
 impl ChannelFeed {
-    /// Puts one message on the bus. `false` if the inbound queue is full
-    /// (the dispatcher is behind) — never blocks, so a demo generator or a
-    /// test cannot be stalled by a slow subscriber.
+    /// Puts one message on the bus. `false`, with the refusal counted, if
+    /// the inbound queue is full (the dispatcher is behind) — never blocks,
+    /// so a demo generator or a test cannot be stalled by a slow
+    /// subscriber.
     pub fn publish(&self, topic: &str, bytes: Vec<u8>) -> bool {
-        self.tx
+        let queued = self
+            .tx
             .try_send(Message {
                 topic: topic.to_string(),
                 received: Utc::now(),
                 bytes,
             })
-            .is_ok()
+            .is_ok();
+        if !queued {
+            self.bus.refused.fetch_add(1, Ordering::Relaxed);
+        }
+        queued
+    }
+
+    /// How many messages this bus has refused, over its whole life and
+    /// across every feed sharing it. The producer's half of
+    /// [`MessageSink::refused`]: that one counts what a subscriber could
+    /// not take, this one what the bus itself could not take, and a demo or
+    /// a diagnostic wanting "are we dropping data" has to be able to ask
+    /// both.
+    pub fn refused(&self) -> u64 {
+        self.bus.refused.load(Ordering::Relaxed)
     }
 
     /// Reports a connection state to every registered subscription,
@@ -306,6 +338,23 @@ impl Subscription for ChannelSubscription {
             return Err(AdapterError {
                 message: format!(
                     "channel adapter '{}': a subscription needs at least one topic",
+                    self.bus.name
+                ),
+            });
+        }
+        // Mirrors `ChannelAdapter::egress`'s door, and for a sharper
+        // reason: once every feed is dropped the channel is closed for
+        // good, and `ensure_dispatcher` would happily answer `Ok` because
+        // the dispatcher slot is still filled by the thread that has since
+        // exited. Subscribing then would report `Connected` and deliver
+        // nothing for the rest of the session — a source reading healthy in
+        // the discovery lane with zero rows behind it, which is the one
+        // failure shape this tier must never produce. A refusal instead,
+        // and nothing registered and no state reported.
+        if self.bus.feed.lock().unwrap().upgrade().is_none() {
+            return Err(AdapterError {
+                message: format!(
+                    "channel adapter '{}': every feed has been dropped; the bus is closed",
                     self.bus.name
                 ),
             });
@@ -531,6 +580,56 @@ mod tests {
             adapter.egress().is_none(),
             "with every feed gone there is nothing to publish onto"
         );
+    }
+
+    #[test]
+    fn subscribing_after_every_feed_is_dropped_is_refused() {
+        let (adapter, feed) = ChannelAdapter::new("demo_bus");
+        let (sink, _rx) = MessageSink::bounded(8);
+        let mut first = adapter.subscription().unwrap();
+        first
+            .subscribe(&["marketdata/cvi/>".into()], sink, Arc::new(|_| {}))
+            .unwrap();
+        drop(first);
+        drop(feed);
+        // The dispatcher has exited (its `Arc<Bus>` is gone), which is
+        // exactly the state in which the started-flag alone would say "all
+        // fine, already running".
+        wait_until(|| Arc::strong_count(&adapter.bus) == 1);
+
+        let (late_sink, late_rx) = MessageSink::bounded(8);
+        let states: Arc<Mutex<Vec<ConnectionState>>> = Default::default();
+        let mut late = adapter.subscription().unwrap();
+        let refused = late
+            .subscribe(&["marketdata/cvi/>".into()], late_sink, recorder(&states))
+            .expect_err("a closed bus cannot be subscribed to");
+        assert!(refused.message.contains("the bus is closed"), "{refused}");
+        // Nothing was registered and nothing was reported: a caller that
+        // was told `Connected` here would wait forever for rows that can
+        // never come.
+        assert!(states.lock().unwrap().is_empty());
+        assert!(late_rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn a_publish_onto_a_full_bus_is_refused_and_counted() {
+        let (adapter, feed) = ChannelAdapter::new("demo_bus");
+        // No subscription, so no dispatcher is draining: the inbound queue
+        // fills at exactly its bound, which makes the refusal deterministic
+        // rather than a race with a consumer.
+        for i in 0..MESSAGE_BOUND {
+            assert!(
+                feed.publish("marketdata/cvi/SPX.Z", vec![i as u8]),
+                "message {i} fits within the bound"
+            );
+        }
+        assert_eq!(feed.refused(), 0);
+        assert!(!feed.publish("marketdata/cvi/SPX.Z", vec![0]));
+        assert!(!feed.publish("marketdata/cvi/SPX.Z", vec![1]));
+        assert_eq!(feed.refused(), 2);
+        // The count is the bus's, not one holder's.
+        assert_eq!(feed.clone().refused(), 2);
+        let _ = adapter;
     }
 
     #[test]

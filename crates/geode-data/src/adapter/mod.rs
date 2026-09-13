@@ -47,7 +47,11 @@ pub struct Message {
     pub bytes: Vec<u8>,
 }
 
-/// The depth of one subscription's message queue.
+/// The depth of one subscription's message queue — and, in
+/// [`ChannelAdapter`], of the bus's own inbound queue as well, since a
+/// producer outrunning the dispatcher and a dispatcher outrunning a
+/// receiver are the same problem one hop apart and there is no reason for
+/// the two to disagree.
 ///
 /// Sized for a burst, not a backlog: a receiver thread that has fallen 256
 /// messages behind is not going to catch up by being given 4,096 — the
@@ -188,10 +192,19 @@ pub trait Egress: Send {
 /// (behind an `Arc`) by the service thread that hands out subscriptions
 /// and by whatever thread the transport itself runs on.
 ///
-/// Both capability doors return `Option` rather than `Result`: "this
-/// adapter has no egress side" is a static fact about the adapter, not the
-/// failure of a call, and the caller's response is to report a
-/// misconfigured source rather than to retry.
+/// Both capability doors return `Option` rather than `Result` because
+/// `None` is not the failure of a call: it says this adapter cannot do
+/// that, and the caller's response is to report a source it cannot serve
+/// rather than to treat it as an error to surface verbatim.
+///
+/// `None` is usually a static fact — a read-only feed has no egress side in
+/// any build. It need not be: an adapter may also LOSE a capability at
+/// runtime, as [`ChannelAdapter`] does once every producer of its bus is
+/// gone. So a caller must not cache the answer as a property of the
+/// adapter; asking again on a later request is legitimate, and the same
+/// goes for a capability that is present but refuses — `subscribe` on a
+/// closed [`ChannelAdapter`] answers `Err` rather than a silent
+/// `Connected`.
 pub trait Adapter: Send + Sync {
     /// The name a `[sources.<name>] adapter = "…"` key refers to. A
     /// `&'static str` because an adapter is compiled in, never named at
