@@ -378,7 +378,17 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                         spot_ref = Some(number("spotRef", trimmed)?)
                     }
                     Shape::Leaf(Leaf::Node) => nodes.push(number("node", trimmed)?),
-                    Shape::Leaf(Leaf::Term) => slice.term = Some(date("term", trimmed)?),
+                    Shape::Leaf(Leaf::Term) => {
+                        // Same rule as the singular leaves above, at the
+                        // one site the first fix wave left uncovered: a
+                        // second `<term>` in one `<slice>` used to win
+                        // silently, publishing the slice under the second
+                        // date with the first discarded.
+                        if slice.term.is_some() {
+                            return Err(already_filled("term"));
+                        }
+                        slice.term = Some(date("term", trimmed)?)
+                    }
                     Shape::Leaf(Leaf::Param) => slice.params.push(number("param", trimmed)?),
                     Shape::Slice => {
                         let term = slice.term.ok_or_else(|| {
@@ -967,6 +977,25 @@ role = "attribute"
 
     /// Two `<slice>` elements for one term are the same defect one level
     /// down: their rows would carry the same (term, node) pairs.
+    #[test]
+    fn a_second_term_inside_one_slice_is_refused_naming_it() {
+        // Two `<term>`s in ONE slice (not two slices sharing a term): the
+        // count check cannot see it and `seen_terms` sees only the
+        // survivor, so without this guard the slice published under the
+        // second date with the first silently dropped.
+        let doc = DOC.replacen(
+            "<term>2026-09-18</term>",
+            "<term>2026-09-18</term><term>2026-09-25</term>",
+            1,
+        );
+        let err = CviKind.parse(doc.as_bytes()).unwrap_err();
+        assert!(
+            err.message.contains("term") && err.message.contains("already"),
+            "{}",
+            err.message
+        );
+    }
+
     #[test]
     fn a_repeated_slice_term_is_refused_naming_the_term() {
         let doc = DOC.replacen(

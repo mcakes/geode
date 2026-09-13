@@ -9107,6 +9107,14 @@ run_mutation "sections: a subscribed source is described as a directory one (pat
   '    if true {' \
   geode-diagnostics a_subscribed_source_shows_its_adapter_and_topics_not_paths
 
+run_mutation "cvi: a second <term> inside one slice wins silently instead of being refused" \
+  crates/geode-documents/src/cvi.rs \
+  '                        if slice.term.is_some() {
+                            return Err(already_filled("term"));
+                        }' \
+  '                        let _ = &slice.term;' \
+  geode-documents a_second_term_inside_one_slice_is_refused_naming_it
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

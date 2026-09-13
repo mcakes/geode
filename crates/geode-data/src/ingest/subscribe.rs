@@ -97,7 +97,7 @@ pub type LoadReportSink = Arc<dyn Fn(&str, Health, String) + Send + Sync>;
 ///
 /// `source_time` is resolved when the message arrives rather than when the
 /// document is released, for two reasons: its failure is a report about
-/// THIS message (`on_parse_failure` names the key), and resolving it late
+/// THIS message (the load report names the key), and resolving it late
 /// would mean either doing the work twice or having a fallible step on the
 /// release path with nowhere sensible to report from.
 struct Pending {
