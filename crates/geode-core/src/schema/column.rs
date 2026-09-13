@@ -87,8 +87,14 @@ pub enum ColumnRole {
     /// A non-numeric property. `Some(grain)` on a measure dataset: carried
     /// at that grain. `None` on a document dataset: document-level — one
     /// value per document, repeated on every row of it (market-data
-    /// spec §3.1). `validate_dataset` refuses each reading on the other
-    /// family, so `None` never reaches the grain tables.
+    /// spec §3.1). `parse_column` produces exactly this split today —
+    /// `None` only for `Family::Document`, always `Some` for
+    /// `Family::Measures` (a missing `grain` is a parse error there) — so
+    /// the type still allows the two cross-family mistakes this doesn't
+    /// prevent: a stray `grain` key on a document attribute, or a
+    /// document-typed attribute on a measure dataset. Refusing those is
+    /// `validate_dataset`'s job, added alongside the rest of document
+    /// validation.
     Attribute { grain: Option<Grain> },
     /// Document family only: identifies a row within a document, in the
     /// dataset's declared `axes` order (market-data spec §3.1).

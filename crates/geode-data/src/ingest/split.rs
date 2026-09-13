@@ -179,7 +179,7 @@ pub fn split_by_grain(conn: &Connection, req: &SplitRequest) -> Result<SplitResu
 mod tests {
     use super::*;
     use crate::store::Store;
-    use geode_core::schema::Grain;
+    use geode_core::schema::{ColumnSpec, ColumnType, Grain};
 
     /// A raw staging table shaped like one instrument over three
     /// underlyings: six ordered pair rows, coarse measures repeated,
@@ -287,6 +287,48 @@ grain = "instrument"
             .writer()
             .query_row(&format!("select sum({col}) from {table}"), [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// The document family's own roles, and a document-level attribute,
+    /// must never be treated as payload at a measure grain — even though
+    /// `parse_column` cannot itself produce this mix today (`Axis`/`Value`
+    /// only come from a document dataset). The `_ => false` this replaces
+    /// would flip to `true` unnoticed: no fixture in this file ever puts
+    /// one of these roles on a measure dataset's columns.
+    #[test]
+    fn payload_columns_never_selects_a_document_shaped_column() {
+        let mut ds = dataset();
+        ds.columns.push(ColumnSpec {
+            name: "term".into(),
+            source_name: None,
+            ty: ColumnType::Date,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Axis,
+        });
+        ds.columns.push(ColumnSpec {
+            name: "param".into(),
+            source_name: None,
+            ty: ColumnType::F64,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Value,
+        });
+        ds.columns.push(ColumnSpec {
+            name: "spot_ref".into(),
+            source_name: None,
+            ty: ColumnType::F64,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Attribute { grain: None },
+        });
+        let payload = payload_columns(&ds, Grain::Position);
+        assert!(!payload.contains(&"term"), "{payload:?}");
+        assert!(!payload.contains(&"param"), "{payload:?}");
+        assert!(!payload.contains(&"spot_ref"), "{payload:?}");
     }
 
     #[test]

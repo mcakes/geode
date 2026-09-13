@@ -697,6 +697,7 @@ impl<'a> Catalog<'a> {
 mod tests {
     use super::*;
     use chrono::{DateTime, Datelike, Timelike, Utc};
+    use geode_core::schema::{ColumnSpec, ColumnType};
 
     /// Terse RFC 3339 literal for tests.
     fn ts(s: &str) -> DateTime<Utc> {
@@ -726,6 +727,38 @@ mod tests {
             archived_only: false,
             health: Health::Ok,
         }
+    }
+
+    /// A document-level attribute (`grain: None`) must never be folded
+    /// into `attributes` at any measure grain. This is the one call this
+    /// dataset shape cannot make honestly today (a document dataset never
+    /// reaches `attribute_conflicts`), so a schema-shaped test cannot see
+    /// a regression here — only a query issued against a table this
+    /// dataset never created can. `store()` never runs `create_table_sql`,
+    /// so if the filter ever matched `spot_ref` here, `.unwrap()` would
+    /// panic on the missing `risk_snapshot_position_live` table instead of
+    /// this test quietly passing.
+    #[test]
+    fn attribute_conflicts_ignores_a_document_level_attribute() {
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        let ds = DatasetSpec {
+            name: "risk_snapshot".into(),
+            columns: vec![ColumnSpec {
+                name: "spot_ref".into(),
+                source_name: None,
+                ty: ColumnType::F64,
+                required: false,
+                textual: false,
+                categorical: false,
+                role: ColumnRole::Attribute { grain: None },
+            }],
+            ..Default::default()
+        };
+        let conflicts = cat
+            .attribute_conflicts("risk_snapshot", &ds, Grain::Position)
+            .unwrap();
+        assert!(conflicts.is_empty(), "{conflicts:?}");
     }
 
     #[test]

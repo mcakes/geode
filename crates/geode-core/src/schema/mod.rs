@@ -999,6 +999,31 @@ role = "attribute"
     }
 
     #[test]
+    fn a_measure_family_key_and_axes_are_cleared_with_a_warning() {
+        // `[risk_snapshot]` must precede the dotted `risk_snapshot.columns.*`
+        // headers SAMPLE opens with — TOML lets a `[table]` header appear
+        // before its own subtables, never after.
+        let text = format!("[risk_snapshot]\nkey = [\"book\"]\naxes = [\"lhu\"]\n{SAMPLE}");
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("risk_snapshot").unwrap();
+        assert!(
+            ds.key.is_empty(),
+            "key must be cleared, not merely warned about"
+        );
+        assert!(ds.axes.is_empty());
+        for field in ["key", "axes"] {
+            let d = diags
+                .iter()
+                .find(|d| {
+                    d.path.as_deref() == Some(&format!("risk_snapshot.{field}"))
+                        && d.message.contains("is ignored on the measure family")
+                })
+                .unwrap_or_else(|| panic!("no warning for '{field}': {diags:?}"));
+            assert_eq!(d.severity, Severity::Warning);
+        }
+    }
+
+    #[test]
     fn a_measure_attribute_still_requires_its_grain() {
         // `Attribute { grain: None }` is the document reading only; on a
         // measure dataset a grainless attribute is the same missing-grain

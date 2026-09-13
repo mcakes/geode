@@ -432,6 +432,7 @@ grain = "underlying"
 mod tests {
     use super::tests_support::{carried_dataset, sample_dataset};
     use super::*;
+    use geode_core::schema::{ColumnSpec, ColumnType};
 
     #[test]
     fn live_table_carries_the_grain_key_and_its_measures_only() {
@@ -519,6 +520,50 @@ mod tests {
         assert!(!sql(Grain::Position).contains("\"currency\""));
         assert!(sql(Grain::Instrument).contains("\"currency\" VARCHAR"));
         assert!(sql(Grain::Underlying).contains("\"currency\" VARCHAR"));
+    }
+
+    /// The document family's own roles, and a document-level attribute,
+    /// must never be selected into a measure-family grain table — even
+    /// though nothing in the schema reader can produce this mix today
+    /// (`parse_column` only emits `Axis`/`Value` on a document dataset).
+    /// `keep`'s "not this branch" arm covering them is otherwise untested:
+    /// flipping it from `false` to `true` compiles clean and every other
+    /// test stays green, since none of them ever puts one of these roles
+    /// on a measure dataset's columns.
+    #[test]
+    fn create_table_never_selects_a_document_shaped_column() {
+        let mut ds = sample_dataset();
+        ds.columns.push(ColumnSpec {
+            name: "term".into(),
+            source_name: None,
+            ty: ColumnType::Date,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Axis,
+        });
+        ds.columns.push(ColumnSpec {
+            name: "param".into(),
+            source_name: None,
+            ty: ColumnType::F64,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Value,
+        });
+        ds.columns.push(ColumnSpec {
+            name: "spot_ref".into(),
+            source_name: None,
+            ty: ColumnType::F64,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Attribute { grain: None },
+        });
+        let sql = create_table_sql(&ds, Grain::Position, TableKind::Live);
+        assert!(!sql.contains("\"term\""), "{sql}");
+        assert!(!sql.contains("\"param\""), "{sql}");
+        assert!(!sql.contains("\"spot_ref\""), "{sql}");
     }
 
     #[test]

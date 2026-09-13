@@ -7475,6 +7475,70 @@ run_mutation "dialog: enter_filter_by_mouse ignores the settings dialog" \
   geode-shell \
   clicking_the_settings_frozen_filter_row_enters_filter_mode
 
+# ---- schema: the document family (market-data spec §3)
+#
+# `from_doc`'s new dataset-level reads (family, key, axes) and the
+# `ColumnRole::Attribute` grain split they drive downstream.
+
+# An unknown `family` must drop the whole dataset, not fall back to
+# Measures silently: a dataset a trader named `document` and misspelled
+# would otherwise parse as an ordinary (and wrong) measure dataset with
+# no diagnostic pointing at the typo.
+run_mutation "schema: an unknown family drops the dataset rather than defaulting to measures" \
+  crates/geode-core/src/schema/mod.rs \
+  '                        continue;' \
+  '                        Family::Measures' \
+  geode-core \
+  an_unknown_family_is_an_error_and_the_dataset_is_dropped
+
+# `key`/`axes` on the measure family must be cleared, not merely
+# warned about and left in place -- a stray `key = [...]` on a measure
+# dataset must never reach `DatasetSpec.key` where nothing reads it
+# today but Task 2's validator will.
+run_mutation "schema: key/axes on the measure family are cleared, not left in place" \
+  crates/geode-core/src/schema/mod.rs \
+  'if family == Family::Measures {' \
+  'if false {' \
+  geode-core \
+  a_measure_family_key_and_axes_are_cleared_with_a_warning
+
+# `create_table_sql`'s grain-path `keep` match must treat a document-level
+# attribute, an axis, and a value the same as a key or a bare dimension:
+# never selected into a measure grain's table. Nothing in today's schema
+# reader can put these roles on a measure dataset, so only a
+# hand-built fixture (this test) can see the arm at all.
+run_mutation "ddl: create_table_sql never selects an axis, value, or document-level attribute" \
+  crates/geode-data/src/store/ddl.rs \
+  '            | ColumnRole::Axis
+            | ColumnRole::Value => false,' \
+  '            | ColumnRole::Axis
+            | ColumnRole::Value => true,' \
+  geode-data \
+  create_table_never_selects_a_document_shaped_column
+
+# `payload_columns`' wildcard arm is the same exclusion, collapsed to one
+# `_ => false`: an axis, a value, and a document-level attribute (along
+# with every key and bare dimension) must never become ingest payload at
+# any grain.
+run_mutation "split: payload_columns never selects an axis, value, or document-level attribute" \
+  crates/geode-data/src/ingest/split.rs \
+  '            _ => false,' \
+  '            _ => true,' \
+  geode-data \
+  payload_columns_never_selects_a_document_shaped_column
+
+# `attribute_conflicts` must count only an attribute carried AT this
+# grain -- a document-level attribute (`grain: None`) has no grain to
+# match and must never be folded in. Widening the guard to any
+# `Attribute` at all would send the query at a table this dataset never
+# created, since a document-level-only dataset has no grain tables.
+run_mutation "catalog: attribute_conflicts ignores a document-level attribute" \
+  crates/geode-data/src/store/catalog.rs \
+  'matches!(c.role, ColumnRole::Attribute { grain: Some(g) } if g == grain)' \
+  'matches!(c.role, ColumnRole::Attribute { .. })' \
+  geode-data \
+  attribute_conflicts_ignores_a_document_level_attribute
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
