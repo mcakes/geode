@@ -1170,3 +1170,34 @@ directly), and the entry is re-pointed at the browse list's own lookup
 (`named.get(&row.name)` in `render.rs`), where the same window test
 catches it. Task 6's deferred "`ColourCache::get` duplicates
 `resolve_named`" minor is moot with it.
+
+### 9.14 Post-merge fix: presentation edits never reached the paint
+
+Reported on a display the same day the branch merged: editing a column's
+label, width or colour in the Views dialog changed nothing in the
+blotter. The chain up to the tile was sound — the promote runs
+`apply_reload`, which emits `ConfigReloaded` for `view_presentation`; the
+bridge reloads the views with the overlay merged in and hands them to the
+factory, which swaps them under every open tile; the tile requeries; and
+`ColumnPlan::build` folds `presentation_of` into every planned column.
+The break was `BlotterDelegate::apply_snapshot`'s gate: it rebuilt the
+plan only when the grouping or the snapshot's column set changed, and a
+presentation edit changes neither (the query returns the same columns at
+the same indices), so the plan holding the old label, width, format,
+colour — and a column just hidden — painted until the next regroup,
+`:view`, or a reopened tile. Every existing test built a fresh plan, so
+none could see it.
+
+The fix builds the plan from the incoming view on every delivery and
+replaces the installed one whenever the fresh plan differs
+(`ColumnPlan: PartialEq`, every field the paint reads); an unchanged
+redelivery still moves nothing. `apply_snapshot` answers whether it
+replaced the plan, and `BlotterTile::apply` calls
+`TableState::refresh_header_layout` on `true`, because the pinned
+gpui-component caches `column()`'s width in `col_groups` (the
+`on_ui_settings` gotcha). Pinned by
+`a_presentation_change_rebuilds_the_plan_on_a_same_column_snapshot`
+(label, width, colour, then hidden, all on the same snapshot) and the
+harness entry `delegate: a presentation edit rebuilds the plan on a
+same-column snapshot`, whose mutation is exactly the old gate; the
+regroup entry is re-anchored on the new line. 746 entries.

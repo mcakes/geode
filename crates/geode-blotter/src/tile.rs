@@ -447,7 +447,14 @@ impl BlotterTile {
             let colours = Arc::clone(&self.colours.borrow());
             self.table.update(cx, |t, cx| {
                 t.delegate_mut().set_colours(colours);
-                t.delegate_mut().apply_snapshot(snapshot, &view, &grouping);
+                let rebuilt = t.delegate_mut().apply_snapshot(snapshot, &view, &grouping);
+                if rebuilt {
+                    // The pinned gpui-component caches `column()`'s width in
+                    // `col_groups` (the `on_ui_settings` gotcha): a plan whose
+                    // widths or labels changed needs the header laid out again,
+                    // not just the rows refreshed.
+                    t.refresh_header_layout(cx);
+                }
                 t.refresh(cx);
                 let row = t.delegate().cursor.row;
                 t.set_selected_row(row, cx);

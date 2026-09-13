@@ -2629,8 +2629,8 @@ run_mutation "delegate: the cursor follows its node across a new snapshot" \
 
 run_mutation "delegate: a regroup with a different grouping rebuilds the plan" \
   crates/geode-blotter/src/delegate.rs \
-  '            Some(p) => p.grouping != grouping || !p.same_columns(&snapshot),' \
-  '            Some(_p) => false,' \
+  '        let rebuild = self.plan.as_ref() != Some(&fresh);' \
+  '        let rebuild = self.plan.is_none();' \
   geode-blotter \
   a_regroup_prunes_expansion_and_rebuilds_the_plan
 
@@ -8846,6 +8846,18 @@ run_mutation "colours: an unstepped hue is written back verbatim" \
   '.is_some_and(|_saved| false);' \
   geode-shell \
   a_fractional_hue_survives_a_save_that_did_not_step_it
+
+# A Views-dialog presentation edit (label, width, colour — 2c §5) arrives
+# as a requery whose snapshot has the SAME columns at the same indices.
+# The plan holds those settings, so it must be rebuilt on any difference,
+# not only on a grouping or column-set change — the 2026-09-13 display
+# report: labels, widths and colours never applied until a regroup.
+run_mutation "delegate: a presentation edit rebuilds the plan on a same-column snapshot" \
+  crates/geode-blotter/src/delegate.rs \
+  '        let rebuild = self.plan.as_ref() != Some(&fresh);' \
+  '        let rebuild = self.plan.as_ref().map_or(true, |p| p.grouping != fresh.grouping);' \
+  geode-blotter \
+  a_presentation_change_rebuilds_the_plan_on_a_same_column_snapshot
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
