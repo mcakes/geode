@@ -8915,6 +8915,22 @@ run_mutation "load: the dataset overlay is applied before the view overlay" \
   geode-core \
   load_views_merges_the_dataset_overlay_under_the_view_overlay_and_reports_its_colours
 
+# spec §2.3, fix round 1 (Critical): the dataset overlay's colour
+# cross-check must fire whenever `dataset_overlay` is `Some`, never only
+# when a `view_presentation` doc also exists — the default desk has none.
+# The anchor is a two-line span: the bare `if let Some(overlay) =
+# &dataset_overlay {` line also opens the `apply` call above it, so the
+# second line (`for (dataset, columns) in &overlay.datasets {`, unique
+# to this block) is what makes the anchor match only here.
+run_mutation "load: the dataset overlay's colours are cross-checked without a view overlay" \
+  crates/geode-core/src/config/load.rs \
+  '    if let Some(overlay) = &dataset_overlay {
+        for (dataset, columns) in &overlay.datasets {' \
+  '    if let Some(overlay) = &dataset_overlay {
+        for (dataset, columns) in overlay.datasets.iter().take(0) {' \
+  geode-core \
+  a_dataset_overlay_colour_is_cross_checked_without_a_view_overlay
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

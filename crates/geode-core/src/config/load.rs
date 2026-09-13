@@ -91,16 +91,22 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
 /// A missing `views` doc is an empty list, not an error: callers that
 /// need to distinguish "no views configured" ask `Config::doc` first.
 ///
-/// Cross-checks a column's named colour (Part 2c §3–§4) against the
-/// `colours` doc at both of the two places a colour can be named, since
-/// neither reader has access to the `colours` doc to check it itself.
-/// The view's own `format.colour` is checked right here, between the two
-/// reads above: the index in the diagnostic's path must be the FILE's
-/// own column order, which is what `views` still is at this point — the
-/// overlay's `apply` below reorders, hides and resizes it. The overlay's
-/// own `[view.columns.<col>].colour` (Part 2c §4) is checked just below,
-/// against `presentation.views` directly rather than the merged result —
-/// it is keyed by column name, not file position, so it needs no such
+/// Cross-checks a column's named colour (Part 2c §3–§4; dataset overlay
+/// spec §2.3) against the `colours` doc at each of the three places a
+/// colour can be named, since no reader has access to the `colours` doc
+/// to check it itself. The view's own `format.colour` is checked right
+/// here, between the two reads above: the index in the diagnostic's
+/// path must be the FILE's own column order, which is what `views`
+/// still is at this point — the overlays' `apply` calls reorder, hide
+/// and resize it. The dataset overlay's `[dataset.columns.<col>].colour`
+/// is checked right after `colours` is bound, UNCONDITIONALLY on
+/// `dataset_overlay` alone — never nested inside the `view_presentation`
+/// block below, since a desk with no `view_presentation.toml` at all
+/// (the default state) must still hear about it (spec §2.3; the whole-
+/// branch review's Critical). The view overlay's own
+/// `[view.columns.<col>].colour` (Part 2c §4) is checked just below,
+/// against `presentation.views` directly rather than the merged result
+/// — it is keyed by column name, not file position, so it needs no such
 /// ordering care.
 pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     let Some(views_doc) = config.doc("views") else {
@@ -131,6 +137,34 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
         .doc("colours")
         .map(|d| crate::colour::NamedColours::from_doc(d).0)
         .unwrap_or_default();
+
+    // Unconditional on `dataset_overlay` alone — NOT nested inside the
+    // `view_presentation` block below, since a desk with no
+    // view_presentation.toml at all (the default state) must still hear
+    // about an unknown colour named at the dataset level (spec §2.3).
+    if let Some(overlay) = &dataset_overlay {
+        for (dataset, columns) in &overlay.datasets {
+            for (col, cp) in columns {
+                let Some(Colour::Named(name)) = &cp.colour else {
+                    continue;
+                };
+                if colours.get(name).is_none() {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        layer: None,
+                        file: None,
+                        message: format!(
+                            "dataset presentation '{dataset}': column '{col}' names colour '{name}', which colours.toml does not define — painted in foreground"
+                        ),
+                        path: Some(format!(
+                            "dataset_presentation.{dataset}.columns.{col}.colour"
+                        )),
+                    });
+                }
+            }
+        }
+    }
+
     for view in &views {
         for (i, column) in view.columns.iter().enumerate() {
             if let Some(Colour::Named(name)) = &view.presentation_of(column.name()).colour
@@ -154,29 +188,6 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     if let Some(doc) = config.doc("view_presentation") {
         let (presentation, d) = ViewPresentationSpec::from_doc(doc);
         diags.extend(d);
-
-        if let Some(overlay) = &dataset_overlay {
-            for (dataset, columns) in &overlay.datasets {
-                for (col, cp) in columns {
-                    let Some(Colour::Named(name)) = &cp.colour else {
-                        continue;
-                    };
-                    if colours.get(name).is_none() {
-                        diags.push(Diagnostic {
-                            severity: Severity::Warning,
-                            layer: None,
-                            file: None,
-                            message: format!(
-                                "dataset presentation '{dataset}': column '{col}' names colour '{name}', which colours.toml does not define — painted in foreground"
-                            ),
-                            path: Some(format!(
-                                "dataset_presentation.{dataset}.columns.{col}.colour"
-                            )),
-                        });
-                    }
-                }
-            }
-        }
 
         for (view_name, p) in &presentation.views {
             for (col, cp) in &p.columns {
@@ -426,6 +437,53 @@ mod tests {
             .iter()
             .find(|d| d.path.as_deref() == Some("dataset_presentation.risk.columns.npv.colour"))
             .expect("the dataset overlay's colour is cross-checked");
+        assert!(
+            colour_warning.message.contains("nope"),
+            "{}",
+            colour_warning.message
+        );
+    }
+
+    #[test]
+    fn a_dataset_overlay_colour_is_cross_checked_without_a_view_overlay() {
+        // No `view_presentation` doc at all — the default state for a
+        // desk that has never opened a presentation dialog. The
+        // dataset-overlay colour cross-check must not depend on that
+        // doc's presence (spec §2.3; the whole-branch review's Critical).
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "views",
+                    "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n[[v.columns]]\nname = \"npv\"\nkind = \"measure\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "dataset_presentation",
+                    "[risk.columns.npv]\ncolour = \"nope\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let (views, diags) = load_views(&config);
+        let v = views.iter().find(|v| v.name == "v").unwrap();
+        assert_eq!(
+            v.presentation_of("npv").colour,
+            Some(Colour::Named("nope".into())),
+            "an unknown colour still merges even with no view_presentation doc"
+        );
+        let colour_warning = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("dataset_presentation.risk.columns.npv.colour"))
+            .expect(
+                "the dataset overlay's colour is cross-checked without a view_presentation doc",
+            );
         assert!(
             colour_warning.message.contains("nope"),
             "{}",
