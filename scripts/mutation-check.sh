@@ -8051,6 +8051,32 @@ run_mutation "objectdialog: enter_column refuses a non-member" \
   geode-shell \
   entering_a_column_swaps_the_fields_and_leaving_restores_them_with_the_fold
 
+# 2c §6.1: to_table writes only the keys in force — no dead hue under a token.
+run_mutation "colours: to_table omits the hue under a token" \
+  crates/geode-shell/src/shell/objectdialog/colours.rs \
+  '    table.remove("hue");' \
+  '    let _ = "hue";' \
+  geode-shell \
+  fields_seed_from_the_definition_and_to_table_writes_only_the_keys_in_force
+
+# 2c §6.1: reserved names are taken on Colours alone.
+run_mutation "objectdialog: reserved colour names are taken" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.reserved_names().contains(&name) {' \
+  '        if false && self.reserved_names().contains(&name) {' \
+  geode-shell \
+  reserved_names_are_taken
+
+# 2c §6.1: a browse row's swatch resolves that row's own saved colour,
+# not a fixed one — observable through the window test, since the fixture
+# defines only `delta` and a wrong lookup name paints no swatch at all.
+run_mutation "colours: the browse swatch resolves the row's own definition" \
+  crates/geode-shell/src/shell/colours.rs \
+  '    let def = colours.get(name)?;' \
+  '    let def = colours.get("nonexistent")?;' \
+  geode-shell \
+  the_colours_dialog_paints_swatches_and_refuses_reserved_names
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

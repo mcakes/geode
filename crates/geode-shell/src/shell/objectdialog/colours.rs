@@ -293,6 +293,30 @@ mod tests {
             definition_of(&draft),
             Some(Definition::Token(Token::Bullish))
         );
+
+        // The mutation `pnl` alone cannot pin: its `source` never held a
+        // `hue` in the first place, so a `to_table` that forgot to
+        // remove one would still render correctly by sheer absence.
+        // Switching a hue-based colour's own draft to a token — `gamma`,
+        // still carrying `hue = 210` and `tone = "light"` in `source` —
+        // is the case that actually exercises the removal: without it,
+        // the stale `hue`/`tone` from `source` would leak straight
+        // through `toml_table_to_edit`, dead beside the new `token`.
+        let mut draft = Domain::Colours.draft(&config, "gamma");
+        let token_field = draft.fields.iter_mut().find(|f| f.key == "token").unwrap();
+        if let FieldKind::Choice { options, selected } = &mut token_field.kind {
+            *selected = options
+                .iter()
+                .position(|o| o == "chart.bullish")
+                .expect("chart.bullish is one of the 16 options");
+        }
+        let text = super::super::object_text("gamma", to_table(&draft, Destination::Doc));
+        assert!(
+            text.contains("token = \"chart.bullish\"")
+                && !text.contains("hue")
+                && !text.contains("tone"),
+            "switching to a token must drop the old hue and tone: {text}"
+        );
     }
 
     #[test]
