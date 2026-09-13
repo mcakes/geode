@@ -7615,6 +7615,24 @@ run_mutation "schema: the document dispatch keeps the reserved-column diagnostic
   '        return validate_document(ds);' \
   geode-core a_reserved_column_name_on_a_document_dataset_is_still_a_diagnostic
 
+run_mutation "schema/document: groupable columns are the dimensions, not the axes" \
+  crates/geode-core/src/schema/mod.rs \
+  '                .filter(|c| matches!(c.role, ColumnRole::Dimension { .. }))
+                .map(|c| c.name.as_str())
+                .collect();
+        }' \
+  '                .filter(|c| matches!(c.role, ColumnRole::Dimension { .. } | ColumnRole::Axis))
+                .map(|c| c.name.as_str())
+                .collect();
+        }' \
+  geode-core a_document_dataset_has_no_grain_and_groups_by_its_dimensions_only
+
+run_mutation "schema/document: document_columns follows the declared axes order" \
+  crates/geode-core/src/schema/mod.rs \
+  '        out.extend(self.axes.iter().filter_map(|a| self.column(a)));' \
+  '        out.extend(self.columns.iter().filter(|c| c.role == ColumnRole::Axis));' \
+  geode-core document_columns_are_key_then_axes_then_values_then_attributes
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

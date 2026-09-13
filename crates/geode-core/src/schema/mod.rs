@@ -116,22 +116,55 @@ impl DatasetSpec {
         out
     }
 
-    /// Every declared column a view or a grouping slot may group by, in
-    /// schema order: the ones some *declared* grain ([`Self::grains`] —
-    /// the grains a measure or attribute gives a table to) [`Self::carries`]
-    /// as a dimension. That is a grain's key columns and every carried
-    /// dimension, categorical or not; never an attribute or a measure. A
-    /// dataset declaring no grain has no table to scan and offers nothing.
-    /// This is the query compiler's own rule (`carries_all` over
-    /// `finest_carrying`), and the one place it is spelled out — the
-    /// Groupings dialog and the blotter's `:group` completion both read it.
+    /// Every declared column a view or a grouping slot may group by. For
+    /// measure datasets, in schema order: the ones some *declared* grain
+    /// ([`Self::grains`] — the grains a measure or attribute gives a table
+    /// to) [`Self::carries`] as a dimension. That is a grain's key columns
+    /// and every carried dimension, categorical or not; never an attribute
+    /// or a measure. A measure dataset declaring no grain has no table to
+    /// scan and offers nothing. For document datasets, every Dimension
+    /// column in schema order; axes are row identity within a document
+    /// (market-data spec §3.3) and never a frame grouping key. This is the
+    /// query compiler's own rule (`carries_all` over `finest_carrying`),
+    /// and the one place it is spelled out — the Groupings dialog and the
+    /// blotter's `:group` completion both read it.
     pub fn groupable_columns(&self) -> Vec<&str> {
+        if self.is_document() {
+            // No grain carries anything here; the identity dimensions are
+            // the whole grouping vocabulary and an axis is row identity
+            // *within* a document, never something the frame groups by
+            // (market-data spec §3.3).
+            return self
+                .columns
+                .iter()
+                .filter(|c| matches!(c.role, ColumnRole::Dimension { .. }))
+                .map(|c| c.name.as_str())
+                .collect();
+        }
         let grains = self.grains();
         self.columns
             .iter()
             .filter(|c| grains.iter().any(|g| self.carries(*g, &c.name)))
             .map(|c| c.name.as_str())
             .collect()
+    }
+
+    /// The document family's storage and projection order (market-data
+    /// spec §3.1, §7): key in declared order, axes in declared order,
+    /// then values and attributes in schema order. `ddl::
+    /// create_document_table_sql` and the document request both read
+    /// this, so the two can never disagree about column positions.
+    pub fn document_columns(&self) -> Vec<&ColumnSpec> {
+        let mut out: Vec<&ColumnSpec> = Vec::with_capacity(self.columns.len());
+        out.extend(self.key.iter().filter_map(|k| self.column(k)));
+        out.extend(self.axes.iter().filter_map(|a| self.column(a)));
+        out.extend(self.columns.iter().filter(|c| c.role == ColumnRole::Value));
+        out.extend(
+            self.columns
+                .iter()
+                .filter(|c| matches!(c.role, ColumnRole::Attribute { grain: None })),
+        );
+        out
     }
 
     /// Carried dimensions this grain's table stores as payload columns.
@@ -1452,5 +1485,49 @@ role = "attribute"
             schema.dataset("cvi_params").is_some(),
             "reserved-column is a warning, not a reason to drop the dataset"
         );
+    }
+
+    #[test]
+    fn a_document_dataset_has_no_grain_and_groups_by_its_dimensions_only() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(CVI));
+        let ds = schema.dataset("cvi_params").unwrap();
+        assert!(ds.grains().is_empty());
+        assert_eq!(ds.groupable_columns(), vec!["underlying_ref"]);
+        assert_eq!(
+            ds.categorical_columns(),
+            vec!["underlying_ref"],
+            "a utf8 dimension defaults to categorical here too"
+        );
+    }
+
+    #[test]
+    fn document_columns_are_key_then_axes_then_values_then_attributes() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(CVI));
+        let ds = schema.dataset("cvi_params").unwrap();
+        let names: Vec<&str> = ds
+            .document_columns()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "underlying_ref",
+                "term",
+                "node",
+                "param",
+                "anchor_date",
+                "spot_ref"
+            ]
+        );
+        // Order comes from `key`/`axes`, not from the TOML: swap the axes.
+        let (schema, _) = cvi_with("axes = [\"term\", \"node\"]", "axes = [\"node\", \"term\"]");
+        let ds = schema.dataset("cvi_params").unwrap();
+        let names: Vec<&str> = ds
+            .document_columns()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names[1..3], ["node", "term"]);
     }
 }
