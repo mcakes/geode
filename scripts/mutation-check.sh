@@ -3850,8 +3850,8 @@ run_mutation "views: a presentation naming a view the config lacks is skipped LO
 # on disk and nothing on screen moves until the next restart.
 run_mutation "reload: a view_presentation change triggers the same reload a views change does" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  'changed("views") || changed("view_presentation") || changed("dimensions");' \
-  'changed("views") || changed("dimensions");' \
+  '                || changed("view_presentation")' \
+  '                || changed("views")' \
   geode-shell \
   a_view_presentation_only_change_emits_config_reloaded
 
@@ -7694,8 +7694,8 @@ run_mutation "objectdialog: a rejected in-memory apply paints the status line" \
 # §19.6: the reload path reports presentation diagnostics instead of dropping them.
 run_mutation "bridge: reload reports presentation diagnostics" \
   crates/geode-app/src/bridge.rs \
-  '                if !presentation_diags.is_empty() {' \
-  '                if false && !presentation_diags.is_empty() {' \
+  '                if !reload_diags.is_empty() {' \
+  '                if false && !reload_diags.is_empty() {' \
   geode-app \
   a_reload_reports_a_stale_presentation_name
 
@@ -8076,6 +8076,47 @@ run_mutation "colours: the browse swatch resolves the row's own definition" \
   '    let def = colours.get("nonexistent")?;' \
   geode-shell \
   the_colours_dialog_paints_swatches_and_refuses_reserved_names
+
+# 2c §6.2: a colours change reaches the tiles like a views change.
+run_mutation "hot_reload: a colours change fires ConfigReloaded" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                || changed("colours");' \
+  '                || changed("views");' \
+  geode-shell \
+  a_colours_change_fires_config_reloaded
+
+# 2c §6.2: the doc is read for the service, so its own diagnostics are
+# reported here — `load_views` reads it too and throws them away.
+run_mutation "bridge: data_setup reports the colours doc diagnostics" \
+  crates/geode-app/src/bridge.rs \
+  '    diagnostics.extend(colour_diags);' \
+  '    diagnostics.extend(Vec::new());' \
+  geode-app \
+  data_setup_carries_the_colours_and_reports_their_diagnostics
+
+# 2c §6.2: the tile hands its definitions down with the plan.
+run_mutation "blotter: a tile hands the delegate its colours" \
+  crates/geode-blotter/src/tile.rs \
+  '                t.delegate_mut().set_colours(colours);' \
+  '                let _ = colours;' \
+  geode-blotter \
+  a_delivered_snapshot_hands_the_delegate_the_tiles_colours
+
+# 2c §6.3: the cache empties when an anchor changes.
+run_mutation "blotter: the colour cache invalidates on a changed anchor" \
+  crates/geode-blotter/src/colour_cache.rs \
+  '        if self.key.as_ref() != Some(&key) {' \
+  '        if self.key.is_none() {' \
+  geode-blotter \
+  a_steady_theme_costs_no_recompute_and_a_changed_anchor_empties_the_cache
+
+# 2c §6.3: an unknown name paints in foreground, never a stale colour.
+run_mutation "blotter: an unknown colour name resolves to none" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.colour_cache.get(&self.colours, name, anchors, tokens)' \
+  '        self.colour_cache.get(&self.colours, name, anchors, tokens).or(Some(gpui::Hsla::default()))' \
+  geode-blotter \
+  a_named_column_paints_its_resolved_colour
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

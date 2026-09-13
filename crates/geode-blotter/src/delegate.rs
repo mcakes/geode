@@ -4,6 +4,7 @@
 //! `render_td` is a lookup. The pure core does the work; this file only
 //! sequences it and paints.
 
+use crate::colour_cache::ColourCache;
 use crate::core::cache::{FormatCache, cell};
 use crate::core::cursor::{Cursor, Mode, restore_by_path, selection};
 use crate::core::expansion::{Expansion, Path, depth_bound, path_of};
@@ -11,14 +12,16 @@ use crate::core::flatten::{SortOrder, SortSpec, flatten};
 use crate::core::format::Sign;
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::attribution::Attribution;
+use geode_core::colour::{Anchors, NamedColours, Tokens};
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{LineNumbers, gutter_digits, gutter_number};
+use geode_shell::shell::colours::{anchors_from_theme, tokens_from_theme};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Div, EventEmitter, IntoElement, SharedString, Stateful, TextAlign,
-    Window, div, px,
+    App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, SharedString, Stateful,
+    TextAlign, Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
@@ -36,6 +39,15 @@ use std::sync::Arc;
 pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<BlotterDelegate> {}
+
+/// A column's `colour` setting reduced to what a paint site needs to
+/// branch on — see `BlotterDelegate::colour_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColourKind {
+    Plain,
+    Sign,
+    Named,
+}
 
 const INDENT: f32 = 14.0;
 const DETERMINED_MARK: &str = "†";
@@ -97,6 +109,16 @@ pub struct BlotterDelegate {
     /// move costs one small `String` per visible row, once.
     numbers: Vec<SharedString>,
     numbers_stamp: Option<(Range<usize>, usize, LineNumbers)>,
+    /// The named colours a `Colour::Named` column resolves against
+    /// (Part 2c §6.2), handed down by the tile out of the one `Arc` the
+    /// factory shares with every tile — refreshed on every plan the tile
+    /// applies, which is every delivered snapshot, and a config reload
+    /// makes every visible tile requery (`Frame::note_config_reloaded`).
+    /// So a reloaded `colours.toml` reaches the paint one query later,
+    /// exactly as a reloaded view definition does.
+    colours: Arc<NamedColours>,
+    /// One resolve per name per theme; see `colour_cache`'s module doc.
+    colour_cache: ColourCache,
 }
 
 impl Default for BlotterDelegate {
@@ -126,7 +148,64 @@ impl BlotterDelegate {
             line_numbers: LineNumbers::Off,
             numbers: Vec::new(),
             numbers_stamp: None,
+            colours: Arc::new(NamedColours::default()),
+            colour_cache: ColourCache::new(),
         }
+    }
+
+    /// The tile hands these down whenever it gives the delegate a plan.
+    /// A different `Arc` means a reloaded `colours.toml`: everything
+    /// resolved so far was resolved from the old definitions, so the
+    /// cache goes with it. Pointer equality, not a deep compare — the
+    /// factory shares exactly one `Arc` per loaded doc, so the same
+    /// pointer IS the same definitions, and the common case (every
+    /// snapshot, no reload) costs one pointer compare.
+    pub fn set_colours(&mut self, colours: Arc<NamedColours>) {
+        if !Arc::ptr_eq(&self.colours, &colours) {
+            self.colours = colours;
+            self.colour_cache.invalidate();
+        }
+    }
+
+    /// The resolved named colour of column `col_ix`, or `None` for
+    /// `none`, `sign` and a name the doc lacks — all three painted in
+    /// the theme's foreground (§6.3). The one door both `render_td` and
+    /// `render_th` go through, so a cell and its header can never
+    /// disagree about a column's colour.
+    pub fn cell_colour(
+        &mut self,
+        col_ix: usize,
+        anchors: &Anchors,
+        tokens: &Tokens,
+    ) -> Option<Hsla> {
+        // Borrows `self.plan` only, so the `&mut self.colour_cache`
+        // below is a disjoint field — which is what lets the name stay a
+        // `&str` rather than being cloned per cell per frame.
+        let name = match self
+            .plan
+            .as_ref()
+            .and_then(|p| p.columns.get(col_ix))
+            .map(|c| &c.format.colour)
+        {
+            Some(Colour::Named(name)) => name.as_str(),
+            _ => return None,
+        };
+        self.colour_cache.get(&self.colours, name, anchors, tokens)
+    }
+
+    /// Which of the three `Colour` shapes column `col_ix` carries, as a
+    /// `Copy` classification. `render_td` reads this per cell per frame
+    /// and must not clone the `String` a `Colour::Named` carries to do
+    /// it — per-frame heap churn is a defect (PHILOSOPHY.md).
+    fn colour_kind(&self, col_ix: usize) -> Option<ColourKind> {
+        self.plan
+            .as_ref()
+            .and_then(|p| p.columns.get(col_ix))
+            .map(|c| match c.format.colour {
+                Colour::None => ColourKind::Plain,
+                Colour::Sign => ColourKind::Sign,
+                Colour::Named(_) => ColourKind::Named,
+            })
     }
 
     /// The gutter's width in px for the current mode and row count —
@@ -694,6 +773,39 @@ impl TableDelegate for BlotterDelegate {
         self.refill_window(visible_range);
     }
 
+    /// The default's element (`div().size_full().child(name)`) plus the
+    /// column's own named colour (§6.3), so a coloured column is
+    /// identifiable from its header and not only from cells that happen
+    /// to be additive. Everything around it — the sort arrow, the
+    /// header cell's padding, borders and drag handle — is the
+    /// component's own (`TableState::render_th` wraps this), so
+    /// overriding here loses none of it.
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let name = self.column(col_ix, cx).name.clone();
+        // Same lazy read as `render_td`'s named arm, for the same
+        // reason: an uncoloured column touches the theme's twelve+fifteen
+        // colours not at all.
+        let colour = match self.colour_kind(col_ix) {
+            Some(ColourKind::Named) => {
+                let (anchors, tokens) = (
+                    anchors_from_theme(cx.theme()),
+                    tokens_from_theme(cx.theme()),
+                );
+                self.cell_colour(col_ix, &anchors, &tokens)
+            }
+            _ => None,
+        };
+        div()
+            .size_full()
+            .when_some(colour, |el, c| el.text_color(c))
+            .child(name)
+    }
+
     fn render_tr(
         &mut self,
         row_ix: usize,
@@ -721,11 +833,7 @@ impl TableDelegate for BlotterDelegate {
             .as_ref()
             .and_then(|p| p.columns.get(col_ix))
             .map(|c| c.kind);
-        let colour = self
-            .plan
-            .as_ref()
-            .and_then(|p| p.columns.get(col_ix))
-            .map(|c| c.format.colour.clone());
+        let colour = self.colour_kind(col_ix);
         let mut el = div()
             .size_full()
             .flex()
@@ -838,11 +946,35 @@ impl TableDelegate for BlotterDelegate {
                 .child(div().pl_1().child(DETERMINED_MARK)),
             Attribution::Additive => {
                 let el = match (colour, cell.sign) {
-                    (Some(Colour::Sign), Some(Sign::Negative)) => {
+                    (Some(ColourKind::Sign), Some(Sign::Negative)) => {
                         el.text_color(theme.chart_bearish)
                     }
-                    (Some(Colour::Sign), Some(Sign::Positive)) => {
+                    (Some(ColourKind::Sign), Some(Sign::Positive)) => {
                         el.text_color(theme.chart_bullish)
+                    }
+                    // A named colour ignores the sign entirely (§6.3):
+                    // `sign` and a name are alternatives, not layers.
+                    // An unknown name falls back to the theme's own
+                    // foreground — the same thing an uncoloured cell
+                    // paints in, so a deleted definition is invisible
+                    // rather than wrong (`load_views` warns about it).
+                    //
+                    // The theme is read into the resolver's vocabulary
+                    // *here*, inside the arm, rather than once at the top
+                    // of the method: it is twelve plus fifteen
+                    // `Hsla -> Rgb` conversions, and a blotter whose
+                    // columns name no colour (every one of them today)
+                    // must not pay them per cell per frame. Reading them
+                    // at the paint site is also what makes the cache's
+                    // invalidation free — they ARE its key, so a theme
+                    // swap empties it with nothing to remember to call.
+                    (Some(ColourKind::Named), _) => {
+                        let (anchors, tokens) =
+                            (anchors_from_theme(theme), tokens_from_theme(theme));
+                        el.text_color(
+                            self.cell_colour(col_ix, &anchors, &tokens)
+                                .unwrap_or(theme.foreground),
+                        )
                     }
                     _ => el,
                 };
@@ -856,6 +988,7 @@ impl TableDelegate for BlotterDelegate {
 mod tests {
     use super::*;
     use geode_core::attribution::{Attribution, ScopeSemantics};
+    use geode_core::colour::{Anchors, Definition, NamedColours, Rgb, Token, Tokens};
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
     use geode_core::view::ViewSpec;
@@ -1508,5 +1641,94 @@ mod tests {
                 "delta01 moved into column 2 and repainted immediately"
             );
         });
+    }
+    /// §6.3: a column naming a colour paints that colour, resolved
+    /// against the theme's own anchors/tokens; `none`, `sign` and a name
+    /// `colours.toml` does not define all resolve to nothing, which the
+    /// paint sites read as "the theme's foreground" — never a stale or
+    /// invented colour. Drives the one door both `render_td` and
+    /// `render_th` go through, so this covers the header label too.
+    #[test]
+    fn a_named_column_paints_its_resolved_colour() {
+        let grey = Rgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+        };
+        let red = Rgb {
+            r: 0.75,
+            g: 0.125,
+            b: 0.125,
+        };
+        let anchors = Anchors {
+            normal: [grey; 6],
+            light: [grey; 6],
+        };
+        let tokens = Tokens {
+            foreground: red,
+            muted: grey,
+            primary: grey,
+            accent: grey,
+            danger: grey,
+            warning: grey,
+            success: grey,
+            info: grey,
+            chart: [grey; 5],
+            bullish: grey,
+            bearish: grey,
+        };
+        let mut colours = NamedColours::default();
+        // A token definition, so the expected value is exactly the
+        // token's own colour and the assertion reads as one.
+        colours.insert("delta".into(), Definition::Token(Token::Foreground));
+
+        // Columns 1..3: a named colour, `sign`, and a name the doc lacks.
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[t.columns]]\nname = \"delta01\"\nformat = { colour = \"delta\" }\n\
+                    [[t.columns]]\nname = \"gamma01\"\nformat = { colour = \"sign\" }\n\
+                    [[t.columns]]\nname = \"vega01\"\nformat = { colour = \"ghost\" }\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let snapshot = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1])),
+                (dim("delta01"), TestColumn::F64(vec![Some(9.0), Some(5.0)])),
+                (dim("gamma01"), TestColumn::F64(vec![Some(1.0), Some(2.0)])),
+                (dim("vega01"), TestColumn::F64(vec![Some(1.0), Some(2.0)])),
+            ],
+            1,
+        ));
+
+        let mut d = BlotterDelegate::new();
+        d.set_colours(Arc::new(colours));
+        d.apply_snapshot(snapshot, &view, &["lhu".to_string()]);
+
+        assert_eq!(
+            d.cell_colour(1, &anchors, &tokens),
+            Some(geode_shell::shell::colours::to_hsla(red)),
+            "a named column resolves its own definition against the theme"
+        );
+        assert_eq!(
+            d.cell_colour(0, &anchors, &tokens),
+            None,
+            "the tree column names no colour"
+        );
+        assert_eq!(
+            d.cell_colour(2, &anchors, &tokens),
+            None,
+            "`sign` is not a named colour — the sign arm paints it"
+        );
+        assert_eq!(
+            d.cell_colour(3, &anchors, &tokens),
+            None,
+            "a name colours.toml does not define paints in foreground, \
+             never some other column's colour"
+        );
+        assert_eq!(
+            d.cell_colour(99, &anchors, &tokens),
+            None,
+            "a column index the plan does not have is not a panic"
+        );
     }
 }

@@ -4,6 +4,7 @@
 //! never sees it.
 
 use crate::tile::{ACTIONS, BlotterTile};
+use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::QueryOutcome;
 use geode_core::schema::SchemaSpec;
@@ -20,6 +21,7 @@ use gpui::prelude::*;
 use gpui::{App, Entity, Window};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct BlotterContent {
@@ -62,6 +64,13 @@ impl TileContent for BlotterContent {
 pub struct BlotterFactory {
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
+    /// `colours.toml`'s definitions (Part 2c §6.2), shared with every
+    /// tile exactly as `views` is and refreshed by the same
+    /// `ConfigReloaded` handler in the app's bridge. An `Arc` inside the
+    /// cell rather than the value itself: a tile hands it straight to
+    /// its delegate, where a pointer compare is what tells "same
+    /// definitions" from "reloaded" without a deep compare per snapshot.
+    colours: Rc<RefCell<Arc<NamedColours>>>,
     /// The schema and derived dimensions `:filter`/`:scope` validate
     /// against (Phase 4a §3.7) — set alongside `views` and refreshed the
     /// same way on `ConfigReloaded`.
@@ -75,6 +84,7 @@ impl BlotterFactory {
     pub fn new(
         data: DataHandle,
         views: Vec<ViewSpec>,
+        colours: NamedColours,
         schema: SchemaSpec,
         dims: DerivedDimensions,
         find_style: FindStyle,
@@ -83,6 +93,7 @@ impl BlotterFactory {
         BlotterFactory {
             data,
             views: Rc::new(RefCell::new(views)),
+            colours: Rc::new(RefCell::new(Arc::new(colours))),
             schema: Rc::new(RefCell::new(schema)),
             dims: Rc::new(RefCell::new(dims)),
             find_style: Rc::new(Cell::new(find_style)),
@@ -94,6 +105,22 @@ impl BlotterFactory {
     /// next requery, which the frame's config counter triggers.
     pub fn set_views(&self, views: Vec<ViewSpec>) {
         *self.views.borrow_mut() = views;
+    }
+
+    /// A reloaded `colours` doc (Part 2c §6.2), same sharing as
+    /// `set_views` — every tile picks the new definitions up on its next
+    /// applied snapshot, which the reload's own config bump already
+    /// triggers. A fresh `Arc` every time, deliberately: that is the
+    /// pointer change a delegate reads as "these are new definitions,
+    /// drop what you resolved from the old ones".
+    pub fn set_colours(&self, colours: NamedColours) {
+        *self.colours.borrow_mut() = Arc::new(colours);
+    }
+
+    /// What the factory is currently handing new tiles — the app's
+    /// bridge tests read it to prove a reload actually landed.
+    pub fn colours(&self) -> Arc<NamedColours> {
+        Arc::clone(&self.colours.borrow())
     }
 
     /// A reloaded `datasets` doc (Phase 4a §3.7): every open tile's next
@@ -150,6 +177,7 @@ impl ModuleFactory for BlotterFactory {
                 frame,
                 self.data.clone(),
                 self.views.clone(),
+                self.colours.clone(),
                 self.schema.clone(),
                 self.dims.clone(),
                 self.find_style.clone(),
@@ -209,6 +237,7 @@ mod tests {
         let short = BlotterFactory::new(
             short_data,
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::Vim,
@@ -224,6 +253,7 @@ mod tests {
         let default = BlotterFactory::new(
             default_data,
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::Vim,

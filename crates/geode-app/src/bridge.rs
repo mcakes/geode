@@ -4,6 +4,7 @@
 //! wakes on arrival, and forwards config reloads back to the data thread.
 
 use geode_blotter::BlotterFactory;
+use geode_core::colour::NamedColours;
 use geode_core::config::{Config, Diagnostic, load_views};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{CatalogParams, DistinctOutcome};
@@ -42,6 +43,13 @@ pub struct DataSetup {
     /// §3.7): the blotter factory validates `:filter`/`:scope` against
     /// the same schema and dimensions the service itself runs on.
     pub dimensions: DerivedDimensions,
+    /// `colours.toml` (Part 2c §6.2): the definitions a view column's
+    /// `colour = "<name>"` resolves against. Read here rather than left
+    /// to `load_views` — that function reads the doc too (to warn about
+    /// a column naming a colour nothing defines) but throws
+    /// `NamedColours::from_doc`'s own diagnostics away, so this is the
+    /// only place a malformed `colours.toml` is ever reported.
+    pub colours: NamedColours,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -68,6 +76,11 @@ pub fn data_setup(config: &Config, db_path: PathBuf) -> Option<DataSetup> {
         .map(|doc| SourceSpec::from_doc(doc, &schema))
         .unwrap_or_default();
     diagnostics.extend(d);
+    let (colours, colour_diags) = config
+        .doc("colours")
+        .map(NamedColours::from_doc)
+        .unwrap_or_default();
+    diagnostics.extend(colour_diags);
     Some(DataSetup {
         config: DataServiceConfig {
             db_path,
@@ -79,6 +92,7 @@ pub fn data_setup(config: &Config, db_path: PathBuf) -> Option<DataSetup> {
         },
         views,
         dimensions,
+        colours,
         diagnostics,
     })
 }
@@ -188,6 +202,7 @@ pub fn start(
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
         setup.views,
+        setup.colours,
         schema,
         dimensions,
         find_style,
@@ -322,13 +337,30 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 for d in &presentation_diags {
                     tracing::warn!(target: "geode::query", "{d}");
                 }
+                // 2c §6.2: `colours` is one of `ConfigReloaded`'s own
+                // triggers (`shell::hot_reload`), so this really is the
+                // handler a colour edit wakes. Its reader's diagnostics
+                // join the presentation ones — `load_views` above read
+                // the same doc and discarded them, so without this a
+                // malformed colour would be reported at startup
+                // (`data_setup`) and never again, which is precisely
+                // when a trader is editing the file.
+                let (colours, colour_diags) = config
+                    .doc("colours")
+                    .map(NamedColours::from_doc)
+                    .unwrap_or_default();
+                for d in &colour_diags {
+                    tracing::warn!(target: "geode::query", "{d}");
+                }
+                factory.set_colours(colours);
                 let (dims, _) = config
                     .doc("dimensions")
                     .map(DerivedDimensions::from_doc)
                     .unwrap_or_default();
                 // `stale_after` is not among `ConfigReloaded`'s own
-                // triggers (that event fires for `views`/`dimensions`
-                // only — `shell::hot_reload::apply_reload`) — an edit to
+                // triggers (that event fires for the docs a tile runs and
+                // paints on — `views`, `view_presentation`, `dimensions`,
+                // `colours`; `shell::hot_reload::apply_reload`) — an edit to
                 // `[app] blotter.stale_after` alone does not itself wake
                 // this handler. It is re-read and re-applied here anyway,
                 // piggybacking on whatever reload did fire, so it never
@@ -354,10 +386,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 handle.replace_views(views, dims);
                 // §19.6: `config`'s last use was just above — free to
                 // borrow `cx` mutably now.
-                if !presentation_diags.is_empty() {
+                let reload_diags: Vec<Diagnostic> =
+                    presentation_diags.into_iter().chain(colour_diags).collect();
+                if !reload_diags.is_empty() {
                     diagnostics.update(cx, |dg, cx| {
                         let before = dg.version();
-                        dg.note_data_diagnostics(presentation_diags, SystemTime::now());
+                        dg.note_data_diagnostics(reload_diags, SystemTime::now());
                         if dg.version() != before {
                             cx.notify();
                         }
@@ -781,6 +815,7 @@ role = "key"
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::default(),
@@ -851,6 +886,7 @@ role = "key"
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::default(),
@@ -918,6 +954,7 @@ role = "key"
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::default(),
@@ -951,6 +988,62 @@ role = "key"
         );
     }
 
+    /// 2c §6.2: a reloaded `colours.toml` reaches the factory, so the
+    /// next tile — and, through `BlotterTile::apply`, every open one —
+    /// paints the new definitions. Without this the doc would be read
+    /// once at startup and a trader's colour edit would need a restart.
+    #[gpui::test]
+    fn a_reload_hands_the_factory_the_new_colours(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            handle,
+            factory: factory.clone(),
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        assert!(
+            factory.colours().get("delta").is_none(),
+            "fixture: the factory starts with no colours at all"
+        );
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        assert!(
+            factory.colours().get("delta").is_some(),
+            "the reload must hand the factory the config's colours"
+        );
+    }
+
     /// Phase 4b §4.5: `attach`'s `cx.observe(&diagnostics, ..)` submits
     /// one `Request::Catalog` per drained `pending_catalog_request`, each
     /// with a fresh, higher tag. Two publishes while a diagnostics tile
@@ -971,6 +1064,7 @@ role = "key"
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::default(),
@@ -1060,6 +1154,7 @@ role = "key"
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::default(),
@@ -1121,6 +1216,7 @@ role = "key"
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::default(),
@@ -1210,6 +1306,7 @@ role = "key"
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
+            NamedColours::default(),
             SchemaSpec::default(),
             DerivedDimensions::default(),
             FindStyle::default(),
@@ -1366,6 +1463,49 @@ role = "key"
             .map(|c| c.name())
             .collect();
         assert_eq!(served, names);
+    }
+
+    /// 2c §6.2: the `colours` doc travels to the blotter through
+    /// `DataSetup` like the views do, and its reader's own diagnostics
+    /// travel with it — `load_views` (the only other place the doc is
+    /// read) discards them, so without this every malformed colour in
+    /// `colours.toml` would be dropped in total silence.
+    #[test]
+    fn data_setup_carries_the_colours_and_reports_their_diagnostics() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                    .unwrap(),
+                LayerDoc::builtin(
+                    "colours",
+                    "[delta]\nhue = 240\n[broken]\nhue = 240\ntoken = \"danger\"\n",
+                )
+                .unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        assert!(
+            setup.colours.get("delta").is_some(),
+            "the good definition must reach the factory"
+        );
+        assert!(
+            setup.colours.get("broken").is_none(),
+            "the refused one must not"
+        );
+        assert!(
+            setup
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("colour 'broken'")),
+            "a malformed colour must be reported, not dropped in silence: {:?}",
+            setup.diagnostics
+        );
     }
 
     #[test]
