@@ -2663,6 +2663,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-documents"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "geode-core",
+ "proptest 1.11.0",
+ "quick-xml",
+]
+
+[[package]]
 name = "geode-shell"
 version = "0.1.0"
 dependencies = [
