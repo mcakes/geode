@@ -7202,10 +7202,15 @@ run_mutation "objectdialog: the chain field paints as the filter row" \
 # last tick and, outliving the flush, writes the object without it on the
 # next one. Every single-entry fixture stays green — the stale window is
 # only reachable by leaving and re-entering a slot inside 250 ms.
+# Anchored on the two lines together: `maybe_refresh_available` now
+# folds the pending batch the same way, so the bare `let folded` line
+# matches twice and only the first would be mutated.
 run_mutation "objectdialog: the edit stage ignores the pending batch" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let folded = apply::config_with_pending(shell);' \
-  '    let folded = apply::config_with_pending(shell).filter(|_| false);' \
+  '    let folded = apply::config_with_pending(shell);
+    if let Some(state) = shell.object_dialog.as_mut() {' \
+  '    let folded = apply::config_with_pending(shell).filter(|_| false);
+    if let Some(state) = shell.object_dialog.as_mut() {' \
   geode-shell \
   jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick
 
@@ -8960,8 +8965,8 @@ run_mutation "objectdialog: Schema's column stage is its one writable surface" \
 # before its write lands — otherwise the chip lies for 250 ms.
 run_mutation "objectdialog: a diverged field's provenance is the view level" \
   crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
-  '            if differs_from(below) || set_in(&ctx.layers.view) {' \
-  '            if set_in(&ctx.layers.view) {' \
+  '            if differs_from(below) {' \
+  '            if false {' \
   geode-shell \
   a_stepped_field_reads_view_before_its_write_lands
 
@@ -9132,6 +9137,66 @@ run_mutation "views: the dataset layer reaches a column the view has yet to carr
   '        .flat_map(|_| view.columns.iter().map(|c| c.name()))' \
   geode-shell \
   a_promoted_columns_stage_seeds_from_the_dataset_level
+
+# Important 1 of the final whole-branch review: the dataset overlay's
+# `apply` must run BELOW the loop that cross-checks each DESK view's own
+# `format.colour`, because that loop reads `view.presentation_of(..)`.
+# Duplicating the apply back above the loop (the position the first cut
+# shipped) makes a dataset-level colour typo report once more per view
+# carrying the column, each at a `views.<v>.columns.<i>.format.colour`
+# path into a file holding no colour key at all — and hides a desk
+# view's own broken colour behind a valid dataset-level one.
+run_mutation "load: the dataset overlay is applied after the desk view's own colour cross-check" \
+  crates/geode-core/src/config/load.rs \
+  '    for view in &views {' \
+  '    if let Some(overlay) = &dataset_overlay {
+        diags.extend(overlay.apply(&mut views, &schema));
+    }
+    for view in &views {' \
+  geode-core \
+  the_desk_views_own_colour_check_reads_the_desk_value
+
+# Minor 2: a key inside `[<ds>.columns.<col>]` that the reader does not
+# recognise warns with its path (spec section 2.2). `parse_format_keys`
+# and `parse_column_keys` report only keys they recognise and mis-read,
+# so without this loop a typo (`precison`) is accepted in silence — the
+# one thing a layer built to tell a trader where a key went must not do.
+run_mutation "view: an unknown key inside a dataset-presentation column table warns" \
+  crates/geode-core/src/view.rs \
+  '                                if !COLUMN_KEYS.contains(&k.as_str()) {' \
+  '                                if false {' \
+  geode-core \
+  dataset_presentation_warns_for_an_unknown_key_inside_a_column_table
+
+# Minor 4: the catalogue rebuilt on a dataset switch seeds each row's
+# presentation from `dataset_presentation.toml` (section 5.4), so it must
+# read the config with the PENDING batch folded in. Read off
+# `services.config` alone, a Schema column-stage edit made inside the
+# 250 ms debounce is invisible, and a column promoted off the stale
+# catalogue carries the stale layer into the writer's comparison.
+run_mutation "objectdialog: the refreshed catalogue reads the pending config" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let folded = apply::config_with_pending(shell);
+    let config = folded.as_ref().unwrap_or(&shell.services.config);' \
+  '    let folded: Option<geode_core::config::Config> = None;
+    let config = folded.as_ref().unwrap_or(&shell.services.config);' \
+  geode-shell \
+  a_dataset_switch_inside_the_debounce_seeds_the_catalogue_from_the_pending_write
+
+# Minor 6: `d`, `r` and `o` all refuse inside a column's stage, so the
+# action bar advertises none of them there — on either door. Without the
+# gate the Views stage paints "Delete this view" and "Revert to desk"
+# over a column, and the read-only Schema door would paint "Delete this
+# dataset" over one.
+run_mutation "objectdialog: a column stage offers no destructive action" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if draft.column().is_some() {
+        return Vec::new();
+    }
+    let row = editing_row(shell);' \
+  '    let row = editing_row(shell);' \
+  geode-shell \
+  a_column_stage_offers_no_destructive_action
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
