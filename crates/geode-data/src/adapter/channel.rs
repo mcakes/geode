@@ -328,6 +328,19 @@ impl ChannelSubscription {
 }
 
 impl Subscription for ChannelSubscription {
+    /// Registers this subscription's interest and reports `Connected`.
+    ///
+    /// The local `_open` below holds a strong inbound sender for the whole
+    /// call, so the bus cannot close between the liveness check, the
+    /// registration and the `Connected` report — without it, a feed dropped
+    /// in that window would still have yielded a `Connected` on a bus that
+    /// was already closed.
+    ///
+    /// A close immediately AFTER the report is inherent rather than a gap:
+    /// that is the ordinary "connection lost after connect" every adapter
+    /// has, and it is what `ConnectionState` and
+    /// [`ChannelFeed::set_state`] exist to model. What must not happen is
+    /// reporting a connection that was never there.
     fn subscribe(
         &mut self,
         topics: &[String],
@@ -351,14 +364,26 @@ impl Subscription for ChannelSubscription {
         // the discovery lane with zero rows behind it, which is the one
         // failure shape this tier must never produce. A refusal instead,
         // and nothing registered and no state reported.
-        if self.bus.feed.lock().unwrap().upgrade().is_none() {
-            return Err(AdapterError {
+        //
+        // `_open` is HELD for the whole function rather than tested and
+        // dropped (round 2 of the review): a strong sender is what keeps the
+        // channel open, so holding one makes "the bus is alive" true across
+        // the check, the registration AND the `Connected` report instead of
+        // only at the instant of the check. It is an `Arc`, not a lock
+        // guard, so the no-nested-locks rule still holds — the `feed` mutex
+        // is released at the end of this statement.
+        let _open = self
+            .bus
+            .feed
+            .lock()
+            .unwrap()
+            .upgrade()
+            .ok_or_else(|| AdapterError {
                 message: format!(
                     "channel adapter '{}': every feed has been dropped; the bus is closed",
                     self.bus.name
                 ),
-            });
-        }
+            })?;
         // Before the registration, so a message can never be dispatched to
         // a half-built one, and so a failure leaves nothing registered.
         self.bus.ensure_dispatcher()?;

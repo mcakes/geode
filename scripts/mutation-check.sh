@@ -8778,12 +8778,16 @@ run_mutation "adapter: an empty topic list is refused, not reported connected" \
 # and the slot outlives the thread, so without this check a subscribe
 # after the last feed was dropped would report `Connected` and deliver
 # nothing for the session — a source reading `Ok` in the discovery lane
-# with zero rows behind it, the false-clean shape. `if false` is exactly
-# the state before the fix.
+# with zero rows behind it, the false-clean shape. Re-anchored in round 2
+# to the same site with the same meaning: the check now UPGRADES and HOLDS
+# the sender for the whole call, so the mutation substitutes an open
+# sender of its own — the bus always looks alive, exactly the pre-fix
+# state — rather than flipping a condition that no longer exists.
 run_mutation "adapter: subscribing to a closed bus is refused" \
   crates/geode-data/src/adapter/channel.rs \
-  '        if self.bus.feed.lock().unwrap().upgrade().is_none() {' \
-  '        if false {' \
+  '            .ok_or_else(|| AdapterError {' \
+  '            .or_else(|| Some(Arc::new(mpsc::sync_channel(1).0)))
+            .ok_or_else(|| AdapterError {' \
   geode-data subscribing_after_every_feed_is_dropped_is_refused
 
 # A refused publish is counted, so a producer outrunning the dispatcher is
