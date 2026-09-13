@@ -5,8 +5,11 @@
 //! detail, which is what makes the future sidecar-process split an
 //! evolution rather than a rewrite (§2).
 
+use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
+use crate::documents::DocumentRegistry;
 use crate::health::{Health, severity_rank};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
+use crate::ingest::subscribe::{ParseFailureSink, SubscriptionWorker};
 use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
 use crate::query::as_of::AsOf;
 use crate::query::catalog::build_catalog;
@@ -22,7 +25,7 @@ use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::Diagnostic;
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::document::join_key;
+use geode_core::document::{check_kind_against, join_key};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
     QueryOutcome,
@@ -45,6 +48,17 @@ pub struct DataServiceConfig {
     /// Configured sources (spec §5.2). Empty means nothing is ever
     /// ingested — a warm database is queried as it stands.
     pub sources: Vec<SourceSpec>,
+    /// The transports this build has (market-data spec §5.2). Filled by
+    /// `geode-app`, because it is the one crate that knows which adapters
+    /// were compiled in — this crate only ever looks a
+    /// `[sources.<name>] adapter = "…"` name up. Empty is legitimate: a
+    /// build with no adapter serves `csv_dir` sources and reports every
+    /// subscribed one as unservable.
+    pub adapters: AdapterRegistry,
+    /// The document formats this build can parse (§6.4), filled by
+    /// `geode-app` for the same reason and consulted the same way — a
+    /// subscribed source's `document` key names one of these.
+    pub documents: DocumentRegistry,
 }
 
 /// Everything the service produces, on one channel (spec §5.1).
@@ -533,6 +547,18 @@ pub struct DataService {
     /// issue one `duckdb_disconnect` and close nothing. An earlier
     /// version of this comment wrongly called a different drop order a
     /// live bug on the strength of this same detail.
+    /// One receiver thread per subscribed source (market-data spec
+    /// §5.4), first in the field list because it must be first in drop
+    /// order: a worker submits documents into the ingest runner, so it
+    /// has to stop before the runner does.
+    ///
+    /// A `Mutex` only because `DataService::shutdown` takes `&self` (as
+    /// every other stop door here does) while
+    /// `SubscriptionWorker::shutdown` takes `&mut self` — the same
+    /// reason `IngestHandle` holds its `JoinHandle` behind one. It is
+    /// never contended: only `shutdown` and `Drop` take it, and
+    /// `shutdown` is idempotent.
+    subscriptions: std::sync::Mutex<Vec<SubscriptionWorker>>,
     pool: QueryPool,
     scheduler: Scheduler,
     ingest: Arc<IngestHandle>,
@@ -866,6 +892,187 @@ impl DataService {
             ingest_sink,
         ));
 
+        // Subscribed sources (market-data spec §5.4): one receiver
+        // thread each. Resolved here because this is the only place that
+        // holds both registries, the schema and the health tracker at
+        // once — and a `csv_dir` source never touches either registry,
+        // since it is the reader's own directory path and goes to the
+        // `Scheduler` below exactly as it always has.
+        //
+        // Placed after the runner (a worker submits into it) and before
+        // `Scheduler::spawn`, for the same ordering reason the load-lane
+        // seed above is placed where it is: a source this build cannot
+        // serve must be reported before the first poll can speak, or the
+        // report reads as a transition away from a poll's `Ok` rather
+        // than as the state.
+        //
+        // Every resolution failure below is the same shape and the same
+        // lane: the source is configured, this build cannot serve it,
+        // and that is a DISCOVERY-lane `Failed` — the lane a connection
+        // state belongs to, an absent adapter being the extreme case of
+        // "not connected". Never the load lane, which is about documents
+        // that did arrive. Reported and skipped, never fatal: one
+        // unservable source must not stop the others or the queries.
+        let mut subscriptions: Vec<SubscriptionWorker> = Vec::new();
+        let mut directory_sources: Vec<SourceSpec> = Vec::new();
+        for spec in &config.sources {
+            if !spec.is_subscribed() {
+                directory_sources.push(spec.clone());
+                continue;
+            }
+            // The scheduler sink's own emit closure, verbatim (it is the
+            // discovery lane's): the deciding slot's pair forwarded as
+            // it comes back, logged at the level the outcome deserves.
+            let report_unservable = |reason: String| {
+                let source = spec.name.clone();
+                let sink = Arc::clone(&sink);
+                health_tracker.report_discovery_and_emit(
+                    &spec.name,
+                    Health::Failed {
+                        reason: reason.clone(),
+                    },
+                    reason,
+                    |reported| match reported {
+                        Some((worst, detail)) => {
+                            log_health_event(&source, &worst, &detail);
+                            sink(DataEvent::Health {
+                                source: source.clone(),
+                                worst,
+                                detail,
+                            })
+                        }
+                        None => true,
+                    },
+                );
+            };
+            let Some(adapter) = config.adapters.get(&spec.adapter) else {
+                report_unservable(format!("adapter '{}' is not in this build", spec.adapter));
+                continue;
+            };
+            // `SourceSpec::from_doc` refuses a subscribed source with no
+            // `document` key and one naming an undeclared or non-document
+            // dataset, so neither this nor the dataset lookup below is
+            // reachable from a config file. Both are still reported
+            // rather than unwrapped: a `DataServiceConfig` can be built
+            // in code (every test here does), and a panic inside `open`
+            // over a misconfigured source would take the whole app down
+            // for the one thing this seam exists to report.
+            let Some(document) = spec.document.as_deref() else {
+                report_unservable(format!("adapter '{}' needs a document kind", spec.adapter));
+                continue;
+            };
+            let Some(kind) = config.documents.get(document) else {
+                report_unservable(format!("document kind '{document}' is not registered"));
+                continue;
+            };
+            let Some(dataset) = config.schema.dataset(&spec.dataset) else {
+                report_unservable(format!("dataset '{}' is not declared", spec.dataset));
+                continue;
+            };
+            // Spec §6.4's check, once per source at open rather than per
+            // document on the receiver thread: the kind and the dataset
+            // must agree on the column set, or every document this source
+            // sends would fail the same way with nothing naming the
+            // cause.
+            if let Err(e) = check_kind_against(kind.as_ref(), dataset) {
+                report_unservable(e);
+                continue;
+            }
+            // Asked for per source, never cached as a property of the
+            // adapter: `Adapter::subscription` may answer `None` at
+            // runtime (see its doc), and one source's refusal says
+            // nothing about the next.
+            let Some(subscription) = adapter.subscription() else {
+                report_unservable(format!(
+                    "adapter '{}' has no subscription side",
+                    spec.adapter
+                ));
+                continue;
+            };
+            // The ingest sink's `Failed` arm, verbatim — `log_ingest_failure`
+            // included: a document that did not publish is the same
+            // event as a file that did not load, so it is logged the
+            // same way and filed on the same LOAD lane, keyed by the
+            // batch the receiver names (the document's key, or the topic
+            // when the bytes never yielded one).
+            let on_parse_failure: ParseFailureSink = {
+                let sink = Arc::clone(&sink);
+                let health_tracker = Arc::clone(&health_tracker);
+                let source = spec.name.clone();
+                let dataset_name = spec.dataset.clone();
+                Arc::new(move |batch: &str, reason: String| {
+                    log_ingest_failure(&dataset_name, batch, &reason);
+                    health_tracker.report_load_and_emit(
+                        &source,
+                        batch,
+                        Health::Failed {
+                            reason: reason.clone(),
+                        },
+                        format!("{batch}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => sink(DataEvent::Health {
+                                source: source.clone(),
+                                worst,
+                                detail,
+                            }),
+                            None => true,
+                        },
+                    );
+                })
+            };
+            let on_connection: HealthSink = {
+                let sink = Arc::clone(&sink);
+                let health_tracker = Arc::clone(&health_tracker);
+                let source = spec.name.clone();
+                Arc::new(move |state: ConnectionState| {
+                    // `ConnectionState`'s own doc records this mapping:
+                    // `Reconnecting` is `Pending` rather than a failure
+                    // because nothing has been lost yet and a trader
+                    // should read "waiting", not "broken"; `Lost` carries
+                    // the adapter's reason through verbatim, since that
+                    // string is the whole of what the diagnostics tile
+                    // can say about a vendor library's failure.
+                    let (worst, detail) = match state {
+                        ConnectionState::Connected => (Health::Ok, String::new()),
+                        ConnectionState::Reconnecting => {
+                            (Health::Pending, "reconnecting".to_string())
+                        }
+                        ConnectionState::Lost { reason } => (
+                            Health::Failed {
+                                reason: reason.clone(),
+                            },
+                            reason,
+                        ),
+                    };
+                    health_tracker.report_discovery_and_emit(&source, worst, detail, |reported| {
+                        match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        }
+                    });
+                })
+            };
+            match SubscriptionWorker::spawn(
+                spec,
+                dataset.clone(),
+                kind,
+                subscription,
+                Arc::clone(&ingest),
+                on_parse_failure,
+                on_connection,
+            ) {
+                Ok(worker) => subscriptions.push(worker),
+                Err(e) => report_unservable(e.message),
+            }
+        }
+
         let scheduler_sink: SchedulerSink = {
             let sink = Arc::clone(&sink);
             let health_tracker = Arc::clone(&health_tracker);
@@ -919,8 +1126,12 @@ impl DataService {
                 }
             })
         };
+        // Directory sources only: a subscribed source has no `paths` to
+        // poll, and handing it to the scheduler would have it report
+        // discovery health for a directory nobody configured — on the
+        // very lane the receiver's own connection state is reported on.
         let scheduler = Scheduler::spawn(
-            config.sources.clone(),
+            directory_sources,
             discovery_conn,
             Arc::clone(&ingest),
             scheduler_sink,
@@ -943,6 +1154,7 @@ impl DataService {
         Ok(DataService {
             config,
             diagnostics,
+            subscriptions: std::sync::Mutex::new(subscriptions),
             pool,
             scheduler,
             ingest,
@@ -1295,6 +1507,18 @@ impl DataService {
     }
 
     pub fn shutdown(&self) {
+        // Subscriptions first: each one's receiver thread submits
+        // documents into the ingest runner, so stopping the runner while
+        // a worker is still delivering would leave work queued behind a
+        // shut-down consumer.
+        for worker in self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+        {
+            worker.shutdown();
+        }
         self.pool.shutdown();
         self.scheduler.shutdown();
         self.ingest.shutdown();
@@ -1304,7 +1528,7 @@ impl DataService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc, ts};
+    use crate::store::ddl::tests_support::{FakeKind, cvi_dataset, cvi_doc, ts};
     use geode_core::scope::{DimensionSelection, Scope};
     use std::time::Duration;
 
@@ -1341,6 +1565,8 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 2,
             sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
         (db, src, service, rx)
@@ -1416,9 +1642,237 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 2,
             sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
         (dir, service, rx)
+    }
+
+    /// A service with one SUBSCRIBED source (market-data spec §5.4) on an
+    /// in-process `ChannelAdapter` — the same code path a broker source
+    /// takes, with only the wire faked (`ChannelAdapter`'s own doc).
+    ///
+    /// `adapter` is what the SOURCE declares, so a test can name one the
+    /// registry does not hold; the bus itself is always registered as
+    /// `demo_bus`. `kind` is registered under its own name, which the
+    /// source's `document` key names. No pre-publish and no scratch
+    /// `Store`: `open` applies the schema itself, and everything these
+    /// tests assert on arrives through the feed.
+    fn subscribed_service(
+        kind: Arc<dyn geode_core::document::DocumentKind>,
+        adapter: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::adapter::ChannelFeed,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(bus);
+        let mut documents = DocumentRegistry::default();
+        documents.register(kind);
+        let ds = cvi_dataset();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let spec = crate::source::SourceSpec {
+            adapter: adapter.to_string(),
+            document: Some("fake_cvi".into()),
+            topics: vec!["cvi/>".into()],
+            // Every message publishes: the coalescing window itself is
+            // `ingest::subscribe`'s to test, and a window here would only
+            // make these assertions wait.
+            coalesce: Duration::ZERO,
+            ..crate::source::SourceSpec::directory("cvi", "cvi_params", Vec::new())
+        };
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: vec![spec],
+            adapters,
+            documents,
+        })
+        .unwrap();
+        (dir, feed, service, rx)
+    }
+
+    /// The next `Published`, skipping anything else.
+    fn next_published(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+    ) -> (String, String, Vec<Option<String>>) {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Published {
+                    dataset,
+                    batch,
+                    books,
+                    ..
+                } => return (dataset, batch, books),
+                _ => continue,
+            }
+        }
+    }
+
+    /// The next `Health`, skipping anything else.
+    fn next_health(rx: &std::sync::mpsc::Receiver<DataEvent>) -> (String, Health, String) {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                } => return (source, worst, detail),
+                _ => continue,
+            }
+        }
+    }
+
+    #[test]
+    fn a_subscribed_source_publishes_what_the_feed_sends_and_serves_it_back() {
+        let (_dir, feed, svc, rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
+        assert!(feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.])
+        ));
+        let (dataset, batch, books) = next_published(&rx);
+        assert_eq!((dataset.as_str(), batch.as_str()), ("cvi_params", "SPX.Z"));
+        // The bookless partition, as a document publish always writes —
+        // an empty list would say nothing was written at all.
+        assert_eq!(books, vec![None]);
+
+        // And it is queryable through the ordinary document request: the
+        // receiver's rows went through the real publish, so nothing about
+        // this path knows the source was subscribed rather than a file.
+        svc.document(&DocumentParams {
+            key: QueryKey(1),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let snap = next(&rx).snapshot.unwrap();
+        assert_eq!(snap.rows(), 6);
+        assert_eq!(snap.f64_value("param", 0), Some(1.0));
+        assert_eq!(snap.text_value("underlying_ref", 0), Some("SPX.Z"));
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_source_naming_an_adapter_this_build_lacks_is_reported_and_skipped() {
+        // The vendor adapter is not compiled into this repo at all
+        // (roadmap ruling 5), so a config naming it is the ordinary case,
+        // not an exotic one: it must read as one unservable source, with
+        // the service still serving everything else.
+        let (_dir, _feed, svc, rx) = subscribed_service(Arc::new(FakeKind::new()), "solace");
+        let (source, worst, detail) = next_health(&rx);
+        assert_eq!(source, "cvi");
+        match &worst {
+            Health::Failed { reason } => {
+                assert!(reason.contains("solace"), "{reason}");
+                assert!(reason.contains("not in this build"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(detail.contains("not in this build"), "{detail}");
+        // Still a working service.
+        let outcome = svc.catalog(&CatalogParams {
+            key: QueryKey(2),
+            tag: 2,
+            as_of: AsOf::Live,
+        });
+        let snap = outcome.snapshot.expect("the catalog still answers");
+        assert_eq!(snap.datasets[0].name, "cvi_params");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_kind_that_disagrees_with_its_dataset_is_reported_and_skipped() {
+        // Spec §6.4's check, at source-open time: the kind produces a
+        // column the dataset does not declare. Caught once, here, rather
+        // than by every document this source would ever send.
+        let (_dir, feed, svc, rx) =
+            subscribed_service(Arc::new(FakeKind::with_extra_column()), "demo_bus");
+        let (source, worst, _) = next_health(&rx);
+        assert_eq!(source, "cvi");
+        match &worst {
+            Health::Failed { reason } => assert!(reason.contains("surface_id"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+        // Nothing is subscribed, so a message on the bus reaches nobody.
+        feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_millis(300)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a skipped source subscribes to nothing"
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_lost_connection_is_discovery_health_and_a_parse_failure_outlives_a_reconnect() {
+        let (_dir, feed, svc, rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
+        // Subscribing reported `Connected`, which is the discovery lane's
+        // `Ok` — the first event this service ever sends.
+        assert_eq!(next_health(&rx).1, Health::Ok);
+
+        feed.set_state(ConnectionState::Lost {
+            reason: "broker gone".into(),
+        });
+        let (_, worst, _) = next_health(&rx);
+        assert_eq!(
+            worst,
+            Health::Failed {
+                reason: "broker gone".into()
+            },
+            "a lost connection is the discovery lane's Failed, reason verbatim"
+        );
+
+        // The two lanes are independent: a message that arrives anyway
+        // still publishes, and its clean LOAD-lane `Ok` does not clear the
+        // connection's `Failed` (CLAUDE.md, Phase 4b's NEW-4).
+        feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        assert_eq!(next_published(&rx).1, "SPX.Z");
+
+        // A parse failure is the LOAD lane, keyed by the topic (the bytes
+        // yielded no key) — and it is what the combined value reports from
+        // here on.
+        feed.publish("cvi/SPX.Z", b"rubbish".to_vec());
+        let (_, worst, detail) = next_health(&rx);
+        assert!(
+            matches!(&worst, Health::Failed { reason } if reason.starts_with("parse: ")),
+            "{worst:?}"
+        );
+        assert!(detail.starts_with("cvi/SPX.Z: parse: "), "{detail}");
+
+        // Reconnecting cannot clear it: a content-blind connection report
+        // says nothing about the documents that did arrive.
+        feed.set_state(ConnectionState::Connected);
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(DataEvent::Health { worst, .. }) => {
+                    panic!("a reconnect must not re-report health at all here: {worst:?}")
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        svc.shutdown();
     }
 
     /// The next query outcome, skipping any other event.
@@ -1686,6 +2140,8 @@ mod tests {
                 dimensions: DerivedDimensions::default(),
                 query_workers: 1,
                 sources: Vec::new(),
+                adapters: Default::default(),
+                documents: Default::default(),
             },
             sink,
         )
@@ -1719,6 +2175,8 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .expect("a broken view must not stop the service opening")
         .0
@@ -1969,6 +2427,8 @@ mod tests {
                     vec![format!("{}/*.csv", src.path().display())],
                 )
             }],
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -2030,6 +2490,8 @@ mod tests {
                     vec![format!("{}/*.csv", src.path().display())],
                 )
             }],
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -2155,6 +2617,8 @@ source_name = "NPV"
                     vec![format!("{}/*.csv", src.path().display())],
                 )
             }],
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -2247,6 +2711,8 @@ source_name = "NPV"
                     vec![format!("{}/*.csv", src.path().display())],
                 )
             }],
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -2343,6 +2809,8 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![carried_source(src, poll)],
+            adapters: Default::default(),
+            documents: Default::default(),
         }
     }
 
@@ -3224,6 +3692,8 @@ source_name = "NPV"
                     vec![format!("{}/*.csv", src.path().display())],
                 )
             }],
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -3327,6 +3797,8 @@ source_name = "NPV"
                     vec![format!("{}/*.csv", src.path().display())],
                 )
             }],
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -3426,6 +3898,8 @@ source_name = "NPV"
                     vec![format!("{}/*.csv", src.path().display())],
                 )
             }],
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -3545,6 +4019,8 @@ source_name = "NPV"
                     vec![format!("{}/*.csv", src.path().display())],
                 )
             }],
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -3614,6 +4090,8 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 
@@ -3667,6 +4145,8 @@ source_name = "NPV"
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
         })
         .unwrap();
 

@@ -7,6 +7,7 @@ pub mod plan;
 pub mod runner;
 pub mod scheduler;
 pub mod split;
+pub mod subscribe;
 
 pub use runner::{DocumentJob, IngestEvent, IngestHandle, IngestRunner, IngestSink};
 

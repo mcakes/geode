@@ -444,6 +444,8 @@ mod tests {
                 dimensions: geode_core::dimensions::DerivedDimensions::default(),
                 query_workers: 1,
                 sources: Vec::new(),
+                adapters: crate::adapter::AdapterRegistry::default(),
+                documents: crate::documents::DocumentRegistry::default(),
             },
             sink,
         );
@@ -514,6 +516,8 @@ mod tests {
                 dimensions: geode_core::dimensions::DerivedDimensions::default(),
                 query_workers: 1,
                 sources: Vec::new(),
+                adapters: crate::adapter::AdapterRegistry::default(),
+                documents: crate::documents::DocumentRegistry::default(),
             },
             sink,
         );
@@ -583,6 +587,8 @@ mod tests {
                 dimensions: geode_core::dimensions::DerivedDimensions::default(),
                 query_workers: 1,
                 sources: Vec::new(),
+                adapters: crate::adapter::AdapterRegistry::default(),
+                documents: crate::documents::DocumentRegistry::default(),
             },
             sink,
         );
@@ -641,6 +647,8 @@ mod tests {
                 dimensions: geode_core::dimensions::DerivedDimensions::default(),
                 query_workers: 1,
                 sources: Vec::new(),
+                adapters: crate::adapter::AdapterRegistry::default(),
+                documents: crate::documents::DocumentRegistry::default(),
             },
             sink,
         );
@@ -676,6 +684,8 @@ mod tests {
                 dimensions: geode_core::dimensions::DerivedDimensions::default(),
                 query_workers: 1,
                 sources: Vec::new(),
+                adapters: crate::adapter::AdapterRegistry::default(),
+                documents: crate::documents::DocumentRegistry::default(),
             },
             sink,
         );

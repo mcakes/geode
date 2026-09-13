@@ -9,6 +9,8 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
+use geode_data::adapter::AdapterRegistry;
+use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink};
 use geode_shell::diagnostics::SourceSummary;
@@ -76,6 +78,13 @@ pub fn data_setup(config: &Config, db_path: PathBuf) -> Option<DataSetup> {
             dimensions: dimensions.clone(),
             query_workers: 4,
             sources,
+            // Filled by the caller in the next task (the demo bus): a
+            // build with no adapter and no document kind serves every
+            // `csv_dir` source and reports each subscribed one as
+            // unservable, which is the honest answer rather than a
+            // silent no-op.
+            adapters: AdapterRegistry::default(),
+            documents: DocumentRegistry::default(),
         },
         views,
         dimensions,
