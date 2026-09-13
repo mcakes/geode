@@ -69,23 +69,36 @@
 pub mod apply;
 mod groupings;
 pub mod render;
+mod schema;
 mod scopes;
+mod sources;
 mod views;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geode_core::config::{Config, Diagnostic, Layer};
+use geode_core::config::{Config, Diagnostic, Layer, Severity};
 
 use crate::dialogmode::DialogMode;
 
+/// The one notice every mutating verb on a [`Domain::writable`] `false`
+/// domain shows — `render.rs`'s browse `n` gate, `handle_edit_key`'s
+/// verb gate, and `render::edit_commit_notice` all read this same
+/// string, so a trader sees one consistent answer wherever they reach
+/// for a key the schema inspector cannot honour.
+pub const READ_ONLY_NOTICE: &str = "the schema is read-only";
+
 /// Which config domain a dialog is browsing. One variant per adapter
-/// module under this directory (spec §8 has two more — Sources and the
-/// read-only Schema — still to arrive with their own adapters).
+/// module under this directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
     Views,
     Groupings,
     Scopes,
+    /// Read-only (§9, §19.4): the datasets the other adapters build their
+    /// choices from.
+    Schema,
+    /// The ingest feeds, one object per source (§8.3, §19.3).
+    Sources,
 }
 
 /// Which stage of the scaffold is on screen.
@@ -143,18 +156,37 @@ pub struct ObjectRow {
     /// on a view only the user layer defines, that would delete the view
     /// outright rather than restore anything. See [`derive_rows`].
     pub overridden: bool,
-    /// Always `false` today, and deliberately still a field.
-    ///
-    /// Drift (spec §5.2) is "the layer I overrode has changed since I
-    /// overrode it", which cannot be computed from `Config` alone: an
-    /// override freezes a copy, so the shadowed layer's text at override
-    /// time has to have been recorded somewhere. That record is
-    /// `overrides.toml`, Part 2's work. Inventing a stand-in here — say,
-    /// comparing the user's copy against the desk's current one — would
-    /// mark every deliberate customisation as drifted, which is exactly
-    /// backwards, so the honest value until the sidecar exists is
-    /// `false`.
+    /// The layer this row overrides has changed since it was forked
+    /// (spec §5.2, §19.6). `overrides.toml` (`OVERRIDES_DOC`) records the
+    /// shadowed layer's canonical text at fork time, keyed by
+    /// [`override_key`]; `derive_rows` compares that text against the
+    /// shadow's CURRENT text. `false` whenever there is no recorded
+    /// entry — an override that predates this sidecar, or a stale entry
+    /// (see [`stale_override_keys`]) — never a guess made by comparing
+    /// the user's copy against the desk's current one, which would mark
+    /// every deliberate customisation as drifted (exactly backwards).
     pub drifted: bool,
+    /// A grouping key painted before the name, dimmed (§19.3): the
+    /// dataset a source feeds. `Some` only on Sources; the primary sort
+    /// key when present, part of `searchable_text`, never the identity —
+    /// the doc key is still `name`, so a dataset with two sources is two
+    /// rows and every click handler and selector stays keyed by `name`.
+    pub prefix: Option<String>,
+}
+
+impl ObjectRow {
+    /// What the browse row paints as its label (§19.3): `"<prefix> ·
+    /// <name>"` for a prefixed row, the bare name otherwise. The one
+    /// spelling of that join, shared by the painted label
+    /// (`render.rs`'s browse painter) and [`searchable_text`], so a hit
+    /// inside the prefix ranks and highlights against the exact text on
+    /// screen.
+    pub fn display_name(&self) -> String {
+        match &self.prefix {
+            Some(p) => format!("{p} · {}", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 impl Domain {
@@ -168,6 +200,8 @@ impl Domain {
             Domain::Views => views::DOC,
             Domain::Groupings => groupings::DOC,
             Domain::Scopes => scopes::DOC,
+            Domain::Schema => schema::DOC,
+            Domain::Sources => sources::DOC,
         }
     }
 
@@ -177,6 +211,8 @@ impl Domain {
             Domain::Views => "Views",
             Domain::Groupings => "Groupings",
             Domain::Scopes => "Scopes",
+            Domain::Schema => "Schema",
+            Domain::Sources => "Sources",
         }
     }
 
@@ -188,6 +224,8 @@ impl Domain {
             Domain::Views => "views",
             Domain::Groupings => "slots",
             Domain::Scopes => "saved",
+            Domain::Schema => "datasets",
+            Domain::Sources => "sources",
         }
     }
 
@@ -199,6 +237,8 @@ impl Domain {
             Domain::Views => views::summary,
             Domain::Groupings => groupings::summary,
             Domain::Scopes => scopes::summary,
+            Domain::Schema => schema::summary,
+            Domain::Sources => sources::summary,
         }
     }
 
@@ -211,14 +251,19 @@ impl Domain {
     /// reasoning) — so [`derive_rows`]'s "personalised without
     /// overriding" check, and `render::run_confirmed`'s removal list,
     /// both have either a real doc name to look for or nothing to look
-    /// for, rather than a name that could never correspond to a file.
+    /// for, rather than a name that could never correspond to a file. Also
+    /// `None` for Schema, which has no user-facing overlay of any kind —
+    /// [`Domain::writable`] is `false` for it, so there is nothing to
+    /// personalise without forking in the first place.
     fn presentation_doc(self) -> Option<&'static str> {
         match self {
             Domain::Views => Some(views::PRESENTATION_DOC),
-            // Scopes has no presentation doc for the same reason
-            // Groupings does not: every field this domain has is
-            // `Destination::Doc` (`scopes.rs`'s module doc).
-            Domain::Groupings | Domain::Scopes => None,
+            // Scopes and Sources have no presentation doc for the same
+            // reason Groupings does not: every field either domain has is
+            // `Destination::Doc` (`scopes.rs`'s and `sources.rs`'s own
+            // module docs). Schema joins them for the reason this
+            // method's own doc comment gives.
+            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Sources => None,
         }
     }
 
@@ -230,10 +275,40 @@ impl Domain {
     /// Slot `0` is not here: `ctrl+0` is `frame::slot_clear`, the view's
     /// own grouping, and `GroupingSlots` is nine wide (user ruling
     /// 2026-09-10).
+    ///
+    /// A separate question from [`Domain::writable`], which follows right
+    /// below: this is "can anything be created that is not already
+    /// listed", not "can this domain be written to at all" — Schema
+    /// answers `None` here (nothing fixes its list; it simply lists
+    /// whatever `datasets.toml` declares) and `false` to `writable`.
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Scopes => None,
+            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources => None,
+        }
+    }
+
+    /// `false` for [`Domain::Schema`] alone (§19.4): the create gate, the
+    /// footer hints and every mutating verb — `space`, `shift+space`,
+    /// `i`, `d`, `r`, `x`, `n`, `o`, `shift+j`/`shift+k`, a tick click,
+    /// a drop — read this, so a read-only surface refuses in one place
+    /// rather than by each verb forgetting. The Groupings roster gate
+    /// (`roster().is_some()`) is a separate question ("can anything be
+    /// created that is not already listed") and stays beside it.
+    pub fn writable(self) -> bool {
+        !matches!(self, Domain::Schema)
+    }
+
+    /// The text painted before an object's name, if this domain groups
+    /// its objects (§19.3). `None` on every domain but Sources — a
+    /// source's row leads with the dataset it feeds
+    /// (`sources::prefix`), painted dimmed ahead of the name and used as
+    /// the primary sort key in [`derive_rows`]; every other domain's
+    /// objects are already uniquely named with nothing to group them by.
+    fn prefix_fn(self) -> Option<fn(&toml::Value) -> Option<String>> {
+        match self {
+            Domain::Sources => Some(sources::prefix),
+            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => None,
         }
     }
 
@@ -246,11 +321,11 @@ impl Domain {
     /// must share the one tested walk. A per-domain `match` here would
     /// merely *discourage* an adapter from doing its own walk and
     /// diverging; an unconditional call makes that unrepresentable — the
-    /// only things a domain decides are its doc name, its summary line
-    /// and (optionally) its presentation doc, and all three arrive
-    /// through the small matches above. Part 2 adds two more adapters
-    /// onto this exact seam, which is why the hole is closed while there
-    /// are still only two.
+    /// only things a domain decides are its doc name, its summary line,
+    /// its optional row prefix and (optionally) its presentation doc, and
+    /// all four arrive through the small matches above. Part 2 adds three
+    /// more adapters onto this exact seam, which is why the hole stays
+    /// closed as they arrive.
     pub fn objects(self, config: &Config) -> Vec<ObjectRow> {
         derive_rows(
             config,
@@ -258,6 +333,7 @@ impl Domain {
             self.presentation_doc(),
             self.roster(),
             self.summary_fn(),
+            self.prefix_fn(),
         )
     }
 
@@ -321,6 +397,113 @@ fn personalised_names<'a>(config: &'a Config, presentation_doc: Option<&str>) ->
         .unwrap_or_default()
 }
 
+/// The drift sidecar (spec §5.2, §19.6): `overrides.toml`, user layer
+/// only, one entry per forked object keyed `"<doc>.<object>"`, holding
+/// the shadowed layer and the shadowed object's canonical TOML text at
+/// fork time. A sidecar rather than a key inside the object, because an
+/// atomic doc's reader treats an unknown key as a diagnostic.
+pub const OVERRIDES_DOC: &str = "overrides";
+
+/// The sidecar's own key for `object` in `doc` — `"<doc>.<object>"`, the
+/// join every reader and writer of `OVERRIDES_DOC` uses to name an entry.
+pub fn override_key(doc: &str, object: &str) -> String {
+    format!("{doc}.{object}")
+}
+
+/// The entry recorded when `object` is forked over `shadowed`'s copy.
+/// The canonical text, not a hash: `DefaultHasher` is not stable across
+/// Rust versions, a crypto dependency is unjustified, and keeping the
+/// text makes a real diff free if it is ever wanted (§5.2).
+pub fn override_entry(shadowed: Layer, object: &str, value: &toml::Value) -> toml::Value {
+    let mut table = toml::Table::new();
+    table.insert(
+        "shadowed_layer".into(),
+        toml::Value::String(shadowed.name().to_string()),
+    );
+    table.insert(
+        "shadowed_text".into(),
+        toml::Value::String(object_text(object, toml_value_to_item(value))),
+    );
+    toml::Value::Table(table)
+}
+
+/// The copy a user-layer write of `object` would shadow: the LAST
+/// non-user layer defining it, with its value. `None` when no such
+/// layer does — a user-only object forks nothing.
+pub fn shadow_of(config: &Config, doc: &str, object: &str) -> Option<(Layer, toml::Value)> {
+    config
+        .layered_docs(doc)
+        .iter()
+        .filter(|d| d.layer != Layer::User)
+        .filter_map(|d| d.table.get(object).map(|v| (d.layer, v.clone())))
+        .next_back()
+}
+
+/// The overrides sidecar's own entries, user layer only, as `key ->
+/// (shadowed_layer, shadowed_text)`. Private: every reader outside this
+/// module goes through [`stale_override_keys`] or `derive_rows`'s own
+/// drift computation, never the raw map.
+fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
+    config
+        .layered_docs(OVERRIDES_DOC)
+        .iter()
+        .filter(|d| d.layer == Layer::User)
+        .flat_map(|d| d.table.iter())
+        .filter(|(k, _)| *k != "config_version")
+        .filter_map(|(k, v)| {
+            let t = v.as_table()?;
+            Some((
+                k.clone(),
+                (
+                    t.get("shadowed_layer")?.as_str()?.to_string(),
+                    t.get("shadowed_text")?.as_str()?.to_string(),
+                ),
+            ))
+        })
+        .collect()
+}
+
+/// Whether `doc.object` has a recorded override entry — the gate
+/// [`render::removal_edits`] uses to decide whether a delete/revert also
+/// touches `overrides.toml`, so a missing sidecar is never created just
+/// to remove nothing from it.
+pub(super) fn has_override_entry(config: &Config, doc: &str, object: &str) -> bool {
+    override_entries(config).contains_key(&override_key(doc, object))
+}
+
+/// Entries that describe nothing any more (§19.6): the user layer no
+/// longer holds the object, or no layer beneath shadows it. Ignored by
+/// `derive_rows` and pruned by the next overrides write.
+pub fn stale_override_keys(config: &Config) -> Vec<String> {
+    override_entries(config)
+        .keys()
+        .filter(|key| {
+            let Some((doc, object)) = key.split_once('.') else {
+                return true;
+            };
+            let user_has = config
+                .layered_docs(doc)
+                .iter()
+                .any(|d| d.layer == Layer::User && d.table.contains_key(object));
+            !user_has || shadow_of(config, doc, object).is_none()
+        })
+        .cloned()
+        .collect()
+}
+
+/// The gate [`derive_rows`] applies to compute [`ObjectRow::drifted`]:
+/// drift is provable only from the sidecar's recorded text, so no entry
+/// means not drifted, never a guess from the shadow's current copy
+/// (§19.6).
+fn drift_of(entry: Option<&(String, String)>, shadow: Option<&toml::Value>, name: &str) -> bool {
+    match (entry, shadow) {
+        (Some((_, recorded)), Some(value)) => {
+            object_text(name, toml_value_to_item(value)) != *recorded
+        }
+        _ => false,
+    }
+}
+
 /// Every object named in `doc`'s layered documents, plus every name
 /// `roster` fixes as always-listed (§18.4 — Groupings' nine slots), one
 /// row each, sorted by name.
@@ -358,11 +541,17 @@ fn personalised_names<'a>(config: &'a Config, presentation_doc: Option<&str>) ->
 /// at all (`presentation_doc: None`) simply has nothing this half can
 /// add.
 ///
-/// Sorted by name rather than kept in file order: rows come from up to
-/// three documents, so "file order" would mean one file's order followed
-/// by whatever names the next file added, which is neither the user's
-/// nor the desk's order and shifts as soon as anything is overridden.
-/// Alphabetical is the one ordering that stays put.
+/// Sorted by name by default, kept rather than left in file order: rows
+/// come from up to three documents, so "file order" would mean one
+/// file's order followed by whatever names the next file added, which is
+/// neither the user's nor the desk's order and shifts as soon as
+/// anything is overridden. Alphabetical is the one ordering that stays
+/// put — and the `BTreeMap` walk below already produces it for free. A
+/// domain with a `prefix` (Sources, §19.3) sorts by `(prefix, name)`
+/// instead: the dataset a source feeds is the grouping a trader scans
+/// by, so its rows cluster by dataset with by-name order only breaking a
+/// tie inside one dataset — a second, explicit sort over the by-name
+/// output, since the `BTreeMap`'s own key is still the bare name.
 ///
 /// `config_version` is skipped — it is the schema stamp every layered
 /// doc carries, not an object.
@@ -372,17 +561,24 @@ fn derive_rows(
     presentation_doc: Option<&str>,
     roster: Option<&'static [&'static str]>,
     summary: fn(&toml::Value) -> String,
+    prefix: Option<fn(&toml::Value) -> Option<String>>,
 ) -> Vec<ObjectRow> {
     // Objects the user layer has personalised without overriding: a
     // `view_presentation.toml` table names the object and forks nothing.
     let personalised = personalised_names(config, presentation_doc);
+    // The sidecar's own entries, read once — the drift question below is
+    // per-row but the doc is not, and `override_entries` already
+    // filters to the user layer.
+    let entries = override_entries(config);
     // Accumulated by name — one name can appear in up to three documents
     // and each appearance updates the same row — in a `BTreeMap`, whose
     // key order IS the by-name order described above, so the rows come
     // out sorted without a separate pass. The `Vec<Layer>` beside each
     // row is every layer that defined it, which is what the `overridden`
-    // question below needs and the row itself does not carry.
-    let mut rows: BTreeMap<String, (Vec<Layer>, ObjectRow)> = BTreeMap::new();
+    // question below needs and the row itself does not carry; the
+    // trailing `Option<toml::Value>` is the last NON-USER layer's value —
+    // the shadow drift compares the sidecar's recorded text against.
+    let mut rows: BTreeMap<String, (Vec<Layer>, ObjectRow, Option<toml::Value>)> = BTreeMap::new();
     // Seeded before the layered walk, not after: a name the walk touches
     // has to update this entry in place (`entry.1.layer = Some(..)`
     // below), and a name it never touches has to survive untouched —
@@ -400,7 +596,9 @@ fn derive_rows(
                     layer: None,
                     overridden: false,
                     drifted: false,
+                    prefix: None,
                 },
+                None,
             ),
         );
     }
@@ -418,7 +616,9 @@ fn derive_rows(
                         layer: Some(layered.layer),
                         overridden: false,
                         drifted: false,
+                        prefix: None,
                     },
+                    None,
                 )
             });
             entry.0.push(layered.layer);
@@ -427,15 +627,33 @@ fn derive_rows(
             // actually takes effect.
             entry.1.layer = Some(layered.layer);
             entry.1.summary = summary(value);
+            entry.1.prefix = prefix.and_then(|f| f(value));
+            if layered.layer != Layer::User {
+                entry.2 = Some(value.clone());
+            }
         }
     }
-    rows.into_values()
-        .map(|(layers, mut row)| {
+    let mut out: Vec<ObjectRow> = rows
+        .into_values()
+        .map(|(layers, mut row, shadow)| {
             let mine = layers.contains(&Layer::User) || personalised.contains(row.name.as_str());
             row.overridden = mine && layers.iter().any(|l| *l < Layer::User);
+            // §19.6: drift is "the shadowed copy moved since the fork" —
+            // provable only from the sidecar's recorded text, so no
+            // entry means not drifted, never a guess.
+            row.drifted = row.overridden
+                && drift_of(
+                    entries.get(&override_key(doc, &row.name)),
+                    shadow.as_ref(),
+                    &row.name,
+                );
             row
         })
-        .collect()
+        .collect();
+    if prefix.is_some() {
+        out.sort_by(|a, b| (&a.prefix, &a.name).cmp(&(&b.prefix, &b.name)));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------
@@ -492,6 +710,19 @@ impl Destination {
             // this arm exists only to keep the match exhaustive.
             (Destination::Presentation, Domain::Scopes) => {
                 unreachable!("Scopes has no Presentation-destined fields")
+            }
+            // Schema has no fields at all in the writable sense — every
+            // one of its `Field`s is `Destination::Doc` (`schema.rs`'s
+            // module doc) — so this arm, like the two above, exists only
+            // to keep the match exhaustive.
+            (Destination::Presentation, Domain::Schema) => {
+                unreachable!("Schema has no Presentation-destined fields")
+            }
+            // Sources joins the same list: `sources.rs`'s module doc has
+            // the reasoning (every field is `Destination::Doc`, there is
+            // no presentation overlay for a source).
+            (Destination::Presentation, Domain::Sources) => {
+                unreachable!("Sources has no Presentation-destined fields")
             }
         }
     }
@@ -600,6 +831,12 @@ pub struct Field {
     pub label: String,
     pub kind: FieldKind,
     pub dest: Destination,
+    /// The layer this row's value came from, painted as a badge on the
+    /// row when `Some` (§19.4). Filled by the Schema adapter from
+    /// `Config::explain`; every writable domain leaves it `None`, since
+    /// the object-level badge in the header already says whose copy is
+    /// on screen and a second badge per row would only repeat it.
+    pub layer: Option<Layer>,
 }
 
 /// One row of the edit stage: a field, or one item of a field's ordered
@@ -710,6 +947,22 @@ impl Confirm {
     }
 }
 
+/// A value field open in the filter row's place (§19.1): the shared
+/// `Input` seeded with a row's value, `enter` applying it down the tick's
+/// own path and `escape` cancelling. The chain field (§18.8) is the case
+/// with `completions: true` — the rows below are then
+/// [`groupings::chain_candidates`] rather than the edit rows.
+///
+/// `row` is an [`EditRow`], not a field index, so a future item-level
+/// text (a column's width, Part 2c) is one more arm and not a second
+/// mechanism; nothing in this plan opens it on anything but
+/// `EditRow::Field`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextEntry {
+    pub row: EditRow,
+    pub completions: bool,
+}
+
 /// One object being edited.
 ///
 /// The edit **buffer**, and what the edit stage actually paints: a
@@ -776,28 +1029,27 @@ pub struct Draft {
     /// [`Domain::validate`]'s output for the draft as it stands, refreshed
     /// on every change (spec §7.2).
     ///
-    /// Shown against the object as a whole rather than against individual
-    /// field rows: attaching a diagnostic to the field whose `key` matches
-    /// its `path` needs `Diagnostic::path` (spec §8.5), which no reader
-    /// carries yet — adding it means a new field on `Diagnostic` and a
-    /// change to all 27 of its construction sites plus every reader that
-    /// would fill it, none of which are files this task owns. Reported as
-    /// a deviation rather than faked by matching on message text.
+    /// Shown on the header AND on the field row it names (§19.5): every
+    /// reader across `geode-core` now fills `Diagnostic::path` with the
+    /// key it was looking at, and [`Draft::row_for_path`] turns that path
+    /// back into the [`EditRow`] it describes — [`Draft::flagged_rows`] is
+    /// what `render.rs` reads to paint the row glyph, while the header
+    /// list (this field, read directly) stays the text of record for
+    /// every diagnostic, matched or not.
     pub diagnostics: Vec<Diagnostic>,
     /// The destructive keystroke waiting on a second one, if any. It
     /// replaces the action bar while armed, so the row list above it never
     /// changes length.
     pub confirm: Option<Confirm>,
-    /// The chain field is open (§18.8, Groupings only — `i` in the edit
-    /// stage). While it is, `query` holds the chain being typed rather
-    /// than a filter — the shared `Input` mirrors into it exactly as a
-    /// filter does, so there is no second text buffer — and
-    /// [`Draft::visible_rows`] is the completion list
-    /// ([`groupings::chain_candidates`]) rather than the filtered rows.
-    /// A flag on the draft beside `confirm` rather than a `Stage` of its
-    /// own, because the stage is what the escape ladder and the browse
-    /// cursor restore key on, and both must still read `Edit` here.
-    pub chain_entry: bool,
+    /// A text field is open (§19.1). While it is, `query` holds the text
+    /// being typed rather than a filter — the shared `Input` mirrors into
+    /// it exactly as a filter does, so there is no second text buffer —
+    /// and, for the chain field's `completions: true`,
+    /// [`Draft::visible_rows`] is the completion list. A field on the
+    /// draft beside `confirm` rather than a `Stage`, because the stage is
+    /// what the escape ladder and the browse cursor restore key on, and
+    /// both must still read `Edit` here.
+    pub text_entry: Option<TextEntry>,
 }
 
 /// Which way [`Draft::step_selected`] moves the value under the cursor.
@@ -907,11 +1159,27 @@ impl Draft {
     /// `sort_by_key` afterwards restores row order among the survivors,
     /// discarding nothing but the score-derived ordering.
     pub fn visible_rows(&self) -> Vec<crate::listfilter::Ranked> {
-        // §18.8: with the chain field open, `query` is the chain being
-        // typed and the rows are its completions — see
-        // [`Draft::chain_entry`].
-        if self.chain_entry {
-            return groupings::chain_candidates(self);
+        // §19.1: while any field is open, `query` is the value being
+        // typed into IT, not a filter over the rows — so the rows below
+        // must not be narrowed by it. The chain field (§18.8) is the one
+        // case where the rows really are a search: its own `query` is
+        // the chain being typed and the rows are its completions. A
+        // plain field's rows stay every edit row, unfiltered and in row
+        // order, so the trader sees the row they are editing highlighted
+        // in place (spec §19.1: "the rows below stay the edit rows with
+        // the edited one highlighted"). An edit-stage filter that was
+        // applied before `i` is lost the moment the field opens (the
+        // seed overwrites `query`) — the same rule the chain field
+        // already has (§18.8) — so there is nothing left to apply here
+        // even if this branch tried to.
+        if let Some(entry) = self.text_entry {
+            return if entry.completions {
+                groupings::chain_candidates(self)
+            } else {
+                let labels: Vec<String> =
+                    self.rows().into_iter().map(|r| self.row_label(r)).collect();
+                crate::listfilter::rank(&labels, "")
+            };
         }
         let labels: Vec<String> = self.rows().into_iter().map(|r| self.row_label(r)).collect();
         let mut ranked = crate::listfilter::rank(&labels, &self.query);
@@ -922,6 +1190,20 @@ impl Draft {
     /// The row the cursor is on, if the cursor is in range — indexed
     /// through [`Draft::visible_rows`], so every verb acts on the row the
     /// trader is actually looking at, filtered or not (§18.3).
+    /// Can `i` open a value field on some row of this draft? A `Number`
+    /// row on any domain, or a `Text` row the domain marks editable
+    /// (`Domain::text_editable`). What the edit footer reads to decide
+    /// whether to advertise `i` at all: a chip for a verb that only
+    /// refuses would teach a trader a key that does nothing on this
+    /// object — the same rule that keeps `x` off every non-Views footer.
+    pub fn offers_text_entry(&self, domain: Domain) -> bool {
+        self.fields.iter().any(|field| match &field.kind {
+            FieldKind::Number { .. } => true,
+            FieldKind::Text(_) => domain.text_editable(&field.key),
+            _ => false,
+        })
+    }
+
     pub fn selected_row(&self) -> Option<EditRow> {
         let rows = self.rows();
         self.visible_rows()
@@ -1047,6 +1329,133 @@ impl Draft {
         self.step_selected(StepDirection::Backward)
     }
 
+    /// Is the open text field the chain field — the one with a completion
+    /// list below it? `false` when no field is open at all.
+    pub fn chain_entry(&self) -> bool {
+        self.text_entry.is_some_and(|entry| entry.completions)
+    }
+
+    /// `i` on a `Text` or `Number` row (§19.1): open the field seeded with
+    /// the row's value, so appending is one keystroke away. Pure — the
+    /// mode switch that hands the shared `Input` the keys is the
+    /// handler's, and the sync writes the seed into the field on its
+    /// return. `Step::Inert` off any other row: the caller says which
+    /// verb (if any) that row has.
+    ///
+    /// Whether a `Text` row is *editable* is the domain's call
+    /// (`Domain::text_editable`), checked by the caller before this —
+    /// Groupings' `slot` and Scopes' two summaries are `Text` rows that
+    /// must stay read-only, and the draft has no domain to ask.
+    ///
+    /// `follow(row)` after setting `text_entry`, not before: once the
+    /// field is open, [`Draft::visible_rows`] answers with every row
+    /// unfiltered rather than the query-filtered list `selected` indexed
+    /// a moment ago, so `row`'s position there can differ from
+    /// `self.selected`'s old value — that is exactly what leaves the
+    /// edited row unhighlighted if this is skipped.
+    ///
+    /// The `Step::Changed` this returns means only that the field
+    /// OPENED, never that a value changed — nothing routes it into
+    /// [`Self::revalidate`] or `apply::commit_or_confirm`, which read a
+    /// step from a tick or a text commit, not from opening the field
+    /// that will produce one.
+    pub fn begin_text_entry(&mut self) -> Step {
+        let Some(row @ EditRow::Field(index)) = self.selected_row() else {
+            return Step::Inert;
+        };
+        let seed = match &self.fields[index].kind {
+            FieldKind::Text(text) => text.clone(),
+            FieldKind::Number { value, .. } => value.to_string(),
+            _ => return Step::Inert,
+        };
+        self.query = seed;
+        self.text_entry = Some(TextEntry {
+            row,
+            completions: false,
+        });
+        self.follow(row);
+        Step::Changed
+    }
+
+    /// `escape` in an open text field: drop the text and close it. The
+    /// value is exactly as it was — nothing here was applied. The chain
+    /// field's cancel is this same function (`groupings.rs` re-exports
+    /// it under its old name).
+    ///
+    /// A plain field leaves `selected` on the row it was editing
+    /// (`follow(row)`, against the now-unfiltered list `text_entry`
+    /// being cleared restores) — the same place [`Draft::apply_text_entry`]
+    /// leaves it, so cancelling and applying agree about where the
+    /// cursor ends up. The chain field keeps its own `selected = 0`: its
+    /// rows go from completions to the full edit-row list, a change
+    /// nothing sensible to "follow" survives.
+    pub fn cancel_text_entry(&mut self) {
+        let entry = self.text_entry.take();
+        self.query.clear();
+        match entry {
+            Some(TextEntry {
+                completions: false,
+                row,
+            }) => self.follow(row),
+            _ => self.selected = 0,
+        }
+    }
+
+    /// `enter` in a plain text field: the typed text becomes the row's
+    /// value and the field closes. A `Number` parses in here — its rule
+    /// is the kind's own (a whole number inside `min..=max`, refused
+    /// rather than clamped, because a clamp would apply a number the
+    /// trader did not type). A `Text` goes through `parse_text` — the
+    /// adapter's door, `(key, text) -> Result<normalised, reason>` — so
+    /// a duration or a regex is refused with the field still open, the
+    /// chain field's own rule for a bad chain. The same value typed
+    /// back is [`Step::Inert`] and still closes the field: closing is
+    /// the visible answer.
+    ///
+    /// `selected` is kept, not reset to 0: the rows below never changed
+    /// (they are the edit rows, not a completion list), so the cursor
+    /// stays on the row just edited.
+    pub fn apply_text_entry(
+        &mut self,
+        parse_text: &dyn Fn(&str, &str) -> Result<String, String>,
+    ) -> Step {
+        let Some(TextEntry {
+            row: EditRow::Field(index),
+            completions: false,
+        }) = self.text_entry
+        else {
+            return Step::Inert;
+        };
+        let typed = self.query.trim().to_string();
+        let field = &mut self.fields[index];
+        let label = field.label.clone();
+        let outcome = match &mut field.kind {
+            FieldKind::Number { value, min, max } => match typed.parse::<i64>() {
+                Err(_) => return Step::Refused(format!("{label} must be a whole number")),
+                Ok(n) if n < *min || n > *max => {
+                    return Step::Refused(format!("{label} must be between {min} and {max}"));
+                }
+                Ok(n) if n == *value => Step::Inert,
+                Ok(n) => {
+                    *value = n;
+                    Step::Changed
+                }
+            },
+            FieldKind::Text(text) => match parse_text(&field.key, &typed) {
+                Err(reason) => return Step::Refused(reason),
+                Ok(parsed) if parsed == *text => Step::Inert,
+                Ok(parsed) => {
+                    *text = parsed;
+                    Step::Changed
+                }
+            },
+            _ => Step::Inert,
+        };
+        self.text_entry = None;
+        self.query.clear();
+        outcome
+    }
+
     /// Shared body of [`Draft::toggle_selected`] and
     /// [`Draft::toggle_selected_back`]: change the value under the
     /// cursor one step in `direction`, recording it in the draft.
@@ -1077,45 +1486,63 @@ impl Draft {
             return Step::Inert;
         };
         match row {
-            EditRow::Field(i) => match &mut self.fields[i].kind {
-                // A bool has only two values, so either direction is the
-                // same flip.
-                FieldKind::Bool(b) => {
-                    *b = !*b;
-                    Step::Changed
-                }
-                // Steps and wraps in both directions, which is what
-                // makes the option just behind the current one reachable
-                // in one key rather than the long way round —
-                // `settings_view::step`'s own forward behaviour, mirrored
-                // for `shift+space`.
-                FieldKind::Choice { options, selected } => {
-                    if options.len() < 2 {
-                        return Step::Inert;
+            EditRow::Field(i) => {
+                let label = self.fields[i].label.clone();
+                match &mut self.fields[i].kind {
+                    // A bool has only two values, so either direction is the
+                    // same flip.
+                    FieldKind::Bool(b) => {
+                        *b = !*b;
+                        Step::Changed
                     }
-                    *selected = match direction {
-                        StepDirection::Forward => (*selected + 1) % options.len(),
-                        StepDirection::Backward => (*selected + options.len() - 1) % options.len(),
-                    };
-                    Step::Changed
-                }
-                FieldKind::Number { value, min, max } => {
-                    match direction {
-                        StepDirection::Forward if *value >= *max => return Step::Inert,
-                        StepDirection::Backward if *value <= *min => return Step::Inert,
-                        StepDirection::Forward => *value = (*value + 1).clamp(*min, *max),
-                        StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),
+                    // Steps and wraps in both directions, which is what
+                    // makes the option just behind the current one reachable
+                    // in one key rather than the long way round —
+                    // `settings_view::step`'s own forward behaviour, mirrored
+                    // for `shift+space`.
+                    FieldKind::Choice { options, selected } => {
+                        if options.len() < 2 {
+                            return Step::Inert;
+                        }
+                        *selected = match direction {
+                            StepDirection::Forward => (*selected + 1) % options.len(),
+                            StepDirection::Backward => {
+                                (*selected + options.len() - 1) % options.len()
+                            }
+                        };
+                        Step::Changed
                     }
-                    Step::Changed
+                    FieldKind::Number { value, min, max } => {
+                        // A value outside [min, max] can arise entirely
+                        // outside this dialog's own bounds — Sources' reader
+                        // accepts any positive `stable_mtime` while the
+                        // dialog's picker caps display at 100 — and clamping
+                        // it here would write a number the trader never
+                        // typed. Refuse the step instead (§19.1's
+                        // refuse-don't-clamp ruling); `i` still reaches a
+                        // value in range.
+                        if *value < *min || *value > *max {
+                            return Step::Refused(format!(
+                                "{label} is {value}, outside {min}–{max} — type a value with i"
+                            ));
+                        }
+                        match direction {
+                            StepDirection::Forward if *value >= *max => return Step::Inert,
+                            StepDirection::Backward if *value <= *min => return Step::Inert,
+                            StepDirection::Forward => *value = (*value + 1).clamp(*min, *max),
+                            StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),
+                        }
+                        Step::Changed
+                    }
+                    // See `FieldKind`: `Text` is `i`'s and `MultiChoice`
+                    // needs a per-option row, neither of which Views has.
+                    // The `OrderedList` header row itself has no value —
+                    // its items, on the rows below, do.
+                    FieldKind::Text(_)
+                    | FieldKind::MultiChoice { .. }
+                    | FieldKind::OrderedList { .. } => Step::Inert,
                 }
-                // See `FieldKind`: `Text` is `i`'s and `MultiChoice`
-                // needs a per-option row, neither of which Views has.
-                // The `OrderedList` header row itself has no value —
-                // its items, on the rows below, do.
-                FieldKind::Text(_)
-                | FieldKind::MultiChoice { .. }
-                | FieldKind::OrderedList { .. } => Step::Inert,
-            },
+            }
             EditRow::Available { field, item } => {
                 let FieldKind::OrderedList { items, available } = &mut self.fields[field].kind
                 else {
@@ -1499,8 +1926,95 @@ impl Draft {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
-            chain_entry: false,
+            text_entry: None,
         }
+    }
+
+    /// The row a reader's diagnostic path names (§19.5), or `None` for a
+    /// path that is not this object's or names no row — those stay on the
+    /// header. The grammar is `<doc>.<object>.<field>[.<index>[...]]`: a
+    /// field matches by `key`; a list field's next segment, when it is an
+    /// index into the array, resolves through [`Self::resolve_list_index`]
+    /// to the item that array position currently names (never an
+    /// available row — the object has no diagnostic about a column it
+    /// does not have).
+    pub fn row_for_path(&self, doc: &str, path: &str) -> Option<EditRow> {
+        let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;
+        self.fields.iter().enumerate().find_map(|(i, field)| {
+            let after = if rest == field.key {
+                ""
+            } else {
+                rest.strip_prefix(&format!("{}.", field.key))?
+            };
+            let raw_index = after
+                .split('.')
+                .next()
+                .and_then(|s| s.parse::<usize>().ok());
+            match (&field.kind, raw_index) {
+                (FieldKind::OrderedList { items, .. }, Some(raw_index)) => {
+                    let item = self
+                        .resolve_list_index(&field.key, raw_index, items)
+                        .unwrap_or(raw_index);
+                    if item < items.len() {
+                        Some(EditRow::Item { field: i, item })
+                    } else {
+                        Some(EditRow::Field(i))
+                    }
+                }
+                _ => Some(EditRow::Field(i)),
+            }
+        })
+    }
+
+    /// A reader's diagnostic index is the position in `Draft::source`'s
+    /// OWN array for this field — for Views that is `views.toml`'s
+    /// definitional column order (`views::columns_for` reads
+    /// `draft.source["columns"]` the same way to write the file back),
+    /// which is unrelated to `items`' order once `ViewPresentation::
+    /// apply` has permuted it by a trader's personal drag order, or once
+    /// the source has since dropped a column `items` still remembers
+    /// (review round 1's Important-2 finding: without this indirection,
+    /// a reordered or shortened presentation makes `row_for_path` flag
+    /// the wrong column entirely). Resolved by NAME — `source[key][raw_
+    /// index]`'s own `name`, whether that entry is a table (Views'
+    /// `[[columns]]`) or a bare string (a hypothetical future list shaped
+    /// like Groupings' own array-of-strings, `dimensions` in this crate,
+    /// though that field's diagnostics never carry an index today: see
+    /// `groupings.rs`'s own doc on why) — found in `items` by NAME, never
+    /// by position, since `items`' order is exactly what may have moved.
+    /// `None` when `source[key]` has no entry at that index, or that
+    /// entry's name is no longer among `items` at all; the caller falls
+    /// back to the raw index in either case (harmless for Groupings,
+    /// whose `source` is always empty — its object is a bare array, not
+    /// a table, so `Domain::draft` never populates one).
+    fn resolve_list_index(&self, key: &str, index: usize, items: &[ListItem]) -> Option<usize> {
+        let entry = self.source.get(key)?.as_array()?.get(index)?;
+        let name = match entry {
+            toml::Value::Table(t) => t.get("name")?.as_str()?,
+            toml::Value::String(s) => s.as_str(),
+            _ => return None,
+        };
+        items.iter().position(|i| i.name == name)
+    }
+
+    /// Every row a current diagnostic lands on, with the worst severity
+    /// there, for the row glyph; the header list is what carries the
+    /// text.
+    pub fn flagged_rows(&self, doc: &str) -> Vec<(EditRow, Severity)> {
+        let mut out: Vec<(EditRow, Severity)> = Vec::new();
+        for d in &self.diagnostics {
+            let Some(row) = d.path.as_deref().and_then(|p| self.row_for_path(doc, p)) else {
+                continue;
+            };
+            match out.iter_mut().find(|(r, _)| *r == row) {
+                Some((_, s)) if *s == Severity::Warning && d.severity == Severity::Error => {
+                    *s = Severity::Error
+                }
+                Some(_) => {}
+                None => out.push((row, d.severity)),
+            }
+        }
+        out
     }
 }
 
@@ -1532,6 +2046,37 @@ fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
 }
 
 impl Domain {
+    /// May `i` edit the `Text` row keyed `key` on this domain? `false`
+    /// everywhere but Sources — Groupings' `slot` and Scopes' two
+    /// summaries are display-only `Text`s and must refuse; Schema is
+    /// read-only outright. Sources (§19.3) is the first `true`, for
+    /// `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
+    /// (`sources::text_editable`).
+    pub fn text_editable(self, key: &str) -> bool {
+        match self {
+            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => {
+                let _ = key;
+                false
+            }
+            Domain::Sources => sources::text_editable(key),
+        }
+    }
+
+    /// The adapter's door for a committed `Text` (§19.1): normalise the
+    /// typed text, or refuse it with the reason the notice shows. Trims
+    /// by default; an adapter with a real grammar (a duration, a regex, a
+    /// path list) overrides its own keys — Sources is the first
+    /// (`sources::parse_text`).
+    pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
+        match self {
+            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => {
+                let _ = key;
+                Ok(text.trim().to_string())
+            }
+            Domain::Sources => sources::parse_text(key, text),
+        }
+    }
+
     /// The fields of `object`, derived fresh from `config` — never cached,
     /// for the same reason [`Domain::objects`] is not.
     ///
@@ -1543,6 +2088,8 @@ impl Domain {
             Domain::Views => views::fields(config, object),
             Domain::Groupings => groupings::fields(config, object),
             Domain::Scopes => scopes::fields(config, object),
+            Domain::Schema => schema::fields(config, object),
+            Domain::Sources => sources::fields(config, object),
         }
     }
 
@@ -1568,7 +2115,7 @@ impl Domain {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
-            chain_entry: false,
+            text_entry: None,
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -1598,6 +2145,8 @@ impl Domain {
             Domain::Views => views::to_table(draft, dest),
             Domain::Groupings => groupings::to_table(draft, dest),
             Domain::Scopes => scopes::to_table(draft, dest),
+            Domain::Schema => schema::to_table(draft, dest),
+            Domain::Sources => sources::to_table(draft, dest),
         }
     }
 
@@ -1609,6 +2158,8 @@ impl Domain {
             Domain::Views => views::validate(draft, config),
             Domain::Groupings => groupings::validate(draft, config),
             Domain::Scopes => scopes::validate(draft, config),
+            Domain::Schema => schema::validate(draft, config),
+            Domain::Sources => sources::validate(draft, config),
         }
     }
 }
@@ -1742,6 +2293,11 @@ pub struct ObjectDialogState {
     /// state this dialog stores rather than derives — deliberately, since
     /// it is also what the edit stage paints; see [`Draft`].
     pub draft: Option<Draft>,
+    /// The dataset the row under the cursor fed when `n` was pressed
+    /// (§19.3, Sources only): the new source's `dataset` seed. Cleared by
+    /// [`Self::cancel_naming`] and consumed by
+    /// `render::create_from_name`.
+    pub naming_dataset: Option<String>,
 }
 
 impl ObjectDialogState {
@@ -1758,6 +2314,7 @@ impl ObjectDialogState {
             mode: DialogMode::Normal,
             notice: None,
             draft: None,
+            naming_dataset: None,
         }
     }
 
@@ -1953,6 +2510,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
+        self.naming_dataset = None;
     }
 
     /// Whether `escape` has a stage to step back into before it closes
@@ -1974,13 +2532,14 @@ impl ObjectDialogState {
     }
 }
 
-/// The text one row exposes to the filter: its name and summary —
-/// exactly what the row paints, and nothing more. `keybindings_view`'s
-/// own `searchable_text` carries the same rule and the review finding
-/// behind it: matching text the user cannot see breaks the agreement
-/// between what ranked and what is highlighted.
+/// The text one row exposes to the filter: its painted label
+/// ([`ObjectRow::display_name`] — the prefix and all, on a Sources row)
+/// and its summary — exactly what the row paints, and nothing more.
+/// `keybindings_view`'s own `searchable_text` carries the same rule and
+/// the review finding behind it: matching text the user cannot see
+/// breaks the agreement between what ranked and what is highlighted.
 pub fn searchable_text(row: &ObjectRow) -> String {
-    format!("{} {}", row.name, row.summary)
+    format!("{} {}", row.display_name(), row.summary)
 }
 
 /// The rows this dialog currently shows, ranked by
@@ -2096,6 +2655,69 @@ mod tests {
         let rows = Domain::Views.objects(&config);
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].overridden);
+    }
+
+    #[test]
+    fn drifted_needs_an_override_entry_and_a_changed_shadow() {
+        let desk_v1 = "[tree]\ndataset = \"risk\"\ncolumns = []\n";
+        let user = "[tree]\ndataset = \"risk\"\n";
+        let entry = |text: &str| {
+            format!("[\"views.tree\"]\nshadowed_layer = \"desk\"\nshadowed_text = '''\n{text}'''\n")
+        };
+        // Entry recorded against exactly the desk text on disk: not drifted.
+        let shadow_text = object_text(
+            "tree",
+            toml_value_to_item(&desk_v1.parse::<toml::Table>().unwrap()["tree"]),
+        );
+        let recorded = entry(&shadow_text);
+        let config = config_from(&[
+            (Layer::Desk, "views", desk_v1),
+            (Layer::User, "views", user),
+            (Layer::User, "overrides", recorded.as_str()),
+        ]);
+        let rows = Domain::Views.objects(&config);
+        assert!(rows[0].overridden);
+        assert!(!rows[0].drifted, "the desk has not moved");
+
+        // The desk adds a column: drifted.
+        let desk_v2 = "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n";
+        let config = config_from(&[
+            (Layer::Desk, "views", desk_v2),
+            (Layer::User, "views", user),
+            (Layer::User, "overrides", recorded.as_str()),
+        ]);
+        assert!(Domain::Views.objects(&config)[0].drifted);
+
+        // No entry at all (an override that predates 2b): never drifted.
+        let config = config_from(&[
+            (Layer::Desk, "views", desk_v2),
+            (Layer::User, "views", user),
+        ]);
+        assert!(!Domain::Views.objects(&config)[0].drifted);
+
+        // Not overridden (user-only): an entry is stale and ignored.
+        let stale = entry("x");
+        let config = config_from(&[
+            (Layer::User, "views", user),
+            (Layer::User, "overrides", stale.as_str()),
+        ]);
+        assert!(!Domain::Views.objects(&config)[0].drifted);
+        assert_eq!(stale_override_keys(&config), vec!["views.tree".to_string()]);
+    }
+
+    #[test]
+    fn override_entry_records_the_shadowed_layer_and_its_text() {
+        let value: toml::Value = "dataset = \"risk\"\n"
+            .parse::<toml::Table>()
+            .unwrap()
+            .into();
+        let entry = override_entry(Layer::Desk, "tree", &value);
+        assert_eq!(entry["shadowed_layer"].as_str(), Some("desk"));
+        assert_eq!(
+            entry["shadowed_text"].as_str(),
+            Some(object_text("tree", toml_value_to_item(&value)).as_str())
+        );
+        assert_eq!(override_key("views", "tree"), "views.tree");
     }
 
     /// A presentation-only override **is** an override. A desk view a
@@ -2353,9 +2975,10 @@ mod tests {
     }
 
     /// §18.8 (user ruling 2026-09-12): a Groupings slot opens IN the
-    /// chain field — `chain_entry` set, the text seeded, the mode at
-    /// `Filter` so the sync hands the field the keys — where every other
-    /// domain still opens in normal mode with no field at all.
+    /// chain field — `text_entry` set with `completions: true`, the text
+    /// seeded, the mode at `Filter` so the sync hands the field the keys
+    /// — where every other domain still opens in normal mode with no
+    /// field at all.
     #[test]
     fn a_groupings_slot_opens_in_the_chain_field_and_a_view_does_not() {
         let config = config_from(&[
@@ -2369,14 +2992,14 @@ mod tests {
         let mut state = ObjectDialogState::new(Domain::Groupings);
         state.enter_edit(&config, "3");
         let draft = state.draft.as_ref().unwrap();
-        assert!(draft.chain_entry);
+        assert!(draft.chain_entry());
         assert_eq!(state.mode, DialogMode::Filter);
         assert_eq!(state.effective_query(), "book", "seeded with the chain");
 
         let mut state = ObjectDialogState::new(Domain::Views);
         state.enter_edit(&config, "tree");
         let draft = state.draft.as_ref().unwrap();
-        assert!(!draft.chain_entry);
+        assert!(!draft.chain_entry());
         assert_eq!(state.mode, DialogMode::Normal);
         assert_eq!(state.effective_query(), "");
     }
@@ -2537,6 +3160,7 @@ mod tests {
             label: "Value".to_string(),
             kind,
             dest: Destination::Doc,
+            layer: None,
         };
         Draft {
             name: "test".to_string(),
@@ -2549,7 +3173,7 @@ mod tests {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
-            chain_entry: false,
+            text_entry: None,
         }
     }
 
@@ -2615,6 +3239,40 @@ mod tests {
                 min: 0,
                 max: 2
             }
+        );
+    }
+
+    /// A value the dialog's own bounds never produced — Sources' reader
+    /// accepts any positive `stable_mtime` while the dialog caps display
+    /// at 100 — must be refused, not clamped: a clamp would write a
+    /// number (the bound) the trader never typed (§19.1's
+    /// refuse-don't-clamp ruling).
+    #[test]
+    fn a_number_outside_its_range_is_refused_not_clamped_by_a_step() {
+        let mut draft = single_field_draft(FieldKind::Number {
+            value: 500,
+            min: 1,
+            max: 100,
+        });
+        assert!(matches!(draft.toggle_selected(), Step::Refused(_)));
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Number {
+                value: 500,
+                min: 1,
+                max: 100
+            },
+            "forward must not clamp the value"
+        );
+        assert!(matches!(draft.toggle_selected_back(), Step::Refused(_)));
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Number {
+                value: 500,
+                min: 1,
+                max: 100
+            },
+            "backward must not clamp the value either"
         );
     }
 
@@ -3449,6 +4107,7 @@ mod tests {
                 available: None,
             },
             dest: Destination::Doc,
+            layer: None,
         });
         assert_eq!(
             draft.drop_row(&drag("columns", true, "book"), &drag("other", true, "z")),
@@ -3655,5 +4314,467 @@ mod tests {
             vec!["banana".to_string(), "apple".to_string()],
             "list order must win over apple's higher fuzzy score"
         );
+    }
+
+    fn draft_with_number_and_text() -> Draft {
+        Draft::new_object(
+            "x",
+            vec![
+                Field {
+                    key: "polls".to_string(),
+                    label: "Stable polls".to_string(),
+                    kind: FieldKind::Number {
+                        value: 3,
+                        min: 1,
+                        max: 100,
+                    },
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+                Field {
+                    key: "interval".to_string(),
+                    label: "Poll interval".to_string(),
+                    kind: FieldKind::Text("30s".to_string()),
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+            ],
+            toml::Table::new(),
+        )
+    }
+
+    #[test]
+    fn begin_text_entry_seeds_the_query_from_a_number_row() {
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 0;
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        assert_eq!(draft.query, "3");
+        assert_eq!(
+            draft.text_entry,
+            Some(TextEntry {
+                row: EditRow::Field(0),
+                completions: false
+            })
+        );
+        assert!(!draft.chain_entry(), "a plain field has no completion list");
+    }
+
+    #[test]
+    fn begin_text_entry_seeds_the_query_from_a_text_row() {
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 1;
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        assert_eq!(draft.query, "30s");
+    }
+
+    #[test]
+    fn begin_text_entry_is_inert_off_a_text_or_number_row() {
+        let mut draft = Draft::new_object(
+            "x",
+            vec![Field {
+                key: "on".to_string(),
+                label: "On".to_string(),
+                kind: FieldKind::Bool(true),
+                dest: Destination::Doc,
+                layer: None,
+            }],
+            toml::Table::new(),
+        );
+        assert_eq!(draft.begin_text_entry(), Step::Inert);
+        assert_eq!(draft.text_entry, None);
+    }
+
+    #[test]
+    fn applying_a_number_parses_and_refuses_out_of_range_without_clamping() {
+        let ok = |_: &str, t: &str| Ok(t.to_string());
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 0;
+        draft.begin_text_entry();
+        draft.query = "abc".to_string();
+        assert!(
+            matches!(draft.apply_text_entry(&ok), Step::Refused(r) if r.contains("whole number"))
+        );
+        assert!(draft.text_entry.is_some(), "a refusal keeps the field open");
+        draft.query = "500".to_string();
+        assert!(matches!(draft.apply_text_entry(&ok), Step::Refused(r) if r.contains("1 and 100")));
+        draft.query = "42".to_string();
+        assert_eq!(draft.apply_text_entry(&ok), Step::Changed);
+        assert_eq!(draft.text_entry, None);
+        assert!(matches!(
+            draft.fields[0].kind,
+            FieldKind::Number { value: 42, .. }
+        ));
+        assert!(draft.query.is_empty());
+    }
+
+    #[test]
+    fn applying_text_goes_through_the_domains_parser_and_the_same_value_is_inert() {
+        let parse = |key: &str, t: &str| -> Result<String, String> {
+            if key == "interval" && t.ends_with('s') {
+                Ok(t.trim().to_string())
+            } else {
+                Err("unit needed".to_string())
+            }
+        };
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 1;
+        draft.begin_text_entry();
+        // `t.ends_with('s')` is the fake parser's whole grammar, so the
+        // refused input must actually fail that check — "2 minutes"
+        // would pass it by accident (the word "minutes" itself ends in
+        // 's'), which is not what this assertion is testing.
+        draft.query = "2m".to_string();
+        assert_eq!(
+            draft.apply_text_entry(&parse),
+            Step::Refused("unit needed".to_string())
+        );
+        draft.query = " 30s ".to_string();
+        assert_eq!(
+            draft.apply_text_entry(&parse),
+            Step::Inert,
+            "the trimmed value is the one already there"
+        );
+        assert_eq!(
+            draft.text_entry, None,
+            "an inert apply still closes the field"
+        );
+        draft.begin_text_entry();
+        draft.query = "45s".to_string();
+        assert_eq!(draft.apply_text_entry(&parse), Step::Changed);
+        assert_eq!(draft.fields[1].kind, FieldKind::Text("45s".to_string()));
+    }
+
+    #[test]
+    fn cancelling_text_entry_drops_the_text_and_leaves_the_value() {
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 1;
+        draft.begin_text_entry();
+        draft.query = "garbage".to_string();
+        draft.cancel_text_entry();
+        assert_eq!(draft.text_entry, None);
+        assert!(draft.query.is_empty());
+        assert_eq!(draft.fields[1].kind, FieldKind::Text("30s".to_string()));
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(1)),
+            "cancel leaves the cursor on the row it was editing, same as apply"
+        );
+    }
+
+    /// Review round 1's Important: `query` inside an open plain field is
+    /// the value being typed, not a filter, so [`Draft::visible_rows`]
+    /// must not narrow the rows by it — narrowing would paint an empty
+    /// list the moment a seeded `Number` (`"3"`) matches no row label,
+    /// and would leave `selected` indexing a position the unfiltered
+    /// list disagrees with. A filter applied before `i` is opened is
+    /// lost with it (the seed overwrites `query`), the same rule the
+    /// chain field already has — this test's `draft.query = "interval"`
+    /// beforehand is there to prove exactly that: opening the field on
+    /// the one row that filter left visible must still show every row
+    /// underneath, not the one-row filtered list frozen in place.
+    #[test]
+    fn a_plain_field_leaves_the_rows_unfiltered_and_the_edited_row_selected() {
+        let mut draft = Draft::new_object(
+            "x",
+            vec![
+                Field {
+                    key: "polls".to_string(),
+                    label: "Stable polls".to_string(),
+                    kind: FieldKind::Number {
+                        value: 3,
+                        min: 1,
+                        max: 100,
+                    },
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+                Field {
+                    key: "interval".to_string(),
+                    label: "Poll interval".to_string(),
+                    kind: FieldKind::Text("30s".to_string()),
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+                Field {
+                    key: "on".to_string(),
+                    label: "On".to_string(),
+                    kind: FieldKind::Bool(true),
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+            ],
+            toml::Table::new(),
+        );
+        draft.query = "interval".to_string();
+        draft.selected = 0;
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(1)),
+            "the pre-existing filter's only surviving row"
+        );
+
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        assert_eq!(
+            draft.visible_rows().len(),
+            draft.rows().len(),
+            "every edit row, not just the ones the old filter matched"
+        );
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(1)),
+            "the row being edited is the one highlighted"
+        );
+
+        draft.cancel_text_entry();
+        assert_eq!(
+            draft.visible_rows().len(),
+            draft.rows().len(),
+            "still unfiltered after closing — the old filter does not come back"
+        );
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(1)),
+            "cancel leaves the cursor where the field left it"
+        );
+
+        // Applying agrees: reopening and typing a valid value still
+        // leaves the row list unfiltered and the cursor on that row.
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        draft.query = "45s".to_string();
+        let ok = |_: &str, t: &str| Ok(t.to_string());
+        assert_eq!(draft.apply_text_entry(&ok), Step::Changed);
+        assert_eq!(
+            draft.visible_rows().len(),
+            draft.rows().len(),
+            "unchanged after applying too"
+        );
+        assert_eq!(draft.selected_row(), Some(EditRow::Field(1)));
+    }
+
+    #[test]
+    fn row_for_path_matches_a_field_by_key_and_a_list_item_by_index() {
+        let draft = Draft::new_object(
+            "tree",
+            vec![
+                Field {
+                    key: "dataset".into(),
+                    label: "Dataset".into(),
+                    kind: FieldKind::Text("risk".into()),
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+                Field {
+                    key: "columns".into(),
+                    label: "Columns".into(),
+                    kind: FieldKind::OrderedList {
+                        items: vec![
+                            ListItem {
+                                name: "npv".into(),
+                                included: true,
+                                width: None,
+                                kind: None,
+                            },
+                            ListItem {
+                                name: "delta".into(),
+                                included: true,
+                                width: None,
+                                kind: None,
+                            },
+                        ],
+                        available: Some(vec![ListItem {
+                            name: "vega".into(),
+                            included: false,
+                            width: None,
+                            kind: None,
+                        }]),
+                    },
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+            ],
+            toml::Table::new(),
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.dataset"),
+            Some(EditRow::Field(0))
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.1.format.precision"),
+            Some(EditRow::Item { field: 1, item: 1 })
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns"),
+            Some(EditRow::Field(1))
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.7"),
+            Some(EditRow::Field(1)),
+            "an index off the list lands on the field"
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.2"),
+            Some(EditRow::Field(1)),
+            "an index exactly at the list's length is still out of bounds \
+             (there is no items[2] when len() == 2) — the off-by-a-lot case \
+             above cannot tell `<` from `<=` on its own"
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree"),
+            None,
+            "object-level stays on the header"
+        );
+        assert_eq!(draft.row_for_path("views", "views.other.dataset"), None);
+        assert_eq!(draft.row_for_path("views", "sources.tree.dataset"), None);
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.nonexistent"),
+            None,
+            "a field key nothing on this object has stays on the header, \
+             not on whichever field happens to be first"
+        );
+    }
+
+    /// §19.5, review round 1's Important-2 finding: a reader's diagnostic
+    /// index is a position in `Draft::source`'s own array — for Views,
+    /// `views.toml`'s definitional column order, the same order
+    /// `views::columns_for` reads to write the file back — which is NOT
+    /// `items`' order once `ViewPresentation::apply` (or a fresh drag)
+    /// has permuted `items` into the trader's personal presentation. This
+    /// fixture: `source.columns` is `[npv, delta]` (npv first, as
+    /// `views.toml` itself declares them), but `items` has been reordered
+    /// to `[delta, npv]`. A diagnostic path index of `1` names
+    /// `source.columns[1]`, which is `delta` — resolving it by name to
+    /// delta's CURRENT position in `items` (`0`) is the fix; resolving it
+    /// as a raw index into `items` (the pre-fix behaviour) would instead
+    /// land on `items[1]`, which is `npv` — the wrong column entirely.
+    #[test]
+    fn row_for_path_resolves_a_reordered_list_index_by_name() {
+        let mut source = toml::Table::new();
+        source.insert(
+            "columns".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::Table(toml::Table::from_iter([(
+                    "name".to_string(),
+                    toml::Value::String("npv".to_string()),
+                )])),
+                toml::Value::Table(toml::Table::from_iter([(
+                    "name".to_string(),
+                    toml::Value::String("delta".to_string()),
+                )])),
+            ]),
+        );
+        let draft = Draft::new_object(
+            "tree",
+            vec![Field {
+                key: "columns".into(),
+                label: "Columns".into(),
+                kind: FieldKind::OrderedList {
+                    items: vec![
+                        ListItem {
+                            name: "delta".into(),
+                            included: true,
+                            width: None,
+                            kind: None,
+                        },
+                        ListItem {
+                            name: "npv".into(),
+                            included: true,
+                            width: None,
+                            kind: None,
+                        },
+                    ],
+                    available: None,
+                },
+                dest: Destination::Doc,
+                layer: None,
+            }],
+            source,
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.1.format.precision"),
+            Some(EditRow::Item { field: 0, item: 0 }),
+            "source index 1 (delta) resolves to delta's current position \
+             in items (0), not to whatever now sits at raw index 1 (npv)"
+        );
+    }
+
+    /// §19.5, review round 1's Minor-4: two diagnostics on the same row —
+    /// a Warning and an Error — must show the WORSE of the two, since the
+    /// glyph is one colour per row and a trader must never see a mild
+    /// warning colour when an error is also standing on that row.
+    #[test]
+    fn flagged_rows_promotes_a_warning_to_error_on_the_same_row() {
+        let mut draft = Draft::new_object(
+            "tree",
+            vec![Field {
+                key: "dataset".into(),
+                label: "Dataset".into(),
+                kind: FieldKind::Text("risk".into()),
+                dest: Destination::Doc,
+                layer: None,
+            }],
+            toml::Table::new(),
+        );
+        draft.diagnostics = vec![
+            Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: "a warning on dataset".into(),
+                path: Some("views.tree.dataset".into()),
+            },
+            Diagnostic {
+                severity: Severity::Error,
+                layer: None,
+                file: None,
+                message: "an error on dataset too".into(),
+                path: Some("views.tree.dataset".into()),
+            },
+        ];
+        assert_eq!(
+            draft.flagged_rows("views"),
+            vec![(EditRow::Field(0), Severity::Error)],
+            "the row's severity is the worse of the two, regardless of order"
+        );
+    }
+
+    /// The edit footer advertises `i` only where a row can take it
+    /// (user request 2026-09-12: "i for edit text isn't discoverable"):
+    /// a `Number` on any domain, a `Text` only where the domain marks
+    /// the key editable — never on a domain whose `i` merely refuses.
+    #[test]
+    fn offers_text_entry_needs_a_number_or_an_editable_text_row() {
+        let text = |key: &str| Field {
+            key: key.to_string(),
+            label: key.to_string(),
+            kind: FieldKind::Text("2s".to_string()),
+            dest: Destination::Doc,
+            layer: None,
+        };
+        let number = Field {
+            key: "polls".to_string(),
+            label: "polls".to_string(),
+            kind: FieldKind::Number {
+                value: 3,
+                min: 1,
+                max: 100,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        };
+        let sources = Draft::new_object("live", vec![text("poll_interval")], toml::Table::new());
+        assert!(sources.offers_text_entry(Domain::Sources));
+        assert!(
+            !sources.offers_text_entry(Domain::Views),
+            "the same key is read-only on Views"
+        );
+        let views = Draft::new_object("tree", vec![text("dataset")], toml::Table::new());
+        assert!(!views.offers_text_entry(Domain::Views));
+        let with_number = Draft::new_object("x", vec![number], toml::Table::new());
+        assert!(
+            with_number.offers_text_entry(Domain::Views),
+            "a Number types anywhere"
+        );
+        let empty = Draft::new_object("x", Vec::new(), toml::Table::new());
+        assert!(!empty.offers_text_entry(Domain::Sources));
     }
 }

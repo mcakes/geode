@@ -212,7 +212,7 @@ impl SchemaSpec {
                             message: format!(
                                 "dataset '{ds_name}': unknown family '{s}'; dataset dropped"
                             ),
-                            path: Some(format!("{ds_name}.family")),
+                            path: Some(format!("datasets.{ds_name}.family")),
                         });
                         continue;
                     }
@@ -238,7 +238,7 @@ impl SchemaSpec {
                                         "dataset '{ds_name}': '{field}' must be an array of \
                                      column names; dataset dropped"
                                     ),
-                                    path: Some(format!("{ds_name}.{field}")),
+                                    path: Some(format!("datasets.{ds_name}.{field}")),
                                 })
                             }),
                     }
@@ -259,7 +259,7 @@ impl SchemaSpec {
                             message: format!(
                                 "dataset '{ds_name}': '{field}' is ignored on the measure family"
                             ),
-                            path: Some(format!("{ds_name}.{field}")),
+                            path: Some(format!("datasets.{ds_name}.{field}")),
                         });
                         list.clear();
                     }
@@ -281,7 +281,10 @@ impl SchemaSpec {
             // neither stored nor queried, and it must be dropped by the
             // same rule that drops a refused one.
             match ds_value.get("columns").and_then(|v| v.as_table()) {
-                None => diags.push(note(format!("dataset '{ds_name}': no [columns] table"))),
+                None => diags.push(note(
+                    format!("datasets.{ds_name}"),
+                    format!("dataset '{ds_name}': no [columns] table"),
+                )),
                 Some(cols) => {
                     for (col_name, col_value) in cols {
                         match parse_column(ds_name, family, col_name, col_value) {
@@ -333,13 +336,16 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
 
     for c in &ds.columns {
         if RESERVED_COLUMNS.contains(&c.name.as_str()) {
-            diags.push(note(format!(
-                "dataset '{}' column '{}': name is reserved by the storage \
-                 layer ({})",
-                ds.name,
-                c.name,
-                RESERVED_COLUMNS.join(", ")
-            )));
+            diags.push(note(
+                format!("datasets.{}.columns.{}", ds.name, c.name),
+                format!(
+                    "dataset '{}' column '{}': name is reserved by the storage \
+                     layer ({})",
+                    ds.name,
+                    c.name,
+                    RESERVED_COLUMNS.join(", ")
+                ),
+            ));
         }
     }
 
@@ -372,7 +378,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                  document family; this is a measure family dataset — column dropped",
                 ds.name
             ),
-            path: Some(format!("{}.columns.{name}.role", ds.name)),
+            path: Some(format!("datasets.{}.columns.{name}.role", ds.name)),
         });
     }
     ds.columns.retain(|c| !foreign.contains(&c.name));
@@ -384,11 +390,18 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     for grain in ds.grains() {
         for key in grain.key_columns() {
             if ds.column(key).is_none() {
-                diags.push(note(format!(
-                    "dataset '{}': grain {:?} requires key column '{}', which \
-                     is not declared",
-                    ds.name, grain, key
-                )));
+                // The key column itself is the one this diagnostic is
+                // *about* even though it is not declared — pointing the
+                // path at it (rather than the dataset as a whole) is what
+                // lets a trader jump straight to where it should be added.
+                diags.push(note(
+                    format!("datasets.{}.columns.{}", ds.name, key),
+                    format!(
+                        "dataset '{}': grain {:?} requires key column '{}', which \
+                         is not declared",
+                        ds.name, grain, key
+                    ),
+                ));
             }
         }
     }
@@ -419,7 +432,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 ds.name,
                 Grain::UnderlyingPair.key_columns().join(", ")
             ),
-            path: None,
+            path: Some(format!("datasets.{}.columns.{name}", ds.name)),
         });
     }
     ds.columns.retain(|c| !bare_outside_key.contains(&c.name));
@@ -461,7 +474,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                  dimension; dropped",
                 ds.name
             ),
-            path: None,
+            path: Some(format!("datasets.{}.columns.{name}", ds.name)),
         });
     }
     ds.columns
@@ -489,7 +502,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                  dimension, so the text filter cannot route it; textual ignored",
                 ds.name
             ),
-            path: None,
+            path: Some(format!("datasets.{}.columns.{name}", ds.name)),
         });
     }
     for c in &mut ds.columns {
@@ -539,7 +552,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 "dataset '{name}' column '{c}': 'key', 'measure' and 'grain = …' belong to \
                  the measure family; this is a document family dataset — column dropped"
             ),
-            format!("{name}.columns.{c}.role"),
+            format!("datasets.{name}.columns.{c}.role"),
         ));
     }
     ds.columns.retain(|c| !foreign.contains(&c.name));
@@ -557,7 +570,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     for c in &non_numeric {
         diags.push(err(
             format!("dataset '{name}' column '{c}': a value must be f64 or i64 — column dropped"),
-            format!("{name}.columns.{c}.type"),
+            format!("datasets.{name}.columns.{c}.type"),
         ));
     }
     ds.columns.retain(|c| !non_numeric.contains(&c.name));
@@ -595,7 +608,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 "dataset '{name}' column '{c}': a document axis or attribute must be f64, \
                  i64, utf8 or date — column dropped"
             ),
-            format!("{name}.columns.{c}.type"),
+            format!("datasets.{name}.columns.{c}.type"),
         ));
     }
     ds.columns.retain(|c| !unsupported.contains(&c.name));
@@ -616,7 +629,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 "dataset '{name}' column '{c}': a document dataset's dimensions are its key; \
                  '{c}' is not listed in key — column dropped"
             ),
-            format!("{name}.columns.{c}.role"),
+            format!("datasets.{name}.columns.{c}.role"),
         ));
     }
     ds.columns.retain(|c| !unkeyed.contains(&c.name));
@@ -641,7 +654,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 "dataset '{name}' column 'book': 'book' is the document family's partition \
                  column; declare the dimension under another name — dataset dropped"
             ),
-            format!("{name}.columns.book"),
+            format!("datasets.{name}.columns.book"),
         ));
         keep = false;
     }
@@ -651,14 +664,14 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
             format!(
                 "dataset '{name}': a document dataset needs a non-empty 'key'; dataset dropped"
             ),
-            format!("{name}.key"),
+            format!("datasets.{name}.key"),
         ));
         keep = false;
     }
     if ds.axes.is_empty() {
         diags.push(err(
             format!("dataset '{name}': a document dataset needs non-empty 'axes'; dataset dropped"),
-            format!("{name}.axes"),
+            format!("datasets.{name}.axes"),
         ));
         keep = false;
     }
@@ -667,7 +680,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
             None => {
                 diags.push(err(
                     format!("dataset '{name}': key names undeclared column '{k}'; dataset dropped"),
-                    format!("{name}.key"),
+                    format!("datasets.{name}.key"),
                 ));
                 keep = false;
             }
@@ -677,7 +690,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                         "dataset '{name}': key column '{k}' must have role = \"dimension\"; \
                          dataset dropped"
                     ),
-                    format!("{name}.key"),
+                    format!("datasets.{name}.key"),
                 ));
                 keep = false;
             }
@@ -694,7 +707,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                         "dataset '{name}': key column '{k}' must be type = \"utf8\"; \
                          dataset dropped"
                     ),
-                    format!("{name}.key"),
+                    format!("datasets.{name}.key"),
                 ));
                 keep = false;
             }
@@ -708,7 +721,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                     format!(
                         "dataset '{name}': axes names undeclared column '{a}'; dataset dropped"
                     ),
-                    format!("{name}.axes"),
+                    format!("datasets.{name}.axes"),
                 ));
                 keep = false;
             }
@@ -717,7 +730,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                     format!(
                         "dataset '{name}': axis '{a}' must have role = \"axis\"; dataset dropped"
                     ),
-                    format!("{name}.axes"),
+                    format!("datasets.{name}.axes"),
                 ));
                 keep = false;
             }
@@ -735,14 +748,14 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                  dataset dropped",
                 c.name
             ),
-            format!("{name}.columns.{}.role", c.name),
+            format!("datasets.{name}.columns.{}.role", c.name),
         ));
         keep = false;
     }
     if !ds.columns.iter().any(|c| c.role == ColumnRole::Value) {
         diags.push(err(
             format!("dataset '{name}': a document dataset declares at least one value column; dataset dropped"),
-            format!("{name}.columns"),
+            format!("datasets.{name}.columns"),
         ));
         keep = false;
     }
@@ -762,7 +775,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 "dataset '{name}' column '{c}': textual = true on a non-dimension of a \
                  document dataset; textual ignored"
             ),
-            format!("{name}.columns.{c}.textual"),
+            format!("datasets.{name}.columns.{c}.textual"),
         ));
     }
     for c in &mut ds.columns {
@@ -779,13 +792,13 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     diags
 }
 
-fn note(message: String) -> Diagnostic {
+fn note(path: String, message: String) -> Diagnostic {
     Diagnostic {
         severity: Severity::Warning,
         layer: None,
         file: None,
         message,
-        path: None,
+        path: Some(path),
     }
 }
 
@@ -799,26 +812,40 @@ fn parse_column(
     name: &str,
     value: &toml::Value,
 ) -> Result<(ColumnSpec, Option<Diagnostic>), Diagnostic> {
-    let bad = |m: String| note(format!("dataset '{ds}' column '{name}': {m}"));
-    let table = value.as_table().ok_or_else(|| bad("not a table".into()))?;
+    // `datasets.<ds>.columns.<name>[.<key>]` — `key` is the deepest field
+    // a call site honestly knows (`type`, `role`, `grain`, `aggregate`,
+    // `categorical`); `None` only for "not a table", which names no key.
+    let bad = |key: Option<&str>, m: String| {
+        note(
+            match key {
+                Some(k) => format!("datasets.{ds}.columns.{name}.{k}"),
+                None => format!("datasets.{ds}.columns.{name}"),
+            },
+            format!("dataset '{ds}' column '{name}': {m}"),
+        )
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| bad(None, "not a table".into()))?;
 
     let ty_str = table
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| bad("missing 'type'".into()))?;
-    let ty = ColumnType::parse(ty_str).ok_or_else(|| bad(format!("unknown type '{ty_str}'")))?;
+        .ok_or_else(|| bad(Some("type"), "missing 'type'".into()))?;
+    let ty = ColumnType::parse(ty_str)
+        .ok_or_else(|| bad(Some("type"), format!("unknown type '{ty_str}'")))?;
 
     let role_str = table
         .get("role")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| bad("missing 'role'".into()))?;
+        .ok_or_else(|| bad(Some("role"), "missing 'role'".into()))?;
 
     let grain_of = |table: &toml::Table| -> Result<Grain, Diagnostic> {
         let g = table
             .get("grain")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| bad("missing 'grain'".into()))?;
-        Grain::parse(g).ok_or_else(|| bad(format!("unknown grain '{g}'")))
+            .ok_or_else(|| bad(Some("grain"), "missing 'grain'".into()))?;
+        Grain::parse(g).ok_or_else(|| bad(Some("grain"), format!("unknown grain '{g}'")))
     };
 
     let role = match role_str {
@@ -826,9 +853,10 @@ fn parse_column(
         "dimension" => ColumnRole::Dimension {
             grain: match table.get("grain").and_then(|v| v.as_str()) {
                 None => None,
-                Some(g) => {
-                    Some(Grain::parse(g).ok_or_else(|| bad(format!("unknown grain '{g}'")))?)
-                }
+                Some(g) => Some(
+                    Grain::parse(g)
+                        .ok_or_else(|| bad(Some("grain"), format!("unknown grain '{g}'")))?,
+                ),
             },
         },
         "attribute" => ColumnRole::Attribute {
@@ -845,13 +873,13 @@ fn parse_column(
                 .and_then(|v| v.as_str())
                 .unwrap_or("sum");
             let aggregate = Aggregate::parse(agg_str)
-                .ok_or_else(|| bad(format!("unknown aggregate '{agg_str}'")))?;
+                .ok_or_else(|| bad(Some("aggregate"), format!("unknown aggregate '{agg_str}'")))?;
             ColumnRole::Measure {
                 grain: grain_of(table)?,
                 aggregate,
             }
         }
-        other => return Err(bad(format!("unknown role '{other}'"))),
+        other => return Err(bad(Some("role"), format!("unknown role '{other}'"))),
     };
 
     // Only a string column can be an ENUM, so the dimension default is
@@ -864,10 +892,13 @@ fn parse_column(
     let categorical = match table.get("categorical").and_then(|v| v.as_bool()) {
         None => categorical_default,
         Some(true) if ty != ColumnType::Utf8 => {
-            warning = Some(bad(format!(
-                "categorical = true needs type = \"utf8\" (got '{ty_str}'); \
-                 only a string column can be an ENUM — categorical ignored"
-            )));
+            warning = Some(bad(
+                Some("categorical"),
+                format!(
+                    "categorical = true needs type = \"utf8\" (got '{ty_str}'); \
+                     only a string column can be an ENUM — categorical ignored"
+                ),
+            ));
             false
         }
         Some(v) => v,
@@ -1365,7 +1396,7 @@ role = "attribute"
             .find(|d| d.message.contains("unknown family 'widget'"))
             .unwrap();
         assert_eq!(d.severity, Severity::Error);
-        assert_eq!(d.path.as_deref(), Some("cvi_params.family"));
+        assert_eq!(d.path.as_deref(), Some("datasets.cvi_params.family"));
     }
 
     #[test]
@@ -1385,7 +1416,7 @@ role = "attribute"
             let d = diags
                 .iter()
                 .find(|d| {
-                    d.path.as_deref() == Some(&format!("risk_snapshot.{field}"))
+                    d.path.as_deref() == Some(&format!("datasets.risk_snapshot.{field}"))
                         && d.message.contains("is ignored on the measure family")
                 })
                 .unwrap_or_else(|| panic!("no warning for '{field}': {diags:?}"));
@@ -1447,10 +1478,10 @@ role = "attribute"
     fn a_document_dataset_needs_a_non_empty_key_and_axes() {
         let (schema, diags) = cvi_with("key = [\"underlying_ref\"]", "key = []");
         assert!(schema.dataset("cvi_params").is_none());
-        error_with_path(&diags, "cvi_params.key");
+        error_with_path(&diags, "datasets.cvi_params.key");
         let (schema, diags) = cvi_with("axes = [\"term\", \"node\"]", "axes = []");
         assert!(schema.dataset("cvi_params").is_none());
-        error_with_path(&diags, "cvi_params.axes");
+        error_with_path(&diags, "datasets.cvi_params.axes");
     }
 
     #[test]
@@ -1458,7 +1489,7 @@ role = "attribute"
         let (schema, diags) = cvi_with("key = [\"underlying_ref\"]", "key = [\"nonesuch\"]");
         assert!(schema.dataset("cvi_params").is_none());
         assert!(
-            error_with_path(&diags, "cvi_params.key")
+            error_with_path(&diags, "datasets.cvi_params.key")
                 .message
                 .contains("nonesuch")
         );
@@ -1468,7 +1499,7 @@ role = "attribute"
         );
         assert!(schema.dataset("cvi_params").is_none());
         assert!(
-            error_with_path(&diags, "cvi_params.axes")
+            error_with_path(&diags, "datasets.cvi_params.axes")
                 .message
                 .contains("nonesuch")
         );
@@ -1483,7 +1514,7 @@ role = "attribute"
             "[cvi_params.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"attribute\"",
         );
         assert!(schema.dataset("cvi_params").is_none());
-        error_with_path(&diags, "cvi_params.key");
+        error_with_path(&diags, "datasets.cvi_params.key");
     }
 
     #[test]
@@ -1492,7 +1523,7 @@ role = "attribute"
         let (schema, diags) = cvi_with("axes = [\"term\", \"node\"]", "axes = [\"term\"]");
         assert!(schema.dataset("cvi_params").is_none());
         assert!(
-            error_with_path(&diags, "cvi_params.columns.node.role")
+            error_with_path(&diags, "datasets.cvi_params.columns.node.role")
                 .message
                 .contains("not listed in axes")
         );
@@ -1502,7 +1533,7 @@ role = "attribute"
             "[cvi_params.columns.node]\ntype = \"f64\"\nrole = \"value\"",
         );
         assert!(schema.dataset("cvi_params").is_none());
-        error_with_path(&diags, "cvi_params.axes");
+        error_with_path(&diags, "datasets.cvi_params.axes");
     }
 
     #[test]
@@ -1517,7 +1548,7 @@ role = "attribute"
         let ds = schema.dataset("cvi_params").expect("dataset kept");
         assert!(ds.column("param").is_none(), "the utf8 value is dropped");
         assert!(ds.column("param2").is_some());
-        error_with_path(&diags, "cvi_params.columns.param.type");
+        error_with_path(&diags, "datasets.cvi_params.columns.param.type");
     }
 
     #[test]
@@ -1527,7 +1558,7 @@ role = "attribute"
             "[cvi_params.columns.param]\ntype = \"f64\"\nrole = \"attribute\"",
         );
         assert!(schema.dataset("cvi_params").is_none());
-        error_with_path(&diags, "cvi_params.columns");
+        error_with_path(&diags, "datasets.cvi_params.columns");
     }
 
     #[test]
@@ -1542,7 +1573,7 @@ role = "attribute"
             .expect("the dataset is kept; the columns are dropped");
         for name in ["npv", "book", "ccy"] {
             assert!(ds.column(name).is_none(), "{name} should be dropped");
-            let d = error_with_path(&diags, &format!("cvi_params.columns.{name}.role"));
+            let d = error_with_path(&diags, &format!("datasets.cvi_params.columns.{name}.role"));
             assert!(d.message.contains("document family"), "{}", d.message);
         }
         assert!(ds.column("param").is_some(), "the legal columns survive");
@@ -1557,7 +1588,10 @@ role = "attribute"
         let ds = schema.dataset("risk_snapshot").unwrap();
         assert!(ds.column("tenor").is_none() && ds.column("cell").is_none());
         for name in ["tenor", "cell"] {
-            let d = error_with_path(&diags, &format!("risk_snapshot.columns.{name}.role"));
+            let d = error_with_path(
+                &diags,
+                &format!("datasets.risk_snapshot.columns.{name}.role"),
+            );
             assert!(d.message.contains("measure family"), "{}", d.message);
         }
     }
@@ -1670,7 +1704,7 @@ role = "attribute"
             schema.dataset("cvi_params").is_none(),
             "the dataset is dropped: its DDL could not be created at all"
         );
-        let d = error_with_path(&diags, "cvi_params.columns.book");
+        let d = error_with_path(&diags, "datasets.cvi_params.columns.book");
         assert!(d.message.contains("partition column"), "{}", d.message);
     }
 
@@ -1683,7 +1717,7 @@ role = "attribute"
             + "\n[cvi_params.columns.book]\ntype = \"utf8\"\nrole = \"attribute\"\n";
         let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
         assert!(schema.dataset("cvi_params").is_none());
-        error_with_path(&diags, "cvi_params.columns.book");
+        error_with_path(&diags, "datasets.cvi_params.columns.book");
     }
 
     /// Minor 4: the no-`[columns]` early return used to push the dataset
@@ -1725,7 +1759,7 @@ role = "attribute"
         );
         let ds = schema.dataset("cvi_params").expect("dataset kept");
         assert!(ds.column("anchor_date").is_none());
-        error_with_path(&diags, "cvi_params.columns.anchor_date.type");
+        error_with_path(&diags, "datasets.cvi_params.columns.anchor_date.type");
 
         // An axis: dropping the column leaves `axes` naming a column that
         // is no longer declared, so the dataset goes with it — an axis is
@@ -1735,7 +1769,7 @@ role = "attribute"
             "[cvi_params.columns.node]\ntype = \"bool\"",
         );
         assert!(schema.dataset("cvi_params").is_none());
-        error_with_path(&diags, "cvi_params.columns.node.type");
+        error_with_path(&diags, "datasets.cvi_params.columns.node.type");
     }
 
     /// A document key is joined into the `batch VARCHAR` column
@@ -1750,7 +1784,7 @@ role = "attribute"
         );
         assert!(schema.dataset("cvi_params").is_none());
         assert!(
-            error_with_path(&diags, "cvi_params.key")
+            error_with_path(&diags, "datasets.cvi_params.key")
                 .message
                 .contains("utf8"),
             "{diags:?}"
@@ -1769,7 +1803,7 @@ role = "attribute"
         );
         let ds = schema.dataset("cvi_params").expect("the column is kept");
         assert!(!ds.column("param").unwrap().textual);
-        error_with_path(&diags, "cvi_params.columns.param.textual");
+        error_with_path(&diags, "datasets.cvi_params.columns.param.textual");
     }
 
     #[test]
@@ -1780,12 +1814,24 @@ role = "attribute"
         let ds = schema.dataset("cvi_params").unwrap();
         assert!(
             diags.iter().any(|d| {
-                d.path.as_deref() == Some("cvi_params.columns.region.role")
+                d.path.as_deref() == Some("datasets.cvi_params.columns.region.role")
                     && d.message.contains("dimensions are its key")
             }),
             "{diags:?}"
         );
         assert!(ds.column("region").is_none());
         assert_eq!(ds.groupable_columns(), vec!["underlying_ref"]);
+    }
+
+    #[test]
+    fn a_bad_column_type_diagnostic_carries_its_field_path() {
+        let (_, diags) = SchemaSpec::from_doc(&doc(
+            "[risk.columns.npv]\ntype = \"nonesuch\"\nrole = \"measure\"\ngrain = \"position\"\n",
+        ));
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("datasets.risk.columns.npv.type"),
+            "{diags:?}"
+        );
     }
 }

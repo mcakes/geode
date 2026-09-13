@@ -189,12 +189,14 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             label: "Dataset".to_string(),
             kind: FieldKind::Choice { options, selected },
             dest: Destination::Doc,
+            layer: None,
         },
         Field {
             key: "columns".to_string(),
             label: "Columns".to_string(),
             kind: FieldKind::OrderedList { items, available },
             dest: Destination::Presentation,
+            layer: None,
         },
     ]
 }
@@ -574,13 +576,12 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
                     "view '{}': dataset '{dataset}' is not in the schema",
                     draft.name
                 ),
-                // `None`, like every other build site in the workspace:
-                // 4b added the field and filled it in from no reader
-                // ("Not filled in by any reader in 4b" — its own doc),
-                // and nothing yet reads it back. Attaching a field-row
-                // path here via `with_path` is the feature that field
-                // was added for, not something a merge should invent.
-                path: None,
+                // The one field this cross-check names is `dataset` —
+                // `ViewSpec::from_doc`'s own reader diagnostics land on
+                // this same key when it is missing (§19.5); this one
+                // lands there too, so `Draft::row_for_path` flags the
+                // same row whichever check found the problem.
+                path: Some(format!("views.{}.dataset", draft.name)),
             });
         }
     }

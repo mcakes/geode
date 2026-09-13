@@ -2394,7 +2394,9 @@ field on one domain. Part 2b generalises it rather than adding a second
 mechanism beside it.
 
 **State.** `Draft::chain_entry: bool` becomes
-`Draft::text_entry: Option<TextEntry>`:
+`Draft::text_entry: Option<TextEntry>`, and `chain_entry` survives as a
+*method* (`Draft::chain_entry() -> bool`, "the open field is the chain
+field") so §18.8's own call sites and tests read as they did:
 
 ```rust
 pub struct TextEntry {
@@ -2418,7 +2420,11 @@ of the field resets the viewport, and `enter_edit_stage` still derives
 from `apply::config_with_pending`.
 
 **`i` on a `Text` row** opens the field seeded with the value and
-labelled with the field's label (`poll_interval`). With
+labelled `"{object} · {field label}"` (`risk · Poll interval`), the
+object-then-field spelling the chain field's own `slot 3 · chain` label
+already used. Opening the field is a `Step::Changed` — the step "the
+field opened", not "a value changed" — which is what tells the caller to
+put the dialog into `DialogMode::Filter`. With
 `completions: false` the rows below stay the edit rows with the edited
 one highlighted, so the trader sees what they are editing; `j`/`k` are
 text, as in any focused field, and `tab`/`shift+tab` get the "nothing
@@ -2475,18 +2481,19 @@ Sources' `stable polls` is a `Number`.
 
 ### 19.3 Sources
 
-`Domain::Sources`, `sources.toml`, palette `config::sources` ("Sources",
-category Config, no default binding — §10). Every field is
+`Domain::Sources`, `sources.toml`, palette `config::sources`
+("Edit sources", category Configuration — the spelling its three
+siblings already use — no default binding, §10). Every field is
 `Destination::Doc`; there is no presentation doc.
 
 | Field | Kind | Spelling / rule |
 |---|---|---|
 | `dataset` | `Choice` | The schema's datasets, sorted; the object's own value kept as an option when the schema lacks it (Views' rule, for the same reason). |
-| `paths` | `Text` | The globs on one line separated by `;`, surrounding whitespace trimmed. Round-trips the reader's array exactly. `;` because it is illegal in a Windows path and unused in globs, where a space is legal in both. |
+| `paths` | `Text` | The globs on one line separated by `;`, surrounding whitespace trimmed. Round-trips the reader's array exactly. `;` is not reserved by either platform's filesystem (NTFS reserves only `< > : " / \ | ? *`) — the choice is unambiguous only in the common case: it is rare inside a glob and never one of glob's own metacharacters, while a space is legal in a path on both platforms and so cannot separate them. A glob that needs a literal `;` cannot be expressed in this field. |
 | `readiness` | `Choice` | `sentinel`, `stable_mtime`. |
-| `stable polls` | `Number` | `1..=100`; the `polls` of `readiness = { stable_mtime = N }`, seeded from the object or else the reader's default. Shown and steppable always, written only when `readiness` is `stable_mtime`. |
+| `stable_polls` (`Stable polls`) | `Number` | `1..=100`; the `polls` of `readiness = { stable_mtime = N }`, seeded from the object or else the reader's default. Shown and steppable always, written only when `readiness` is `stable_mtime`. |
 | `priority` | `Choice` | `latest_risk`, `latest_other`, `backfill`. |
-| `poll_interval`, `pending_timeout` | `Text` | The reader's own `45s` / `5m` / `2h`; `parse_text` refuses what `parse_duration` cannot read. An absent key shows the reader's default and is written explicitly on the object's first edit, since a write renders the whole object. |
+| `poll_interval`, `pending_timeout` | `Text` | The reader's own `45s` / `5m` / `2h`; `parse_text` refuses what `parse_duration` cannot read. An absent key shows the reader's default — `spell_duration` of `DEFAULT_POLL`/`DEFAULT_PENDING_TIMEOUT`, so `30s` and `10m` — and is written explicitly on the object's first edit, since a write renders the whole object. |
 | `batch_pattern` | `Text` | Empty means none. `parse_text` refuses a regex that does not compile or has no `batch` capture — the reader's two diagnostics for it, made inline refusals. |
 
 **The browse list is every dataset-and-source pair, flat (user ruling
@@ -2522,8 +2529,8 @@ refuses a draft carrying an error, so nothing `n` could write was legal.
 Ruled: **a source with no paths is idle, not broken** — the reader
 downgrades "missing or empty 'paths'" to a warning and still skips the
 source (it has nothing to poll), a desk file with a typo still shows the
-warning in the diagnostics tile, and `n` writes
-`{ dataset = <the cursor row's>, paths = [] }` at zero debounce through
+warning in the diagnostics tile, and `n` writes the cursor row's
+`dataset` and an empty `paths` at zero debounce through
 `commit_create`, opening the stage with the warning on the `paths` row
 (§19.5) for the trader to type the globs into. The scheduler needs no
 change: a skipped source never reaches it.
@@ -2543,7 +2550,7 @@ delivery path. A live restart, if ever wanted, is its own design.
 ### 19.4 The schema inspector
 
 `Domain::Schema`, palette `config::schema` ("Schema (read-only)",
-category Config), over `datasets`. §9 as written, with three mechanics
+category Configuration), over `datasets`. §9 as written, with three mechanics
 settled:
 
 - **`Domain::writable()` lands** and answers `false` here alone. The
@@ -2553,12 +2560,25 @@ settled:
   one notice — `the schema is read-only` — and the footer omits every
   one of them. `/` filters as anywhere; a digit is the edit stage's
   usual "not a verb here".
-- **Browse** lists datasets: summary `<n> columns · <grains>`. The
+- **Browse** lists datasets: summary
+  `<n> column(s) · <m> measure(s) · <k> dimension(s)`, counted off the
+  raw `[columns]` table (so a dataset the reader drops a column from
+  still counts what the file says) rather than the grain list this was
+  first sketched as — the counts are what a trader compares two datasets
+  by, and the grains are already on every column row one `enter` away.
+  The
   provenance walk (`derive_rows`) runs unchanged, so a desk dataset
   shadowed by a user one is marked `override` like any object.
-- **The stage** lists one display-only `Text` row per column — label
-  the column name, value `<type> · <role>[ · grain <g>]` plus whichever
-  of `required`, `textual`, `categorical` hold — then one row per
+- **The stage** lists one display-only `Text` row per column, in schema
+  (file) order — label the column name, value
+  `<type> · <role>[ (aggregate) ][ · grain <g> | · carried by <g>]` plus
+  whichever of `required`, `textual`, `categorical` hold. A measure
+  names its aggregate inside the role clause
+  (`f64 · measure (sum) · grain instrument`) and a carried dimension
+  reads `carried by <g>` rather than `grain <g>`, so the row says which
+  of the two relationships it has; `source_name` is not shown (an
+  ingest-time rename with nothing for a config dialog to act on). Then
+  one row per
   derived dimension whose `from` is a column of this dataset, label
   `<name> (derived)`, value `from <column> · <n> values`.
 - **`Field.layer: Option<Layer>`** is new, painted as a `dialog::badge`
@@ -2577,9 +2597,15 @@ settled:
 
 §8.5's other half. Every reader fills `path` where it knows the key, in
 one grammar: `<doc>.<object>[.<field>[.<index>[.<subkey>]]]` —
-`views.tree.columns.3.name`, `sources.risk.paths`,
-`datasets.risk_snapshot.columns.7.kind`, `groupings.3`,
-`scopes.eod.<key>`, `dimensions.region.from`. The readers are
+`views.tree.columns.3.name`, `views.tree.columns.3.format.scale`,
+`views.tree.dataset`, `views.tree.joins`, `views.tree.sort`,
+`view_presentation.tree.order` / `.hidden` / `.width.<col>`,
+`sources.risk.paths`, `groupings.3`, `scopes.eod.expression`,
+`scopes.eod.dimensions.<col>`, `dimensions.region.from`,
+`dimensions.region.values.<v>`. A schema path names its column by
+**name**, not by index (`datasets.risk_snapshot.columns.kind.type`):
+`[datasets.<ds>.columns]` is a table keyed by column name, so an index
+would name nothing the file has. The readers are
 `ViewSpec::from_doc`, `ViewPresentationSpec::from_doc`,
 `GroupingSlots::from_doc`, `saved_scopes_from_doc`,
 `SourceSpec::from_doc`, `SchemaSpec::from_doc` and
@@ -2590,9 +2616,11 @@ object) carries the deepest path it honestly can. `Display` appends
 ` (at <path>)` when set, so the diagnostics tile, the log and stderr
 gain it with no further work.
 
-**Matching.** `Draft::diagnostic_rows()` strips `<doc>.<object>.` and
+**Matching.** `Draft::row_for_path` strips `<doc>.<object>.` and
 compares the remainder against each field's `key` (`dataset`), or a
-list field's `key.<index>` prefix for an `EditRow::Item`. A matched row
+list field's `key.<index>` prefix for an `EditRow::Item`;
+`Draft::flagged_rows` maps that over the draft's diagnostics, keeping
+the worse severity where two land on one row. A matched row
 paints a severity glyph before its label, and its line in the header's
 diagnostics block is prefixed with the row's label so the two can be
 read together. An unmatched diagnostic — no path, or a path naming no
@@ -2627,7 +2655,9 @@ still says no reader fills the field, is corrected.
   that predates Part 2b never claims a drift it cannot prove. A stale
   entry (its user object gone, or its shadowed object gone so the row is
   no longer overridden) is ignored, and pruned by the next overrides
-  write.
+  write — the pruning removals are inserted into the batch *before* the
+  fork's own entry, so a key that is both listed stale and being written
+  ends up `Some` in the `BTreeMap`, never removed.
 - The browse row gains a `drifted` badge; the edit header says the
   desk's copy has changed since it was copied and names `r`. No diff
   (§1.4). A presentation-only personalisation never drifts (§15 item 4).
@@ -2677,63 +2707,282 @@ batch; `r` and `d` removing it; `ReloadRejected` emitted only on the
 rejected branch. Display checks stay pending on the user's screen, as
 §18.6's are.
 
-## 20. Part 2c — direction only (2026-09-12)
+### 19.8 As built
 
-Not yet designed; recorded so the session that designs it starts from
-the rulings already taken rather than rediscovering them. Part 2c is
-**column presentation and shared colours**: a nested *column stage*
-under a Views member row (`enter` on a member) holding every
-presentation field the model already has — `label`, `width`, `scale`
-(`none`/`k`/`M`, the header already paints `npv (k)`), `precision`,
-`thousands`, `negative` — plus a named, shared colour; the user overlay
-(`view_presentation.toml`) grows to carry the same format keys per
-column so a trader's own scale or decimals merge *over* the desk's view
-without forking it (the rule §4.1 already applies to width); and a
-dialog of its own for the shared colours, on a doc of its own, read by
-the blotter now and by charting later.
+Part 2b shipped as seven tasks on `worktree-phase-4c-part-2b`
+(`027364d`..`56e9676`, 25 harness entries added, 644 total). §19.1–§19.6
+above are corrected in place where the build contradicted them — the
+browse summary, the column-value spelling, the schema path grammar, the
+`Sources`/`Schema` palette titles, the created source's keys, the label
+on an open field, `chain_entry` surviving as a method, and the ordering
+of the stale-override removals. What follows is what a maintainer has to
+know that the design did not say.
 
-**The colour model, agreed in principle (user, 2026-09-12).** A shared
-colour is a **hue angle on a canonical wheel plus a tone**, and each
-theme is a transformation of that wheel: every bundled theme sets
-twelve base hues (`base.red`/`yellow`/`green`/`cyan`/`blue`/`magenta`,
-each with a `.light` tone), placed at canonical angles 0/60/120/180/
-240/300, and a definition's hue is interpolated between the theme's two
-nearest anchors **in OKLCH**, not HSL (HSL midpoints across hues lose
-lightness and chroma; the OKLab conversion is ~40 lines of pure
-arithmetic in `geode-core`, no dependency). `hue = 240` is exactly the
-theme's blue; `hue = 210` is a third of the way from its cyan to its
-blue in that theme's own saturation and lightness. A `token` form stays
-for the semantic colours a theme already names (`chart.bullish`,
-`chart.bearish`, `danger`), so sign colouring and a shared colour share
-one vocabulary. **No literal hex**: a hex is theme-blind, and a
-theme-blind colour is the failure this model exists to remove. Sketch:
+- **The open text field is one row, named: `Draft::text_entry:
+  Option<TextEntry { row: EditRow, completions: bool }>`.** §18.8's
+  `chain_entry: bool` is gone as a field and back as a method
+  (`Draft::chain_entry()` = "the open field is the chain field"), so
+  every §18.8 call site and test reads as it did. `TextEntry.row` is the
+  load-bearing addition and not just bookkeeping: **while a plain field
+  is open the row list below stays unfiltered, with the edited row
+  highlighted**, because the trader must see what they are editing, and
+  `row` is what `Draft::visible_rows` highlights and what
+  `begin_text_entry`/`cancel_text_entry` `follow()` so the cursor lands
+  back on that row on both cancel and apply. (A review Major: the first
+  build fell through to `rank(query)`, so typing a value filtered the
+  rows by it — the field's own text narrowing the list it sits above.)
+  The accepted loss is the chain field's own: an edit-stage filter
+  active when `i` is pressed is dropped with the field.
+  `begin_text_entry` answers `Step::Changed` meaning **"the field
+  opened"**, not "a value changed" — that is what puts the dialog into
+  `DialogMode::Filter`; `render::open_text_field` decides editability
+  (`Number` always, `Text` through `Domain::text_editable`) and
+  otherwise falls into `edit_commit_notice`. `handle_chain_key` is now
+  `handle_text_key`, with `tab` and the nav block gated on
+  `completions` and `enter` dispatching to `apply_chain` or
+  `apply_text_entry(&|key, text| domain.parse_text(key, text))`. The
+  pill is `edit` (`dialog::edit_pill`, `dialog-mode-pill-edit`); the
+  label is `"{object} · {field label}"`; a row **click** while a plain
+  field is open does nothing (the click arm is a three-way
+  `Some(true)` → completion, `Some(false)` → nothing, `None` → select),
+  because there is no completion list to click and a select behind an
+  open field would silently edit a different row than the label names.
+  A `Number` parses and range-checks in the scaffold (`apply_text_entry`
+  itself, refused rather than clamped); `parse_text` is the adapter's
+  door for `Text` alone. First exercised end to end by a window test in
+  Task 3 — Task 1 shipped the gpui path with pure tests only, since no
+  domain had an editable `Text` or `Number` until Sources.
 
-```toml
-[delta]
-hue = 240
+- **`Domain::writable()` is the one gate, and it is ten sites, not
+  one.** `false` for `Schema` alone; `READ_ONLY_NOTICE` ("the schema is
+  read-only") is the single string every refusal uses. The gate sits in
+  `handle_edit_key`'s normal-mode entry, `actions()` (an empty action
+  bar), both footers, browse `n`, the dest badge, `edit_commit_notice`,
+  `press_verb`, **`on_tick_clicked` and `on_row_dropped`** — the last
+  two added by a review Major: §18.9 made the tick and the drop mouse
+  forms of `space` and a reorder, so a read-only domain that gated only
+  the keyboard was writable with a mouse. `Field.layer: Option<Layer>`
+  is painted as a `dialog::badge` (`objectdialog-field-layer-{key}`) and
+  filled by `Schema` alone, from `Config::explain` — `datasets.<ds>` for
+  a column row (a dataset is atomic at depth 1, so every column of one
+  dataset carries the same layer; the badge is honest, merely uniform)
+  and `dimensions.<name>` for a derived row, which can differ. The dest
+  badge is painted only where the domain is writable, since "where does
+  this write" is not a question a read-only row raises. Rows are in
+  schema **file** order (`preserve_order`, CLAUDE.md's workspace-wide
+  rule), not sorted.
 
-[gamma]
-hue = 210
-tone = "light"
+- **Sources is a flat `<dataset> · <name>` list, and the prefix is a
+  field on the row, not a Sources trick.** `ObjectRow.prefix:
+  Option<String>` + `ObjectRow::display_name()`;
+  `Domain::prefix_fn` supplies it; `derive_rows` sorts by
+  `(prefix, name)` **only when a prefix fn exists**, so every other
+  domain's by-name order is untouched. The prefix is part of
+  `searchable_text`, painted dimmed (`theme.muted_foreground`) as a
+  separate highlight run. `n` seeds the new source's `dataset` from the
+  row under the cursor through `ObjectDialogState.naming_dataset`
+  (recorded when `n` is pressed, read by `create_from_name`, cleared by
+  `cancel_naming`) and pre-fills the name with the dataset's own when no
+  source holds it yet. **An empty `paths` is idle, not broken**
+  (`source_config::IDLE_PATHS`, `Severity::Warning`, the source still
+  skipped) — that ruling is what makes `n` legal at all, since
+  `apply::blocking_diagnostic` refuses a draft carrying an error.
+  `check_batch_pattern` (`geode-core::source_config`) is the one
+  spelling of "compiles and names a `batch` capture", called by the
+  reader and by `parse_text`, so an inline refusal and a file diagnostic
+  can never disagree. A created source writes six keys, not two —
+  `dataset`, `paths = []`, and the four defaulted ones (`readiness`,
+  `priority`, `poll_interval`, `pending_timeout`) — because `to_table`
+  renders the whole object and §19.3 already rules that an absent key is
+  written explicitly on the first write. `stable_polls` is written only
+  under `stable_mtime`; an empty `batch_pattern` removes the key rather
+  than writing `""`. **A Sources write reaches the running service
+  through nothing new:** the in-memory `apply_reload` compares the
+  `sources` doc against its session-start baseline and raises the
+  existing `sources changed — restart to apply` stripe
+  (`restart_required`, `ShellEvent::RestartRequired`), clearing it when
+  an edit goes back. That is the whole delivery path; no live
+  `DataService` restart was built.
 
-[pnl]
-token = "chart.bullish"
-```
+- **Every named-object reader fills `Diagnostic.path`, and the draft
+  resolves a list index BY NAME.** `ViewSpec::from_doc`,
+  `ViewPresentationSpec::from_doc`/`apply`, `GroupingSlots::from_doc`,
+  `saved_scopes_from_doc`, `SourceSpec::from_doc`,
+  `SchemaSpec::from_doc` and `DerivedDimensions::from_doc` each grew an
+  `at`/`diag`/`warn` closure carrying the path; `Display` appends
+  ` (at <path>)`, so the diagnostics tile, the log and stderr gained it
+  with no further work. Three honest `path: None` survivors remain in
+  `view.rs`: `ViewSpec::validate` (a cross-dataset check, not a read of
+  one object) and the two document-level `default =` diagnostics (no
+  view is being read, so there is no object to name). `Draft::row_for_path`
+  strips `<doc>.<object>.`, matches a field `key` or a list field's
+  `key.<index>` — and resolves that index through `Draft::source[key]`,
+  the object's OWN array in file order, mapping the entry's **name** to
+  its current position in `items`, with the raw index only as a
+  fallback. A review Major: a diagnostic's index is a source-order
+  position while `items` are in *presentation* order, which this dialog
+  writes on every drag, so the raw index flagged the wrong column the
+  moment a personal order existed. `Draft::flagged_rows` is a
+  `Vec<(EditRow, Severity)>` keeping the worse severity where two land
+  on one row. The glyph and the label share **one inner flex child**
+  (`objectdialog-label-{selector}`), because a third child of a
+  `justify_between` row splits the free space into two gaps and floats
+  every label — flagged or not, on every domain — toward the row's
+  centre (the other review Major). An unmatched diagnostic stays on the
+  header exactly as before; a matched one also prefixes its header line
+  with the row's label. **Row-landing is exercised by Views, Sources and
+  Schema only**, by design: Scopes' reader paths (`.expression`,
+  `.dimensions.<col>`) and Groupings' object-level paths never match
+  those domains' field keys.
 
-Known strains, to be met by checks rather than rules: a theme whose
-neighbouring anchors sit close together folds that arc, so definitions
-apart on the canonical wheel can coincide there — extend the
-theme-authoring checks to report each theme's smallest inter-anchor arc
-and each generated hue's contrast against the theme background; and
-distinguishability is per theme, so the colour dialog should paint a
-swatch strip in the active theme beside each definition.
+- **`ShellEvent::ReloadRejected(Vec<Diagnostic>)` is emitted after
+  `self.last_reload = outcome`,** with each diagnostic logged at
+  `error` on `geode::config` first — the emit alone leaves nothing
+  behind for a trader not watching whatever consumes the event. The
+  dialog's status rides the **existing** `config_write_error` field
+  (there is no second status channel): `apply::promote` reads the
+  rejected count off `shell.last_reload` immediately after
+  `apply_in_memory` and hands it down through `schedule_flush` to
+  `finish_flush`, which paints
+  `"saved to disk · rejected by the merge: <n> error(s) — keeping last
+  good"` (`apply::REJECTED_STATUS`) on the `Ok(())` arm and clears it on
+  the next flush memory accepts. The bridge's `ConfigReloaded` arm now
+  keeps `load_views`'s presentation diagnostics and notes them through
+  `note_data_diagnostics` — placed **after** `handle.replace_views(..)`
+  rather than beside `load_views`, because `config` is borrowed out of
+  `cx` until its last use and the update needs `cx` mutably (E0502);
+  behaviour is identical, only the line moved.
 
-**Open for the design session:** the name of the thing ("colour
-family" was the user's placeholder and is not final); whether a
-column's colour paints the header, the values, or both; whether a
-shared colour can combine with `sign` on one column; how a resolved
-colour reaches modules (the `UiSettings` gpui global is the
-shell→module pattern, and colours are genuinely app-wide and
-module-visible, which is the bar CLAUDE.md sets for widening it); and
-how the overlay's per-column keys are spelled next to the existing
-`order`/`hidden`/`width`.
+- **Drift is a sidecar, and `would_fork` is its gate.**
+  `overrides.toml` (`OVERRIDES_DOC`, user layer only, `atomic_depth` 1),
+  keyed `"<doc>.<object>"`, holding `shadowed_layer` and `shadowed_text`
+  — the `object_text` of the shadowed layer's object at fork time
+  (`override_key`, `override_entry`, `shadow_of`). `commit_edit` folds
+  the entry into the **same batch** as the fork it records, gated on
+  `would_fork(shell, domain)` and never on `shadow_of` alone: once the
+  fork has landed the shadow is still there, so a `shadow_of` gate would
+  rewrite the entry identically on every later keystroke and stamp a
+  *new* baseline over the one drift is measured against. The stale
+  removals (`stale_override_keys`) are inserted **before** the entry, so
+  a key that is both listed stale and being written ends up `Some` in
+  the `BTreeMap`. `r` and `d` remove the entry through `commit_removal`,
+  and only when `has_override_entry` says the sidecar actually holds one
+  — a missing `overrides.toml` is never created just to remove nothing.
+  `drift_of` (a named helper, extracted so the harness has a unique
+  anchor) answers `drifted`: overridden, an entry present, and the
+  shadowed layer's *current* `object_text` differing. No entry is not
+  drifted — an override predating Part 2b never claims a drift it cannot
+  prove. The browse row gains a `drifted` badge, the edit header the
+  same badge, and a note under the header
+  (`objectdialog-drift-note`) naming `r`, never `d`.
+
+**Final review fix wave (2026-09-12).** The final whole-branch review
+found two Importants and ten Minors; one fix wave took the two
+Importants plus six of the Minors (the rest, and the review's own
+CAN-WAIT triage rows, are folded into **Deferred** below). Fixed:
+`Draft::step_selected`'s `Number` arm now refuses a step on a value
+outside `[min, max]` rather than clamping it to the bound (Sources'
+`stable_mtime` reader accepts any positive integer while the dialog's
+own picker caps display at 100, so a value seeded from the file could
+sit outside the dialog's range; one `shift+space` used to silently
+write the bound — a number the trader never typed — against §19.1's
+refuse-don't-clamp ruling; this also resolves the "`polls` above 100 is
+silently clamped" item the Deferred list below used to carry).
+`ShellView::config_write_error`'s field doc now says what the field
+actually holds — a failed-and-rolled-back write OR a rejected-merge
+status, cleared only by the next flush memory accepts, not merely by
+"a later write succeeding". The plain-field label in `render.rs` no
+longer panics on a `TextEntry.row` that is not `EditRow::Field` (the
+doc on `TextEntry.row` already anticipates an item-level field, Part
+2c); it falls back to `Draft::row_label`. The `batch_pattern` reader
+diagnostic no longer double-quotes the whole underlying message, and
+the no-capture case's "(every file's batch would be its whole stem)"
+explainer lives in `check_batch_pattern` itself rather than the caller
+that wrapped it. `PATH_SEPARATOR`'s doc and this section's own `paths`
+row no longer claim `;` is illegal on Windows (NTFS reserves only
+`< > : " / \ | ? *`); both now say the true reason — rare inside a
+glob, never one of glob's own metacharacters, unlike a space, which is
+legal in a path on both platforms. `commit_edit`'s stale-removals-
+before-the-fork's-own-entry order (§19.6, above) is now commented where
+it is decided and covered by a test that seeds a stale twin for the
+object about to be forked. Four §19.7 harness entries this section's
+harness count already included by number but not by content are now
+real: `parse_text`'s duration and `batch_pattern` arms, `row_for_path`'s
+unmatched-diagnostic case (which gained the covering assertion it
+lacked), and `removal_edits`'s own overrides-entry removal. Tidied
+alongside: the `let edits = ..; let mut edits = edits;` rebinding in
+`commit_edit` is one `let mut`; `override_key` has a doc comment;
+`dialog::state_pill`'s doc names `edit_pill` as its third caller;
+`Draft::begin_text_entry`'s doc says its `Step::Changed` means "the
+field opened"; `sources::fields`' readiness match dropped its dead
+first disjunct (`v.as_str() == Some("sentinel") ||`, redundant with
+`v.is_str()`); and the duration refusal in `sources::parse_text` now
+names the field label ("Poll interval", "Pending timeout"), matching
+how the `Number` refusals name theirs.
+
+**Deferred** — each is a review Minor taken and recorded rather than
+fixed, so the next branch finds them:
+
+- `press_verb`'s `writable()` gate has no covering test;
+  `schema::validate`'s "this dataset alone" isolation has no
+  second-dataset fixture and no harness entry; `schema.rs`'s test module
+  re-imports `Config`/`Layer`/`LayerDoc` beside `use super::*`.
+- Sources' prefix-in-filter and its two-run highlight split are
+  untested (no window test types a query on that list);
+  `seed_dataset_under_cursor` re-derives the rows on every browse
+  keystroke rather than only on `n`; `naming_dataset`'s doc says
+  "consumed by `create_from_name`" though only `cancel_naming` clears
+  it.
+- `Display`'s ` (at <path>)` suffix has no unit test beside
+  `config/mod.rs`'s four `Display` tests; the Error and Warning glyph
+  arms are identical but for the colour.
+- `hot_reload.rs`'s `Applied`-arm comment still says `Diagnostic` has no
+  `Display` impl; `bridge.rs` states the §19.6 rationale twice; a test
+  `.unwrap()`s `config_write_error` where `.expect(..)` would name the
+  behaviour; no test covers the clearing direction (a rejected flush
+  then an accepted one).
+- `row_for_path` allocates a field-key `format!` per field per call
+  (twice per render); `derive_rows` clones every non-user object's whole
+  `toml::Value` per render where `Option<&toml::Value>` would do;
+  "shadow = the last non-user layer" has two implementations
+  (`shadow_of` and `derive_rows`'s accumulator) and only `shadow_of`'s
+  has a harness entry; no test asserts a `drifted` badge PRESENT or
+  reads `objectdialog-drift-note`; the drift note says "the desk's copy"
+  while `shadowed_layer` may be `builtin` (it is recorded and unused);
+  the Scopes reader scrapes its column name out of a diagnostic
+  message rather than carrying it structurally.
+
+**Display checks are pending on the user's screen**, as §18.6's are: no
+sandbox in this branch painted a window. Unverified pixel-for-pixel: the
+severity glyph and its two colours, the label block's left alignment
+beside a glyph, the dimmed Sources prefix and its two highlight runs, the
+`edit` pill, the layer badge on a schema row, the `drifted` badge on both
+the browse row and the edit header, and the drift note under the header.
+Everything else in this section is verified against window-test
+assertions, unit tests, the harness, and the code directly.
+
+**Harness.** 656 entries: 655 once main was merged back in (main had gained
+five groupings-vocabulary entries meanwhile), plus one for the edit footer's
+`i` chip (user request 2026-09-12, "i for edit text isn't discoverable":
+`Draft::offers_text_entry` decides whether the footer advertises `i` —
+Sources today; never a domain where `i` only refuses); this branch's own count was
+650 (619 at the branch point, 25 added over the seven tasks, 6 more added by the final review's fix wave above, none
+removed, plus several pre-existing entries re-anchored where these
+tasks — and the fix wave — moved their source lines; `--anchors-only`
+caught every one of those before commit, as it is meant to).
+`--anchors-only` reports 0 stale, 0 ambiguous.
+
+## 20. Part 2c — designed elsewhere
+
+Part 2c — the column stage, the overlay's per-column tables, and named
+colours — is governed by
+`docs/superpowers/specs/2026-09-13-geode-phase-4c-part-2c-columns-and-colours-design.md`
+(approved 2026-09-13). The direction note that stood here on 2026-09-12
+(a hue on a canonical wheel that each theme transforms, OKLCH
+interpolation over the theme's twelve base hues, a `token` form, no
+literal hex) is that spec's §2 in full; its open questions were settled
+there: the thing is a **named colour** (`colours.toml`, "Edit colours"),
+it paints a column's **header and values** and does not combine with
+`sign`, definitions travel to modules like views and resolve at the
+paint site, and the overlay carries one `[view.columns.<col>]` table per
+column.

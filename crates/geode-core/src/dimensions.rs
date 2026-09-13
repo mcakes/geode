@@ -52,19 +52,27 @@ impl DerivedDimensions {
             if name == "config_version" {
                 continue;
             }
-            let bad = |m: String| Diagnostic {
+            // `dimensions.<name>[.<suffix>]` (§19.5) — `""` for "not a
+            // table" (there is no field to point into), `from` for the
+            // source-column key, `values.<derived_value>` for a problem
+            // inside one mapped value's own array.
+            let bad = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Warning,
                 layer: None,
                 file: None,
                 message: format!("dimension '{name}': {m}"),
-                path: None,
+                path: Some(if suffix.is_empty() {
+                    format!("dimensions.{name}")
+                } else {
+                    format!("dimensions.{name}.{suffix}")
+                }),
             };
             let Some(table) = value.as_table() else {
-                diags.push(bad("not a table".into()));
+                diags.push(bad("", "not a table".into()));
                 continue;
             };
             let Some(from) = table.get("from").and_then(|v| v.as_str()) else {
-                diags.push(bad("missing 'from'".into()));
+                diags.push(bad("from", "missing 'from'".into()));
                 continue;
             };
 
@@ -72,7 +80,10 @@ impl DerivedDimensions {
             if let Some(map) = table.get("values").and_then(|v| v.as_table()) {
                 for (derived_value, sources) in map {
                     let Some(list) = sources.as_array() else {
-                        diags.push(bad(format!("'{derived_value}' is not an array")));
+                        diags.push(bad(
+                            &format!("values.{derived_value}"),
+                            format!("'{derived_value}' is not an array"),
+                        ));
                         continue;
                     };
                     for source in list.iter().filter_map(|s| s.as_str()) {
@@ -81,10 +92,13 @@ impl DerivedDimensions {
                         {
                             // Many-to-many would break the functional
                             // dependency the additivity rule rests on.
-                            diags.push(bad(format!(
-                                "'{source}' is mapped to both '{existing}' and \
-                                 '{derived_value}'; the map must be many-to-one"
-                            )));
+                            diags.push(bad(
+                                &format!("values.{derived_value}"),
+                                format!(
+                                    "'{source}' is mapped to both '{existing}' and \
+                                     '{derived_value}'; the map must be many-to-one"
+                                ),
+                            ));
                             continue;
                         }
                         values.insert(source.to_string(), derived_value.clone());
@@ -176,6 +190,17 @@ IDX_EXO_US = ["BK003"]
         let (dims, diags) = DerivedDimensions::from_doc(&doc(""));
         assert!(dims.all().next().is_none());
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn a_missing_from_diagnostic_carries_its_field_path() {
+        let (_, diags) =
+            DerivedDimensions::from_doc(&doc("[region]\n[region.values]\nA = [\"BK000\"]\n"));
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("dimensions.region.from"),
+            "{diags:?}"
+        );
     }
 
     #[test]

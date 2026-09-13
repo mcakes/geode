@@ -633,6 +633,137 @@ fn adding_an_available_column_to_a_desk_view_asks_before_forking(cx: &mut gpui::
     let _ = shell;
 }
 
+/// §19.6: the fork's own batch carries the overrides entry, so it lands
+/// in the same flush; `r` removes it with the user copy.
+#[gpui::test]
+fn a_fork_records_an_override_entry_and_revert_removes_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // A builtin view and two datasets, so stepping `dataset` is a Doc edit
+    // on an object the user does not own — a fork.
+    let mut services = test_services();
+    let views = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"book\"\n",
+    )
+    .unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [vol.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            views,
+            datasets,
+        ],
+        desk: None,
+        user: None,
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("space"); // dataset: risk → vol
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    cx.simulate_keystrokes("enter"); // fork
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
+    assert!(overrides.contains("[\"views.tree\"]"), "{overrides}");
+    assert!(
+        overrides.contains("shadowed_layer = \"builtin\""),
+        "{overrides}"
+    );
+    assert!(
+        overrides.contains("dataset = \"risk\""),
+        "the shadowed text is the builtin's, not the fork: {overrides}"
+    );
+
+    // The reload lands; the row is overridden, not drifted (nothing moved).
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-overridden-tree").is_some());
+    assert!(cx.debug_bounds("objectdialog-drifted-tree").is_none());
+
+    cx.simulate_keystrokes("enter r enter"); // revert to desk
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
+    assert!(!overrides.contains("views.tree"), "{overrides}");
+    let _ = shell;
+}
+
+/// §19.6, MINOR 10: `commit_edit`'s fork block inserts the stale
+/// removals into the batch BEFORE its own fresh entry, and that order is
+/// load-bearing. At fork time the user layer does not yet own the
+/// object, so `stale_override_keys` reports the very key this fork is
+/// about to write as stale — the ordinary case, not a rare collision.
+/// Both inserts share one `BTreeMap` key, so whichever runs second wins;
+/// this pins the fresh `Some` entry as the one that must.
+#[gpui::test]
+fn the_forks_own_entry_wins_over_its_stale_twin(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let views = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"book\"\n",
+    )
+    .unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [vol.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    // A pre-existing entry for the exact object about to be forked,
+    // describing an earlier (now-defunct) shadow — this IS the key
+    // `stale_override_keys` names stale, since the user layer's own
+    // `views` doc does not hold `tree` yet.
+    std::fs::write(
+        dir.path().join("overrides.toml"),
+        "[\"views.tree\"]\nshadowed_layer = \"builtin\"\n\
+         shadowed_text = \"dataset = \\\"stale\\\"\"\n",
+    )
+    .unwrap();
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            views,
+            datasets,
+        ],
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("space"); // dataset: risk → vol
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    cx.simulate_keystrokes("enter"); // fork
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
+    assert!(
+        overrides.contains("[\"views.tree\"]"),
+        "the fork's own entry must survive being listed alongside its \
+         own stale twin: {overrides}"
+    );
+    assert!(
+        overrides.contains("dataset = \"risk\""),
+        "the surviving entry must be the fresh shadow (risk), not the \
+         stale text it replaced: {overrides}"
+    );
+    assert!(
+        !overrides.contains("\"stale\""),
+        "the old shadowed text must be gone: {overrides}"
+    );
+    let _ = shell;
+}
+
 /// **A draft whose own reader rejects it must not reach the batch.**
 ///
 /// Spec §7.1's no-carry-forward rule means `reload::decide` rejects any
@@ -1109,7 +1240,7 @@ fn a_stale_write_completion_does_not_erase_a_newer_edit(cx: &mut gpui::TestAppCo
     // An older flush completing successfully, exactly as it would if this
     // keystroke had landed while that flush's write was in flight.
     shell.update(&mut cx, |shell, cx| {
-        objectdialog::apply::finish_flush(shell, seq.wrapping_sub(1), Ok(()), cx);
+        objectdialog::apply::finish_flush(shell, seq.wrapping_sub(1), Ok(()), None, cx);
     });
     assert!(
         shell.read_with(&cx, |shell, _| shell.pending_config_write.is_some()),
@@ -2954,7 +3085,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert!(
-        edit_draft(&shell, &cx, |d| d.chain_entry),
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
         "the field is open"
     );
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
@@ -2977,7 +3108,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     // First escape: the chooser, with the chain untouched.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -2991,7 +3122,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     // `i` reopens it; second escape from the chooser goes back a stage.
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
     assert_eq!(
@@ -3002,7 +3133,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     // By `enter` from the list, the same landing.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert!(dialog_filter_is_focused(&shell, &mut cx));
 }
 
@@ -3031,7 +3162,7 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
     // The field is open on arrival (§18.8); `i` is only the way BACK in.
     cx.simulate_keystrokes("3");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert!(
         dialog_filter_is_focused(&shell, &mut cx),
         "the field has the keys"
@@ -3080,7 +3211,7 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert!(!dialog_filter_is_focused(&shell, &mut cx));
     assert_eq!(dialog_input_text(&shell, &cx), "");
@@ -3138,7 +3269,7 @@ fn a_refused_chain_keeps_the_field_open_and_escape_cancels_it(cx: &mut gpui::Tes
     cx.run_until_parked();
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
     assert!(notice.contains("npv"), "{notice}");
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry), "still open");
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()), "still open");
     assert!(dialog_filter_is_focused(&shell, &mut cx));
     assert_eq!(
         dialog_input_text(&shell, &cx),
@@ -3148,7 +3279,7 @@ fn a_refused_chain_keeps_the_field_open_and_escape_cancels_it(cx: &mut gpui::Tes
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -3171,7 +3302,7 @@ fn i_on_views_still_gives_the_read_only_notice(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert!(dialog_state(&shell, &cx, |s| s.notice.is_some()));
 }
@@ -3900,7 +4031,7 @@ fn clicking_a_groupings_row_lands_in_the_chain_field(cx: &mut gpui::TestAppConte
         gpui::Modifiers::none(),
     );
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "book / lhu");
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
 }
@@ -4242,7 +4373,7 @@ fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) 
     );
     cx.simulate_keystrokes("3");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     // Open a fresh segment so `lhu` is offered.
     cx.simulate_input(" / ");
     cx.run_until_parked();
@@ -4260,7 +4391,7 @@ fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) 
         "book / lhu / "
     );
     assert!(
-        edit_draft(&shell, &cx, |d| d.chain_entry),
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
         "the field is still open"
     );
     assert_eq!(
@@ -4471,5 +4602,534 @@ fn a_drop_whose_name_has_left_the_list_says_that_row_is_gone(cx: &mut gpui::Test
     assert!(
         !dir.path().join("view_presentation.toml").exists(),
         "a drop that resolved to nothing writes nothing"
+    );
+}
+
+/// A `datasets` doc across two datasets, `risk` and `vol` — enough for
+/// the browse list, and for `risk`'s `book` column to carry a layer.
+fn services_with_schema() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [vol.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// §19.4: the inspector lists datasets, opens one to its column rows —
+/// each with the layer it came from — and refuses every verb with one
+/// notice; `n` is refused in browse and the footer never offers it.
+#[gpui::test]
+fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
+    assert!(cx.debug_bounds("objectdialog-row-risk").is_some());
+    assert!(cx.debug_bounds("objectdialog-row-vol").is_some());
+
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some(objectdialog::READ_ONLY_NOTICE)
+    );
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    ));
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-field-columns.book").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-field-layer-columns.book")
+            .is_some(),
+        "the row's own layer badge"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-dest-columns.book").is_none(),
+        "no doc badge on a read-only row"
+    );
+
+    for key in ["space", "i", "d", "shift-j", "enter"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+            Some(objectdialog::READ_ONLY_NOTICE),
+            "{key}"
+        );
+        assert!(
+            shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
+            "{key} queued a write"
+        );
+    }
+    // `/` still filters.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("pos");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-field-columns.position_ref")
+            .is_some()
+    );
+    assert!(cx.debug_bounds("objectdialog-field-columns.book").is_none());
+}
+
+/// Review round 1's Important: `on_tick_clicked` and `on_row_dropped`
+/// are the mouse's own paths to the same writes the keyboard gate above
+/// refuses, and `Domain::writable`'s own doc comment names both as gate
+/// sites — a mouse drop on a read-only row must refuse identically to a
+/// keystroke, not merely fail to find anything to drag. `on_row_dropped`
+/// is `pub(in crate::shell)` precisely so this can drive it directly,
+/// the same door `a_drop_whose_name_has_left_the_list_says_that_row_is_gone`
+/// above uses.
+#[gpui::test]
+fn a_drop_on_the_schema_inspector_is_refused(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let row = objectdialog::RowDrag {
+        field: "columns.book".to_string(),
+        own: true,
+        name: "book".to_string(),
+    };
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::on_row_dropped(shell, &row, &row, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some(objectdialog::READ_ONLY_NOTICE)
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
+        "a drop on a read-only row queued a write"
+    );
+}
+
+/// A two-source `sources.toml` over a two-dataset schema — `vols` feeds
+/// `vol`, `live` feeds `risk` and carries every optional key, so the
+/// window tests below have both the sort order (§19.3: dataset first)
+/// and a full set of fields to exercise `i` against.
+fn services_with_sources() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [vol.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    let sources = LayerDoc::builtin(
+        "sources",
+        "[vols]\ndataset = \"vol\"\npaths = [\"/v/*.csv\"]\n\
+         [live]\ndataset = \"risk\"\npaths = [\"/a/*.csv\"]\npoll_interval = \"2s\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            sources,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// §19.3: rows read dataset first and sort by it; `i` on a text row
+/// opens the field seeded with the value; a bad duration is refused with
+/// the field open; a good one applies and, on a builtin source, asks
+/// before forking; the flush writes the spelling the reader reads.
+#[gpui::test]
+fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    let live = cx.debug_bounds("objectdialog-row-live").unwrap();
+    let vols = cx.debug_bounds("objectdialog-row-vols").unwrap();
+    assert!(
+        live.origin.y < vols.origin.y,
+        "risk · live sorts before vol · vols"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // Cursor to `poll_interval` (row 5: dataset, paths, readiness, polls, priority, poll_interval).
+    cx.simulate_keystrokes("j j j j j");
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some() && !d.chain_entry()));
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "2s",
+        "seeded with the value"
+    );
+    assert!(cx.debug_bounds("dialog-mode-pill-edit").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-actions").is_none(),
+        "no verbs while a field is open"
+    );
+
+    cx.simulate_input(" minutes");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "refused: still open"
+    );
+    assert!(
+        dialog_state(&shell, &cx, |s| s.notice.clone())
+            .unwrap()
+            .contains("45s")
+    );
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "2s minutes",
+        "the text is kept"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("backspace backspace");
+    cx.simulate_input("30s");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "a builtin source asks before forking"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("sources.toml")).unwrap();
+    assert!(written.contains("poll_interval = \"30s\""), "{written}");
+    assert!(written.contains("paths = [\"/a/*.csv\"]"), "{written}");
+    // §19.3's delivery path: the in-memory apply ran `apply_reload`, whose
+    // sources-baseline comparison raised the existing stripe.
+    assert!(
+        shell
+            .read_with(&cx, |s, _| s.restart_required.clone())
+            .is_some_and(|m| m.contains("sources")),
+        "a sources write raises the restart-required stripe"
+    );
+}
+
+/// §19.3: `n` seeds the dataset from the cursor row and the name from
+/// it when free; the created source is idle (empty paths, a warning
+/// on the row, never an error).
+#[gpui::test]
+fn n_on_sources_seeds_the_dataset_and_creates_an_idle_source(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    cx.simulate_keystrokes("j"); // vol · vols
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_dataset.clone()).as_deref(),
+        Some("vol")
+    );
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "vol",
+        "the dataset's name, since no source holds it"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("dataset").map(str::to_string)).as_deref(),
+        Some("vol")
+    );
+    assert!(edit_draft(&shell, &cx, |d| d
+        .diagnostics
+        .iter()
+        .all(|x| x.severity != geode_core::config::Severity::Error)));
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("sources.toml")).unwrap();
+    assert!(
+        written.contains("[vol]\ndataset = \"vol\"\npaths = []"),
+        "{written}"
+    );
+}
+
+// --- Task 4: `Diagnostic.path` lands on its field row (4c §19.5) --------
+
+/// §19.5: a reader diagnostic that names a column lands on that column's
+/// row as a glyph, and its header line is prefixed with the row's label;
+/// an object-level one — here, a join missing `dataset`, whose path
+/// (`views.tree.joins`) names a key no `Field` owns and so cannot
+/// resolve to any row — stays on the header alone, with no glyph
+/// anywhere and no prefix on its own header line.
+#[gpui::test]
+fn a_column_diagnostic_flags_its_row(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let views = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"delta\"\nformat = { precision = 99 }\n\
+         [[tree.joins]]\non = [\"book\"]\n",
+    )
+    .unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.npv]\ntype = \"f64\"\nrole = \"dimension\"\n[risk.columns.delta]\ntype = \"f64\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            views,
+            datasets,
+        ],
+        desk: None,
+        user: None,
+    });
+    let (shell, mut cx) = dialog_test_shell_with(cx, services, "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-delta")
+            .is_some(),
+        "the glyph on delta's row"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-npv")
+            .is_none()
+    );
+    // Review round 1's Important-1 finding: the glyph used to be a THIRD
+    // direct child of the row under `justify_between`, which splits the
+    // row's free space into two gaps and floats the label toward the
+    // row's centre — on every row, flagged or not, since neither the
+    // glyph nor the label carries `flex_1()`. Comparing the flagged
+    // row's label origin against the unflagged row's is what would have
+    // caught that: with the bug, delta's label (flagged, three children)
+    // sits at a different x than npv's (unflagged, two children); fixed,
+    // both labels start at the same x regardless of the glyph's content.
+    let delta_row = cx
+        .debug_bounds("objectdialog-item-delta")
+        .expect("delta's row is painted");
+    let delta_label = cx
+        .debug_bounds("objectdialog-label-objectdialog-item-delta")
+        .expect("delta's label is painted");
+    let npv_row = cx
+        .debug_bounds("objectdialog-item-npv")
+        .expect("npv's row is painted");
+    let npv_label = cx
+        .debug_bounds("objectdialog-label-objectdialog-item-npv")
+        .expect("npv's label is painted");
+    assert_eq!(
+        delta_label.origin.x, npv_label.origin.x,
+        "a flagged row's label starts at the same x as an unflagged row's"
+    );
+    // The label must start near the row's own left edge — under the bug
+    // (glyph as a third `justify_between` child) it floated toward the
+    // 640px row's centre instead. `40.` is generous (row padding + the
+    // 12px glyph + its gap is well under half the row's width) without
+    // being so loose it would pass under the centring bug too.
+    for (row, label, name) in [
+        (delta_row, delta_label, "delta"),
+        (npv_row, npv_label, "npv"),
+    ] {
+        let offset = label.origin.x - row.origin.x;
+        assert!(
+            offset < px(40.),
+            "{name}'s label starts {offset:?} from its row's left edge, not near it"
+        );
+    }
+    let diags = edit_draft(&shell, &cx, |d| d.diagnostics.clone());
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.path.as_deref() == Some("views.tree.columns.1.format.precision")),
+        "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.path.as_deref() == Some("views.tree.joins")),
+        "the join diagnostic is present: {diags:?}"
+    );
+    // The header line's prefix is exactly what `render.rs`'s header block
+    // computes: `row_for_path` resolved to a row, then `row_label`'d.
+    // Checked through the same two calls rather than by reading painted
+    // text — every header line shares the `objectdialog-diagnostic`
+    // selector, so `debug_bounds` cannot tell one line's text from
+    // another's.
+    let (matched_prefix, unmatched_row, flagged_count) = edit_draft(&shell, &cx, |d| {
+        let matched_prefix = d
+            .diagnostics
+            .iter()
+            .find(|x| x.path.as_deref() == Some("views.tree.columns.1.format.precision"))
+            .and_then(|x| x.path.as_deref())
+            .and_then(|p| d.row_for_path("views", p))
+            .map(|row| d.row_label(row));
+        let unmatched_row = d
+            .diagnostics
+            .iter()
+            .find(|x| x.path.as_deref() == Some("views.tree.joins"))
+            .and_then(|x| x.path.as_deref())
+            .and_then(|p| d.row_for_path("views", p));
+        (matched_prefix, unmatched_row, d.flagged_rows("views").len())
+    });
+    assert_eq!(
+        matched_prefix.as_deref(),
+        Some("delta"),
+        "the format diagnostic's header line is prefixed \"delta: \""
+    );
+    assert_eq!(
+        unmatched_row, None,
+        "the join diagnostic resolves to no row — its header line gets no prefix"
+    );
+    assert_eq!(
+        flagged_count, 1,
+        "only delta's row is flagged; the join diagnostic paints no glyph anywhere"
+    );
+}
+
+/// Review round 1's Important-2 finding: `views.toml` declares `npv`
+/// first and `delta` second (so the reader's diagnostic index — a
+/// position in THAT order — names `delta` at index 1), but a
+/// `view_presentation.toml` `order` flips them to `delta` first for the
+/// edit stage's `items`. The glyph must still land on `delta` — the
+/// column the diagnostic actually names — not on whatever the raw index
+/// now happens to point at in the reordered `items` (`npv`, the bug this
+/// finding describes).
+#[gpui::test]
+fn a_column_diagnostic_survives_a_reordered_presentation(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let views = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"delta\"\nformat = { precision = 99 }\n",
+    )
+    .unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.npv]\ntype = \"f64\"\nrole = \"dimension\"\n[risk.columns.delta]\ntype = \"f64\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    let presentation = LayerDoc::builtin(
+        "view_presentation",
+        "[tree]\norder = [\"delta\", \"npv\"]\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            views,
+            datasets,
+            presentation,
+        ],
+        desk: None,
+        user: None,
+    });
+    let (_shell, mut cx) = dialog_test_shell_with(cx, services, "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // `items` is now `[delta, npv]` (the presentation's order), so a
+    // pre-fix raw-index lookup of `columns.1` would have landed on
+    // `npv` — this is the assertion that would have failed before the
+    // fix.
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-delta")
+            .is_some(),
+        "the glyph stays on delta even though the presentation moved it to the front"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-npv")
+            .is_none(),
+        "npv must never be flagged for a diagnostic that names delta"
+    );
+}
+
+/// §19.6: a flush whose in-memory merge is refused still writes the file
+/// (disk stays the arbiter), and the status line says both halves.
+#[gpui::test]
+fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // `keymap.mod = "ctrl"` is refused with an ERROR diagnostic at every
+    // reload (Phase 4a Task 4b), so any batch applied over this user
+    // layer is rejected while its own object is fine.
+    std::fs::write(
+        dir.path().join("app.toml"),
+        "config_version = 1\n[keymap]\nmod = \"ctrl\"\n",
+    )
+    .unwrap();
+    // `dialog_test_shell_in_dir` hands `user_dir` to `ShellView::new` as
+    // the WRITE directory only; `services.config` is whatever was built,
+    // so the user layer has to be loaded into it here.
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[wide]\ndataset = \"risk\"\n[[wide.columns]]\nname = \"npv\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            builtin,
+        ],
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("j enter"); // wide
+    cx.run_until_parked();
+    // Past the `Dataset` field row and the `Columns` field's own header
+    // row (`open_tree_edit_stage`'s own comment names the same two rows
+    // for the same reason), onto the `Columns` list's first — here only
+    // — item: `npv`.
+    cx.simulate_keystrokes("j j space"); // hide npv: a presentation write
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let status = shell
+        .read_with(&cx, |s, _| s.config_write_error.clone())
+        .unwrap();
+    assert!(
+        status.starts_with(objectdialog::apply::REJECTED_STATUS),
+        "{status}"
+    );
+    assert!(
+        dir.path().join("view_presentation.toml").exists(),
+        "the file was written regardless"
+    );
+}
+
+/// The edit footer names `i` where a row can take it (Sources has editable
+/// text and a number) and stays silent where `i` only refuses (Views).
+#[gpui::test]
+fn the_edit_footer_offers_i_only_where_a_row_can_take_it(cx: &mut gpui::TestAppContext) {
+    let (_shell, mut cx) = dialog_test_shell_with(cx, services_with_sources(), "config::sources");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "Sources' footer advertises i"
+    );
+}
+
+#[gpui::test]
+fn the_edit_footer_hides_i_where_it_would_only_refuse(cx: &mut gpui::TestAppContext) {
+    let (_shell, mut cx) = open_views_dialog(cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_none(),
+        "Views has no row i can open, so the footer must not teach it"
     );
 }

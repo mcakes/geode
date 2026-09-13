@@ -193,14 +193,17 @@ fn a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_versi
     );
 }
 
-/// An error-severity diagnostic in the new config (here: an
-/// unsupported `config_version`) means the entire previous `Config`
-/// (and everything built from it — mod alias, keymap) is kept
-/// untouched, and the outcome records the error for the status bar.
-/// A palette open at the time stays open — only a *successful* reload
-/// closes it.
-#[gpui::test]
-fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::TestAppContext) {
+/// The shared setup `apply_reload_with_an_error_diagnostic_keeps_last_good_config`
+/// and `a_rejected_reload_emits_reload_rejected_with_the_errors` both need:
+/// a real window and shell (palette opened, so a caller can assert a
+/// rejected reload leaves it alone) plus a desk-layer `Config` whose
+/// unsupported `config_version` is an error diagnostic on `Config::load`
+/// itself (`geode_core::config::load_layer`) — the one thing distinguishing
+/// the two tests is what each does with `bad_config` once `apply_reload`
+/// has run.
+fn bad_config_and_shell(
+    cx: &mut gpui::TestAppContext,
+) -> (Entity<ShellView>, gpui::VisualTestContext, Config) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -225,8 +228,6 @@ fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::T
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    let original_mod_alias = shell.read_with(&cx, |shell, _| shell.services.mod_alias);
-
     cx.simulate_keystrokes("ctrl-k");
     assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
 
@@ -234,6 +235,21 @@ fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::T
     // diagnostic on `Config::load` itself (geode_core::config::load_layer).
     let desk = tempfile::tempdir().unwrap();
     std::fs::write(desk.path().join("app.toml"), "config_version = 99\n").unwrap();
+    // A second desk file whose only problem is a WARNING (an unknown
+    // action bound to a key, `keymap::build::unknown_action_is_warning_
+    // and_skipped`'s own fixture) — added so `new_config.diagnostics`
+    // carries both severities at once. `apply_reload`'s `errors` (what
+    // `ReloadOutcome::KeptLastGood` carries) already filters to `Error`
+    // alone, so this changes nothing either existing assertion here
+    // reads; it exists for `a_rejected_reload_emits_reload_rejected_with_
+    // the_errors`, which needs a mix to tell "errors only" apart from
+    // "every diagnostic" at all — with `app.toml` alone, the two answers
+    // are the same one-element vector and the distinction is untestable.
+    std::fs::write(
+        desk.path().join("keymap.toml"),
+        "config_version = 1\n[[bindings]]\n[bindings.keys]\n\"mod+x\" = \"nope::nothing\"\n",
+    )
+    .unwrap();
     let bad_config = Config::load(&ConfigSources {
         builtin: vec![],
         desk: Some(desk.path().to_path_buf()),
@@ -246,6 +262,21 @@ fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::T
             .any(|d| d.severity == geode_core::config::Severity::Error),
         "sanity: the constructed config must actually carry an error diagnostic"
     );
+
+    (shell, cx, bad_config)
+}
+
+/// An error-severity diagnostic in the new config (here: an
+/// unsupported `config_version`) means the entire previous `Config`
+/// (and everything built from it — mod alias, keymap) is kept
+/// untouched, and the outcome records the error for the status bar.
+/// A palette open at the time stays open — only a *successful* reload
+/// closes it.
+#[gpui::test]
+fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, bad_config) = bad_config_and_shell(cx);
+
+    let original_mod_alias = shell.read_with(&cx, |shell, _| shell.services.mod_alias);
 
     shell.update(&mut cx, |shell, cx| shell.apply_reload(bad_config, cx));
 
@@ -266,6 +297,60 @@ fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::T
             other => panic!("expected KeptLastGood, got {other:?}"),
         }
     });
+}
+
+/// §19.6: a rejected reload says so as an event carrying the errors, so
+/// a dialog (or the bridge) can tell a trader the file they just wrote
+/// is on disk but not live.
+#[gpui::test]
+fn a_rejected_reload_emits_reload_rejected_with_the_errors(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, bad_config) = bad_config_and_shell(cx);
+
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let sink = events.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
+    });
+
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(bad_config, cx));
+
+    // Sanity: `apply_reload` folds the `keymap.toml` fixture's own
+    // unknown-action warning into `new_config.diagnostics` (`note_config`
+    // below stores exactly that set, on every outcome — Phase 4b §4.4)
+    // alongside the `app.toml` fixture's error — otherwise the assertion
+    // below would hold trivially whether or not the filter it is meant
+    // to pin is even there.
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    assert!(
+        diagnostics.read_with(&cx, |d, _| d
+            .config
+            .iter()
+            .any(|d| d.severity == geode_core::config::Severity::Warning)),
+        "sanity: the fixture must carry a warning alongside its error \
+         for this test to tell 'errors only' apart from 'every diagnostic'"
+    );
+
+    let rejected: Vec<_> = events
+        .borrow()
+        .iter()
+        .filter_map(|e| match e {
+            ShellEvent::ReloadRejected(d) => Some(d.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rejected.len(), 1);
+    assert!(!rejected[0].is_empty());
+    assert!(
+        rejected[0]
+            .iter()
+            .all(|d| d.severity == geode_core::config::Severity::Error),
+        "a warning alongside the fixture's error must never reach \
+         `ReloadRejected` — {:?}",
+        rejected[0]
+    );
 }
 
 /// Task 4b (Phase 4a, user ruling): `keymap.mod = "ctrl"` is refused as

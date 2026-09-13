@@ -1420,8 +1420,8 @@ run_mutation "sources: an undeclared dataset skips the source" \
 
 run_mutation "sources: a pattern without a batch capture is dropped" \
   crates/geode-core/src/source_config.rs \
-  '                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),' \
-  '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),' \
+  '        Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Ok(()),' \
+  '        Ok(re) if re.capture_names().count() > 0 => Ok(()),' \
   geode-core \
   a_pattern_without_a_batch_capture_is_dropped_with_a_warning
 
@@ -3851,9 +3851,9 @@ run_mutation "views: data_setup goes through load_views, not the raw views doc" 
 # that case's own skip-vs-drop behaviour, which this one cannot see.
 run_mutation "views: a presentation naming a column the view lacks warns, it does not error" \
   crates/geode-core/src/view.rs \
-  '            let warn = |m: String| Diagnostic {
+  '            let warn = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Warning,' \
-  '            let warn = |m: String| Diagnostic {
+  '            let warn = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Error,' \
   geode-core \
   a_column_the_view_lacks_is_a_warning_not_an_error
@@ -3867,7 +3867,7 @@ run_mutation "views: a presentation naming a column the view lacks warns, it doe
 # why, which is the one outcome a trader cannot debug.
 run_mutation "views: a presentation naming a view the config lacks is skipped LOUDLY" \
   crates/geode-core/src/view.rs \
-  '                diags.push(warn("no view of that name — ignored".into()));' \
+  '                diags.push(warn("", "no view of that name — ignored".into()));' \
   '' \
   geode-core \
   a_view_the_config_lacks_is_a_warning_not_an_error
@@ -7138,24 +7138,28 @@ run_mutation "groupings: a duplicated name is not refused" \
   geode-shell \
   applying_refuses_an_unknown_or_duplicated_name_and_stays_open
 
-# The chain handler must run AHEAD of filter mode — the two share a
+# The text-field handler must run AHEAD of filter mode — the two share a
 # focused `Input`, and filter mode's `enter` is a notice, its `tab` a
 # drop. Skipping the dispatch leaves the field open with `enter` saying
-# "read-only" and `tab` doing nothing; `i` itself still works.
+# "read-only" and `tab` doing nothing; `i` itself still works. (§19.1
+# generalised this from the chain-only `chain_entry` flag to
+# `Draft::text_entry`; the chain field is now its `completions: true`
+# case, still exercised by this same window test.)
 run_mutation "objectdialog: the chain field's keys fall through to filter mode" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if chain_entry {' \
+  '    if text_entry {' \
   '    if false {' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
-# The pill has to say `chain`, not `filter`, over a field whose text is a
-# value: `enter` applies it rather than opening a row. The mode really is
-# `Filter` underneath, so every mode assertion stays green.
+# The pill has to say `chain`, not `edit` or `filter`, over the chain
+# field specifically: `enter` there applies a whole dimension chain
+# rather than one value. The mode really is `Filter` underneath, so
+# every mode assertion stays green.
 run_mutation "objectdialog: the chain field wears the filter pill" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                if s.draft.as_ref().is_some_and(|d| d.chain_entry) {' \
-  '                if false {' \
+  '                    Some(entry) if entry.completions => dialog::chain_pill(cx),' \
+  '                    Some(entry) if false && entry.completions => dialog::chain_pill(cx),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -7163,8 +7167,8 @@ run_mutation "objectdialog: the chain field wears the filter pill" \
 # search icon over a chain.
 run_mutation "objectdialog: the chain field paints as the filter row" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let filter = if draft.chain_entry {' \
-  '    let filter = if false {' \
+  '    let filter = if let Some(entry) = draft.text_entry {' \
+  '    let filter = if let Some(entry) = draft.text_entry.filter(|_| false) {' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -7882,9 +7886,15 @@ run_mutation "schema/document: a column named book collides with the partition c
 # path never reached the guard at all.
 run_mutation "schema/document: the no-columns path skips validation and pushes anyway" \
   crates/geode-core/src/schema/mod.rs \
-  "                None => diags.push(note(format!(\"dataset '{ds_name}': no [columns] table\")))," \
+  "                None => diags.push(note(
+                    format!(\"datasets.{ds_name}\"),
+                    format!(\"dataset '{ds_name}': no [columns] table\"),
+                ))," \
   "                None => {
-                    diags.push(note(format!(\"dataset '{ds_name}': no [columns] table\")));
+                    diags.push(note(
+                        format!(\"datasets.{ds_name}\"),
+                        format!(\"dataset '{ds_name}': no [columns] table\"),
+                    ));
                     out.datasets.push(dataset);
                     continue;
                 }" \
@@ -7954,7 +7964,7 @@ run_mutation "schema/document: key naming an undeclared column drops the dataset
   "            None => {
                 diags.push(err(
                     format!(\"dataset '{name}': key names undeclared column '{k}'; dataset dropped\"),
-                    format!(\"{name}.key\"),
+                    format!(\"datasets.{name}.key\"),
                 ));
                 keep = false;
             }" \
@@ -8117,6 +8127,350 @@ run_mutation "distinct: a document dataset applies its own dimension selections"
                     let _ = (clause, clause_params);
                 }' \
   geode-data a_selection_on_a_document_dimension_narrows_its_contribution
+
+# §19.1: a Number typed outside its range is REFUSED, never clamped — a
+# clamp would apply a number the trader did not type.
+run_mutation "objectdialog: a typed number outside min..max is refused not clamped" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                Ok(n) if n < *min || n > *max => {' \
+  '                Ok(n) if false && (n < *min || n > *max) => {' \
+  geode-shell \
+  applying_a_number_parses_and_refuses_out_of_range_without_clamping
+
+# §19.1: the same text typed back closes the field with nothing queued.
+run_mutation "objectdialog: retyping the same text is inert and closes the field" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                Ok(parsed) if parsed == *text => Step::Inert,' \
+  '                Ok(parsed) if parsed == *text => Step::Changed,' \
+  geode-shell \
+  applying_text_goes_through_the_domains_parser_and_the_same_value_is_inert
+
+# §19.1: `i` seeds the field with the row's value, not an empty field.
+run_mutation "objectdialog: begin_text_entry seeds the query from the row" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.query = seed;' \
+  '        self.query = String::new();' \
+  geode-shell \
+  begin_text_entry_seeds_the_query_from_a_number_row
+
+# Review round 1's Important: while a plain field is open, `query` is the
+# value being typed into IT, not a filter over the rows below — feeding
+# it back into `rank` reproduces the original defect (a seeded `Number`
+# like "3" matches no row label, so the list under the field paints
+# empty, and the cursor is left indexing a position the real,
+# still-narrowed list disagrees with).
+run_mutation "objectdialog: a plain text field leaves the rows unfiltered" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                crate::listfilter::rank(&labels, "")' \
+  '                crate::listfilter::rank(&labels, &self.query)' \
+  geode-shell \
+  a_plain_field_leaves_the_rows_unfiltered_and_the_edited_row_selected
+
+# §19.4: `writable()` is the one gate every mutating verb on the schema
+# inspector reads. Flipping it to `true` must be caught by the window
+# test, which presses four verbs and asserts nothing queued.
+run_mutation "objectdialog: Schema is not writable" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        !matches!(self, Domain::Schema)' \
+  '        true' \
+  geode-shell \
+  the_schema_inspector_lists_datasets_and_refuses_every_verb
+
+# §19.4: a schema row carries the layer `Config::explain` names.
+run_mutation "objectdialog: schema rows carry the dataset's layer" \
+  crates/geode-shell/src/shell/objectdialog/schema.rs \
+  '    let dataset_layer = config.explain(DOC, name);' \
+  '    let dataset_layer: Option<Layer> = None;' \
+  geode-shell \
+  every_row_carries_the_layer_that_defined_it
+
+# §19.4: derived rows are those whose `from` is one of THIS dataset's columns.
+run_mutation "objectdialog: schema lists only this dataset's derived dimensions" \
+  crates/geode-shell/src/shell/objectdialog/schema.rs \
+  '    for dim in dims.all().filter(|d| dataset.column(&d.from).is_some()) {' \
+  '    for dim in dims.all() {' \
+  geode-shell \
+  fields_are_one_read_only_text_per_column_then_the_derived_dimensions
+
+# Review round 1's Important: a mouse drop is its own gate site, distinct
+# from the keyboard's — `Domain::writable`'s own doc names both a tick
+# click and a drop. Flipping this local condition off must be caught even
+# if the shared `Domain::writable()` method itself were untouched.
+run_mutation "objectdialog: a drop on the schema inspector is refused" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    // §19.4: a drop is a reorder or a promotion/demotion — a write, same
+    // as the tick — so a read-only domain refuses it identically.
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain.writable());
+    if !writable {' \
+  '    // §19.4: a drop is a reorder or a promotion/demotion — a write, same
+    // as the tick — so a read-only domain refuses it identically.
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain.writable());
+    if false {' \
+  geode-shell \
+  a_drop_on_the_schema_inspector_is_refused
+
+# §19.3: the path separator is `;`, not whitespace — a space is legal in a path.
+run_mutation "sources: paths split on the semicolon" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '    text.split(PATH_SEPARATOR)' \
+  '    text.split(char::is_whitespace)' \
+  geode-shell \
+  parse_text_refuses_bad_durations_and_patterns_and_splits_paths
+
+# §19.3: `stable_polls` is written only under `stable_mtime`.
+run_mutation "sources: polls are written only under stable_mtime" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '        (Some("stable_mtime"), Some(polls)) => {' \
+  '        (Some(_), Some(polls)) => {' \
+  geode-shell \
+  to_table_writes_readiness_polls_only_under_stable_mtime
+
+# §19.3: an idle source is a WARNING — an error would block `n`.
+run_mutation "sources: empty paths is a warning not an error" \
+  crates/geode-core/src/source_config.rs \
+  '                diags.push(diag(Severity::Warning, name, Some("paths"), IDLE_PATHS));' \
+  '                diags.push(diag(Severity::Error, name, Some("paths"), IDLE_PATHS));' \
+  geode-core \
+  empty_paths_is_a_warning_and_the_source_is_skipped
+
+# §19.3: rows sort by dataset first.
+run_mutation "objectdialog: prefixed rows sort by prefix then name" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        out.sort_by(|a, b| (&a.prefix, &a.name).cmp(&(&b.prefix, &b.name)));' \
+  '        out.sort_by(|a, b| a.name.cmp(&b.name));' \
+  geode-shell \
+  rows_are_sorted_by_dataset_then_name_and_carry_the_prefix
+
+# §19.3: `n` seeds the dataset from the cursor row, not the schema's first.
+run_mutation "sources: n seeds the dataset from the cursor row" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    row.prefix.clone()' \
+  '    None' \
+  geode-shell \
+  n_on_sources_seeds_the_dataset_and_creates_an_idle_source
+
+# §19.5: a column diagnostic's path carries the column INDEX — without
+# it the row match lands on the `columns` field header, not the column.
+run_mutation "views reader: column diagnostics carry the column index" \
+  crates/geode-core/src/view.rs \
+  '                            &format!("columns.{i}.{key}"),' \
+  '                            &format!("columns.{key}"),' \
+  geode-core \
+  a_column_format_diagnostic_carries_its_indexed_path
+
+# §19.5: an index off the end lands on the field, never on a phantom row.
+run_mutation "objectdialog: row_for_path bounds the item index" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    if item < items.len() {' \
+  '                    if item <= items.len() {' \
+  geode-shell \
+  row_for_path_matches_a_field_by_key_and_a_list_item_by_index
+
+# §19.5: a path from another object never flags this draft's rows.
+run_mutation "objectdialog: row_for_path is scoped to this object" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;' \
+  '        let rest = path.strip_prefix(&format!("{doc}.")).and_then(|r| r.split_once('"'"'.'"'"')).map(|(_, r)| r)?;' \
+  geode-shell \
+  row_for_path_matches_a_field_by_key_and_a_list_item_by_index
+
+# §19.5, review round 1 Important-2: a diagnostic's index is a position
+# in `Draft::source`'s own array (the reader's file order), not a raw
+# index into `items` — the latter can be reordered by a presentation.
+# Without the name lookup, a reordered draft flags the wrong column.
+run_mutation "objectdialog: row_for_path resolves a list index by name" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    let item = self
+                        .resolve_list_index(&field.key, raw_index, items)
+                        .unwrap_or(raw_index);' \
+  '                    let item = raw_index;' \
+  geode-shell \
+  row_for_path_resolves_a_reordered_list_index_by_name
+
+# §19.5, review round 1 Minor-4: two diagnostics on one row must show the
+# WORSE severity — without the promotion, a Warning recorded first would
+# never be overtaken by a later Error on the same row.
+run_mutation "objectdialog: flagged_rows promotes to the worse severity" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    *s = Severity::Error' \
+  '                    *s = Severity::Warning' \
+  geode-shell \
+  flagged_rows_promotes_a_warning_to_error_on_the_same_row
+
+# §19.6: the rejected event carries ERROR diagnostics only.
+run_mutation "hot_reload: ReloadRejected carries only the errors" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '.filter(|d| d.severity == Severity::Error)' \
+  '.filter(|_| true)' \
+  geode-shell \
+  a_rejected_reload_emits_reload_rejected_with_the_errors
+
+# §19.6: a rejected merge is painted, not cleared, by the flush that hit it.
+run_mutation "objectdialog: a rejected in-memory apply paints the status line" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        crate::reload::ReloadOutcome::KeptLastGood { errors } => Some(errors.len()),' \
+  '        crate::reload::ReloadOutcome::KeptLastGood { errors } => { let _ = errors; None }' \
+  geode-shell \
+  a_flush_the_merge_rejects_says_saved_but_rejected
+
+# §19.6: the reload path reports presentation diagnostics instead of dropping them.
+run_mutation "bridge: reload reports presentation diagnostics" \
+  crates/geode-app/src/bridge.rs \
+  '                if !presentation_diags.is_empty() {' \
+  '                if false && !presentation_diags.is_empty() {' \
+  geode-app \
+  a_reload_reports_a_stale_presentation_name
+
+# §19.6: no entry means NOT drifted — never a guess from the current desk copy.
+run_mutation "objectdialog: drifted is false without an override entry" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    match (entry, shadow) {
+        (Some((_, recorded)), Some(value)) => {
+            object_text(name, toml_value_to_item(value)) != *recorded
+        }
+        _ => false,
+    }' \
+  '    match (entry, shadow) {
+        (Some((_, recorded)), Some(value)) => {
+            object_text(name, toml_value_to_item(value)) != *recorded
+        }
+        (None, Some(_)) => true,
+        _ => false,
+    }' \
+  geode-shell \
+  drifted_needs_an_override_entry_and_a_changed_shadow
+
+# §19.6: drifted compares the shadow's CURRENT text against the recorded one.
+run_mutation "objectdialog: drifted compares the shadow text" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            object_text(name, toml_value_to_item(value)) != *recorded' \
+  '            object_text(name, toml_value_to_item(value)) == *recorded' \
+  geode-shell \
+  drifted_needs_an_override_entry_and_a_changed_shadow
+
+# §19.6: the entry rides the fork's own batch.
+run_mutation "objectdialog: a fork records its override entry" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        edits.insert(
+            (super::OVERRIDES_DOC, key),
+            Some(super::override_entry(layer, &draft.name, &value)),
+        );' \
+  '        let _ = (key, layer, value);' \
+  geode-shell \
+  a_fork_records_an_override_entry_and_revert_removes_it
+
+# §19.6: the shadow is the last NON-USER layer.
+run_mutation "objectdialog: shadow_of skips the user layer" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        .filter(|d| d.layer != Layer::User)' \
+  '        .filter(|_| true)' \
+  geode-shell \
+  drifted_needs_an_override_entry_and_a_changed_shadow
+
+# ---- Final review's fix wave (2026-09-12, §19.8) -----------------------
+
+# The final whole-branch review's IMPORTANT 1: a `Number` outside its own
+# [min, max] (Sources' `stable_mtime` reader accepts any positive integer;
+# the dialog's own picker caps display at 100) used to be CLAMPED to the
+# bound by one `shift+space` — a value the trader never typed. Removing
+# the guard restores exactly that defect.
+run_mutation "objectdialog: a step on an out-of-range number is refused not clamped" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                        if *value < *min || *value > *max {' \
+  '                        if false {' \
+  geode-shell \
+  a_number_outside_its_range_is_refused_not_clamped_by_a_step
+
+# §19.7: `parse_text`'s duration arm never got a harness entry of its own.
+run_mutation "sources: parse_text refuses a bad duration" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '                Err(format!("{label}: a number and a unit, like 45s, 5m or 2h"))' \
+  '                let _ = label;
+                Ok(text.to_string())' \
+  geode-shell \
+  parse_text_refuses_bad_durations_and_patterns_and_splits_paths
+
+# §19.7: nor did the `batch_pattern` arm beside it.
+run_mutation "sources: parse_text refuses a bad batch pattern" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '"batch_pattern" => check_batch_pattern(text).map(|()| text.to_string()),' \
+  '"batch_pattern" => Ok(text.to_string()),' \
+  geode-shell \
+  parse_text_refuses_bad_durations_and_patterns_and_splits_paths
+
+# §19.5, §19.7: a diagnostic path whose prefix names this object but
+# whose field key matches nothing must stay on the header, not land on
+# whichever field happens to be first — the one branch of `row_for_path`
+# no existing assertion reached (the review's MINOR 11c; the covering
+# assertion was added in the same commit as this entry).
+run_mutation "objectdialog: an unmatched diagnostic stays on the header" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                _ => Some(EditRow::Field(i)),
+            }
+        })
+    }' \
+  '                _ => Some(EditRow::Field(i)),
+            }
+        })
+        .or(Some(EditRow::Field(0)))
+    }' \
+  geode-shell \
+  row_for_path_matches_a_field_by_key_and_a_list_item_by_index
+
+# §19.6, §19.7: `d`/`r`'s own overrides-entry removal (`render::
+# removal_edits`), distinct from the fork's own insert above.
+run_mutation "objectdialog: revert removes the overrides entry" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        if super::has_override_entry(&shell.services.config, domain.doc(), &name) {' \
+  '        if false && super::has_override_entry(&shell.services.config, domain.doc(), &name) {' \
+  geode-shell \
+  a_fork_records_an_override_entry_and_revert_removes_it
+
+# §19.6, MINOR 10: the stale removals are inserted BEFORE the fork's own
+# entry, and that order is load-bearing — at fork time the user layer
+# does not yet own the object, so `stale_override_keys` names the very
+# key this fork is about to write as stale, and both inserts share one
+# `BTreeMap` key. Swapping the order makes the stale `None` win instead
+# of the fresh `Some`, which this entry's fixture (a stale twin already
+# on disk for the object about to be forked) makes visible.
+run_mutation "objectdialog: the fork's own entry wins over its stale twin" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        let key = super::override_key(domain.doc(), &draft.name);
+        for stale in super::stale_override_keys(&shell.services.config) {
+            edits.insert((super::OVERRIDES_DOC, stale), None);
+        }
+        edits.insert(
+            (super::OVERRIDES_DOC, key),
+            Some(super::override_entry(layer, &draft.name, &value)),
+        );' \
+  '        let key = super::override_key(domain.doc(), &draft.name);
+        edits.insert(
+            (super::OVERRIDES_DOC, key),
+            Some(super::override_entry(layer, &draft.name, &value)),
+        );
+        for stale in super::stale_override_keys(&shell.services.config) {
+            edits.insert((super::OVERRIDES_DOC, stale), None);
+        }' \
+  geode-shell \
+  the_forks_own_entry_wins_over_its_stale_twin
+
+# User request 2026-09-12 ("i for edit text isn't discoverable"): the edit
+# footer advertises `i` only where a row can take it. Treating every Text
+# as editable would put the chip on Views, where `i` only refuses — the
+# Views window test asserts the chip is absent, the Sources one that it
+# is present, and the pure test pins the per-domain rule.
+run_mutation "objectdialog: the footer offers i only for an editable text or a number" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            FieldKind::Text(_) => domain.text_editable(&field.key),' \
+  '            FieldKind::Text(_) => true,' \
+  geode-shell \
+  offers_text_entry_needs_a_number_or_an_editable_text_row
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

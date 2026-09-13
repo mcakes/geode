@@ -51,11 +51,17 @@ pub struct Diagnostic {
     pub file: Option<PathBuf>,
     pub message: String,
     /// The reader's own key path into the doc, e.g. `"app.theme.name"`
-    /// (Phase 4b Task 4). `None` by default — every existing constructor
-    /// (`Diagnostic::error`/`warning`, every literal build site across
-    /// the workspace) leaves it unset; 4c's config dialogs attach it to
-    /// a field row via [`Self::with_path`]. Not filled in by any reader
-    /// in 4b.
+    /// (Phase 4b Task 4; grammar and every reader filled in Phase 4c
+    /// §19.5: `<doc>.<object>[.<field>[.<index>[.<subkey>]]]`, e.g.
+    /// `views.tree.columns.1.format.precision`). `None` by default —
+    /// `Diagnostic::error`/`warning` and a handful of document-level
+    /// literal build sites (a bad `default =` header, an unrecognised
+    /// top-level key) leave it unset since there is no object to name —
+    /// but every reader across `geode-core` that parses a *named* config
+    /// object (views, view presentation, groupings, scopes, sources,
+    /// datasets/schema, dimensions) attaches it via [`Self::with_path`].
+    /// 4c's config dialogs use it to land a diagnostic on the field row
+    /// it names (`Draft::row_for_path`, `flagged_rows`).
     pub path: Option<String>,
 }
 
@@ -64,7 +70,11 @@ impl std::fmt::Display for Diagnostic {
     /// `[user] /path/keymap.toml: parse error` (both present), `[builtin]
     /// <no file>: message` (file absent), `<no file>: message` (both
     /// absent) — the leading `[layer] ` is simply omitted rather than
-    /// printing an empty bracket pair.
+    /// printing an empty bracket pair. A `path`, when present, is
+    /// appended as ` (at <path>)` after the message — it names the exact
+    /// key the reader was looking at, which the layer/file pair alone
+    /// cannot (two objects in the same file, one diagnostic each, read
+    /// identically without it).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(layer) = self.layer {
             write!(f, "[{}] ", layer.name())?;
@@ -73,7 +83,11 @@ impl std::fmt::Display for Diagnostic {
             Some(file) => write!(f, "{}: ", file.display()),
             None => write!(f, "<no file>: "),
         }?;
-        write!(f, "{}", self.message)
+        write!(f, "{}", self.message)?;
+        if let Some(path) = &self.path {
+            write!(f, " (at {path})")?;
+        }
+        Ok(())
     }
 }
 

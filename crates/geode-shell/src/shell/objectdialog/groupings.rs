@@ -152,6 +152,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             label: "Slot".to_string(),
             kind: FieldKind::Text(object.unwrap_or("").to_string()),
             dest: Destination::Doc,
+            layer: None,
         },
         Field {
             key: "dimensions".to_string(),
@@ -162,6 +163,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                 available: None,
             },
             dest: Destination::Doc,
+            layer: None,
         },
     ]
 }
@@ -226,6 +228,9 @@ impl Draft {
     /// shared `Input` the keys is the handler's, and the sync writes the
     /// field from `query` on its return (spec §16.1).
     pub fn begin_chain_entry(&mut self) {
+        let Some(field) = self.fields.iter().position(|f| f.key == DIMENSIONS) else {
+            return;
+        };
         let names: Vec<String> = self
             .list_items(DIMENSIONS)
             .unwrap_or_default()
@@ -238,16 +243,17 @@ impl Draft {
         } else {
             GroupingSlots::label_of(&names)
         };
-        self.chain_entry = true;
+        self.text_entry = Some(super::TextEntry {
+            row: super::EditRow::Field(field),
+            completions: true,
+        });
         self.selected = 0;
     }
 
-    /// `escape` in the chain field: drop the text and close it. The
-    /// chain is exactly as it was — nothing here was applied.
+    /// `escape` in the chain field — [`Draft::cancel_text_entry`] under
+    /// the name the chain tests use.
     pub fn cancel_chain_entry(&mut self) {
-        self.chain_entry = false;
-        self.query.clear();
-        self.selected = 0;
+        self.cancel_text_entry();
     }
 
     /// `tab` in the chain field: replace the trailing segment with the
@@ -314,7 +320,7 @@ impl Draft {
         // would re-sort an order `shift+j`/`shift+k` had put an unticked
         // item into, leaving the draft dirty under an answer of "inert".
         if before == names {
-            self.chain_entry = false;
+            self.text_entry = None;
             self.query.clear();
             self.selected = 0;
             return Step::Inert;
@@ -335,7 +341,7 @@ impl Draft {
             out.push(item);
         }
         *items = out;
-        self.chain_entry = false;
+        self.text_entry = None;
         self.query.clear();
         self.selected = 0;
         Step::Changed
@@ -681,9 +687,9 @@ mod tests {
     fn beginning_chain_entry_seeds_the_current_chain() {
         let config = config_with_three_dims("3 = [\"book\", \"lhu\"]\n");
         let mut draft = Domain::Groupings.draft(&config, "3");
-        assert!(!draft.chain_entry);
+        assert!(!draft.chain_entry());
         draft.begin_chain_entry();
-        assert!(draft.chain_entry);
+        assert!(draft.chain_entry());
         assert_eq!(draft.query, "book / lhu");
         assert_eq!(draft.selected, 0);
     }
@@ -740,7 +746,7 @@ mod tests {
                 ("book".to_string(), false)
             ]
         );
-        assert!(!draft.chain_entry);
+        assert!(!draft.chain_entry());
         assert_eq!(draft.query, "");
         assert!(draft.is_dirty());
     }
@@ -758,7 +764,7 @@ mod tests {
             panic!("an unknown name must be refused");
         };
         assert!(reason.contains("npv"), "{reason}");
-        assert!(draft.chain_entry);
+        assert!(draft.chain_entry());
         assert_eq!(draft.query, "book / npv");
         assert_eq!(ticked(&draft)[0], ("book".to_string(), true), "untouched");
 
@@ -770,7 +776,7 @@ mod tests {
             reason.contains("book") && reason.contains("twice"),
             "{reason}"
         );
-        assert!(draft.chain_entry);
+        assert!(draft.chain_entry());
     }
 
     /// An empty chain is the state the config model cannot hold
@@ -786,7 +792,7 @@ mod tests {
             panic!("an empty chain must be refused");
         };
         assert!(reason.contains("at least one"), "{reason}");
-        assert!(draft.chain_entry);
+        assert!(draft.chain_entry());
     }
 
     /// The same chain typed back is nothing to write: inert, and the
@@ -797,7 +803,7 @@ mod tests {
         let mut draft = Domain::Groupings.draft(&config, "3");
         draft.begin_chain_entry();
         assert_eq!(draft.apply_chain(), Step::Inert);
-        assert!(!draft.chain_entry);
+        assert!(!draft.chain_entry());
         assert!(!draft.is_dirty());
     }
 
@@ -834,7 +840,7 @@ mod tests {
         draft.begin_chain_entry();
         draft.query = "desk".to_string();
         draft.cancel_chain_entry();
-        assert!(!draft.chain_entry);
+        assert!(!draft.chain_entry());
         assert_eq!(draft.query, "");
         assert_eq!(
             candidate_names(&draft).len(),

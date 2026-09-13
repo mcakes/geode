@@ -154,12 +154,14 @@ fn fields_from_table(table: Option<&toml::Table>) -> Vec<Field> {
             label: "Selects".to_string(),
             kind: FieldKind::Text(selects),
             dest: Destination::Doc,
+            layer: None,
         },
         Field {
             key: "text".to_string(),
             label: "Text filter".to_string(),
             kind: FieldKind::Text(text),
             dest: Destination::Doc,
+            layer: None,
         },
     ]
 }

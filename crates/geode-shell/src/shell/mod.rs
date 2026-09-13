@@ -213,6 +213,13 @@ pub enum ShellEvent {
     /// `DataEvent::Distinct`, which the bridge routes to
     /// [`ShellView::deliver_distinct`].
     DistinctRequested(geode_core::query::DistinctParams),
+    /// The last reload was refused — `reload::decide` kept the previous
+    /// config because the new one carried these error diagnostics (§19.6).
+    /// Distinct from `RestartRequired`: nothing here is live, the file is
+    /// on disk exactly as written, and a dialog that just wrote it needs
+    /// to say so. Carries the diagnostics, not the count, so a consumer
+    /// can name the file.
+    ReloadRejected(Vec<geode_core::config::Diagnostic>),
 }
 
 impl EventEmitter<ShellEvent> for ShellView {}
@@ -874,9 +881,18 @@ pub struct ShellView {
     /// has been superseded and does nothing, which is how N keystrokes
     /// coalesce into one write.
     config_write_seq: u64,
-    /// The last config write that failed and had to be rolled back out of
-    /// memory, as the status bar shows it (`objectdialog::apply::
-    /// revert_failed_write`), or `None` once a later write succeeds.
+    /// The status bar's own notice for the last config write that did
+    /// not fully land, as either of two independent outcomes leaves it
+    /// (§19.6): a write that failed and had to be rolled back out of
+    /// memory (`objectdialog::apply::revert_failed_write`), or one that
+    /// reached disk but whose in-memory merge the reload decided to
+    /// reject (`objectdialog::apply::REJECTED_STATUS`, set by
+    /// `finish_flush`'s `rejected` arm — the file and the memory halves
+    /// of a flush are independent, and this is the file succeeding while
+    /// memory does not). Cleared only by the next flush memory ACCEPTS,
+    /// never by the write that failed or was rejected in the first
+    /// place — `None` therefore means "memory currently agrees with
+    /// disk", not merely "no failure since the last success".
     ///
     /// The status bar rather than the dialog's own notice, because
     /// `pending_config_write` outlives the dialog on purpose: a trader can
