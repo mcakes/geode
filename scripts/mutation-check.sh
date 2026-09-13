@@ -353,11 +353,15 @@ run_mutation "discovery: a changed file is reloaded" \
 # Dropping the live half here is the same class of omission the old
 # entry caught: a partition whose current generation lives only in
 # `_live` would vanish from the rebuilt summary.
+#
+# Re-anchored again (TablePair): `history_of` flattens the dataset's
+# `table_pairs` instead of naming `table_name(dataset, grain, kind)` per
+# grain, so both families go through it. Same site, same meaning -- the
+# live half of every pair is dropped from the history list.
 run_mutation "as-of: multi-grain generation resolution" \
   crates/geode-data/src/store/ddl.rs \
-  '                table_name(dataset, g, TableKind::Archive),
-                table_name(dataset, g, TableKind::Live),' \
-  '                table_name(dataset, g, TableKind::Archive),' \
+  '        .flat_map(|p| [p.archive, p.live])' \
+  '        .flat_map(|p| [p.archive])' \
   geode-data history_of_names_the_archive_and_live_table_of_every_grain
 
 run_mutation "as-of: current generation read from live" \
@@ -595,11 +599,16 @@ run_mutation "generations: sweep reconciliation removed" \
   '    let _ = ds;' \
   geode-data sweeping_leaves_the_summary_matching_the_tables
 
+# Re-anchored (TablePair): the reconciliation SQL builder iterates the
+# dataset's `TablePair`s rather than its grains, so both families go
+# through it. Same site, same meaning -- truncating the table list to the
+# first pair leaves a summary row deleted for a generation another pair
+# still holds.
 run_mutation "generations: reconciliation covers only the first grain" \
   crates/geode-data/src/store/retention.rs \
-  'let checks: Vec<String> = grains
+  'let checks: Vec<String> = pairs
         .iter()' \
-  'let checks: Vec<String> = grains
+  'let checks: Vec<String> = pairs
         .iter()
         .take(1)' \
   geode-data a_generation_present_at_only_one_grain_survives_the_reconciliation
@@ -609,12 +618,17 @@ run_mutation "generations: reconciliation covers only the first grain" \
 # caller happened to evict -- the entry above mutates the SQL builder's
 # own truncation; this one mutates the call site that used to be (and
 # must never again be) the caller-supplied `grains` parameter.
+# Re-anchored (TablePair): the list is now `ddl::table_pairs(ds)` rather
+# than `ds.grains()`. Same site, same meaning -- the reconciliation must
+# derive its own table list from the dataset, never take the caller's.
+# `Grain` is spelled out in full because this module no longer imports it
+# (only its tests do), so the mutation must not depend on an import.
 run_mutation "generations: reconciliation derives grains from the caller again, not the dataset" \
   crates/geode-data/src/store/retention.rs \
   'fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
-    let grains = ds.grains();' \
+    let pairs = table_pairs(ds);' \
   'fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
-    let grains = vec![Grain::Position];' \
+    let pairs = vec![TablePair::for_grain(&ds.name, geode_core::schema::Grain::Position)];' \
   geode-data reconciliation_covers_every_grain_the_dataset_has_not_just_the_swept_subset
 
 run_mutation "generations: the open-time migration rebuild is skipped" \

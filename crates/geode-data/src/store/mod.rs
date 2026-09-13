@@ -90,12 +90,26 @@ impl Store {
         &self.path
     }
 
-    /// Create the live and archive tables for every grain the dataset
-    /// declares measures at. Idempotent.
+    /// Create the live and archive pair(s) a dataset owns: one per grain
+    /// for the measure family (every grain it declares a measure or an
+    /// attribute at), one for the whole dataset for the document family.
+    /// Idempotent.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` never migrates an existing table, so a
+    /// dataset whose column set grew since the database was written keeps
+    /// the old table and fails at publish with a column-count mismatch —
+    /// see `CLAUDE.md` on deleting the demo database after a schema change.
     pub fn apply_schema(&self, ds: &DatasetSpec) -> Result<(), StoreError> {
-        for grain in ds.grains() {
-            for kind in [TableKind::Live, TableKind::Archive] {
-                let sql = ddl::create_table_sql(ds, grain, kind);
+        for kind in [TableKind::Live, TableKind::Archive] {
+            let statements: Vec<String> = if ds.is_document() {
+                vec![ddl::create_document_table_sql(ds, kind)]
+            } else {
+                ds.grains()
+                    .into_iter()
+                    .map(|g| ddl::create_table_sql(ds, g, kind))
+                    .collect()
+            };
+            for sql in statements {
                 self.writer
                     .execute_batch(&sql)
                     .map_err(|source| StoreError::Sql {
