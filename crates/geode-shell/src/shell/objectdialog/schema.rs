@@ -88,9 +88,15 @@ pub fn describe_column(column: &ColumnSpec) -> String {
             aggregate_name(*aggregate),
             grain.short()
         )),
-        ColumnRole::Attribute { grain } => {
-            out.push_str(&format!("attribute · grain {}", grain.short()))
+        ColumnRole::Attribute { grain: Some(g) } => {
+            out.push_str(&format!("attribute · grain {}", g.short()))
         }
+        // The document family's vocabulary (market-data spec §3): a
+        // grainless attribute is document-level, and an axis or a value
+        // has no grain to name at all — a document dataset declares none.
+        ColumnRole::Attribute { grain: None } => out.push_str("attribute"),
+        ColumnRole::Axis => out.push_str("axis"),
+        ColumnRole::Value => out.push_str("value"),
     }
     if column.required {
         out.push_str(" · required");

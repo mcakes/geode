@@ -4,7 +4,6 @@
 
 use crate::query::as_of::{AsOf, resolve_generations};
 use crate::store::StoreError;
-use crate::store::ddl::{TableKind, table_name};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use geode_core::query::{CatalogSnapshot, DatasetCatalog, GenerationInfo, PartitionCatalog};
@@ -80,17 +79,20 @@ fn dataset_catalog(
         }
     }
 
+    // Per TABLE, not per grain. A document dataset has no grain at all
+    // (`grains()` is empty for it), so summing over grains reported 0
+    // live and 0 archive rows however many rows the dataset held — the
+    // diagnostics data section painted `0` beside a real list of live
+    // partitions, which reads as "the partitions are empty" rather than
+    // "this counter cannot see them". `table_pairs` is the one place
+    // either family's table set is named (`store::ddl`), the same list
+    // `apply_schema` created and `history_of` resolves over, so this
+    // count cannot drift from what exists.
     let mut live_rows = 0u64;
     let mut archive_rows = 0u64;
-    for grain in ds.grains() {
-        live_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Live))
-            .copied()
-            .unwrap_or(0);
-        archive_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Archive))
-            .copied()
-            .unwrap_or(0);
+    for pair in crate::store::ddl::table_pairs(ds) {
+        live_rows += sizes.get(&pair.live).copied().unwrap_or(0);
+        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
     }
 
     Ok(DatasetCatalog {
@@ -646,5 +648,143 @@ grain = "position"
             .find(|p| p.batch == "EOD" && p.book.is_none())
             .unwrap();
         assert_eq!(bookless.resolved_gen, Some(2));
+    }
+
+    const CVI: &str = r#"
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
+"#;
+
+    fn cvi() -> DatasetSpec {
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", CVI).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("cvi_params").unwrap().clone()
+    }
+
+    fn cvi_doc(key: &str, params: [f64; 6]) -> geode_core::document::DocumentRows {
+        use geode_core::document::{Column, DocumentRows, Value};
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        DocumentRows {
+            key: vec![key.into()],
+            attributes: vec![
+                ("anchor_date".into(), Value::Date(d("2026-09-12"))),
+                ("spot_ref".into(), Value::F64(7650.0)),
+            ],
+            axes: vec![
+                (
+                    "term".into(),
+                    Column::Date(vec![
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]),
+                ),
+                (
+                    "node".into(),
+                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
+                ),
+            ],
+            values: vec![("param".into(), Column::F64(params.to_vec()))],
+        }
+    }
+
+    /// Step 6: `partitions_for` already lists one partition per document
+    /// batch with `book: None` (it reads the `generations` summary the
+    /// same way for both families) — this pins that against two real
+    /// documents published through `publish_document`, splitting each
+    /// partition's `batch` back to the key that produced it
+    /// (`geode_core::document::split_key`, `join_key`'s exact inverse).
+    #[test]
+    fn a_document_datasets_partitions_split_back_to_their_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        let ds = cvi();
+        store.apply_schema(&ds).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &cvi_doc("SPX.Z", [1.; 6]),
+                source_time: ts("2026-09-12T14:00:00Z"),
+                received_at: ts("2026-09-12T14:00:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &cvi_doc("NDX.Z", [2.; 6]),
+                source_time: ts("2026-09-12T14:01:00Z"),
+                received_at: ts("2026-09-12T14:01:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        // `estimated_size` equals `count(*)` on a freshly checkpointed
+        // table and is an estimate otherwise (see
+        // `the_row_counts_agree_with_duckdb_by_execution`), and
+        // `publish_document` does not checkpoint — so the row-count
+        // assertion below states its own precondition.
+        store.writer().execute_batch("checkpoint;").unwrap();
+        let snap = build_catalog(store.writer(), &schema, &AsOf::Live).unwrap();
+        let ds_catalog = &snap.datasets[0];
+        // Important 1 (final fix wave): the row counts are per table, not
+        // per grain, and a document dataset has no grain — summed over
+        // `grains()` this dataset reported 0 live rows beside two live
+        // partitions. Two keys x six rows, both live, nothing archived.
+        assert_eq!(
+            (ds_catalog.live_rows, ds_catalog.archive_rows),
+            (12, 0),
+            "two documents of six rows each, both still live"
+        );
+        let mut keys: Vec<Vec<String>> = ds_catalog
+            .partitions
+            .iter()
+            .map(|p| {
+                assert_eq!(p.book, None, "a document partition is always bookless");
+                assert_eq!(p.generations.len(), 1);
+                assert!(p.generations[0].live, "the only generation is live");
+                geode_core::document::split_key(&p.batch)
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![vec!["NDX.Z".to_string()], vec!["SPX.Z".to_string()],]
+        );
     }
 }

@@ -10,8 +10,8 @@
 # suite could not see, and the fixture was the reason every time: reviews
 # find what the fixture makes reachable. Reading the tests never revealed
 # that; twenty minutes of mutation did. Run it after touching the
-# compiler, the scope lowering, as-of routing, publish, or the grain
-# vocabulary, and treat a SURVIVED line as a missing test rather than a
+# compiler, the scope lowering, as-of routing, publish, the grain
+# vocabulary, or the document family, and treat a SURVIVED line as a missing test rather than a
 # curiosity.
 #
 # The two source-time tie-break entries were described as "caught
@@ -353,11 +353,15 @@ run_mutation "discovery: a changed file is reloaded" \
 # Dropping the live half here is the same class of omission the old
 # entry caught: a partition whose current generation lives only in
 # `_live` would vanish from the rebuilt summary.
+#
+# Re-anchored again (TablePair): `history_of` flattens the dataset's
+# `table_pairs` instead of naming `table_name(dataset, grain, kind)` per
+# grain, so both families go through it. Same site, same meaning -- the
+# live half of every pair is dropped from the history list.
 run_mutation "as-of: multi-grain generation resolution" \
   crates/geode-data/src/store/ddl.rs \
-  '                table_name(dataset, g, TableKind::Archive),
-                table_name(dataset, g, TableKind::Live),' \
-  '                table_name(dataset, g, TableKind::Archive),' \
+  '        .flat_map(|p| [p.archive, p.live])' \
+  '        .flat_map(|p| [p.archive])' \
   geode-data history_of_names_the_archive_and_live_table_of_every_grain
 
 run_mutation "as-of: current generation read from live" \
@@ -595,11 +599,16 @@ run_mutation "generations: sweep reconciliation removed" \
   '    let _ = ds;' \
   geode-data sweeping_leaves_the_summary_matching_the_tables
 
+# Re-anchored (TablePair): the reconciliation SQL builder iterates the
+# dataset's `TablePair`s rather than its grains, so both families go
+# through it. Same site, same meaning -- truncating the table list to the
+# first pair leaves a summary row deleted for a generation another pair
+# still holds.
 run_mutation "generations: reconciliation covers only the first grain" \
   crates/geode-data/src/store/retention.rs \
-  'let checks: Vec<String> = grains
+  'let checks: Vec<String> = pairs
         .iter()' \
-  'let checks: Vec<String> = grains
+  'let checks: Vec<String> = pairs
         .iter()
         .take(1)' \
   geode-data a_generation_present_at_only_one_grain_survives_the_reconciliation
@@ -609,12 +618,17 @@ run_mutation "generations: reconciliation covers only the first grain" \
 # caller happened to evict -- the entry above mutates the SQL builder's
 # own truncation; this one mutates the call site that used to be (and
 # must never again be) the caller-supplied `grains` parameter.
+# Re-anchored (TablePair): the list is now `ddl::table_pairs(ds)` rather
+# than `ds.grains()`. Same site, same meaning -- the reconciliation must
+# derive its own table list from the dataset, never take the caller's.
+# `Grain` is spelled out in full because this module no longer imports it
+# (only its tests do), so the mutation must not depend on an import.
 run_mutation "generations: reconciliation derives grains from the caller again, not the dataset" \
   crates/geode-data/src/store/retention.rs \
   'fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
-    let grains = ds.grains();' \
+    let pairs = table_pairs(ds);' \
   'fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
-    let grains = vec![Grain::Position];' \
+    let pairs = vec![TablePair::for_grain(&ds.name, geode_core::schema::Grain::Position)];' \
   geode-data reconciliation_covers_every_grain_the_dataset_has_not_just_the_swept_subset
 
 run_mutation "generations: the open-time migration rebuild is skipped" \
@@ -3028,8 +3042,22 @@ run_mutation "schema: a bare dimension outside every key is dropped" \
 
 run_mutation "schema: textual on an unroutable column is cleared" \
   crates/geode-core/src/schema/mod.rs \
-  '        if unroutable.contains(&c.name) {' \
-  '        if false {' \
+  '    for c in &mut ds.columns {
+        if unroutable.contains(&c.name) {
+            c.textual = false;
+        }
+    }
+
+    diags
+}' \
+  '    for c in &mut ds.columns {
+        if false {
+            c.textual = false;
+        }
+    }
+
+    diags
+}' \
   geode-core textual_on_a_column_no_grain_can_route_is_an_error_and_textual_is_cleared
 
 run_mutation "schema: a dimension carried by an uncarriable grain is dropped" \
@@ -4666,22 +4694,16 @@ run_mutation "build_catalog: resolved_gen is ignored under AsOf::At, always None
 # `ds.live_rows == 5`), so neither test was proven isolated. Mutating
 # `archive_rows` instead has exactly one defence: the `archive_rows`
 # assertion this fix round added here.
+#
+# Re-anchored by the final fix wave: the loop is over `table_pairs(ds)`
+# now, not `ds.grains()` (Important 1 -- a document dataset has no grain
+# and reported 0 rows), so the per-grain `table_name` calls this entry used
+# to mutate are gone.
 run_mutation "build_catalog: archive_rows sums the live tables too" \
   crates/geode-data/src/query/catalog.rs \
-  '        archive_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Archive))
-            .copied()
-            .unwrap_or(0);
-    }' \
-  '        archive_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Live))
-            .copied()
-            .unwrap_or(0);
-        archive_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Archive))
-            .copied()
-            .unwrap_or(0);
-    }' \
+  '        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);' \
+  '        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
+        archive_rows += sizes.get(&pair.live).copied().unwrap_or(0);' \
   geode-data the_row_counts_agree_with_duckdb_by_execution
 
 # Review round 1 MAJ-1: the fixture's `file_id`s (11, 12, 13) are
@@ -6081,7 +6103,7 @@ run_mutation "groupings: fields duplicates a chain column instead of deduping ag
   '        if false {
             continue;
         }' \
-  geode-shell fields_offers_every_pickable_column_chain_first_then_the_rest
+  geode-shell fields_offers_every_groupable_column_chain_first_then_the_rest
 
 run_mutation "groupings: to_table writes every list item, ticked or not" \
   crates/geode-shell/src/shell/objectdialog/groupings.rs \
@@ -7499,6 +7521,633 @@ run_mutation "dialog: enter_filter_by_mouse ignores the settings dialog" \
   '    } else if let Some(state) = shell.settings.as_mut().filter(|_| false) {' \
   geode-shell \
   clicking_the_settings_frozen_filter_row_enters_filter_mode
+
+# ---- schema: the document family (market-data spec §3)
+#
+# `from_doc`'s new dataset-level reads (family, key, axes) and the
+# `ColumnRole::Attribute` grain split they drive downstream.
+
+# An unknown `family` must drop the whole dataset, not fall back to
+# Measures silently: a dataset a trader named `document` and misspelled
+# would otherwise parse as an ordinary (and wrong) measure dataset with
+# no diagnostic pointing at the typo.
+run_mutation "schema: an unknown family drops the dataset rather than defaulting to measures" \
+  crates/geode-core/src/schema/mod.rs \
+  '                        continue;' \
+  '                        Family::Measures' \
+  geode-core \
+  an_unknown_family_is_an_error_and_the_dataset_is_dropped
+
+# `key`/`axes` on the measure family must be cleared, not merely
+# warned about and left in place -- a stray `key = [...]` on a measure
+# dataset must never reach `DatasetSpec.key` where nothing reads it
+# today but Task 2's validator will.
+run_mutation "schema: key/axes on the measure family are cleared, not left in place" \
+  crates/geode-core/src/schema/mod.rs \
+  'if family == Family::Measures {' \
+  'if false {' \
+  geode-core \
+  a_measure_family_key_and_axes_are_cleared_with_a_warning
+
+# `create_table_sql`'s grain-path `keep` match must treat a document-level
+# attribute, an axis, and a value the same as a key or a bare dimension:
+# never selected into a measure grain's table. Nothing in today's schema
+# reader can put these roles on a measure dataset, so only a
+# hand-built fixture (this test) can see the arm at all.
+run_mutation "ddl: create_table_sql never selects an axis, value, or document-level attribute" \
+  crates/geode-data/src/store/ddl.rs \
+  '            | ColumnRole::Axis
+            | ColumnRole::Value => false,' \
+  '            | ColumnRole::Axis
+            | ColumnRole::Value => true,' \
+  geode-data \
+  create_table_never_selects_a_document_shaped_column
+
+# `payload_columns`' wildcard arm is the same exclusion, collapsed to one
+# `_ => false`: an axis, a value, and a document-level attribute (along
+# with every key and bare dimension) must never become ingest payload at
+# any grain.
+run_mutation "split: payload_columns never selects an axis, value, or document-level attribute" \
+  crates/geode-data/src/ingest/split.rs \
+  '            _ => false,' \
+  '            _ => true,' \
+  geode-data \
+  payload_columns_never_selects_a_document_shaped_column
+
+# `attribute_conflicts` must count only an attribute carried AT this
+# grain -- a document-level attribute (`grain: None`) has no grain to
+# match and must never be folded in. Widening the guard to any
+# `Attribute` at all would send the query at a table this dataset never
+# created, since a document-level-only dataset has no grain tables.
+run_mutation "catalog: attribute_conflicts ignores a document-level attribute" \
+  crates/geode-data/src/store/catalog.rs \
+  'matches!(c.role, ColumnRole::Attribute { grain: Some(g) } if g == grain)' \
+  'matches!(c.role, ColumnRole::Attribute { .. })' \
+  geode-data \
+  attribute_conflicts_ignores_a_document_level_attribute
+
+# ---- schema: validating a document dataset (market-data spec §3.2)
+#
+# Task 2's load-time rules for the document family, dispatched from
+# `validate_dataset` into `validate_document`, plus the mirror refusal on
+# the measure family.
+
+run_mutation "schema/document: an empty key drops the dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.key.is_empty() {' \
+  '    if false {' \
+  geode-core a_document_dataset_needs_a_non_empty_key_and_axes
+
+run_mutation "schema/document: a key column must be a dimension" \
+  crates/geode-core/src/schema/mod.rs \
+  '            Some(c) if !matches!(c.role, ColumnRole::Dimension { grain: None }) => {' \
+  '            Some(c) if false && !matches!(c.role, ColumnRole::Dimension { grain: None }) => {' \
+  geode-core every_key_column_must_be_a_dimension
+
+run_mutation "schema/document: an axis role not listed in axes is refused" \
+  crates/geode-core/src/schema/mod.rs \
+  '        .filter(|c| c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))' \
+  '        .filter(|c| false && c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))' \
+  geode-core axes_and_axis_roles_must_agree_both_ways
+
+run_mutation "schema/document: measure vocabulary is dropped per column" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !foreign.contains(&c.name));
+
+    // A value is a number: it feeds the numeric cell of the document' \
+  '    let _ = &foreign;
+
+    // A value is a number: it feeds the numeric cell of the document' \
+  geode-core measure_vocabulary_on_a_document_dataset_is_refused_per_column
+
+run_mutation "schema/measures: document vocabulary is dropped per column" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !foreign.contains(&c.name));
+
+    // Every grain in use groups by its key columns' \
+  '    let _ = &foreign;
+
+    // Every grain in use groups by its key columns' \
+  geode-core document_vocabulary_on_a_measure_dataset_is_the_mirror_error
+
+run_mutation "schema/document: a refused dataset is not pushed" \
+  crates/geode-core/src/schema/mod.rs \
+  '            if dataset.is_document() && dataset.columns.is_empty() {' \
+  '            if false {' \
+  geode-core a_document_dataset_declares_at_least_one_value
+
+# The document-family dispatch must fold the reserved-column diagnostics
+# pushed above it into the return, not discard them by returning
+# `validate_document(ds)` directly -- a document dataset naming a
+# storage-layer column (`batch`, `source_file_id`, ...) would otherwise
+# load with no warning and hit the exact DDL collision the check exists
+# to prevent (review round 1's Important finding).
+run_mutation "schema: the document dispatch keeps the reserved-column diagnostics" \
+  crates/geode-core/src/schema/mod.rs \
+  '        diags.extend(validate_document(ds));' \
+  '        return validate_document(ds);' \
+  geode-core a_reserved_column_name_on_a_document_dataset_is_still_a_diagnostic
+
+run_mutation "schema/document: groupable columns are the dimensions, not the axes" \
+  crates/geode-core/src/schema/mod.rs \
+  '                .filter(|c| matches!(c.role, ColumnRole::Dimension { .. }))
+                .map(|c| c.name.as_str())
+                .collect();
+        }' \
+  '                .filter(|c| matches!(c.role, ColumnRole::Dimension { .. } | ColumnRole::Axis))
+                .map(|c| c.name.as_str())
+                .collect();
+        }' \
+  geode-core a_document_dataset_has_no_grain_and_groups_by_its_dimensions_only
+
+run_mutation "schema/document: document_columns follows the declared axes order" \
+  crates/geode-core/src/schema/mod.rs \
+  '        out.extend(self.axes.iter().filter_map(|a| self.column(a)));' \
+  '        out.extend(self.columns.iter().filter(|c| c.role == ColumnRole::Axis));' \
+  geode-core document_columns_are_key_then_axes_then_values_then_attributes
+
+run_mutation "schema/document: dimensions outside the key are dropped, not silent" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !unkeyed.contains(&c.name));' \
+  '    let _ = &unkeyed;' \
+  geode-core a_document_dimension_outside_the_key_is_dropped
+
+# `Scope::applicable_to` (market-data spec §3.4): a selection on a column
+# the dataset lacks must be dropped from what is applied and named in the
+# return, not silently kept as if the dataset had it.
+run_mutation "scope: applicable_to drops a selection on a column the dataset lacks" \
+  crates/geode-core/src/scope/mod.rs \
+  '            if !present {
+                dropped.push(d.column.clone());
+            }
+            present' \
+  '            if !present {
+                dropped.push(d.column.clone());
+            }
+            true' \
+  geode-core applicable_to_drops_selections_on_columns_the_dataset_lacks_and_names_them
+
+# `ScopeSemantics::meet` (market-data spec §3.4): `NotApplicable` must win
+# over `SemiJoined` -- a dropped selection is weaker than a semi-join, not
+# equal to it.
+run_mutation "attribution: NotApplicable is weaker than SemiJoined" \
+  crates/geode-core/src/attribution.rs \
+  '                ScopeSemantics::NotApplicable { dimensions }' \
+  '                ScopeSemantics::SemiJoined { dimensions }' \
+  geode-core not_applicable_is_weaker_than_semi_joined_and_unions_dimensions
+
+# `ColumnPlan::build` (market-data spec §3.4, review round on Task 5): a
+# `NotApplicable` column must paint the same `semi_joined` marker a
+# `SemiJoined` one does -- falling back to the wildcard `_ => Vec::new()`
+# arm silently drops the marker for a dropped selection.
+run_mutation "blotter: NotApplicable paints the same marker as SemiJoined" \
+  crates/geode-blotter/src/core/plan.rs \
+  '            let semi_joined = match meta.map(|m| &m.scope_semantics) {
+                Some(ScopeSemantics::SemiJoined { dimensions })
+                | Some(ScopeSemantics::NotApplicable { dimensions }) => dimensions.clone(),
+                _ => Vec::new(),
+            };' \
+  '            let semi_joined = match meta.map(|m| &m.scope_semantics) {
+                Some(ScopeSemantics::SemiJoined { dimensions }) => dimensions.clone(),
+                _ => Vec::new(),
+            };' \
+  geode-blotter not_applicable_paints_the_same_marker_as_semi_joined
+
+# ---- TablePair: the two dataset families' table sets (market-data §4.1)
+
+# `table_pairs` is the one place a dataset's tables are named, and the
+# family test is the whole of it. Sent down the grain path, a document
+# dataset yields NO pairs at all (it declares no grain), so `apply_schema`
+# would create no table, `history_of` would name none, and the sweep's
+# reconciliation would delete every summary row for the dataset -- each of
+# them silently, since an empty table list is valid SQL everywhere here.
+run_mutation "tablepair: table_pairs sends a document dataset down the grain path" \
+  crates/geode-data/src/store/ddl.rs \
+  '    if ds.is_document() {' \
+  '    if false {' \
+  geode-data a_document_dataset_has_one_pair_named_document_and_no_grain_pairs
+
+# ---- publish_document: a document publishes as a generation (market-data §4.1)
+
+# The validation gate is the whole of "a malformed message changes
+# nothing". Without it the staging loop reads a short value column at the
+# axes' length, so the store is touched -- ids spent, a staging table
+# written, possibly a panic -- by a message that should have been refused
+# before any of it.
+run_mutation "document: an invalid document is refused before staging" \
+  crates/geode-data/src/store/document.rs \
+  '    req.rows
+        .validate(req.dataset)
+        .map_err(StoreError::Document)?;' \
+  '    let _ = req.rows.validate(req.dataset);' \
+  geode-data an_invalid_document_is_refused_before_anything_is_written
+
+# The backfill guard (§4.4) on the document path. `None` reads as "nothing
+# is live yet", so a late-arriving older document would overwrite the
+# current one instead of becoming history -- last Tuesday's surface over
+# this morning's.
+run_mutation "document: the backfill guard reads the live source time" \
+  crates/geode-data/src/store/document.rs \
+  '    let live_source_time = catalog.live_source_time(&ds.name, &batch, None)?;' \
+  '    let live_source_time = None;' \
+  geode-data an_older_document_is_archived_only_and_live_is_untouched
+
+# The key IS the partition (§4.1). A constant batch in the publish request
+# no longer matches the batch the staged rows carry, so the replacement
+# delete hits nothing and live accumulates a copy per publish -- while
+# every key's document claims to be the same partition.
+run_mutation "document: the key is the batch" \
+  crates/geode-data/src/store/document.rs \
+  '            partitions: vec![Partition {
+                batch: batch.clone(),
+                book: None,
+            }],' \
+  '            partitions: vec![Partition {
+                batch: "doc".into(),
+                book: None,
+            }],' \
+  geode-data two_keys_are_two_partitions_that_do_not_disturb_each_other
+
+# Without the refresh the dataset has no ENUM type at all, so the query
+# path cannot cast the key dimension to a dictionary and the text filter's
+# rewrite has nothing to read (§3.5, §3.6).
+run_mutation "document: the key dimension enum is refreshed" \
+  crates/geode-data/src/store/document.rs \
+  '        ddl::refresh_enum(conn, &ds.name, col, &tables.live, &tables.archive)?;' \
+  '        let _ = (col, &tables);' \
+  geode-data the_key_dimension_enum_is_refreshed_after_publish
+
+# `archived_only` is what keeps a generation that was never live out of
+# freshness (§4.5). Hardcoded false, provenance claims a backfilled
+# document as the batch's current state while live holds something newer.
+run_mutation "document: archived_only is recorded from the outcome" \
+  crates/geode-data/src/store/document.rs \
+  '        archived_only: matches!(outcome, PublishOutcome::ArchivedOnly { .. }),' \
+  '        archived_only: false,' \
+  geode-data an_older_document_is_archived_only_and_live_is_untouched
+
+# The row floor (`DocumentRows::validate`, market-data spec §6.2). Without
+# it an empty document validates and publishes: the transaction archives
+# and deletes the batch's live rows, inserts none, and records a summary
+# row no table holds -- so the panel reads as "no document has arrived for
+# this key" and the generation summary names a generation as-of can resolve
+# to nothing.
+run_mutation "document: a document with no rows is refused" \
+  crates/geode-core/src/document.rs \
+  '        if self.rows() == 0 {' \
+  '        if false {' \
+  geode-core validate_refuses_a_document_with_no_rows
+
+# ---- Task 8: the document request (market-data spec §7)
+#
+# `compile_document` deliberately resolves and pins the generation for
+# THIS document alone (its own batch), not the general multi-partition
+# `generation_predicate` a view query builds — see the doc comment on
+# `compile_document`'s as-of arm for why a document dataset holding many
+# unrelated documents makes that narrowing a correctness requirement, not
+# an optimisation.
+
+run_mutation "document query: as-of pins the resolved generation" \
+  crates/geode-data/src/query/document.rs \
+  '                    (relation, format!(" and gen_id = {}", g.gen_id))' \
+  '                    (relation, String::new())' \
+  geode-data an_as_of_document_query_reads_the_resolved_generation_from_the_archive
+
+run_mutation "document query: rows come back in axis order" \
+  crates/geode-data/src/query/document.rs \
+  '.map(|a| format!("\"{a}\""))' \
+  '.rev().map(|a| format!("\"{a}\""))' \
+  geode-data a_live_document_query_selects_one_key_in_axis_order
+
+run_mutation "document query: a value is DeterminedNonAdditive" \
+  crates/geode-data/src/query/document.rs \
+  '                ColumnRole::Value => Attribution::DeterminedNonAdditive,' \
+  '                ColumnRole::Value => Attribution::Additive,' \
+  geode-data a_live_document_query_selects_one_key_in_axis_order
+
+run_mutation "document query: the wrong family is refused" \
+  crates/geode-data/src/query/document.rs \
+  '    if !ds.is_document() {' \
+  '    if false {' \
+  geode-data the_wrong_family_or_arity_or_dataset_is_a_compile_error
+
+run_mutation "handle: a document compile error is that key's outcome" \
+  crates/geode-data/src/handle.rs \
+  '                    // `Document` shares `Query`'"'"'s outcome shape (there is
+                    // no `DataEvent::Document`), so a failed compile goes
+                    // out as `DataEvent::Query` exactly as `Request::
+                    // Query`'"'"'s own error arm does.
+                    sink(DataEvent::Query(QueryOutcome {
+                        key: params.key,
+                        tag: params.tag,
+                        snapshot: Err(e.to_string()),
+                        submitted: params.submitted,
+                    }));' \
+  '                    // `Document` shares `Query`'"'"'s outcome shape (there is
+                    // no `DataEvent::Document`), so a failed compile goes
+                    // out as `DataEvent::Query` exactly as `Request::
+                    // Query`'"'"'s own error arm does.
+                    let _ = DataEvent::Query(QueryOutcome {
+                        key: params.key,
+                        tag: params.tag,
+                        snapshot: Err(e.to_string()),
+                        submitted: params.submitted,
+                    });' \
+  geode-data a_document_compile_error_is_that_keys_outcome_on_the_real_service
+
+# ---- Task 8 review (Important #1, #2): the document request, round 2
+#
+# The first fixture published one key only, so `compile_document`'s
+# batch-scoped resolve and its "nothing existed yet" branch could not be
+# told apart from a wrong implementation that just took the first
+# resolved generation regardless of which document it named. A second
+# key at a different source time makes the two implementations diverge —
+# each mutation below was run by hand and confirmed to fail its named
+# test before being committed.
+
+run_mutation "document query: the resolved generation is this document's own" \
+  crates/geode-data/src/query/document.rs \
+  '            let resolved = gens.into_iter().find(|g| g.batch == batch);' \
+  '            let resolved = gens.into_iter().next();' \
+  geode-data an_as_of_document_query_resolves_each_key_to_its_own_generation
+
+run_mutation "document query: no generation as of t is no rows, not every row" \
+  crates/geode-data/src/query/document.rs \
+  '                None => (relation, " and false".to_string()),' \
+  '                None => (relation, String::new()),' \
+  geode-data an_as_of_before_the_first_publish_compiles_and_returns_no_rows
+
+run_mutation "service: a live document's freshness is its own, not the dataset's stalest" \
+  crates/geode-data/src/service.rs \
+  '                    .live_source_time(&params.dataset, &join_key(&params.document_key), None)?' \
+  '                    .dataset_as_of(&params.dataset, &[])?' \
+  geode-data a_live_document_request_reports_its_own_documents_freshness
+
+# ---- final fix wave: validate_document's rules, one entry per rule
+#
+# Minor 8 of the whole-branch review: `validate_document` grew nine rules
+# and the harness guarded three of them. Every entry below was run by hand
+# and confirmed to fail its named test before being committed.
+
+# Important 2. `create_document_table_sql` appends a `book VARCHAR` of its
+# own, so a declared column of that name emits the name twice and the
+# CREATE fails inside `DataService::open` -- taking every other dataset
+# with it. `RESERVED_COLUMNS` cannot carry this rule (`book` is a legal
+# grain key column on the measure side), so this per-family check is the
+# only thing standing between that config line and a dead app.
+run_mutation "schema/document: a column named book collides with the partition column" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.columns.iter().any(|c| c.name == "book") {' \
+  '    if false {' \
+  geode-core a_document_column_named_book_collides_with_the_partition_column
+
+# Minor 4. The old no-`[columns]` early return, restored: a document
+# dataset with no columns reaches the schema having never met
+# `validate_document`. The push guard's own entry cannot see this -- that
+# path never reached the guard at all.
+run_mutation "schema/document: the no-columns path skips validation and pushes anyway" \
+  crates/geode-core/src/schema/mod.rs \
+  "                None => diags.push(note(
+                    format!(\"datasets.{ds_name}\"),
+                    format!(\"dataset '{ds_name}': no [columns] table\"),
+                ))," \
+  "                None => {
+                    diags.push(note(
+                        format!(\"datasets.{ds_name}\"),
+                        format!(\"dataset '{ds_name}': no [columns] table\"),
+                    ));
+                    out.datasets.push(dataset);
+                    continue;
+                }" \
+  geode-core a_document_dataset_with_no_columns_table_is_not_pushed
+
+# `Column`/`Value` cover f64/i64/utf8/date only: widening the accepted set
+# to every type makes the rule never fire, so a `timestamp` axis loads and
+# every publish is then refused for a type mismatch -- reported as a feed
+# health failure rather than as the config error it is.
+run_mutation "schema/document: an axis or attribute of an unsupported type is refused" \
+  crates/geode-core/src/schema/mod.rs \
+  '                ColumnType::F64 | ColumnType::I64 | ColumnType::Utf8 | ColumnType::Date' \
+  '                ColumnType::F64
+                    | ColumnType::I64
+                    | ColumnType::Utf8
+                    | ColumnType::Date
+                    | ColumnType::Timestamp
+                    | ColumnType::Bool' \
+  geode-core a_document_axis_or_attribute_of_an_unsupported_type_is_refused
+
+# The key is joined into `batch VARCHAR` and bound back as text: a key
+# column of any other declared type compiles and selects nothing.
+run_mutation "schema/document: a key column must be utf8" \
+  crates/geode-core/src/schema/mod.rs \
+  '            Some(c) if c.ty != ColumnType::Utf8 => {' \
+  '            Some(c) if c.ty != ColumnType::Utf8 && false => {' \
+  geode-core a_document_key_column_must_be_utf8
+
+# Minor 8: the document side's `textual` clearing. Setting the flag
+# instead of clearing it leaves a value column routed as text, so the
+# scope compiler's text filter emits an `ILIKE` against a number.
+run_mutation "schema/document: textual is cleared on a non-dimension, not set" \
+  crates/geode-core/src/schema/mod.rs \
+  '    for c in &mut ds.columns {
+        if unroutable.contains(&c.name) {
+            c.textual = false;
+        }
+    }
+
+    if !keep {' \
+  '    for c in &mut ds.columns {
+        if unroutable.contains(&c.name) {
+            c.textual = true;
+        }
+    }
+
+    if !keep {' \
+  geode-core textual_on_a_document_value_is_an_error_and_textual_is_cleared
+
+# Minor 8: a listed axis whose role is not `axis`. The mirror rule (an
+# `axis` role not listed in `axes`) already had an entry; this direction
+# did not, and without it `document_columns()` would emit a value column
+# in an axis position -- the document request would then order by it and
+# `publish_document`'s staging plan would read the wrong source.
+run_mutation "schema/document: a listed axis whose role is not axis is refused" \
+  crates/geode-core/src/schema/mod.rs \
+  '            Some(c) if c.role != ColumnRole::Axis => {' \
+  '            Some(c) if c.role != ColumnRole::Axis && false => {' \
+  geode-core axes_and_axis_roles_must_agree_both_ways
+
+# Minor 8: `key` naming a column that was never declared. Silently
+# accepted, `document_columns()` simply omits it (`filter_map`), so the
+# document's first key part would be stored in the second key column's
+# place.
+run_mutation "schema/document: key naming an undeclared column drops the dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  "            None => {
+                diags.push(err(
+                    format!(\"dataset '{name}': key names undeclared column '{k}'; dataset dropped\"),
+                    format!(\"datasets.{name}.key\"),
+                ));
+                keep = false;
+            }" \
+  '            None => {}' \
+  geode-core a_key_or_axis_naming_an_undeclared_column_drops_the_dataset
+
+# Minor 8: empty `axes`. A document with no axis has no row identity at
+# all, and `DocumentRows::rows()` reads the first axis's length -- with
+# none, every document would count zero rows and be refused at publish
+# instead of at load.
+run_mutation "schema/document: an empty axes list drops the dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.axes.is_empty() {' \
+  '    if false {' \
+  geode-core a_document_dataset_needs_a_non_empty_key_and_axes
+
+# Minor 8: the non-numeric value DROP, not just its diagnostic. A test
+# asserting on the diagnostic alone cannot see a column that was reported
+# and kept -- and a kept utf8 value reaches the DDL as a VARCHAR the
+# blotter would then read through `f64_at`.
+run_mutation "schema/document: a non-numeric value column is really dropped" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !non_numeric.contains(&c.name));' \
+  '    let _ = &non_numeric;' \
+  geode-core a_non_numeric_value_column_is_dropped_and_the_dataset_kept
+
+# Minor 8: "at least one value", anchored on the RULE rather than on the
+# push guard the existing entry mutates. A document dataset with no value
+# column has no numeric cell to paint: the panel would be axes and
+# nothing else.
+run_mutation "schema/document: the at-least-one-value rule itself" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if !ds.columns.iter().any(|c| c.role == ColumnRole::Value) {' \
+  '    if false {' \
+  geode-core a_document_dataset_declares_at_least_one_value
+
+# Minor 7: a declared-but-absent axis column is a message, not a panic --
+# and not a silently skipped check either. `continue` would let a document
+# whose axis the dataset does not declare pass validation and reach the
+# appender, where `cell_source` returns `None` for it.
+run_mutation "document: a declared-but-absent axis column is refused, not skipped" \
+  crates/geode-core/src/document.rs \
+  '            let Some(spec) = ds.column(declared) else {
+                return Err(format!("axis '"'"'{name}'"'"' is not a declared column"));
+            };' \
+  '            let Some(spec) = ds.column(declared) else {
+                continue;
+            };' \
+  geode-core validate_refuses_an_axis_the_dataset_does_not_declare_as_a_column
+
+# Ledger (ii): the undeclared-attribute branch. Accepting one silently
+# drops the value -- `document_columns()` has no column for it, so
+# nothing stages it and the document publishes short of what arrived.
+run_mutation "document: an attribute the dataset does not declare is refused" \
+  crates/geode-core/src/document.rs \
+  '                .any(|c| &c.name == name && matches!(c.role, ColumnRole::Attribute { grain: None }))' \
+  '                .any(|_| true)' \
+  geode-core validate_refuses_an_attribute_the_dataset_does_not_declare
+
+# Important 1: the catalog's row counts are per TABLE. Summed over
+# `ds.grains()` a document dataset -- which has no grain -- reported 0
+# live and 0 archive rows beside a real list of live partitions, which
+# reads as "the partitions are empty" rather than "this counter cannot
+# see them".
+run_mutation "catalog: row counts are per table, not per grain" \
+  crates/geode-data/src/query/catalog.rs \
+  '    for pair in crate::store::ddl::table_pairs(ds) {
+        live_rows += sizes.get(&pair.live).copied().unwrap_or(0);
+        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
+    }' \
+  '    for grain in ds.grains() {
+        live_rows += sizes
+            .get(&crate::store::ddl::table_name(
+                &ds.name,
+                grain,
+                crate::store::ddl::TableKind::Live,
+            ))
+            .copied()
+            .unwrap_or(0);
+        archive_rows += sizes
+            .get(&crate::store::ddl::table_name(
+                &ds.name,
+                grain,
+                crate::store::ddl::TableKind::Archive,
+            ))
+            .copied()
+            .unwrap_or(0);
+    }' \
+  geode-data a_document_datasets_partitions_split_back_to_their_keys
+
+# Important 3: the picker's values for a document dataset. Without the
+# document arm a shared dimension shows only the measure datasets' values
+# (silently short) and a document-only dimension fails the whole query
+# with "no dataset carries".
+run_mutation "distinct: a document dataset contributes its values" \
+  crates/geode-data/src/query/distinct.rs \
+  '        if ds.is_document() {' \
+  '        if false {' \
+  geode-data distinct_over_a_document_only_dimension_returns_its_values
+
+# An axis is row identity WITHIN a document, never a frame dimension
+# (market-data spec §3.3): offering one here would paint every term of
+# every curve in the picker's value list, none of which the frame can
+# scope by.
+run_mutation "distinct: only a document dimension contributes, not an axis" \
+  crates/geode-data/src/query/distinct.rs \
+  '        .is_some_and(|c| matches!(c.role, ColumnRole::Dimension { .. }))' \
+  '        .is_some_and(|_| true)' \
+  geode-data distinct_over_a_document_dataset_offers_no_axis_values
+
+# The as-of arm must filter BOTH sides of the union by the resolved
+# generations. Without the predicate every generation is read at once, so
+# a document published after `t` leaks into a historical answer.
+run_mutation "distinct: a document dataset's as-of filters the generations" \
+  crates/geode-data/src/query/distinct.rs \
+  '                "(select * from {} where {predicate} \
+                 union all select * from {} where {predicate})",' \
+  '                "(select * from {} where true \
+                 union all select * from {} where true)",' \
+  geode-data distinct_over_a_document_dataset_under_as_of_reads_the_resolved_generation
+
+# ... and it must resolve them as of the REQUESTED instant. Resolving at
+# `now` instead compiles a predicate that looks exactly as historical and
+# answers with today's state.
+run_mutation "distinct: a document dataset's as-of resolves at t, not now" \
+  crates/geode-data/src/query/distinct.rs \
+  'let predicate = generation_predicate(&resolve_generations(conn, &ds.name, *t)?);' \
+  'let predicate = generation_predicate(&resolve_generations(conn, &ds.name, chrono::Utc::now())?);' \
+  geode-data distinct_over_a_document_dataset_under_as_of_reads_the_resolved_generation
+
+# ... and it must read the live side too: the generation a partition holds
+# NOW is in live and nowhere else, so an as-of read aimed at the archive
+# alone answers "no such document" for the common case.
+run_mutation "distinct: a document dataset's as-of reads the live side too" \
+  crates/geode-data/src/query/distinct.rs \
+  '                pair.live, pair.archive' \
+  '                pair.archive, pair.archive' \
+  geode-data distinct_over_a_document_dataset_under_as_of_reads_the_resolved_generation
+
+# `applicable_to` is what keeps a scope aimed at the measure datasets --
+# a book selection, say -- from compiling into a predicate on a column
+# the document table does not have: a binder error that would fail the
+# whole picker query, not just this dataset's branch.
+run_mutation "distinct: a selection the document dataset lacks is dropped" \
+  crates/geode-data/src/query/distinct.rs \
+  '    let (scope, _dropped) = params.scope.applicable_to(ds, dims);' \
+  '    let (scope, _dropped) = (params.scope.clone(), Vec::<String>::new());' \
+  geode-data a_selection_the_document_dataset_lacks_is_dropped_not_a_binder_error
+
+# The selections that DO apply must really bind. Dropping them counts
+# every document's rows under whatever the trader has narrowed to, which
+# is the picker's whole question answered wrongly.
+run_mutation "distinct: a document dataset applies its own dimension selections" \
+  crates/geode-data/src/query/distinct.rs \
+  '                Some((clause, clause_params)) => {
+                    clauses.push(clause);
+                    sql_params.extend(clause_params);
+                }' \
+  '                Some((clause, clause_params)) => {
+                    let _ = (clause, clause_params);
+                }' \
+  geode-data a_selection_on_a_document_dimension_narrows_its_contribution
 
 # §19.1: a Number typed outside its range is REFUSED, never clamped — a
 # clamp would apply a number the trader did not type.

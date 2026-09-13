@@ -991,8 +991,8 @@ row stripe or a selection highlight can still read below 3:1.
 
 ### 9.10 Harness
 
-**688 entries** (656 at the branch point, 32 added over the eight tasks,
-none removed); `--anchors-only` reports 0 stale, 0 ambiguous. Ten
+**688 entries** on the branch (656 at the branch point, 32 added over the eight tasks,
+none removed; 741 once main's market-data documents Part 1 was merged in); `--anchors-only` reports 0 stale, 0 ambiguous. Ten
 entries were re-anchored where these tasks moved their source lines —
 eight predating this branch, two added earlier on it: `views: a
 presentation save pins the desk's column order`, `views: a presentation

@@ -342,3 +342,33 @@ type = "f64"
 role = "measure"
 grain = "position"
 source_name = "SC"
+
+# ---- Market-data documents (2026-09-12 design, Part 1). ----
+# Declared now so Part 2's demo bus has a dataset to feed; until then the
+# table is created empty at startup and shows in the diagnostics tile's
+# data section with no generations.
+
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]          # one document per key value
+axes = ["term", "node"]           # ordered; identify a row within a document
+
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"                # document-level: constant within one document
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"

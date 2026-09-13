@@ -1,5 +1,8 @@
-//! Table DDL generated from the declared schema (spec §4.2). One live and
-//! one archive table per grain present in the dataset.
+//! Table DDL generated from the declared schema (spec §4.2). The measure
+//! family gets one live and one archive table per grain present in the
+//! dataset; the document family gets exactly one such pair for the whole
+//! dataset (market-data spec §4.1). Either way a dataset owns a set of
+//! [`TablePair`]s, which is what publish, retention and history all speak.
 //!
 //! Live carries exactly the current rows for every file partition: no
 //! generation column, no history predicate, size independent of retention.
@@ -44,6 +47,63 @@ impl TableKind {
 /// the second dataset the first one's table, with the wrong columns.
 pub fn table_name(dataset: &str, grain: Grain, kind: TableKind) -> String {
     format!("{dataset}_{}{}", grain.short(), kind.suffix())
+}
+
+/// A dataset's live/archive pair. The measure family has one per grain,
+/// the document family exactly one (market-data spec §4.1); everything
+/// that publishes, sweeps or resolves history takes a pair rather than a
+/// `Grain` so the two families go through one door.
+///
+/// The names are built once and carried, not rebuilt at each use: a pair
+/// is never derivable from a grain alone anyway (a document dataset has
+/// no grain), so passing the pair is the only shape that serves both
+/// families without a family test at every call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TablePair {
+    pub live: String,
+    pub archive: String,
+}
+
+impl TablePair {
+    pub fn for_grain(dataset: &str, grain: Grain) -> TablePair {
+        TablePair {
+            live: table_name(dataset, grain, TableKind::Live),
+            archive: table_name(dataset, grain, TableKind::Archive),
+        }
+    }
+
+    /// `document` is not a `Grain::short()` value, so this can never
+    /// collide with a grain table of the same dataset — a dataset that
+    /// somehow declared both families would get separate tables rather
+    /// than one silently shared by both.
+    pub fn for_document(dataset: &str) -> TablePair {
+        TablePair {
+            live: format!("{dataset}_document{}", TableKind::Live.suffix()),
+            archive: format!("{dataset}_document{}", TableKind::Archive.suffix()),
+        }
+    }
+
+    pub fn of(&self, kind: TableKind) -> &str {
+        match kind {
+            TableKind::Live => &self.live,
+            TableKind::Archive => &self.archive,
+        }
+    }
+}
+
+/// Every live/archive pair a dataset owns: one per grain for the measure
+/// family, exactly one for the document family. The single place the two
+/// families' table sets are named, so `apply_schema`, `history_of` and
+/// the sweep's reconciliation cannot drift apart on which tables exist.
+pub fn table_pairs(ds: &DatasetSpec) -> Vec<TablePair> {
+    if ds.is_document() {
+        vec![TablePair::for_document(&ds.name)]
+    } else {
+        ds.grains()
+            .into_iter()
+            .map(|g| TablePair::for_grain(&ds.name, g))
+            .collect()
+    }
 }
 
 /// The ENUM type name for a dimension column of a dataset.
@@ -147,8 +207,16 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
 
     for c in ds.columns.iter() {
         let keep = match c.role {
-            ColumnRole::Measure { grain: g, .. } | ColumnRole::Attribute { grain: g } => g == grain,
-            ColumnRole::Key | ColumnRole::Dimension { .. } => false,
+            ColumnRole::Measure { grain: g, .. } => g == grain,
+            ColumnRole::Attribute { grain: Some(g) } => g == grain,
+            // A document-level attribute (`grain: None`) carries no
+            // grain to match; `Axis`/`Value` are the document family's
+            // own row shape and never reach a grain table at all.
+            ColumnRole::Attribute { grain: None }
+            | ColumnRole::Key
+            | ColumnRole::Dimension { .. }
+            | ColumnRole::Axis
+            | ColumnRole::Value => false,
         };
         if keep {
             cols.push(format!("  \"{}\" {}", c.name, c.ty.sql()));
@@ -186,23 +254,77 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
     )
 }
 
-/// Every table a dataset's history lives in: the archive **and** live for
-/// each grain. Generations are resolved (and rebuilt) across all of them
-/// — a partition can be missing from one grain while present at another
-/// (a cash-only book has no underlying rows), and the generation a
-/// partition holds now is in live and nowhere else (see
-/// `query::as_of::resolve_generations`). Shared by `service.rs` (the
-/// freshness fold and the open-time migration) and `query::compile`
+/// The document family's one table (market-data spec §4.1):
+/// `DatasetSpec::document_columns` in that order — key, axes, values,
+/// then grainless attributes — followed by the storage columns every
+/// grain table carries, `book` included.
+///
+/// The storage columns mean exactly what they mean for a grain table:
+/// `batch` is what a republish replaces on, `source_file_id` is
+/// provenance only, and `gen_id`/`source_time` ride on live as well as
+/// archive so archived rows keep the identity they had while live (see
+/// `create_table_sql` for the full argument — live still holds one
+/// generation per partition, so no query filters on `gen_id`). `book` is
+/// the one a grain table gets from its grain key and this one declares
+/// itself: a document's book is *empty*, which is a NULL in a column that
+/// exists rather than a missing column, and every partition-keyed
+/// statement in `store` joins on it.
+///
+/// An attribute repeats down every row of its document rather than
+/// living in a table of its own: a document is published, replaced and
+/// read whole, so there is no second grain to join and nothing a
+/// separate header table would save.
+pub fn create_document_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
+    let mut cols: Vec<String> = ds
+        .document_columns()
+        .iter()
+        .map(|c| format!("  \"{}\" {}", c.name, c.ty.sql()))
+        .collect();
+    // Partition key completion, same four columns and the same meanings as
+    // a grain table's (`create_table_sql`) -- plus `book`, which the
+    // document family gets *here* because no grain key supplies it. A
+    // document's book is empty (market-data spec §4.1), and empty means a
+    // NULL value in a column that exists, not an absent column: every
+    // partition-keyed statement in this module joins on `book`
+    // (retention's eviction, `generations_reconcile_sql`,
+    // `rebuild_generations`' union, `publish_file`'s own
+    // `partition_predicate` with its `book is null` term), so a table
+    // without the column could not be published into, swept, reconciled
+    // or summarised at all.
+    cols.push("  \"batch\" VARCHAR".to_string());
+    cols.push("  \"book\" VARCHAR".to_string());
+    cols.push("  \"source_file_id\" BIGINT".to_string());
+    cols.push("  \"gen_id\" BIGINT".to_string());
+    cols.push("  \"source_time\" TIMESTAMP WITH TIME ZONE".to_string());
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
+        TablePair::for_document(&ds.name).of(kind),
+        cols.join(",\n")
+    )
+}
+
+/// Every table a dataset's history lives in: the archive **and** live of
+/// every pair it owns — each grain's pair for the measure family, the one
+/// document pair for the document family. Generations are resolved (and
+/// rebuilt) across all of them — a partition can be missing from one
+/// grain while present at another (a cash-only book has no underlying
+/// rows), and the generation a partition holds now is in live and nowhere
+/// else (see `query::as_of::resolve_generations`). Shared by `service.rs`
+/// (the freshness fold and the open-time migration) and `query::compile`
 /// (`era_for` and the join path) so the table list is named in one place.
+///
+/// `dataset` is the caller's own name for the dataset and must be
+/// `ds.name` — kept as a parameter because every caller already has it to
+/// hand, and passing it makes the table names visibly the named
+/// dataset's at the call site.
 pub fn history_of(dataset: &str, ds: &DatasetSpec) -> Vec<String> {
-    ds.grains()
+    debug_assert_eq!(
+        dataset, ds.name,
+        "history_of must name the dataset it is given"
+    );
+    table_pairs(ds)
         .into_iter()
-        .flat_map(|g| {
-            [
-                table_name(dataset, g, TableKind::Archive),
-                table_name(dataset, g, TableKind::Live),
-            ]
-        })
+        .flat_map(|p| [p.archive, p.live])
         .collect()
 }
 
@@ -247,10 +369,10 @@ fn generations_union_sql(tables: &[String]) -> String {
 ///
 /// Inside one transaction: delete every row currently recorded for
 /// `dataset`, then reinsert one row per generation found across `tables`
-/// (ordinarily `history_of(dataset, ds)` -- every grain's archive and
-/// live table, so a partition missing from one grain's history is not
-/// silently dropped from the rebuilt summary either). Returns how many
-/// rows the summary now holds for the dataset.
+/// (ordinarily `history_of(dataset, ds)` -- every pair's archive and live
+/// table, so a partition missing from one pair's history is not silently
+/// dropped from the rebuilt summary either). Returns how many rows the
+/// summary now holds for the dataset.
 pub fn rebuild_generations(
     conn: &Connection,
     dataset: &str,
@@ -418,12 +540,58 @@ grain = "underlying"
             .unwrap()
             .clone()
     }
+
+    /// The market-data spec's own document dataset (§2.1), parsed through
+    /// the real reader rather than hand-built: a document dataset's table
+    /// shape is decided by `family`/`key`/`axes` and the roles the reader
+    /// derives from them, so a hand-built `DatasetSpec` could disagree
+    /// with what a TOML layer can actually produce.
+    pub(crate) fn cvi_dataset() -> DatasetSpec {
+        let text = r#"
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("cvi_params")
+            .unwrap()
+            .clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::tests_support::{carried_dataset, sample_dataset};
+    use super::tests_support::{carried_dataset, cvi_dataset, sample_dataset};
     use super::*;
+    use geode_core::schema::{ColumnSpec, ColumnType};
 
     #[test]
     fn live_table_carries_the_grain_key_and_its_measures_only() {
@@ -513,6 +681,50 @@ mod tests {
         assert!(sql(Grain::Underlying).contains("\"currency\" VARCHAR"));
     }
 
+    /// The document family's own roles, and a document-level attribute,
+    /// must never be selected into a measure-family grain table — even
+    /// though nothing in the schema reader can produce this mix today
+    /// (`parse_column` only emits `Axis`/`Value` on a document dataset).
+    /// `keep`'s "not this branch" arm covering them is otherwise untested:
+    /// flipping it from `false` to `true` compiles clean and every other
+    /// test stays green, since none of them ever puts one of these roles
+    /// on a measure dataset's columns.
+    #[test]
+    fn create_table_never_selects_a_document_shaped_column() {
+        let mut ds = sample_dataset();
+        ds.columns.push(ColumnSpec {
+            name: "term".into(),
+            source_name: None,
+            ty: ColumnType::Date,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Axis,
+        });
+        ds.columns.push(ColumnSpec {
+            name: "param".into(),
+            source_name: None,
+            ty: ColumnType::F64,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Value,
+        });
+        ds.columns.push(ColumnSpec {
+            name: "spot_ref".into(),
+            source_name: None,
+            ty: ColumnType::F64,
+            required: false,
+            textual: false,
+            categorical: false,
+            role: ColumnRole::Attribute { grain: None },
+        });
+        let sql = create_table_sql(&ds, Grain::Position, TableKind::Live);
+        assert!(!sql.contains("\"term\""), "{sql}");
+        assert!(!sql.contains("\"param\""), "{sql}");
+        assert!(!sql.contains("\"spot_ref\""), "{sql}");
+    }
+
     #[test]
     fn categorical_columns_follow_the_flag_not_the_role() {
         let ds = carried_dataset();
@@ -537,6 +749,106 @@ mod tests {
         assert!(tables.contains(&"risk_snapshot_position_live".to_string()));
         assert!(tables.contains(&"risk_snapshot_underlying_archive".to_string()));
         assert!(tables.contains(&"risk_snapshot_underlying_live".to_string()));
+    }
+
+    #[test]
+    fn a_document_dataset_has_one_pair_named_document_and_no_grain_pairs() {
+        let ds = cvi_dataset();
+        let pairs = table_pairs(&ds);
+        assert_eq!(
+            pairs,
+            vec![TablePair {
+                live: "cvi_params_document_live".into(),
+                archive: "cvi_params_document_archive".into(),
+            }]
+        );
+        assert_eq!(TablePair::for_document("cvi_params"), pairs[0]);
+        assert_eq!(
+            history_of("cvi_params", &ds),
+            vec![
+                "cvi_params_document_archive".to_string(),
+                "cvi_params_document_live".to_string(),
+            ]
+        );
+    }
+
+    /// `TablePair::for_document`'s safety claim, checked rather than
+    /// asserted in prose: a document pair's name can never be some
+    /// grain's table of the same dataset, so the two families can share a
+    /// database (and a dataset name) with no chance of
+    /// `CREATE TABLE IF NOT EXISTS` handing one family the other's table.
+    #[test]
+    fn document_is_not_a_grain_short_name() {
+        for grain in Grain::ALL {
+            assert_ne!(grain.short(), "document");
+            assert_ne!(
+                TablePair::for_document("ds"),
+                TablePair::for_grain("ds", grain)
+            );
+        }
+    }
+
+    #[test]
+    fn a_measure_dataset_has_one_pair_per_grain_in_grain_order() {
+        let ds = sample_dataset();
+        let pairs = table_pairs(&ds);
+        assert_eq!(pairs.len(), ds.grains().len());
+        for (pair, grain) in pairs.iter().zip(ds.grains()) {
+            assert_eq!(*pair, TablePair::for_grain("risk_snapshot", grain));
+        }
+    }
+
+    #[test]
+    fn document_table_columns_are_document_columns_then_the_storage_columns() {
+        let ds = cvi_dataset();
+        let sql = create_document_table_sql(&ds, TableKind::Live);
+        assert!(
+            sql.starts_with("CREATE TABLE IF NOT EXISTS cvi_params_document_live ("),
+            "{sql}"
+        );
+        let expected = [
+            "\"underlying_ref\" VARCHAR",
+            "\"term\" DATE",
+            "\"node\" DOUBLE",
+            "\"param\" DOUBLE",
+            "\"anchor_date\" DATE",
+            "\"spot_ref\" DOUBLE",
+            "\"batch\" VARCHAR",
+            // A document's book is empty, not absent: the column exists
+            // and Task 7 writes NULL into it, because every
+            // partition-keyed statement in `store` joins on `book`.
+            "\"book\" VARCHAR",
+            "\"source_file_id\" BIGINT",
+            "\"gen_id\" BIGINT",
+            "\"source_time\" TIMESTAMP WITH TIME ZONE",
+        ];
+        let mut last = 0;
+        for col in expected {
+            let at = sql[last..]
+                .find(col)
+                .unwrap_or_else(|| panic!("{col} missing or out of order in {sql}"));
+            last += at + col.len();
+        }
+        assert_eq!(
+            create_document_table_sql(&ds, TableKind::Archive).replace("_archive", "_live"),
+            sql,
+            "live and archive carry identical columns"
+        );
+    }
+
+    #[test]
+    fn apply_schema_creates_the_document_pair() {
+        use crate::store::Store;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("g.duckdb")).unwrap();
+        store.apply_schema(&cvi_dataset()).unwrap();
+        for t in ["cvi_params_document_live", "cvi_params_document_archive"] {
+            let n: i64 = store
+                .writer()
+                .query_row(&format!("select count(*) from {t}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0);
+        }
     }
 }
 

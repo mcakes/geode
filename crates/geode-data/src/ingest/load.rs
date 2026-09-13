@@ -13,6 +13,7 @@ use crate::health::Health;
 use crate::ingest::split::{Conflict, SplitRequest, split_by_grain};
 use crate::source::Sentinel;
 use crate::store::catalog::{Catalog, FileGeneration, FileId};
+use crate::store::ddl::TablePair;
 use crate::store::publish::{Partition, PublishOutcome, PublishRequest, publish_file};
 use crate::store::{Store, StoreError};
 use chrono::{DateTime, Utc};
@@ -228,7 +229,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             conn,
             &PublishRequest {
                 dataset: req.dataset_name.to_string(),
-                grain: *grain,
+                tables: TablePair::for_grain(req.dataset_name, *grain),
                 staging_table: staging_table.clone(),
                 partitions: partitions.clone(),
                 gen_id,

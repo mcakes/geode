@@ -7,10 +7,9 @@
 //! reachable by construction rather than by tuning.
 
 use crate::store::StoreError;
-use crate::store::ddl::{TableKind, table_name};
+use crate::store::ddl::TablePair;
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
-use geode_core::schema::Grain;
 
 /// The unit of replacement: a batch within a book (spec §4.3). Not the file
 /// — filenames carry dates, so file identity is not partition identity.
@@ -27,10 +26,15 @@ pub struct Partition {
 
 #[derive(Debug, Clone)]
 pub struct PublishRequest {
-    /// Table names carry the dataset (spec §4.2), so the request must
-    /// name it: two datasets can share a grain.
+    /// The dataset the published rows belong to. It names the summary
+    /// row (`generations`), not a table: table names live in `tables`.
     pub dataset: String,
-    pub grain: Grain,
+    /// The pair the rows move between — a grain's pair for the measure
+    /// family, the one document pair for the document family. Two
+    /// datasets can share a grain (spec §4.2), so a pair is never derived
+    /// from a grain alone; the caller that knows the family builds it
+    /// (`ddl::table_pairs`, `TablePair::for_grain`).
+    pub tables: TablePair,
     pub staging_table: String,
     pub partitions: Vec<Partition>,
     pub gen_id: i64,
@@ -136,8 +140,21 @@ fn generation_summary_insert(req: &PublishRequest) -> String {
 }
 
 pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOutcome, StoreError> {
-    let live = table_name(&req.dataset, req.grain, TableKind::Live);
-    let archive = table_name(&req.dataset, req.grain, TableKind::Archive);
+    let live = &req.tables.live;
+    let archive = &req.tables.archive;
+    // The tables used to be *derived* from `req.dataset`, so the rows and
+    // the summary row this publish records could not name different
+    // datasets. Now they are two fields, and disagreeing would write rows
+    // into one dataset's tables while recording the generation under
+    // another's name -- as-of would then resolve a generation with no data
+    // and skip one with data, silently. Every pair's names begin with the
+    // dataset's, whichever family built it, so this catches it in debug.
+    debug_assert!(
+        live.starts_with(&format!("{}_", req.dataset))
+            && archive.starts_with(&format!("{}_", req.dataset)),
+        "publish request names dataset '{}' but tables {live}/{archive}",
+        req.dataset,
+    );
     let predicate = partition_predicate(&req.partitions);
 
     // Publishing with no partitions would delete nothing and insert
@@ -245,6 +262,7 @@ mod tests {
     use crate::store::catalog::Catalog;
     use crate::store::ddl::assert_generations_match_tables;
     use chrono::{DateTime, Utc};
+    use geode_core::schema::Grain;
 
     /// Terse RFC 3339 literal for tests.
     fn ts(s: &str) -> DateTime<Utc> {
@@ -337,7 +355,7 @@ mod tests {
     fn request(batch: &str, book: &str, generation: i64, t: DateTime<Utc>) -> PublishRequest {
         PublishRequest {
             dataset: "risk_snapshot".into(),
-            grain: Grain::Position,
+            tables: TablePair::for_grain("risk_snapshot", Grain::Position),
             staging_table: "staging_position".into(),
             partitions: vec![Partition {
                 batch: batch.into(),
@@ -796,7 +814,7 @@ mod tests {
     ) -> PublishRequest {
         PublishRequest {
             dataset: "risk_snapshot".into(),
-            grain: Grain::Underlying,
+            tables: TablePair::for_grain("risk_snapshot", Grain::Underlying),
             staging_table: "staging_underlying".into(),
             partitions: vec![Partition {
                 batch: batch.into(),

@@ -104,8 +104,12 @@ impl ColumnPlan {
             let attribution = meta
                 .map(|m| m.attribution_by_depth.clone())
                 .unwrap_or_default();
+            // `NotApplicable` paints the same marker as `SemiJoined`: a
+            // dropped selection is the weaker case (core spec §3.4), and
+            // Part 1 has no separate style for it.
             let semi_joined = match meta.map(|m| &m.scope_semantics) {
-                Some(ScopeSemantics::SemiJoined { dimensions }) => dimensions.clone(),
+                Some(ScopeSemantics::SemiJoined { dimensions })
+                | Some(ScopeSemantics::NotApplicable { dimensions }) => dimensions.clone(),
                 _ => Vec::new(),
             };
             columns.push(PlannedColumn {
@@ -209,6 +213,16 @@ name = "missing_in_snapshot"
     }
 
     fn snapshot() -> Snapshot {
+        snapshot_with_pnl_semantics(ScopeSemantics::SemiJoined {
+            dimensions: vec!["underlying_ref".into()],
+        })
+    }
+
+    /// Same fixture as [`snapshot`], but with `daily_trading_pnl`'s scope
+    /// semantics parameterized — the one thing
+    /// `not_applicable_paints_the_same_marker_as_semi_joined` needs to
+    /// vary.
+    fn snapshot_with_pnl_semantics(pnl_semantics: ScopeSemantics) -> Snapshot {
         Snapshot::for_tests(
             vec![
                 (
@@ -251,9 +265,7 @@ name = "missing_in_snapshot"
                             Attribution::Additive,
                             Attribution::NonAttributable,
                         ],
-                        ScopeSemantics::SemiJoined {
-                            dimensions: vec!["underlying_ref".into()],
-                        },
+                        pnl_semantics,
                     ),
                     TestColumn::F64(vec![Some(7.0), Some(7.0), None]),
                 ),
@@ -385,6 +397,19 @@ name = "missing_in_snapshot"
             vec!["underlying_ref".to_string()]
         );
         assert!(plan.columns[2].semi_joined.is_empty());
+    }
+
+    /// A dropped selection (market-data spec §3.4) paints the same marker
+    /// a semi-join does: Part 1 has no separate style for it, so
+    /// `NotApplicable`'s dimensions must reach `semi_joined` exactly the
+    /// way `SemiJoined`'s do.
+    #[test]
+    fn not_applicable_paints_the_same_marker_as_semi_joined() {
+        let snap = snapshot_with_pnl_semantics(ScopeSemantics::NotApplicable {
+            dimensions: vec!["book".into()],
+        });
+        let plan = ColumnPlan::build(&view(), snap.grouping(), &snap);
+        assert_eq!(plan.columns[3].semi_joined, vec!["book".to_string()]);
     }
 
     #[test]

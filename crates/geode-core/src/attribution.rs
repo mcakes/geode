@@ -47,6 +47,11 @@ pub enum ScopeSemantics {
     /// Some predicate names a finer column, applied as a membership test:
     /// "positions that have SPX risk", not "the SPX share".
     SemiJoined { dimensions: Vec<String> },
+    /// Some scope selection named a dimension this dataset does not have
+    /// at all, so it was dropped for this query rather than applied
+    /// (market-data spec §3.4). Weaker than `SemiJoined`: a semi-join
+    /// still narrowed the rows, a dropped selection did not.
+    NotApplicable { dimensions: Vec<String> },
 }
 
 impl ScopeSemantics {
@@ -57,16 +62,35 @@ impl ScopeSemantics {
     /// The weaker of two, for a value computed from both: semi-joined if
     /// either input was, over the union of the dimensions responsible.
     /// "Positions that have SPX risk" does not become direct by being
-    /// divided by something that is.
+    /// divided by something that is. `NotApplicable` is weaker still — a
+    /// dropped selection narrowed nothing at all — and wins over both,
+    /// again unioning the dimensions responsible, this time in
+    /// encounter order (own first, then the other side's not already
+    /// present) rather than sorted: `NotApplicable`'s dimensions are a
+    /// provenance trail for a diagnostic, not a set a UI renders chips
+    /// from the way `SemiJoined`'s are.
     pub fn meet(&self, other: &ScopeSemantics) -> ScopeSemantics {
         match (self, other) {
             (ScopeSemantics::Direct, ScopeSemantics::Direct) => ScopeSemantics::Direct,
+            (ScopeSemantics::NotApplicable { .. }, _)
+            | (_, ScopeSemantics::NotApplicable { .. }) => {
+                let mut dimensions: Vec<String> = self.dimensions().to_vec();
+                for d in other.dimensions() {
+                    if !dimensions.contains(d) {
+                        dimensions.push(d.clone());
+                    }
+                }
+                ScopeSemantics::NotApplicable { dimensions }
+            }
             _ => {
                 let mut dimensions: Vec<String> = [self, other]
                     .iter()
                     .filter_map(|s| match s {
                         ScopeSemantics::SemiJoined { dimensions } => Some(dimensions.clone()),
                         ScopeSemantics::Direct => None,
+                        ScopeSemantics::NotApplicable { .. } => {
+                            unreachable!("handled by the arm above")
+                        }
                     })
                     .flatten()
                     .collect();
@@ -80,7 +104,8 @@ impl ScopeSemantics {
     pub fn dimensions(&self) -> &[String] {
         match self {
             ScopeSemantics::Direct => &[],
-            ScopeSemantics::SemiJoined { dimensions } => dimensions,
+            ScopeSemantics::SemiJoined { dimensions }
+            | ScopeSemantics::NotApplicable { dimensions } => dimensions,
         }
     }
 }
@@ -378,6 +403,30 @@ grain = "underlying"
             attribution(Grain::Position, &["book", "position_ref"]),
             Attribution::Additive
         );
+    }
+
+    #[test]
+    fn not_applicable_is_weaker_than_semi_joined_and_unions_dimensions() {
+        let na = ScopeSemantics::NotApplicable {
+            dimensions: vec!["book".into()],
+        };
+        let sj = ScopeSemantics::SemiJoined {
+            dimensions: vec!["underlying_ref".into()],
+        };
+        assert_eq!(
+            na.clone().meet(&sj),
+            ScopeSemantics::NotApplicable {
+                dimensions: vec!["book".into(), "underlying_ref".into()]
+            }
+        );
+        assert_eq!(
+            sj.meet(&na),
+            ScopeSemantics::NotApplicable {
+                dimensions: vec!["underlying_ref".into(), "book".into()]
+            }
+        );
+        assert_eq!(ScopeSemantics::Direct.meet(&na), na);
+        assert!(!na.is_direct());
     }
 
     #[test]

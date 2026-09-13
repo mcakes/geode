@@ -4,12 +4,17 @@
 //!
 //! Retention is per partition: "keep 50 generations" means each (batch, book)
 //! keeps its own 50, so a busy book cannot evict a quiet one's history.
+//!
+//! What a sweep is handed is a [`TablePair`], not a grain: the measure
+//! family's pairs are its grains', the document family's is its one
+//! document pair (market-data spec §4.1), and neither family needs a
+//! sweep of its own.
 
 use crate::store::StoreError;
-use crate::store::ddl::{TableKind, table_name};
+use crate::store::ddl::{TableKind, TablePair, table_pairs};
 use chrono::{DateTime, Duration, Utc};
 use duckdb::Connection;
-use geode_core::schema::{DatasetSpec, Grain};
+use geode_core::schema::DatasetSpec;
 
 #[derive(Debug, Clone, Default)]
 pub struct RetentionPolicy {
@@ -40,18 +45,18 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
 }
 
 /// The `generations` reconciliation delete: a row survives only if at
-/// least one of `grains`' archive **or** live tables still holds it.
+/// least one of `pairs`' archive **or** live tables still holds it.
 ///
-/// `grains` here is deliberately whatever `reconcile_generations` passes
-/// -- **always** `ds.grains()`, never the subset `sweep`'s caller chose to
-/// evict (review round 1, MAJ-2). A generation this sweep evicted from
-/// one grain's archive can still be present at another (a cash-only book
-/// has no underlying rows, so its position-grain history outlives
-/// anything recorded at the underlying grain, and the reverse is just as
-/// real: a grain published less often can hold a generation long after a
-/// busier grain has aged it out). Reconciling against the swept subset
-/// instead of the whole dataset would delete a summary row for a
-/// generation that a grain outside that subset still has, and time
+/// `pairs` here is deliberately whatever `reconcile_generations` passes
+/// -- **always** `ddl::table_pairs(ds)`, never the subset `sweep`'s
+/// caller chose to evict (review round 1, MAJ-2). A generation this sweep
+/// evicted from one pair's archive can still be present in another (a
+/// cash-only book has no underlying rows, so its position-grain history
+/// outlives anything recorded at the underlying grain, and the reverse is
+/// just as real: a grain published less often can hold a generation long
+/// after a busier grain has aged it out). Reconciling against the swept
+/// subset instead of the whole dataset would delete a summary row for a
+/// generation that a table outside that subset still has, and time
 /// travel to it would find data with no summary entry to resolve
 /// through -- exactly the corruption the harness's own `generations:
 /// reconciliation covers only the first grain` entry demonstrates.
@@ -68,16 +73,11 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
 /// This scans every named table, same as the eviction above already
 /// does -- background work on the sweeper's own cadence, never paid by a
 /// requery (`query::as_of::resolve_generations` reads only the summary).
-fn generations_reconcile_sql(dataset: &str, grains: &[Grain]) -> String {
+fn generations_reconcile_sql(dataset: &str, pairs: &[TablePair]) -> String {
     let escaped = dataset.replace('\'', "''");
-    let checks: Vec<String> = grains
+    let checks: Vec<String> = pairs
         .iter()
-        .flat_map(|g| {
-            [
-                table_name(dataset, *g, TableKind::Archive),
-                table_name(dataset, *g, TableKind::Live),
-            ]
-        })
+        .flat_map(|p| [p.of(TableKind::Archive), p.of(TableKind::Live)])
         .map(|t| {
             format!(
                 "not exists (
@@ -98,35 +98,42 @@ fn generations_reconcile_sql(dataset: &str, grains: &[Grain]) -> String {
 }
 
 /// Reconcile the `generations` summary against **every** table `ds` has
-/// (`ds.grains()`) -- never the subset of grains a particular `sweep`
-/// call happened to evict. Review round 1 (MAJ-2): the reconciliation
-/// used to trust `sweep`'s own `grains` parameter, which a caller
-/// bounding a large sweep's transaction to one grain at a time (an
-/// obvious thing to do) would silently narrow, deleting summary rows for
-/// generations that a grain outside the call's own list still holds. The
+/// (`ddl::table_pairs`: each grain's pair for the measure family, the one
+/// document pair for the document family) -- never the subset a
+/// particular `sweep` call happened to evict. Review round 1 (MAJ-2): the
+/// reconciliation used to trust `sweep`'s own table list, which a caller
+/// bounding a large sweep's transaction to one pair at a time (an obvious
+/// thing to do) would silently narrow, deleting summary rows for
+/// generations that a table outside the call's own list still holds. The
 /// property now belongs to this function, not to what any caller
 /// remembers to pass.
 ///
-/// A no-op for a dataset with no grains at all (nothing to check
-/// against, so nothing to delete).
+/// A no-op for a dataset that owns no table at all -- a measure dataset
+/// declaring no grain (nothing to check against, so nothing to delete).
+/// A document dataset always owns its one pair.
 fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
-    let grains = ds.grains();
-    if grains.is_empty() {
+    let pairs = table_pairs(ds);
+    if pairs.is_empty() {
         return Ok(());
     }
-    let sql = generations_reconcile_sql(&ds.name, &grains);
+    let sql = generations_reconcile_sql(&ds.name, &pairs);
     conn.execute_batch(&sql).map_err(sql_err(&sql))
 }
 
-/// Evict old generations, per `RetentionPolicy`, from each of `grains`'
+/// Evict old generations, per `RetentionPolicy`, from each of `pairs`'
 /// archive tables -- bounded to what the caller is sweeping in this call
-/// (bounding a large sweep's transaction by grain is a legitimate reason
-/// to call this once per grain) -- then reconcile the `generations`
-/// summary against **every** grain `ds` declares, regardless of `grains`
+/// (bounding a large sweep's transaction pair by pair is a legitimate
+/// reason to call this once per pair) -- then reconcile the `generations`
+/// summary against **every** pair `ds` owns, regardless of `pairs`
 /// (`reconcile_generations`; review round 1, MAJ-2 -- the reconciliation
 /// is not the caller's to narrow).
 ///
-/// One transaction: `begin`, the per-grain eviction, the reconciliation,
+/// A pair rather than a `Grain`, so one sweep serves both families: the
+/// measure family's caller passes a grain's pair (or `ddl::table_pairs`
+/// for all of them), the document family's the one document pair. A
+/// document dataset has no grain to name at all.
+///
+/// One transaction: `begin`, the per-pair eviction, the reconciliation,
 /// `commit` on success, `rollback` on any error -- the counts and
 /// `min(source_time)` reads inside see the transaction's own deletes.
 /// Three consequences worth knowing before this is wired into a
@@ -135,15 +142,15 @@ fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), Stor
 /// 1. Calling `sweep` on a connection already inside a transaction now
 ///    fails with a nested `begin` where it used to work. No caller does
 ///    this today.
-/// 2. Every grain `ds` declares needs its **live** table to exist, not
-///    just its archive -- the reconciliation names both, for every
-///    grain, regardless of which grains this call actually swept. That
-///    is why this file's own `fixture()` grew a live table and an
+/// 2. Every pair `ds` owns needs its **live** table to exist, not just
+///    its archive -- the reconciliation names both, for every pair,
+///    regardless of which pairs this call actually swept. That is why
+///    this file's own `fixture()` grew a live table and an
 ///    `ensure_tables()` call.
 /// 3. The whole call is one transaction on the single writer connection
 ///    ingest publishes through (`store::mod`). A large sweep now blocks
-///    every publish for its duration, where the old per-grain
-///    auto-commits let a publish interleave between grains. Spec §7's
+///    every publish for its duration, where the old per-pair
+///    auto-commits let a publish interleave between pairs. Spec §7's
 ///    "ingest never drops a foreground frame" makes this worth a
 ///    decision when the sweeper is wired -- and the reconciliation does
 ///    not actually need the evictions in its own transaction, only their
@@ -152,12 +159,12 @@ fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), Stor
 pub fn sweep(
     conn: &Connection,
     ds: &DatasetSpec,
-    grains: &[Grain],
+    pairs: &[TablePair],
     policy: &RetentionPolicy,
     now: DateTime<Utc>,
 ) -> Result<SweepReport, StoreError> {
     conn.execute_batch("begin;").map_err(sql_err("begin"))?;
-    match sweep_in_transaction(conn, ds, grains, policy, now) {
+    match sweep_in_transaction(conn, ds, pairs, policy, now) {
         Ok(report) => {
             conn.execute_batch("commit;").map_err(sql_err("commit"))?;
             Ok(report)
@@ -170,19 +177,18 @@ pub fn sweep(
 }
 
 /// The body of `sweep`, run inside the transaction `sweep` owns: eviction
-/// per grain, then `reconcile_generations` once every grain has been
-/// swept.
+/// per pair, then `reconcile_generations` once every pair has been swept.
 fn sweep_in_transaction(
     conn: &Connection,
     ds: &DatasetSpec,
-    grains: &[Grain],
+    pairs: &[TablePair],
     policy: &RetentionPolicy,
     now: DateTime<Utc>,
 ) -> Result<SweepReport, StoreError> {
     let mut report = SweepReport::default();
 
-    for grain in grains {
-        let archive = table_name(&ds.name, *grain, TableKind::Archive);
+    for pair in pairs {
+        let archive = pair.of(TableKind::Archive);
 
         if !policy.is_empty() {
             let before: i64 = {
@@ -270,7 +276,17 @@ mod tests {
     use crate::store::ddl::{assert_generations_match_tables, rebuild_generations};
     use chrono::{DateTime, Datelike, Timelike, Utc};
     use geode_core::config::{LayerDoc, merge_docs};
-    use geode_core::schema::SchemaSpec;
+    use geode_core::schema::{Grain, SchemaSpec};
+
+    /// `risk_snapshot`'s pairs for the grains a test means to sweep. These
+    /// tests name grains because the eviction they check is a measure
+    /// dataset's; `sweep` itself no longer knows what a grain is.
+    fn pairs(grains: &[Grain]) -> Vec<TablePair> {
+        grains
+            .iter()
+            .map(|g| TablePair::for_grain("risk_snapshot", *g))
+            .collect()
+    }
 
     /// Terse RFC 3339 literal for tests.
     fn ts(s: &str) -> DateTime<Utc> {
@@ -393,7 +409,7 @@ grain = "position"
         let report = sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &policy,
             ts("2026-08-31T00:00:00Z"),
         )
@@ -418,7 +434,7 @@ grain = "position"
         sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &policy,
             ts("2026-08-30T10:00:00Z"),
         )
@@ -438,7 +454,7 @@ grain = "position"
         sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &policy,
             ts("2026-08-30T10:00:00Z"),
         )
@@ -459,7 +475,7 @@ grain = "position"
         let report = sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &policy,
             ts("2026-08-31T00:00:00Z"),
         )
@@ -502,7 +518,7 @@ grain = "position"
         let report = sweep(
             store.writer(),
             &position_and_underlying_dataset(),
-            &[Grain::Position, Grain::Underlying],
+            &pairs(&[Grain::Position, Grain::Underlying]),
             &RetentionPolicy::default(),
             ts("2026-08-31T00:00:00Z"),
         )
@@ -524,7 +540,7 @@ grain = "position"
         let report = sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &RetentionPolicy::default(),
             ts("2026-08-31T00:00:00Z"),
         )
@@ -539,7 +555,7 @@ grain = "position"
         let report = sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &RetentionPolicy {
                 keep_generations: Some(3),
                 keep_age: None,
@@ -568,7 +584,7 @@ grain = "position"
         let report = sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &RetentionPolicy {
                 keep_generations: Some(3),
                 keep_age: None,
@@ -607,7 +623,7 @@ grain = "position"
             sweep(
                 store.writer(),
                 &position_only_dataset(),
-                &[Grain::Position],
+                &pairs(&[Grain::Position]),
                 &RetentionPolicy {
                     keep_generations: Some(1),
                     keep_age: None,
@@ -644,7 +660,7 @@ grain = "position"
         sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &RetentionPolicy {
                 keep_generations: Some(1),
                 keep_age: None,
@@ -703,7 +719,7 @@ grain = "position"
         sweep(
             store.writer(),
             &position_and_underlying_dataset(),
-            &[Grain::Position, Grain::Underlying],
+            &pairs(&[Grain::Position, Grain::Underlying]),
             &RetentionPolicy {
                 keep_generations: Some(1),
                 keep_age: None,
@@ -782,7 +798,7 @@ grain = "position"
         sweep(
             store.writer(),
             &position_and_underlying_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &RetentionPolicy {
                 keep_generations: Some(1),
                 keep_age: None,
@@ -821,7 +837,7 @@ grain = "position"
         sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &RetentionPolicy::default(),
             ts("2026-08-31T00:00:00Z"),
         )
@@ -854,7 +870,7 @@ grain = "position"
         let err = sweep(
             store.writer(),
             &position_and_underlying_dataset(),
-            &[Grain::Position, Grain::Underlying],
+            &pairs(&[Grain::Position, Grain::Underlying]),
             &RetentionPolicy {
                 keep_generations: Some(1),
                 keep_age: None,
@@ -888,7 +904,7 @@ grain = "position"
         sweep(
             store.writer(),
             &position_only_dataset(),
-            &[Grain::Position],
+            &pairs(&[Grain::Position]),
             &RetentionPolicy {
                 keep_generations: Some(1),
                 keep_age: None,

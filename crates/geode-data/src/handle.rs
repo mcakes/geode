@@ -8,7 +8,9 @@
 use crate::service::{DataEvent, DataService, DataServiceConfig, EventSink, QueryParams};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::query::{CatalogParams, DistinctOutcome, DistinctParams, QueryKey, QueryOutcome};
+use geode_core::query::{
+    CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey, QueryOutcome,
+};
 use geode_core::view::ViewSpec;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -25,6 +27,9 @@ pub enum Request {
     Query(QueryParams),
     /// The picker's distinct-values query (spec §3.4).
     Distinct(DistinctParams),
+    /// The document request (market-data spec §7): one document by key,
+    /// live or as-of — see `DataService::document`.
+    Document(DocumentParams),
     /// The diagnostics tile's "what does the database hold" request
     /// (Phase 4b §4.5). Answered synchronously on the service thread,
     /// not through the query pool — see `DataService::catalog`.
@@ -124,6 +129,13 @@ impl DataHandle {
     /// `DataEvent::Distinct`, keyed and tagged as asked.
     pub fn distinct(&self, params: DistinctParams) -> bool {
         self.send(Request::Distinct(params))
+    }
+
+    /// Queue the document request (market-data spec §7). `false` means it
+    /// was not queued; the result, when it comes, arrives on the sink as
+    /// an ordinary `DataEvent::Query`, keyed and tagged as asked.
+    pub fn document(&self, params: DocumentParams) -> bool {
+        self.send(Request::Document(params))
     }
 
     /// Queue the diagnostics tile's catalog request (spec §4.5). `false`
@@ -244,6 +256,22 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
                     }));
                 }
             }
+            Request::Document(params) => {
+                if let Err(e) = service.document(&params) {
+                    // Same rule as `Query`: a compile-time failure is
+                    // this key's outcome, not a lost request (§10.1).
+                    // `Document` shares `Query`'s outcome shape (there is
+                    // no `DataEvent::Document`), so a failed compile goes
+                    // out as `DataEvent::Query` exactly as `Request::
+                    // Query`'s own error arm does.
+                    sink(DataEvent::Query(QueryOutcome {
+                        key: params.key,
+                        tag: params.tag,
+                        snapshot: Err(e.to_string()),
+                        submitted: params.submitted,
+                    }));
+                }
+            }
             Request::Catalog(params) => {
                 sink(DataEvent::Catalog(service.catalog(&params)));
             }
@@ -294,6 +322,26 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             Request::Cancel { key: QueryKey(5) }
         ));
+    }
+
+    #[test]
+    fn document_requests_are_forwarded_with_their_key() {
+        let (handle, rx) = DataHandle::for_tests();
+        assert!(handle.document(DocumentParams {
+            key: QueryKey(5),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        }));
+        match rx.recv().unwrap() {
+            Request::Document(p) => assert_eq!(
+                (p.key, p.document_key.as_slice()),
+                (QueryKey(5), &["SPX.Z".to_string()][..])
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     fn distinct_params(key: u64, column: &str) -> DistinctParams {
@@ -422,6 +470,152 @@ mod tests {
             1,
             "the refused post-shutdown request is counted"
         );
+    }
+
+    const CVI: &str = r#"
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
+"#;
+
+    fn cvi() -> geode_core::schema::DatasetSpec {
+        let doc = geode_core::config::merge_docs(
+            "datasets",
+            &[geode_core::config::LayerDoc::builtin("datasets", CVI).unwrap()],
+        );
+        let (schema, diags) = geode_core::schema::SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("cvi_params").unwrap().clone()
+    }
+
+    fn doc_ts(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn cvi_doc(key: &str, params: [f64; 6]) -> geode_core::document::DocumentRows {
+        use geode_core::document::{Column, DocumentRows, Value};
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        DocumentRows {
+            key: vec![key.into()],
+            attributes: vec![
+                ("anchor_date".into(), Value::Date(d("2026-09-12"))),
+                ("spot_ref".into(), Value::F64(7650.0)),
+            ],
+            axes: vec![
+                (
+                    "term".into(),
+                    Column::Date(vec![
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]),
+                ),
+                (
+                    "node".into(),
+                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
+                ),
+            ],
+            values: vec![("param".into(), Column::F64(params.to_vec()))],
+        }
+    }
+
+    #[test]
+    fn a_document_compile_error_is_that_keys_outcome_on_the_real_service() {
+        // Mirrors `the_real_service_answers_through_the_sink_and_reports_
+        // open_failures`'s shape for `Request::Query`, for `Request::
+        // Document`: a real service thread, a good request and a
+        // compile-time failure, both addressed to the key that asked —
+        // the failure arriving as `DataEvent::Query` since there is no
+        // `DataEvent::Document`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = cvi();
+        store.apply_schema(&ds).unwrap();
+        crate::store::catalog::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+                source_time: doc_ts("2026-09-12T14:00:00Z"),
+                received_at: doc_ts("2026-09-12T14:00:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+        drop(store);
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        let (tx, rx) = channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let h = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.path().join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: geode_core::dimensions::DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+            },
+            sink,
+        );
+        assert!(h.document(DocumentParams {
+            key: QueryKey(9),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        }));
+        assert!(h.document(DocumentParams {
+            key: QueryKey(10),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "nonesuch".into(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        }));
+        let mut got = std::collections::BTreeMap::new();
+        while got.len() < 2 {
+            if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                got.insert(o.key, o.snapshot.is_ok());
+            }
+        }
+        assert_eq!(got.get(&QueryKey(9)), Some(&true));
+        assert_eq!(
+            got.get(&QueryKey(10)),
+            Some(&false),
+            "unknown dataset is an Err outcome"
+        );
+        h.shutdown();
     }
 
     #[test]

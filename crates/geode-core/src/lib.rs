@@ -5,6 +5,7 @@ pub mod attribution;
 pub mod colour;
 pub mod config;
 pub mod dimensions;
+pub mod document;
 pub mod groupings;
 pub mod health;
 pub mod log;

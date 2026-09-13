@@ -364,6 +364,47 @@ impl DictionaryCache {
     }
 }
 
+/// One dimension selection as a predicate on the column it really reads,
+/// with its values bound as a single delimiter-joined varchar and split
+/// back by `string_split` in SQL — so the statement text, and therefore
+/// the prepared plan, is the same whatever the selection's size.
+///
+/// `None` means "this selection can match nothing": a selection on a
+/// derived dimension names *derived* values while the stored column holds
+/// source ones, so it has to be translated back through the map, and a
+/// derived value the map does not produce leaves no source value at all.
+/// Binding the derived value against the source column would compile
+/// cleanly and silently match nothing, which is the worst way for this to
+/// fail (spec §6.8) — the caller turns `None` into an explicit "selects
+/// nothing" instead.
+///
+/// `pub(crate)` because `compile_distinct`'s document arm binds the very
+/// same selections without a grain to route them through (a document
+/// dataset has none, market-data spec §3.3): the derived translation and
+/// the binding form are spelled here once so the two paths cannot drift.
+pub(crate) fn selection_clause(
+    sel: &geode_core::scope::DimensionSelection,
+    dims: &DerivedDimensions,
+) -> Option<(String, Vec<Value>)> {
+    let base = dims.base_column(&sel.column).to_string();
+    let values: Vec<String> = match dims.get(&sel.column) {
+        None => sel.values.clone(),
+        Some(d) => d
+            .values
+            .iter()
+            .filter(|(_, derived)| sel.values.contains(derived))
+            .map(|(source, _)| source.clone())
+            .collect(),
+    };
+    if values.is_empty() {
+        return None;
+    }
+    Some((
+        format!("\"{base}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))"),
+        vec![Value::Text(values.join(SELECTION_DELIMITER))],
+    ))
+}
+
 /// Top-level `and` terms, each routed on its own so a scope mixing
 /// grains — `underlying_ref = 'SPX' and strike > 100` — compiles.
 fn conjuncts(expr: &Expr) -> Vec<&Expr> {
@@ -496,31 +537,11 @@ pub(crate) fn compile_scope_cached(
         if sel.values.is_empty() {
             continue;
         }
-        let base = dims.base_column(&sel.column).to_string();
-
-        // A selection on a derived dimension names *derived* values, but
-        // the stored column holds source values — so the selection has to
-        // be translated back through the map. Binding the derived values
-        // against the source column compiles cleanly and silently matches
-        // nothing, which is the worst way for this to fail (spec §6.8).
-        let values: Vec<String> = match dims.get(&sel.column) {
-            None => sel.values.clone(),
-            Some(d) => d
-                .values
-                .iter()
-                .filter(|(_, derived)| sel.values.contains(derived))
-                .map(|(source, _)| source.clone())
-                .collect(),
-        };
-        if values.is_empty() {
+        let Some(clause) = selection_clause(sel, dims) else {
             // Selected a derived value the map does not produce: nothing
             // can match, and saying so beats an empty `in ()`.
             return Ok(nothing());
-        }
-        let clause = (
-            format!("\"{base}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))"),
-            vec![Value::Text(values.join(SELECTION_DELIMITER))],
-        );
+        };
         place(&mut r, ds, dims, grain, &[sel.column.as_str()], clause)?;
     }
 
@@ -1125,7 +1146,7 @@ grain = "position"
             textual: false,
             categorical: false,
             role: geode_core::schema::ColumnRole::Attribute {
-                grain: Grain::Instrument,
+                grain: Some(Grain::Instrument),
             },
         });
         let (dir, store) = store();

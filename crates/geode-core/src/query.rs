@@ -88,6 +88,29 @@ pub struct CatalogParams {
     pub as_of: AsOf,
 }
 
+/// A document request (market-data spec §7): one document, named by its
+/// full key, live or as-of. Unlike [`QueryParams`] there is no view, no
+/// grouping, and no scope — the key names the one row set a document
+/// dataset's key identifies, and `compile_document`
+/// (`geode_data::query::document`) is the whole compiler for it.
+///
+/// `PartialEq` rather than `Eq`, matching `QueryParams`/`DistinctParams`:
+/// `AsOf` carries a `DateTime<Utc>`, not a float, so this could derive
+/// `Eq` too, but there is no caller that needs it and matching its
+/// siblings' bound keeps the three requests looking alike.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentParams {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub submitted: Instant,
+    pub dataset: String,
+    /// In the dataset's declared `key` order (`DatasetSpec::key`) — the
+    /// same order `geode_core::document::join_key` expects, since a
+    /// document's storage identity (`batch`) is exactly that join.
+    pub document_key: Vec<String>,
+    pub as_of: AsOf,
+}
+
 /// The catalog request's result, addressed to the key that asked.
 #[derive(Debug)]
 pub struct CatalogOutcome {

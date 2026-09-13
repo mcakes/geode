@@ -10,13 +10,50 @@ pub use grain::Grain;
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 
+/// Which of the two dataset families a dataset belongs to (market-data
+/// spec §3; roadmap ruling 7). The measure family is the grain
+/// vocabulary as it always was; the document family is keyed by a
+/// declared identity plus axes and has no grain at all. The two are
+/// side by side rather than one declared-key model because attribution
+/// rests on the grains forming a prefix chain, and nothing a document
+/// dataset does needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Family {
+    #[default]
+    Measures,
+    Document,
+}
+
+impl Family {
+    pub fn parse(s: &str) -> Option<Family> {
+        match s {
+            "measures" => Some(Family::Measures),
+            "document" => Some(Family::Document),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DatasetSpec {
     pub name: String,
     pub columns: Vec<ColumnSpec>,
+    pub family: Family,
+    /// Document family: the identity key, in declared order. One document
+    /// per distinct key tuple; the batch a publish replaces (spec §4.1).
+    /// Empty for the measure family.
+    pub key: Vec<String>,
+    /// Document family: the row identity within a document, in declared
+    /// order — also the order a document request sorts by (spec §7).
+    /// Empty for the measure family.
+    pub axes: Vec<String>,
 }
 
 impl DatasetSpec {
+    pub fn is_document(&self) -> bool {
+        self.family == Family::Document
+    }
+
     pub fn column(&self, name: &str) -> Option<&ColumnSpec> {
         self.columns.iter().find(|c| c.name == name)
     }
@@ -79,22 +116,55 @@ impl DatasetSpec {
         out
     }
 
-    /// Every declared column a view or a grouping slot may group by, in
-    /// schema order: the ones some *declared* grain ([`Self::grains`] —
-    /// the grains a measure or attribute gives a table to) [`Self::carries`]
-    /// as a dimension. That is a grain's key columns and every carried
-    /// dimension, categorical or not; never an attribute or a measure. A
-    /// dataset declaring no grain has no table to scan and offers nothing.
-    /// This is the query compiler's own rule (`carries_all` over
-    /// `finest_carrying`), and the one place it is spelled out — the
-    /// Groupings dialog and the blotter's `:group` completion both read it.
+    /// Every declared column a view or a grouping slot may group by. For
+    /// measure datasets, in schema order: the ones some *declared* grain
+    /// ([`Self::grains`] — the grains a measure or attribute gives a table
+    /// to) [`Self::carries`] as a dimension. That is a grain's key columns
+    /// and every carried dimension, categorical or not; never an attribute
+    /// or a measure. A measure dataset declaring no grain has no table to
+    /// scan and offers nothing. For document datasets, every Dimension
+    /// column in schema order; axes are row identity within a document
+    /// (market-data spec §3.3) and never a frame grouping key. This is the
+    /// query compiler's own rule (`carries_all` over `finest_carrying`),
+    /// and the one place it is spelled out — the Groupings dialog and the
+    /// blotter's `:group` completion both read it.
     pub fn groupable_columns(&self) -> Vec<&str> {
+        if self.is_document() {
+            // No grain carries anything here; the identity dimensions are
+            // the whole grouping vocabulary and an axis is row identity
+            // *within* a document, never something the frame groups by
+            // (market-data spec §3.3).
+            return self
+                .columns
+                .iter()
+                .filter(|c| matches!(c.role, ColumnRole::Dimension { .. }))
+                .map(|c| c.name.as_str())
+                .collect();
+        }
         let grains = self.grains();
         self.columns
             .iter()
             .filter(|c| grains.iter().any(|g| self.carries(*g, &c.name)))
             .map(|c| c.name.as_str())
             .collect()
+    }
+
+    /// The document family's storage and projection order (market-data
+    /// spec §3.1, §7): key in declared order, axes in declared order,
+    /// then values and attributes in schema order. `ddl::
+    /// create_document_table_sql` and the document request both read
+    /// this, so the two can never disagree about column positions.
+    pub fn document_columns(&self) -> Vec<&ColumnSpec> {
+        let mut out: Vec<&ColumnSpec> = Vec::with_capacity(self.columns.len());
+        out.extend(self.key.iter().filter_map(|k| self.column(k)));
+        out.extend(self.axes.iter().filter_map(|a| self.column(a)));
+        out.extend(self.columns.iter().filter(|c| c.role == ColumnRole::Value));
+        out.extend(
+            self.columns
+                .iter()
+                .filter(|c| matches!(c.role, ColumnRole::Attribute { grain: None })),
+        );
+        out
     }
 
     /// Carried dimensions this grain's table stores as payload columns.
@@ -130,37 +200,130 @@ impl SchemaSpec {
         let mut out = SchemaSpec::default();
         let mut diags = Vec::new();
         for (ds_name, ds_value) in &doc.value {
+            let family = match ds_value.get("family").and_then(|v| v.as_str()) {
+                None => Family::Measures,
+                Some(s) => match Family::parse(s) {
+                    Some(f) => f,
+                    None => {
+                        diags.push(Diagnostic {
+                            severity: Severity::Error,
+                            layer: None,
+                            file: None,
+                            message: format!(
+                                "dataset '{ds_name}': unknown family '{s}'; dataset dropped"
+                            ),
+                            path: Some(format!("datasets.{ds_name}.family")),
+                        });
+                        continue;
+                    }
+                },
+            };
+            let string_list =
+                |field: &str, diags: &mut Vec<Diagnostic>| -> Result<Vec<String>, ()> {
+                    match ds_value.get(field) {
+                        None => Ok(Vec::new()),
+                        Some(v) => v
+                            .as_array()
+                            .and_then(|a| {
+                                a.iter()
+                                    .map(|x| x.as_str().map(str::to_string))
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .ok_or_else(|| {
+                                diags.push(Diagnostic {
+                                    severity: Severity::Error,
+                                    layer: None,
+                                    file: None,
+                                    message: format!(
+                                        "dataset '{ds_name}': '{field}' must be an array of \
+                                     column names; dataset dropped"
+                                    ),
+                                    path: Some(format!("datasets.{ds_name}.{field}")),
+                                })
+                            }),
+                    }
+                };
+            let (Ok(mut key), Ok(mut axes)) = (
+                string_list("key", &mut diags),
+                string_list("axes", &mut diags),
+            ) else {
+                continue;
+            };
+            if family == Family::Measures {
+                for (field, list) in [("key", &mut key), ("axes", &mut axes)] {
+                    if !list.is_empty() {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            layer: None,
+                            file: None,
+                            message: format!(
+                                "dataset '{ds_name}': '{field}' is ignored on the measure family"
+                            ),
+                            path: Some(format!("datasets.{ds_name}.{field}")),
+                        });
+                        list.clear();
+                    }
+                }
+            }
             let mut dataset = DatasetSpec {
                 name: ds_name.clone(),
                 columns: Vec::new(),
+                family,
+                key,
+                axes,
             };
-            let Some(cols) = ds_value.get("columns").and_then(|v| v.as_table()) else {
-                diags.push(note(
+            // Both paths fall through to `validate_dataset` and the guard
+            // below. An early `push`-and-`continue` here is what let a
+            // document dataset with no `[columns]` table reach the schema
+            // never having met `validate_document` at all, contradicting
+            // the guard's own comment: a columnless document dataset has
+            // no key column, no axis column and no value, so it can be
+            // neither stored nor queried, and it must be dropped by the
+            // same rule that drops a refused one.
+            match ds_value.get("columns").and_then(|v| v.as_table()) {
+                None => diags.push(note(
                     format!("datasets.{ds_name}"),
                     format!("dataset '{ds_name}': no [columns] table"),
-                ));
-                out.datasets.push(dataset);
-                continue;
-            };
-            for (col_name, col_value) in cols {
-                match parse_column(ds_name, col_name, col_value) {
-                    Ok((spec, warning)) => {
-                        dataset.columns.push(spec);
-                        diags.extend(warning);
+                )),
+                Some(cols) => {
+                    for (col_name, col_value) in cols {
+                        match parse_column(ds_name, family, col_name, col_value) {
+                            Ok((spec, warning)) => {
+                                dataset.columns.push(spec);
+                                diags.extend(warning);
+                            }
+                            Err(d) => diags.push(d),
+                        }
                     }
-                    Err(d) => diags.push(d),
                 }
             }
             diags.extend(validate_dataset(&mut dataset));
+            if dataset.is_document() && dataset.columns.is_empty() {
+                // `validate_document` empties a dataset it refused, and a
+                // dataset that declared no `[columns]` table arrives here
+                // empty already — never push a document dataset with no
+                // columns, it could not be stored or queried. A measure
+                // dataset with no columns is still pushed: it declares no
+                // grain, so it owns no table and nothing reads it, which
+                // is inert rather than broken.
+                continue;
+            }
             out.datasets.push(dataset);
         }
         (out, diags)
     }
 }
 
-/// Column names the storage layer adds to every table (spec §4.2, §4.3).
-/// A dataset declaring one of these would generate DDL with a duplicate
-/// column and fail at table creation with a raw engine error.
+/// Column names the storage layer adds to every table of **both** families
+/// (spec §4.2, §4.3). A dataset declaring one of these would generate DDL
+/// with a duplicate column and fail at table creation with a raw engine
+/// error.
+///
+/// Not the whole reserved set for a document dataset: its table carries a
+/// `book` column too (`ddl::create_document_table_sql`, market-data spec
+/// §4.5), because no grain key supplies one there. `book` cannot join this
+/// list — it is a legal grain key column on the measure side — so that one
+/// name is refused by `validate_document` instead, per family.
 pub const RESERVED_COLUMNS: &[&str] = &["batch", "source_file_id", "gen_id", "source_time"];
 
 /// Checks that can only be made once every column is parsed. Each failure
@@ -185,6 +348,40 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
             ));
         }
     }
+
+    if ds.is_document() {
+        diags.extend(validate_document(ds));
+        return diags;
+    }
+
+    // Document vocabulary on a measure dataset (market-data spec §3.2):
+    // refused per column, never guessed at. The document family has the
+    // mirror rule in `validate_document`.
+    let foreign: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.role,
+                ColumnRole::Axis | ColumnRole::Value | ColumnRole::Attribute { grain: None }
+            )
+        })
+        .map(|c| c.name.clone())
+        .collect();
+    for name in &foreign {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: format!(
+                "dataset '{}' column '{name}': 'axis', 'value' and a grainless 'attribute' belong to the \
+                 document family; this is a measure family dataset — column dropped",
+                ds.name
+            ),
+            path: Some(format!("datasets.{}.columns.{name}.role", ds.name)),
+        });
+    }
+    ds.columns.retain(|c| !foreign.contains(&c.name));
 
     // Every grain in use groups by its key columns, so each must be
     // declared. Undeclared, the generated SQL references a column the
@@ -317,6 +514,284 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     diags
 }
 
+/// The document family's load-time rules (market-data spec §3.2). Every
+/// failure is a diagnostic with `path` set. A document dataset has no
+/// grain, so none of `validate_dataset`'s grain-key checks apply — this
+/// validates the key/axes/value shape instead and returns in place of
+/// them.
+fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let err = |message: String, path: String| Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message,
+        path: Some(path),
+    };
+    let name = ds.name.clone();
+
+    // Measure vocabulary is refused per column, never reinterpreted. The
+    // mirror rule lives in `validate_dataset`'s measure-family body.
+    let foreign: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.role,
+                ColumnRole::Key
+                    | ColumnRole::Measure { .. }
+                    | ColumnRole::Dimension { grain: Some(_) }
+                    | ColumnRole::Attribute { grain: Some(_) }
+            )
+        })
+        .map(|c| c.name.clone())
+        .collect();
+    for c in &foreign {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column '{c}': 'key', 'measure' and 'grain = …' belong to \
+                 the measure family; this is a document family dataset — column dropped"
+            ),
+            format!("datasets.{name}.columns.{c}.role"),
+        ));
+    }
+    ds.columns.retain(|c| !foreign.contains(&c.name));
+
+    // A value is a number: it feeds the numeric cell of the document
+    // grid, and a non-numeric one would fail every downstream fold.
+    let non_numeric: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| {
+            c.role == ColumnRole::Value && !matches!(c.ty, ColumnType::F64 | ColumnType::I64)
+        })
+        .map(|c| c.name.clone())
+        .collect();
+    for c in &non_numeric {
+        diags.push(err(
+            format!("dataset '{name}' column '{c}': a value must be f64 or i64 — column dropped"),
+            format!("datasets.{name}.columns.{c}.type"),
+        ));
+    }
+    ds.columns.retain(|c| !non_numeric.contains(&c.name));
+
+    // `geode_core::document::Column` and `Value` — the shapes a parsed
+    // document actually arrives in — cover f64, i64, utf8 and date and
+    // nothing else, and `DocumentRows::validate` compares each column's
+    // own type against the declared one. So a `timestamp` or `bool` axis
+    // or attribute is a column no feed could ever fill: every publish
+    // would be refused for a type mismatch and reported as a source
+    // health failure, pointing at the feed rather than at the config
+    // line that is actually wrong. Refused here instead, where the
+    // diagnostic can name the key. A value is already held to the
+    // stricter f64/i64 rule above and is deliberately not re-checked, so
+    // a `timestamp` value is reported once, not twice. Part 2 widens
+    // `Column`/`Value` if a document ever needs a timestamp axis; this
+    // rule moves with them.
+    let unsupported: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.role,
+                ColumnRole::Axis | ColumnRole::Attribute { grain: None }
+            ) && !matches!(
+                c.ty,
+                ColumnType::F64 | ColumnType::I64 | ColumnType::Utf8 | ColumnType::Date
+            )
+        })
+        .map(|c| c.name.clone())
+        .collect();
+    for c in &unsupported {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column '{c}': a document axis or attribute must be f64, \
+                 i64, utf8 or date — column dropped"
+            ),
+            format!("datasets.{name}.columns.{c}.type"),
+        ));
+    }
+    ds.columns.retain(|c| !unsupported.contains(&c.name));
+
+    // A dimension is the document's identity key. A per-row dimension within
+    // a document is an axis, not a grouping key. A dimension with no storage
+    // column in the key would be groupable (from `groupable_columns`) but
+    // unqueryable (omitted by `document_columns`), a broken invariant.
+    let unkeyed: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| matches!(c.role, ColumnRole::Dimension { .. }) && !ds.key.contains(&c.name))
+        .map(|c| c.name.clone())
+        .collect();
+    for c in &unkeyed {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column '{c}': a document dataset's dimensions are its key; \
+                 '{c}' is not listed in key — column dropped"
+            ),
+            format!("datasets.{name}.columns.{c}.role"),
+        ));
+    }
+    ds.columns.retain(|c| !unkeyed.contains(&c.name));
+
+    let mut keep = true;
+
+    // `book` is the document family's own partition column: `ddl::
+    // create_document_table_sql` appends `"book" VARCHAR` after
+    // `document_columns()`, because no grain key supplies one here. A
+    // declared column of that name therefore emits the same name twice
+    // and `CREATE TABLE` fails with a raw engine error — raised inside
+    // `DataService::open`, which takes every other dataset down with it,
+    // which is why this is a dataset-dropping error rather than a column
+    // drop. `RESERVED_COLUMNS` cannot carry the rule: `book` is a legal
+    // grain key column on the measure side, so the refusal has to be
+    // per family, and this is the family that reserves it. Checked after
+    // the drops above, so it fires only on a column that would really
+    // reach the DDL.
+    if ds.columns.iter().any(|c| c.name == "book") {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column 'book': 'book' is the document family's partition \
+                 column; declare the dimension under another name — dataset dropped"
+            ),
+            format!("datasets.{name}.columns.book"),
+        ));
+        keep = false;
+    }
+
+    if ds.key.is_empty() {
+        diags.push(err(
+            format!(
+                "dataset '{name}': a document dataset needs a non-empty 'key'; dataset dropped"
+            ),
+            format!("datasets.{name}.key"),
+        ));
+        keep = false;
+    }
+    if ds.axes.is_empty() {
+        diags.push(err(
+            format!("dataset '{name}': a document dataset needs non-empty 'axes'; dataset dropped"),
+            format!("datasets.{name}.axes"),
+        ));
+        keep = false;
+    }
+    for k in &ds.key {
+        match ds.column(k) {
+            None => {
+                diags.push(err(
+                    format!("dataset '{name}': key names undeclared column '{k}'; dataset dropped"),
+                    format!("datasets.{name}.key"),
+                ));
+                keep = false;
+            }
+            Some(c) if !matches!(c.role, ColumnRole::Dimension { grain: None }) => {
+                diags.push(err(
+                    format!(
+                        "dataset '{name}': key column '{k}' must have role = \"dimension\"; \
+                         dataset dropped"
+                    ),
+                    format!("datasets.{name}.key"),
+                ));
+                keep = false;
+            }
+            // The key is stored as text and nothing else: `join_key` folds
+            // `DocumentRows.key` (a `Vec<String>`) into the `batch
+            // VARCHAR` column that names the partition, and the document
+            // request binds each part back as `Value::Text` against the
+            // key column itself. A key column of any other declared type
+            // would be a DDL type that binding could never match — the
+            // predicate would compile and select nothing.
+            Some(c) if c.ty != ColumnType::Utf8 => {
+                diags.push(err(
+                    format!(
+                        "dataset '{name}': key column '{k}' must be type = \"utf8\"; \
+                         dataset dropped"
+                    ),
+                    format!("datasets.{name}.key"),
+                ));
+                keep = false;
+            }
+            Some(_) => {}
+        }
+    }
+    for a in &ds.axes {
+        match ds.column(a) {
+            None => {
+                diags.push(err(
+                    format!(
+                        "dataset '{name}': axes names undeclared column '{a}'; dataset dropped"
+                    ),
+                    format!("datasets.{name}.axes"),
+                ));
+                keep = false;
+            }
+            Some(c) if c.role != ColumnRole::Axis => {
+                diags.push(err(
+                    format!(
+                        "dataset '{name}': axis '{a}' must have role = \"axis\"; dataset dropped"
+                    ),
+                    format!("datasets.{name}.axes"),
+                ));
+                keep = false;
+            }
+            Some(_) => {}
+        }
+    }
+    for c in ds
+        .columns
+        .iter()
+        .filter(|c| c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))
+    {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column '{}': role = \"axis\" but not listed in axes; \
+                 dataset dropped",
+                c.name
+            ),
+            format!("datasets.{name}.columns.{}.role", c.name),
+        ));
+        keep = false;
+    }
+    if !ds.columns.iter().any(|c| c.role == ColumnRole::Value) {
+        diags.push(err(
+            format!("dataset '{name}': a document dataset declares at least one value column; dataset dropped"),
+            format!("datasets.{name}.columns"),
+        ));
+        keep = false;
+    }
+
+    // `textual` is routable through any dimension of a document dataset
+    // (there is no grain to route it): only a textual axis/value/attribute
+    // is refused, and it is cleared, not dropped, as on the measure side.
+    let unroutable: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| c.textual && !matches!(c.role, ColumnRole::Dimension { .. }))
+        .map(|c| c.name.clone())
+        .collect();
+    for c in &unroutable {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column '{c}': textual = true on a non-dimension of a \
+                 document dataset; textual ignored"
+            ),
+            format!("datasets.{name}.columns.{c}.textual"),
+        ));
+    }
+    for c in &mut ds.columns {
+        if unroutable.contains(&c.name) {
+            c.textual = false;
+        }
+    }
+
+    if !keep {
+        ds.columns.clear();
+        ds.key.clear();
+        ds.axes.clear();
+    }
+    diags
+}
+
 fn note(path: String, message: String) -> Diagnostic {
     Diagnostic {
         severity: Severity::Warning,
@@ -333,6 +808,7 @@ fn note(path: String, message: String) -> Diagnostic {
 /// over a flag typo (the wrong severity for that mistake).
 fn parse_column(
     ds: &str,
+    family: Family,
     name: &str,
     value: &toml::Value,
 ) -> Result<(ColumnSpec, Option<Diagnostic>), Diagnostic> {
@@ -384,8 +860,13 @@ fn parse_column(
             },
         },
         "attribute" => ColumnRole::Attribute {
-            grain: grain_of(table)?,
+            grain: match family {
+                Family::Measures => Some(grain_of(table)?),
+                Family::Document => None,
+            },
         },
+        "axis" => ColumnRole::Axis,
+        "value" => ColumnRole::Value,
         "measure" => {
             let agg_str = table
                 .get("aggregate")
@@ -846,6 +1327,119 @@ grain = "underlying"
         }
     }
 
+    const CVI: &str = r#"
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
+"#;
+
+    #[test]
+    fn a_document_dataset_parses_its_family_key_and_axes() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(CVI));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("cvi_params").unwrap();
+        assert_eq!(ds.family, Family::Document);
+        assert!(ds.is_document());
+        assert_eq!(ds.key, vec!["underlying_ref".to_string()]);
+        assert_eq!(ds.axes, vec!["term".to_string(), "node".to_string()]);
+        assert_eq!(ds.column("term").unwrap().role, ColumnRole::Axis);
+        assert_eq!(ds.column("param").unwrap().role, ColumnRole::Value);
+        // A document-level attribute carries no grain.
+        assert_eq!(
+            ds.column("spot_ref").unwrap().role,
+            ColumnRole::Attribute { grain: None }
+        );
+    }
+
+    #[test]
+    fn a_dataset_without_a_family_is_the_measure_family() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(SAMPLE));
+        let ds = schema.dataset("risk_snapshot").unwrap();
+        assert_eq!(ds.family, Family::Measures);
+        assert!(!ds.is_document());
+        assert!(ds.key.is_empty() && ds.axes.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_family_is_an_error_and_the_dataset_is_dropped() {
+        let text = CVI.replace("family = \"document\"", "family = \"widget\"");
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(schema.dataset("cvi_params").is_none());
+        let d = diags
+            .iter()
+            .find(|d| d.message.contains("unknown family 'widget'"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(d.path.as_deref(), Some("datasets.cvi_params.family"));
+    }
+
+    #[test]
+    fn a_measure_family_key_and_axes_are_cleared_with_a_warning() {
+        // `[risk_snapshot]` must precede the dotted `risk_snapshot.columns.*`
+        // headers SAMPLE opens with — TOML lets a `[table]` header appear
+        // before its own subtables, never after.
+        let text = format!("[risk_snapshot]\nkey = [\"book\"]\naxes = [\"lhu\"]\n{SAMPLE}");
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("risk_snapshot").unwrap();
+        assert!(
+            ds.key.is_empty(),
+            "key must be cleared, not merely warned about"
+        );
+        assert!(ds.axes.is_empty());
+        for field in ["key", "axes"] {
+            let d = diags
+                .iter()
+                .find(|d| {
+                    d.path.as_deref() == Some(&format!("datasets.risk_snapshot.{field}"))
+                        && d.message.contains("is ignored on the measure family")
+                })
+                .unwrap_or_else(|| panic!("no warning for '{field}': {diags:?}"));
+            assert_eq!(d.severity, Severity::Warning);
+        }
+    }
+
+    #[test]
+    fn a_measure_attribute_still_requires_its_grain() {
+        // `Attribute { grain: None }` is the document reading only; on a
+        // measure dataset a grainless attribute is the same missing-grain
+        // error it always was.
+        let text = SAMPLE.to_string()
+            + "\n[risk_snapshot.columns.note]\ntype = \"utf8\"\nrole = \"attribute\"\n";
+        let (_, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("column 'note': missing 'grain'")),
+            "{diags:?}"
+        );
+    }
+
     #[test]
     fn textual_on_a_column_no_grain_can_route_is_an_error_and_textual_is_cleared() {
         // underlying2_ref is in the pair grain's raw key but not its
@@ -865,6 +1459,368 @@ grain = "underlying"
             ds.column("underlying2_ref").is_some(),
             "the key column itself stays"
         );
+    }
+
+    fn cvi_with(from: &str, to: &str) -> (SchemaSpec, Vec<Diagnostic>) {
+        let text = CVI.replace(from, to);
+        assert_ne!(text, CVI, "the replacement must change the fixture");
+        SchemaSpec::from_doc(&doc(&text))
+    }
+
+    fn error_with_path<'a>(diags: &'a [Diagnostic], path: &str) -> &'a Diagnostic {
+        diags
+            .iter()
+            .find(|d| d.severity == Severity::Error && d.path.as_deref() == Some(path))
+            .unwrap_or_else(|| panic!("no error at path {path}: {diags:?}"))
+    }
+
+    #[test]
+    fn a_document_dataset_needs_a_non_empty_key_and_axes() {
+        let (schema, diags) = cvi_with("key = [\"underlying_ref\"]", "key = []");
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "datasets.cvi_params.key");
+        let (schema, diags) = cvi_with("axes = [\"term\", \"node\"]", "axes = []");
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "datasets.cvi_params.axes");
+    }
+
+    #[test]
+    fn a_key_or_axis_naming_an_undeclared_column_drops_the_dataset() {
+        let (schema, diags) = cvi_with("key = [\"underlying_ref\"]", "key = [\"nonesuch\"]");
+        assert!(schema.dataset("cvi_params").is_none());
+        assert!(
+            error_with_path(&diags, "datasets.cvi_params.key")
+                .message
+                .contains("nonesuch")
+        );
+        let (schema, diags) = cvi_with(
+            "axes = [\"term\", \"node\"]",
+            "axes = [\"term\", \"nonesuch\"]",
+        );
+        assert!(schema.dataset("cvi_params").is_none());
+        assert!(
+            error_with_path(&diags, "datasets.cvi_params.axes")
+                .message
+                .contains("nonesuch")
+        );
+    }
+
+    #[test]
+    fn every_key_column_must_be_a_dimension() {
+        // Make the key column an attribute: no longer scopeable, so no
+        // longer a legal identity (spec §3.2).
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"",
+            "[cvi_params.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"attribute\"",
+        );
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "datasets.cvi_params.key");
+    }
+
+    #[test]
+    fn axes_and_axis_roles_must_agree_both_ways() {
+        // An axis column not listed in `axes`.
+        let (schema, diags) = cvi_with("axes = [\"term\", \"node\"]", "axes = [\"term\"]");
+        assert!(schema.dataset("cvi_params").is_none());
+        assert!(
+            error_with_path(&diags, "datasets.cvi_params.columns.node.role")
+                .message
+                .contains("not listed in axes")
+        );
+        // A listed axis whose role is not `axis`.
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.node]\ntype = \"f64\"\nrole = \"axis\"",
+            "[cvi_params.columns.node]\ntype = \"f64\"\nrole = \"value\"",
+        );
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "datasets.cvi_params.axes");
+    }
+
+    #[test]
+    fn a_non_numeric_value_column_is_dropped_and_the_dataset_kept() {
+        // Only value column gone → the "at least one value" rule fires
+        // next, so add a second numeric value to isolate this rule.
+        let text = CVI.replace(
+            "[cvi_params.columns.param]\ntype = \"f64\"",
+            "[cvi_params.columns.param]\ntype = \"utf8\"",
+        ) + "\n[cvi_params.columns.param2]\ntype = \"i64\"\nrole = \"value\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("cvi_params").expect("dataset kept");
+        assert!(ds.column("param").is_none(), "the utf8 value is dropped");
+        assert!(ds.column("param2").is_some());
+        error_with_path(&diags, "datasets.cvi_params.columns.param.type");
+    }
+
+    #[test]
+    fn a_document_dataset_declares_at_least_one_value() {
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.param]\ntype = \"f64\"\nrole = \"value\"",
+            "[cvi_params.columns.param]\ntype = \"f64\"\nrole = \"attribute\"",
+        );
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "datasets.cvi_params.columns");
+    }
+
+    #[test]
+    fn measure_vocabulary_on_a_document_dataset_is_refused_per_column() {
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n"
+            + "\n[cvi_params.columns.book]\ntype = \"utf8\"\nrole = \"key\"\n"
+            + "\n[cvi_params.columns.ccy]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"instrument\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema
+            .dataset("cvi_params")
+            .expect("the dataset is kept; the columns are dropped");
+        for name in ["npv", "book", "ccy"] {
+            assert!(ds.column(name).is_none(), "{name} should be dropped");
+            let d = error_with_path(&diags, &format!("datasets.cvi_params.columns.{name}.role"));
+            assert!(d.message.contains("document family"), "{}", d.message);
+        }
+        assert!(ds.column("param").is_some(), "the legal columns survive");
+    }
+
+    #[test]
+    fn document_vocabulary_on_a_measure_dataset_is_the_mirror_error() {
+        let text = SAMPLE.to_string()
+            + "\n[risk_snapshot.columns.tenor]\ntype = \"f64\"\nrole = \"axis\"\n"
+            + "\n[risk_snapshot.columns.cell]\ntype = \"f64\"\nrole = \"value\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("risk_snapshot").unwrap();
+        assert!(ds.column("tenor").is_none() && ds.column("cell").is_none());
+        for name in ["tenor", "cell"] {
+            let d = error_with_path(
+                &diags,
+                &format!("datasets.risk_snapshot.columns.{name}.role"),
+            );
+            assert!(d.message.contains("measure family"), "{}", d.message);
+        }
+    }
+
+    #[test]
+    fn a_document_key_need_not_be_a_built_in_grain_key_column() {
+        // `index_ref` is no grain's key column. On the measure family a
+        // bare dimension of that name is dropped; on the document family
+        // it is the whole point.
+        let text = CVI
+            .replace("key = [\"underlying_ref\"]", "key = [\"index_ref\"]")
+            .replace(
+                "[cvi_params.columns.underlying_ref]",
+                "[cvi_params.columns.index_ref]",
+            );
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("cvi_params").unwrap();
+        assert!(ds.column("index_ref").is_some());
+        assert!(
+            ds.column("index_ref").unwrap().textual,
+            "textual is routable through the key"
+        );
+    }
+
+    #[test]
+    fn a_reserved_column_name_on_a_document_dataset_is_still_a_diagnostic() {
+        // The reserved-column check runs before the document-family
+        // dispatch and must not be lost when `validate_dataset` returns
+        // early into `validate_document` — a document dataset naming a
+        // storage-layer column hits the very DDL collision the check
+        // exists to warn about.
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.batch]\ntype = \"utf8\"\nrole = \"attribute\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("name is reserved by the storage layer")),
+            "{diags:?}"
+        );
+        assert!(
+            schema.dataset("cvi_params").is_some(),
+            "reserved-column is a warning, not a reason to drop the dataset"
+        );
+    }
+
+    #[test]
+    fn a_document_dataset_has_no_grain_and_groups_by_its_dimensions_only() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(CVI));
+        let ds = schema.dataset("cvi_params").unwrap();
+        assert!(ds.grains().is_empty());
+        assert_eq!(ds.groupable_columns(), vec!["underlying_ref"]);
+        assert_eq!(
+            ds.categorical_columns(),
+            vec!["underlying_ref"],
+            "a utf8 dimension defaults to categorical here too"
+        );
+    }
+
+    #[test]
+    fn document_columns_are_key_then_axes_then_values_then_attributes() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(CVI));
+        let ds = schema.dataset("cvi_params").unwrap();
+        let names: Vec<&str> = ds
+            .document_columns()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "underlying_ref",
+                "term",
+                "node",
+                "param",
+                "anchor_date",
+                "spot_ref"
+            ]
+        );
+        // Order comes from `key`/`axes`, not from the TOML: swap the axes.
+        let (schema, _) = cvi_with("axes = [\"term\", \"node\"]", "axes = [\"node\", \"term\"]");
+        let ds = schema.dataset("cvi_params").unwrap();
+        let names: Vec<&str> = ds
+            .document_columns()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names[1..3], ["node", "term"]);
+    }
+
+    /// Important 2: `create_document_table_sql` appends a `book VARCHAR`
+    /// of its own (no grain key supplies one), so a document column of
+    /// that name is a duplicate-column DDL error — and `RESERVED_COLUMNS`
+    /// cannot list `book`, which is a legal grain key column on the
+    /// measure side. Without this rule `DataService::open` fails at table
+    /// creation with a raw engine error and every dataset is dead.
+    #[test]
+    fn a_document_column_named_book_collides_with_the_partition_column() {
+        // The key renamed along with its column, so this is a legal
+        // document key in every respect except its name.
+        let text = CVI
+            .replace("key = [\"underlying_ref\"]", "key = [\"book\"]")
+            .replace(
+                "[cvi_params.columns.underlying_ref]",
+                "[cvi_params.columns.book]",
+            );
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(
+            schema.dataset("cvi_params").is_none(),
+            "the dataset is dropped: its DDL could not be created at all"
+        );
+        let d = error_with_path(&diags, "datasets.cvi_params.columns.book");
+        assert!(d.message.contains("partition column"), "{}", d.message);
+    }
+
+    /// The same rule from the other direction: a document-level attribute
+    /// named `book` is just as fatal as a key of that name, because
+    /// `document_columns()` emits it into the DDL either way.
+    #[test]
+    fn a_document_attribute_named_book_is_refused_too() {
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.book]\ntype = \"utf8\"\nrole = \"attribute\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "datasets.cvi_params.columns.book");
+    }
+
+    /// Minor 4: the no-`[columns]` early return used to push the dataset
+    /// before `validate_dataset` ever ran, so a document dataset with no
+    /// columns at all reached the schema — contradicting the guard's own
+    /// claim that a refused document dataset is never pushed. Both paths
+    /// now run the guard.
+    #[test]
+    fn a_document_dataset_with_no_columns_table_is_not_pushed() {
+        let text = "[cvi_params]\nfamily = \"document\"\nkey = [\"u\"]\naxes = [\"term\"]\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(text));
+        assert!(
+            schema.dataset("cvi_params").is_none(),
+            "a document dataset with no columns could be neither stored nor queried"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("no [columns] table")),
+            "{diags:?}"
+        );
+        // And the measure family is unchanged: a columnless measure
+        // dataset is still pushed, exactly as before.
+        let (schema, _) = SchemaSpec::from_doc(&doc("[empty]\nfamily = \"measures\"\n"));
+        assert!(schema.dataset("empty").is_some());
+    }
+
+    /// `geode_core::document::Column`/`Value` cover f64/i64/utf8/date
+    /// only, so an axis or attribute of any other type could never be
+    /// matched by a parsed document: `DocumentRows::validate` would refuse
+    /// every publish with a type mismatch. Refused at load instead, where
+    /// the diagnostic can name the key.
+    #[test]
+    fn a_document_axis_or_attribute_of_an_unsupported_type_is_refused() {
+        // An attribute: the column is dropped, the dataset kept.
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.anchor_date]\ntype = \"date\"",
+            "[cvi_params.columns.anchor_date]\ntype = \"timestamp\"",
+        );
+        let ds = schema.dataset("cvi_params").expect("dataset kept");
+        assert!(ds.column("anchor_date").is_none());
+        error_with_path(&diags, "datasets.cvi_params.columns.anchor_date.type");
+
+        // An axis: dropping the column leaves `axes` naming a column that
+        // is no longer declared, so the dataset goes with it — an axis is
+        // mandatory and there is nothing left to store.
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.node]\ntype = \"f64\"",
+            "[cvi_params.columns.node]\ntype = \"bool\"",
+        );
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "datasets.cvi_params.columns.node.type");
+    }
+
+    /// A document key is joined into the `batch VARCHAR` column
+    /// (`geode_core::document::join_key` over `Vec<String>`) and bound
+    /// back as text by the document request, so a key column of any other
+    /// type would be a DDL type the request could never match.
+    #[test]
+    fn a_document_key_column_must_be_utf8() {
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.underlying_ref]\ntype = \"utf8\"",
+            "[cvi_params.columns.underlying_ref]\ntype = \"i64\"",
+        );
+        assert!(schema.dataset("cvi_params").is_none());
+        assert!(
+            error_with_path(&diags, "datasets.cvi_params.key")
+                .message
+                .contains("utf8"),
+            "{diags:?}"
+        );
+    }
+
+    /// Minor 8: the document side's `textual` clearing had no test at all.
+    /// `textual` routes through a dimension; a value column is not one, so
+    /// the flag is an error and is cleared — the column itself stays, the
+    /// same judgement the measure side makes.
+    #[test]
+    fn textual_on_a_document_value_is_an_error_and_textual_is_cleared() {
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.param]\ntype = \"f64\"\nrole = \"value\"",
+            "[cvi_params.columns.param]\ntype = \"f64\"\nrole = \"value\"\ntextual = true",
+        );
+        let ds = schema.dataset("cvi_params").expect("the column is kept");
+        assert!(!ds.column("param").unwrap().textual);
+        error_with_path(&diags, "datasets.cvi_params.columns.param.textual");
+    }
+
+    #[test]
+    fn a_document_dimension_outside_the_key_is_dropped() {
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.region]\ntype = \"utf8\"\nrole = \"dimension\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("cvi_params").unwrap();
+        assert!(
+            diags.iter().any(|d| {
+                d.path.as_deref() == Some("datasets.cvi_params.columns.region.role")
+                    && d.message.contains("dimensions are its key")
+            }),
+            "{diags:?}"
+        );
+        assert!(ds.column("region").is_none());
+        assert_eq!(ds.groupable_columns(), vec!["underlying_ref"]);
     }
 
     #[test]

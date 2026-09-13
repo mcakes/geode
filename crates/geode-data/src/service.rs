@@ -12,6 +12,7 @@ use crate::query::as_of::AsOf;
 use crate::query::catalog::build_catalog;
 use crate::query::compile::compile_view;
 use crate::query::distinct::compile_distinct;
+use crate::query::document::compile_document;
 use crate::query::pool::{
     QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId,
 };
@@ -21,8 +22,10 @@ use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::Diagnostic;
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::document::join_key;
 use geode_core::query::{
-    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, QueryKey, QueryOutcome,
+    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
+    QueryOutcome,
 };
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
@@ -1123,6 +1126,71 @@ impl DataService {
         }))
     }
 
+    /// The document request (market-data spec §7): compiled by
+    /// `compile_document` and submitted like a view query, so it shares
+    /// the pool's cancellation and per-key coalescing and comes back as
+    /// an ordinary `DataEvent::Query` — the tile route is unchanged.
+    pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {
+        let compiled = compile_document(&self.conn, &self.config.schema, params)?;
+        let catalog = Catalog::new(&self.conn);
+        let freshness = match &params.as_of {
+            AsOf::Live => Freshness {
+                dataset: params.dataset.clone(),
+                // Per-document, not `dataset_as_of`/`book_freshness`: a
+                // document's `book` is always `None` (spec §4.1), so
+                // every document in the dataset collapses into the same
+                // one `book_freshness` group and the MIN across all of
+                // them would label a just-published document with some
+                // *other* document's staler time (Task 8 review, Major).
+                // `live_source_time` scoped to this document's own batch
+                // is the same honest per-partition reading the as-of arm
+                // below already takes.
+                as_of: catalog
+                    .live_source_time(&params.dataset, &join_key(&params.document_key), None)?
+                    .map(|t| t.to_rfc3339()),
+                generation: catalog.latest_gen_id()?,
+            },
+            AsOf::At(_) => Freshness {
+                dataset: params.dataset.clone(),
+                // The generation actually resolved for *this* document,
+                // never the requested instant — the same stalest-input
+                // rule live freshness applies elsewhere (§5.4).
+                as_of: compiled
+                    .resolved_as_of
+                    .get(&params.dataset)
+                    .map(|t| t.to_rfc3339()),
+                // No per-document generation id is threaded out of
+                // `compile_document` (only its `source_time` is, above);
+                // `0` here matches the view path's own as-of arm, which
+                // reports the same placeholder for the identical reason
+                // (`query` above, a few lines up: "Per-partition, so no
+                // single number describes it").
+                generation: 0,
+            },
+        };
+        let provenance = Provenance {
+            datasets: vec![freshness],
+            as_of_request: match &params.as_of {
+                AsOf::Live => None,
+                AsOf::At(t) => Some(t.to_rfc3339()),
+            },
+        };
+        Ok(self.pool.submit(QueryRequest {
+            key: params.key,
+            tag: params.tag,
+            submitted: params.submitted,
+            view: ViewId(format!(
+                "document:{}:{}",
+                params.dataset,
+                params.document_key.join("/")
+            )),
+            grouping: Vec::new(),
+            compiled,
+            provenance,
+            kind: RequestKind::Query,
+        }))
+    }
+
     pub fn cancel(&self, key: QueryKey) {
         self.pool.cancel(key);
     }
@@ -1198,19 +1266,18 @@ impl DataService {
     /// only generation in live, and as-of to any instant since then reads
     /// it (`Era::relation`), so the bound starts at the oldest generation
     /// anywhere rather than at the oldest one that has been superseded.
+    ///
+    /// The table list is `ddl::history_of`, the one place a dataset's
+    /// tables are named, so both families are covered: built from
+    /// `ds.grains()` here instead, a document dataset (which declares no
+    /// grain) scanned nothing and reported `None` — no bound, so no time
+    /// travel — however much history it held.
     pub fn as_of_bounds(&self, dataset: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
         let Some(ds) = self.config.schema.dataset(dataset) else {
             return Ok(None);
         };
         let mut oldest: Option<DateTime<Utc>> = None;
-        let tables = ds.grains().into_iter().flat_map(|grain| {
-            [
-                crate::store::ddl::TableKind::Archive,
-                crate::store::ddl::TableKind::Live,
-            ]
-            .map(|kind| crate::store::ddl::table_name(dataset, grain, kind))
-        });
-        for table in tables {
+        for table in crate::store::ddl::history_of(&ds.name, ds) {
             let sql = format!("select min(source_time) from {table}");
             let found: Option<DateTime<Utc>> = self
                 .conn
@@ -1276,6 +1343,155 @@ mod tests {
         })
         .unwrap();
         (db, src, service, rx)
+    }
+
+    const CVI: &str = r#"
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
+"#;
+
+    fn cvi() -> geode_core::schema::DatasetSpec {
+        let doc = geode_core::config::merge_docs(
+            "datasets",
+            &[geode_core::config::LayerDoc::builtin("datasets", CVI).unwrap()],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("cvi_params").unwrap().clone()
+    }
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn d(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    /// Two terms x three nodes, term-major — the same shape
+    /// `store::document`'s own tests use.
+    fn doc(key: &str, params: [f64; 6]) -> geode_core::document::DocumentRows {
+        use geode_core::document::{Column, DocumentRows, Value};
+        DocumentRows {
+            key: vec![key.into()],
+            attributes: vec![
+                ("anchor_date".into(), Value::Date(d("2026-09-12"))),
+                ("spot_ref".into(), Value::F64(7650.0)),
+            ],
+            axes: vec![
+                (
+                    "term".into(),
+                    Column::Date(vec![
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]),
+                ),
+                (
+                    "node".into(),
+                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
+                ),
+            ],
+            values: vec![("param".into(), Column::F64(params.to_vec()))],
+        }
+    }
+
+    /// A service opened over a document dataset, with SPX.Z published
+    /// twice — the CVI fixture `query::document`'s own tests use, built
+    /// through `publish_document` on a scratch `Store` (dropped before
+    /// the service opens its own connection to the same file, the same
+    /// two-phase shape `service()` above uses for the measure family).
+    fn document_service() -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = cvi();
+        store.apply_schema(&ds).unwrap();
+        crate::store::catalog::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &doc("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+                source_time: ts("2026-09-12T14:00:00Z"),
+                received_at: ts("2026-09-12T14:00:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+        // A second key, published once at a time strictly between SPX.Z's
+        // two — so a live request for either document has a genuinely
+        // different own freshness to report, and a bug that collapsed
+        // every document's freshness into one dataset-wide MIN (Task 8
+        // review, Major) would answer both with NDX.Z's 14:03 rather than
+        // each document's own time.
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &doc("NDX.Z", [100., 200., 300., 400., 500., 600.]),
+                source_time: ts("2026-09-12T14:03:00Z"),
+                received_at: ts("2026-09-12T14:03:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &doc("SPX.Z", [10., 20., 30., 40., 50., 60.]),
+                source_time: ts("2026-09-12T14:05:00Z"),
+                received_at: ts("2026-09-12T14:05:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+        drop(store);
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: Vec::new(),
+        })
+        .unwrap();
+        (dir, service, rx)
     }
 
     /// The next query outcome, skipping any other event.
@@ -1386,6 +1602,79 @@ mod tests {
         let snap = outcome.snapshot.expect("catalog request failed");
         assert_eq!(snap.datasets.len(), 1);
         assert_eq!(snap.datasets[0].name, "risk_snapshot");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_document_request_returns_the_document_as_a_query_outcome() {
+        let (_dir, svc, rx) = document_service();
+        let p = DocumentParams {
+            key: QueryKey(3),
+            tag: 9,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        };
+        svc.document(&p).unwrap();
+        let out = next(&rx);
+        assert_eq!((out.key, out.tag), (QueryKey(3), 9));
+        let snap = out.snapshot.unwrap();
+        assert_eq!(snap.rows(), 6);
+        assert_eq!(snap.f64_value("param", 0), Some(10.0));
+        assert_eq!(snap.text_value("underlying_ref", 0), Some("SPX.Z"));
+        assert_eq!(snap.provenance().datasets[0].dataset, "cvi_params");
+        assert!(snap.provenance().datasets[0].as_of.is_some());
+        let bad = DocumentParams {
+            dataset: "nonesuch".into(),
+            ..p.clone()
+        };
+        assert!(svc.document(&bad).is_err());
+        svc.shutdown();
+    }
+
+    /// Task 8 review, Major: a live document request used to report
+    /// `dataset_as_of`/`book_freshness`, which groups by `book` — always
+    /// `None` for a document — so every document in the dataset collapsed
+    /// into one group and a request for a just-published document was
+    /// labelled with some *other* document's staler time. Two documents
+    /// of different freshness, each asked for live, must each get its
+    /// own back.
+    #[test]
+    fn a_live_document_request_reports_its_own_documents_freshness() {
+        let (_dir, svc, rx) = document_service();
+
+        svc.document(&DocumentParams {
+            key: QueryKey(4),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let spx = next(&rx).snapshot.unwrap();
+        assert_eq!(
+            spx.provenance().datasets[0].as_of.as_deref(),
+            Some(ts("2026-09-12T14:05:00Z").to_rfc3339().as_str()),
+            "SPX.Z's own live generation, not NDX.Z's staler one"
+        );
+
+        svc.document(&DocumentParams {
+            key: QueryKey(5),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["NDX.Z".into()],
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let ndx = next(&rx).snapshot.unwrap();
+        assert_eq!(
+            ndx.provenance().datasets[0].as_of.as_deref(),
+            Some(ts("2026-09-12T14:03:00Z").to_rfc3339().as_str()),
+            "NDX.Z's own generation, not SPX.Z's newer one"
+        );
         svc.shutdown();
     }
 

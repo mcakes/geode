@@ -84,8 +84,24 @@ pub enum ColumnRole {
     Dimension { grain: Option<Grain> },
     /// A number, aggregated at its declared grain.
     Measure { grain: Grain, aggregate: Aggregate },
-    /// A non-numeric property carried at a grain (strike, expiry).
-    Attribute { grain: Grain },
+    /// A non-numeric property. `Some(grain)` on a measure dataset: carried
+    /// at that grain. `None` on a document dataset: document-level — one
+    /// value per document, repeated on every row of it (market-data
+    /// spec §3.1). `parse_column` produces exactly this split today —
+    /// `None` only for `Family::Document`, always `Some` for
+    /// `Family::Measures` (a missing `grain` is a parse error there) — so
+    /// the type still allows the two cross-family mistakes this doesn't
+    /// prevent by construction: a stray `grain` key on a document
+    /// attribute, or a document-typed attribute on a measure dataset.
+    /// `validate_dataset` refuses both, per column, dropping the column
+    /// (the document-family case in `validate_document`, its mirror in
+    /// `validate_dataset`'s own measure-family body).
+    Attribute { grain: Option<Grain> },
+    /// Document family only: identifies a row within a document, in the
+    /// dataset's declared `axes` order (market-data spec §3.1).
+    Axis,
+    /// Document family only: a numeric cell of the document.
+    Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,8 +134,14 @@ impl ColumnSpec {
     /// "declared at exactly this grain".
     pub fn grain(&self) -> Option<Grain> {
         match self.role {
-            ColumnRole::Measure { grain, .. } | ColumnRole::Attribute { grain } => Some(grain),
-            ColumnRole::Key | ColumnRole::Dimension { .. } => None,
+            ColumnRole::Measure { grain, .. } | ColumnRole::Attribute { grain: Some(grain) } => {
+                Some(grain)
+            }
+            ColumnRole::Attribute { grain: None }
+            | ColumnRole::Key
+            | ColumnRole::Dimension { .. }
+            | ColumnRole::Axis
+            | ColumnRole::Value => None,
         }
     }
 

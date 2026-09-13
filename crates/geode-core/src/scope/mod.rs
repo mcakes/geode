@@ -183,13 +183,41 @@ impl Scope {
         }
         diags
     }
+
+    /// The scope as it applies to one dataset: dimension selections on
+    /// columns the dataset lacks — resolving a derived dimension to the
+    /// column it derives from — are removed and returned by name, so the
+    /// query drops them and the snapshot's provenance can say so
+    /// (`ScopeSemantics::NotApplicable`, market-data spec §3.4). Text and
+    /// expression pass through: the text filter already routes by the
+    /// dataset's own textual columns, and an expression naming an
+    /// unknown column is refused at the point of entry by `validate`.
+    pub fn applicable_to(
+        &self,
+        ds: &DatasetSpec,
+        dims: &DerivedDimensions,
+    ) -> (Scope, Vec<String>) {
+        let mut kept = self.clone();
+        let mut dropped = Vec::new();
+        kept.dimensions.retain(|d| {
+            let present = match dims.get(&d.column) {
+                Some(derived) => ds.column(&derived.from).is_some(),
+                None => ds.column(&d.column).is_some(),
+            };
+            if !present {
+                dropped.push(d.column.clone());
+            }
+            present
+        });
+        (kept, dropped)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{LayerDoc, merge_docs};
-    use crate::schema::SchemaSpec;
+    use crate::schema::{ColumnRole, ColumnSpec, ColumnType, DatasetSpec, Family, SchemaSpec};
 
     fn dataset() -> crate::schema::DatasetSpec {
         let text = r#"
@@ -542,5 +570,71 @@ grain = "underlying"
         let ds = dataset();
         let textual: Vec<&str> = ds.textual_columns().map(|c| c.name.as_str()).collect();
         assert_eq!(textual, vec!["book", "underlying_ref"]);
+    }
+
+    /// A minimal document dataset (market-data spec §3.1) whose only
+    /// column is the named dimension, keyed on it.
+    fn document_dataset_with_dimension(column: &str) -> DatasetSpec {
+        DatasetSpec {
+            name: "cvi".into(),
+            columns: vec![ColumnSpec {
+                name: column.into(),
+                source_name: None,
+                ty: ColumnType::Utf8,
+                required: true,
+                textual: false,
+                categorical: true,
+                role: ColumnRole::Dimension { grain: None },
+            }],
+            family: Family::Document,
+            key: vec![column.into()],
+            axes: vec![],
+        }
+    }
+
+    #[test]
+    fn applicable_to_drops_selections_on_columns_the_dataset_lacks_and_names_them() {
+        let ds = document_dataset_with_dimension("underlying_ref");
+        let scope = Scope {
+            dimensions: vec![
+                DimensionSelection {
+                    column: "book".into(),
+                    values: vec!["EQD".into()],
+                },
+                DimensionSelection {
+                    column: "underlying_ref".into(),
+                    values: vec!["SPX.Z".into()],
+                },
+                DimensionSelection {
+                    column: "lhu".into(),
+                    values: vec!["A".into()],
+                },
+            ],
+            text: Some("spx".into()),
+            expression: None,
+            impossible: false,
+        };
+        let (kept, dropped) = scope.applicable_to(&ds, &DerivedDimensions::default());
+        assert_eq!(dropped, vec!["book".to_string(), "lhu".to_string()]);
+        assert_eq!(kept.dimensions.len(), 1);
+        assert_eq!(kept.dimensions[0].column, "underlying_ref");
+        assert_eq!(kept.text.as_deref(), Some("spx"), "text passes through");
+
+        // A derived dimension over a column the dataset has is kept.
+        let dims_doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin("dimensions", "[region]\nfrom = \"underlying_ref\"\n").unwrap()],
+        );
+        let dims = crate::dimensions::DerivedDimensions::from_doc(&dims_doc).0;
+        let scope = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "region".into(),
+                values: vec!["US".into()],
+            }],
+            ..Scope::default()
+        };
+        let (kept, dropped) = scope.applicable_to(&ds, &dims);
+        assert!(dropped.is_empty());
+        assert_eq!(kept.dimensions.len(), 1);
     }
 }

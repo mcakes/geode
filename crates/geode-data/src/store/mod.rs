@@ -7,6 +7,7 @@
 
 pub mod catalog;
 pub mod ddl;
+pub mod document;
 pub mod publish;
 pub mod retention;
 
@@ -34,6 +35,13 @@ pub enum StoreError {
     /// panicked, so the pool can shut down the workers it already spawned
     /// instead of leaving them detached.
     SpawnWorker { source: std::io::Error },
+    /// A document was refused before it reached SQL at all: the message
+    /// disagreed with the dataset it claims to be (`DocumentRows::validate`,
+    /// market-data spec §6.2). A variant of its own rather than a `Sql`
+    /// with a fabricated statement, because there is no statement — and a
+    /// caller that wants to report "the feed sent something malformed"
+    /// separately from "the database refused a statement" can match on it.
+    Document(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -48,6 +56,7 @@ impl std::fmt::Display for StoreError {
             StoreError::SpawnWorker { source } => {
                 write!(f, "starting a query worker: {source}")
             }
+            StoreError::Document(reason) => write!(f, "document: {reason}"),
         }
     }
 }
@@ -90,12 +99,26 @@ impl Store {
         &self.path
     }
 
-    /// Create the live and archive tables for every grain the dataset
-    /// declares measures at. Idempotent.
+    /// Create the live and archive pair(s) a dataset owns: one per grain
+    /// for the measure family (every grain it declares a measure or an
+    /// attribute at), one for the whole dataset for the document family.
+    /// Idempotent.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` never migrates an existing table, so a
+    /// dataset whose column set grew since the database was written keeps
+    /// the old table and fails at publish with a column-count mismatch —
+    /// see `CLAUDE.md` on deleting the demo database after a schema change.
     pub fn apply_schema(&self, ds: &DatasetSpec) -> Result<(), StoreError> {
-        for grain in ds.grains() {
-            for kind in [TableKind::Live, TableKind::Archive] {
-                let sql = ddl::create_table_sql(ds, grain, kind);
+        for kind in [TableKind::Live, TableKind::Archive] {
+            let statements: Vec<String> = if ds.is_document() {
+                vec![ddl::create_document_table_sql(ds, kind)]
+            } else {
+                ds.grains()
+                    .into_iter()
+                    .map(|g| ddl::create_table_sql(ds, g, kind))
+                    .collect()
+            };
+            for sql in statements {
                 self.writer
                     .execute_batch(&sql)
                     .map_err(|source| StoreError::Sql {

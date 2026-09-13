@@ -166,9 +166,11 @@ set to the offending key:
   row identity inside a document, not something the frame groups by.
 - `grains()` is empty for a document dataset; every caller that
   iterates grains already handles an empty list.
-- The conflict detector (Phase 2 §3.5) applies to document-level
-  attributes: a value that varies within one document is a per-column
-  conflict count in diagnostics, the same signal a coarse measure gives.
+- A document-level attribute cannot vary within one document by
+  construction: `DocumentRows` carries one `Value` per attribute and
+  `publish_document` writes it onto every row (Part 1 ruling). The
+  §3.5 conflict detector therefore has nothing to detect here and is
+  not run on document tables.
 
 ### 3.4 Shared dimensions and scope applicability
 
@@ -225,6 +227,86 @@ document source at a 500 ms coalesce can mint a generation every half
 second per key; the demo layer's retention for `cvi_params` is set by
 count so the archive stays bounded, and the spec's perf section
 records the archive growth rate at the demo cadence.
+
+### 4.5 As built (Part 1)
+
+- A document table carries a `book VARCHAR` column, always NULL, between
+  `batch` and `source_file_id`, because every partition-keyed store
+  statement joins on `book`.
+- A document dataset's `Dimension` columns must all be listed in its
+  `key`; an unkeyed dimension is an error at load and the column is
+  dropped.
+- `DocumentRows::validate` refuses a document with zero rows, so no
+  generation is ever recorded against an empty table.
+- The document request's as-of arm pins the document's own resolved
+  generation and reports `resolved_as_of` as that document's own
+  `source_time`, never the dataset-wide fold; its live arm's freshness
+  is likewise per document, not per dataset.
+- A column named `book` is refused on this family (error at
+  `{ds}.columns.book`, dataset dropped). `create_document_table_sql`
+  appends its own `"book" VARCHAR`, so the DDL would carry the name twice
+  and `DataService::open` would fail on it, taking every other dataset
+  with it. `RESERVED_COLUMNS` cannot carry the rule — `book` is a legal
+  grain key column on the measure side — so it is per family, checked
+  after `validate_document`'s own column drops so it fires only on a
+  column that would really reach the DDL.
+- `geode_core::document::Column` and `Value` cover **f64, i64, utf8 and
+  date only**. `validate_document` therefore refuses `timestamp` and
+  `bool` on an axis or an attribute (error at
+  `{ds}.columns.{name}.type`, column dropped — dropping an axis leaves
+  `axes` naming an undeclared column, so the dataset goes too; a *value*
+  is already held to the stricter f64/i64 rule and is not reported
+  twice), and requires every key column to be `utf8` (error at
+  `{ds}.key`, dataset dropped: the key is joined into the `batch
+  VARCHAR` column by `join_key` and bound back as `Value::Text`, so any
+  other declared type compiles and selects nothing). Widen the refusal
+  when — and only when — Part 2 widens `Column`/`Value`.
+- The catalog's `live_rows`/`archive_rows` are summed over
+  `store::ddl::table_pairs(ds)`, not `ds.grains()`: a document dataset
+  has no grain and reported 0 rows beside a real list of live
+  partitions.
+- The picker's distinct-values query has a document arm
+  (`query::distinct::document_select`, spec §3.3): one union branch over
+  the document pair, shaped exactly like the measure arms' so the
+  union's column set agrees. Live reads the live table; as-of reads both
+  sides under `generation_predicate(&resolve_generations(conn, ds, t))`
+  resolved **dataset-wide**, because distinct spans every key by
+  definition — the narrowing `compile_document` does to one batch would
+  be wrong here. Only `Dimension` columns are offered, never an axis
+  (§3.3) and never a value. Its scope is `Scope::applicable_to`'s kept
+  **dimension selections** alone, bound through
+  `scope_sql::selection_clause` (extracted so the derived-value
+  translation and the `string_split` binding form are spelled once).
+  **The text and expression filters are not applied**: `compile_scope`
+  is the only place either is lowered and every routing decision it
+  makes is defined in terms of a `Grain` this family has none of, so
+  under an active text filter a document dataset's counts can be
+  over-counted relative to the measure datasets beside them. A
+  grain-free scope lowering belongs with Part 2's panel; dropping the
+  dataset instead would hide a document-only dimension from the picker
+  entirely, and pretending the filter applied would report a number
+  that is wrong with no way to tell.
+- **No query produces `ScopeSemantics::NotApplicable` yet.** The type
+  and `Scope::applicable_to` exist, and the blotter paints the marker,
+  but the one caller that drops selections today (`document_select`) has
+  nowhere to report them: `DistinctOutcome` is `{key, tag, column,
+  values}` — `(value, count)` rows and no provenance or per-column
+  semantics at all. Part 2's panel is where the marker starts being
+  produced.
+- `compile_document` does **not** cast the key column to its ENUM type,
+  the way the view compiler casts a dimension for dictionary encoding
+  (§7.2). The type is maintained — `publish_document` calls
+  `refresh_enum` for each key dimension — so the cast is available; it
+  is a Part 2 **measurement** item rather than a correctness one, since
+  a document request returns one key's worth of rows rather than a
+  million.
+- `publish_file` moves rows **positionally** (`insert into {live}
+  select *, …` from staging; the outgoing generation `select *` into the
+  archive), and both table shapes emit their payload columns in TOML
+  file order. Reordering two same-typed columns in `datasets.toml`
+  against an existing database therefore misfiles their values with no
+  error — the same reason CLAUDE.md's `--demo` note says to delete the
+  database after a column change, now including a reorder.
 
 ## 5. The adapter tier
 
