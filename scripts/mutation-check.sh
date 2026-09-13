@@ -7639,6 +7639,30 @@ run_mutation "schema/document: dimensions outside the key are dropped, not silen
   '    let _ = &unkeyed;' \
   geode-core a_document_dimension_outside_the_key_is_dropped
 
+# `Scope::applicable_to` (market-data spec §3.4): a selection on a column
+# the dataset lacks must be dropped from what is applied and named in the
+# return, not silently kept as if the dataset had it.
+run_mutation "scope: applicable_to drops a selection on a column the dataset lacks" \
+  crates/geode-core/src/scope/mod.rs \
+  '            if !present {
+                dropped.push(d.column.clone());
+            }
+            present' \
+  '            if !present {
+                dropped.push(d.column.clone());
+            }
+            true' \
+  geode-core applicable_to_drops_selections_on_columns_the_dataset_lacks_and_names_them
+
+# `ScopeSemantics::meet` (market-data spec §3.4): `NotApplicable` must win
+# over `SemiJoined` -- a dropped selection is weaker than a semi-join, not
+# equal to it.
+run_mutation "attribution: NotApplicable is weaker than SemiJoined" \
+  crates/geode-core/src/attribution.rs \
+  '                ScopeSemantics::NotApplicable { dimensions }' \
+  '                ScopeSemantics::SemiJoined { dimensions }' \
+  geode-core not_applicable_is_weaker_than_semi_joined_and_unions_dimensions
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
