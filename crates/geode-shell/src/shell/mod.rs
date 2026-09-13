@@ -1059,7 +1059,12 @@ impl ShellView {
                 // are mutually exclusive by `close_modal`'s contract, so
                 // order carries no meaning here.
                 state.set_query(query);
-                view.object_dialog_scroll.scroll_to_item(0);
+                // The top for a filter (the cursor just reset there); the
+                // edited row for an open plain field, which `set_query` keeps
+                // the cursor on — scrolling to 0 there would carry the list
+                // away from the row the trader is typing into.
+                let cursor = state.effective_selected();
+                view.object_dialog_scroll.scroll_to_item(cursor);
             } else if let Some(state) = view.keybindings.as_mut() {
                 state.set_query(query);
                 view.keybindings_scroll.scroll_to_item(0);

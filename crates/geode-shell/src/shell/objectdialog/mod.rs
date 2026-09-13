@@ -1675,6 +1675,26 @@ impl Draft {
     /// [`Self::revalidate`] or `apply::commit_or_confirm`, which read a
     /// step from a tick or a text commit, not from opening the field
     /// that will produce one.
+    /// The write half of the query mirror for this draft —
+    /// `ObjectDialogState::set_query` routes an edit- or column-stage
+    /// keystroke here. A filter keystroke resets the cursor to the top
+    /// match, because the list just re-ranked and the old index points at
+    /// an unrelated row. An open PLAIN text field is not a filter: its rows
+    /// stay unfiltered with the edited row highlighted (§19.1), so the
+    /// cursor stays on that row. The chain field's rows ARE its completions
+    /// and keep the reset (§18.8). Found on a display 2026-09-13: every
+    /// keystroke after `i` sent the highlight back to the first row.
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+        match self.text_entry {
+            Some(TextEntry {
+                row: field,
+                completions: false,
+            }) => self.follow(field),
+            _ => self.selected = 0,
+        }
+    }
+
     pub fn begin_text_entry(&mut self) -> Step {
         let Some(row @ EditRow::Field(index)) = self.selected_row() else {
             return Step::Inert;
@@ -2858,8 +2878,7 @@ impl ObjectDialogState {
         if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
             && let Some(draft) = self.draft.as_mut()
         {
-            draft.query = query;
-            draft.selected = 0;
+            draft.set_query(query);
         } else {
             self.query = query;
             self.selected = 0;
@@ -2876,6 +2895,18 @@ impl ObjectDialogState {
         match (&self.stage, self.draft.as_ref()) {
             (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),
             _ => self.query.as_str(),
+        }
+    }
+
+    /// The cursor of the open stage, in the same slot rule as
+    /// [`Self::effective_query`]: the draft's in the edit and column
+    /// stages, the state's own otherwise. What the change subscription
+    /// scrolls to after a keystroke — the top for a filter (the reset),
+    /// the edited row for an open plain field, which `set_query` keeps.
+    pub fn effective_selected(&self) -> usize {
+        match (&self.stage, self.draft.as_ref()) {
+            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.selected,
+            _ => self.selected,
         }
     }
 
@@ -4848,6 +4879,34 @@ mod tests {
             ],
             toml::Table::new(),
         )
+    }
+
+    /// A keystroke in an open plain field reaches the draft through the
+    /// `Input`'s change subscription as `set_query`. The rows under a plain
+    /// field stay unfiltered with the edited row highlighted (§19.1), so
+    /// the cursor must stay on that row — the filter's "reset to the top
+    /// match" rule is for a list that just re-ranked, and this one did
+    /// not. Found on a display 2026-09-13: every keystroke after `i` sent
+    /// the highlight back to the first row.
+    #[test]
+    fn a_keystroke_in_a_plain_field_keeps_the_cursor_on_the_edited_row() {
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 1;
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        assert_eq!(draft.selected, 1);
+        draft.set_query("45".to_string());
+        assert_eq!(draft.query, "45");
+        assert_eq!(
+            draft.selected, 1,
+            "typing must not move the cursor off the field"
+        );
+        draft.set_query(String::new());
+        assert_eq!(draft.selected, 1, "an emptied field is still the same row");
+        // Without a field open the same call is the filter, and the filter
+        // starts from the top match.
+        draft.cancel_text_entry();
+        draft.set_query("po".to_string());
+        assert_eq!(draft.selected, 0);
     }
 
     #[test]

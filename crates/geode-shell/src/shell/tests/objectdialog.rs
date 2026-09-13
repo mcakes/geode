@@ -5391,6 +5391,15 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
     // the typed text can be corrected rather than retyped.
     cx.simulate_keystrokes("backspace backspace backspace backspace");
     cx.simulate_input("wide");
+    cx.run_until_parked();
+    // Typing mirrors through the `Input`'s change subscription; the
+    // cursor must still be on the width row (1), not reset to the top as a
+    // filter keystroke is (found on a display 2026-09-13).
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected),
+        1,
+        "typing into the open field must not move the cursor"
+    );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();

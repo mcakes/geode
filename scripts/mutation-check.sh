@@ -8859,6 +8859,17 @@ run_mutation "delegate: a presentation edit rebuilds the plan on a same-column s
   geode-blotter \
   a_presentation_change_rebuilds_the_plan_on_a_same_column_snapshot
 
+# 4c §19.9: a keystroke in an open PLAIN text field keeps the cursor on
+# the edited row — the filter's reset-to-top is for a list that just
+# re-ranked, and a plain field's rows stay unfiltered (the 2026-09-13
+# display report: every keystroke after `i` jumped to the first row).
+run_mutation "objectdialog: a keystroke in a plain field keeps the cursor on its row" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            }) => self.follow(field),' \
+  '            }) => self.selected = 0,' \
+  geode-shell \
+  a_keystroke_in_a_plain_field_keeps_the_cursor_on_the_edited_row
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
