@@ -8476,6 +8476,58 @@ run_mutation "objectdialog: the footer offers i only for an editable text or a n
   geode-shell \
   offers_text_entry_needs_a_number_or_an_editable_text_row
 
+# ---- market-data documents Part 2 Task 1: the document arm of
+# compile_distinct lowers the text and expression filters grain-free.
+# Part 1 shipped that arm with dimension selections only and disclosed the
+# gap; these four entries pin each half of closing it, and the direction
+# each half must fail in.
+
+# The narrowing itself. Without the OR term a text-filtered picker counts
+# every document whatever the needle -- Part 1's over-count.
+run_mutation "distinct/document: a text filter narrows the document contribution" \
+  crates/geode-data/src/query/distinct.rs \
+  '            clauses.push(format!("({})", terms.join(" or ")));
+            sql_params.extend(term_params);' \
+  '            let _ = (&terms, &term_params);' \
+  geode-data a_text_filter_narrows_a_document_datasets_contribution
+
+# The direction. A needle over a dataset with nothing searchable matches
+# NOTHING; `true` here widens hardest exactly when the trader has narrowed
+# hardest, which is the failure mode the measure path's own rule forbids.
+run_mutation "distinct/document: no textual column means nothing, not everything" \
+  crates/geode-data/src/query/distinct.rs \
+  '        if terms.is_empty() {
+            clauses.push("false".to_string());' \
+  '        if terms.is_empty() {
+            clauses.push("true".to_string());' \
+  geode-data a_text_filter_on_a_document_dataset_with_no_textual_column_contributes_nothing
+
+# The expression half: the conjunct is lowered AND kept. Dropping it is
+# exactly Part 1's behaviour, so this mutation restores the parked gap.
+run_mutation "distinct/document: an expression conjunct really binds" \
+  crates/geode-data/src/query/distinct.rs \
+  '            let sql = render_expr(term, &mut expr_params, dims)?;
+            clauses.push(sql);
+            sql_params.extend(expr_params);' \
+  '            let sql = render_expr(term, &mut expr_params, dims)?;
+            let _ = (sql, expr_params);' \
+  geode-data an_expression_filter_narrows_a_document_datasets_contribution
+
+# ... and a conjunct naming a column the document table has no storage for
+# is DROPPED, not compiled: compiling it is a binder error that fails the
+# whole picker query on the one dataset with no `book`, not just its branch.
+run_mutation "distinct/document: a conjunct on an absent column is dropped, not compiled" \
+  crates/geode-data/src/query/distinct.rs \
+  '            if term
+                .columns()
+                .iter()
+                .any(|c| !stored.contains(&dims.base_column(c)))
+            {
+                continue;' \
+  '            if false {
+                continue;' \
+  geode-data an_expression_the_document_dataset_lacks_a_column_for_is_dropped_not_an_error
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
