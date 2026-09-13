@@ -67,6 +67,7 @@
 //! from the reverted config, so the two cannot drift apart.
 
 pub mod apply;
+mod colours;
 mod groupings;
 pub mod render;
 mod schema;
@@ -100,6 +101,10 @@ pub enum Domain {
     Schema,
     /// The ingest feeds, one object per source (§8.3, §19.3).
     Sources,
+    /// The shared colour vocabulary a column's `colour` field and a
+    /// chart series can name — one object per named colour, a hue (with
+    /// its tone) or a theme token (Part 2c §6.1).
+    Colours,
 }
 
 /// Which stage of the scaffold is on screen.
@@ -218,6 +223,7 @@ impl Domain {
             Domain::Scopes => scopes::DOC,
             Domain::Schema => schema::DOC,
             Domain::Sources => sources::DOC,
+            Domain::Colours => colours::DOC,
         }
     }
 
@@ -229,6 +235,7 @@ impl Domain {
             Domain::Scopes => "Scopes",
             Domain::Schema => "Schema",
             Domain::Sources => "Sources",
+            Domain::Colours => "Colours",
         }
     }
 
@@ -242,6 +249,7 @@ impl Domain {
             Domain::Scopes => "saved",
             Domain::Schema => "datasets",
             Domain::Sources => "sources",
+            Domain::Colours => "colours",
         }
     }
 
@@ -255,6 +263,7 @@ impl Domain {
             Domain::Scopes => scopes::summary,
             Domain::Schema => schema::summary,
             Domain::Sources => sources::summary,
+            Domain::Colours => colours::summary,
         }
     }
 
@@ -278,8 +287,15 @@ impl Domain {
             // reason Groupings does not: every field either domain has is
             // `Destination::Doc` (`scopes.rs`'s and `sources.rs`'s own
             // module docs). Schema joins them for the reason this
-            // method's own doc comment gives.
-            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Sources => None,
+            // method's own doc comment gives. Colours joins for the same
+            // "every field is `Destination::Doc`" reason (`colours.rs`'s
+            // own module doc) — there is nothing to personalise about a
+            // shared colour without forking it.
+            Domain::Groupings
+            | Domain::Scopes
+            | Domain::Schema
+            | Domain::Sources
+            | Domain::Colours => None,
         }
     }
 
@@ -300,7 +316,9 @@ impl Domain {
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources => None,
+            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colours => {
+                None
+            }
         }
     }
 
@@ -324,7 +342,11 @@ impl Domain {
     fn prefix_fn(self) -> Option<fn(&toml::Value) -> Option<String>> {
         match self {
             Domain::Sources => Some(sources::prefix),
-            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => None,
+            Domain::Views
+            | Domain::Groupings
+            | Domain::Scopes
+            | Domain::Schema
+            | Domain::Colours => None,
         }
     }
 
@@ -369,9 +391,29 @@ impl Domain {
     /// cannot see that name at all, which is why the refusal reads this
     /// union rather than the list.
     ///
+    /// The names this domain refuses outright, reserved by a grammar
+    /// outside its own doc (Part 2c §6.1) — `Colours` alone: a column's
+    /// `colour` field already spells `none` and `sign` itself, so a
+    /// named colour object by either name would be unreachable through
+    /// that field and confusing everywhere else. Empty for every other
+    /// domain, which has no such collision.
+    pub fn reserved_names(self) -> &'static [&'static str] {
+        match self {
+            Domain::Colours => &geode_core::colour::RESERVED_NAMES,
+            Domain::Views
+            | Domain::Groupings
+            | Domain::Scopes
+            | Domain::Schema
+            | Domain::Sources => &[],
+        }
+    }
+
     /// `config_version` never reaches here: `check_object_name` refuses
     /// it before the caller asks.
     pub fn name_taken(self, config: &Config, name: &str) -> bool {
+        if self.reserved_names().contains(&name) {
+            return true;
+        }
         if self.roster().is_some_and(|roster| roster.contains(&name)) {
             return true;
         }
@@ -739,6 +781,12 @@ impl Destination {
             // no presentation overlay for a source).
             (Destination::Presentation, Domain::Sources) => {
                 unreachable!("Sources has no Presentation-destined fields")
+            }
+            // Colours joins the same list: `colours.rs`'s module doc has
+            // the reasoning (every field is `Destination::Doc`, there is
+            // no presentation overlay for a shared colour).
+            (Destination::Presentation, Domain::Colours) => {
+                unreachable!("Colours has no Presentation-destined fields")
             }
         }
     }
@@ -2369,6 +2417,13 @@ impl Domain {
             }
             Domain::Views => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
+            // Colours has no `Text` rows at all — `hue` is a `Number`,
+            // `tone`/`token` are `Choice` — so `i` never reaches this
+            // arm for it; kept only to stay exhaustive.
+            Domain::Colours => {
+                let _ = key;
+                false
+            }
         }
     }
 
@@ -2386,6 +2441,12 @@ impl Domain {
             }
             Domain::Views => views::parse_text(key, text),
             Domain::Sources => sources::parse_text(key, text),
+            // Same reasoning as `text_editable` above: Colours has no
+            // `Text` row for this door to ever be called on.
+            Domain::Colours => {
+                let _ = key;
+                Ok(text.trim().to_string())
+            }
         }
     }
 
@@ -2402,6 +2463,7 @@ impl Domain {
             Domain::Scopes => scopes::fields(config, object),
             Domain::Schema => schema::fields(config, object),
             Domain::Sources => sources::fields(config, object),
+            Domain::Colours => colours::fields(config, object),
         }
     }
 
@@ -2461,6 +2523,7 @@ impl Domain {
             Domain::Scopes => scopes::to_table(draft, dest),
             Domain::Schema => schema::to_table(draft, dest),
             Domain::Sources => sources::to_table(draft, dest),
+            Domain::Colours => colours::to_table(draft, dest),
         }
     }
 
@@ -2474,6 +2537,7 @@ impl Domain {
             Domain::Scopes => scopes::validate(draft, config),
             Domain::Schema => schema::validate(draft, config),
             Domain::Sources => sources::validate(draft, config),
+            Domain::Colours => colours::validate(draft, config),
         }
     }
 }

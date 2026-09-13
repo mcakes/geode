@@ -120,6 +120,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use super::apply;
+use super::colours;
 use super::scopes;
 use super::sources;
 use super::views;
@@ -133,6 +134,11 @@ use crate::listfilter;
 use crate::vimnav;
 
 use super::super::ShellView;
+// Aliased: `colours` (unqualified, `use super::colours;` above) is the
+// `Domain::Colours` adapter; this is `shell::colours`, the gpui<->pure
+// theme bridge (§6.1) — a different module, one directory further out,
+// that the adapter itself never touches.
+use super::super::colours as colour_theme;
 use super::super::dialog;
 use super::super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
 
@@ -558,15 +564,21 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         }
     };
     if domain.name_taken(&shell.services.config, &name) {
-        // Two ways a name can be taken, and they need different
-        // instructions. A name with a row is one `escape` and an `enter`
-        // away; a name only the presentation overlay holds
-        // (`Domain::name_taken`'s own doc) has nothing on this list to
-        // open at all, so pointing the trader at the list would be a
-        // dead end — the orphaned `view_presentation.toml` entry is the
-        // thing in their way, and it is the thing the notice names.
-        let listed = derive_rows(shell).iter().any(|row| row.name == name);
-        let notice = if listed {
+        // Three ways a name can be taken, and they need different
+        // instructions. Reserved (Colours' `none`/`sign`, Part 2c §6.1)
+        // is checked first — no row and no orphaned presentation could
+        // ever explain it, so it gets its own message rather than
+        // falling into either of the other two, both of which point the
+        // trader at something that does not exist for a reserved name. A
+        // name with a row is one `escape` and an `enter` away; a name
+        // only the presentation overlay holds (`Domain::name_taken`'s
+        // own doc) has nothing on this list to open at all, so pointing
+        // the trader at the list would be a dead end — the orphaned
+        // `view_presentation.toml` entry is the thing in their way, and
+        // it is the thing the notice names.
+        let notice = if domain.reserved_names().contains(&name.as_str()) {
+            format!("'{name}' is reserved")
+        } else if derive_rows(shell).iter().any(|row| row.name == name) {
             format!("'{name}' already exists — open it instead")
         } else {
             format!(
@@ -2265,6 +2277,18 @@ fn build(
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
 
+    // §6.1: the merged `colours.toml`, read once for the whole list
+    // rather than once per row — every browse row's swatch resolves its
+    // own saved colour against it. `None` for every other domain, so a
+    // non-Colours dialog never even asks `Config` for a doc it will
+    // never read the rest of the row loop for.
+    let named_colours: Option<geode_core::colour::NamedColours> = (state.domain == Domain::Colours)
+        .then(|| {
+            let empty = geode_core::config::MergedDoc::default();
+            let doc = shell.services.config.doc(colours::DOC).unwrap_or(&empty);
+            geode_core::colour::NamedColours::from_doc(doc).0
+        });
+
     let visible = super::visible_rows(state, &rows);
 
     let mut list = v_flex()
@@ -2378,10 +2402,20 @@ fn build(
             ));
         }
 
+        // §6.1: a swatch before the label, resolved from this row's own
+        // saved colour — painted only when the colour actually resolves
+        // (a dropped or invalid one paints no swatch, never a fallback
+        // that would misrepresent it).
+        let swatch = named_colours.as_ref().and_then(|named| {
+            colour_theme::resolve_named(named, &row.name, theme)
+                .map(|hsla| dialog::swatch(hsla, format!("objectdialog-swatch-{}", row.name), cx))
+        });
+
         let entity_for_row = entity.clone();
         let clicked = row.name.clone();
         let selector_name = row.name.clone();
         let row_el = row_el
+            .children(swatch)
             .child(label)
             .child(markers)
             // Keyed by the object's own name, not its index: the list is
@@ -2606,6 +2640,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let chip_bg = theme.muted;
     let row = editing_row(shell);
 
+    // §6.1: on Colours, the swatch beside the name — resolved from the
+    // draft's own live fields (`colours::definition_of`), not from the
+    // saved `colours.toml`, so stepping the hue repaints it before any
+    // write lands. `None` (no swatch) only if the draft somehow lacks a
+    // `hue` row, which `colours::fields` never produces.
+    let name_child = match (state.domain, colours::definition_of(draft)) {
+        (Domain::Colours, Some(def)) => {
+            let anchors = colour_theme::anchors_from_theme(theme);
+            let tokens = colour_theme::tokens_from_theme(theme);
+            let hsla = colour_theme::to_hsla(geode_core::colour::resolve(&def, &anchors, &tokens));
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(dialog::swatch(
+                    hsla,
+                    "objectdialog-swatch-header".to_string(),
+                    cx,
+                ))
+                .child(div().text_lg().child(draft.name.clone()))
+                .into_any_element()
+        }
+        _ => div().text_lg().child(draft.name.clone()).into_any_element(),
+    };
+
     // The object header: its name, and the same two provenance markers
     // the browse row carries, so opening an object never loses the
     // context the list gave it.
@@ -2614,7 +2672,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .items_center()
         .justify_between()
         .gap_3()
-        .child(div().text_lg().child(draft.name.clone()))
+        .child(name_child)
         .debug_selector(|| "objectdialog-edit-header".to_string());
     if row.is_some() || draft.is_new {
         let mut markers = h_flex().gap_1().items_center();
@@ -3370,12 +3428,12 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
             "DIMENSIONS — space includes · shift+j / shift+k reorder",
             "members",
         ),
-        // None of Scopes, Schema or Sources has an `OrderedList` field at
-        // all (`scopes.rs`'s, `schema.rs`'s and `sources.rs`'s own module
-        // docs — every field on any of the three is a plain scalar), so
-        // this arm is unreachable for all three; kept only to stay
-        // exhaustive as domains are added.
-        (Domain::Scopes | Domain::Schema | Domain::Sources, _) => ("", "members"),
+        // None of Scopes, Schema, Sources or Colours has an `OrderedList`
+        // field at all (`scopes.rs`'s, `schema.rs`'s, `sources.rs`'s and
+        // `colours.rs`'s own module docs — every field on any of the
+        // four is a plain scalar), so this arm is unreachable for all
+        // four; kept only to stay exhaustive as domains are added.
+        (Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colours, _) => ("", "members"),
     }
 }
 

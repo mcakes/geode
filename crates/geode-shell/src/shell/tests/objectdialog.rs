@@ -5346,3 +5346,62 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
     let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
     assert!(written.contains("width = 160"), "{written}");
 }
+
+// --- Task 5: the Colours dialog (Part 2c §6.1) --------------------------
+
+/// A builtin `colours` doc with one colour (`delta`, `hue = 240`) plus
+/// the keymap — the same shape `services_with_sources` uses, so a first
+/// edit to `delta` asks before forking exactly as a builtin source's
+/// first edit does.
+fn services_with_colours() -> ShellServices {
+    let mut services = test_services();
+    let colours = LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            colours,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// §6.1: the browse rows and the edit header carry a swatch resolved
+/// against the active theme; stepping the hue repaints it; `n` refuses a
+/// reserved name.
+#[gpui::test]
+fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    assert!(cx.debug_bounds("objectdialog-swatch-delta").is_some());
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("sign");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        dialog_state(&shell, &cx, |s| s.notice.clone())
+            .unwrap()
+            .contains("reserved")
+    );
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("enter"); // delta
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-swatch-header").is_some());
+    cx.simulate_keystrokes("space"); // hue 240 → 255
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        d.fields[0].kind,
+        objectdialog::FieldKind::Number { value: 255, .. }
+    )));
+    // A builtin colour's first edit asks the fork question, exactly as
+    // `sources_rows_are_dataset_first_and_i_types_a_duration` presses
+    // `enter` on it before the flush.
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    assert!(written.contains("[delta]\nhue = 255"), "{written}");
+}

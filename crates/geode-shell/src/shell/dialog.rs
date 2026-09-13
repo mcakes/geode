@@ -887,6 +887,28 @@ pub(crate) fn badge(
     el.into_any_element()
 }
 
+/// A small filled square painting one resolved colour — the Colours
+/// dialog's live swatch (Part 2c §6.1), on a browse row and beside the
+/// edit header's own name. `colour` is already-resolved data (the
+/// definition run through `shell::colours::resolve_named`/`resolve`
+/// against the active theme), never a raw literal picked here — the one
+/// deliberate exception to "no raw colour in chrome" this crate's other
+/// chrome follows, because the whole point of this element is to show
+/// the trader exactly what a name resolves to. The border stays
+/// `theme.border` regardless, so the swatch never borrows the resolved
+/// fill for its own outline.
+pub(crate) fn swatch(colour: Hsla, selector: String, cx: &App) -> AnyElement {
+    div()
+        .w(px(14.))
+        .h(px(14.))
+        .rounded(px(3.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(colour)
+        .debug_selector(move || selector.clone())
+        .into_any_element()
+}
+
 /// Cap on the modal panel's height, as a fraction of the window's viewport
 /// height — a *max*, not a fixed size (see [`render_modal`]'s `.max_h`
 /// use): a small dialog's panel still hugs its own content, this only

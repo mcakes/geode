@@ -1,0 +1,130 @@
+//! Bridges gpui-component's `Theme` to the pure
+//! [`geode_core::colour`] resolver (Part 2c spec §6.1) — the one place a
+//! gpui `Hsla` and a `geode_core::colour::Rgb` meet. `geode_core::colour`
+//! itself knows no gpui type (its own module doc says so), so every
+//! caller that has a real theme to resolve against — the Colours dialog's
+//! swatches today, the blotter's cell colouring (Task 6) tomorrow — comes
+//! through here rather than hand-rolling the conversion at its own call
+//! site.
+//!
+//! `anchors_from_theme`/`tokens_from_theme` read the theme's own colours
+//! once per resolve; nothing here caches them, because a theme swap
+//! (`[theme] name` in `app.toml`) has to be visible on the very next
+//! paint and a cache would need its own invalidation for no real cost —
+//! six-plus-eleven `Hsla` field reads is not a hot path.
+
+use geode_core::colour::{Anchors, NamedColours, Rgb, Tokens};
+use gpui::Hsla;
+use gpui_component::Theme;
+
+/// A gpui `Hsla` as the pure resolver's own `Rgb` — alpha dropped, since
+/// every colour this crate resolves through the pure vocabulary is
+/// opaque (a swatch, a cell, a chart series never carries transparency
+/// of its own).
+pub fn to_rgb(hsla: Hsla) -> Rgb {
+    let c = hsla.to_rgb();
+    Rgb {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+    }
+}
+
+/// The reverse of [`to_rgb`]: opaque (`a: 1.0`), through gpui's own
+/// `Rgba -> Hsla` conversion rather than a hand-rolled one, so this
+/// crate never re-derives HSL math gpui already has.
+pub fn to_hsla(rgb: Rgb) -> Hsla {
+    gpui::Rgba {
+        r: rgb.r,
+        g: rgb.g,
+        b: rgb.b,
+        a: 1.0,
+    }
+    .into()
+}
+
+/// The theme's six base hues, red/yellow/green/cyan/blue/magenta, in
+/// both tones — [`geode_core::colour::ANCHOR_DEGREES`]'s own order,
+/// which every [`Anchors`] this crate builds must agree with, or a
+/// `hue` colour resolves against the wrong anchor entirely.
+pub fn anchors_from_theme(theme: &Theme) -> Anchors {
+    Anchors {
+        normal: [
+            theme.red,
+            theme.yellow,
+            theme.green,
+            theme.cyan,
+            theme.blue,
+            theme.magenta,
+        ]
+        .map(to_rgb),
+        light: [
+            theme.red_light,
+            theme.yellow_light,
+            theme.green_light,
+            theme.cyan_light,
+            theme.blue_light,
+            theme.magenta_light,
+        ]
+        .map(to_rgb),
+    }
+}
+
+/// The theme's semantic tokens, spec §2.3's table: `muted` reads the
+/// theme's `muted_foreground` (there is no bare `muted` colour on
+/// gpui-component's own `Theme` — its `muted` is a background tint, not
+/// a foreground token, and §2.3 names the foreground one).
+pub fn tokens_from_theme(theme: &Theme) -> Tokens {
+    Tokens {
+        foreground: to_rgb(theme.foreground),
+        muted: to_rgb(theme.muted_foreground),
+        primary: to_rgb(theme.primary),
+        accent: to_rgb(theme.accent),
+        danger: to_rgb(theme.danger),
+        warning: to_rgb(theme.warning),
+        success: to_rgb(theme.success),
+        info: to_rgb(theme.info),
+        chart: [
+            theme.chart_1,
+            theme.chart_2,
+            theme.chart_3,
+            theme.chart_4,
+            theme.chart_5,
+        ]
+        .map(to_rgb),
+        bullish: to_rgb(theme.chart_bullish),
+        bearish: to_rgb(theme.chart_bearish),
+    }
+}
+
+/// A named colour, resolved against `theme` — `None` when `colours`
+/// does not define `name` at all (dropped by the reader, or never
+/// saved), which the caller reads as "paint no swatch" rather than a
+/// fallback colour standing in for one that does not exist.
+pub fn resolve_named(colours: &NamedColours, name: &str, theme: &Theme) -> Option<Hsla> {
+    let def = colours.get(name)?;
+    let anchors = anchors_from_theme(theme);
+    let tokens = tokens_from_theme(theme);
+    Some(to_hsla(geode_core::colour::resolve(def, &anchors, &tokens)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-tripping through `Hsla` loses a little precision (HSL <->
+    /// RGB is not exact in floating point) but must stay visually
+    /// identical — within a tight tolerance, not bit-for-bit.
+    #[test]
+    fn to_rgb_and_to_hsla_round_trip_within_tolerance() {
+        let rgb = Rgb {
+            r: 0.25,
+            g: 0.5,
+            b: 0.75,
+        };
+        let back = to_rgb(to_hsla(rgb));
+        assert!((back.r - rgb.r).abs() < 0.01, "{back:?}");
+        assert!((back.g - rgb.g).abs() < 0.01, "{back:?}");
+        assert!((back.b - rgb.b).abs() < 0.01, "{back:?}");
+    }
+}
