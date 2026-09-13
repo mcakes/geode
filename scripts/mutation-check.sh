@@ -8931,6 +8931,16 @@ run_mutation "load: the dataset overlay's colours are cross-checked without a vi
   geode-core \
   a_dataset_overlay_colour_is_cross_checked_without_a_view_overlay
 
+# dataset-presentation spec §6: omitted from the predicate, a dataset-level
+# edit sits on disk until the next restart — the same failure the
+# view_presentation and colours lines above it fixed.
+run_mutation "reload: a dataset_presentation change fires ConfigReloaded" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                || changed("dataset_presentation")' \
+  '                || false' \
+  geode-shell \
+  a_dataset_presentation_change_fires_config_reloaded
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
