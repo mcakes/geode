@@ -8757,6 +8757,18 @@ run_mutation "adapter: egress publishes on the target topic" \
   geode-data an_upload_echoes_on_the_target_topic
 
 
+# A subscription with no topic matches nothing, so accepting one would
+# register a sink the dispatcher can never feed and report `Connected` for
+# it — a source that reads healthy and delivers nothing, the worst of the
+# two failure shapes. `sources.toml` already refuses an empty list, so
+# this is the trait boundary's own guard and needs its own defence.
+run_mutation "adapter: an empty topic list is refused, not reported connected" \
+  crates/geode-data/src/adapter/channel.rs \
+  '        if topics.is_empty() {' \
+  '        if false {' \
+  geode-data subscribing_to_no_topic_at_all_is_refused_rather_than_reported_connected
+
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

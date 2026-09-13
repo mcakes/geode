@@ -405,6 +405,24 @@ mod tests {
     }
 
     #[test]
+    fn subscribing_to_no_topic_at_all_is_refused_rather_than_reported_connected() {
+        let (adapter, feed) = ChannelAdapter::new("demo_bus");
+        let (sink, _rx) = MessageSink::bounded(8);
+        let states: Arc<Mutex<Vec<ConnectionState>>> = Default::default();
+        let mut sub = adapter.subscription().unwrap();
+        let refused = sub
+            .subscribe(&[], sink, recorder(&states))
+            .expect_err("a subscription with no topics matches nothing");
+        assert!(refused.message.contains("at least one topic"), "{refused}");
+        // The refusal is what keeps the caller from believing it is live:
+        // nothing was registered and no `Connected` was reported, so a
+        // source misconfigured this way reads as broken rather than as a
+        // healthy feed that never delivers.
+        assert!(states.lock().unwrap().is_empty());
+        assert!(feed.publish("marketdata/cvi/SPX.Z", b"<x/>".to_vec()));
+    }
+
+    #[test]
     fn a_published_message_reaches_every_matching_subscription_and_no_other() {
         let (adapter, feed) = ChannelAdapter::new("demo_bus");
         let (cvi_sink, cvi_rx) = MessageSink::bounded(8);
