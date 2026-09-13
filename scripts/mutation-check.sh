@@ -4357,9 +4357,9 @@ run_mutation "views: a presentation save pins the desk's column order" \
 run_mutation "views: a presentation save copies the desk's widths into the user's file" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
   '        if item.presentation.width != desk.width {' \
-  '        if false {' \
+  '        if true {' \
   geode-shell \
-  the_presentation_table_holds_order_hidden_and_width
+  a_presentation_save_writes_only_what_the_trader_changed
 
 # ---- Phase 4c: the reload keeps the app's own builtin layer ----------
 
@@ -7940,6 +7940,17 @@ run_mutation "views: hidden is written whenever a member is excluded" \
   '        if false {' \
   geode-shell \
   hiding_a_column_writes_presentation_and_does_not_fork_the_view
+
+# 2c §5.4: the member-row summary names only the keys that differ from
+# the column's kind default — mutating this comparison to always-true
+# would name precision on every column, including ones the trader never
+# touched.
+run_mutation "views: the member summary omits keys at the kind default" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    if effective.precision != kind_default.precision {' \
+  '    if effective.precision != kind_default.precision || true {' \
+  geode-shell \
+  column_summary_names_only_the_keys_in_force
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

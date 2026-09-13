@@ -759,7 +759,12 @@ pub struct ListItem {
     /// Shown rather than hidden. For a view this is the inverse of
     /// `ColumnPresentation::hidden`, and it is presentation, never the
     /// column set: a hidden column stays in `ViewSpec::columns`, so the
-    /// compiler still selects it and unhiding costs nothing.
+    /// compiler still selects it and unhiding costs nothing. `included`
+    /// is the one truth from here on — the tick flips it and
+    /// `views::presentation_table` reads only it to decide `hidden`;
+    /// `presentation.hidden` is merely the seed `views::fields` read out
+    /// of the merged overlay when this item was built, never consulted
+    /// again.
     pub included: bool,
     pub presentation: ColumnPresentation,
     /// The `[[columns]]` `kind` a first-time write of this item needs —

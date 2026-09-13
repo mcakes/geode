@@ -455,6 +455,18 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
 /// OUTER condition's own line, and collapsing the two would fold that
 /// line into a different one the moment a sibling key's comparison
 /// changed — `#[allow]` below, not the suggested rewrite.
+///
+/// **An item key `None` where the desk has `Some` cannot arise here**:
+/// the item was seeded from the *merged* presentation
+/// (`ListItem::presentation`'s own doc), so a key the desk sets is never
+/// `None` on the item unless the trader's own edit cleared it back to
+/// `None` — a verb this crate does not yet offer. That is why `if key !=
+/// desk.key { if let Some(v) = key { … } }` never silently drops a
+/// clear: there is no clear to drop yet. A future verb that lets a
+/// trader explicitly clear one key back to "whatever the desk says" must
+/// write the desk's OWN value into that key, not `None` — writing `None`
+/// here would omit the key from `t` and read back as "nothing to say",
+/// which is only true today because nothing can produce that state.
 #[allow(clippy::collapsible_if)]
 fn presentation_table(draft: &Draft) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
@@ -702,8 +714,12 @@ pub fn column_summary(kind_default: &ColumnFormat, p: &ColumnPresentation) -> St
     if effective.negative != Negative::Minus {
         parts.push("parens".to_string());
     }
-    if kind_default.thousands && !effective.thousands {
-        parts.push("no thousands".to_string());
+    if effective.thousands != kind_default.thousands {
+        if effective.thousands {
+            parts.push("thousands".to_string());
+        } else {
+            parts.push("no thousands".to_string());
+        }
     }
     if effective.colour != kind_default.colour {
         parts.push(match &effective.colour {
@@ -1574,5 +1590,64 @@ mod tests {
         items_mut(&mut draft)[0].presentation.precision = Some(2);
         let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
         assert!(!text.contains("precision"), "{text}");
+    }
+
+    /// A bare `ListItem` of `kind`, for [`kind_default`]'s own test —
+    /// nothing else about the item matters to it.
+    fn item_of_kind(kind: Option<&str>) -> ListItem {
+        ListItem {
+            name: "x".to_string(),
+            included: true,
+            presentation: ColumnPresentation::default(),
+            kind: kind.map(str::to_string),
+        }
+    }
+
+    /// Part 2c §5.4: [`kind_default`] answers [`ColumnFormat::TEXT`] only
+    /// for a dimension, and [`column_summary`] names only the keys the
+    /// trader actually overrode — nothing at all for an untouched column,
+    /// and both directions of `thousands` (a dimension turning it ON is
+    /// as much an override as a measure turning it off).
+    #[test]
+    fn column_summary_names_only_the_keys_in_force() {
+        assert_eq!(
+            kind_default(&item_of_kind(Some("dimension"))),
+            ColumnFormat::TEXT
+        );
+        assert_eq!(
+            kind_default(&item_of_kind(Some("measure"))),
+            ColumnFormat::MEASURE
+        );
+        assert_eq!(kind_default(&item_of_kind(None)), ColumnFormat::MEASURE);
+
+        let overridden = ColumnPresentation {
+            width: Some(120.0),
+            scale: Some(Scale::Thousands),
+            precision: Some(0),
+            colour: Some(Colour::Named("delta".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(
+            column_summary(&ColumnFormat::MEASURE, &overridden),
+            "120 px · k · 0 dp · delta"
+        );
+
+        assert_eq!(
+            column_summary(&ColumnFormat::MEASURE, &ColumnPresentation::default()),
+            "",
+            "an untouched column paints nothing"
+        );
+
+        // A dimension defaults to no thousands separators; turning them ON
+        // is exactly as much an override as a measure turning them off.
+        let dimension_thousands = ColumnPresentation {
+            thousands: Some(true),
+            ..Default::default()
+        };
+        let summary = column_summary(&ColumnFormat::TEXT, &dimension_thousands);
+        assert!(
+            summary.contains("thousands"),
+            "a dimension's non-default thousands must be named: {summary:?}"
+        );
     }
 }
