@@ -9069,6 +9069,43 @@ run_mutation "dataset_columns: a key column's kind falls back on its type" \
   geode-shell \
   a_key_column_takes_the_text_kind_from_its_type
 
+# dataset-presentation spec §5.1: the view writer compares against desk +
+# dataset, so a view field equal to the dataset level writes NOTHING —
+# compared against the desk alone, every dataset-level key would be
+# copied into the view overlay as a spurious override, pinning that view
+# against the trader's own next dataset-level change.
+run_mutation "views: the overlay writer's baseline includes the dataset level" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    let baseline = baseline_below(draft);' \
+  '    let baseline = desk_baseline(draft);' \
+  geode-shell \
+  a_view_field_equal_to_the_dataset_level_writes_nothing
+
+# §5.1 / §3.2: the dataset layer is looked up by the column's OWNER — the
+# join's dataset for a joined column, never only the view's own. Read off
+# the view's dataset alone, a joined column takes nothing from this layer:
+# the trader's entry paints in every view of that dataset except the ones
+# that reach it by join.
+run_mutation "views: the dataset layer follows the column's owning dataset" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            let owner = DatasetPresentationSpec::owner_of(view, c.name(), &schema)?;' \
+  '            let owner = view.dataset.as_str();' \
+  geode-shell \
+  a_joined_columns_dataset_layer_comes_from_the_join
+
+# §5.2: "cleared" is measured against the ITEM's own pre-fold value —
+# "this keystroke emptied it" — not against whether some layer below sets
+# the key. Drop the guard and every fold of a column with no label reports
+# one cleared; the `width` arm runs after the `label` arm, so a genuinely
+# cleared label is overwritten by a `width` nobody touched and the
+# trader's notice names the wrong key or goes missing.
+run_mutation "views: a clear is what this keystroke emptied" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '                    if item.presentation.label.is_some() {' \
+  '                    if true {' \
+  geode-shell \
+  clearing_a_desk_label_falls_back_to_the_desk
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

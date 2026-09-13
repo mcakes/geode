@@ -2314,6 +2314,62 @@ mod tests {
         );
     }
 
+    /// §5.1 and §3.2: the dataset layer is looked up by the column's
+    /// OWNER — the view's own dataset first, then each join's in file
+    /// order, the order the compiler resolves names in — so a column a
+    /// view reaches through a join takes the JOIN's dataset-level entry.
+    ///
+    /// Read off only the view's own dataset (the obvious shortcut), a
+    /// joined column silently takes nothing from this layer: the trader's
+    /// `[ref.columns.sector]` label would paint in every view of `ref`
+    /// except the ones that reach it by join, and the writer's baseline
+    /// would then call the value in force a divergence and copy it into
+    /// that view's own overlay.
+    #[test]
+    fn a_joined_columns_dataset_layer_comes_from_the_join() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [ref.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [ref.columns.exposure]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [ref.columns.sector]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"instrument\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\ngrouping = [\"book\"]\n\
+                 joins = [{ dataset = \"ref\", on = [\"book\"] }]\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+                 [[tree.columns]]\nname = \"npv\"\nkind = \"measure\"\n\
+                 [[tree.columns]]\nname = \"sector\"\nkind = \"dimension\"\n",
+            ),
+            (
+                Layer::User,
+                "dataset_presentation",
+                "[risk.columns.npv]\nscale = \"k\"\n\
+                 [ref.columns.sector]\nlabel = \"Sector\"\n",
+            ),
+        ]);
+        let draft = Domain::Views.draft(&config, "tree");
+        assert_eq!(
+            draft.dataset_layer["sector"].label.as_deref(),
+            Some("Sector"),
+            "the join's dataset owns `sector`, so its entry is the one that applies"
+        );
+        assert_eq!(
+            draft.dataset_layer["npv"].scale,
+            Some(Scale::Thousands),
+            "and the view's own dataset still owns its own columns"
+        );
+        // `book` is declared by BOTH datasets and personalised in
+        // neither, so it simply has no entry — the own-dataset-first rule
+        // is about which one is asked, not about inventing a default.
+        assert!(!draft.dataset_layer.contains_key("book"));
+    }
+
     /// A bare `ListItem` of `kind`, for [`kind_default`]'s own test —
     /// nothing else about the item matters to it.
     fn item_of_kind(kind: Option<&str>) -> ListItem {
