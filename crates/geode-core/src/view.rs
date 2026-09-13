@@ -1095,6 +1095,31 @@ impl DatasetPresentationSpec {
                                         .into(),
                                 );
                             }
+                            // Every key a column table can carry (§2.2).
+                            // `color` is `parse_format_keys`' own
+                            // American alias and `hidden` has its own
+                            // message just above; a key that is neither
+                            // is a typo (`precison`, `colour_`) that
+                            // would otherwise be accepted in silence —
+                            // and telling a trader where a key went is
+                            // this whole layer's value (the final
+                            // whole-branch review's Minor 2).
+                            const COLUMN_KEYS: [&str; 9] = [
+                                "label",
+                                "width",
+                                "scale",
+                                "precision",
+                                "thousands",
+                                "negative",
+                                "colour",
+                                "color",
+                                "hidden",
+                            ];
+                            for k in ct.keys() {
+                                if !COLUMN_KEYS.contains(&k.as_str()) {
+                                    warn(k, format!("unknown key '{k}' — ignored"));
+                                }
+                            }
                             diags.extend(col_diags.into_inner());
                             columns.insert(col.clone(), cp);
                         }
@@ -1947,6 +1972,42 @@ npv = 120
         assert_eq!(
             diags[1].path.as_deref(),
             Some("dataset_presentation.risk.columns.delta01.hidden")
+        );
+    }
+
+    /// A typo inside a column table used to be accepted in silence:
+    /// `parse_format_keys`/`parse_column_keys` report a key they
+    /// recognise and mis-read, never one they do not recognise at all
+    /// (the final whole-branch review's Minor 2). `color` is the one
+    /// American alias `parse_format_keys` itself reads, so it must NOT
+    /// warn.
+    #[test]
+    fn dataset_presentation_warns_for_an_unknown_key_inside_a_column_table() {
+        let (spec, diags) = DatasetPresentationSpec::from_doc(&dataset_doc(
+            "[risk.columns.npv]\nprecison = 3\ncolor = \"sign\"\nwidth = 80\n",
+        ));
+        assert_eq!(
+            spec.datasets["risk"]["npv"].width,
+            Some(80.0),
+            "an unknown key skips the key, not the column"
+        );
+        assert_eq!(
+            spec.datasets["risk"]["npv"].colour,
+            Some(Colour::Sign),
+            "`color` is the reader's own alias, not an unknown key"
+        );
+        let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
+        assert_eq!(
+            paths,
+            vec!["dataset_presentation.risk.columns.npv.precison"],
+            "{diags:?}"
+        );
+        assert!(
+            diags[0]
+                .message
+                .contains("column 'npv': unknown key 'precison' — ignored"),
+            "{}",
+            diags[0].message
         );
     }
 

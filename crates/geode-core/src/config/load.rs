@@ -95,10 +95,14 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
 /// spec §2.3) against the `colours` doc at each of the three places a
 /// colour can be named, since no reader has access to the `colours` doc
 /// to check it itself. The view's own `format.colour` is checked right
-/// here, between the two reads above: the index in the diagnostic's
-/// path must be the FILE's own column order, which is what `views`
-/// still is at this point — the overlays' `apply` calls reorder, hide
-/// and resize it. The dataset overlay's `[dataset.columns.<col>].colour`
+/// here, between the two reads above and ABOVE both overlays' `apply`
+/// calls: the index in the diagnostic's path must be the FILE's own
+/// column order, which is what `views` still is at this point — the
+/// view overlay's `apply` reorders, hides and resizes it — and the
+/// VALUE must be the desk's own key, which is what
+/// `view.presentation_of` still answers only while neither overlay has
+/// been merged over it. The dataset overlay's
+/// `[dataset.columns.<col>].colour`
 /// is checked right after `colours` is bound, UNCONDITIONALLY on
 /// `dataset_overlay` alone — never nested inside the `view_presentation`
 /// block below, since a desk with no `view_presentation.toml` at all
@@ -129,10 +133,6 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
             diags.extend(d);
             spec
         });
-    if let Some(overlay) = &dataset_overlay {
-        diags.extend(overlay.apply(&mut views, &schema));
-    }
-
     let colours = config
         .doc("colours")
         .map(|d| crate::colour::NamedColours::from_doc(d).0)
@@ -183,6 +183,20 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
                 });
             }
         }
+    }
+
+    // Applied HERE, BELOW the desk-view colour loop above and above the
+    // view overlay below. The loop reads `view.presentation_of(..)`, so
+    // merging the dataset level over the desk's keys first would make
+    // that loop report the DATASET's colour at a `views.<v>.columns.<i>`
+    // path (a file holding no colour key at all) once per view carrying
+    // the column, and would hide a desk view's own bad colour behind a
+    // valid dataset-level one (the final whole-branch review's
+    // Important 1). Resolution order is unaffected: the loop mutates
+    // nothing, so the merge is still kind default → desk → dataset →
+    // view (spec §3.1).
+    if let Some(overlay) = &dataset_overlay {
+        diags.extend(overlay.apply(&mut views, &schema));
     }
 
     if let Some(doc) = config.doc("view_presentation") {
@@ -433,6 +447,19 @@ mod tests {
             Some(Colour::Named("nope".into())),
             "an unknown colour still merges; it is warned about, not dropped"
         );
+        let colour_paths: Vec<&str> = diags
+            .iter()
+            .filter_map(|d| d.path.as_deref())
+            .filter(|p| p.ends_with(".colour"))
+            .collect();
+        assert_eq!(
+            colour_paths,
+            vec!["dataset_presentation.risk.columns.npv.colour"],
+            "one mistake, one diagnostic: the dataset-level colour must not \
+             also be reported at `views.<v>.columns.<i>.format.colour`, a \
+             path into a file that holds no colour key at all (the final \
+             whole-branch review's Important 1)"
+        );
         let colour_warning = diags
             .iter()
             .find(|d| d.path.as_deref() == Some("dataset_presentation.risk.columns.npv.colour"))
@@ -441,6 +468,59 @@ mod tests {
             colour_warning.message.contains("nope"),
             "{}",
             colour_warning.message
+        );
+    }
+
+    /// Case 2 of the same finding: the desk view's own `format.colour`
+    /// loop reads `view.presentation_of(..)`, so with the dataset
+    /// overlay merged over it first a VALID dataset-level colour hid
+    /// the desk's own broken one entirely — a regression to an existing
+    /// check, resurfacing only when the trader cleared their overlay.
+    #[test]
+    fn the_desk_views_own_colour_check_reads_the_desk_value() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "views",
+                    "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n[[v.columns]]\nname = \"npv\"\nkind = \"measure\"\nformat = { colour = \"ghost\" }\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "dataset_presentation",
+                    "[risk.columns.npv]\ncolour = \"delta\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let (views, diags) = load_views(&config);
+        let v = views.iter().find(|v| v.name == "v").unwrap();
+        assert_eq!(
+            v.presentation_of("npv").colour,
+            Some(Colour::Named("delta".into())),
+            "the dataset level still wins the resolution; only the \
+             cross-check reads the desk's own key"
+        );
+        let colour_paths: Vec<&str> = diags
+            .iter()
+            .filter_map(|d| d.path.as_deref())
+            .filter(|p| p.ends_with(".colour"))
+            .collect();
+        assert_eq!(
+            colour_paths,
+            vec!["views.v.columns.1.format.colour"],
+            "the desk's own unknown colour is still warned about, at the \
+             views path, even under a valid dataset-level colour"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("ghost")),
+            "the diagnostic names the desk's own colour: {diags:?}"
         );
     }
 
