@@ -7663,6 +7663,23 @@ run_mutation "attribution: NotApplicable is weaker than SemiJoined" \
   '                ScopeSemantics::SemiJoined { dimensions }' \
   geode-core not_applicable_is_weaker_than_semi_joined_and_unions_dimensions
 
+# `ColumnPlan::build` (market-data spec §3.4, review round on Task 5): a
+# `NotApplicable` column must paint the same `semi_joined` marker a
+# `SemiJoined` one does -- falling back to the wildcard `_ => Vec::new()`
+# arm silently drops the marker for a dropped selection.
+run_mutation "blotter: NotApplicable paints the same marker as SemiJoined" \
+  crates/geode-blotter/src/core/plan.rs \
+  '            let semi_joined = match meta.map(|m| &m.scope_semantics) {
+                Some(ScopeSemantics::SemiJoined { dimensions })
+                | Some(ScopeSemantics::NotApplicable { dimensions }) => dimensions.clone(),
+                _ => Vec::new(),
+            };' \
+  '            let semi_joined = match meta.map(|m| &m.scope_semantics) {
+                Some(ScopeSemantics::SemiJoined { dimensions }) => dimensions.clone(),
+                _ => Vec::new(),
+            };' \
+  geode-blotter not_applicable_paints_the_same_marker_as_semi_joined
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
