@@ -8960,7 +8960,7 @@ run_mutation "objectdialog: Schema's column stage is its one writable surface" \
 # before its write lands — otherwise the chip lies for 250 ms.
 run_mutation "objectdialog: a diverged field's provenance is the view level" \
   crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
-  '            if differs_from(&inputs.below) || set_in(&ctx.layers.view) {' \
+  '            if differs_from(below) || set_in(&ctx.layers.view) {' \
   '            if set_in(&ctx.layers.view) {' \
   geode-shell \
   a_stepped_field_reads_view_before_its_write_lands
@@ -9056,6 +9056,18 @@ run_mutation "objectdialog: leaving a schema column stage re-derives its rows" \
   '    let reseed = (domain != Domain::Schema).then(|| {' \
   geode-shell \
   the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay
+
+# §4.3: a column whose ROLE names no kind (`key`, `attribute`) takes it
+# from its TYPE, so a utf8 key column opens at ColumnFormat::TEXT. Drop
+# the fallback and `views::kind_default` answers MEASURE for it: the
+# stage paints Precision 2 and Thousands on for a text column, and
+# stepping either writes a real key every view carrying it then merges.
+run_mutation "dataset_columns: a key column's kind falls back on its type" \
+  crates/geode-shell/src/shell/objectdialog/dataset_columns.rs \
+  '            .or_else(|| kind_for_type(spec.ty))' \
+  '            .or(None)' \
+  geode-shell \
+  a_key_column_takes_the_text_kind_from_its_type
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

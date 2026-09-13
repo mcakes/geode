@@ -12,7 +12,7 @@
 use super::views;
 use super::{ColumnContext, ColumnDoor, Draft, Field, FieldKind, ListItem, Provenance};
 use geode_core::config::Config;
-use geode_core::schema::DatasetSpec;
+use geode_core::schema::{ColumnType, DatasetSpec};
 use geode_core::view::{ColumnFormat, ColumnPresentation};
 
 /// The doc this door writes: `dataset_presentation.toml`, user layer.
@@ -32,16 +32,23 @@ pub const DOC: &str = geode_core::view::DATASET_PRESENTATION_DOC;
 /// that the charter names a defect (review round 1's Minor).
 pub struct ProvenanceInputs<'a> {
     pub ctx: &'a ColumnContext,
-    /// The layers below the view overlay (desk + dataset). Unused by the
-    /// Dataset door, which compares against the unset presentation.
-    pub below: ColumnPresentation,
+    /// The layers below the view overlay (desk + dataset) — `Some` for
+    /// the Views door alone. The Dataset door compares against the unset
+    /// presentation and never reads this, so it is not built there
+    /// either: a Schema column stage would otherwise pay `below_view`'s
+    /// clone-and-merge on every painted frame for a value nothing looks
+    /// at (fix round 1's Minor).
+    pub below: Option<ColumnPresentation>,
     pub kind: ColumnFormat,
 }
 
 impl<'a> ProvenanceInputs<'a> {
     pub fn new(ctx: &'a ColumnContext) -> ProvenanceInputs<'a> {
         ProvenanceInputs {
-            below: ctx.layers.below_view(),
+            below: match ctx.door {
+                ColumnDoor::View => Some(ctx.layers.below_view()),
+                ColumnDoor::Dataset => None,
+            },
             kind: ctx
                 .item
                 .as_ref()
@@ -110,13 +117,16 @@ pub fn provenance_of(inputs: &ProvenanceInputs, field: &Field) -> Option<Provena
             _ => false,
         }
     };
+    let unset = ColumnPresentation::default();
     match ctx.door {
         ColumnDoor::Dataset => {
-            let unset = ColumnPresentation::default();
             (differs_from(&unset) || set_in(&ctx.layers.dataset)).then_some(Provenance::Dataset)
         }
         ColumnDoor::View => {
-            if differs_from(&inputs.below) || set_in(&ctx.layers.view) {
+            // `Some` for this door by construction
+            // ([`ProvenanceInputs::new`]); borrowed, never cloned.
+            let below = inputs.below.as_ref().unwrap_or(&unset);
+            if differs_from(below) || set_in(&ctx.layers.view) {
                 Some(Provenance::View)
             } else if set_in(&ctx.layers.dataset) {
                 Some(Provenance::Dataset)
@@ -161,6 +171,17 @@ pub fn overlay_object(config: &Config, dataset: &str) -> toml::Table {
 /// every one of them against the file, with its path, and reporting them
 /// a second time from inside a keystroke would put a file-level warning
 /// on a stage that is about one column.
+///
+/// **A `key` or `attribute` column takes its kind from its TYPE**
+/// ([`kind_for_type`]). This door is open to every column the dataset
+/// declares — a trader wants a label and a width on `position_ref` as
+/// much as on `npv` — but `views::schema_role_kind` has no kind for
+/// those two roles (the view reader accepts only `dimension`, `measure`
+/// and `derived`), and a bare `None` makes `views::kind_default` answer
+/// `ColumnFormat::MEASURE`. That painted a `utf8` key column with
+/// Precision 2, Thousands on and a Colour, and stepping any of them
+/// wrote a real key into the overlay that every view carrying that
+/// column then merges (fix round 1's Important).
 pub fn item_for(
     dataset: &DatasetSpec,
     column: &str,
@@ -184,8 +205,33 @@ pub fn item_for(
         name: column.to_string(),
         included: true,
         presentation,
-        kind: views::schema_role_kind(&spec.role).map(str::to_string),
+        kind: views::schema_role_kind(&spec.role)
+            .or_else(|| kind_for_type(spec.ty))
+            .map(str::to_string),
     })
+}
+
+/// The `kind` a column whose ROLE names none should be presented as — the
+/// fallback [`item_for`]'s doc explains, for `key` and `attribute`.
+///
+/// A non-numeric column is `"dimension"`, so `views::kind_default` gives
+/// it [`ColumnFormat::TEXT`]: precision 0, no thousands separator, no
+/// colour — the format a text column actually has in a blotter. A numeric
+/// one answers `None` and keeps the MEASURE default, which is right for
+/// it: a numeric attribute is formatted like a measure even though it
+/// does not sum.
+///
+/// Deliberately keyed on the type rather than on the role: the question
+/// "how is this column formatted" is a question about its values, and a
+/// future role would otherwise have to be remembered here as well as in
+/// `views::schema_role_kind`.
+fn kind_for_type(ty: ColumnType) -> Option<&'static str> {
+    match ty {
+        ColumnType::F64 | ColumnType::I64 => None,
+        ColumnType::Utf8 | ColumnType::Date | ColumnType::Timestamp | ColumnType::Bool => {
+            Some("dimension")
+        }
+    }
 }
 
 /// The whole `[<dataset>]` object (§4.5): every OTHER column's table
@@ -200,6 +246,17 @@ pub fn item_for(
 /// dataset's whole table: rendering only the open column would erase
 /// every other personalised column of that dataset on the first
 /// keystroke.
+///
+/// **Sibling keys of `columns` are NOT carried through.** `[<dataset>]`
+/// holds one key in this vocabulary and `columns` is it — a hand-written
+/// `order`, or any unknown key, is already refused by
+/// `DatasetPresentationSpec::from_doc` with a warning naming
+/// `view_presentation.toml` (§2.1), so it has no effect on anything the
+/// app reads and nothing here is preserving state by keeping it. A write
+/// through this dialog therefore normalises the object to `columns`
+/// alone, which is the same thing the warning asks the trader to do by
+/// hand. Contrast the columns themselves, which ARE state and are copied
+/// verbatim above.
 ///
 /// The fields are folded into a CLONE of the context's item first, so the
 /// writer sees the keystroke that is being committed rather than the one
@@ -468,6 +525,40 @@ mod writer_tests {
         assert_eq!(unset.presentation, ColumnPresentation::default());
         assert_eq!(unset.kind.as_deref(), Some("dimension"));
         assert!(item_for(risk, "ghost", &overlay("")).is_none());
+    }
+
+    /// Fix round 1's Important. `position_ref` is a `utf8` KEY column, a
+    /// role `views::schema_role_kind` has no kind for — and a bare `None`
+    /// there makes `views::kind_default` answer `ColumnFormat::MEASURE`,
+    /// so the stage painted a text column with Precision 2 and Thousands
+    /// on, and stepping either wrote a real key into the overlay that
+    /// every view carrying the column then merges. The type decides
+    /// instead, so the seven fields open at `ColumnFormat::TEXT`.
+    #[test]
+    fn a_key_column_takes_the_text_kind_from_its_type() {
+        let schema = risk_schema();
+        let risk = schema.dataset("risk").unwrap();
+        let key = item_for(risk, "position_ref", &overlay("")).unwrap();
+        assert_eq!(key.kind.as_deref(), Some("dimension"));
+        assert_eq!(views::kind_default(&key), ColumnFormat::TEXT);
+
+        let fields = views::column_fields(&key, &[], Destination::DatasetPresentation);
+        let kind_of = |k: &str| fields.iter().find(|f| f.key == k).unwrap().kind.clone();
+        assert!(
+            matches!(kind_of("precision"), FieldKind::Number { value, .. }
+                     if value == i64::from(ColumnFormat::TEXT.precision)),
+            "{:?}",
+            kind_of("precision")
+        );
+        assert_eq!(
+            kind_of("thousands"),
+            FieldKind::Bool(ColumnFormat::TEXT.thousands)
+        );
+        // The numeric roles are untouched: `npv` is a measure by role and
+        // never reaches the fallback, and a numeric column whose role has
+        // no kind keeps MEASURE deliberately.
+        assert_eq!(kind_for_type(ColumnType::F64), None);
+        assert_eq!(kind_for_type(ColumnType::I64), None);
     }
 
     #[test]

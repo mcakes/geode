@@ -979,7 +979,6 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
 /// of this: its member row is painted from the `ListItem` the fold has
 /// already written through.
 fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let pending = apply::config_with_pending(shell);
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
@@ -987,6 +986,13 @@ fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let Stage::Column { object, .. } = state.stage.clone() else {
         return;
     };
+    // Only the Schema door re-derives, so only it pays for the folded
+    // config — `config_with_pending` re-merges every layered document,
+    // which is real work to do on a keystroke that, for Views, wants
+    // nothing from it.
+    let pending = (domain == Domain::Schema)
+        .then(|| apply::config_with_pending(shell))
+        .flatten();
     let reseed = (domain == Domain::Schema).then(|| {
         schema::fields(
             pending.as_ref().unwrap_or(&shell.services.config),
