@@ -17,7 +17,7 @@
 //! which is the exact input to both derivations and so needs no
 //! invalidation of its own either.
 
-use geode_core::colour::{Anchors, NamedColours, Rgb, Tokens};
+use geode_core::colour::{Anchors, Rgb, Tokens};
 use gpui::Hsla;
 use gpui_component::Theme;
 
@@ -159,23 +159,6 @@ pub fn theme_signature(theme: &Theme) -> [Hsla; 28] {
         theme.chart_bearish,
         theme.background,
     ]
-}
-
-/// A named colour, resolved against `theme` — `None` when `colours`
-/// does not define `name` at all (dropped by the reader, or never
-/// saved), which the caller reads as "paint no swatch" rather than a
-/// fallback colour standing in for one that does not exist.
-///
-/// For ONE colour. It derives the theme's anchors and tokens inside
-/// itself, so a caller resolving a list of them pays that derivation per
-/// entry — hoist the two out and call [`geode_core::colour::resolve`] in
-/// the loop instead, as the Colours dialog's browse list does (the final
-/// review's M-8) and as the blotter's own memo does per frame (I-1).
-pub fn resolve_named(colours: &NamedColours, name: &str, theme: &Theme) -> Option<Hsla> {
-    let def = colours.get(name)?;
-    let anchors = anchors_from_theme(theme);
-    let tokens = tokens_from_theme(theme);
-    Some(to_hsla(geode_core::colour::resolve(def, &anchors, &tokens)))
 }
 
 #[cfg(test)]

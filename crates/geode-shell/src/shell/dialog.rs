@@ -890,7 +890,7 @@ pub(crate) fn badge(
 /// A small filled square painting one resolved colour — the Colours
 /// dialog's live swatch (Part 2c §6.1), on a browse row and beside the
 /// edit header's own name. `colour` is already-resolved data (the
-/// definition run through `shell::colours::resolve_named`/`resolve`
+/// definition run through `geode_core::colour::resolve` over `shell::colours`' anchors and tokens
 /// against the active theme), never a raw literal picked here — the one
 /// deliberate exception to "no raw colour in chrome" this crate's other
 /// chrome follows, because the whole point of this element is to show

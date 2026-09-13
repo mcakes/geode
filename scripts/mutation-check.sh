@@ -8720,9 +8720,9 @@ run_mutation "objectdialog: reserved colour names are taken" \
 # not a fixed one — observable through the window test, since the fixture
 # defines only `delta` and a wrong lookup name paints no swatch at all.
 run_mutation "colours: the browse swatch resolves the row's own definition" \
-  crates/geode-shell/src/shell/colours.rs \
-  '    let def = colours.get(name)?;' \
-  '    let def = colours.get("nonexistent")?;' \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                named.get(&row.name).map(|def| (def, anchors, tokens))' \
+  '                named.get("nonexistent").map(|def| (def, anchors, tokens))' \
   geode-shell \
   the_colours_dialog_paints_swatches_and_refuses_reserved_names
 

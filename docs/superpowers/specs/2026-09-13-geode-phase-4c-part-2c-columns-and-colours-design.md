@@ -727,7 +727,7 @@ against it. Every `Step::Changed` in the stage runs `fold_column` before
 `NamedColours::from_doc` over a one-entry doc, `fields`, `definition_of`
 for the live swatch, `to_table`, `validate`); `shell/colours.rs` is the
 gpui↔pure bridge (`to_rgb`, `to_hsla`, `anchors_from_theme`,
-`tokens_from_theme`, `resolve_named`). `dialog::swatch` is a 14px rounded
+`tokens_from_theme`, `theme_signature`). `dialog::swatch` is a 14px rounded
 square whose border is always `theme.border`, never the resolved fill.
 Selectors: `objectdialog-swatch-{name}` per browse row and
 `objectdialog-swatch-header` in the edit header.
@@ -973,8 +973,8 @@ frame; the fix is to stash the derived pair on the delegate and compare
 two sentinel `Hsla`s before re-deriving. **Marked likely-to-fix before
 merge.** `render_th`'s colour branch has no test and no harness entry.
 `cell_colour`'s doc over-claims "painted in foreground" for the header
-caller, which inherits the header colour. `ColourCache::get` duplicates
-`resolve_named`'s resolution. `BlotterFactory::colours()` has only a test
+caller, which inherits the header colour. `ColourCache::get` duplicated
+`resolve_named`'s resolution (moot: §9.13 deleted it). `BlotterFactory::colours()` has only a test
 caller. Every `ConfigReloaded` mints a fresh `Arc<NamedColours>` and so
 invalidates every tile's colour cache, where `content.rs`'s comment
 claims a tighter invariant.
@@ -1110,8 +1110,8 @@ M-6 and M-8 as code and M-5, M-7 as doc sentences** — the whole set.
 - **M-8** — the browse list hoists `anchors_from_theme`/
   `tokens_from_theme` out of the row loop beside the `NamedColours` it
   already hoisted, and resolves each row through
-  `geode_core::colour::resolve`. `colours::resolve_named` is now the
-  single-colour door and its doc says so.
+  `geode_core::colour::resolve`, which left `colours::resolve_named` with
+  no caller (§9.13 deletes it).
 - **M-5** — `Draft::fold_column`'s doc names its coupling: it calls
   `views::desk_baseline`/`views::fold_into` by name where `enter_column`
   deliberately takes the fields in, and a second domain gaining a column
@@ -1154,3 +1154,19 @@ call against `cell_colour`'s. **745 entries**, `--anchors-only`: 0 stale,
 **Display checks.** §9.11's list is unchanged by this wave — none of
 these fixes moves a pixel except I-1, which paints the same colour by a
 cheaper route.
+
+### 9.13 The full harness run
+
+`zsh scripts/mutation-check.sh --changed=main` on the fix-waved, merged
+tree (0604c74): 271 caught, **one survivor**, 473 entries skipped as
+unchanged since main. The survivor was `colours: the browse swatch
+resolves the row's own definition`, whose anchor sat in
+`shell::colours::resolve_named` — a function M-8's hoist had left with no
+caller, so the mutation broke dead code and nothing could see it. The
+fix is the honest one: `resolve_named` is deleted (the browse list, the
+edit header and the blotter's memo all resolve through
+`geode_core::colour::resolve` over `anchors_from_theme`/`tokens_from_theme`
+directly), and the entry is re-pointed at the browse list's own lookup
+(`named.get(&row.name)` in `render.rs`), where the same window test
+catches it. Task 6's deferred "`ColourCache::get` duplicates
+`resolve_named`" minor is moot with it.

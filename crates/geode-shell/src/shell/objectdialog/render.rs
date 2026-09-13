@@ -2328,7 +2328,7 @@ fn build(
     // rest of the row loop for.
     //
     // The pair is hoisted with the doc (the final review's M-8):
-    // `colour_theme::resolve_named` reads the theme inside itself, so
+    // `resolve_named` (since deleted — this hoist left it with no caller) read the theme inside itself, so
     // resolving per row cost M x 28 `Hsla -> Rgb` conversions for a list
     // of M colours. Bounded by colour count in a modal rather than by row
     // count on the paint path, so it is tidiness rather than budget — but
