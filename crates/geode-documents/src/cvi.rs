@@ -85,6 +85,22 @@ fn parse_err(message: impl Into<String>) -> ParseError {
     }
 }
 
+/// The refusal every at-most-once element shares (`<underlying>`,
+/// `<anchorDate>`, `<spotRef>`, `<cviParams>`, `<nodes>`, `<slices>`).
+///
+/// Refused rather than merged or last-wins, because both silent
+/// outcomes are worse than a rejected message: a second `<cviParams>`
+/// or `<slices>` repeats every (term, node) pair, and a second
+/// `<spotRef>` quietly publishes one of two different spots.
+/// `DocumentRows::validate` refuses the repeated-tuple shape too, but
+/// only after the parse has thrown away WHICH element the feed sent
+/// twice — so this is the report that can name it.
+fn already_filled(element: &str) -> ParseError {
+    parse_err(format!(
+        "'{element}' is already filled; it may appear only once"
+    ))
+}
+
 fn write_err(message: impl Into<String>) -> WriteError {
     WriteError {
         message: message.into(),
@@ -264,6 +280,14 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
     let mut param_col: Vec<f64> = Vec::new();
     let mut slices = 0usize;
     let mut slice = Slice::default();
+    // The containers this model reads at most once. The singular LEAVES
+    // need no flag of their own — their `Option` above already records
+    // whether one was read — and `<slice>` is tracked by its term
+    // instead, two slices being legal only for two different terms.
+    let mut saw_cvi_params = false;
+    let mut saw_nodes = false;
+    let mut saw_slices = false;
+    let mut seen_terms: Vec<NaiveDate> = Vec::new();
 
     // The text of whichever element is open, reset by every `Start`. A
     // container's accumulation (the whitespace between its children) is
@@ -290,7 +314,27 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                     saw_root = true;
                 }
                 match classify(stack.path()) {
-                    Shape::Container | Shape::Leaf(_) => {}
+                    Shape::Container => {
+                        // Depth and name tell the singular containers
+                        // apart without a second path table. `marketData`
+                        // itself is absent from this list: quick-xml
+                        // refuses a second root element before the walk
+                        // ever sees it.
+                        let path = stack.path();
+                        let once = match (path.len(), path[path.len() - 1].as_str()) {
+                            (2, "cviParams") => Some((&mut saw_cvi_params, "cviParams")),
+                            (3, "nodes") => Some((&mut saw_nodes, "nodes")),
+                            (3, "slices") => Some((&mut saw_slices, "slices")),
+                            _ => None,
+                        };
+                        if let Some((seen, element)) = once {
+                            if *seen {
+                                return Err(already_filled(element));
+                            }
+                            *seen = true;
+                        }
+                    }
+                    Shape::Leaf(_) => {}
                     Shape::Slice => slice.restart(),
                     Shape::Unknown => {
                         // Reported by path, once per occurrence — the
@@ -313,15 +357,26 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                 let trimmed = text.trim();
                 match classify(stack.path()) {
                     Shape::Leaf(Leaf::Underlying) => {
+                        if underlying.is_some() {
+                            return Err(already_filled("underlying"));
+                        }
                         if trimmed.is_empty() {
                             return Err(parse_err("underlying is empty"));
                         }
                         underlying = Some(trimmed.to_string());
                     }
                     Shape::Leaf(Leaf::AnchorDate) => {
+                        if anchor_date.is_some() {
+                            return Err(already_filled("anchorDate"));
+                        }
                         anchor_date = Some(date("anchorDate", trimmed)?)
                     }
-                    Shape::Leaf(Leaf::SpotRef) => spot_ref = Some(number("spotRef", trimmed)?),
+                    Shape::Leaf(Leaf::SpotRef) => {
+                        if spot_ref.is_some() {
+                            return Err(already_filled("spotRef"));
+                        }
+                        spot_ref = Some(number("spotRef", trimmed)?)
+                    }
                     Shape::Leaf(Leaf::Node) => nodes.push(number("node", trimmed)?),
                     Shape::Leaf(Leaf::Term) => slice.term = Some(date("term", trimmed)?),
                     Shape::Leaf(Leaf::Param) => slice.params.push(number("param", trimmed)?),
@@ -329,6 +384,18 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                         let term = slice.term.ok_or_else(|| {
                             parse_err(format!("slice {} has no term", slices + 1))
                         })?;
+                        // Two slices for one term are the singular-element
+                        // defect one level down: their rows carry the same
+                        // (term, node) pairs, which nothing downstream can
+                        // tell apart. A linear scan because a document has
+                        // a handful of listed expiries, not thousands.
+                        if seen_terms.contains(&term) {
+                            return Err(parse_err(format!(
+                                "slice term {} appears twice",
+                                term.format(DATE_FORMAT)
+                            )));
+                        }
+                        seen_terms.push(term);
                         // Checked per slice rather than once at the end,
                         // so the message can name the offending term; and
                         // before the count comparison, so an absent
@@ -812,6 +879,104 @@ role = "attribute"
         assert!(
             err.message
                 .contains("slice 2026-10-16 has 2 params, nodes has 3"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// Every element this model reads at most once is refused on its
+    /// second occurrence, rather than overwritten or MERGED. A second
+    /// `<cviParams>` used to append its nodes to the first's ladder and
+    /// its slices to the first's rows, producing a document whose
+    /// (term, node) pairs repeat — `DocumentRows::validate` refuses that
+    /// shape too, but only after the parse has already thrown away which
+    /// element was duplicated, so the report a trader sees would name a
+    /// cell instead of the element the feed really sent twice.
+    #[test]
+    fn a_repeated_singular_container_is_refused_naming_it() {
+        // A whole second `<cviParams>` carrying only `<slices>`: the
+        // narrowest possible duplicate, and exactly the shape a merge
+        // hides — the nodes and attributes are not repeated, so nothing
+        // but the extra rows would say anything was wrong.
+        let extra = format!("</cviParams>\n  <cviParams>{}</cviParams>", slices_block());
+        let doc = DOC.replacen("</cviParams>", &extra, 1);
+        let err = CviKind.parse(doc.as_bytes()).unwrap_err();
+        assert!(
+            err.message.contains("cviParams") && err.message.contains("already"),
+            "{}",
+            err.message
+        );
+
+        for (element, block) in [
+            ("nodes", "<nodes><node>9</node></nodes>"),
+            ("slices", slices_block()),
+        ] {
+            let doc = DOC.replacen("<slices>", &format!("{block}<slices>"), 1);
+            let err = CviKind.parse(doc.as_bytes()).unwrap_err();
+            assert!(
+                err.message.contains(element) && err.message.contains("already"),
+                "a second <{element}> is refused: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeated_singular_leaf_is_refused_naming_it() {
+        // A second `<spotRef>`: the last one used to win silently, so a
+        // document carrying two different spots published one of them
+        // with nothing recording that the other existed.
+        let doc = DOC.replacen(
+            "<spotRef>7650</spotRef>",
+            "<spotRef>7650</spotRef><spotRef>7700</spotRef>",
+            1,
+        );
+        let err = CviKind.parse(doc.as_bytes()).unwrap_err();
+        assert!(
+            err.message.contains("spotRef") && err.message.contains("already"),
+            "{}",
+            err.message
+        );
+
+        // Each duplicate goes where the model would actually classify it
+        // as that leaf: `<underlying>` is a child of `marketData`,
+        // `<anchorDate>` of `cviParams` — inserted at the wrong depth it
+        // would merely be an unknown element, and the test would pass for
+        // the wrong reason.
+        for (element, needle, second) in [
+            (
+                "underlying",
+                "<cviParams>",
+                "<underlying>NDX.Z</underlying><cviParams>",
+            ),
+            (
+                "anchorDate",
+                "<anchorDate>2026-09-12</anchorDate>",
+                "<anchorDate>2026-09-12</anchorDate><anchorDate>2026-09-11</anchorDate>",
+            ),
+        ] {
+            let doc = DOC.replacen(needle, second, 1);
+            let err = CviKind.parse(doc.as_bytes()).unwrap_err();
+            assert!(
+                err.message.contains(element) && err.message.contains("already"),
+                "a second <{element}> is refused: {}",
+                err.message
+            );
+        }
+    }
+
+    /// Two `<slice>` elements for one term are the same defect one level
+    /// down: their rows would carry the same (term, node) pairs.
+    #[test]
+    fn a_repeated_slice_term_is_refused_naming_the_term() {
+        let doc = DOC.replacen(
+            "<slices>",
+            "<slices><slice><term>2026-09-18</term><param>1</param><param>2</param><param>3</param></slice>",
+            1,
+        );
+        let err = CviKind.parse(doc.as_bytes()).unwrap_err();
+        assert!(
+            err.message.contains("2026-09-18") && err.message.contains("twice"),
             "{}",
             err.message
         );

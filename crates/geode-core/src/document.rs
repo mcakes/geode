@@ -177,6 +177,31 @@ impl DocumentRows {
                 ));
             }
         }
+        // No two rows may carry the same axis tuple. Nothing downstream
+        // can tell two such rows apart: the store has no uniqueness
+        // constraint over (batch, axes), and the panel addresses a cell by
+        // its tuple — so a document that MERGED two copies of the same
+        // element (a feed sending `<cviParams>` or a `<slice>` twice, the
+        // defect this check exists for) would publish as a perfectly
+        // healthy generation with some cells silently doubled.
+        //
+        // Sorted row indices rather than a hash set of tuples: one `Vec`
+        // for the whole document instead of a key allocation per row, and
+        // O(n log n) comparisons over the columns in place (PHILOSOPHY §6
+        // — the receiver thread runs this per message). Every axis is
+        // known to be `rows` long by the loop above, so every index below
+        // is in range.
+        if let Some((a, b)) = self.first_duplicate_rows() {
+            let tuple = self
+                .axes
+                .iter()
+                .map(|(name, col)| format!("{name}={}", cell_text(col, a)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "axis tuple ({tuple}) appears twice (rows {a} and {b})"
+            ));
+        }
         for (name, col) in &self.values {
             let Some(spec) = ds.column(name).filter(|c| c.role == ColumnRole::Value) else {
                 return Err(format!("value '{name}' is not declared"));
@@ -227,6 +252,68 @@ impl DocumentRows {
             }
         }
         Ok(())
+    }
+
+    /// The first pair of rows sharing an axis tuple, as `(earlier,
+    /// later)` row indices, or `None` when every tuple is distinct.
+    ///
+    /// "First" is by the EARLIER row of the pair: the indices are sorted
+    /// by axis value with the row index as the final tie-break, so the
+    /// duplicate reported is stable for a given document and reads as the
+    /// first row a human scanning the grid would notice twice.
+    ///
+    /// Callers may index `self.axes` freely with the answer: it only ever
+    /// names rows that exist.
+    fn first_duplicate_rows(&self) -> Option<(usize, usize)> {
+        let rows = self.rows();
+        if rows < 2 || self.axes.is_empty() {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..rows).collect();
+        order.sort_unstable_by(|&a, &b| {
+            self.axes
+                .iter()
+                .map(|(_, col)| cmp_cell(col, a, b))
+                .find(|o| o.is_ne())
+                .unwrap_or_else(|| a.cmp(&b))
+        });
+        let mut found: Option<(usize, usize)> = None;
+        for pair in order.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if self.axes.iter().all(|(_, col)| cmp_cell(col, a, b).is_eq()) {
+                let pair = (a.min(b), a.max(b));
+                if found.is_none_or(|(first, _)| pair.0 < first) {
+                    found = Some(pair);
+                }
+            }
+        }
+        found
+    }
+}
+
+/// One cell of an axis or value column, as a diagnostic spells it.
+/// Only ever called on an error path, so the `String` per cell costs
+/// nothing on the hot one.
+fn cell_text(col: &Column, i: usize) -> String {
+    match col {
+        Column::F64(v) => v[i].to_string(),
+        Column::I64(v) => v[i].to_string(),
+        Column::Utf8(v) => v[i].clone(),
+        Column::Date(v) => v[i].to_string(),
+    }
+}
+
+/// Orders two rows of one column. `total_cmp` for `f64` because it is a
+/// total order over every bit pattern including NaN — an axis carrying
+/// one is a document `CviKind::parse` already refuses, and a partial
+/// comparison here would make the sort's own ordering undefined rather
+/// than merely report the NaN late.
+fn cmp_cell(col: &Column, a: usize, b: usize) -> std::cmp::Ordering {
+    match col {
+        Column::F64(v) => v[a].total_cmp(&v[b]),
+        Column::I64(v) => v[a].cmp(&v[b]),
+        Column::Utf8(v) => v[a].cmp(&v[b]),
+        Column::Date(v) => v[a].cmp(&v[b]),
     }
 }
 
@@ -412,6 +499,27 @@ role = "attribute"
     fn a_well_formed_document_validates_against_its_dataset() {
         assert_eq!(sample().validate(&cvi()), Ok(()));
         assert_eq!(sample().rows(), 6);
+    }
+
+    #[test]
+    fn a_repeated_axis_tuple_is_refused_and_the_message_names_it() {
+        // Two rows carrying the same (term, node) pair. Nothing
+        // downstream can tell them apart — the panel indexes its grid by
+        // the axis tuple, and the store has no uniqueness constraint — so
+        // a document that merged two copies of an element (a feed sending
+        // `<cviParams>` twice, say) would publish a healthy-looking
+        // generation with one cell silently doubled.
+        let mut r = sample();
+        let Column::F64(nodes) = &mut r.axes[1].1 else {
+            panic!("node is the f64 axis")
+        };
+        nodes[2] = nodes[1];
+        let e = r.validate(&cvi()).expect_err("a repeated axis tuple");
+        assert!(
+            e.contains("term=2026-09-18") && e.contains("node=-1"),
+            "the message names the duplicated tuple: {e}"
+        );
+        assert!(e.contains("twice"), "{e}");
     }
 
     #[test]

@@ -9055,6 +9055,25 @@ run_mutation "demo bus: the demo layer's [cvi] source" \
   geode-app the_demo_layer_declares_the_cvi_source
 
 
+# ---- final fix wave: repeated known elements must not merge into duplicate rows ----
+
+run_mutation "document: a repeated axis tuple validates as a healthy document" \
+  crates/geode-core/src/document.rs \
+  '        if let Some((a, b)) = self.first_duplicate_rows() {' \
+  '        if let Some((a, b)) = None::<(usize, usize)> {' \
+  geode-core a_repeated_axis_tuple_is_refused_and_the_message_names_it
+
+run_mutation "cvi: a second singular container merges into the first instead of being refused" \
+  crates/geode-documents/src/cvi.rs \
+  '                        if let Some((seen, element)) = once {
+                            if *seen {
+                                return Err(already_filled(element));
+                            }
+                            *seen = true;
+                        }' \
+  '                        let _ = once;' \
+  geode-documents a_repeated_singular_container_is_refused_naming_it
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
