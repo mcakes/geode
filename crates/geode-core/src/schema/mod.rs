@@ -272,25 +272,37 @@ impl SchemaSpec {
                 key,
                 axes,
             };
-            let Some(cols) = ds_value.get("columns").and_then(|v| v.as_table()) else {
-                diags.push(note(format!("dataset '{ds_name}': no [columns] table")));
-                out.datasets.push(dataset);
-                continue;
-            };
-            for (col_name, col_value) in cols {
-                match parse_column(ds_name, family, col_name, col_value) {
-                    Ok((spec, warning)) => {
-                        dataset.columns.push(spec);
-                        diags.extend(warning);
+            // Both paths fall through to `validate_dataset` and the guard
+            // below. An early `push`-and-`continue` here is what let a
+            // document dataset with no `[columns]` table reach the schema
+            // never having met `validate_document` at all, contradicting
+            // the guard's own comment: a columnless document dataset has
+            // no key column, no axis column and no value, so it can be
+            // neither stored nor queried, and it must be dropped by the
+            // same rule that drops a refused one.
+            match ds_value.get("columns").and_then(|v| v.as_table()) {
+                None => diags.push(note(format!("dataset '{ds_name}': no [columns] table"))),
+                Some(cols) => {
+                    for (col_name, col_value) in cols {
+                        match parse_column(ds_name, family, col_name, col_value) {
+                            Ok((spec, warning)) => {
+                                dataset.columns.push(spec);
+                                diags.extend(warning);
+                            }
+                            Err(d) => diags.push(d),
+                        }
                     }
-                    Err(d) => diags.push(d),
                 }
             }
             diags.extend(validate_dataset(&mut dataset));
             if dataset.is_document() && dataset.columns.is_empty() {
-                // `validate_document` empties a dataset it refused — never
-                // push a document dataset with no columns, it could not
-                // be stored or queried.
+                // `validate_document` empties a dataset it refused, and a
+                // dataset that declared no `[columns]` table arrives here
+                // empty already — never push a document dataset with no
+                // columns, it could not be stored or queried. A measure
+                // dataset with no columns is still pushed: it declares no
+                // grain, so it owns no table and nothing reads it, which
+                // is inert rather than broken.
                 continue;
             }
             out.datasets.push(dataset);
@@ -299,9 +311,16 @@ impl SchemaSpec {
     }
 }
 
-/// Column names the storage layer adds to every table (spec §4.2, §4.3).
-/// A dataset declaring one of these would generate DDL with a duplicate
-/// column and fail at table creation with a raw engine error.
+/// Column names the storage layer adds to every table of **both** families
+/// (spec §4.2, §4.3). A dataset declaring one of these would generate DDL
+/// with a duplicate column and fail at table creation with a raw engine
+/// error.
+///
+/// Not the whole reserved set for a document dataset: its table carries a
+/// `book` column too (`ddl::create_document_table_sql`, market-data spec
+/// §4.5), because no grain key supplies one there. `book` cannot join this
+/// list — it is a legal grain key column on the measure side — so that one
+/// name is refused by `validate_document` instead, per family.
 pub const RESERVED_COLUMNS: &[&str] = &["batch", "source_file_id", "gen_id", "source_time"];
 
 /// Checks that can only be made once every column is parsed. Each failure
@@ -543,6 +562,44 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     }
     ds.columns.retain(|c| !non_numeric.contains(&c.name));
 
+    // `geode_core::document::Column` and `Value` — the shapes a parsed
+    // document actually arrives in — cover f64, i64, utf8 and date and
+    // nothing else, and `DocumentRows::validate` compares each column's
+    // own type against the declared one. So a `timestamp` or `bool` axis
+    // or attribute is a column no feed could ever fill: every publish
+    // would be refused for a type mismatch and reported as a source
+    // health failure, pointing at the feed rather than at the config
+    // line that is actually wrong. Refused here instead, where the
+    // diagnostic can name the key. A value is already held to the
+    // stricter f64/i64 rule above and is deliberately not re-checked, so
+    // a `timestamp` value is reported once, not twice. Part 2 widens
+    // `Column`/`Value` if a document ever needs a timestamp axis; this
+    // rule moves with them.
+    let unsupported: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.role,
+                ColumnRole::Axis | ColumnRole::Attribute { grain: None }
+            ) && !matches!(
+                c.ty,
+                ColumnType::F64 | ColumnType::I64 | ColumnType::Utf8 | ColumnType::Date
+            )
+        })
+        .map(|c| c.name.clone())
+        .collect();
+    for c in &unsupported {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column '{c}': a document axis or attribute must be f64, \
+                 i64, utf8 or date — column dropped"
+            ),
+            format!("{name}.columns.{c}.type"),
+        ));
+    }
+    ds.columns.retain(|c| !unsupported.contains(&c.name));
+
     // A dimension is the document's identity key. A per-row dimension within
     // a document is an axis, not a grouping key. A dimension with no storage
     // column in the key would be groupable (from `groupable_columns`) but
@@ -565,6 +622,29 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     ds.columns.retain(|c| !unkeyed.contains(&c.name));
 
     let mut keep = true;
+
+    // `book` is the document family's own partition column: `ddl::
+    // create_document_table_sql` appends `"book" VARCHAR` after
+    // `document_columns()`, because no grain key supplies one here. A
+    // declared column of that name therefore emits the same name twice
+    // and `CREATE TABLE` fails with a raw engine error — raised inside
+    // `DataService::open`, which takes every other dataset down with it,
+    // which is why this is a dataset-dropping error rather than a column
+    // drop. `RESERVED_COLUMNS` cannot carry the rule: `book` is a legal
+    // grain key column on the measure side, so the refusal has to be
+    // per family, and this is the family that reserves it. Checked after
+    // the drops above, so it fires only on a column that would really
+    // reach the DDL.
+    if ds.columns.iter().any(|c| c.name == "book") {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column 'book': 'book' is the document family's partition \
+                 column; declare the dimension under another name — dataset dropped"
+            ),
+            format!("{name}.columns.book"),
+        ));
+        keep = false;
+    }
 
     if ds.key.is_empty() {
         diags.push(err(
@@ -595,6 +675,23 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 diags.push(err(
                     format!(
                         "dataset '{name}': key column '{k}' must have role = \"dimension\"; \
+                         dataset dropped"
+                    ),
+                    format!("{name}.key"),
+                ));
+                keep = false;
+            }
+            // The key is stored as text and nothing else: `join_key` folds
+            // `DocumentRows.key` (a `Vec<String>`) into the `batch
+            // VARCHAR` column that names the partition, and the document
+            // request binds each part back as `Value::Text` against the
+            // key column itself. A key column of any other declared type
+            // would be a DDL type that binding could never match — the
+            // predicate would compile and select nothing.
+            Some(c) if c.ty != ColumnType::Utf8 => {
+                diags.push(err(
+                    format!(
+                        "dataset '{name}': key column '{k}' must be type = \"utf8\"; \
                          dataset dropped"
                     ),
                     format!("{name}.key"),
@@ -1550,6 +1647,129 @@ role = "attribute"
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(names[1..3], ["node", "term"]);
+    }
+
+    /// Important 2: `create_document_table_sql` appends a `book VARCHAR`
+    /// of its own (no grain key supplies one), so a document column of
+    /// that name is a duplicate-column DDL error — and `RESERVED_COLUMNS`
+    /// cannot list `book`, which is a legal grain key column on the
+    /// measure side. Without this rule `DataService::open` fails at table
+    /// creation with a raw engine error and every dataset is dead.
+    #[test]
+    fn a_document_column_named_book_collides_with_the_partition_column() {
+        // The key renamed along with its column, so this is a legal
+        // document key in every respect except its name.
+        let text = CVI
+            .replace("key = [\"underlying_ref\"]", "key = [\"book\"]")
+            .replace(
+                "[cvi_params.columns.underlying_ref]",
+                "[cvi_params.columns.book]",
+            );
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(
+            schema.dataset("cvi_params").is_none(),
+            "the dataset is dropped: its DDL could not be created at all"
+        );
+        let d = error_with_path(&diags, "cvi_params.columns.book");
+        assert!(d.message.contains("partition column"), "{}", d.message);
+    }
+
+    /// The same rule from the other direction: a document-level attribute
+    /// named `book` is just as fatal as a key of that name, because
+    /// `document_columns()` emits it into the DDL either way.
+    #[test]
+    fn a_document_attribute_named_book_is_refused_too() {
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.book]\ntype = \"utf8\"\nrole = \"attribute\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "cvi_params.columns.book");
+    }
+
+    /// Minor 4: the no-`[columns]` early return used to push the dataset
+    /// before `validate_dataset` ever ran, so a document dataset with no
+    /// columns at all reached the schema — contradicting the guard's own
+    /// claim that a refused document dataset is never pushed. Both paths
+    /// now run the guard.
+    #[test]
+    fn a_document_dataset_with_no_columns_table_is_not_pushed() {
+        let text = "[cvi_params]\nfamily = \"document\"\nkey = [\"u\"]\naxes = [\"term\"]\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(text));
+        assert!(
+            schema.dataset("cvi_params").is_none(),
+            "a document dataset with no columns could be neither stored nor queried"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("no [columns] table")),
+            "{diags:?}"
+        );
+        // And the measure family is unchanged: a columnless measure
+        // dataset is still pushed, exactly as before.
+        let (schema, _) = SchemaSpec::from_doc(&doc("[empty]\nfamily = \"measures\"\n"));
+        assert!(schema.dataset("empty").is_some());
+    }
+
+    /// `geode_core::document::Column`/`Value` cover f64/i64/utf8/date
+    /// only, so an axis or attribute of any other type could never be
+    /// matched by a parsed document: `DocumentRows::validate` would refuse
+    /// every publish with a type mismatch. Refused at load instead, where
+    /// the diagnostic can name the key.
+    #[test]
+    fn a_document_axis_or_attribute_of_an_unsupported_type_is_refused() {
+        // An attribute: the column is dropped, the dataset kept.
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.anchor_date]\ntype = \"date\"",
+            "[cvi_params.columns.anchor_date]\ntype = \"timestamp\"",
+        );
+        let ds = schema.dataset("cvi_params").expect("dataset kept");
+        assert!(ds.column("anchor_date").is_none());
+        error_with_path(&diags, "cvi_params.columns.anchor_date.type");
+
+        // An axis: dropping the column leaves `axes` naming a column that
+        // is no longer declared, so the dataset goes with it — an axis is
+        // mandatory and there is nothing left to store.
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.node]\ntype = \"f64\"",
+            "[cvi_params.columns.node]\ntype = \"bool\"",
+        );
+        assert!(schema.dataset("cvi_params").is_none());
+        error_with_path(&diags, "cvi_params.columns.node.type");
+    }
+
+    /// A document key is joined into the `batch VARCHAR` column
+    /// (`geode_core::document::join_key` over `Vec<String>`) and bound
+    /// back as text by the document request, so a key column of any other
+    /// type would be a DDL type the request could never match.
+    #[test]
+    fn a_document_key_column_must_be_utf8() {
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.underlying_ref]\ntype = \"utf8\"",
+            "[cvi_params.columns.underlying_ref]\ntype = \"i64\"",
+        );
+        assert!(schema.dataset("cvi_params").is_none());
+        assert!(
+            error_with_path(&diags, "cvi_params.key")
+                .message
+                .contains("utf8"),
+            "{diags:?}"
+        );
+    }
+
+    /// Minor 8: the document side's `textual` clearing had no test at all.
+    /// `textual` routes through a dimension; a value column is not one, so
+    /// the flag is an error and is cleared — the column itself stays, the
+    /// same judgement the measure side makes.
+    #[test]
+    fn textual_on_a_document_value_is_an_error_and_textual_is_cleared() {
+        let (schema, diags) = cvi_with(
+            "[cvi_params.columns.param]\ntype = \"f64\"\nrole = \"value\"",
+            "[cvi_params.columns.param]\ntype = \"f64\"\nrole = \"value\"\ntextual = true",
+        );
+        let ds = schema.dataset("cvi_params").expect("the column is kept");
+        assert!(!ds.column("param").unwrap().textual);
+        error_with_path(&diags, "cvi_params.columns.param.textual");
     }
 
     #[test]

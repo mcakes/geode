@@ -96,8 +96,17 @@ impl DocumentRows {
     }
 
     /// Every check `publish_document` needs before it touches the store:
-    /// key arity, axis names/order/types, value names/types, attribute
-    /// names/types against `document_columns()`, and equal lengths.
+    /// key arity and separator-freedom, a non-empty row count, axis
+    /// names/order/types, value names/types/completeness, document-level
+    /// attribute names/types/completeness, and equal column lengths.
+    ///
+    /// The role filters below are `document_columns()`'s own, applied here
+    /// one rule at a time rather than by walking that helper's flat list:
+    /// each group has a different question to ask (an axis is matched
+    /// positionally against `ds.axes`, a value by name in either
+    /// direction, an attribute by name against a single `Value`) and a
+    /// different message to give, and a flat list has already thrown away
+    /// which group a column came from.
     pub fn validate(&self, ds: &DatasetSpec) -> Result<(), String> {
         if !ds.is_document() {
             return Err(format!("dataset '{}' is not a document dataset", ds.name));
@@ -140,7 +149,17 @@ impl DocumentRows {
                     "axis {i} is '{name}', dataset declares '{declared}'"
                 ));
             }
-            let spec = ds.column(declared).expect("validated by the schema");
+            // A message, not a panic: `schema::validate_document` refuses
+            // a dataset whose `axes` names an undeclared column, so no
+            // schema-loaded spec reaches this — but a spec built in code
+            // can, and this runs on the ingest thread, where a panic
+            // costs the whole load and says less than a line naming the
+            // column. `store::document::cell_source` answers the very
+            // same "declared but absent" shape the same way, with
+            // `StoreError::Document`; the two stay symmetrical.
+            let Some(spec) = ds.column(declared) else {
+                return Err(format!("axis '{name}' is not a declared column"));
+            };
             if col.column_type() != spec.ty {
                 return Err(format!(
                     "axis '{name}' is {}, dataset declares {}",
@@ -382,6 +401,39 @@ role = "attribute"
         assert_eq!(r.rows(), 0);
         let err = r.validate(&cvi()).unwrap_err();
         assert!(err.contains("document has no rows"), "{err}");
+    }
+
+    /// Ledger (ii): the undeclared-attribute branch — the mirror of
+    /// "attribute 'x' is missing". A document carrying an attribute the
+    /// dataset never declared has nowhere to put it: `document_columns()`
+    /// would omit it, so the value would be dropped silently rather than
+    /// stored.
+    #[test]
+    fn validate_refuses_an_attribute_the_dataset_does_not_declare() {
+        let mut r = sample();
+        r.attributes.push(("nonesuch".into(), Value::F64(1.0)));
+        let err = r.validate(&cvi()).unwrap_err();
+        assert!(
+            err.contains("attribute 'nonesuch' is not declared"),
+            "{err}"
+        );
+    }
+
+    /// Minor 7: a `DatasetSpec` whose `axes` names a column its `columns`
+    /// does not hold is a message, not a panic. `validate_document`
+    /// refuses that shape at load, so no schema-loaded spec reaches it —
+    /// but a hand-built one does, and `store::document::cell_source`
+    /// deliberately answers the very same "declared but absent" shape with
+    /// `StoreError::Document` rather than unwinding the ingest thread.
+    #[test]
+    fn validate_refuses_an_axis_the_dataset_does_not_declare_as_a_column() {
+        let mut ds = cvi();
+        ds.columns.retain(|c| c.name != "term");
+        let err = sample().validate(&ds).unwrap_err();
+        assert!(
+            err.contains("axis 'term' is not a declared column"),
+            "{err}"
+        );
     }
 
     #[test]

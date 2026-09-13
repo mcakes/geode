@@ -7864,6 +7864,162 @@ run_mutation "service: a live document's freshness is its own, not the dataset's
   '                    .dataset_as_of(&params.dataset, &[])?' \
   geode-data a_live_document_request_reports_its_own_documents_freshness
 
+# ---- final fix wave: validate_document's rules, one entry per rule
+#
+# Minor 8 of the whole-branch review: `validate_document` grew nine rules
+# and the harness guarded three of them. Every entry below was run by hand
+# and confirmed to fail its named test before being committed.
+
+# Important 2. `create_document_table_sql` appends a `book VARCHAR` of its
+# own, so a declared column of that name emits the name twice and the
+# CREATE fails inside `DataService::open` -- taking every other dataset
+# with it. `RESERVED_COLUMNS` cannot carry this rule (`book` is a legal
+# grain key column on the measure side), so this per-family check is the
+# only thing standing between that config line and a dead app.
+run_mutation "schema/document: a column named book collides with the partition column" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.columns.iter().any(|c| c.name == "book") {' \
+  '    if false {' \
+  geode-core a_document_column_named_book_collides_with_the_partition_column
+
+# Minor 4. The old no-`[columns]` early return, restored: a document
+# dataset with no columns reaches the schema having never met
+# `validate_document`. The push guard's own entry cannot see this -- that
+# path never reached the guard at all.
+run_mutation "schema/document: the no-columns path skips validation and pushes anyway" \
+  crates/geode-core/src/schema/mod.rs \
+  "                None => diags.push(note(format!(\"dataset '{ds_name}': no [columns] table\")))," \
+  "                None => {
+                    diags.push(note(format!(\"dataset '{ds_name}': no [columns] table\")));
+                    out.datasets.push(dataset);
+                    continue;
+                }" \
+  geode-core a_document_dataset_with_no_columns_table_is_not_pushed
+
+# `Column`/`Value` cover f64/i64/utf8/date only: widening the accepted set
+# to every type makes the rule never fire, so a `timestamp` axis loads and
+# every publish is then refused for a type mismatch -- reported as a feed
+# health failure rather than as the config error it is.
+run_mutation "schema/document: an axis or attribute of an unsupported type is refused" \
+  crates/geode-core/src/schema/mod.rs \
+  '                ColumnType::F64 | ColumnType::I64 | ColumnType::Utf8 | ColumnType::Date' \
+  '                ColumnType::F64
+                    | ColumnType::I64
+                    | ColumnType::Utf8
+                    | ColumnType::Date
+                    | ColumnType::Timestamp
+                    | ColumnType::Bool' \
+  geode-core a_document_axis_or_attribute_of_an_unsupported_type_is_refused
+
+# The key is joined into `batch VARCHAR` and bound back as text: a key
+# column of any other declared type compiles and selects nothing.
+run_mutation "schema/document: a key column must be utf8" \
+  crates/geode-core/src/schema/mod.rs \
+  '            Some(c) if c.ty != ColumnType::Utf8 => {' \
+  '            Some(c) if c.ty != ColumnType::Utf8 && false => {' \
+  geode-core a_document_key_column_must_be_utf8
+
+# Minor 8: the document side's `textual` clearing. Setting the flag
+# instead of clearing it leaves a value column routed as text, so the
+# scope compiler's text filter emits an `ILIKE` against a number.
+run_mutation "schema/document: textual is cleared on a non-dimension, not set" \
+  crates/geode-core/src/schema/mod.rs \
+  '    for c in &mut ds.columns {
+        if unroutable.contains(&c.name) {
+            c.textual = false;
+        }
+    }
+
+    if !keep {' \
+  '    for c in &mut ds.columns {
+        if unroutable.contains(&c.name) {
+            c.textual = true;
+        }
+    }
+
+    if !keep {' \
+  geode-core textual_on_a_document_value_is_an_error_and_textual_is_cleared
+
+# Minor 8: a listed axis whose role is not `axis`. The mirror rule (an
+# `axis` role not listed in `axes`) already had an entry; this direction
+# did not, and without it `document_columns()` would emit a value column
+# in an axis position -- the document request would then order by it and
+# `publish_document`'s staging plan would read the wrong source.
+run_mutation "schema/document: a listed axis whose role is not axis is refused" \
+  crates/geode-core/src/schema/mod.rs \
+  '            Some(c) if c.role != ColumnRole::Axis => {' \
+  '            Some(c) if c.role != ColumnRole::Axis && false => {' \
+  geode-core axes_and_axis_roles_must_agree_both_ways
+
+# Minor 8: `key` naming a column that was never declared. Silently
+# accepted, `document_columns()` simply omits it (`filter_map`), so the
+# document's first key part would be stored in the second key column's
+# place.
+run_mutation "schema/document: key naming an undeclared column drops the dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  "            None => {
+                diags.push(err(
+                    format!(\"dataset '{name}': key names undeclared column '{k}'; dataset dropped\"),
+                    format!(\"{name}.key\"),
+                ));
+                keep = false;
+            }" \
+  '            None => {}' \
+  geode-core a_key_or_axis_naming_an_undeclared_column_drops_the_dataset
+
+# Minor 8: empty `axes`. A document with no axis has no row identity at
+# all, and `DocumentRows::rows()` reads the first axis's length -- with
+# none, every document would count zero rows and be refused at publish
+# instead of at load.
+run_mutation "schema/document: an empty axes list drops the dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.axes.is_empty() {' \
+  '    if false {' \
+  geode-core a_document_dataset_needs_a_non_empty_key_and_axes
+
+# Minor 8: the non-numeric value DROP, not just its diagnostic. A test
+# asserting on the diagnostic alone cannot see a column that was reported
+# and kept -- and a kept utf8 value reaches the DDL as a VARCHAR the
+# blotter would then read through `f64_at`.
+run_mutation "schema/document: a non-numeric value column is really dropped" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !non_numeric.contains(&c.name));' \
+  '    let _ = &non_numeric;' \
+  geode-core a_non_numeric_value_column_is_dropped_and_the_dataset_kept
+
+# Minor 8: "at least one value", anchored on the RULE rather than on the
+# push guard the existing entry mutates. A document dataset with no value
+# column has no numeric cell to paint: the panel would be axes and
+# nothing else.
+run_mutation "schema/document: the at-least-one-value rule itself" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if !ds.columns.iter().any(|c| c.role == ColumnRole::Value) {' \
+  '    if false {' \
+  geode-core a_document_dataset_declares_at_least_one_value
+
+# Minor 7: a declared-but-absent axis column is a message, not a panic --
+# and not a silently skipped check either. `continue` would let a document
+# whose axis the dataset does not declare pass validation and reach the
+# appender, where `cell_source` returns `None` for it.
+run_mutation "document: a declared-but-absent axis column is refused, not skipped" \
+  crates/geode-core/src/document.rs \
+  '            let Some(spec) = ds.column(declared) else {
+                return Err(format!("axis '"'"'{name}'"'"' is not a declared column"));
+            };' \
+  '            let Some(spec) = ds.column(declared) else {
+                continue;
+            };' \
+  geode-core validate_refuses_an_axis_the_dataset_does_not_declare_as_a_column
+
+# Ledger (ii): the undeclared-attribute branch. Accepting one silently
+# drops the value -- `document_columns()` has no column for it, so
+# nothing stages it and the document publishes short of what arrived.
+run_mutation "document: an attribute the dataset does not declare is refused" \
+  crates/geode-core/src/document.rs \
+  '                .any(|c| &c.name == name && matches!(c.role, ColumnRole::Attribute { grain: None }))' \
+  '                .any(|_| true)' \
+  geode-core validate_refuses_an_attribute_the_dataset_does_not_declare
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
