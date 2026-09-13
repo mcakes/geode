@@ -9017,6 +9017,42 @@ run_mutation "subscribe: a subscription's refusal count reads zero rather than i
     }' \
   geode-data a_subscription_whose_queue_fills_counts_what_it_could_not_take
 
+run_mutation "demo bus: publishes every key once at start" \
+  crates/geode-app/src/demo_bus.rs \
+  '    // Every key once, immediately: the first thing a freshly opened
+    // panel sees.
+    for key in &underlyings {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        publish_one(&feed, kind, generator, key, &mut warned_full);
+    }
+' \
+  '' \
+  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
+
+run_mutation "demo bus: the topic format" \
+  crates/geode-app/src/demo_bus.rs \
+  'let topic = format!("marketdata/cvi/{key}");' \
+  'let topic = format!("marketdata/wrong/{key}");' \
+  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
+
+run_mutation "demo bus: the generator's drift" \
+  crates/geode-demo-data/src/documents.rs \
+  '                    let magnitude = rng.random_range(MIN_WALK_STEP..MAX_WALK_STEP);' \
+  '                    let magnitude = 0.0;' \
+  geode-demo-data successive_documents_drift
+
+run_mutation "demo bus: the demo layer's [cvi] source" \
+  crates/geode-app/src/demo.rs \
+  '         [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+         topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
+         priority = \"latest_other\"\n",
+' \
+  '",
+' \
+  geode-app the_demo_layer_declares_the_cvi_source
+
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
