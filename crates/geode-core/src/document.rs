@@ -119,6 +119,21 @@ impl DocumentRows {
                 ds.axes.len()
             ));
         }
+        // A document with no rows is refused rather than published as an
+        // empty generation, because publishing one is silently destructive
+        // in two ways. The publish transaction archives and deletes the
+        // batch's live rows and inserts none, so the panel reads as "no
+        // document has ever arrived for this key" rather than "the feed
+        // sent an empty one" — and the generation it records in the
+        // summary is held by no table at all, which is exactly the
+        // invariant `store::ddl::assert_generations_match_tables` asserts
+        // and `retention::reconcile_generations` would later delete
+        // behind as-of's back. A dataset of this family always declares
+        // at least one axis (`schema::validate_dataset`), so `rows()`
+        // here reads a real axis's length, never a missing one.
+        if self.rows() == 0 {
+            return Err("document has no rows".to_string());
+        }
         for (i, ((name, col), declared)) in self.axes.iter().zip(&ds.axes).enumerate() {
             if name != declared {
                 return Err(format!(
@@ -347,6 +362,26 @@ role = "attribute"
         let mut r = sample();
         r.key[0] = format!("SPX{KEY_SEPARATOR}Z");
         assert!(r.validate(&ds).unwrap_err().contains("reserved separator"));
+    }
+
+    /// An empty document is refused at the source, so nothing downstream
+    /// has to decide what an empty generation means: publishing one would
+    /// delete the batch's live rows, insert none, and record a generation
+    /// no table holds.
+    #[test]
+    fn validate_refuses_a_document_with_no_rows() {
+        let mut r = sample();
+        for (_, col) in r.axes.iter_mut().chain(r.values.iter_mut()) {
+            *col = match col {
+                Column::F64(_) => Column::F64(Vec::new()),
+                Column::I64(_) => Column::I64(Vec::new()),
+                Column::Utf8(_) => Column::Utf8(Vec::new()),
+                Column::Date(_) => Column::Date(Vec::new()),
+            };
+        }
+        assert_eq!(r.rows(), 0);
+        let err = r.validate(&cvi()).unwrap_err();
+        assert!(err.contains("document has no rows"), "{err}");
     }
 
     #[test]

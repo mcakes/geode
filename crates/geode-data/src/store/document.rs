@@ -592,17 +592,51 @@ role = "attribute"
     #[test]
     fn the_file_generations_row_records_the_document_with_a_synthetic_path() {
         let (_d, store, ds) = fixture();
-        let out = publish(&store, &ds, &doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z");
-        let (path, size, rows, health): (String, i64, i64, String) = store
+        // `received_at` deliberately later than `source_time`: a document's
+        // receive time is what stands in for a file's mtime, and recording
+        // the source time there instead would pass every other test here.
+        let rows_in = doc("SPX.Z", [1.; 6]);
+        let out = publish_document(
+            &store,
+            &DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &rows_in,
+                source_time: ts("2026-09-12T14:00:00Z"),
+                received_at: ts("2026-09-12T14:01:00Z"),
+                bytes: 1234,
+            },
+        )
+        .unwrap();
+        let (path, size, rows, health, mtime, source_time): (
+            String,
+            i64,
+            i64,
+            String,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ) = store
             .writer()
             .query_row(
-                "select path, size, row_count, health from file_generations where gen_id = ?",
+                "select path, size, row_count, health, mtime, source_time \
+                 from file_generations where gen_id = ?",
                 duckdb::params![out.gen_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(path, "document://cvi/cvi_params/SPX.Z");
         assert_eq!((size, rows, health.as_str()), (1234, 6, "ok"));
+        assert_eq!(mtime, ts("2026-09-12T14:01:00Z"), "mtime is received_at");
+        assert_eq!(source_time, ts("2026-09-12T14:00:00Z"));
     }
 
     #[test]
@@ -648,6 +682,58 @@ role = "attribute"
             .query_row("select count(*) from file_generations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// What the row floor in `DocumentRows::validate` protects on this side:
+    /// an empty document would archive and delete the batch's live rows,
+    /// insert none, and record a generation no table holds — so the panel
+    /// would read as "no document has arrived for this key" and the summary
+    /// would name a generation `assert_generations_match_tables` rejects.
+    #[test]
+    fn an_empty_document_is_refused_and_the_live_generation_survives() {
+        let (_d, store, ds) = fixture();
+        publish(&store, &ds, &doc("SPX.Z", [7.; 6]), "2026-09-12T14:00:00Z");
+        let mut empty = doc("SPX.Z", [1.; 6]);
+        empty.axes[0].1 = Column::Date(Vec::new());
+        empty.axes[1].1 = Column::F64(Vec::new());
+        empty.values[0].1 = Column::F64(Vec::new());
+        let err = publish_document(
+            &store,
+            &DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &empty,
+                source_time: ts("2026-09-12T14:05:00Z"),
+                received_at: ts("2026-09-12T14:05:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("document has no rows"), "{err}");
+        assert_eq!(
+            live_params(&store, "SPX.Z"),
+            vec![7.; 6],
+            "the live generation is untouched"
+        );
+        let files: i64 = store
+            .writer()
+            .query_row("select count(*) from file_generations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(files, 1, "only the real publish is recorded");
+        let gens: i64 = store
+            .writer()
+            .query_row(
+                "select count(*) from generations where dataset = 'cvi_params'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(gens, 1, "no generation is summarised for the refusal");
+        assert_generations_match_tables(
+            store.writer(),
+            "cvi_params",
+            &crate::store::ddl::history_of("cvi_params", &ds),
+        );
     }
 
     #[test]

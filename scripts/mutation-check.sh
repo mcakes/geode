@@ -7767,6 +7767,18 @@ run_mutation "document: archived_only is recorded from the outcome" \
   '        archived_only: false,' \
   geode-data an_older_document_is_archived_only_and_live_is_untouched
 
+# The row floor (`DocumentRows::validate`, market-data spec §6.2). Without
+# it an empty document validates and publishes: the transaction archives
+# and deletes the batch's live rows, inserts none, and records a summary
+# row no table holds -- so the panel reads as "no document has arrived for
+# this key" and the generation summary names a generation as-of can resolve
+# to nothing.
+run_mutation "document: a document with no rows is refused" \
+  crates/geode-core/src/document.rs \
+  '        if self.rows() == 0 {' \
+  '        if false {' \
+  geode-core validate_refuses_a_document_with_no_rows
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
