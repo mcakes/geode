@@ -2402,28 +2402,23 @@ fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
 
 impl Domain {
     /// May `i` edit the `Text` row keyed `key` on this domain? `false` on
-    /// Groupings, Scopes and Schema — Groupings' `slot` and Scopes' two
-    /// summaries are display-only `Text`s and must refuse; Schema is
-    /// read-only outright. Sources (§19.3) was the first `true`, for
-    /// `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
+    /// Groupings, Scopes, Schema and Colours — Groupings' `slot` and
+    /// Scopes' two summaries are display-only `Text`s and must refuse;
+    /// Schema is read-only outright; Colours has no `Text` row at all
+    /// (`hue` is a `Number`, `tone`/`token` are `Choice`), so `i` never
+    /// reaches this door for it. Sources (§19.3) was the first `true`,
+    /// for `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
     /// (`sources::text_editable`); Views answers `true` for the column
     /// stage's `label` and `width` (Part 2c §5.3, `views::text_editable`)
     /// and for nothing else it has.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
-            Domain::Groupings | Domain::Scopes | Domain::Schema => {
+            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Colours => {
                 let _ = key;
                 false
             }
             Domain::Views => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
-            // Colours has no `Text` rows at all — `hue` is a `Number`,
-            // `tone`/`token` are `Choice` — so `i` never reaches this
-            // arm for it; kept only to stay exhaustive.
-            Domain::Colours => {
-                let _ = key;
-                false
-            }
         }
     }
 
@@ -2435,18 +2430,15 @@ impl Domain {
     /// `width`, Part 2c §5.3).
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
-            Domain::Groupings | Domain::Scopes | Domain::Schema => {
+            // Colours joins for the same reason `text_editable` gives
+            // it no `true` above: no `Text` row for this door to ever
+            // be called on.
+            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Colours => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
             Domain::Views => views::parse_text(key, text),
             Domain::Sources => sources::parse_text(key, text),
-            // Same reasoning as `text_editable` above: Colours has no
-            // `Text` row for this door to ever be called on.
-            Domain::Colours => {
-                let _ = key;
-                Ok(text.trim().to_string())
-            }
         }
     }
 
