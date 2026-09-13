@@ -8556,6 +8556,56 @@ run_mutation "document kind: a same-named column's type is compared, not just it
         {' \
   geode-core check_kind_against_accepts_a_matching_dataset_and_names_each_mismatch
 
+# cvi: a slice whose `param` count differs from the `node` count is
+# refused, not zipped down to the shorter of the two. Positional
+# alignment IS the document's meaning (spec §6.3), so a zipped ragged
+# slice is silently wrong data on a trader's surface — the shape no
+# marker and no row count would give away.
+run_mutation "cvi: a ragged slice is refused" \
+  crates/geode-documents/src/cvi.rs \
+  '                    if slice.params.len() != nodes.len() {' \
+  '                    if false {' \
+  geode-documents a_ragged_slice_fails_with_both_counts
+
+# cvi: an element the model does not know is REPORTED by path, not
+# merely skipped. The skipped set is the per-source diagnostic that
+# makes an XSD drift visible (spec §6.3); swallowing it silently is the
+# failure mode where the desk adds a field and nobody hears about it.
+run_mutation "cvi: an unknown element is reported, not swallowed" \
+  crates/geode-documents/src/cvi.rs \
+  '                        unknown_paths.push(stack.join("/"));' \
+  '                        let _ = ();' \
+  geode-documents an_unknown_element_is_skipped_and_reported_by_path
+
+# cvi: `write` emits one `<param>` per node IN NODE ORDER. The document
+# carries no node label inside a slice, so a reversed (or otherwise
+# permuted) emission is a different surface that parses back cleanly —
+# the round trip is the only thing that can see it.
+run_mutation "cvi: write emits params in node order" \
+  crates/geode-documents/src/cvi.rs \
+  '        for n in 0..grid.nodes.len() {' \
+  '        for n in (0..grid.nodes.len()).rev() {' \
+  geode-documents write_then_parse_round_trips_the_expected_rows
+
+# cvi: a term appearing in two non-adjacent blocks is refused, because
+# the document form has one `<slice>` per term — writing such rows
+# splits or reorders them, and what comes back is not what went in.
+run_mutation "cvi: write refuses a term that is not one contiguous block" \
+  crates/geode-documents/src/cvi.rs \
+  '                if distinct.contains(t) {' \
+  '                if false {' \
+  geode-documents write_refuses_a_term_that_is_not_one_contiguous_block
+
+# cvi: a block whose nodes differ from the first block's is a hole in
+# the grid, and the document form cannot say "no value here" — the row
+# COUNT can still be right (a repeated node instead of a missing one),
+# so only comparing the node lists themselves catches it.
+run_mutation "cvi: write refuses a hole in the grid" \
+  crates/geode-documents/src/cvi.rs \
+  '        if &nodes[start..end] != first_nodes {' \
+  '        if false {' \
+  geode-documents write_refuses_rows_that_are_not_a_full_grid
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
