@@ -230,6 +230,101 @@ impl DocumentRows {
     }
 }
 
+/// What a parser reports beside the rows: element paths it did not
+/// recognise. The receiver logs each once per source (spec §6.3) rather
+/// than once per document, so a feed sending one stray element on every
+/// message does not flood the log.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedDocument {
+    pub rows: DocumentRows,
+    pub unknown_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError {
+    pub message: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteError {
+    pub message: String,
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+/// A market-data document format (spec §6): what its parser recognises
+/// coming in and its writer produces going out (the round-trip publish
+/// path, spec §6.5), plus the columns it can feed — checked once against
+/// the dataset it is paired with, at source-open time, rather than on
+/// every parsed document. Lives in `geode-core`, not `geode-data`,
+/// because `geode-data` dev-depends on the demo generator (which will
+/// produce `DocumentRows`) — a trait in the data crate would be a cycle;
+/// `geode-data`'s registry (`geode_data::documents::DocumentRegistry`)
+/// sees only this trait, never a parser crate.
+pub trait DocumentKind: Send + Sync {
+    fn name(&self) -> &'static str;
+    /// The columns this kind produces — key parts, axes, values,
+    /// attributes — with their types, checked against the dataset it
+    /// feeds when the source opens (spec §6.4).
+    fn columns(&self) -> &[(&'static str, ColumnType)];
+    fn parse(&self, bytes: &[u8]) -> Result<ParsedDocument, ParseError>;
+    fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError>;
+}
+
+/// The load-time check in spec §6.4: every column the kind produces is
+/// declared on the dataset with the same type, and every column the
+/// dataset declares (key, axes, values, document-level attributes) is
+/// one the kind produces. Both directions, so a document can be staged
+/// in `document_columns()` order by construction — a mismatch caught
+/// here at source-open time is a config diagnostic, never a per-row
+/// surprise discovered on the ingest thread.
+pub fn check_kind_against(kind: &dyn DocumentKind, ds: &DatasetSpec) -> Result<(), String> {
+    if !ds.is_document() {
+        return Err(format!("dataset '{}' is not a document dataset", ds.name));
+    }
+    let declared = ds.document_columns();
+    for (name, _) in kind.columns() {
+        if !declared.iter().any(|c| &c.name == name) {
+            return Err(format!(
+                "kind produces '{name}', which dataset '{}' does not declare",
+                ds.name
+            ));
+        }
+    }
+    for spec in &declared {
+        if !kind.columns().iter().any(|(name, _)| name == &spec.name) {
+            return Err(format!(
+                "dataset '{}' declares '{}', which kind '{}' does not produce",
+                ds.name,
+                spec.name,
+                kind.name()
+            ));
+        }
+    }
+    for (name, ty) in kind.columns() {
+        if let Some(spec) = declared.iter().find(|c| &c.name == name)
+            && *ty != spec.ty
+        {
+            return Err(format!(
+                "'{name}' is {} in the kind, {} in the dataset",
+                type_name(*ty),
+                type_name(spec.ty)
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +538,109 @@ role = "attribute"
         assert!(
             sample()
                 .validate(&ds)
+                .unwrap_err()
+                .contains("not a document dataset")
+        );
+    }
+
+    /// The CVI fixture's six columns, in `document_columns()` order
+    /// (key, axes, values, attributes) — the vocabulary `FakeKind`
+    /// claims to produce by default, matching `cvi()` exactly.
+    fn fake_columns() -> Vec<(&'static str, ColumnType)> {
+        vec![
+            ("underlying_ref", ColumnType::Utf8),
+            ("term", ColumnType::Date),
+            ("node", ColumnType::F64),
+            ("param", ColumnType::F64),
+            ("anchor_date", ColumnType::Date),
+            ("spot_ref", ColumnType::F64),
+        ]
+    }
+
+    fn with_extra(extra: (&'static str, ColumnType)) -> Vec<(&'static str, ColumnType)> {
+        let mut v = fake_columns();
+        v.push(extra);
+        v
+    }
+
+    fn without(name: &str) -> Vec<(&'static str, ColumnType)> {
+        fake_columns()
+            .into_iter()
+            .filter(|(n, _)| *n != name)
+            .collect()
+    }
+
+    fn retyped(name: &str, ty: ColumnType) -> Vec<(&'static str, ColumnType)> {
+        fake_columns()
+            .into_iter()
+            .map(|(n, t)| if n == name { (n, ty) } else { (n, t) })
+            .collect()
+    }
+
+    struct FakeKind {
+        columns: Vec<(&'static str, ColumnType)>,
+    }
+
+    impl Default for FakeKind {
+        fn default() -> Self {
+            FakeKind {
+                columns: fake_columns(),
+            }
+        }
+    }
+
+    impl DocumentKind for FakeKind {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn columns(&self) -> &[(&'static str, ColumnType)] {
+            &self.columns
+        }
+        fn parse(&self, _bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
+            Ok(ParsedDocument {
+                rows: sample(),
+                unknown_paths: Vec::new(),
+            })
+        }
+        fn write(&self, _rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
+            Ok(b"fake".to_vec())
+        }
+    }
+
+    #[test]
+    fn check_kind_against_accepts_a_matching_dataset_and_names_each_mismatch() {
+        let ds = cvi();
+        assert_eq!(check_kind_against(&FakeKind::default(), &ds), Ok(()));
+        // The kind produces a column the dataset lacks.
+        let extra = FakeKind {
+            columns: with_extra(("vol", ColumnType::F64)),
+        };
+        assert!(
+            check_kind_against(&extra, &ds)
+                .unwrap_err()
+                .contains("kind produces 'vol', which dataset 'cvi_params' does not declare")
+        );
+        // The dataset declares a column the kind does not produce.
+        let missing = FakeKind {
+            columns: without("spot_ref"),
+        };
+        assert!(check_kind_against(&missing, &ds).unwrap_err().contains(
+            "dataset 'cvi_params' declares 'spot_ref', which kind 'fake' does not produce"
+        ));
+        // Same name, different type.
+        let wrong = FakeKind {
+            columns: retyped("node", ColumnType::I64),
+        };
+        assert!(
+            check_kind_against(&wrong, &ds)
+                .unwrap_err()
+                .contains("'node' is i64 in the kind, f64 in the dataset")
+        );
+        // A measure dataset is refused outright.
+        let mut m = ds.clone();
+        m.family = crate::schema::Family::Measures;
+        assert!(
+            check_kind_against(&FakeKind::default(), &m)
                 .unwrap_err()
                 .contains("not a document dataset")
         );
