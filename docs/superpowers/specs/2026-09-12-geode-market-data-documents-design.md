@@ -407,10 +407,16 @@ A dedicated receiver thread per source drains the sink and runs:
    `coalesce` has elapsed since its last release, or immediately at
    `coalesce = "0"`. The coalescer is a pure struct with a `now`
    parameter, tested without threads.
-3. **Enqueue** a `WorkItem` whose `Candidate` is a new
-   `Candidate::Document(DocumentRows)` variant, priority from the
-   source, `source_time` per §4.2. The existing ingest runner pops it
-   and calls `publish_document`.
+3. **Enqueue.** *Amended (Task 11, §5.6): as built, this is not a
+   `WorkItem`/`Candidate::Document` variant riding the source's
+   `priority` alongside files on one rung — it is a second, separate
+   queue (`Queue::documents: VecDeque<DocumentJob>`) the runner always
+   pops from first, ahead of any file whatever that file's `Priority`.
+   A subscribed source's own `priority` key is still parsed like any
+   other source's but has no effect on a document's queue position; a
+   `DocumentJob` carries no `Priority` field at all.* `source_time` is
+   still per §4.2. The existing ingest runner pops it and calls
+   `publish_document`.
 
 Connection state from the health sink is forwarded through
 `report_discovery_and_emit`: `Connected` is `Ok`, `Reconnecting` is
@@ -427,6 +433,134 @@ egress side pushes uploaded bytes back into its own inbound channel
 under the topic the target names, after the writer, which is the echo
 §9.4 relies on. It is the fixture every data-tier test uses, and the
 demo bus's transport (§10).
+
+### 5.6 As built (Part 2)
+
+- **Documents are popped ahead of files, not merged into the file
+  queue's own priority rung.** §5.4 step 3 above is amended in place:
+  the runner's `Queue` gained a second, separate `documents:
+  VecDeque<DocumentJob>` always taken before `items` (the
+  priority-ordered file queue), whatever the head file's `Priority` —
+  a coalesced document publish is milliseconds, so popping it first
+  cannot starve a file load, and `DocumentJob` carries no `Priority` at
+  all. A subscribed source's `priority` config key is still parsed and
+  stored like any other source's; it simply has no effect on a
+  document's queue position. `IngestHandle::shutdown` drops whatever is
+  still queued in `documents` exactly as it drops whatever is still
+  queued in `items` — neither queue drains before the runner thread
+  returns.
+- **`SourceTime::Document(field)`'s two readable shapes, and where each
+  is checked.** `SourceSpec::from_doc` validates `sources.<name>.
+  source_time` at LOAD: the named field must be a document-level
+  `Attribute` (§3.1) of type `date` or `utf8`, or the source is refused
+  with an `Error` diagnostic and skipped. `source_time_of`
+  (`geode_data::ingest::subscribe`) then reads, per document: a `Date`
+  as that date's value at MIDNIGHT UTC (a business date has no time of
+  day); a `Utf8` as RFC 3339, which carries its own offset, so a feed
+  stamping local time with an offset is honoured rather than silently
+  read as UTC. A missing or wrongly-typed field on an actual message is
+  reported per document even though the schema check already ran at
+  load — that check is about the declared shape, this one about what a
+  given message actually sent.
+- **The coalescer's window restarts from each release, and a key's
+  first offer always releases at once.** `Coalescer<T>::offer`, on a
+  key with nothing pending and nothing yet released, returns the item
+  immediately; once released, the *next* release for that key is due
+  no earlier than `window` after THAT release, not after the original
+  offer — a re-offered pending item's own due time never moves, so a
+  fast-repeating key cannot push its own release out forever, but a
+  change arriving right after a release waits out a full fresh window
+  before the next one shows.
+- **`ConnectionState` maps onto the discovery lane exactly; parse,
+  validate and `source_time` failures map onto the load lane, keyed by
+  batch or, when the bytes never parsed far enough to yield one, by the
+  raw topic.** `Connected → Health::Ok`, `Reconnecting →
+  Health::Pending("reconnecting")` (nothing lost yet — a trader should
+  read "waiting", not "broken"), `Lost { reason } → Health::Failed {
+  reason }` (the adapter's own reason, verbatim) — all through
+  `report_discovery_and_emit`. A parse failure has no key (the bytes
+  never parsed), so it reports on the LOAD lane keyed by the message's
+  raw topic; a validate or `source_time_of` failure has a key (the rows
+  parsed fine) and reports keyed by that document's own batch. A
+  panicking `DocumentKind::parse` runs under the same `catch_unwind` +
+  `geode_core::panic::contained` boundary every other background
+  boundary in this crate uses, and is reported exactly as a parse
+  `Err` would be — keyed by topic, `"parse panicked: …"` — so one
+  malformed message costs one document, not the receiver thread. The
+  receiver's `handle_message` is this crate's SIXTH such boundary, not
+  its fifth: an ingest file's load, its pop-time catalog recheck, a
+  discovery poll, a query pool worker (Phase 4b's original four), this
+  plan's own document publish (`publish_one_document`, Task 8), and now
+  a message receive (Task 9).
+- **`AdapterRegistry` and `DocumentRegistry` live on
+  `DataServiceConfig` and are filled by the app, never by `geode-data`
+  itself.** `geode_app::bridge::data_setup` always folds in
+  `geode_documents::builtin_kinds()` into `documents` — a document kind
+  carries no state, so there is nothing a caller could sensibly leave
+  out — while `adapters` is the caller's own roster: `main.rs`
+  registers a `ChannelAdapter` named `"demo_bus"` only under `--demo`;
+  every other build passes `AdapterRegistry::default()`, so a
+  non-demo build serves every `csv_dir` source and reports each
+  subscribed one as unservable rather than silently doing nothing.
+  `geode-data` depends on neither `geode-documents` nor
+  `geode-demo-data` — confirmed in each crate's `Cargo.toml` — so the
+  layering rule holds structurally, not just by convention.
+- **A missing adapter, a missing document kind, a kind/dataset column
+  mismatch, or an adapter with no subscription side is a discovery-lane
+  `Failed` for that source, resolved once at `DataService::open` — and
+  is NOT also surfaced as a `Diagnostic` in the config section.** All
+  four resolution failures (§5.3, §6.4) go through the same
+  `report_unservable` closure onto the discovery lane. `DataSetup::
+  diagnostics` is built by `data_setup` from schema/view/dimension/
+  source *parsing* alone, before `DataService::open` ever runs, so none
+  of these reaches it. Recorded as a known gap, not fixed here: a
+  trader sees the failure in the diagnostics tile's data section
+  (as a source health), never its config section.
+- **`ChannelAdapter` can lose a capability at runtime, and both its
+  doors say so rather than pretending.** It holds its inbound sender
+  only weakly, so the bus closes for good once every `ChannelFeed` and
+  outstanding egress is dropped (no new strong sender can be made from
+  a `Weak` with no strong holders left): `subscribe` on a closed bus is
+  `Err`, never a `Connected` that then delivers nothing, and `egress()`
+  answers `None` once every feed is gone. `ChannelFeed::refused()`
+  counts inbound publishes the bus itself could not queue (the
+  dispatcher fell behind); `SubscriptionWorker::refused()`
+  (`geode_data::ingest::subscribe`) exposes a subscribed source's own
+  dropped-message count the same way. Neither has an in-app reader yet
+  — the natural next one is the diagnostics tile's sources section.
+- **The demo bus publishes every key once at start, then advances one
+  key per `cadence ± jitter` sleep.** `geode_app::demo_bus::spawn`
+  publishes every one of `CviGenerator::underlyings()` immediately, so
+  a panel opened at startup has something on its first frame, then
+  loops over the keys forever, waiting `(cadence - jitter) +
+  uniform(0, 2 * jitter)` before each publish. The overall rate of new
+  generations is therefore about one every `cadence` (the shipped
+  constant is 5s) regardless of key count — the bus advances one key
+  per wait, not one wait per key — while any one key's own republish
+  period is roughly `cadence × keys` (ten demo underlyings ⇒ about 50s
+  per key at the shipped cadence).
+- **The picker's document arm lowers the whole scope grain-free (Task
+  1, closing the item §4.5's Part 1 bullet parked).** `query::
+  distinct::document_select`'s text filter runs through
+  `scope_sql::text_column_term` per textual column (a literal `false`
+  when none survives), and its expression filter runs one top-level
+  `and` conjunct at a time through `scope_sql::render_expr`. A
+  conjunct naming a column the document table has no storage for is
+  DROPPED — neither compiled (a binder error would fail the whole
+  picker query on the one dataset with no such column) nor collapsed
+  to `false` (which would claim the document holds no such rows rather
+  than that the question never reaches it) — mirroring exactly the
+  widening `Scope::applicable_to` already does for a dimension
+  selection.
+- **`--demo` feeds `cvi_params` for real now.**
+  `geode_demo_data::documents::cvi::CviGenerator` (seeded; 8 listed
+  monthly expiries × 12 fixed nodes per document — smaller than either
+  of the two synthetic grid shapes `docs/perf.md`'s benchmarks use) and
+  `geode_app::demo_bus` are the generator and producer, subscribed
+  through a `[cvi]` source (`adapter = "demo_bus"`) the demo layer
+  declares alongside the risk snapshot's own directory source. Numbers
+  — parse/write, publish, and archive growth at the demo cadence — are
+  in `docs/perf.md`'s "Market-data documents" section.
 
 ## 6. Document kinds
 

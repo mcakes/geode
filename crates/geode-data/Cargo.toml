@@ -43,3 +43,7 @@ harness = false
 [[bench]]
 name = "query"
 harness = false
+
+[[bench]]
+name = "publish_document"
+harness = false

@@ -343,10 +343,11 @@ role = "measure"
 grain = "position"
 source_name = "SC"
 
-# ---- Market-data documents (2026-09-12 design, Part 1). ----
-# Declared now so Part 2's demo bus has a dataset to feed; until then the
-# table is created empty at startup and shows in the diagnostics tile's
-# data section with no generations.
+# ---- Market-data documents (2026-09-12 design). ----
+# Declared in Part 1; Part 2's demo bus (`geode-app::demo_bus`, fed
+# through the `[cvi]` source `demo.rs::layer` generates over the
+# `demo_bus` `ChannelAdapter`) feeds it now, so `--demo` publishes CVI
+# documents into this table rather than leaving it empty.
 
 [cvi_params]
 family = "document"

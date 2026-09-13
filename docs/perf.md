@@ -73,6 +73,12 @@ These rows read `—` until a module records its first requery (Plan 3c).
   row, baked per row once at palette open.
 - `cargo bench -p geode-demo-data` — the synthetic data generator
   (100k/1M rows), established in phase 0.
+- `cargo bench -p geode-documents` — the CVI document kind's parse and
+  write cost at two grid shapes (`benches/cvi.rs`); see "Market-data
+  documents" below.
+- `cargo bench -p geode-data --bench publish_document` — the store-side
+  publish cost at the same two shapes; see "Market-data documents"
+  below.
 - `cargo bench --workspace --no-run` — CI compiles every bench on both
   platforms (the workspace-wide `bench = false` / `harness = false`
   invariants in CLAUDE.md keep criterion the only harness).
@@ -1322,3 +1328,86 @@ and pickable re-derives, the frame updates) and the fan-out it triggers.
 The fan-out's cost **is** the blotter requery already budgeted by §7.1;
 what this design changed is how often it can fire, which is now bounded
 at one per 250 ms rather than one per key repeat.
+
+## Market-data documents (spec §5.4/§6, Part 2, Task 11)
+
+Two costs on the document path, both `--release`, DuckDB 1.10505
+bundled, criterion medians, an M-series Mac. Read them side by side:
+the first is the receiver thread's cost, in memory, before a document
+ever reaches the runner; the second is the runner's cost after.
+
+**Parse and write** (`cargo bench -p geode-documents`, `benches/cvi.rs`)
+— `CviKind::parse`/`write` at two grid shapes: 20 terms × 30 nodes (600
+rows, a single underlying's surface, the shape a panel shows) and 200 ×
+300 (60,000 rows, well past anything the desk sends):
+
+| Benchmark | Result |
+|---|---|
+| `cvi/write/20x30` | 48.4 µs |
+| `cvi/parse/20x30` | 67.8 µs |
+| `cvi/write/200x300` | 4.65 ms |
+| `cvi/parse/200x300` | 5.85 ms |
+
+(Task 4's own fix-wave numbers — write 47.3 µs/4.60 ms, parse 68.6
+µs/5.73 ms — read within normal run-to-run noise of these.)
+
+**Publish** (`cargo bench -p geode-data --bench publish_document`, new)
+— `publish_document` at the same two shapes, staging and publishing
+through a real temporary `Store` (schema applied, catalog tables
+ensured). Each iteration gets its own store, the same per-iteration
+pattern `benches/ingest.rs` uses, so a hundred-odd publishes never share
+one growing archive that would skew later samples; the *timed* half of
+each iteration is a second publish of the same key over an untimed
+first one — a live document overwriting a live document, which is the
+demo bus's steady state, not the one-off, less interesting cost of the
+first insert into an empty table:
+
+| Benchmark | Result |
+|---|---|
+| `publish_document/20x30` | 5.32 ms |
+| `publish_document/200x300` | 146.8 ms |
+
+Publish costs roughly two orders of magnitude more than parse+write at
+600 rows (5.32 ms against 116 µs) narrowing to about one order of
+magnitude at 60,000 rows (146.8 ms against 10.5 ms) — expected, since
+`publish_document` does real synchronous disk I/O per row (a `create or
+replace` staging table, one `Appender::append_row` call per row, then
+`publish_file`'s own transaction moving staging into the live/archive
+tables and refreshing the key dimension's ENUM dictionary) where
+`CviKind::parse`/`write` never touch a disk. The two benchmarks are not
+directly additive into an end-to-end document latency — `parse`+`write`
+measures the wire format alone and `publish_document` starts from
+in-memory `DocumentRows`, the same handoff shape the receiver thread
+hands the runner — but together they show where the document path's
+cost actually sits: overwhelmingly in the store, not the parser.
+
+### Archive growth at the demo cadence
+
+The demo bus (`geode-app::demo_bus`) publishes one document roughly
+every `cadence` (5 s, the shipped constant), independent of key count —
+it advances one key per wait rather than waiting once per key, so any
+one key's own republish period is about `cadence × keys` (ten
+underlyings ⇒ ~50 s per key at the shipped cadence), while the
+*overall* rate of new generations is one per ~5 s throughout.
+
+A one-off measurement, same method as `publish_document` above but at
+the demo's own real document shape — `CviGenerator`'s 8 listed expiries
+× 12 fixed nodes = 96 rows per document, smaller than either bench's
+synthetic grid — published one key 50 times running into a fresh store
+and read the `.duckdb` file's own size (after `checkpoint`) before and
+after: **2,097,152 bytes of growth over 50 publishes, ~41.9 KB per
+generation.** (That figure is dominated by DuckDB's own block/segment
+allocation granularity rather than the ~1.5 KB of raw column payload a
+96-row document actually carries — the round number, exactly 2 MiB
+over 50 publishes, is itself the tell.) At one new generation roughly
+every 5 s that is about **8.2 KB/s ⇒ ~29.5 MB/hour ⇒ ~708 MB/day** of
+continuous `--demo` running.
+
+**Known gap, recorded rather than fixed here:** nothing in the document
+path currently sweeps or retires old generations — Phase 2a's
+retention/sweep machinery (`store::retention`) runs over directory
+sources' `file_generations`, and a subscribed source's document
+generations are not yet wired into it — so a `--demo` session (or a
+real desk's subscribed source) left running indefinitely would grow its
+archive unbounded. Out of this task's scope; a candidate for whichever
+of Parts 3–4 next touches retention.

@@ -200,6 +200,18 @@ mod demo_config_integration {
         // no diagnostics, per this same fixture's own
         // the_demo_layer_declares_the_cvi_source.
         assert_eq!(setup.config.sources.len(), 2);
+        // Task 11 carry-in: the demo schema's own `cvi_params` dataset
+        // must agree with the built-in `CviKind`'s column set (spec
+        // §6.4) — the same check `DataService::open` runs per subscribed
+        // source at open time, pinned here so a demo-config edit that
+        // drifts the two apart fails this fixture rather than only ever
+        // failing silently as a discovery-lane `Failed` a trader has to
+        // notice at runtime.
+        geode_core::document::check_kind_against(
+            &geode_documents::CviKind,
+            setup.config.schema.dataset("cvi_params").unwrap(),
+        )
+        .unwrap();
     }
 
     /// Task 1 (Phase 4 spec §3.3): `currency`, `model_code` and `expiry`
