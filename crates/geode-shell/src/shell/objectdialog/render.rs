@@ -796,11 +796,12 @@ fn enter_edit_stage(
 /// claim, and the shell closes the whole dialog instead of stepping back
 /// to the view.
 ///
-/// The colour names come from the live `colours` doc, read at open time
-/// rather than carried on the draft: the doc can be reloaded while the
-/// dialog stands, and the `Choice` is built once per stage — a name added
-/// to `colours.toml` shows up the next time a column is opened, which is
-/// the same freshness every other choice list here has.
+/// The colour names come from the live `colours` doc — with the pending
+/// write batch folded in, [`enter_edit_stage`]'s own rule — read at open
+/// time rather than carried on the draft: the doc can be reloaded while
+/// the dialog stands, and the `Choice` is built once per stage, so a
+/// name added to `colours.toml` shows up the next time a column is
+/// opened. That is the same freshness every other choice list here has.
 ///
 /// [`Draft::enter_column`] answers `false` for a name the view's list
 /// does not hold, and then nothing moves: no stage change, no cursor
@@ -808,9 +809,17 @@ fn enter_edit_stage(
 /// (the caller's own `EditRow::Item` guard already refuses it) and, more
 /// usefully, the case where a future caller aims at a stale name.
 fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
-    let colours: Vec<String> = shell
-        .services
-        .config
+    // Through the folded config, exactly as `enter_edit_stage` reads it
+    // (the final review's M-6): inside the 250 ms write debounce
+    // `services.config` is still the documents as they stood before the
+    // last tick, so a colour just created in the Colours dialog would be
+    // missing from this `Choice` for as long as that window is open. The
+    // two doors into a stage now agree about what "the live config"
+    // means.
+    let folded = apply::config_with_pending(shell);
+    let colours: Vec<String> = folded
+        .as_ref()
+        .unwrap_or(&shell.services.config)
         .doc("colours")
         .map(|doc| {
             geode_core::colour::NamedColours::from_doc(doc)
@@ -1634,11 +1643,12 @@ fn in_column_stage(shell: &ShellView) -> bool {
         .is_some_and(|draft| draft.column().is_some())
 }
 
-/// The one answer for a list verb pressed in the column stage: `x`,
+/// The one answer for a verb the column stage does not own: `x`,
 /// `shift+j` and `shift+k` all reorder or demote rows of a list this
-/// stage does not install, so each says the same thing with its own key
-/// in it, rather than the edit stage's answer about rows that are not on
-/// screen.
+/// stage does not install, and `d`/`r` (the final review's I-2) act on
+/// the whole view the crumb has narrowed away from — so each says the
+/// same thing with its own key in it, rather than the edit stage's
+/// answer about an object or rows that are not on screen.
 fn not_a_column_verb(shell: &mut ShellView, key: &str) {
     set_notice(shell, format!("{key} is not a verb in a column's stage"));
 }
@@ -1932,6 +1942,26 @@ fn removal_edits(
 /// the message names the real state ("is empty") and the real remedy
 /// (tick a dimension) instead.
 fn arm_delete(shell: &mut ShellView) {
+    // Part 2c final review, I-2: refused in the column stage, through
+    // the very notice `x`/`shift+j`/`shift+k` already answer with. The
+    // crumb has narrowed the object to one column, and `d`'s confirmed
+    // effect is on the whole view — it deletes the user-layer view
+    // outright. A destructive verb must not answer about an object the
+    // trader has navigated away from, which is the same rule the three
+    // list verbs were refused under; leaving these two live where those
+    // three were refused is the asymmetry that reads as an oversight.
+    // The cost is one keystroke: `escape` first, then `d`.
+    //
+    // Guarded here rather than at the dispatch arm (where `x`'s own
+    // guard sits) because this function has two callers — the `d`
+    // keystroke and `press_verb`'s action-bar click (§18.9 made the bar
+    // the mouse form of these letters), and a guard on only the keyboard
+    // one would leave the stage destructible with a mouse, exactly the
+    // Part 2b review Major that `Domain::writable`'s ten sites answer.
+    if in_column_stage(shell) {
+        not_a_column_verb(shell, "d");
+        return;
+    }
     match editing_row(shell) {
         Some(row) if row.layer == Some(Layer::User) => {
             if let Some(draft) = draft_mut(shell) {
@@ -1972,6 +2002,16 @@ fn arm_delete(shell: &mut ShellView) {
 /// undo for hiding a column — the commonest edit §4.1's split exists to
 /// make cheap, and the one whose override never reaches `views.toml`.
 fn arm_revert(shell: &mut ShellView) {
+    // Part 2c final review, I-2 — `arm_delete`'s guard, for the same
+    // reason and with the same reach over both callers. `r`'s confirmed
+    // effect is a removal across `views` AND `view_presentation`, so
+    // from a stage crumbed `tree > npv` it would throw away the
+    // trader's personalisation of every column of the view, not the one
+    // the crumb names.
+    if in_column_stage(shell) {
+        not_a_column_verb(shell, "r");
+        return;
+    }
     match editing_row(shell) {
         Some(row) if row.overridden => {
             if let Some(draft) = draft_mut(shell) {
@@ -2277,17 +2317,33 @@ fn build(
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
 
-    // §6.1: the merged `colours.toml`, read once for the whole list
-    // rather than once per row — every browse row's swatch resolves its
-    // own saved colour against it. `None` for every other domain, so a
-    // non-Colours dialog never even asks `Config` for a doc it will
-    // never read the rest of the row loop for.
-    let named_colours: Option<geode_core::colour::NamedColours> = (state.domain == Domain::Colours)
-        .then(|| {
-            let empty = geode_core::config::MergedDoc::default();
-            let doc = shell.services.config.doc(colours::DOC).unwrap_or(&empty);
-            geode_core::colour::NamedColours::from_doc(doc).0
-        });
+    // §6.1: the merged `colours.toml` AND the theme's own
+    // anchors/tokens, read once for the whole list rather than once per
+    // row — every browse row's swatch resolves its own saved colour
+    // against them. `None` for every other domain, so a non-Colours
+    // dialog never even asks `Config` for a doc it will never read the
+    // rest of the row loop for.
+    //
+    // The pair is hoisted with the doc (the final review's M-8):
+    // `colour_theme::resolve_named` reads the theme inside itself, so
+    // resolving per row cost M x 28 `Hsla -> Rgb` conversions for a list
+    // of M colours. Bounded by colour count in a modal rather than by row
+    // count on the paint path, so it is tidiness rather than budget — but
+    // it is the same shape the blotter's I-1 memo answers, and the list
+    // was already hoisting the doc.
+    let named_colours: Option<(
+        geode_core::colour::NamedColours,
+        geode_core::colour::Anchors,
+        geode_core::colour::Tokens,
+    )> = (state.domain == Domain::Colours).then(|| {
+        let empty = geode_core::config::MergedDoc::default();
+        let doc = shell.services.config.doc(colours::DOC).unwrap_or(&empty);
+        (
+            geode_core::colour::NamedColours::from_doc(doc).0,
+            colour_theme::anchors_from_theme(theme),
+            colour_theme::tokens_from_theme(theme),
+        )
+    });
 
     let visible = super::visible_rows(state, &rows);
 
@@ -2406,10 +2462,15 @@ fn build(
         // saved colour — painted only when the colour actually resolves
         // (a dropped or invalid one paints no swatch, never a fallback
         // that would misrepresent it).
-        let swatch = named_colours.as_ref().and_then(|named| {
-            colour_theme::resolve_named(named, &row.name, theme)
-                .map(|hsla| dialog::swatch(hsla, format!("objectdialog-swatch-{}", row.name), cx))
-        });
+        let swatch = named_colours
+            .as_ref()
+            .and_then(|(named, anchors, tokens)| {
+                named.get(&row.name).map(|def| (def, anchors, tokens))
+            })
+            .map(|(def, anchors, tokens)| {
+                let hsla = colour_theme::to_hsla(geode_core::colour::resolve(def, anchors, tokens));
+                dialog::swatch(hsla, format!("objectdialog-swatch-{}", row.name), cx)
+            });
 
         let entity_for_row = entity.clone();
         let clicked = row.name.clone();

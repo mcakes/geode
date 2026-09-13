@@ -480,6 +480,14 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
 /// a literal `None` instead would omit the key and read back as "nothing
 /// to say", which is true only when the desk says nothing either; where
 /// the desk sets a label, it would swallow the clear whole.
+/// **This writer fully owns the overlay's `[view.columns.*]` block**
+/// (the final review's M-7). Every other adapter's `to_table` starts
+/// from `draft.source` and preserves what it does not model; this one is
+/// built from `items` instead, so anything a trader hand-wrote under a
+/// column's table that the vocabulary does not model is dropped on the
+/// next save. That matches the reader, which already drops unrecognised
+/// keys there, and the pre-2c behaviour of `order`/`hidden`/`width` —
+/// this doc is the statement of it, not a change to it.
 #[allow(clippy::collapsible_if)]
 fn presentation_table(draft: &Draft) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();

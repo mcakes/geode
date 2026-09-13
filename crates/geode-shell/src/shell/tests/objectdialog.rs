@@ -5287,6 +5287,66 @@ fn a_failed_write_in_the_column_stage_steps_back_to_the_view(cx: &mut gpui::Test
     );
 }
 
+/// I-2 (Part 2c final review): `d` and `r` are refused in the column
+/// stage, through the same `not_a_column_verb` notice `x`, `shift+j` and
+/// `shift+k` already answer with.
+///
+/// The crumb has narrowed the object to one column, and both verbs act
+/// on the WHOLE view — `d` deletes the user-layer view, `r` undoes the
+/// trader's personalisation of every column of it, not the open one. The
+/// fixture makes that reachable rather than merely refused-anyway: one
+/// `space` on `scale` gives the view a user-layer presentation override,
+/// so `r` would arm a real `Confirm::Revert` here absent the guard.
+///
+/// The last block is the scoping half: the refusal is the column
+/// stage's, not a blanket disabling of the two letters — one `escape`
+/// back to the view and `r` arms exactly as it always did.
+#[gpui::test]
+fn delete_and_revert_are_refused_in_the_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter"); // npv's column stage
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j space"); // scale → k, a real override
+    cx.run_until_parked();
+    // The override has to reach MEMORY before either verb is asked
+    // about it: an ordinary field edit applies at the debounced flush,
+    // and `derive_rows` reads the live config — without this the row is
+    // not `overridden` yet and `r` would have been refused anyway,
+    // which would make the assertions below prove nothing.
+    flush_config_write(&mut cx);
+
+    for key in ["d", "r"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.notice.clone()),
+            Some(format!("{key} is not a verb in a column's stage")),
+            "{key} answered about the view from inside a column's stage"
+        );
+        assert_eq!(
+            edit_draft(&shell, &cx, |d| d.confirm),
+            None,
+            "{key} armed a confirm the crumb has navigated away from"
+        );
+        assert!(
+            edit_draft(&shell, &cx, |d| d.column().is_some()),
+            "{key} left the column stage"
+        );
+    }
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.column().is_none()));
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.confirm),
+        Some(objectdialog::Confirm::Revert),
+        "the refusal is the column stage's alone — r still arms on the view"
+    );
+}
+
 /// §5.3: `width` is a typed value, not a stepped one — `i` opens it
 /// seeded with `auto`, a pixel count inside the range applies and reaches
 /// the overlay, and anything else is refused with the range named and the

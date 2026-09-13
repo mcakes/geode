@@ -182,10 +182,20 @@ pub fn definition_of(draft: &Draft) -> Option<Definition> {
 /// comment has the "only three keys, never four" reasoning. Anything
 /// the vocabulary does not model survives untouched, the same
 /// "preserve what we don't own" rule every other adapter's `to_table`
-/// follows.
+/// follows — and so does a `hue` the vocabulary DOES model but this
+/// save did not step, which is how a hand-edited `hue = 210.5` survives
+/// a step of `tone` (the final review's M-2: the field is seeded
+/// rounded, so writing it unconditionally rewrote the file).
 pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     let mut table = super::toml_table_to_edit(&draft.source);
-    table.remove("hue");
+    // Kept, not discarded (the final review's M-2): `fields` seeds the
+    // `Number` with `hue.round()`, so a hand-edited `hue = 210.5` reads
+    // back as `211` and writing the field on every save would rewrite
+    // the file's own value on a step of `tone` or `token` the trader
+    // made instead. The saved item goes back verbatim — formatting and
+    // all — whenever the field still rounds to it, so only a step of the
+    // hue itself replaces it.
+    let saved_hue = table.remove("hue");
     table.remove("tone");
     table.remove("token");
     match draft.choice("token") {
@@ -197,7 +207,17 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
                 (key, FieldKind::Number { value, .. }) if key == "hue" => Some(*value),
                 _ => None,
             }) {
-                table["hue"] = toml_edit::value(value);
+                let unstepped = saved_hue
+                    .as_ref()
+                    .and_then(|item| item.as_value())
+                    .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                    .is_some_and(|saved| saved.round() as i64 == value);
+                match (unstepped, saved_hue) {
+                    (true, Some(saved)) => {
+                        table.insert("hue", saved);
+                    }
+                    _ => table["hue"] = toml_edit::value(value),
+                }
             }
             if draft.choice("tone") == Some("light") {
                 table["tone"] = toml_edit::value("light");
@@ -316,6 +336,48 @@ mod tests {
                 && !text.contains("hue")
                 && !text.contains("tone"),
             "switching to a token must drop the old hue and tone: {text}"
+        );
+    }
+
+    /// M-2 (Part 2c final review): a hand-edited fractional `hue` is the
+    /// trader's own value, and a save that did not step the hue must
+    /// leave it alone.
+    ///
+    /// [`fields`] seeds the `Number` with `hue.round()` — the field
+    /// vocabulary has no fractional step — so writing the field's value
+    /// on every save rewrote `hue = 210.5` to `hue = 211` the first time
+    /// the trader touched `tone` or `token`, without them ever pressing
+    /// a key on the hue row. Stepping the hue itself still writes it,
+    /// which is the other half asserted here: the guard is "did this
+    /// save move the hue", never "is the source fractional".
+    #[test]
+    fn a_fractional_hue_survives_a_save_that_did_not_step_it() {
+        let config = config_with_colours("[gamma]\nhue = 210.5\n");
+
+        // A step of `tone` alone: the hue row was never touched.
+        let mut draft = Domain::Colours.draft(&config, "gamma");
+        let tone = draft.fields.iter_mut().find(|f| f.key == "tone").unwrap();
+        if let FieldKind::Choice { options, selected } = &mut tone.kind {
+            *selected = options.iter().position(|o| o == "light").unwrap();
+        }
+        let text = super::super::object_text("gamma", to_table(&draft, Destination::Doc));
+        assert!(
+            text.contains("hue = 210.5") && text.contains("tone = \"light\""),
+            "a step of tone rewrote the hand-edited hue: {text}"
+        );
+
+        // And a step of the hue itself does write the field's value —
+        // the rounded one, since that is what the trader stepped from.
+        let mut draft = Domain::Colours.draft(&config, "gamma");
+        let hue = draft.fields.iter_mut().find(|f| f.key == "hue").unwrap();
+        if let FieldKind::Number { value, .. } = &mut hue.kind {
+            *value += 15;
+        }
+        let text = super::super::object_text("gamma", to_table(&draft, Destination::Doc));
+        assert!(
+            text.contains("hue = 226") && !text.contains("210.5"),
+            "stepping the hue must write the stepped value — 211, the \
+             rounded seed, plus one step: {text}"
         );
     }
 

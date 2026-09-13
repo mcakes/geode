@@ -1402,6 +1402,20 @@ impl Draft {
     /// its own: a filter or a half-open field belonging to the list
     /// behind would be live against rows that no longer exist.
     pub fn enter_column(&mut self, column: &str, fields: Vec<Field>) -> bool {
+        // Re-entry would be the end of the object (the final review's
+        // M-1): the membership test below passes THROUGH
+        // `field_by_key`'s parent fallback, so from an already-open
+        // stage it would stash the seven installed column fields as
+        // `parent_fields` and drop the view's own list forever — after
+        // which `list_items("columns")` answers `None` and the write
+        // path renders a view with no columns at all. Unreached today
+        // (this stage installs no `EditRow::Item` rows, and
+        // `commit_selected_row` gates on `column().is_none()` besides),
+        // so this line is what makes it unrepresentable rather than
+        // merely unreached.
+        if self.column.is_some() {
+            return false;
+        }
         let is_member = self
             .list_items("columns")
             .is_some_and(|items| items.iter().any(|i| i.name == column));
@@ -1439,6 +1453,16 @@ impl Draft {
     ///
     /// Returns the key that fell back, for the caller's notice — see
     /// `views::fold_into` on why at most one can.
+    ///
+    /// **This method is coupled to `Domain::Views` by name** (the final
+    /// review's M-5): it calls `views::desk_baseline` and
+    /// `views::fold_into` directly, where [`Draft::enter_column`]
+    /// deliberately takes the stage's fields in rather than reaching for
+    /// a domain's vocabulary. Correct today because Views is the only
+    /// domain that ever sets `self.column` — but a second domain gaining
+    /// a column stage would silently inherit Views' desk-fallback
+    /// semantics here, and the fix at that point is to hand the fold in
+    /// the way `enter_column` hands the fields in, not to add a match.
     pub fn fold_column(&mut self) -> Option<&'static str> {
         let name = self.column.clone()?;
         // Read before the mutable borrow below: the baseline comes off
@@ -5328,6 +5352,56 @@ mod tests {
             "cursor back on the column"
         );
         assert!(!draft.enter_column("ghost", Vec::new()), "not a member");
+    }
+
+    /// M-1 (Part 2c final review): a second `enter_column` while a column
+    /// stage is already open is refused, changing nothing.
+    ///
+    /// Unreachable through the dialog today, which is exactly why the
+    /// guard is worth its line: the membership test below it passes
+    /// through `field_by_key`'s parent fallback, so a re-entry would
+    /// stash the SEVEN installed column fields as `parent_fields` and
+    /// drop the view's own `columns` list forever — and the next write
+    /// would render a view with no columns at all. The assertions are on
+    /// that list surviving, not merely on the `false`.
+    #[test]
+    fn enter_column_refuses_re_entry_and_keeps_the_objects_own_list() {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let item = draft.list_items("columns").unwrap()[0].clone();
+        assert!(draft.enter_column("npv", views::column_fields(&item, &[])));
+        let installed = draft.fields.len();
+        let names = |draft: &Draft| {
+            draft
+                .list_items("columns")
+                .map(|items| items.iter().map(|i| i.name.clone()).collect::<Vec<_>>())
+        };
+        let before = names(&draft);
+        assert_eq!(
+            before.as_deref(),
+            Some(&["npv".to_string(), "book".to_string()][..])
+        );
+
+        assert!(
+            !draft.enter_column("npv", Vec::new()),
+            "re-entry on the open column is refused"
+        );
+        assert!(
+            !draft.enter_column("book", Vec::new()),
+            "re-entry on another member is refused too — it is the open \
+             stage that forbids this, not the name"
+        );
+        assert_eq!(draft.column(), Some("npv"));
+        assert_eq!(
+            draft.fields.len(),
+            installed,
+            "the seven fields still stand"
+        );
+        assert_eq!(
+            names(&draft),
+            before,
+            "the view's own column list survived the refused re-entry"
+        );
     }
 
     /// Part 2c §5.5: a diagnostic path whose index resolves — by name, 2b's

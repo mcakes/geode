@@ -11,7 +11,11 @@
 //! once per resolve; nothing here caches them, because a theme swap
 //! (`[theme] name` in `app.toml`) has to be visible on the very next
 //! paint and a cache would need its own invalidation for no real cost —
-//! six-plus-eleven `Hsla` field reads is not a hot path.
+//! six-plus-eleven `Hsla` field reads is not a hot path. A caller on a
+//! path where it IS one — the blotter paints `render_td` per visible
+//! cell — memoises the derived pair itself behind [`theme_signature`],
+//! which is the exact input to both derivations and so needs no
+//! invalidation of its own either.
 
 use geode_core::colour::{Anchors, NamedColours, Rgb, Tokens};
 use gpui::Hsla;
@@ -101,10 +105,72 @@ pub fn tokens_from_theme(theme: &Theme) -> Tokens {
     }
 }
 
+/// Every theme colour [`anchors_from_theme`] and [`tokens_from_theme`]
+/// read, in one array — the exact input to both derivations, so two
+/// signatures comparing equal mean two identical derived pairs (Part 2c
+/// final review, I-1).
+///
+/// Twelve anchors then sixteen token colours, in each function's own
+/// field order. It is a read of twenty-eight `Hsla` fields and no
+/// arithmetic: `Hsla` is `Copy` with a hand-written `PartialEq`, so a
+/// caller that memoises its derived pair behind this pays 28 copies and
+/// 28 compares on the steady path and **zero** `Hsla -> Rgb`
+/// conversions, which is what spec §6.3's "one comparison a frame" asks
+/// for.
+///
+/// **A colour added to either derivation must be added here too**, or a
+/// theme that moves only that colour compares equal and the memo stays
+/// stale. The whole point of the full signature (over the two-sentinel
+/// sketch the ledger first carried) is that it is exact: a memo behind
+/// `background` + `foreground` alone would keep painting the old colour
+/// through any theme change that leaves those two equal while moving an
+/// anchor, and the blotter's `ColourCache` could never notice, because
+/// the stale derived pair IS its own key.
+pub fn theme_signature(theme: &Theme) -> [Hsla; 28] {
+    [
+        // `anchors_from_theme`: normal then light, `ANCHOR_DEGREES` order.
+        theme.red,
+        theme.yellow,
+        theme.green,
+        theme.cyan,
+        theme.blue,
+        theme.magenta,
+        theme.red_light,
+        theme.yellow_light,
+        theme.green_light,
+        theme.cyan_light,
+        theme.blue_light,
+        theme.magenta_light,
+        // `tokens_from_theme`, in its own field order.
+        theme.foreground,
+        theme.muted_foreground,
+        theme.primary,
+        theme.accent,
+        theme.danger,
+        theme.warning,
+        theme.success,
+        theme.info,
+        theme.chart_1,
+        theme.chart_2,
+        theme.chart_3,
+        theme.chart_4,
+        theme.chart_5,
+        theme.chart_bullish,
+        theme.chart_bearish,
+        theme.background,
+    ]
+}
+
 /// A named colour, resolved against `theme` — `None` when `colours`
 /// does not define `name` at all (dropped by the reader, or never
 /// saved), which the caller reads as "paint no swatch" rather than a
 /// fallback colour standing in for one that does not exist.
+///
+/// For ONE colour. It derives the theme's anchors and tokens inside
+/// itself, so a caller resolving a list of them pays that derivation per
+/// entry — hoist the two out and call [`geode_core::colour::resolve`] in
+/// the loop instead, as the Colours dialog's browse list does (the final
+/// review's M-8) and as the blotter's own memo does per frame (I-1).
 pub fn resolve_named(colours: &NamedColours, name: &str, theme: &Theme) -> Option<Hsla> {
     let def = colours.get(name)?;
     let anchors = anchors_from_theme(theme);

@@ -17,14 +17,14 @@ use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{LineNumbers, gutter_digits, gutter_number};
-use geode_shell::shell::colours::{anchors_from_theme, tokens_from_theme};
+use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, SharedString, Stateful,
     TextAlign, Window, div, px,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
+use gpui_component::{ActiveTheme as _, Theme};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -119,6 +119,32 @@ pub struct BlotterDelegate {
     colours: Arc<NamedColours>,
     /// One resolve per name per theme; see `colour_cache`'s module doc.
     colour_cache: ColourCache,
+    /// The theme's own colours as `Anchors`/`Tokens`, memoised behind the
+    /// signature they were derived from — the final review's I-1.
+    ///
+    /// `render_td` runs per visible cell, so deriving the pair at the
+    /// paint site cost N x 28 `Hsla -> Rgb` conversions per named column
+    /// per frame, where N is the visible row count; spec §6.3 promises
+    /// one comparison a frame. `None` until the first named cell paints,
+    /// which is what keeps the lazy read: a blotter naming no colour
+    /// never builds it at all. See [`BlotterDelegate::ensure_theme_inputs`].
+    theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
+}
+
+/// The name column `col_ix` carries a `Colour::Named` of, if it does.
+///
+/// A free function over the plan rather than a `&self` method for the
+/// borrow reason [`BlotterDelegate::cell_colour`] gives: the returned
+/// `&str` borrows `plan` alone, leaving the delegate's other fields free
+/// for the `&mut` the colour cache needs.
+fn named_colour_of(plan: Option<&ColumnPlan>, col_ix: usize) -> Option<&str> {
+    match plan
+        .and_then(|p| p.columns.get(col_ix))
+        .map(|c| &c.format.colour)
+    {
+        Some(Colour::Named(name)) => Some(name.as_str()),
+        _ => None,
+    }
 }
 
 impl Default for BlotterDelegate {
@@ -150,6 +176,7 @@ impl BlotterDelegate {
             numbers_stamp: None,
             colours: Arc::new(NamedColours::default()),
             colour_cache: ColourCache::new(),
+            theme_inputs: None,
         }
     }
 
@@ -180,17 +207,53 @@ impl BlotterDelegate {
     ) -> Option<Hsla> {
         // Borrows `self.plan` only, so the `&mut self.colour_cache`
         // below is a disjoint field — which is what lets the name stay a
-        // `&str` rather than being cloned per cell per frame.
-        let name = match self
-            .plan
-            .as_ref()
-            .and_then(|p| p.columns.get(col_ix))
-            .map(|c| &c.format.colour)
-        {
-            Some(Colour::Named(name)) => name.as_str(),
-            _ => return None,
-        };
+        // `&str` rather than being cloned per cell per frame. That is
+        // also why the lookup is a free function over `plan` rather than
+        // a `&self` method: a method's returned `&str` would borrow the
+        // whole delegate and shut the cache's own `&mut` out.
+        let name = named_colour_of(self.plan.as_ref(), col_ix)?;
         self.colour_cache.get(&self.colours, name, anchors, tokens)
+    }
+
+    /// [`BlotterDelegate::cell_colour`] against the theme's own colours,
+    /// derived at most once per theme rather than once per painted cell
+    /// (Part 2c final review, I-1).
+    ///
+    /// The one door both paint sites use, so a cell and its header can no
+    /// more disagree about the memo than they can about the colour.
+    pub fn themed_cell_colour(&mut self, col_ix: usize, theme: &Theme) -> Option<Hsla> {
+        self.ensure_theme_inputs(theme);
+        // Four disjoint field borrows in one body — `plan` and `colours`
+        // and `theme_inputs` shared, `colour_cache` mutable. Splitting
+        // any of them out into a `&self` method would borrow the whole
+        // delegate and this would not compile.
+        let name = named_colour_of(self.plan.as_ref(), col_ix)?;
+        let (_, anchors, tokens) = self.theme_inputs.as_ref().expect("set just above");
+        self.colour_cache.get(&self.colours, name, anchors, tokens)
+    }
+
+    /// Re-derive `theme_inputs` if and only if one of the twenty-eight
+    /// theme colours the derivation reads has moved.
+    ///
+    /// The compare is the FULL signature, not a sentinel or two: a theme
+    /// change that leaves `background`/`foreground` equal while moving an
+    /// anchor would otherwise keep painting the old colour, and the
+    /// `ColourCache` sitting behind this could never catch it — the stale
+    /// derived pair IS its key (`colours::theme_signature`'s own doc).
+    /// The steady path is 28 `Hsla` copies and 28 `Hsla` compares, with
+    /// no `Hsla -> Rgb` conversion at all.
+    fn ensure_theme_inputs(&mut self, theme: &Theme) {
+        let signature = theme_signature(theme);
+        match &self.theme_inputs {
+            Some((have, ..)) if *have == signature => {}
+            _ => {
+                self.theme_inputs = Some((
+                    signature,
+                    anchors_from_theme(theme),
+                    tokens_from_theme(theme),
+                ));
+            }
+        }
     }
 
     /// Which of the three `Colour` shapes column `col_ix` carries, as a
@@ -789,15 +852,10 @@ impl TableDelegate for BlotterDelegate {
         let name = self.column(col_ix, cx).name.clone();
         // Same lazy read as `render_td`'s named arm, for the same
         // reason: an uncoloured column touches the theme's twelve+fifteen
-        // colours not at all.
+        // colours not at all — `themed_cell_colour` derives them only
+        // when this arm is the one taken, and only when the theme moved.
         let colour = match self.colour_kind(col_ix) {
-            Some(ColourKind::Named) => {
-                let (anchors, tokens) = (
-                    anchors_from_theme(cx.theme()),
-                    tokens_from_theme(cx.theme()),
-                );
-                self.cell_colour(col_ix, &anchors, &tokens)
-            }
+            Some(ColourKind::Named) => self.themed_cell_colour(col_ix, cx.theme()),
             _ => None,
         };
         div()
@@ -964,18 +1022,21 @@ impl TableDelegate for BlotterDelegate {
                     // of the method: it is twelve plus fifteen
                     // `Hsla -> Rgb` conversions, and a blotter whose
                     // columns name no colour (every one of them today)
-                    // must not pay them per cell per frame. Reading them
-                    // at the paint site is also what makes the cache's
-                    // invalidation free — they ARE its key, so a theme
-                    // swap empties it with nothing to remember to call.
-                    (Some(ColourKind::Named), _) => {
-                        let (anchors, tokens) =
-                            (anchors_from_theme(theme), tokens_from_theme(theme));
-                        el.text_color(
-                            self.cell_colour(col_ix, &anchors, &tokens)
-                                .unwrap_or(theme.foreground),
-                        )
-                    }
+                    // must not pay them at all. `themed_cell_colour`
+                    // keeps that laziness and adds the memo the final
+                    // review's I-1 asked for: this arm runs per visible
+                    // cell, so the conversions themselves happen once per
+                    // theme, behind a 28-value signature compare, not
+                    // once per cell per frame. The cache's invalidation
+                    // stays free either way — the derived pair IS its
+                    // key, so a theme swap empties it with nothing to
+                    // remember to call, and the signature is what makes
+                    // sure the memo hands it a *fresh* pair to be keyed
+                    // on.
+                    (Some(ColourKind::Named), _) => el.text_color(
+                        self.themed_cell_colour(col_ix, theme)
+                            .unwrap_or(theme.foreground),
+                    ),
                     _ => el,
                 };
                 el.child(text)
@@ -1730,6 +1791,51 @@ mod tests {
             d.cell_colour(99, &anchors, &tokens),
             None,
             "a column index the plan does not have is not a panic"
+        );
+    }
+
+    /// I-1 (Part 2c final review): the theme -> `Anchors`/`Tokens`
+    /// derivation is memoised behind the full 28-value signature, so a
+    /// steady theme re-derives NOTHING across paints and a moved theme
+    /// colour re-derives on the next one.
+    ///
+    /// Both halves are asserted through a deliberately poisoned memo,
+    /// because that is the only way the difference is observable: a
+    /// re-derivation under an unchanged theme produces a pair equal to
+    /// the one it replaced, so an assertion on the pair's *value* would
+    /// pass whether the memo works or not. The anchor moved in the
+    /// second half is `red` — neither `background` nor `foreground`, so
+    /// this also pins the reason the signature is 28 values rather than
+    /// the two-sentinel sketch.
+    #[test]
+    fn the_theme_input_memo_re_derives_only_when_a_theme_colour_moves() {
+        let mut theme = Theme::default();
+        let mut d = BlotterDelegate::new();
+        assert!(
+            d.theme_inputs.is_none(),
+            "the memo is lazy — a blotter that paints no named colour never builds it"
+        );
+        d.ensure_theme_inputs(&theme);
+
+        let poison = Rgb {
+            r: 0.01,
+            g: 0.02,
+            b: 0.03,
+        };
+        d.theme_inputs.as_mut().expect("derived once").1.normal[0] = poison;
+        d.ensure_theme_inputs(&theme);
+        assert_eq!(
+            d.theme_inputs.as_ref().expect("still memoised").1.normal[0],
+            poison,
+            "an unchanged theme re-derived the pair — the signature compare is not holding,              and every painted cell is paying 28 conversions again"
+        );
+
+        theme.red = gpui::hsla(0.0, 0.8, 0.25, 1.0);
+        d.ensure_theme_inputs(&theme);
+        assert_eq!(
+            d.theme_inputs.as_ref().expect("re-derived").1.normal[0],
+            geode_shell::shell::colours::to_rgb(theme.red),
+            "a moved anchor must re-derive the pair — a two-sentinel compare would              have missed this one, and the colour cache could not, since the stale              pair is its own key"
         );
     }
 }

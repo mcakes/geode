@@ -700,6 +700,21 @@ pub struct ViewPresentation {
     /// `view_presentation.toml` still uses; a column set in both wins by
     /// the table, with a warning.
     pub columns: BTreeMap<String, ColumnPresentation>,
+    /// For each column whose `columns` entry was created by a LEGACY key
+    /// rather than by a `[view.columns.<col>]` table of its own, the
+    /// spelling it was read under — `"hidden"` or `"width"` (the final
+    /// review's M-4).
+    ///
+    /// It exists for one reader, [`ViewPresentationSpec::apply`]'s
+    /// "the view does not have that column" warning: a file still on
+    /// `hidden = ["ghost"]` was being told about
+    /// `view_presentation.<view>.columns.ghost`, and the trader went
+    /// looking for a `[<view>.columns.ghost]` table their file does not
+    /// have. Only the creating spelling is recorded — a column named by
+    /// both legacy keys keeps the first — and a column the `columns`
+    /// table itself names is absent from here entirely, which is the
+    /// `columns` answer by omission.
+    pub legacy_keys: BTreeMap<String, &'static str>,
 }
 
 /// `view_presentation.toml`, user layer — one table per view name,
@@ -812,6 +827,7 @@ impl ViewPresentationSpec {
                         for item in a {
                             match item.as_str() {
                                 Some(col) => {
+                                    let is_new = !p.columns.contains_key(col);
                                     let entry = p.columns.entry(col.to_string()).or_default();
                                     if entry.hidden.is_some() {
                                         diags.push(bad(
@@ -823,6 +839,15 @@ impl ViewPresentationSpec {
                                         continue;
                                     }
                                     entry.hidden = Some(true);
+                                    if is_new {
+                                        // The final review's M-4: which
+                                        // spelling this column's entry
+                                        // came from, so `apply`'s
+                                        // "the view does not have it"
+                                        // warning names a key the file
+                                        // actually holds.
+                                        p.legacy_keys.insert(col.to_string(), "hidden");
+                                    }
                                 }
                                 None => diags.push(bad(
                                     "hidden",
@@ -841,8 +866,7 @@ impl ViewPresentationSpec {
                 match v.as_table() {
                     Some(t) => {
                         for (col, w) in t {
-                            let entry = p.columns.entry(col.clone()).or_default();
-                            if entry.width.is_some() {
+                            if p.columns.get(col).is_some_and(|e| e.width.is_some()) {
                                 diags.push(bad(
                                     &format!("columns.{col}.width"),
                                     format!(
@@ -851,9 +875,24 @@ impl ViewPresentationSpec {
                                 ));
                                 continue;
                             }
+                            // Validated BEFORE the entry is created (the
+                            // final review's M-3): an `or_default()` up
+                            // here made an entry for a column this file
+                            // is about to be told is invalid, and `apply`
+                            // then warned a SECOND time that the view
+                            // does not have it — two diagnostics for one
+                            // mistake, the second of them about a key the
+                            // trader never wrote. The `hidden` loop below
+                            // has nothing to validate and so never had
+                            // this shape.
                             match w.as_float().or_else(|| w.as_integer().map(|i| i as f64)) {
                                 Some(x) if x > 0.0 => {
+                                    let is_new = !p.columns.contains_key(col);
+                                    let entry = p.columns.entry(col.clone()).or_default();
                                     entry.width = Some(x as f32);
+                                    if is_new {
+                                        p.legacy_keys.insert(col.clone(), "width");
+                                    }
                                 }
                                 _ => diags.push(bad(
                                     &format!("width.{col}"),
@@ -945,10 +984,21 @@ impl ViewPresentationSpec {
             // the legacy `hidden`/`width` keys folded in (§4.2).
             for (col, cp) in &p.columns {
                 if !view.columns.iter().any(|c| c.name() == col) {
+                    // Named under the spelling the key was READ under
+                    // (the final review's M-4) — a file still using
+                    // `hidden = ["ghost"]` has no `[<view>.columns.ghost]`
+                    // table to be sent to, and `from_doc` folding the
+                    // legacy keys into `columns` is an implementation
+                    // detail no trader can see in their own file.
+                    let (suffix, key) = match p.legacy_keys.get(col).copied() {
+                        Some("hidden") => ("hidden".to_string(), "hidden"),
+                        Some("width") => (format!("width.{col}"), "width"),
+                        _ => (format!("columns.{col}"), "columns"),
+                    };
                     diags.push(warn(
-                        &format!("columns.{col}"),
+                        &suffix,
                         format!(
-                            "'columns' names column '{col}', which the view does not have — ignored"
+                            "'{key}' names column '{col}', which the view does not have — ignored"
                         ),
                     ));
                     continue;
@@ -1465,6 +1515,88 @@ npv = 120
         assert_eq!(p.scale, Some(Scale::Thousands), "the desk's key survives");
         assert_eq!(p.precision, Some(0), "the trader's key wins");
         assert_eq!(p.colour, Some(Colour::Named("delta".to_string())));
+    }
+
+    /// M-3 (Part 2c final review): an invalid legacy `width` is ONE
+    /// diagnostic, not two.
+    ///
+    /// The fold used to create the `columns` entry before validating the
+    /// value, so a bad width for a column the view lacks was reported
+    /// twice — once honestly by the reader, and once by [`apply`] as
+    /// "'columns' names column 'ghost'", about a table the trader never
+    /// wrote and cannot find. Validating first is what keeps the reader's
+    /// refusal total: a value it rejected leaves no entry behind for
+    /// anything downstream to trip over.
+    #[test]
+    fn an_invalid_legacy_width_on_an_unknown_column_is_one_diagnostic() {
+        let (mut views, _) = ViewSpec::from_doc(&doc("[tree]\ndataset = \"risk_snapshot\"\n\
+             [[tree.columns]]\nname = \"npv\"\nkind = \"measure\"\n"));
+        let (pres, diags) =
+            ViewPresentationSpec::from_doc(&presentation_doc("[tree.width]\nghost = 0\n"));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0].message.contains("must be a positive number"),
+            "{diags:?}"
+        );
+        assert!(
+            !pres.views["tree"].columns.contains_key("ghost"),
+            "a refused width must leave no column entry behind"
+        );
+        let warnings = pres.apply(&mut views);
+        assert!(
+            warnings.is_empty(),
+            "apply must not warn a second time about a column the reader \
+             already refused: {warnings:?}"
+        );
+    }
+
+    /// M-4 (Part 2c final review): the "the view does not have that
+    /// column" warning names the spelling the key was actually read
+    /// under.
+    ///
+    /// `from_doc` folds the legacy `hidden` array and `width` map into
+    /// `columns` (§4.2), which is an implementation detail no trader can
+    /// see in their own file — so a file still on `hidden = ["ghost"]`
+    /// was being sent to a `[tree.columns.ghost]` table that does not
+    /// exist. All three spellings are asserted, including the new one,
+    /// since "name the spelling" is only a property if the `columns`
+    /// answer is still reached by omission.
+    #[test]
+    fn the_column_not_in_view_warning_names_the_spelling_it_was_read_under() {
+        let view = "[tree]\ndataset = \"risk_snapshot\"\n\
+                    [[tree.columns]]\nname = \"npv\"\nkind = \"measure\"\n";
+        let case = |text: &str| {
+            let (mut views, _) = ViewSpec::from_doc(&doc(view));
+            let (pres, diags) = ViewPresentationSpec::from_doc(&presentation_doc(text));
+            assert!(diags.is_empty(), "{diags:?}");
+            let warnings = pres.apply(&mut views);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            (
+                warnings[0].message.clone(),
+                warnings[0].path.clone().unwrap_or_default(),
+            )
+        };
+
+        let (message, path) = case("[tree]\nhidden = [\"ghost\"]\n");
+        assert!(
+            message.contains("'hidden' names column 'ghost'"),
+            "{message}"
+        );
+        assert_eq!(path, "view_presentation.tree.hidden");
+
+        let (message, path) = case("[tree.width]\nghost = 90\n");
+        assert!(
+            message.contains("'width' names column 'ghost'"),
+            "{message}"
+        );
+        assert_eq!(path, "view_presentation.tree.width.ghost");
+
+        let (message, path) = case("[tree.columns.ghost]\nhidden = true\n");
+        assert!(
+            message.contains("'columns' names column 'ghost'"),
+            "{message}"
+        );
+        assert_eq!(path, "view_presentation.tree.columns.ghost");
     }
 
     /// A desk that renames a column must not break a personal file. The
