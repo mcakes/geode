@@ -68,6 +68,7 @@
 
 pub mod apply;
 mod colours;
+mod dataset_columns;
 mod groupings;
 pub mod render;
 mod schema;
@@ -322,15 +323,18 @@ impl Domain {
         }
     }
 
-    /// `false` for [`Domain::Schema`] alone (§19.4): the create gate, the
-    /// footer hints and every mutating verb — `space`, `shift+space`,
-    /// `i`, `d`, `r`, `x`, `n`, `o`, `shift+j`/`shift+k`, a tick click,
-    /// a drop — read this, so a read-only surface refuses in one place
-    /// rather than by each verb forgetting. The Groupings roster gate
+    /// `false` for [`Domain::Schema`] outside its column stage (§19.4,
+    /// dataset-presentation spec §4.2): the create gate, the footer hints
+    /// and every mutating verb — `space`, `shift+space`, `i`, `d`, `r`,
+    /// `x`, `n`, `o`, `shift+j`/`shift+k`, a tick click, a drop — read
+    /// this, so a read-only surface refuses in one place rather than by
+    /// each verb forgetting. Schema's ONE writable surface is
+    /// [`Stage::Column`], whose fields write the dataset overlay, never
+    /// the datasets doc. The Groupings roster gate
     /// (`roster().is_some()`) is a separate question ("can anything be
     /// created that is not already listed") and stays beside it.
-    pub fn writable(self) -> bool {
-        !matches!(self, Domain::Schema)
+    pub fn writable(self, stage: &Stage) -> bool {
+        !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. })
     }
 
     /// The text painted before an object's name, if this domain groups
@@ -748,6 +752,9 @@ pub enum Destination {
     Doc,
     /// `view_presentation.toml`, user layer.
     Presentation,
+    /// `dataset_presentation.toml`, user layer — the Schema dialog's
+    /// column stage (dataset-presentation spec §4.1).
+    DatasetPresentation,
 }
 
 impl Destination {
@@ -787,6 +794,12 @@ impl Destination {
             // no presentation overlay for a shared colour).
             (Destination::Presentation, Domain::Colours) => {
                 unreachable!("Colours has no Presentation-destined fields")
+            }
+            (Destination::DatasetPresentation, Domain::Schema) => {
+                geode_core::view::DATASET_PRESENTATION_DOC
+            }
+            (Destination::DatasetPresentation, _) => {
+                unreachable!("only the Schema door builds DatasetPresentation-destined fields")
             }
         }
     }
@@ -904,6 +917,74 @@ pub enum FieldKind {
         items: Vec<ListItem>,
         available: Option<Vec<ListItem>>,
     },
+}
+
+/// Which layer's value a column-stage field is showing (dataset-
+/// presentation spec §5.3): the trader's own view-level override, their
+/// dataset-level setting, or the desk view's own key. `None` when the
+/// kind default is in force. Painted as a lowercase chip in the slot the
+/// Schema rows' layer badge uses — the two never appear together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    Desk,
+    Dataset,
+    View,
+}
+
+impl Provenance {
+    pub fn name(self) -> &'static str {
+        match self {
+            Provenance::Desk => "desk",
+            Provenance::Dataset => "dataset",
+            Provenance::View => "view",
+        }
+    }
+}
+
+/// Which door opened the column stage (§4.1, §5): the Views dialog's
+/// member row (the fields write the view overlay over a desk + dataset
+/// baseline) or the Schema dialog's column row (the fields write the
+/// dataset overlay over the kind default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnDoor {
+    View,
+    Dataset,
+}
+
+/// The three layers under one column, each as the keys that layer
+/// itself sets — NOT merged — so provenance and the fold can name a
+/// layer (§5.1–§5.3).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ColumnLayers {
+    pub desk: ColumnPresentation,
+    pub dataset: ColumnPresentation,
+    pub view: ColumnPresentation,
+}
+
+impl ColumnLayers {
+    /// desk with the dataset level merged over — what a cleared VIEW key
+    /// falls to, and what the view writer compares against (§5.1).
+    pub fn below_view(&self) -> ColumnPresentation {
+        let mut p = self.desk.clone();
+        p.merge_over(&self.dataset);
+        p
+    }
+}
+
+/// Everything a column stage needs beyond the seven fields, set by the
+/// door that opened it and dropped by [`Draft::leave_column`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnContext {
+    pub door: ColumnDoor,
+    pub layers: ColumnLayers,
+    /// The Schema door only: the `[<dataset>]` table of
+    /// `dataset_presentation.toml` as it stands (empty when absent), so
+    /// the writer can render the dataset's OTHER personalised columns
+    /// verbatim beside the one being edited (§4.5).
+    pub overlay_object: toml::Table,
+    /// The Schema door only: the scratch item the fields fold into,
+    /// where the Views door folds into its parent list's item.
+    pub item: Option<ListItem>,
 }
 
 /// One editable property of one object.
@@ -1153,6 +1234,13 @@ pub struct Draft {
     /// target, and the scope [`Draft::row_for_path`] narrows to. `Some`
     /// exactly when `parent_fields` is; [`Draft::column`] is the read.
     column: Option<String>,
+    /// What the door that opened [`Stage::Column`] knows and the seven
+    /// fields do not (dataset-presentation spec §4.1, §5.1): which door
+    /// it was, the three layers under the column, and — the Schema door
+    /// — the overlay table and the scratch item the fold writes into.
+    /// `None` off the column stage, set by the door and dropped by
+    /// [`Draft::leave_column`].
+    pub column_ctx: Option<ColumnContext>,
 }
 
 /// Which way [`Draft::step_selected`] moves the value under the cursor.
@@ -1190,6 +1278,24 @@ impl Step {
     pub fn changed(&self) -> bool {
         matches!(self, Step::Changed)
     }
+}
+
+/// What a cleared column-stage key fell to (dataset-presentation spec
+/// §3.3, §4.4, §5.2): the desk view's own key, the dataset level, or —
+/// from the Schema door — whatever each view says. `None` means nothing
+/// below sets the key, so there is nothing to tell the trader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FellTo {
+    Desk,
+    Dataset,
+    EachView,
+}
+
+/// One fold's outcome: the key the trader cleared, and what it fell to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fold {
+    pub key: &'static str,
+    pub to: Option<FellTo>,
 }
 
 impl Draft {
@@ -1416,9 +1522,15 @@ impl Draft {
         if self.column.is_some() {
             return false;
         }
-        let is_member = self
+        // Membership is what the door lists: the Views door's `columns`
+        // list, or — the Schema door — a parent field keyed
+        // `columns.<col>`, which is how `schema::fields` names a column
+        // row (dataset-presentation spec §4.1).
+        let listed = self
             .list_items("columns")
             .is_some_and(|items| items.iter().any(|i| i.name == column));
+        let row_key = format!("columns.{column}");
+        let is_member = listed || self.fields.iter().any(|f| f.key == row_key);
         if !is_member {
             return false;
         }
@@ -1441,46 +1553,89 @@ impl Draft {
     /// no longer holds, which [`Draft::enter_column`]'s membership check
     /// makes unreachable.
     ///
-    /// **The desk baseline goes in and the two `Text` fields come back
-    /// out.** A cleared `label` or an `auto` width means "stop overriding
-    /// this", which resolves to whatever the desk's own `views.toml` says
+    /// **The baseline goes in and the two `Text` fields come back out.**
+    /// A cleared `label` or an `auto` width means "stop overriding this",
+    /// which resolves to whatever the layers BELOW this door say
     /// (`views::fold_into` has the full statement, and why writing `None`
     /// there would silently swallow the clear). The fold then re-seeds
-    /// those two fields from the item, so the desk's value is on screen
-    /// on the same keystroke rather than a blank the next rebuild
-    /// contradicts. Re-seeding is a no-op for every other value, since
-    /// the field and the item already agree.
+    /// those two fields from the item, so that value is on screen on the
+    /// same keystroke rather than a blank the next rebuild contradicts.
+    /// Re-seeding is a no-op for every other value, since the field and
+    /// the item already agree.
     ///
-    /// Returns the key that fell back, for the caller's notice — see
-    /// `views::fold_into` on why at most one can.
+    /// Returns the key that was cleared and the layer it fell to, for the
+    /// caller's notice — see `views::fold_into` on why at most one key
+    /// can be cleared per fold.
     ///
-    /// **This method is coupled to `Domain::Views` by name** (the final
-    /// review's M-5): it calls `views::desk_baseline` and
-    /// `views::fold_into` directly, where [`Draft::enter_column`]
-    /// deliberately takes the stage's fields in rather than reaching for
-    /// a domain's vocabulary. Correct today because Views is the only
-    /// domain that ever sets `self.column` — but a second domain gaining
-    /// a column stage would silently inherit Views' desk-fallback
-    /// semantics here, and the fix at that point is to hand the fold in
-    /// the way `enter_column` hands the fields in, not to add a match.
-    pub fn fold_column(&mut self) -> Option<&'static str> {
+    /// **Which door opened the stage decides both the baseline and the
+    /// fold target**, read off [`Draft::column_ctx`] rather than assumed
+    /// (dataset-presentation spec §5.1; the final review's M-5, now
+    /// answered): the Views door folds into the item its own `columns`
+    /// list holds, over desk + dataset; the Schema door folds into the
+    /// context's own scratch item, over the kind default, since a dataset
+    /// has no view list to project into. A stage whose door left no
+    /// context folds nothing — there is no baseline to be honest about.
+    pub fn fold_column(&mut self) -> Option<Fold> {
         let name = self.column.clone()?;
-        // Read before the mutable borrow below: the baseline comes off
-        // `source`, which the column stage never touches, so one walk per
-        // fold describes the desk exactly.
-        let desk = views::desk_baseline(self)
-            .remove(name.as_str())
-            .unwrap_or_default();
-        let parent = self.parent_fields.as_mut()?;
-        let field = parent.iter_mut().find(|f| f.key == "columns")?;
-        let FieldKind::OrderedList { items, .. } = &mut field.kind else {
-            return None;
+        let ctx = self.column_ctx.clone()?;
+        let baseline = match ctx.door {
+            ColumnDoor::View => ctx.layers.below_view(),
+            ColumnDoor::Dataset => ColumnPresentation::default(),
         };
-        let item = items.iter_mut().find(|i| i.name == name)?;
-        let followed_desk = views::fold_into(item, &self.fields, &desk);
-        // Copied out so the parent's borrow ends before the installed
-        // fields are written.
-        let (label, width) = (item.presentation.label.clone(), item.presentation.width);
+        let cleared = match ctx.door {
+            ColumnDoor::View => {
+                let parent = self.parent_fields.as_mut()?;
+                let field = parent.iter_mut().find(|f| f.key == "columns")?;
+                let FieldKind::OrderedList { items, .. } = &mut field.kind else {
+                    return None;
+                };
+                let item = items.iter_mut().find(|i| i.name == name)?;
+                let cleared = views::fold_into(item, &self.fields, &baseline);
+                // Copied out so the parent's borrow ends before the
+                // installed fields are written.
+                let (label, width) = (item.presentation.label.clone(), item.presentation.width);
+                self.reseed_cleared_texts(label, width);
+                cleared
+            }
+            ColumnDoor::Dataset => {
+                let ctx_mut = self.column_ctx.as_mut()?;
+                let item = ctx_mut.item.as_mut()?;
+                let cleared = views::fold_into(item, &self.fields, &baseline);
+                let (label, width) = (item.presentation.label.clone(), item.presentation.width);
+                self.reseed_cleared_texts(label, width);
+                cleared
+            }
+        };
+        let key = cleared?;
+        let to = match ctx.door {
+            // §4.4: below the dataset level is the desk view's own key,
+            // which varies per view — so the honest answer is "each
+            // view", not one layer's name.
+            ColumnDoor::Dataset => Some(FellTo::EachView),
+            ColumnDoor::View => {
+                let set = |p: &ColumnPresentation| match key {
+                    "label" => p.label.is_some(),
+                    "width" => p.width.is_some(),
+                    _ => false,
+                };
+                // §5.2: the dataset level sits ABOVE the desk view, so a
+                // cleared view key meets it first.
+                if set(&ctx.layers.dataset) {
+                    Some(FellTo::Dataset)
+                } else if set(&ctx.layers.desk) {
+                    Some(FellTo::Desk)
+                } else {
+                    None
+                }
+            }
+        };
+        Some(Fold { key, to })
+    }
+
+    /// After a fold, the label and width `Text` fields show what the
+    /// column now has (the baseline's value once cleared), so the desk's
+    /// or dataset's value reappears on the keystroke that cleared it.
+    fn reseed_cleared_texts(&mut self, label: Option<String>, width: Option<f32>) {
         for field in &mut self.fields {
             let FieldKind::Text(text) = &mut field.kind else {
                 continue;
@@ -1491,7 +1646,6 @@ impl Draft {
                 _ => {}
             }
         }
-        followed_desk
     }
 
     /// Close the column stage (Part 2c §5.2): fold one last time, restore
@@ -1522,6 +1676,9 @@ impl Draft {
             return;
         };
         let column = self.column.take();
+        // Dropped with the stage it belongs to: a context left behind
+        // would have `fold_column` folding into a door that has closed.
+        self.column_ctx = None;
         self.fields = parent;
         self.baseline = self.fields.clone();
         self.query.clear();
@@ -2293,6 +2450,7 @@ impl Draft {
             text_entry: None,
             parent_fields: None,
             column: None,
+            column_ctx: None,
         }
     }
 
@@ -2448,20 +2606,27 @@ impl Domain {
     /// May `i` edit the `Text` row keyed `key` on this domain? `false` on
     /// Groupings, Scopes, Schema and Colours — Groupings' `slot` and
     /// Scopes' two summaries are display-only `Text`s and must refuse;
-    /// Schema is read-only outright; Colours has no `Text` row at all
-    /// (`hue` is a `Number`, `tone`/`token` are `Choice`), so `i` never
-    /// reaches this door for it. Sources (§19.3) was the first `true`,
-    /// for `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
+    /// Colours has no `Text` row at all (`hue` is a `Number`,
+    /// `tone`/`token` are `Choice`), so `i` never reaches this door for
+    /// it. Sources (§19.3) was the first `true`, for
+    /// `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
     /// (`sources::text_editable`); Views answers `true` for the column
     /// stage's `label` and `width` (Part 2c §5.3, `views::text_editable`)
     /// and for nothing else it has.
+    ///
+    /// **Schema shares the Views answer** (dataset-presentation spec
+    /// §4.1): its column stage paints the very same seven rows, so `i`
+    /// must open the same two. Its rows OUTSIDE that stage are keyed
+    /// `columns.<name>` / `derived.<name>`, which `views::text_editable`
+    /// answers `false` for — it matches `label | width` and nothing else
+    /// — so routing here does not make one read-only schema row typeable.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
-            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Colours => {
+            Domain::Groupings | Domain::Scopes | Domain::Colours => {
                 let _ = key;
                 false
             }
-            Domain::Views => views::text_editable(key),
+            Domain::Views | Domain::Schema => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
         }
     }
@@ -2477,11 +2642,14 @@ impl Domain {
             // Colours joins for the same reason `text_editable` gives
             // it no `true` above: no `Text` row for this door to ever
             // be called on.
-            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Colours => {
+            Domain::Groupings | Domain::Scopes | Domain::Colours => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
-            Domain::Views => views::parse_text(key, text),
+            // Schema joins Views for the reason `text_editable` gives:
+            // the two column stages are the same seven rows, so `width`
+            // must have the same grammar through either door.
+            Domain::Views | Domain::Schema => views::parse_text(key, text),
             Domain::Sources => sources::parse_text(key, text),
         }
     }
@@ -2528,6 +2696,7 @@ impl Domain {
             text_entry: None,
             parent_fields: None,
             column: None,
+            column_ctx: None,
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -3004,6 +3173,127 @@ pub fn filtered_position(
 mod tests {
     use super::*;
     use geode_core::config::{Config, ConfigSources, Layer, LayerDoc, Severity};
+
+    /// dataset-presentation spec §5.2: a cleared view-level key meets
+    /// the DATASET level before the desk view's own, because that is the
+    /// order they resolve in — so the notice names the layer the trader
+    /// will actually see from here, not the one furthest down.
+    ///
+    /// All three answers, from one clear over three different sets of
+    /// layers: the key cleared is the same in each, and only what sits
+    /// below it changes.
+    #[test]
+    fn a_cleared_view_key_falls_to_the_dataset_level_before_the_desk() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nlabel = \"NPV\"\n",
+            ),
+        ]);
+        // The stage as the door opens it, with `layers` under it and the
+        // label field emptied — the one keystroke every case here makes.
+        let open = |layers: ColumnLayers| {
+            let mut draft = Domain::Views.draft(&config, "tree");
+            let item = draft.list_items("columns").unwrap()[0].clone();
+            assert_eq!(
+                item.presentation.label.as_deref(),
+                Some("NPV"),
+                "sanity: the item holds a label, so emptying it is a real clear"
+            );
+            draft.column_ctx = Some(ColumnContext {
+                door: ColumnDoor::View,
+                layers,
+                overlay_object: toml::Table::new(),
+                item: Some(item.clone()),
+            });
+            assert!(draft.enter_column(
+                "npv",
+                views::column_fields(&item, &[], Destination::Presentation)
+            ));
+            for field in &mut draft.fields {
+                if field.key == "label" {
+                    field.kind = FieldKind::Text(String::new());
+                }
+            }
+            draft
+        };
+        let labelled = |text: &str| ColumnPresentation {
+            label: Some(text.to_string()),
+            ..Default::default()
+        };
+
+        let mut both = open(ColumnLayers {
+            desk: labelled("NPV"),
+            dataset: labelled("Δ"),
+            view: ColumnPresentation::default(),
+        });
+        assert_eq!(
+            both.fold_column(),
+            Some(Fold {
+                key: "label",
+                to: Some(FellTo::Dataset)
+            }),
+            "the dataset level sits above the desk view, so it is what \
+             the cleared key lands on first"
+        );
+
+        let mut desk_only = open(ColumnLayers {
+            desk: labelled("NPV"),
+            ..Default::default()
+        });
+        assert_eq!(
+            desk_only.fold_column(),
+            Some(Fold {
+                key: "label",
+                to: Some(FellTo::Desk)
+            })
+        );
+
+        let mut neither = open(ColumnLayers::default());
+        assert_eq!(
+            neither.fold_column(),
+            Some(Fold {
+                key: "label",
+                to: None
+            }),
+            "the key really was cleared, but nothing below sets it — so \
+             the caller has no layer to name and says nothing"
+        );
+    }
+
+    #[test]
+    fn schema_types_only_into_the_column_stages_label_and_width() {
+        assert!(Domain::Schema.text_editable("label"));
+        assert!(Domain::Schema.text_editable("width"));
+        assert!(!Domain::Schema.text_editable("columns.npv"));
+        assert!(!Domain::Schema.text_editable("derived.region"));
+    }
+
+    #[test]
+    fn schema_is_writable_in_the_column_stage_alone() {
+        let column = Stage::Column {
+            object: "risk".into(),
+            column: "npv".into(),
+        };
+        for stage in [
+            Stage::Browse,
+            Stage::Naming,
+            Stage::Edit {
+                object: "risk".into(),
+            },
+        ] {
+            assert!(!Domain::Schema.writable(&stage), "{stage:?}");
+            assert!(Domain::Views.writable(&stage), "{stage:?}");
+        }
+        assert!(Domain::Schema.writable(&column));
+        assert!(Domain::Views.writable(&column));
+    }
 
     /// A `Config` assembled from literal per-layer documents, in the
     /// Builtin → Desk → User order `merge_docs` documents its callers
@@ -3635,6 +3925,7 @@ mod tests {
             text_entry: None,
             parent_fields: None,
             column: None,
+            column_ctx: None,
         }
     }
 
@@ -5359,20 +5650,30 @@ mod tests {
         let config = config_with_view_and_datasets();
         let mut draft = Domain::Views.draft(&config, "tree");
         let parent_len = draft.fields.len();
-        assert!(
-            draft.enter_column(
-                "npv",
-                views::column_fields(
-                    draft
-                        .list_items("columns")
-                        .unwrap()
-                        .iter()
-                        .find(|i| i.name == "npv")
-                        .unwrap(),
-                    &[]
-                )
-            )
-        );
+        let npv = draft
+            .list_items("columns")
+            .unwrap()
+            .iter()
+            .find(|i| i.name == "npv")
+            .unwrap()
+            .clone();
+        // The context the door installs (dataset-presentation spec
+        // §5.1): without it the stage opens but folds nothing.
+        draft.column_ctx = Some(ColumnContext {
+            door: ColumnDoor::View,
+            layers: ColumnLayers {
+                desk: views::desk_baseline(&draft)
+                    .remove("npv")
+                    .unwrap_or_default(),
+                ..ColumnLayers::default()
+            },
+            overlay_object: toml::Table::new(),
+            item: Some(npv.clone()),
+        });
+        assert!(draft.enter_column(
+            "npv",
+            views::column_fields(&npv, &[], Destination::Presentation)
+        ));
         assert_eq!(draft.column(), Some("npv"));
         assert_eq!(draft.fields.len(), 7);
         assert!(
@@ -5428,7 +5729,10 @@ mod tests {
         let config = config_with_view_and_datasets();
         let mut draft = Domain::Views.draft(&config, "tree");
         let item = draft.list_items("columns").unwrap()[0].clone();
-        assert!(draft.enter_column("npv", views::column_fields(&item, &[])));
+        assert!(draft.enter_column(
+            "npv",
+            views::column_fields(&item, &[], Destination::Presentation)
+        ));
         let installed = draft.fields.len();
         let names = |draft: &Draft| {
             draft
@@ -5472,7 +5776,10 @@ mod tests {
         let config = config_with_view_and_datasets();
         let mut draft = Domain::Views.draft(&config, "tree");
         let item = draft.list_items("columns").unwrap()[0].clone();
-        draft.enter_column("npv", views::column_fields(&item, &[]));
+        draft.enter_column(
+            "npv",
+            views::column_fields(&item, &[], Destination::Presentation),
+        );
         let precision = draft
             .fields
             .iter()

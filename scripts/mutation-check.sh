@@ -8192,7 +8192,7 @@ run_mutation "objectdialog: a plain text field leaves the rows unfiltered" \
 # test, which presses four verbs and asserts nothing queued.
 run_mutation "objectdialog: Schema is not writable" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        !matches!(self, Domain::Schema)' \
+  '        !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. })' \
   '        true' \
   geode-shell \
   the_schema_inspector_lists_datasets_and_refuses_every_verb
@@ -8224,14 +8224,14 @@ run_mutation "objectdialog: a drop on the schema inspector is refused" \
     let writable = shell
         .object_dialog
         .as_ref()
-        .is_some_and(|state| state.domain.writable());
+        .is_some_and(|state| state.domain.writable(&state.stage));
     if !writable {' \
   '    // §19.4: a drop is a reorder or a promotion/demotion — a write, same
     // as the tick — so a read-only domain refuses it identically.
     let writable = shell
         .object_dialog
         .as_ref()
-        .is_some_and(|state| state.domain.writable());
+        .is_some_and(|state| state.domain.writable(&state.stage));
     if false {' \
   geode-shell \
   a_drop_on_the_schema_inspector_is_refused

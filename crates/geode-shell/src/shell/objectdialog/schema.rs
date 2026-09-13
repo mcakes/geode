@@ -284,10 +284,14 @@ mod tests {
 
     #[test]
     fn schema_is_the_one_domain_that_is_not_writable() {
-        assert!(!Domain::Schema.writable());
-        assert!(Domain::Views.writable());
-        assert!(Domain::Groupings.writable());
-        assert!(Domain::Scopes.writable());
+        // Outside the column stage, which is Schema's one writable
+        // surface (dataset-presentation spec §4.2) — the browse stage is
+        // what this inspector's own rows live in.
+        let stage = super::super::Stage::Browse;
+        assert!(!Domain::Schema.writable(&stage));
+        assert!(Domain::Views.writable(&stage));
+        assert!(Domain::Groupings.writable(&stage));
+        assert!(Domain::Scopes.writable(&stage));
     }
 
     #[test]

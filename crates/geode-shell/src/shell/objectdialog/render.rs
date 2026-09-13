@@ -121,12 +121,13 @@ use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use super::apply;
 use super::colours;
+use super::dataset_columns;
 use super::scopes;
 use super::sources;
 use super::views;
 use super::{
-    Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow,
-    READ_ONLY_NOTICE, RowDrag, Stage, Step,
+    ColumnContext, ColumnDoor, ColumnLayers, Confirm, Destination, Domain, Draft, EditRow, FellTo,
+    Field, FieldKind, Fold, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Keystroke, Modifiers};
@@ -414,7 +415,7 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
             // created that is not already on the list (`Domain::roster`'s
             // own doc).
             NormalCommand::Verb('n') => {
-                if !state.domain.writable() {
+                if !state.domain.writable(&state.stage) {
                     state.notice = Some(READ_ONLY_NOTICE.to_string());
                 } else if state.domain.roster().is_some() {
                     state.notice = Some("the slots are fixed — open one to fill it".to_string());
@@ -849,7 +850,25 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     else {
         return;
     };
-    let fields = views::column_fields(&item, &colours);
+    let fields = views::column_fields(&item, &colours, Destination::Presentation);
+    // The Views door's context (dataset-presentation spec §5.1). The
+    // dataset and view layers are Task 5's; today only the desk layer is
+    // filled, which is exactly what this stage compared against before
+    // the context existed, so the fold and the notice are unchanged.
+    // `item` is carried so `dataset_columns::provenance_of` reads the
+    // right kind default for the column being edited.
+    let layers = ColumnLayers {
+        desk: views::desk_baseline(draft)
+            .remove(column)
+            .unwrap_or_default(),
+        ..ColumnLayers::default()
+    };
+    draft.column_ctx = Some(ColumnContext {
+        door: ColumnDoor::View,
+        layers,
+        overlay_object: toml::Table::new(),
+        item: Some(item.clone()),
+    });
     if !draft.enter_column(column, fields) {
         return;
     }
@@ -1146,7 +1165,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     let writable = shell
         .object_dialog
         .as_ref()
-        .is_some_and(|s| s.domain.writable());
+        .is_some_and(|s| s.domain.writable(&s.stage));
     if !writable
         && matches!(
             cmd,
@@ -1372,8 +1391,8 @@ fn edit_commit_notice(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
-    let domain = state.domain;
-    if !domain.writable() {
+    let (domain, stage) = (state.domain, state.stage.clone());
+    if !domain.writable(&stage) {
         // §19.4: agree with `i` and every other verb's refusal on a
         // read-only domain rather than falling back to the ordinary
         // "this row is read-only" wording, which names the ROW, not the
@@ -1780,13 +1799,13 @@ fn revalidate(shell: &mut ShellView) {
     let Some(draft) = state.draft.as_mut() else {
         return;
     };
-    // The key a cleared `label`/`width` handed back to the desk, if any —
-    // see the notice at the end of this function.
-    let mut followed_desk = None;
+    // The key a cleared `label`/`width` handed back, and the layer it
+    // fell to — see the notice at the end of this function.
+    let mut fold = None;
     // 2c §5.2: the column stage is a projection; fold it into the item
     // FIRST so the validator and the overlay writer see this keystroke.
     if draft.column().is_some() {
-        followed_desk = draft.fold_column();
+        fold = draft.fold_column();
     }
     // Validated, then stored: `validate` needs the draft immutably and
     // the config from a sibling field, which is exactly the disjoint
@@ -1803,8 +1822,20 @@ fn revalidate(shell: &mut ShellView) {
     // exactly. Set here, not in the arms: every path that changes a value
     // comes through this function, and only this function knows the fold
     // happened.
-    if let Some(key) = followed_desk {
-        set_notice(shell, format!("{key} follows the desk again"));
+    //
+    // The layer is named rather than assumed (dataset-presentation spec
+    // §5.2): a cleared view key meets the dataset level before the desk,
+    // and a cleared DATASET key falls to whatever each view says. A fold
+    // with nothing below it (`to: None`) says nothing at all — there is
+    // no layer to name and the field simply went back to the kind
+    // default, which is on screen already.
+    if let Some(Fold { key, to: Some(to) }) = fold {
+        let layer = match to {
+            FellTo::Desk => "the desk",
+            FellTo::Dataset => "the dataset",
+            FellTo::EachView => "each view",
+        };
+        set_notice(shell, format!("{key} follows {layer} again"));
     }
 }
 
@@ -2248,7 +2279,7 @@ fn actions(shell: &ShellView) -> Vec<Action> {
     if state.draft.is_none() {
         return Vec::new();
     }
-    if !state.domain.writable() {
+    if !state.domain.writable(&state.stage) {
         return Vec::new();
     }
     let row = editing_row(shell);
@@ -2567,7 +2598,7 @@ fn build(
                     // with nothing behind it — nor for a read-only domain
                     // (Schema, §19.4), for the same reason: `n` there only
                     // ever says the surface cannot be written to.
-                    if state.domain.writable() && state.domain.roster().is_none() {
+                    if state.domain.writable(&state.stage) && state.domain.roster().is_none() {
                         action.push(chip("n"));
                         action.push(sep("new ·"));
                     }
@@ -2803,6 +2834,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     });
 
     let domain = state.domain;
+    // §19.4 / dataset-presentation §4.2: whether a `doc`/`pres`/`dataset`
+    // badge may be painted at all, read once per render rather than per
+    // row — Schema answers `true` here only inside its column stage.
+    let dest_badges = domain.writable(&state.stage);
     let rows = draft.rows();
     let visible = draft.visible_rows();
     // §19.5: which rows a current diagnostic names, computed once per
@@ -2852,6 +2887,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 let dest_label = match field.dest {
                     Destination::Doc => "doc",
                     Destination::Presentation => "pres",
+                    Destination::DatasetPresentation => "dataset",
                 };
                 (
                     format!("objectdialog-field-{}", field.key),
@@ -2865,6 +2901,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                 .text_color(theme.muted_foreground)
                                 .child(field_value(field)),
                         )
+                        // dataset-presentation §5.3: the layer in force
+                        // on a column-stage field. The same slot as the
+                        // layer badge below, and the two never both
+                        // appear: Schema fills `layer` on its own rows
+                        // (which are not column-stage rows), the column
+                        // stage fills this.
+                        .children(provenance_chip(draft, field, theme, cx))
                         // §19.4: the layer a schema row's value came from
                         // — `None` on every writable domain (`Field::
                         // layer`'s own doc has the reasoning).
@@ -2880,7 +2923,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         // A `doc`/`pres` badge promises a write this row
                         // can make — painting it on a read-only domain
                         // would promise one the scaffold refuses outright.
-                        .children(domain.writable().then(|| {
+                        .children(dest_badges.then(|| {
                             dialog::badge(
                                 dest_label,
                                 theme.muted_foreground,
@@ -3297,7 +3340,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             ],
             vec![chip("escape"), sep("back to normal")],
         )
-    } else if !state.domain.writable() {
+    } else if !state.domain.writable(&state.stage) {
         // §19.4: a read-only domain's normal-mode vocabulary is reading
         // and filtering alone — no `space`/`shift+space` to change a row,
         // no `shift+j`/`shift+k` to reorder, none of `d`/`r`/`x`/`n`/`o`,
@@ -3663,6 +3706,29 @@ fn confirm_row(
         .into_any_element()
 }
 
+/// §5.3: the chip naming the layer in force on a column-stage field,
+/// computed from the draft's layers at paint so a stepped field reads
+/// `view` (or `dataset`, from the Schema door) on the same frame.
+///
+/// `None` off the column stage, where `Draft::column_ctx` is `None` and
+/// there are no layers to name.
+fn provenance_chip(
+    draft: &Draft,
+    field: &Field,
+    theme: &gpui_component::Theme,
+    cx: &App,
+) -> Option<AnyElement> {
+    let ctx = draft.column_ctx.as_ref()?;
+    let provenance = dataset_columns::provenance_of(ctx, field)?;
+    Some(dialog::badge(
+        provenance.name(),
+        theme.muted_foreground,
+        theme.border,
+        Some(format!("objectdialog-field-provenance-{}", field.key)),
+        cx,
+    ))
+}
+
 /// A verb pressed with the mouse instead of the keyboard. One door, so a
 /// button and its letter can never do different things.
 fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut Context<ShellView>) {
@@ -3678,7 +3744,7 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
     let writable = shell
         .object_dialog
         .as_ref()
-        .is_some_and(|state| state.domain.writable());
+        .is_some_and(|state| state.domain.writable(&state.stage));
     if !writable {
         set_notice(shell, READ_ONLY_NOTICE.to_string());
         cx.notify();
@@ -3772,7 +3838,7 @@ fn on_tick_clicked(
     let writable = shell
         .object_dialog
         .as_ref()
-        .is_some_and(|state| state.domain.writable());
+        .is_some_and(|state| state.domain.writable(&state.stage));
     if !writable {
         set_notice(shell, READ_ONLY_NOTICE.to_string());
         cx.notify();
@@ -3925,7 +3991,7 @@ pub(in crate::shell) fn on_row_dropped(
     let writable = shell
         .object_dialog
         .as_ref()
-        .is_some_and(|state| state.domain.writable());
+        .is_some_and(|state| state.domain.writable(&state.stage));
     if !writable {
         set_notice(shell, READ_ONLY_NOTICE.to_string());
         cx.notify();

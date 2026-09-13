@@ -244,7 +244,11 @@ pub(crate) struct PendingConfigWrite {
 pub fn object_value(object: &str, item: toml_edit::Item, dest: Destination) -> ObjectWrite {
     if item_is_empty(&item) {
         return match dest {
-            Destination::Presentation => ObjectWrite::Remove,
+            // `dataset_presentation.toml` joins `view_presentation.toml`
+            // for exactly the same reason (dataset-presentation spec
+            // §4.1): it is an overlay, so an absent table IS "I have no
+            // personalisation of this column".
+            Destination::Presentation | Destination::DatasetPresentation => ObjectWrite::Remove,
             Destination::Doc => ObjectWrite::Nothing,
         };
     }
