@@ -10092,6 +10092,70 @@ run_mutation "matrix: flatten refuses a repeated row label" \
   geode-marketdata \
   a_repeated_row_label_is_refused_when_the_columns_are_flat
 
+# Market-data documents Part 3 Task 6: the panel tile.
+#
+# A stale outcome is dropped. Mutated to apply every delivery, an answer
+# to a question the panel has already superseded — a different key, an
+# older as-of — paints over the current one, and the header's own source
+# time goes with it: a wrong document under the right title.
+run_mutation "mdtile: a stale tag is dropped" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if outcome.tag != self.tag {' \
+  '        if false {' \
+  geode-marketdata \
+  a_stale_tag_is_dropped
+
+# The panel follows the frame's `data` version, which every publish bumps
+# — that is the whole of how a subscribed document reaches the screen
+# without the tile subscribing to anything itself. Mutated to a constant,
+# the panel paints the generation it happened to open on and never asks
+# again: the header keeps showing a source time that is minutes old with
+# nothing to say a newer document exists.
+run_mutation "mdtile: a publish bumps data and the panel requeries" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let now = (frame.as_of().clone(), frame.versions().data);' \
+  '        let now = (frame.as_of().clone(), 0);' \
+  geode-marketdata \
+  a_publish_bumps_the_frame_and_the_tile_requeries
+
+# A panel with no catalog for its dataset asks for one, or `:key`'s
+# completions can never arrive: nothing else on this path requests a
+# catalog (the diagnostics tile's `watch` does, but only while a
+# diagnostics tile is open). Mutated to never ask, the completions are
+# silently empty forever and a trader has to know the key by heart.
+run_mutation "mdtile: a panel with no catalog requests one" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !self.needs_catalog(cx) {' \
+  '        if true {' \
+  geode-marketdata \
+  key_completions_come_from_the_catalog
+
+# Unsent edits survive a restart (spec §8.5). Mutated to omit the draft,
+# `serialize` writes the key alone and every unsent edit is gone on the
+# next launch — work lost silently, with the restored panel looking
+# perfectly healthy.
+run_mutation "mdtile: serialize writes the draft" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !self.draft.is_empty() {' \
+  '        if false {' \
+  geode-marketdata \
+  serialize_round_trips_key_and_draft
+
+# A delivery re-clamps the cursor, because a new generation can be
+# shorter than the one it replaces. Mutated away, the cursor sits past the
+# end of the grid: a yank answers nothing, and `move_cursor`'s own clamp
+# cannot save it — nothing moved, so nothing re-clamps.
+run_mutation "mdtile: a shorter document clamps the cursor" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.cursor.0 = self.cursor.0.min(self.model.rows.len().saturating_sub(1));
+        self.cursor.1 = self
+            .cursor
+            .1
+            .min(self.model.columns.len().saturating_sub(1));' \
+  '        let _ = &self.model;' \
+  geode-marketdata \
+  a_shorter_document_clamps_the_cursor
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
