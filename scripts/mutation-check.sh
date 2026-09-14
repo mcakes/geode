@@ -10734,9 +10734,14 @@ run_mutation "final: the Behind chip does not call an older document newer" \
 # all, on a dialog the palette still called read-only.
 run_mutation "objectdialog: the Schema edit footer names enter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                action.push(hint_enter(chip("enter")));
-                action.push(sep("open column ·"));' \
-  '                action.push(sep("open column ·"));' \
+  '        let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
+        if opens_column {
+            hints.push(open_column());
+        }' \
+  '        let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
+        if opens_column {
+            let _ = &open_column;
+        }' \
   geode-shell \
   the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door
 
@@ -10744,9 +10749,11 @@ run_mutation "objectdialog: the Schema edit footer names enter" \
 # and the normal-mode footer never said so.
 run_mutation "objectdialog: the browse footer names enter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                    action.push(hint_enter(chip("enter")));
-                    action.push(sep("open ·"));' \
-  '                    action.push(sep("open ·"));' \
+  '                hints.push(
+                    Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),
+                );
+                hints.push(Hint::new(HintRow::Go, &["/"], "filter"));' \
+  '                hints.push(Hint::new(HintRow::Go, &["/"], "filter"));' \
   geode-shell \
   the_footers_name_enter_where_it_opens_something
 
@@ -10839,15 +10846,43 @@ run_mutation "objectdialog: the edit footer paints the reorder group on a row wi
 # Review 2026-09-13: `tab` steps in the settings dialog's NORMAL mode and
 # the footer used to withhold it there, on the grounds that it was filter
 # mode's only stepping key — withholding a live key from the mode with
-# the most of them. The `settings-hint-change` selector rides the `tab`
-# chip, so dropping the chip is what the window test sees.
+# the most of them. Since the footer rows went shared (2026-09-14, spec
+# §19) the group is one `Hint` and every chip of a tagged hint carries
+# `<selector>-<key>`, so dropping `tab` from the keys is what the window
+# test sees through `settings-hint-change-tab`.
 run_mutation "settings: the normal-mode footer names tab beside space and l" \
   crates/geode-shell/src/shell/settings_view.rs \
-  '                chip("l"),
-                hint_change(chip("tab")),' \
-  '                chip("l"),' \
+  '                &["space", "shift+space", "tab", "h", "l"],' \
+  '                &["space", "shift+space", "h", "l"],' \
   geode-shell \
   l_and_h_step_the_selected_value_in_settings_normal_mode
+
+# ---- Footer rows by category (spec §19, 2026-09-14) --------------------
+#
+# The whole point of `geode_shell::footer` is that a hint's ROW is its
+# category, decided once for every dialog, never its position in the list
+# the dialog wrote. Filing everything under the first row keeps every
+# window test green (each of them asks whether a chip is painted, not
+# where); only the pure test reading the layout can see it.
+run_mutation "footer: a hint's row is its position, not its category" \
+  crates/geode-shell/src/footer.rs \
+  '            let members: Vec<&Hint> = hints.iter().filter(|h| h.row == row).collect();' \
+  '            let members: Vec<&Hint> = hints
+                .iter()
+                .filter(|_| row == HintRow::Move)
+                .collect();' \
+  geode-shell \
+  a_hints_category_decides_its_row_not_its_position
+
+# A row nobody put a hint on must not paint — a read-only stage has no
+# edit row, the naming stage only a go row — or the labels `edit` / `go`
+# stand over nothing.
+run_mutation "footer: an empty row is painted anyway" \
+  crates/geode-shell/src/footer.rs \
+  '            (!members.is_empty()).then_some((row, members))' \
+  '            Some((row, members))' \
+  geode-shell \
+  an_empty_row_is_dropped_and_the_order_holds
 
 # The row-sensitive footer: paint the change group on EVERY row, the
 # fixed group the ruling replaced. A `Text` row that cannot step is where
@@ -10856,7 +10891,7 @@ run_mutation "settings: the normal-mode footer names tab beside space and l" \
 # than asserting on one.
 run_mutation "objectdialog: the edit footer paints the change group on a row nothing changes" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            RowVocabulary::Inert | RowVocabulary::Types => return Vec::new(),' \
+  '            RowVocabulary::Inert | RowVocabulary::Types => return None,' \
   '            RowVocabulary::Inert | RowVocabulary::Types => "change",' \
   geode-shell \
   the_edit_footer_names_only_what_the_selected_row_offers
@@ -10867,8 +10902,8 @@ run_mutation "objectdialog: the edit footer paints the change group on a row not
 # steps and nothing on screen says so.
 run_mutation "objectdialog: the filter-mode footer names the pair that still steps" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            action.extend(change_group(true, true));' \
-  '            let _ = &change_group;' \
+  '            hints.extend(change_hint(true));' \
+  '            let _ = &change_hint;' \
   geode-shell \
   the_edit_footer_names_only_what_the_selected_row_offers
 

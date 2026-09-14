@@ -170,6 +170,7 @@ use geode_core::config::Layer;
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
+use crate::footer::{Hint, HintRow};
 use crate::keymap::{Binding, Keymap, Keystroke, Modifiers};
 use crate::keymap_edit::{Displacement, Rebind, Unbind, apply_rebind, apply_unbind};
 use crate::listfilter::{self, Ranked};
@@ -1403,92 +1404,56 @@ fn build(
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
-    // The hint row states the CURRENT mode's vocabulary, not the union of
+    // The hint rows state the CURRENT mode's vocabulary, not the union of
     // both: a modal surface's whole risk is a user who cannot tell which
     // mode they are in, and a footer listing keys that are inert right
-    // now is exactly the lie the mode pill exists to prevent.
-    let hint_line: AnyElement = if state.listening.is_some() {
-        h_flex()
-            .gap_1()
-            .items_center()
-            .flex_wrap()
-            .children(vec![
-                sep("Listening — type keys,"),
-                chip("enter"),
-                sep("to save,"),
-                chip("escape"),
-                sep("to cancel"),
-            ])
-            .into_any_element()
+    // now is exactly the lie the mode pill exists to prevent. Which row
+    // a hint paints on is `crate::footer`'s call (move / edit / go, spec
+    // §19), not this dialog's.
+    let hints: Vec<Hint> = if state.listening.is_some() {
+        vec![
+            Hint::prose(HintRow::Go, "listening — type keys"),
+            Hint::new(HintRow::Go, &["enter"], "save"),
+            Hint::new(HintRow::Go, &["escape"], "cancel"),
+        ]
     } else {
-        // Two rows, one idiom family each: motion, then rebind/escape —
-        // so the hints read as a table rather than one wrapped run-on
-        // line.
-        let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = match state.mode {
-            DialogMode::Normal => (
-                vec![
-                    chip("j"),
-                    chip("k"),
-                    sep("move ·"),
-                    chip("ctrl+d"),
-                    chip("ctrl+u"),
-                    sep("±5 ·"),
-                    chip("ctrl+f"),
-                    chip("ctrl+b"),
-                    sep("±10"),
-                ],
-                vec![
-                    chip("enter"),
-                    sep("rebind ·"),
-                    // The two verbs normal mode exists to make room for
-                    // (spec §8/§9): a chord has no clickable target and
-                    // a bare letter has no visible one, so the footer is
-                    // where `d` and `r` are discovered at all.
-                    chip("d"),
-                    sep("unbind ·"),
-                    chip("r"),
-                    sep("reset ·"),
-                    chip("/"),
-                    sep("filter ·"),
-                    chip("escape"),
-                    // Honest about which rung the next escape takes: with
-                    // a query still applied it clears the query, and only
-                    // then closes.
-                    sep(if state.query.is_empty() {
+        match state.mode {
+            DialogMode::Normal => vec![
+                Hint::new(HintRow::Move, &["j", "k"], "move"),
+                Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+                Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+                Hint::new(HintRow::Edit, &["enter"], "rebind"),
+                // The two verbs normal mode exists to make room for
+                // (spec §8/§9): a chord has no clickable target and a
+                // bare letter has no visible one, so the footer is where
+                // `d` and `r` are discovered at all.
+                Hint::new(HintRow::Edit, &["d"], "unbind"),
+                Hint::new(HintRow::Edit, &["r"], "reset"),
+                Hint::new(HintRow::Go, &["/"], "filter"),
+                // Honest about which rung the next escape takes: with a
+                // query still applied it clears the query, and only then
+                // closes.
+                Hint::new(
+                    HintRow::Go,
+                    &["escape"],
+                    if state.query.is_empty() {
                         "close"
                     } else {
                         "clear the filter"
-                    }),
-                ],
-            ),
-            DialogMode::Filter => (
-                vec![
-                    sep("type to filter ·"),
-                    chip("up"),
-                    chip("down"),
-                    sep("move ·"),
-                    chip("ctrl+d"),
-                    chip("ctrl+u"),
-                    sep("±5 ·"),
-                    chip("ctrl+f"),
-                    chip("ctrl+b"),
-                    sep("±10"),
-                ],
-                vec![
-                    chip("enter"),
-                    sep("rebind the selected row ·"),
-                    chip("escape"),
-                    sep("back to normal"),
-                ],
-            ),
-        };
-        v_flex()
-            .gap_0p5()
-            .child(h_flex().gap_1().items_center().flex_wrap().children(motion))
-            .child(h_flex().gap_1().items_center().flex_wrap().children(action))
-            .into_any_element()
+                    },
+                ),
+            ],
+            DialogMode::Filter => vec![
+                Hint::prose(HintRow::Move, "type to filter"),
+                Hint::new(HintRow::Move, &["up", "down"], "move"),
+                Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+                Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+                Hint::new(HintRow::Edit, &["enter"], "rebind the selected row"),
+                Hint::new(HintRow::Go, &["escape"], "back to normal"),
+            ],
+        }
     };
-
+    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg);
     let footer = v_flex()
         .w(px(WIDTH))
         .gap_1()

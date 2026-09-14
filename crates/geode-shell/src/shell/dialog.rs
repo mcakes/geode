@@ -68,7 +68,8 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, box_shadow,
 
 use super::ShellView;
 use crate::dialogmode::{self, DialogMode, FocusTarget};
-use crate::keymap::Keystroke;
+use crate::footer::{self, Hint};
+use crate::keymap::{Keystroke, Modifiers};
 
 /// A modal's content builder, called as `build(shell, window, cx)` — see
 /// [`ShellModal::build`]'s own doc comment for why the first argument is a
@@ -1090,4 +1091,72 @@ pub(crate) fn render_modal(
             }),
         )
         .child(panel)
+}
+
+/// The footer hint rows every modal dialog paints — the one renderer of
+/// [`crate::footer`]'s layout (spec §19): a row per [`crate::footer::HintRow`] that has
+/// something in it, in `HintRow::ALL` order, each led by its dim
+/// fixed-width label so the eye can find "edit" or "go" without reading
+/// the line. Hints on a row are joined with ` · `; a hint's keys paint
+/// as [`key_chip`]s (with `between` between the first two, for a range
+/// like `1 – 9`). A hint with a selector gives every one of its chips
+/// `"<selector>-<key>"` and its first chip the bare `"<selector>"` as
+/// well, so a test can ask both "is this group painted" and "is this
+/// particular key taught in it" — the second is what lets a test prove
+/// `tab` is named in normal mode rather than merely that some stepping
+/// key is.
+///
+/// The dialogs only decide which hints are live; nothing here lets a
+/// caller pick a row, which is what keeps `space` under `space` on
+/// every surface.
+pub(crate) fn hint_rows(hints: &[Hint], chip_fg: Hsla, chip_bg: Hsla) -> AnyElement {
+    let chip = |spec: &str| {
+        let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
+            .expect("footer hint keystrokes are hardcoded valid");
+        super::keybindings_view::key_chip(&ks, chip_fg, chip_bg)
+    };
+    let mut lines = v_flex().gap_0p5();
+    for (row, members) in footer::rows(hints) {
+        let mut line = h_flex().gap_1().items_center().flex_wrap().child(
+            div()
+                .w(px(30.))
+                .flex_shrink_0()
+                .text_xs()
+                .child(row.label()),
+        );
+        let last = members.len().saturating_sub(1);
+        for (i, hint) in members.into_iter().enumerate() {
+            for (k, key) in hint.keys.iter().enumerate() {
+                if k == 1
+                    && let Some(between) = hint.between
+                {
+                    line = line.child(div().child(between));
+                }
+                let chip = chip(key);
+                line = line.child(match hint.selector {
+                    Some(selector) => {
+                        let keyed = format!("{selector}-{key}");
+                        let inner = div().debug_selector(move || keyed.clone()).child(chip);
+                        if k == 0 {
+                            div()
+                                .debug_selector(move || selector.to_string())
+                                .child(inner)
+                                .into_any_element()
+                        } else {
+                            inner.into_any_element()
+                        }
+                    }
+                    None => chip,
+                });
+            }
+            let word = if i == last {
+                hint.word.to_string()
+            } else {
+                format!("{} ·", hint.word)
+            };
+            line = line.child(div().child(word));
+        }
+        lines = lines.child(line);
+    }
+    lines.into_any_element()
 }
