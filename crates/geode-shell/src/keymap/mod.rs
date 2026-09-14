@@ -4,6 +4,7 @@
 
 mod build;
 mod context;
+pub mod fragments;
 mod keystroke;
 mod matcher;
 

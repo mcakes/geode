@@ -25,6 +25,7 @@ use geode_shell::diagnostics::{ActionTail, Diagnostics};
 use geode_shell::fonts;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::build_keymap;
+use geode_shell::keymap::fragments;
 use geode_shell::module::{ModuleFactory, ModuleRoster, TileOccupant};
 use geode_shell::session;
 use geode_shell::shell::{LogServices, ShellServices, ShellView, pickable_columns, saved_scopes};
@@ -505,6 +506,17 @@ impl ModuleFactory for BlotterFactoryHandle {
     fn register_actions(&self, registry: &mut ActionRegistry) {
         self.0.register_actions(registry)
     }
+    // Forwarded like everything else on this trait: a defaulted method
+    // NOT forwarded here would silently answer for the wrapper (no
+    // fragment, contexts = the kind) instead of for the factory it
+    // wraps, and the blotter's whole keymap would vanish with no
+    // diagnostic anywhere.
+    fn contexts(&self) -> Vec<&'static str> {
+        self.0.contexts()
+    }
+    fn default_keymap(&self) -> Option<&'static str> {
+        self.0.default_keymap()
+    }
     fn create(
         &self,
         tile: TileId,
@@ -530,6 +542,13 @@ impl ModuleFactory for DiagnosticsFactoryHandle {
     }
     fn register_actions(&self, registry: &mut ActionRegistry) {
         self.0.register_actions(registry)
+    }
+    // Forwarded for the reason [`BlotterFactoryHandle::contexts`] gives.
+    fn contexts(&self) -> Vec<&'static str> {
+        self.0.contexts()
+    }
+    fn default_keymap(&self) -> Option<&'static str> {
+        self.0.default_keymap()
     }
     fn create(
         &self,
@@ -707,10 +726,24 @@ fn build_shell_services(
     if let Some(diag) = modules_default_diagnostic(&config) {
         print_diagnostic(&diag);
     }
-    let (keymap, keymap_diags) = build_keymap(config.layered_docs("keymap"), mod_alias, &registry);
+    // Each module's own default bindings (market-data documents §8.4),
+    // spliced above the compiled-in keymap and below every desk/user
+    // layer — the roster is final by here (the bridge's blotter factory
+    // was added above), so this is the first point every fragment
+    // exists. Its diagnostics join `keymap_diags` below rather than
+    // living in `config.diagnostics`: like the keymap's own they are
+    // resolved against this registry and this roster, neither of which
+    // `ShellView::new` can reconstruct.
+    let (fragments, frag_diags) = roster.keymap_fragments();
+    for diag in &frag_diags {
+        print_diagnostic(diag);
+    }
+    let layered = fragments::splice(config.layered_docs("keymap"), &fragments);
+    let (keymap, mut keymap_diags) = build_keymap(&layered, mod_alias, &registry);
     for diag in &keymap_diags {
         print_diagnostic(diag);
     }
+    keymap_diags.extend(frag_diags);
 
     let (theme, theme_warnings) = theme::load_bundled();
     for warning in &theme_warnings {
@@ -751,6 +784,10 @@ fn build_shell_services(
         // this registry, not just the config) and the diagnostics tile's
         // config section would otherwise miss it until a hot reload.
         keymap_diagnostics: keymap_diags,
+        // The checked fragments themselves, so `apply_reload` can splice
+        // the same ones back in at every hot reload — see the field's own
+        // doc comment for why they are carried rather than recomputed.
+        keymap_fragments: fragments,
     };
     (services, desk, user, bridge, diagnostics_factory)
 }

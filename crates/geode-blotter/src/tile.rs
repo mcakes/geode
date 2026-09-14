@@ -3544,27 +3544,6 @@ mod tests {
         assert!(!drop.contains(&"daily_trading_pnl".to_string()));
     }
 
-    /// The shell cannot depend on `geode-blotter` (layering: shell never
-    /// depends on a module), so `geode_shell::defaults` carries its own
-    /// copy of these ids (and, since the final review, titles too) to
-    /// reserve, ahead of `BlotterFactory::register_actions`, so
-    /// `BUILTIN_KEYMAP`'s `blotter::*` bindings are never dropped as
-    /// unregistered and the palette shows the same title either way.
-    /// This pins both lists identical — ids via `BLOTTER_ACTIONS` (kept
-    /// for the id-only comparison), titles via `BLOTTER_ACTION_DEFS`
-    /// directly, since it was made `pub` for exactly this.
-    #[test]
-    fn the_shells_reserved_blotter_actions_match_ours() {
-        let ours: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ours, geode_shell::defaults::BLOTTER_ACTIONS.to_vec());
-        assert_eq!(
-            ACTIONS,
-            geode_shell::defaults::BLOTTER_ACTION_DEFS,
-            "titles must match too, not just ids — `ActionRegistry::register`'s \
-             discarded `Err` on the shell's duplicate registration means the \
-             shell's title, not the blotter's, is what actually reaches the palette"
-        );
-    }
     /// 2c §6.2: the definitions travel from the factory's shared cell to
     /// the delegate, and they travel on the plan — the tile hands them
     /// over in `apply`, where the plan is built, so the delegate can

@@ -415,6 +415,78 @@ fn a_key_in_the_occupants_context_reaches_its_dispatch_with_the_count(
     );
 }
 
+/// The whole point of a keymap fragment (market-data documents §8.4): a
+/// key the shell's own `BUILTIN_KEYMAP` never mentions reaches the module
+/// that shipped it, through the live keymap, on a real keypress. Nothing
+/// but the roster carries `q` here.
+#[gpui::test]
+fn a_binding_from_a_modules_fragment_reaches_its_hosted_tile(cx: &mut gpui::TestAppContext) {
+    let (services, log) = services_with_a_module_fragment(REC_FRAGMENT);
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("q");
+    let shell = shell_of(&window, &mut cx);
+    let tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert!(
+        log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Dispatch(t, a, None)
+                if *t == tile && a.0 == "rec::noop"
+        )),
+        "{:?}",
+        log.borrow()
+    );
+}
+
+/// The other half of the layer order: a fragment sits BELOW every layer a
+/// trader edits, so a user keymap binding the same key in the same context
+/// wins — the property that makes a module's defaults defaults rather than
+/// an unoverridable second builtin. `workspace::close_tile` is the visible
+/// proof: the tile is gone, and the module was never told anything.
+#[gpui::test]
+fn a_user_layer_binding_wins_over_a_modules_fragment(cx: &mut gpui::TestAppContext) {
+    let (mut services, log) = services_with_a_module_fragment(REC_FRAGMENT);
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table:
+            "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"q\" = \"workspace::close_tile\"\n"
+                .parse()
+                .unwrap(),
+    };
+    services.keymap =
+        test_keymap_with_fragments(&services.registry, &services.keymap_fragments, &[user]);
+    let (window, mut cx) = open_shell(cx, services);
+    // The first `ctrl-v` fills the starting placeholder in place (add-tile
+    // §4.2), so two are needed for a second tile to exist at all.
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("ctrl-v");
+    let shell = shell_of(&window, &mut cx);
+    let before = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().tree().tiles().len()
+    });
+    assert_eq!(before, 2, "fixture check: ctrl-v twice added a second tile");
+    cx.simulate_keystrokes("q");
+    let after = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().tree().tiles().len()
+    });
+    assert_eq!(
+        after, 1,
+        "the user's binding must win over the module's fragment"
+    );
+    assert!(
+        !log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Dispatch(_, a, _) if a.0 == "rec::noop"
+        )),
+        "the module's own action must not have fired at all: {:?}",
+        log.borrow()
+    );
+}
+
 #[gpui::test]
 fn closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility(
     cx: &mut gpui::TestAppContext,

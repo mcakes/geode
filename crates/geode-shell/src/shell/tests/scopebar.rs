@@ -55,6 +55,7 @@ fn test_services_with_ctrl_alias() -> ShellServices {
             crate::diagnostics::ActionTail::new(),
         )),
         keymap_diagnostics: Vec::new(),
+        keymap_fragments: Vec::new(),
     }
 }
 
@@ -300,6 +301,7 @@ fn services_with_saved_scope() -> ShellServices {
             crate::diagnostics::ActionTail::new(),
         )),
         keymap_diagnostics: Vec::new(),
+        keymap_fragments: Vec::new(),
     }
 }
 

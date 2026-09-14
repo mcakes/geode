@@ -12,6 +12,7 @@ use gpui::Context;
 use crate::defaults::mod_alias_from_config;
 use crate::fontsize::FontSize;
 use crate::keymap::build_keymap;
+use crate::keymap::fragments;
 use crate::reload;
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, Diagnostic, Severity};
@@ -169,11 +170,19 @@ impl ShellView {
     /// watcher is just what schedules calling it.
     pub(super) fn apply_reload(&mut self, mut new_config: Config, cx: &mut Context<Self>) {
         let (mod_alias, mod_diags) = mod_alias_from_config(&new_config);
-        let (keymap, keymap_diags) = build_keymap(
+        // The modules' fragments go back in at the same point in the
+        // layer order `main.rs` put them (§8.4): above the builtin docs,
+        // below desk and user. Splicing them here rather than
+        // recomputing them from the roster is what keeps a reload from
+        // re-reporting every fragment diagnostic — and omitting the
+        // splice entirely would unbind every module key on the first
+        // config write of a session, the same class of bug `builtin`'s
+        // own doc comment records.
+        let layered = fragments::splice(
             new_config.layered_docs("keymap"),
-            mod_alias,
-            &self.services.registry,
+            &self.services.keymap_fragments,
         );
+        let (keymap, keymap_diags) = build_keymap(&layered, mod_alias, &self.services.registry);
         // `mod_diags` extended in here, BEFORE `reload::decide` runs below: an
         // error-severity diagnostic (the refused `keymap.mod = "ctrl"`
         // alias, Task 4b) must reject the whole reload as last-good,

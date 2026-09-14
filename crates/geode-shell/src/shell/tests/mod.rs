@@ -31,12 +31,27 @@ pub(super) const TEST_ADD_KEYMAP: &str = "[[bindings]]\ncontext = \"workspace\"\
 
 /// `BUILTIN_KEYMAP` + [`TEST_ADD_KEYMAP`] + `extra`, built clean.
 pub(super) fn test_keymap(registry: &ActionRegistry, extra: &[LayerDoc]) -> crate::keymap::Keymap {
+    test_keymap_with_fragments(registry, &[], extra)
+}
+
+/// [`test_keymap`] with a roster's keymap fragments spliced in at the
+/// point `main.rs` splices them (market-data documents §8.4) — above the
+/// compiled-in docs, below everything a trader edits. Every fixture here
+/// goes through this call with an empty fragment list, so the identity
+/// case is exercised by the whole suite and only a fragment test has to
+/// name it.
+pub(super) fn test_keymap_with_fragments(
+    registry: &ActionRegistry,
+    fragments: &[LayerDoc],
+    extra: &[LayerDoc],
+) -> crate::keymap::Keymap {
     let mut docs = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
         LayerDoc::builtin("keymap", TEST_ADD_KEYMAP).unwrap(),
     ];
     docs.extend(extra.iter().cloned());
-    let (keymap, diags) = build_keymap(&docs, default_mod(), registry);
+    let spliced = crate::keymap::fragments::splice(&docs, fragments);
+    let (keymap, diags) = build_keymap(&spliced, default_mod(), registry);
     assert!(diags.is_empty(), "{diags:?}");
     keymap
 }
@@ -64,6 +79,38 @@ pub(super) fn test_services_with_log() -> (
 /// some *other* path — a direct `Workspaces::split_active`, or a session
 /// record naming a kind nothing registered — is a placeholder.
 fn services_with_rec_roster() -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    RecFocus,
+) {
+    services_with_rec_roster_shipping(None)
+}
+
+/// The default bindings the fixture recorder ships when asked to
+/// (market-data documents §8.4): `q` in its own `rec` context, so a
+/// hosting test can prove a key bound by nothing but the *module* reaches
+/// the module — `TEST_ADD_KEYMAP` and the shell's own `BUILTIN_KEYMAP`
+/// bind nothing to `q`, in any context.
+pub(super) const REC_FRAGMENT: &str =
+    "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n";
+
+/// [`services_with_rec_roster`] whose recorder ships `fragment` as its
+/// [`crate::module::ModuleFactory::default_keymap`], the keymap built
+/// over `splice` exactly as `main.rs` builds it — so the fragment reaches
+/// the live keymap through the roster and nothing else.
+pub(super) fn services_with_a_module_fragment(
+    fragment: &'static str,
+) -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+) {
+    let (services, log, _focus) = services_with_rec_roster_shipping(Some(fragment));
+    (services, log)
+}
+
+fn services_with_rec_roster_shipping(
+    fragment: Option<&'static str>,
+) -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
     RecFocus,
@@ -100,7 +147,8 @@ fn services_with_rec_roster() -> (
     // 2026-09-08 add-tile §3.2) — `main.rs` registers these from the
     // roster's kinds in this same slot, before `build_keymap`.
     crate::defaults::register_add_actions(&mut registry, &["rec"]);
-    let recorder = crate::module::recording::RecordingFactory::new("rec");
+    let mut recorder = crate::module::recording::RecordingFactory::new("rec");
+    recorder.fragment = fragment;
     let log = recorder.log.clone();
     let last_focus = recorder.last_focus.clone();
     let mut roster = crate::module::ModuleRoster::new();
@@ -109,8 +157,12 @@ fn services_with_rec_roster() -> (
     // orders it — a binding into the module's own context is what
     // `services_with_recorder`'s extra layer needs to resolve.
     roster.register_actions(&mut registry);
+    // And the modules' fragments are collected right after, from the
+    // finished roster, in `main.rs`'s own order (§8.4).
+    let (keymap_fragments, frag_diags) = roster.keymap_fragments();
+    assert!(frag_diags.is_empty(), "{frag_diags:?}");
     let mod_alias = default_mod();
-    let keymap = test_keymap(&registry, &[]);
+    let keymap = test_keymap_with_fragments(&registry, &keymap_fragments, &[]);
     let (theme, warnings) = crate::theme::load_bundled();
     assert!(warnings.is_empty(), "{warnings:?}");
     let services = ShellServices {
@@ -131,6 +183,7 @@ fn services_with_rec_roster() -> (
             crate::diagnostics::ActionTail::new(),
         )),
         keymap_diagnostics: Vec::new(),
+        keymap_fragments,
     };
     (services, log, last_focus)
 }

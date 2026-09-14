@@ -1711,6 +1711,51 @@ mod tests {
         assert_eq!(bound.layer, Layer::User);
     }
 
+    /// A module's fragment binding (market-data documents §8.4) lists as
+    /// `Layer::Builtin`, carrying its predicate like any other binding —
+    /// which is what makes this dialog's `d` write a user-layer `"none"`
+    /// shadow over it and its `r` leave it alone, with no branch here
+    /// that has to know a module exists. Built through the roster and
+    /// `splice`, the real path `main.rs` uses, so a fragment that stopped
+    /// reporting `Builtin` (or stopped reaching the keymap at all) fails
+    /// here rather than in a dialog test that could only say "no row".
+    #[test]
+    fn a_modules_fragment_binding_lists_as_a_builtin_layer_binding() {
+        use crate::keymap::fragments::splice;
+        let reg = registry_with(&[
+            ("rec::noop", "Recording no-op", "Test"),
+            ("palette::toggle", "Toggle command palette", "Palette"),
+        ]);
+        let mut factory = crate::module::recording::RecordingFactory::new("rec");
+        factory.fragment =
+            Some("[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n");
+        let mut roster = crate::module::ModuleRoster::new();
+        roster.add(Box::new(factory));
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let builtin = doc(
+            Layer::Builtin,
+            "[[bindings]]\n[bindings.keys]\n\"ctrl+k\" = \"palette::toggle\"\n",
+        );
+        let layered = splice(&[builtin], &fragments);
+        let (keymap, diags) = build_keymap(&layered, Modifiers::ALT, &reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        let rows = derive_rows(&reg, &keymap);
+        let row = rows
+            .iter()
+            .find(|r| r.action.0 == "rec::noop")
+            .expect("the module's action has a row");
+        let bound = row.current.as_ref().expect("and a binding");
+        assert_eq!(bound.keystrokes[0].key, "q");
+        assert_eq!(
+            bound.layer,
+            Layer::Builtin,
+            "a fragment binding is part of what the binary shipped, so `r` restores it \
+             and `d` shadows it exactly as for a shell default"
+        );
+        assert_eq!(bound.context_source.as_deref(), Some("rec"));
+    }
+
     #[test]
     fn rows_sort_by_category_then_title_not_by_action_id() {
         let reg = registry_with(&[

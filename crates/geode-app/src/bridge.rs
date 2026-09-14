@@ -801,6 +801,7 @@ role = "key"
                 geode_shell::diagnostics::ActionTail::new(),
             )),
             keymap_diagnostics: Vec::new(),
+            keymap_fragments: Vec::new(),
         }
     }
 

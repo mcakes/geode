@@ -144,6 +144,20 @@ pub struct ShellServices {
     /// action nothing registered, say) was logged at startup and then
     /// invisible in the diagnostics tile until some later hot reload.
     pub keymap_diagnostics: Vec<Diagnostic>,
+    /// The modules' own default bindings (market-data documents §8.4),
+    /// as `ModuleRoster::keymap_fragments` produced them at startup —
+    /// already checked against each factory's contexts, ready to splice.
+    ///
+    /// Carried on the services for the same reason `builtin` is: a config
+    /// hot reload re-reads only the desk and user *directories*, so
+    /// `apply_reload` has to splice the very same fragments back in
+    /// ([`crate::keymap::fragments::splice`]) or the first config write
+    /// of a session would silently unbind every module key until restart.
+    /// They cannot be recomputed here either — the roster is on these
+    /// services, but re-running the check on every reload would re-report
+    /// every fragment diagnostic each time, and `main.rs` has already
+    /// logged them once.
+    pub keymap_fragments: Vec<LayerDoc>,
 }
 
 /// The pieces of the installed `tracing` subscriber the shell needs at

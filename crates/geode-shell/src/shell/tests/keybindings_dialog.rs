@@ -1723,3 +1723,114 @@ fn clicking_the_frozen_filter_row_while_listening_cancels_the_capture(
     assert!(!listening, "the capture was cancelled");
     assert_eq!(mode, DialogMode::Filter);
 }
+
+/// Filter down to the recording module's own row and leave filter mode —
+/// the fragment twin of [`select_the_palette_row`].
+fn select_the_module_row(cx: &mut gpui::VisualTestContext) {
+    cx.simulate_keystrokes("/ r e c o r d i n g");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+}
+
+/// A module's fragment binding (market-data documents §8.4) is a builtin
+/// binding to this dialog, so `d` silences it with the documented
+/// user-layer `"none"` shadow — this app only ever writes the user layer,
+/// and a fragment is no more removable than the shell's own defaults.
+/// Before fragments this key came from `BUILTIN_KEYMAP`, so `d` on a
+/// module binding was already covered by the palette row's test; it is
+/// worth its own test now precisely because the binding no longer comes
+/// from a document the shell owns.
+#[gpui::test]
+fn d_over_a_modules_fragment_binding_writes_a_user_layer_shadow(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (services, _log) = services_with_a_module_fragment(REC_FRAGMENT);
+    let (window, mut vcx) = open_shell_with_user_dir(cx, services, dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_module_row(&mut vcx);
+    let (action, bound) = selected_row(&shell, &vcx);
+    let (key, layer) = bound.expect("the module's row must carry its fragment binding");
+    assert_eq!(action.0, "rec::noop", "sanity: the filter landed on it");
+    assert_eq!(key, "q");
+    assert_eq!(
+        layer,
+        Layer::Builtin,
+        "a fragment binding reports Builtin, which is what selects `d`'s shadow branch"
+    );
+
+    vcx.simulate_keystrokes("d");
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml"))
+        .expect("d must write the user keymap");
+    // `toml_edit` writes a bare key unquoted, so the shadow reads
+    // `q = "none"` — the same document `build_keymap` reads back.
+    assert!(
+        text.contains("q = \"none\""),
+        "a module's fragment binding is silenced, not removed: {text}"
+    );
+    assert!(
+        text.contains("context = \"rec\""),
+        "and the shadow must carry the fragment's own context, or it would \
+         silence `q` everywhere: {text}"
+    );
+}
+
+/// The other verb over the same row: `r` removes the trader's own
+/// override so the module's fragment shows through again. The fragment is
+/// what it falls back TO — the thing that used to be a section of
+/// `BUILTIN_KEYMAP` — so this is the test that says a module's defaults
+/// really are the layer beneath a user keymap, not a peer of it.
+#[gpui::test]
+fn r_removes_a_user_override_and_the_modules_fragment_shows_through(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The file and the in-memory keymap must agree: the writer edits the
+    // file, so a fixture whose keymap claims an override the file lacks
+    // would find nothing to remove (see `USER_KEYMAP_TEXT`'s own comment).
+    let user_text = "config_version = 1\n\n[[bindings]]\ncontext = \"rec\"\n\n[bindings.keys]\n\"ctrl+alt+y\" = \"rec::noop\"\n";
+    std::fs::write(dir.path().join("keymap.toml"), user_text).unwrap();
+    let (mut services, _log) = services_with_a_module_fragment(REC_FRAGMENT);
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: dir.path().join("keymap.toml"),
+        table: user_text.parse().unwrap(),
+    };
+    services.keymap =
+        test_keymap_with_fragments(&services.registry, &services.keymap_fragments, &[user]);
+    let (window, mut vcx) = open_shell_with_user_dir(cx, services, dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_module_row(&mut vcx);
+    let (action, bound) = selected_row(&shell, &vcx);
+    let (key, layer) = bound.expect("bound");
+    assert_eq!(action.0, "rec::noop");
+    assert_eq!(
+        (key.as_str(), layer),
+        ("ctrl+alt+y", Layer::User),
+        "fixture check: the user's override is the effective binding, over the fragment"
+    );
+
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
+    assert!(
+        !text.contains("ctrl+alt+y"),
+        "reset removes the user's key so the module's fragment shows through: {text}"
+    );
+    assert!(
+        !text.contains("none"),
+        "reset must never write a shadow — that would bury the fragment it is \
+         meant to uncover: {text}"
+    );
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("r acknowledges the write it spawned");
+    assert!(
+        !notice.contains("no user override"),
+        "a reset that had something to reset reports no complaint: {notice}"
+    );
+}

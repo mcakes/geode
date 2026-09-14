@@ -63,6 +63,21 @@ use geode_core::config::{Config, Diagnostic, Severity};
 /// longer load-bearing for that reason. It stays as written: removing it
 /// buys nothing, and the tie-break rule is worth keeping documented for
 /// whatever binding table lands here next.
+///
+/// **This document binds nothing inside a module's context, and must not
+/// start again** (market-data documents §8.4). The blotter's two
+/// `blotter && mode == …` sections and the diagnostics tile's own section
+/// used to live here, with a mirrored `(id, title)` table apiece
+/// (`BLOTTER_ACTION_DEFS`, `DIAGNOSTICS_ACTION_DEFS`) registered by
+/// [`register_builtin_actions`] so those bindings survived `build_keymap`
+/// in a build that had never loaded the module — the shell cannot depend
+/// on a module crate, so the only way to bind a module's keys from here
+/// was to keep a copy of its vocabulary. All four are retired: a module
+/// now ships its own bindings as a keymap fragment
+/// ([`crate::keymap::fragments`], `ModuleFactory::default_keymap`), which
+/// the app splices in above this document and below every desk/user
+/// layer, so the ids a binding names and the ids the module registers are
+/// one list in one crate.
 pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 [bindings.keys]
@@ -133,189 +148,7 @@ context = "tile"
 ":" = "tile::command_line"
 "/" = "tile::find"
 
-[[bindings]]
-context = "blotter && mode == normal"
-[bindings.keys]
-"j" = "blotter::down"
-"k" = "blotter::up"
-"h" = "blotter::left"
-"l" = "blotter::right"
-"g g" = "blotter::top"
-"shift+g" = "blotter::bottom"
-"ctrl+d" = "blotter::page_down"
-"ctrl+u" = "blotter::page_up"
-"ctrl+f" = "blotter::page_down_full"
-"ctrl+b" = "blotter::page_up_full"
-"pagedown" = "blotter::page_down_full"
-"pageup" = "blotter::page_up_full"
-"home" = "blotter::first_col"
-"end" = "blotter::last_col"
-"^" = "blotter::first_col"
-"$" = "blotter::last_col"
-"z o" = "blotter::expand"
-"z c" = "blotter::collapse"
-"z a" = "blotter::toggle"
-"z shift+r" = "blotter::expand_all"
-"z shift+m" = "blotter::collapse_all"
-"space" = "blotter::toggle"
-"v" = "blotter::visual"
-"y" = "blotter::yank"
-"n" = "blotter::find_next"
-"shift+n" = "blotter::find_prev"
-"s" = "blotter::sort_cycle"
-"shift+s" = "blotter::sort_cycle_abs"
-"escape" = "blotter::escape"
-
-[[bindings]]
-context = "blotter && mode == visual"
-[bindings.keys]
-"j" = "blotter::down"
-"k" = "blotter::up"
-"g g" = "blotter::top"
-"shift+g" = "blotter::bottom"
-"ctrl+d" = "blotter::page_down"
-"ctrl+u" = "blotter::page_up"
-"ctrl+f" = "blotter::page_down_full"
-"ctrl+b" = "blotter::page_up_full"
-"pagedown" = "blotter::page_down_full"
-"pageup" = "blotter::page_up_full"
-"y" = "blotter::yank"
-"v" = "blotter::escape"
-"escape" = "blotter::escape"
-
-[[bindings]]
-context = "diagnostics"
-[bindings.keys]
-"j" = "diagnostics::down"
-"k" = "diagnostics::up"
-"g g" = "diagnostics::top"
-"shift+g" = "diagnostics::bottom"
-"ctrl+d" = "diagnostics::page_down"
-"ctrl+u" = "diagnostics::page_up"
-"ctrl+f" = "diagnostics::page_down_full"
-"ctrl+b" = "diagnostics::page_up_full"
-"pagedown" = "diagnostics::page_down_full"
-"pageup" = "diagnostics::page_up_full"
-"[" = "diagnostics::prev_section"
-"]" = "diagnostics::next_section"
-"z o" = "diagnostics::expand"
-"z c" = "diagnostics::collapse"
 "#;
-
-/// Mirrors `geode_blotter::tile::ACTIONS` (id, title) exactly — the
-/// shell cannot depend on the blotter crate, so `BUILTIN_KEYMAP`'s own
-/// `blotter::*` bindings (above) carry their own copy of the ids they
-/// name, registered here so `build_keymap` never has to drop them for
-/// want of a registered action, even in a shell-only build that has
-/// never loaded `geode-blotter`. When `BlotterFactory::register_actions`
-/// (Phase 3 §3.2) later tries to register the same ids against the
-/// same registry, `ActionRegistry::register` reports each as already
-/// registered — an `Err` it already discards — so the titles below are
-/// the ones actually shown in the palette; keep them identical to
-/// `geode_blotter::tile::ACTIONS`. `pub` (final review) so
-/// `geode-blotter`'s own `the_shells_reserved_blotter_actions_match_ours`
-/// test can compare titles as well as ids — the shell cannot depend on
-/// the blotter crate to run that check itself, so the mirroring only
-/// runs from the blotter side.
-pub const BLOTTER_ACTION_DEFS: &[(&str, &str)] = &[
-    ("blotter::down", "Cursor down"),
-    ("blotter::up", "Cursor up"),
-    ("blotter::left", "Cursor left"),
-    ("blotter::right", "Cursor right"),
-    ("blotter::top", "Cursor to top"),
-    ("blotter::bottom", "Cursor to bottom"),
-    ("blotter::page_down", "Half page down"),
-    ("blotter::page_up", "Half page up"),
-    ("blotter::page_down_full", "Page down"),
-    ("blotter::page_up_full", "Page up"),
-    ("blotter::first_col", "First column"),
-    ("blotter::last_col", "Last column"),
-    ("blotter::expand", "Expand node"),
-    ("blotter::collapse", "Collapse node"),
-    ("blotter::toggle", "Toggle node"),
-    ("blotter::expand_all", "Expand all"),
-    ("blotter::collapse_all", "Collapse all"),
-    ("blotter::visual", "Visual mode"),
-    ("blotter::escape", "Leave visual / clear narrowing"),
-    ("blotter::yank", "Yank rows as TSV"),
-    ("blotter::find_next", "Next match"),
-    ("blotter::find_prev", "Previous match"),
-    ("blotter::sort_cycle", "Sort by cursor column"),
-    (
-        "blotter::sort_cycle_abs",
-        "Sort by cursor column's magnitude",
-    ),
-];
-
-/// Just the ids from [`BLOTTER_ACTION_DEFS`], for the mirror test.
-pub const BLOTTER_ACTIONS: &[&str] = &[
-    "blotter::down",
-    "blotter::up",
-    "blotter::left",
-    "blotter::right",
-    "blotter::top",
-    "blotter::bottom",
-    "blotter::page_down",
-    "blotter::page_up",
-    "blotter::page_down_full",
-    "blotter::page_up_full",
-    "blotter::first_col",
-    "blotter::last_col",
-    "blotter::expand",
-    "blotter::collapse",
-    "blotter::toggle",
-    "blotter::expand_all",
-    "blotter::collapse_all",
-    "blotter::visual",
-    "blotter::escape",
-    "blotter::yank",
-    "blotter::find_next",
-    "blotter::find_prev",
-    "blotter::sort_cycle",
-    "blotter::sort_cycle_abs",
-];
-
-/// Mirrors `geode_diagnostics::ACTIONS` (id, title) exactly — same
-/// reasoning as [`BLOTTER_ACTION_DEFS`]'s own doc comment: `BUILTIN_KEYMAP`'s
-/// `diagnostics::*` bindings carry their own copy of the ids they name,
-/// registered here so `build_keymap` never drops them for want of a
-/// registered action even in a shell-only build that never loaded
-/// `geode-diagnostics` — `cargo check -p geode-shell --features
-/// test-support --all-targets` is exactly that build. `pub` for the same
-/// cross-crate mirror-test reason. `diagnostics::open` was retired by user
-/// ruling 2026-09-09: the status bar's diagnostics-summary click is the
-/// one focus-or-add door (`ShellView::open_module`), and the palette's
-/// `Diagnostics: Split` rows (`register_add_actions`) always add or fill.
-pub const DIAGNOSTICS_ACTION_DEFS: &[(&str, &str)] = &[
-    ("diagnostics::down", "Cursor down"),
-    ("diagnostics::up", "Cursor up"),
-    ("diagnostics::top", "Cursor to top"),
-    ("diagnostics::bottom", "Cursor to bottom"),
-    ("diagnostics::page_down", "Half page down"),
-    ("diagnostics::page_up", "Half page up"),
-    ("diagnostics::page_down_full", "Page down"),
-    ("diagnostics::page_up_full", "Page up"),
-    ("diagnostics::next_section", "Next section"),
-    ("diagnostics::prev_section", "Previous section"),
-    ("diagnostics::expand", "Expand"),
-    ("diagnostics::collapse", "Collapse"),
-];
-
-/// Just the ids from [`DIAGNOSTICS_ACTION_DEFS`], for the mirror test.
-pub const DIAGNOSTICS_ACTIONS: &[&str] = &[
-    "diagnostics::down",
-    "diagnostics::up",
-    "diagnostics::top",
-    "diagnostics::bottom",
-    "diagnostics::page_down",
-    "diagnostics::page_up",
-    "diagnostics::page_down_full",
-    "diagnostics::page_up_full",
-    "diagnostics::next_section",
-    "diagnostics::prev_section",
-    "diagnostics::expand",
-    "diagnostics::collapse",
-];
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
     reg.register(ActionDef {
@@ -602,18 +435,6 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
             "Dump frame-time stats to stderr",
             "Diagnostics",
         );
-    }
-    // The blotter's own actions (Phase 3 §3.2), reserved here so
-    // BUILTIN_KEYMAP's `blotter::*` bindings above never get dropped as
-    // unregistered — see `BLOTTER_ACTION_DEFS`'s doc comment.
-    for (id, title) in BLOTTER_ACTION_DEFS {
-        action(reg, id, title, "Blotter");
-    }
-    // The diagnostics module's own actions (Phase 4b Task 5), reserved
-    // here so BUILTIN_KEYMAP's `diagnostics::*` bindings never get dropped
-    // as unregistered — see `DIAGNOSTICS_ACTION_DEFS`'s doc comment.
-    for (id, title) in DIAGNOSTICS_ACTION_DEFS {
-        action(reg, id, title, "Diagnostics");
     }
 }
 
@@ -923,84 +744,6 @@ mod tests {
                 assert_eq!(action.0, "frame::slot_1");
             }
             other => panic!("expected a match, got {other:?}"),
-        }
-    }
-
-    /// `^`/`$` are vim's line-start/line-end motions, bound beside
-    /// `home`/`end` as the column-extreme pair (user ruling 2026-09-12: a
-    /// general navigation grammar, the blotter its first surface). Both
-    /// are shifted punctuation on a US layout, so they bind as the bare
-    /// character with no `shift` modifier — the same shape `:` and `[`
-    /// already rely on (see the shift+punctuation note on
-    /// `BUILTIN_KEYMAP`'s doc comment).
-    #[test]
-    fn caret_and_dollar_resolve_to_the_column_extremes_in_the_blotter() {
-        let mut reg = ActionRegistry::default();
-        register_builtin_actions(&mut reg);
-        let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &reg);
-        assert!(diags.is_empty(), "{diags:?}");
-        let stack = [
-            KeyContext::new("workspace"),
-            KeyContext::new("tile"),
-            KeyContext::new("blotter").pair("mode", "normal").counts(),
-        ];
-        for (spec, expected) in [("^", "blotter::first_col"), ("$", "blotter::last_col")] {
-            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
-            match Matcher::default().press(&keymap, keystroke, &stack) {
-                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
-                other => panic!("{spec}: expected a match, got {other:?}"),
-            }
-        }
-    }
-
-    /// `BLOTTER_ACTIONS` and `BLOTTER_ACTION_DEFS` are two separate
-    /// consts in this file (a plain id list for the cross-crate mirror
-    /// test, a (id, title) list to register with) — this guards them
-    /// against drifting apart from each other, since `geode-blotter`'s
-    /// own mirror test only ever sees `BLOTTER_ACTIONS`.
-    #[test]
-    fn the_two_blotter_action_lists_in_this_file_agree() {
-        let ids: Vec<&str> = BLOTTER_ACTION_DEFS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, BLOTTER_ACTIONS.to_vec());
-    }
-
-    /// Every `blotter::*` id the builtin keymap binds (Step 5) must be
-    /// registered here — this is what makes
-    /// `builtin_keymap_builds_clean_against_builtin_actions` diagnostic-
-    /// free once the blotter bindings are appended.
-    #[test]
-    fn every_blotter_binding_target_is_reserved() {
-        let mut reg = ActionRegistry::default();
-        register_builtin_actions(&mut reg);
-        for id in BLOTTER_ACTIONS {
-            assert!(
-                reg.contains(&ActionId((*id).to_string())),
-                "{id} must be reserved by register_builtin_actions"
-            );
-        }
-    }
-
-    /// Same drift guard as [`the_two_blotter_action_lists_in_this_file_agree`],
-    /// for the diagnostics pair.
-    #[test]
-    fn the_two_diagnostics_action_lists_in_this_file_agree() {
-        let ids: Vec<&str> = DIAGNOSTICS_ACTION_DEFS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, DIAGNOSTICS_ACTIONS.to_vec());
-    }
-
-    /// Every `diagnostics::*` id the builtin keymap binds (the
-    /// `diagnostics` context block) must be registered here — same
-    /// reasoning as [`every_blotter_binding_target_is_reserved`].
-    #[test]
-    fn every_diagnostics_binding_target_is_reserved() {
-        let mut reg = ActionRegistry::default();
-        register_builtin_actions(&mut reg);
-        for id in DIAGNOSTICS_ACTIONS {
-            assert!(
-                reg.contains(&ActionId((*id).to_string())),
-                "{id} must be reserved by register_builtin_actions"
-            );
         }
     }
 

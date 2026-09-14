@@ -23,6 +23,76 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// This module's default bindings (market-data documents §8.4), handed to
+/// the app through [`ModuleFactory::default_keymap`] and spliced above the
+/// shell's own `BUILTIN_KEYMAP` — where, until Part 3, these very two
+/// `[[bindings]]` sections lived, beside a mirrored copy of
+/// `crate::tile::ACTIONS` the shell had to carry because it cannot depend
+/// on this crate. Both copies are gone: the ids a binding names and the
+/// ids `register_actions` registers are now the same list in the same
+/// crate, so they cannot drift, and a desk or user keymap still overrides
+/// any of this exactly as it always did (a fragment sits below every layer
+/// a trader edits).
+///
+/// Two contexts, matching what `BlotterTile::key_context` actually
+/// pushes: `normal` is the full grammar, `visual` the subset that makes
+/// sense while a selection is live (motions, `y`, and the two ways out).
+/// `^`/`$` sit beside `home`/`end` as the column-extreme pair (user ruling
+/// 2026-09-12: a general navigation grammar, the blotter its first
+/// surface); both are shifted punctuation on a US layout, so they bind as
+/// the bare character with no `shift` modifier.
+pub const DEFAULT_KEYMAP: &str = r#"
+[[bindings]]
+context = "blotter && mode == normal"
+[bindings.keys]
+"j" = "blotter::down"
+"k" = "blotter::up"
+"h" = "blotter::left"
+"l" = "blotter::right"
+"g g" = "blotter::top"
+"shift+g" = "blotter::bottom"
+"ctrl+d" = "blotter::page_down"
+"ctrl+u" = "blotter::page_up"
+"ctrl+f" = "blotter::page_down_full"
+"ctrl+b" = "blotter::page_up_full"
+"pagedown" = "blotter::page_down_full"
+"pageup" = "blotter::page_up_full"
+"home" = "blotter::first_col"
+"end" = "blotter::last_col"
+"^" = "blotter::first_col"
+"$" = "blotter::last_col"
+"z o" = "blotter::expand"
+"z c" = "blotter::collapse"
+"z a" = "blotter::toggle"
+"z shift+r" = "blotter::expand_all"
+"z shift+m" = "blotter::collapse_all"
+"space" = "blotter::toggle"
+"v" = "blotter::visual"
+"y" = "blotter::yank"
+"n" = "blotter::find_next"
+"shift+n" = "blotter::find_prev"
+"s" = "blotter::sort_cycle"
+"shift+s" = "blotter::sort_cycle_abs"
+"escape" = "blotter::escape"
+
+[[bindings]]
+context = "blotter && mode == visual"
+[bindings.keys]
+"j" = "blotter::down"
+"k" = "blotter::up"
+"g g" = "blotter::top"
+"shift+g" = "blotter::bottom"
+"ctrl+d" = "blotter::page_down"
+"ctrl+u" = "blotter::page_up"
+"ctrl+f" = "blotter::page_down_full"
+"ctrl+b" = "blotter::page_up_full"
+"pagedown" = "blotter::page_down_full"
+"pageup" = "blotter::page_up_full"
+"y" = "blotter::yank"
+"v" = "blotter::escape"
+"escape" = "blotter::escape"
+"#;
+
 pub struct BlotterContent {
     tile: Entity<BlotterTile>,
 }
@@ -153,6 +223,16 @@ impl ModuleFactory for BlotterFactory {
         "blotter"
     }
 
+    /// The one context `BlotterTile::key_context` names — the `mode` pair
+    /// it also sets is a pair inside this context, not a second one.
+    fn contexts(&self) -> Vec<&'static str> {
+        vec!["blotter"]
+    }
+
+    fn default_keymap(&self) -> Option<&'static str> {
+        Some(DEFAULT_KEYMAP)
+    }
+
     fn register_actions(&self, registry: &mut ActionRegistry) {
         for (id, title) in ACTIONS {
             let _ = registry.register(ActionDef {
@@ -202,6 +282,106 @@ mod tests {
     use geode_core::groupings::GroupingSlots;
     use geode_core::log::LogLevels;
     use geode_core::scopes::SavedScopes;
+    use geode_shell::defaults::default_mod;
+    use geode_shell::keymap::fragments::{check_fragment, fragment_doc};
+    use geode_shell::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
+
+    /// What the retired `the_shells_reserved_blotter_actions_match_ours`
+    /// and the shell's own `every_blotter_binding_target_is_reserved`
+    /// together used to guarantee, now provable inside this crate and
+    /// without a mirrored copy of anything: every id
+    /// [`DEFAULT_KEYMAP`] binds is an id `register_actions` registers
+    /// (`build_keymap` warns and drops otherwise, so a clean diagnostic
+    /// list IS that check), and every registered action is reachable from
+    /// some key (the direction a mirror of the id list could never
+    /// cover: it compared two lists, not a list against the bindings).
+    #[test]
+    fn the_default_keymap_binds_exactly_the_actions_this_module_registers() {
+        let doc = fragment_doc("blotter", DEFAULT_KEYMAP).expect("the fragment parses");
+        let (doc, diags) = check_fragment(doc, &["blotter"]);
+        assert!(
+            diags.is_empty(),
+            "every fragment binding must name this module's own context: {diags:?}"
+        );
+        let mut registry = ActionRegistry::default();
+        for (id, title) in ACTIONS {
+            registry
+                .register(ActionDef {
+                    id: ActionId((*id).to_string()),
+                    title: (*title).to_string(),
+                    category: "Blotter".to_string(),
+                })
+                .expect("no duplicate ids");
+        }
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry);
+        assert!(
+            diags.is_empty(),
+            "the fragment must bind only registered actions: {diags:?}"
+        );
+        let bound: std::collections::BTreeSet<&str> = keymap
+            .bindings()
+            .iter()
+            .map(|b| b.action.0.as_str())
+            .collect();
+        for (id, _) in ACTIONS {
+            assert!(
+                bound.contains(id),
+                "{id} is registered but the default keymap binds nothing to it"
+            );
+        }
+    }
+
+    /// Moved here from the shell's own `defaults.rs` with the bindings
+    /// (user ruling 2026-09-12: `^`/`$` are the column-extreme pair
+    /// beside `home`/`end`). Both are shifted punctuation on a US layout,
+    /// so they bind as the bare character with `shift` cleared — a
+    /// regression here would be silent, since the keystroke still parses.
+    #[test]
+    fn caret_and_dollar_resolve_to_the_column_extremes() {
+        let doc = fragment_doc("blotter", DEFAULT_KEYMAP).unwrap();
+        let mut registry = ActionRegistry::default();
+        for (id, title) in ACTIONS {
+            let _ = registry.register(ActionDef {
+                id: ActionId((*id).to_string()),
+                title: (*title).to_string(),
+                category: "Blotter".to_string(),
+            });
+        }
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let stack = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("blotter").pair("mode", "normal").counts(),
+        ];
+        for (spec, expected) in [("^", "blotter::first_col"), ("$", "blotter::last_col")] {
+            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
+            match Matcher::default().press(&keymap, keystroke, &stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
+                other => panic!("{spec}: expected a match, got {other:?}"),
+            }
+        }
+    }
+
+    /// The factory is what the app asks, so the fragment has to reach the
+    /// roster through it — a `DEFAULT_KEYMAP` nothing returns is a
+    /// blotter with no keys at all, and no diagnostic anywhere would say
+    /// so.
+    #[test]
+    fn the_factory_ships_the_fragment_and_declares_the_blotter_context() {
+        let (data, _rx) = DataHandle::for_tests();
+        let factory = BlotterFactory::new(
+            data,
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::Vim,
+            Duration::from_secs(1),
+        );
+        assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
+        assert_eq!(factory.contexts(), vec!["blotter"]);
+    }
 
     /// One tile per open window, its own `VisualTestContext`.
     fn open_tile(

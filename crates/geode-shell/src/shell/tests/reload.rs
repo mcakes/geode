@@ -1380,3 +1380,44 @@ fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
         "one reload-poll tick must refresh `today` from the clock"
     );
 }
+
+/// The reload half of keymap fragments (market-data documents §8.4): a
+/// hot reload rebuilds the keymap from the freshly loaded config, which
+/// knows nothing about any module, so `apply_reload` has to splice the
+/// services' own fragments back in. Without that, the FIRST config write
+/// of a session — a theme pick, a font-size step, any dialog save —
+/// silently unbinds every module key until restart, the same class of bug
+/// `ShellServices::builtin`'s own doc comment records for the builtin
+/// docs.
+#[gpui::test]
+fn a_reload_keeps_the_modules_fragment_bindings(cx: &mut gpui::TestAppContext) {
+    let (services, log) = services_with_a_module_fragment(REC_FRAGMENT);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+
+    shell.update(&mut vcx, |shell, cx| {
+        shell.apply_reload(config_with_theme("Gruvbox Dark"), cx)
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    shell.read_with(&vcx, |shell, _| {
+        assert_eq!(
+            shell.services.theme.active_name(),
+            "Gruvbox Dark",
+            "fixture check: the reload really was applied"
+        );
+    });
+
+    log.borrow_mut().clear();
+    vcx.simulate_keystrokes("q");
+    assert!(
+        log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Dispatch(_, a, _) if a.0 == "rec::noop"
+        )),
+        "the module's fragment binding must survive the reload: {:?}",
+        log.borrow()
+    );
+}

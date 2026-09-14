@@ -46,6 +46,37 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diagnostics::collapse", "Collapse"),
 ];
 
+/// This module's default bindings (market-data documents §8.4), handed to
+/// the app through [`ModuleFactory::default_keymap`]. Until Part 3 this
+/// `[[bindings]]` section lived in the shell's own `BUILTIN_KEYMAP`,
+/// beside a mirrored copy of [`ACTIONS`] the shell had to carry because it
+/// cannot depend on this crate; both copies are gone, and the ids a
+/// binding names are now the same list `register_actions` registers, in
+/// the same crate.
+///
+/// One context, and no `mode` pair: this tile has no modes — `[`/`]`
+/// cycle its five sections and `/` (the shell's own `tile` binding)
+/// filters.
+pub const DEFAULT_KEYMAP: &str = r#"
+[[bindings]]
+context = "diagnostics"
+[bindings.keys]
+"j" = "diagnostics::down"
+"k" = "diagnostics::up"
+"g g" = "diagnostics::top"
+"shift+g" = "diagnostics::bottom"
+"ctrl+d" = "diagnostics::page_down"
+"ctrl+u" = "diagnostics::page_up"
+"ctrl+f" = "diagnostics::page_down_full"
+"ctrl+b" = "diagnostics::page_up_full"
+"pagedown" = "diagnostics::page_down_full"
+"pageup" = "diagnostics::page_up_full"
+"[" = "diagnostics::prev_section"
+"]" = "diagnostics::next_section"
+"z o" = "diagnostics::expand"
+"z c" = "diagnostics::collapse"
+"#;
+
 struct DiagnosticsContent {
     tile: Entity<DiagnosticsTile>,
 }
@@ -116,6 +147,15 @@ impl ModuleFactory for DiagnosticsFactory {
         "diagnostics"
     }
 
+    /// The one context `DiagnosticsTile::key_context` names.
+    fn contexts(&self) -> Vec<&'static str> {
+        vec!["diagnostics"]
+    }
+
+    fn default_keymap(&self) -> Option<&'static str> {
+        Some(DEFAULT_KEYMAP)
+    }
+
     fn register_actions(&self, registry: &mut ActionRegistry) {
         for (id, title) in ACTIONS {
             let _ = registry.register(ActionDef {
@@ -158,23 +198,66 @@ impl ModuleFactory for DiagnosticsFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_shell::keymap::fragments::{check_fragment, fragment_doc};
 
-    /// The shell cannot depend on `geode-diagnostics` (layering: shell
-    /// never depends on a module), so `geode_shell::defaults` carries its
-    /// own copy of these ids and titles to reserve, ahead of
-    /// `DiagnosticsFactory::register_actions`, so `BUILTIN_KEYMAP`'s
-    /// `diagnostics::*` bindings are never dropped as unregistered and
-    /// the palette shows the same title
-    /// either way — same shape as `geode_blotter::tile::tests::
-    /// the_shells_reserved_blotter_actions_match_ours`.
+    /// What the retired `the_shells_reserved_diagnostics_actions_match_ours`
+    /// and the shell's own `every_diagnostics_binding_target_is_reserved`
+    /// together used to guarantee, now provable inside this crate with no
+    /// mirrored copy of anything — the twin of
+    /// `geode_blotter::content`'s own fragment test, and the same two
+    /// directions: every id the fragment binds is registered here (a
+    /// `build_keymap` warning is exactly that failure), and every
+    /// registered action is reachable from some key.
     #[test]
-    fn the_shells_reserved_diagnostics_actions_match_ours() {
-        let ours: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ours, geode_shell::defaults::DIAGNOSTICS_ACTIONS.to_vec());
-        assert_eq!(
-            ACTIONS,
-            geode_shell::defaults::DIAGNOSTICS_ACTION_DEFS,
-            "titles must match too, not just ids"
+    fn the_default_keymap_binds_exactly_the_actions_this_module_registers() {
+        let doc = fragment_doc("diagnostics", DEFAULT_KEYMAP).expect("the fragment parses");
+        let (doc, diags) = check_fragment(doc, &["diagnostics"]);
+        assert!(
+            diags.is_empty(),
+            "every fragment binding must name this module's own context: {diags:?}"
         );
+        let mut registry = ActionRegistry::default();
+        for (id, title) in ACTIONS {
+            registry
+                .register(ActionDef {
+                    id: ActionId((*id).to_string()),
+                    title: (*title).to_string(),
+                    category: "Diagnostics".to_string(),
+                })
+                .expect("no duplicate ids");
+        }
+        let (keymap, diags) = geode_shell::keymap::build_keymap(
+            &[doc],
+            geode_shell::defaults::default_mod(),
+            &registry,
+        );
+        assert!(
+            diags.is_empty(),
+            "the fragment must bind only registered actions: {diags:?}"
+        );
+        let bound: std::collections::BTreeSet<&str> = keymap
+            .bindings()
+            .iter()
+            .map(|b| b.action.0.as_str())
+            .collect();
+        for (id, _) in ACTIONS {
+            assert!(
+                bound.contains(id),
+                "{id} is registered but the default keymap binds nothing to it"
+            );
+        }
+    }
+
+    /// The factory is what the app asks: a `DEFAULT_KEYMAP` the factory
+    /// does not return is a diagnostics tile with no keys, and nothing
+    /// would report it.
+    #[test]
+    fn the_factory_ships_the_fragment_and_declares_the_diagnostics_context() {
+        let factory = DiagnosticsFactory::new(
+            Arc::new(Ring::new(8)),
+            geode_core::config::Config::load(&geode_core::config::ConfigSources::default()),
+        );
+        assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
+        assert_eq!(factory.contexts(), vec!["diagnostics"]);
     }
 }

@@ -68,6 +68,7 @@ fn services_with_pickable() -> ShellServices {
             crate::diagnostics::ActionTail::new(),
         )),
         keymap_diagnostics: Vec::new(),
+        keymap_fragments: Vec::new(),
     }
 }
 

@@ -13,7 +13,9 @@ use crate::actions::{ActionId, ActionRegistry};
 use crate::diagnostics::Diagnostics;
 use crate::frame::Frame;
 use crate::keymap::KeyContext;
+use crate::keymap::fragments;
 use crate::tiling::TileId;
+use geode_core::config::{Diagnostic, LayerDoc};
 use geode_core::query::{QueryKey, QueryOutcome};
 use gpui::{AnyView, App, Entity, Window};
 
@@ -113,6 +115,33 @@ pub trait ModuleFactory {
     /// Runs once, before the keymap builds — `build_keymap` drops any
     /// binding whose action is unregistered.
     fn register_actions(&self, registry: &mut ActionRegistry);
+    /// The key contexts this module's [`TileContent::key_context`] can
+    /// name (`["blotter"]`). A fragment binding whose predicate does not
+    /// name one of these as its FIRST identifier is dropped with an error
+    /// diagnostic ([`crate::keymap::fragments::check_fragment`]), so a
+    /// fragment can never shadow a shell binding or another module's.
+    ///
+    /// Defaults to the kind, which is what every module whose context and
+    /// kind are the same word wants — but it is a separate answer on
+    /// purpose, because the two names are genuinely independent: the
+    /// market-data panel is kind `cvi` (one roster entry per document
+    /// kind) and context `marketdata` (one vocabulary shared by all of
+    /// them). A `Vec` rather than the `&'static [&'static str]` the plan
+    /// sketched: a default body has only `self.kind()` to work with, and
+    /// a `&'static` slice cannot be built from a value without leaking.
+    /// Called once per factory at startup and on each reload, so the
+    /// allocation is not on any hot path.
+    fn contexts(&self) -> Vec<&'static str> {
+        vec![self.kind()]
+    }
+    /// This module's default bindings, as keymap TOML (`[[bindings]]`
+    /// tables only) — the module's own copy of what used to live in the
+    /// shell's `BUILTIN_KEYMAP`. `None` for a module with no keys of its
+    /// own (the placeholder). See [`crate::keymap::fragments`] for where
+    /// it sits in the layer order and why.
+    fn default_keymap(&self) -> Option<&'static str> {
+        None
+    }
     /// Build a fresh occupant for `tile`. **Contract (I2, final
     /// review):** the occupant does not yet know whether it is on
     /// screen — `TileContent::set_visible`'s own doc comment states the
@@ -166,6 +195,37 @@ impl ModuleRoster {
 
     pub fn kinds(&self) -> Vec<&'static str> {
         self.factories.iter().map(|f| f.kind()).collect()
+    }
+
+    /// Every module's default bindings as keymap docs, in roster order,
+    /// each already checked against its own factory's
+    /// [`ModuleFactory::contexts`] — the app splices these into the layer
+    /// stack with [`crate::keymap::fragments::splice`] and folds the
+    /// diagnostics into the ones `build_keymap` reports.
+    ///
+    /// The pairing of a fragment with the contexts it is checked against
+    /// happens HERE, inside the loop that reads both off the same
+    /// factory, rather than at the call site: a caller collecting docs
+    /// and contexts into two lists and zipping them is one reordering
+    /// away from checking a fragment against another module's contexts,
+    /// which would silently drop exactly the bindings it should keep.
+    pub fn keymap_fragments(&self) -> (Vec<LayerDoc>, Vec<Diagnostic>) {
+        let mut docs = Vec::new();
+        let mut diags = Vec::new();
+        for factory in &self.factories {
+            let Some(text) = factory.default_keymap() else {
+                continue;
+            };
+            match fragments::fragment_doc(factory.kind(), text) {
+                Ok(doc) => {
+                    let (doc, d) = fragments::check_fragment(doc, &factory.contexts());
+                    docs.push(doc);
+                    diags.extend(d);
+                }
+                Err(d) => diags.push(d),
+            }
+        }
+        (docs, diags)
     }
 }
 
@@ -293,6 +353,18 @@ pub mod recording {
         /// view type is private and the roster hands back `&dyn
         /// ModuleFactory`. `None` until the first `create`.
         pub last_focus: Rc<RefCell<Option<FocusHandle>>>,
+        /// What [`ModuleFactory::default_keymap`] answers — the keymap
+        /// fragment this factory ships. `None` by default, so every
+        /// existing fixture is a module with no default bindings; a test
+        /// that wants one sets it before boxing the factory.
+        pub fragment: Option<&'static str>,
+        /// What [`ModuleFactory::contexts`] answers, when non-empty.
+        /// Empty (the default) means "just my kind", the trait's own
+        /// default — so a fixture opts into a context that differs from
+        /// its kind (the market-data panel's shape) by setting this, and
+        /// every other fixture keeps the ordinary behaviour without
+        /// naming a string twice.
+        pub contexts: &'static [&'static str],
     }
 
     impl RecordingFactory {
@@ -303,6 +375,8 @@ pub mod recording {
                 completions: vec!["delta01".into(), "gamma01".into()],
                 command_result: Ok(()),
                 last_focus: Rc::new(RefCell::new(None)),
+                fragment: None,
+                contexts: &[],
             }
         }
     }
@@ -386,6 +460,16 @@ pub mod recording {
         fn kind(&self) -> &'static str {
             self.kind
         }
+        fn contexts(&self) -> Vec<&'static str> {
+            if self.contexts.is_empty() {
+                vec![self.kind]
+            } else {
+                self.contexts.to_vec()
+            }
+        }
+        fn default_keymap(&self) -> Option<&'static str> {
+            self.fragment
+        }
         fn register_actions(&self, registry: &mut ActionRegistry) {
             let _ = registry.register(crate::actions::ActionDef {
                 id: ActionId(format!("{}::noop", self.kind)),
@@ -450,5 +534,81 @@ mod tests {
         let mut again = ActionRegistry::default();
         roster.register_actions(&mut again);
         assert_eq!(again.iter().count(), 1);
+    }
+
+    /// One doc per factory that ships a fragment, in roster order, each
+    /// already through `check_fragment` — the roster is where the app
+    /// collects them, so this is the one place that pairing can be got
+    /// wrong (a fragment checked against the wrong factory's contexts
+    /// would drop exactly the bindings it should keep).
+    #[test]
+    fn keymap_fragments_are_one_checked_doc_per_factory_that_ships_one() {
+        let mut first = recording::RecordingFactory::new("rec");
+        first.fragment =
+            Some("[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n");
+        let mut second = recording::RecordingFactory::new("other");
+        // Declares a context that is NOT its kind (the market-data
+        // panel's own shape: kind `cvi`, context `marketdata`), so a
+        // roster that checked against `kind()` would drop this binding.
+        second.contexts = &["othercontext"];
+        second.fragment = Some(
+            "[[bindings]]\ncontext = \"othercontext\"\n[bindings.keys]\n\"q\" = \"other::noop\"\n",
+        );
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(first));
+        roster.add(Box::new(second));
+        // Ships no fragment at all: contributes no doc, not an empty one.
+        roster.add(Box::new(placeholder::PlaceholderFactory));
+
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let files: Vec<String> = docs
+            .iter()
+            .map(|d| d.file.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files, vec!["<module:rec>", "<module:other>"]);
+        for doc in &docs {
+            assert_eq!(doc.name, "keymap");
+            assert_eq!(doc.layer, geode_core::config::Layer::Builtin);
+            assert_eq!(doc.table["bindings"].as_array().unwrap().len(), 1);
+        }
+    }
+
+    /// The check really runs here: a fragment binding outside its own
+    /// factory's contexts is dropped with an error diagnostic by the
+    /// roster, not merely by whoever remembers to call `check_fragment`.
+    #[test]
+    fn a_factorys_fragment_is_checked_against_its_own_contexts() {
+        let mut factory = recording::RecordingFactory::new("rec");
+        factory.fragment = Some(
+            "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n\n[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"ctrl+q\" = \"rec::noop\"\n",
+        );
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(factory));
+        let (docs, diags) = roster.keymap_fragments();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(
+            docs[0].table["bindings"].as_array().unwrap().len(),
+            1,
+            "the workspace binding must be gone: {:?}",
+            docs[0].table
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, geode_core::config::Severity::Error);
+        assert!(diags[0].message.contains("workspace"), "{}", diags[0]);
+    }
+
+    /// The default `contexts()` is the factory's kind, so the common case
+    /// (a module whose context and kind are the same word) ships a
+    /// fragment with nothing extra to declare.
+    #[test]
+    fn a_factory_declares_its_kind_as_its_context_by_default() {
+        let factory = recording::RecordingFactory::new("rec");
+        assert_eq!(factory.contexts(), vec!["rec"]);
+        assert_eq!(
+            placeholder::PlaceholderFactory.contexts(),
+            vec!["placeholder"]
+        );
+        assert_eq!(placeholder::PlaceholderFactory.default_keymap(), None);
     }
 }
