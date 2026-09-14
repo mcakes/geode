@@ -9941,6 +9941,48 @@ run_mutation "fragments: a reload re-states the fragment diagnostics in the conf
   '' \
   geode-shell a_dropped_fragment_bindings_diagnostic_survives_a_reload
 
+# ---- Part 3 Task 4: insert mode (market-data documents §8.6) ----
+
+# The branch must key on a TILE holding the keyboard, not on the mode
+# alone: with the shell root focused (one tile click away, via
+# `pending_focus_restore`) nothing is being typed into an input, so the
+# matcher — counts and all — has to stay in charge.
+run_mutation "insert: the insert branch runs even while a shell surface holds focus" \
+  crates/geode-shell/src/shell/input.rs \
+  '            .is_some_and(|focused| !self.holds_shell_focus(&focused, cx))' \
+  '            .is_some_and(|_focused| true)' \
+  geode-shell the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode
+
+# Resolved against the whole stack, not `workspace` alone (the filter
+# field's rule, which this branch deliberately does NOT copy): the
+# module's own `escape`/`enter` in `<kind> && mode == insert` are exactly
+# the bindings that must win while its input has the keyboard.
+run_mutation "insert: single-keystroke bindings resolve against workspace alone, not the tile's stack" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && let Some(action) = self
+                        .single_keystroke_binding(&ks, &stack)' \
+  '                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && let Some(action) = self
+                        .single_keystroke_binding(&ks, &[KeyContext::new("workspace")])' \
+  geode-shell typed_keys_reach_a_tiles_focused_input_in_insert_mode
+
+# The early return is the "never feed the matcher" half: without it a
+# keystroke no binding claimed falls through to `matcher.press`, and a
+# typed digit becomes a count prefix again.
+run_mutation "insert: a non-binding keystroke falls through to the matcher" \
+  crates/geode-shell/src/shell/input.rs \
+  '                return;
+            }
+        }
+
+        // Deliberately no analogous "if palette_input is focused, return' \
+  '            }
+        }
+
+        // Deliberately no analogous "if palette_input is focused, return' \
+  geode-shell a_count_prefix_typed_in_insert_mode_is_text_not_a_count
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
