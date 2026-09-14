@@ -10289,6 +10289,98 @@ run_mutation "mdtile: a delivery under an open barrier is staged" \
   geode-marketdata \
   a_delivery_under_an_open_barrier_is_staged_until_the_flip
 
+# Task 7 — cell editing.
+#
+# A commit PARSES before it writes (spec §8.6), through the column's
+# declared type. Mutated to write a constant, every commit files 0.0 in
+# the draft: a wrong VALUE on screen and, come Part 4's upload, a wrong
+# value sent to the desk — and every marker assertion (edited, the header
+# count, insert mode gone) still passes, which is why the covering test
+# asserts the number itself.
+run_mutation "mdedit: a commit parses the typed text before writing it" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let value = match parse_cell(&text, self.spec.value_type) {' \
+  '        let value = match Ok::<f64, String>(0.0) {' \
+  geode-marketdata \
+  edit_commit_paints_the_cell_as_edited_and_the_header_counts_it
+
+# R1 (Task 4, verified at the pinned gpui-component rev): blur FIRST, then
+# drop. Mutated to drop alone, `Root` keeps the focused input alive as a
+# strong `AnyInputState` — it only ever unregisters from the `Input`'s own
+# render, which an input removed from the tree never reaches — so
+# `Window::focused` stays `Some` on a dead editor, the shell's
+# dropped-focus net (`render`'s `focused(cx).is_none()`) never fires, and
+# every chord is gone for the rest of the session. Both lines are the
+# anchor because `self.editor = None;` alone appears elsewhere.
+run_mutation "mdedit: the editor gives up focus before it is dropped" \
+  crates/geode-marketdata/src/tile.rs \
+  '        window.blur(cx);
+        self.editor = None;' \
+  '        self.editor = None;' \
+  geode-marketdata \
+  the_editor_gives_up_focus_before_it_is_dropped
+
+# The editor is dropped on a SUCCESSFUL commit. Mutated to keep it, the
+# panel stays in insert mode with the value already written: every
+# keystroke after that is text going into an input nobody meant to be
+# open, and `mode == insert` is exactly what tells the shell to stop
+# matching. Anchored on the two lines after `draft.set`, since
+# `close_editor(window, cx)` alone appears at four sites (the moved cell,
+# the two refusals and this one).
+run_mutation "mdedit: a committed edit closes the editor" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.close_editor(window, cx);
+        self.notice = None;' \
+  '        self.notice = None;' \
+  geode-marketdata \
+  key_context_reports_insert_while_the_editor_exists
+
+# `:bump` walks the cursor's ROW by default (a term's whole node ladder is
+# the shape a trader nudges); `col` is the opt-in. Mutated so the row arm
+# walks the column instead, a bare `:bump 0.25` moves one node across
+# every term rather than one term across every node — the same count of
+# edits, in the wrong cells, and nothing about the header or the edit
+# markers says so.
+#
+# The parse-side default (`commands.rs`'s `None | Some("row")`) is guarded
+# by that core's own `bump_reads_a_delta_and_an_optional_axis`; this entry
+# is the tile half, which is what Task 7 built.
+run_mutation "mdedit: bump walks the cursor's row by default" \
+  crates/geode-marketdata/src/tile.rs \
+  '            BumpAxis::Row => self.model.rows[row]
+                .cells
+                .iter()
+                .enumerate()
+                .filter_map(|(ci, cell)| cell.value.map(|v| ((row, ci), v)))
+                .collect(),' \
+  '            BumpAxis::Row => self
+                .model
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(ri, r)| {
+                    r.cells
+                        .get(col)
+                        .and_then(|cell| cell.value)
+                        .map(|v| ((ri, col), v))
+                })
+                .collect(),' \
+  geode-marketdata \
+  bump_adds_to_the_cursors_row_by_default_and_to_its_column_on_request
+
+# The grid can move under an open editor: a delivery lands while a trader
+# is typing and a shorter generation clamps the cursor, so the cell the
+# editor was opened on may now carry another term's labels. Mutated away,
+# the typed number is filed against whatever that cell has become — a
+# wrong value in the draft, painted as a deliberate edit, and Part 4 would
+# upload it.
+run_mutation "mdedit: a commit whose cell moved under it is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.model.label_of(cell) != labels {' \
+  '        if false {' \
+  geode-marketdata \
+  a_commit_whose_cell_moved_under_it_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
