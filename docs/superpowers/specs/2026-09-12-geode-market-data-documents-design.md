@@ -864,11 +864,12 @@ newer generation restores into `Behind` rather than misaligning), and
    the sequence, and a future text-entry module owes it too.
 4. **`Delivery` is `pub enum Delivery { Query(QueryOutcome) }` with
    `Delivery::key() -> QueryKey`.** `TileContent::deliver` takes it,
-   and the five occupants that implement it (blotter, diagnostics,
-   placeholder, recording, and the shell-test-only `WatchingContent`)
-   match it exhaustively with no wildcard arm, so Part 4's `Upload`
-   variant forces a compile error at every site rather than a silent
-   no-op.
+   and the six occupants that implement it (blotter, diagnostics,
+   placeholder, recording, the shell-test-only `WatchingContent`, and
+   this Part's own `MarketDataContent`, `geode-marketdata/src/content.rs`
+   — the panel Part 4 must wire `Upload` into) match it exhaustively
+   with no wildcard arm, so Part 4's `Upload` variant forces a compile
+   error at every site rather than a silent no-op.
 5. **The fragment no-shadow rule is enforced textually, on the
    predicate's tokens, not by evaluating the compiled boolean tree.**
    `check_fragment` refuses a predicate containing `!`, `||` or `(`
@@ -879,10 +880,13 @@ newer generation restores into `Behind` rather than misaligning), and
    not. `!=` is refused for the same reason (it contains `!`); neither
    shipped fragment needs it.
 6. **`splice` partitions the layered docs on `Layer::Builtin`, rather
-   than splicing fragments at a fixed index**, because a binary can
-   compile in more than one builtin keymap doc (a `--demo`-shaped
-   layer, say) and a fixed insertion point would misorder a second
-   one relative to the fragments.
+   than splicing fragments at a fixed index** — future-proofing, not a
+   live case: exactly one builtin keymap doc exists today
+   (`defaults::BUILTIN_KEYMAP`; `--demo`'s generated desk layer ships
+   no `keymap` doc). Should a binary ever compile in a second builtin
+   keymap doc, a fixed insertion point would misorder it relative to
+   the fragments, where the partition keeps every builtin doc ahead of
+   them by construction.
 7. **A fragment's diagnostics are carried on
    `ShellServices.keymap_fragment_diagnostics`, separately from
    `ShellServices.keymap_diagnostics`, and folded into the config
@@ -961,13 +965,14 @@ newer generation restores into `Behind` rather than misaligning), and
     closing an ambiguity §8.3 leaves unstated, rather than the
     alternative of discarding the draft and reporting it, which would
     misfile a trader's numbers under a document they never chose to
-    move to. Its completions unconditionally re-request the catalog on
-    every `:key` line rather than gating on staleness, because a
+    move to. The `:` line unconditionally re-requests the catalog on
+    every `key` line rather than gating on staleness, because a
     subscribed feed can grow the key list within one completion
     session — `request_catalog()` plus `cx.notify()` in the same
-    update is the trap a maintainer must keep together, since the
-    request is otherwise queued and invisible until some unrelated
-    mutation happens to notify.
+    update, inside `command` rather than `completions` (which takes
+    only `&App` and can queue nothing), is the trap a maintainer must
+    keep together, since the request is otherwise queued and invisible
+    until some unrelated mutation happens to notify.
 17. **Session restore rebases against the *first delivered* model, not
     a config-time one.** `from_toml` parks each restored edit at the
     unaddressable column `usize::MAX` (`UNRESOLVED_COLUMN`) because the
@@ -1000,6 +1005,24 @@ newer generation restores into `Behind` rather than misaligning), and
     subscribed source, and every claim about theme colours in the
     panel body are all unverified pixel-for-pixel — verified instead
     against window-test assertions and by reading.
+22. **`ModuleFactory::contexts()` is a separate answer from `kind()`**
+    because the two names are genuinely independent: the market-data
+    panel factory is kind `cvi` (one roster entry per document kind)
+    and returns `vec!["marketdata"]` from `contexts()` (one vocabulary
+    shared by every document kind's panel). The trait's default body
+    (`vec![self.kind()]`) is what every module whose context and kind
+    match wants, but taking it here would leave this panel with no
+    keys at all, since `check_fragment` drops a binding whose first
+    identifier names a context the factory did not declare.
+23. **The keybindings dialog reads a fragment binding as
+    `Layer::Builtin`**, the same layer the shell's own shipped keymap
+    reports: `r` removes a user override and lets the fragment show
+    through again, and `d` writes a user-layer `"none"` shadow over it
+    rather than trying to remove a binding the trader's own config
+    does not own —
+    `d_over_a_modules_fragment_binding_writes_a_user_layer_shadow` and
+    `r_removes_a_user_override_and_the_modules_fragment_shows_through`
+    (`shell/tests/keybindings_dialog.rs`).
 
 ## 9. Egress
 
