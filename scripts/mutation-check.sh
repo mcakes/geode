@@ -10113,8 +10113,8 @@ run_mutation "mdtile: a stale tag is dropped" \
 # nothing to say a newer document exists.
 run_mutation "mdtile: a publish bumps data and the panel requeries" \
   crates/geode-marketdata/src/tile.rs \
-  '        let now = (frame.as_of().clone(), frame.versions().data);' \
-  '        let now = (frame.as_of().clone(), 0);' \
+  '        acted.as_of != now.as_of || acted.data != now.data' \
+  '        acted.as_of != now.as_of' \
   geode-marketdata \
   a_publish_bumps_the_frame_and_the_tile_requeries
 
@@ -10134,10 +10134,16 @@ run_mutation "mdtile: a panel with no catalog requests one" \
 # `serialize` writes the key alone and every unsent edit is gone on the
 # next launch — work lost silently, with the restored panel looking
 # perfectly healthy.
+#
+# Two lines, not one: `set_key`'s own draft check (the entry below) is the
+# same `if !self.draft.is_empty() {` text, and an ambiguous anchor mutates
+# whichever site comes first.
 run_mutation "mdtile: serialize writes the draft" \
   crates/geode-marketdata/src/tile.rs \
-  '        if !self.draft.is_empty() {' \
-  '        if false {' \
+  '        if !self.draft.is_empty() {
+            t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));' \
+  '        if false {
+            t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));' \
   geode-marketdata \
   serialize_round_trips_key_and_draft
 
@@ -10155,6 +10161,46 @@ run_mutation "mdtile: a shorter document clamps the cursor" \
   '        let _ = &self.model;' \
   geode-marketdata \
   a_shorter_document_clamps_the_cursor
+
+# Ruling 2026-09-14: a key change with edits pending is REFUSED, never a
+# silent discard. Mutated away, `:key NDX.Z` throws unsent work off the
+# screen and out of the session on a keystroke that reads like navigation
+# — and the draft's cells are grid indices into the OLD document, so the
+# panel would then paint one document's numbers on another's ladder.
+# Anchored on two lines for the reason the `serialize` entry above gives.
+run_mutation "mdtile: a key change with edits pending is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !self.draft.is_empty() {
+            let n = self.draft.len();' \
+  '        if false {
+            let n = self.draft.len();' \
+  geode-marketdata \
+  a_key_change_is_refused_while_the_draft_has_edits
+
+# Phase 4 §3.10: the panel answers a barrier for a change it will not
+# requery for. Mutated away, every blotter on screen waits out
+# `FLIP_DEADLINE` — 250 ms, five times the §7.1 requery budget — on every
+# scope keystroke, for a tile that had nothing coming. The same gap was
+# fixed in the diagnostics tile in the same round (its own test:
+# `the_tile_answers_a_flip_barrier_it_has_nothing_coming_for`).
+run_mutation "mdtile: a panel self-arrives on a change it does not requery for" \
+  crates/geode-marketdata/src/tile.rs \
+  '                this.self_arrive(now, cx);' \
+  '                let _ = now;' \
+  geode-marketdata \
+  a_panel_self_arrives_on_a_scope_change_it_does_not_requery_for
+
+# The other half: a change the panel DOES requery for is answered by its
+# own delivery. Mutated away, an as-of change holds the barrier to the
+# deadline even though the panel's document arrived — and a failed select
+# holds it just as long, which is the case the blotter's own rule ("one
+# broken tile must never hold every other tile open") exists for.
+run_mutation "mdtile: a delivery answers the flip barrier" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.arrive(cx);' \
+  '        let _ = &self.frame;' \
+  geode-marketdata \
+  a_panel_arrives_on_delivery_after_an_as_of_change
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

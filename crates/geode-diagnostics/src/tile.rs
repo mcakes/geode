@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use geode_core::config::Config;
 use geode_core::log::{Record, Ring};
+use geode_core::query::QueryKey;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions};
@@ -234,6 +235,24 @@ impl DiagnosticsTile {
                 this.diagnostics.update(cx, |d, cx| {
                     d.request_catalog();
                     cx.notify();
+                });
+            }
+            // Phase 4 §3.10, found by the market-data panel's own review
+            // (2026-09-14): this tile is a real occupant, so
+            // `ShellView::visible_tile_keys` puts its key in every
+            // barrier — and it submits no query through the pool and so
+            // never arrives, holding every blotter on screen open until
+            // `FLIP_DEADLINE` (250 ms) on every scope keystroke, an as-of
+            // change and a grouping change alike. It has nothing coming,
+            // ever, so it answers unconditionally; `barrier_wants` is the
+            // only gate needed (a hidden tile's key was never in the set,
+            // since `visible_tile_keys` is what built it).
+            let key = QueryKey(this.tile.0);
+            if frame.read(cx).barrier_wants(key, now) {
+                frame.update(cx, |f, cx| {
+                    if f.arrived(key, now) {
+                        cx.notify();
+                    }
                 });
             }
         })
@@ -893,6 +912,33 @@ mod tests {
             },
             vcx,
         )
+    }
+
+    /// Phase 4 §3.10, found by the market-data panel's review
+    /// (2026-09-14) and fixed at both sites in the same round: this tile
+    /// is a real occupant, so `ShellView::visible_tile_keys` puts its key
+    /// in every flip barrier — and it never submits a query, so without
+    /// this it holds every blotter on screen open until `FLIP_DEADLINE`
+    /// (250 ms) on every scope keystroke. The shell's own frame observer
+    /// is registered before any occupant's, so the mutation and
+    /// `open_flip` really do land before this tile's observer runs —
+    /// which is what one update block reproduces.
+    #[gpui::test]
+    fn the_tile_answers_a_flip_barrier_it_has_nothing_coming_for(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_scope(Scope {
+                text: Some("spx".into()),
+                ..Default::default()
+            });
+            f.open_flip([QueryKey(9)], std::time::Instant::now());
+            cx.notify();
+        });
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "a tile that will never answer must answer at once, or every \
+             other following tile waits out the deadline"
+        );
     }
 
     #[gpui::test]

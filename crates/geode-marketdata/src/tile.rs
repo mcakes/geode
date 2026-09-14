@@ -11,6 +11,15 @@
 //! deliberately not among them, for the reason CLAUDE.md gives for the
 //! blotter: `flip` never means "requery".
 //!
+//! It does still ANSWER the flip barrier for every change (Phase 4
+//! §3.10), because `ShellView::visible_tile_keys` cannot know which tiles
+//! follow which counters: a change it requeries for is answered by its
+//! own delivery (`arrive`), and one it does not is answered on the spot
+//! (`self_arrive`). Following fewer counters than the blotter is exactly
+//! why that second door has to exist — a panel that stayed silent would
+//! hold every blotter on screen to the 250 ms deadline on every scope
+//! keystroke.
+//!
 //! Cell EDITING is Task 7 and the draft states (`Behind`, `:rebase`,
 //! `:discard`) are Task 8. What is here for them is the plumbing they
 //! need and nothing that pretends to be them: [`MarketDataTile::editor`]
@@ -21,13 +30,13 @@
 use crate::commands::{self, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::{Draft, MatrixModel, PanelSpec};
 use geode_core::document::split_key;
-use geode_core::query::{AsOf, DocumentParams, QueryKey, QueryOutcome};
+use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::fonts;
-use geode_shell::frame::Frame;
+use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::FindEvent;
 use geode_shell::tiling::TileId;
@@ -109,10 +118,18 @@ pub struct MarketDataTile {
     /// asked for.
     key: Option<Vec<String>>,
     tag: u64,
-    /// The `(as_of, data version)` the last request was made under;
-    /// `None` until the first. This pair, and not `FrameVersions`, is the
-    /// whole of what a document request depends on.
-    acted: Option<(AsOf, u64)>,
+    /// The frame versions the last request was made under; `None` until
+    /// the first.
+    ///
+    /// The WHOLE `FrameVersions`, even though only two of its counters
+    /// decide a requery (`follows_changed` compares `as_of` and `data`
+    /// and nothing else): the flip barrier is keyed by the flip identity
+    /// — `(scope, grouping, as_of)` — so answering it
+    /// (`Frame::arrived(key, acted)`) needs the versions the request was
+    /// made under, not just the pair this panel follows. One field rather
+    /// than two, because they are one fact: what the frame looked like
+    /// when this panel last asked.
+    acted: Option<FrameVersions>,
     visible: bool,
     /// The newest delivered snapshot. While the draft is `Behind` this is
     /// the newer generation the panel is NOT painting — `base_snapshot`
@@ -139,6 +156,11 @@ pub struct MarketDataTile {
     /// they paint nowhere until a model resolves them. Set at
     /// construction and cleared by the first delivery, which is the one
     /// that has a model to rebase against.
+    ///
+    /// `set_key` deliberately does not clear it: this being `true` implies
+    /// a non-empty draft, and a key change with edits pending is refused
+    /// outright (ruling 2026-09-14), so it can never be left set against
+    /// a document its labels did not come from.
     unresolved_restore: bool,
     /// (row, column) into the model's grid — the same index a
     /// `Draft` edit is keyed by.
@@ -194,12 +216,20 @@ impl MarketDataTile {
             .map(Draft::from_toml)
             .unwrap_or_default();
 
-        cx.observe(&frame, |this, _frame, cx| {
+        cx.observe(&frame, |this, frame, cx| {
+            if !this.visible {
+                return;
+            }
+            let now = frame.read(cx).versions();
             // Only `as_of` and `data` are followed (see the module doc);
             // a scope keystroke bumps `scope` on every character and must
             // not cost this panel a requery.
-            if this.visible && this.key.is_some() && this.follows_changed(cx) {
+            if this.key.is_some() && this.follows_changed(now) {
+                // The barrier is answered on delivery instead, with the
+                // versions this request was made under.
                 this.requery(cx);
+            } else {
+                this.self_arrive(now, cx);
             }
         })
         .detach();
@@ -250,11 +280,51 @@ impl MarketDataTile {
     // ---- the request -------------------------------------------------
 
     /// Whether the frame has moved in a way a document request depends
-    /// on. `None` (nothing asked yet) is always a change.
-    fn follows_changed(&self, cx: &App) -> bool {
-        let frame = self.frame.read(cx);
-        let now = (frame.as_of().clone(), frame.versions().data);
-        self.acted.as_ref() != Some(&now)
+    /// on — `as_of` and `data`, never `scope`/`grouping`/`config`/`flip`
+    /// (the module doc says why for each). `None` (nothing asked yet) is
+    /// always a change.
+    fn follows_changed(&self, now: FrameVersions) -> bool {
+        let Some(acted) = self.acted else {
+            return true;
+        };
+        acted.as_of != now.as_of || acted.data != now.data
+    }
+
+    /// Answer an open flip barrier for a change this panel is NOT going
+    /// to requery for (a scope or grouping bump, or no key to ask about).
+    ///
+    /// `ShellView::visible_tile_keys` cannot know which tiles follow
+    /// which counters, so every visible occupant is in the barrier's key
+    /// set (Phase 4 §3.10). Left unanswered, this panel would hold every
+    /// blotter on screen open until `FLIP_DEADLINE` — 250 ms — on every
+    /// scope keystroke, for a tile with nothing coming. The blotter's own
+    /// `on_frame_changed` has this exact branch, for the exact same
+    /// reason (a pinned tile under a grouping change).
+    fn self_arrive(&mut self, now: FrameVersions, cx: &mut Context<Self>) {
+        let key = QueryKey(self.id.0);
+        if self.frame.read(cx).barrier_wants(key, now) {
+            self.frame.update(cx, |f, cx| {
+                if f.arrived(key, now) {
+                    cx.notify();
+                }
+            });
+        }
+    }
+
+    /// Tell an open barrier this panel's own outcome has landed, with the
+    /// versions the request was made under — a failed outcome counts too
+    /// (the blotter's rule: one broken tile must never hold every other
+    /// tile open until the deadline).
+    fn arrive(&mut self, cx: &mut Context<Self>) {
+        let Some(acted) = self.acted else {
+            return;
+        };
+        let key = QueryKey(self.id.0);
+        self.frame.update(cx, |f, cx| {
+            if f.arrived(key, acted) {
+                cx.notify();
+            }
+        });
     }
 
     /// Submit this panel's document request, keyed by the tile so two
@@ -263,12 +333,12 @@ impl MarketDataTile {
         let Some(document_key) = self.key.clone() else {
             return;
         };
-        let (as_of, data_version) = {
+        let (as_of, versions) = {
             let frame = self.frame.read(cx);
-            (frame.as_of().clone(), frame.versions().data)
+            (frame.as_of().clone(), frame.versions())
         };
         self.tag += 1;
-        self.acted = Some((as_of.clone(), data_version));
+        self.acted = Some(versions);
         let queued = self.data.document(DocumentParams {
             key: QueryKey(self.id.0),
             tag: self.tag,
@@ -285,7 +355,13 @@ impl MarketDataTile {
 
     pub fn deliver(&mut self, outcome: QueryOutcome, cx: &mut Context<Self>) {
         if outcome.tag != self.tag {
-            return; // stale: a newer request is out
+            // Stale: a newer request is out — and deliberately NOT an
+            // arrival (the blotter drops one the same way). A barrier
+            // waits for the versions this panel last ACTED under, which
+            // is the newer request's; arriving here would answer for a
+            // question that is still in flight, and that newer outcome's
+            // own delivery is what answers it.
+            return;
         }
         match outcome.snapshot {
             Ok(snapshot) => {
@@ -331,6 +407,9 @@ impl MarketDataTile {
                 self.notice = Some(e.into());
             }
         }
+        // Both arms, before the notify: this panel's answer for the
+        // versions it asked under has landed, whichever way it went.
+        self.arrive(cx);
         self.changed(cx);
     }
 
@@ -343,7 +422,8 @@ impl MarketDataTile {
             // The catalog is where `:key`'s completions come from, and
             // nothing else asks for one on this panel's behalf.
             self.request_catalog_if_needed(cx);
-            if self.key.is_some() && self.follows_changed(cx) {
+            let now = self.frame.read(cx).versions();
+            if self.key.is_some() && self.follows_changed(now) {
                 self.requery(cx);
             }
         } else {
@@ -672,10 +752,7 @@ impl MarketDataTile {
             self.request_catalog_if_needed(cx);
         }
         match commands::parse(line)? {
-            Command::Key(key) => {
-                self.set_key(key, cx);
-                Ok(())
-            }
+            Command::Key(key) => self.set_key(key, cx),
             // Parsed, not executed: the grammar a trader types is the one
             // Tasks 7 and 8 wire up, so a typo is still a typo here and
             // only a real verb answers this.
@@ -689,18 +766,22 @@ impl MarketDataTile {
 
     /// Point the panel at another document.
     ///
-    /// Unsent edits are dropped and the drop is reported: a draft's cells
-    /// are grid indices into the document they were made on, so carrying
-    /// them across would paint one document's numbers onto another's
-    /// ladder. Roadmap ruling 9 protects a draft from a newer
-    /// *generation* arriving underneath it, which nobody asked for — not
-    /// from the trader deliberately naming a different document.
-    fn set_key(&mut self, key: Vec<String>, cx: &mut Context<Self>) {
+    /// **Refused while the draft has edits** (ruling 2026-09-14), never
+    /// discarding them: a draft's cells are grid indices into the
+    /// document they were made on, so carrying them across would paint
+    /// one document's numbers onto another's ladder — and dropping them
+    /// silently would throw unsent work away on a keystroke that reads
+    /// like navigation. The notice names the count in the header's own
+    /// spelling and the verb that clears it.
+    fn set_key(&mut self, key: Vec<String>, cx: &mut Context<Self>) -> Result<(), String> {
         if self.key.as_deref() == Some(key.as_slice()) {
-            return;
+            return Ok(());
         }
-        let dropped = self.draft.revert();
-        self.unresolved_restore = false;
+        if !self.draft.is_empty() {
+            let n = self.draft.len();
+            let plural = if n == 1 { "" } else { "s" };
+            return Err(format!("{n} edit{plural} pending — :revert first"));
+        }
         self.key = Some(key);
         self.snapshot = None;
         self.base_snapshot = None;
@@ -709,17 +790,12 @@ impl MarketDataTile {
         self.acted = None;
         self.cursor = (0, 0);
         self.rebuild_model();
-        self.notice = (dropped > 0).then(|| {
-            let plural = if dropped == 1 { "" } else { "s" };
-            SharedString::from(format!(
-                "{dropped} unsent edit{plural} discarded with the key change"
-            ))
-        });
         if self.visible {
             self.requery(cx);
         } else {
             self.changed(cx);
         }
+        Ok(())
     }
 
     pub fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
@@ -1299,6 +1375,147 @@ mod tests {
         });
         assert_eq!(rows, 2, "last good stays on screen");
         assert_eq!(notice.as_deref(), Some("the document select failed"));
+    }
+
+    /// Phase 4 §3.10: `ShellView::visible_tile_keys` puts every visible
+    /// occupant in the barrier's key set, because it cannot know which
+    /// tiles follow which counters. A scope change is not a change this
+    /// panel requeries for — so if it does not answer the barrier, every
+    /// blotter on screen waits out `FLIP_DEADLINE` (250 ms) on every
+    /// scope keystroke. The shell's own observer is registered first, so
+    /// the mutation and `open_flip` really do land before this panel's
+    /// observer runs, which is what this update block reproduces.
+    #[gpui::test]
+    fn a_panel_self_arrives_on_a_scope_change_it_does_not_requery_for(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_scope(geode_core::scope::Scope {
+                text: Some("spx".into()),
+                ..Default::default()
+            });
+            f.open_flip([QueryKey(TILE)], Instant::now());
+            cx.notify();
+        });
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "the panel must answer a barrier it has nothing coming for, \
+             rather than holding every other tile to the deadline"
+        );
+        assert!(
+            h.document_request().is_none(),
+            "and it must not requery for a scope change either"
+        );
+    }
+
+    /// The other half: a change the panel DOES requery for is answered by
+    /// its own delivery, under the versions the request was made — never
+    /// early, or the barrier would release before this panel had the
+    /// document it is about to paint.
+    #[gpui::test]
+    fn a_panel_arrives_on_delivery_after_an_as_of_change(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+
+        let at = chrono::DateTime::parse_from_rfc3339(BASE)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.open_flip([QueryKey(TILE)], Instant::now());
+            cx.notify();
+        });
+        let second = h
+            .document_request()
+            .expect("an as-of change is this panel's own requery");
+        assert!(
+            h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "still open: the panel has asked but has nothing to paint yet"
+        );
+        h.deliver(&mut vcx, second.tag, Arc::new(cvi(BASE)));
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "the delivery is the arrival"
+        );
+    }
+
+    /// An error is an arrival too (the blotter's rule): one broken tile
+    /// must never hold every other tile open until the deadline.
+    #[gpui::test]
+    fn a_failed_delivery_still_arrives(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        let at = chrono::DateTime::parse_from_rfc3339(BASE)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.open_flip([QueryKey(TILE)], Instant::now());
+            cx.notify();
+        });
+        let second = h.document_request().unwrap().tag;
+        h.deliver_err(&mut vcx, second, "the document select failed");
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "a failure arrives as surely as a snapshot does"
+        );
+    }
+
+    /// Ruling 2026-09-14: unsent edits are never discarded by a key
+    /// change. A draft's cells are grid indices into the document they
+    /// were made on, so the panel cannot carry them — and must not throw
+    /// them away on a keystroke that reads like navigation.
+    #[gpui::test]
+    fn a_key_change_is_refused_while_the_draft_has_edits(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        assert_eq!(
+            h.command(&mut vcx, "key NDX.Z"),
+            Err("1 edit pending — :revert first".to_string()),
+            "the count is spelled as the header spells it, and the verb is named"
+        );
+        let (key, edits) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.serialize(), t.draft().len()));
+        assert_eq!(edits, 1, "the edit is still there");
+        assert_eq!(
+            key.get("key").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(1)
+        );
+        assert_eq!(
+            key["key"][0].as_str(),
+            Some("SPX.Z"),
+            "and the panel is still on the document those edits belong to"
+        );
+        assert!(
+            h.document_request().is_none(),
+            "a refused key change asks for nothing"
+        );
     }
 
     #[gpui::test]
