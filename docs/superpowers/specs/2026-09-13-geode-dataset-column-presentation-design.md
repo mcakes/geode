@@ -989,7 +989,7 @@ writable door must not call itself read-only, and `enter` — which opens
 the edit stage from the browse list in both modes, a member row's column
 stage in the Views edit stage and a column row's stage in the Schema edit
 stage — was named in no footer at all. The palette title `Schema
-(read-only)` is now `Schema`; `READ_ONLY_NOTICE` reads `the datasets doc
+(read-only)` is now `Edit schema` (briefly `Schema` — the other five config dialogs read `Edit …`); `READ_ONLY_NOTICE` reads `the datasets doc
 is read-only — open a column (enter) to set how it paints`, so a refused
 `d`/`n`/tick on a dataset row teaches the door; and both footers name
 `enter` exactly where it opens something (`open` in browse, `open column`

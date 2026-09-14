@@ -480,7 +480,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // their choices from, made inspectable. Palette-only like its
     // siblings; its title says read-only because the palette row is the
     // only place a trader learns that before opening it.
-    action(reg, "config::schema", "Schema", "Configuration");
+    action(reg, "config::schema", "Edit schema", "Configuration");
     // Part 2b Task 3: the object dialog over `sources` — the ingest
     // feeds, flat-listed dataset first (§19.3). Palette-only like its
     // siblings; there is no chord because a trader reaches for it as
