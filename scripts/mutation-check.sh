@@ -9874,6 +9874,57 @@ run_mutation "delivery: ShellView::deliver routes to the tile addressed by deliv
   'TileId(0)' \
   geode-shell a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other
 
+# ---- Part 3 Task 3: keymap fragments (market-data documents §8.4) ----
+
+run_mutation "fragments: check_fragment keeps a binding in a context the module does not declare" \
+  crates/geode-shell/src/keymap/fragments.rs \
+  '                    Some(name) if contexts.contains(&name) => kept.push(entry.clone()),' \
+  '                    Some(_) => kept.push(entry.clone()),' \
+  geode-shell a_fragment_binding_outside_the_modules_contexts_is_dropped_with_a_diagnostic
+
+run_mutation "fragments: splice appends the module fragments LAST, above every desk/user layer" \
+  crates/geode-shell/src/keymap/fragments.rs \
+  '    out.extend(fragments.iter().cloned());
+    out.extend(
+        layered
+            .iter()
+            .filter(|d| d.layer != Layer::Builtin)
+            .cloned(),
+    );' \
+  '    out.extend(
+        layered
+            .iter()
+            .filter(|d| d.layer != Layer::Builtin)
+            .cloned(),
+    );
+    out.extend(fragments.iter().cloned());' \
+  geode-shell a_user_layer_binding_wins_over_a_modules_fragment
+
+run_mutation "fragments: the roster takes a factory's fragment without checking its contexts" \
+  crates/geode-shell/src/module.rs \
+  '                Ok(doc) => {
+                    let (doc, d) = fragments::check_fragment(doc, &factory.contexts());
+                    docs.push(doc);
+                    diags.extend(d);
+                }' \
+  '                Ok(doc) => docs.push(doc),' \
+  geode-shell a_factorys_fragment_is_checked_against_its_own_contexts
+
+run_mutation "fragments: a hot reload rebuilds the keymap without the modules' fragments" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '        let layered = fragments::splice(
+            new_config.layered_docs("keymap"),
+            &self.services.keymap_fragments,
+        );' \
+  '        let layered = fragments::splice(new_config.layered_docs("keymap"), &[]);' \
+  geode-shell a_reload_keeps_the_modules_fragment_bindings
+
+run_mutation "fragments: the blotter's own fragment binds outside its own key context" \
+  crates/geode-blotter/src/content.rs \
+  'context = "blotter && mode == normal"' \
+  'context = "workspace"' \
+  geode-blotter the_default_keymap_binds_exactly_the_actions_this_module_registers
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
