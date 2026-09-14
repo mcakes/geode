@@ -10381,6 +10381,79 @@ run_mutation "mdedit: a commit whose cell moved under it is refused" \
   geode-marketdata \
   a_commit_whose_cell_moved_under_it_is_refused
 
+# Task 8 — draft states.
+#
+# While `Behind`, the panel paints `base_snapshot` (the generation the
+# edits were made against), never the newer `snapshot` that just arrived —
+# spec §8.4's core rule. Mutated to always paint the newest delivered
+# snapshot, the grid and header would show the newer document's own rows
+# UNDER the trader's still-open edits, which is exactly the half-decided
+# state `Behind` exists to prevent: a cell reading as edited that no
+# longer names the term the trader thinks it does.
+run_mutation "mddraft: Behind paints the base, not the newer document" \
+  crates/geode-marketdata/src/tile.rs \
+  '    fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.base_snapshot.clone().or_else(|| self.snapshot.clone())
+    }' \
+  '    fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.snapshot.clone()
+    }' \
+  geode-marketdata \
+  a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base
+
+# `:rebase` resolves every edit's label against the NEWER document
+# (`self.snapshot`), not the base it is leaving behind. Mutated to fall
+# back to `base_snapshot`, every label is found (it is the very document
+# the edits were made against) so nothing is ever reported dropped, and
+# the edits stay at their OLD, now-stale grid indices — which
+# `rebuild_model` then paints straight into the newer document's actual
+# shape: a wrong value in a cell the edit was never about.
+run_mutation "mddraft: rebase resolves labels against the newer document" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let snapshot = self
+            .snapshot
+            .clone()
+            .expect("`Behind` implies a newer generation was delivered");' \
+  '        let snapshot = self
+            .base_snapshot
+            .clone()
+            .or_else(|| self.snapshot.clone())
+            .expect("`Behind` implies a newer generation was delivered");' \
+  geode-marketdata \
+  rebase_reapplies_edits_by_label_and_reports_dropped_ones
+
+# `:discard` drops the edits outright — a trader saying "show me the new
+# document", not "move my numbers onto it". Mutated away, the edits
+# survive and keep painting over the newer document `discard` just showed,
+# which is `:rebase`'s job silently done half-right: the state answers
+# `Clean` while cells the trader meant to abandon are still marked edited.
+run_mutation "mddraft: discard clears the edits" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.draft.discard();' \
+  '        // self.draft.discard();' \
+  geode-marketdata \
+  discard_shows_the_newer_document_clean
+
+# Controller ruling 2026-09-14: `edit` refuses outright while the draft is
+# `Behind` — a live or restored one alike — because an edit made now would
+# be keyed against the base generation's grid while `:rebase` is about to
+# move every edit off it onto the newer document by label. Mutated away,
+# `edit` opens a fresh editor over the base grid as if nothing were
+# pending, and a commit there is a plain `Draft::set` at a cell `:rebase`
+# will remap right out from under it.
+run_mutation "mddraft: editing is refused while the draft is behind" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.draft.is_behind() {
+            self.notice = Some(BEHIND_REFUSED.into());
+            return;
+        }' \
+  '        if false {
+            self.notice = Some(BEHIND_REFUSED.into());
+            return;
+        }' \
+  geode-marketdata \
+  edit_and_bump_are_refused_while_behind
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
