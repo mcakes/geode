@@ -10,11 +10,12 @@ use std::collections::HashSet;
 
 use gpui::{App, Context, FocusHandle, Focusable as _, Window};
 
+use crate::module::Delivery;
 use crate::module::ModuleFactory as _;
 use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::session;
 use crate::tiling::TileId;
-use geode_core::query::{QueryKey, QueryOutcome};
+use geode_core::query::QueryKey;
 
 use super::ShellView;
 
@@ -57,12 +58,12 @@ impl ShellView {
         self.occupants.get(&tile).map(|o| o.kind)
     }
 
-    /// Route a query outcome to the tile whose id is its key (§5.1). The
-    /// app bridge calls this; an outcome for a tile that no longer exists
-    /// is dropped.
-    pub fn deliver(&mut self, outcome: QueryOutcome, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(o) = self.occupants.get(&TileId(outcome.key.0)) {
-            o.content.deliver(outcome, window, cx);
+    /// Route a delivery to the tile whose id is `delivery.key()` (§5.1).
+    /// The app bridge calls this; a delivery for a tile that no longer
+    /// exists is dropped.
+    pub fn deliver(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(o) = self.occupants.get(&TileId(delivery.key().0)) {
+            o.content.deliver(delivery, window, cx);
         }
     }
 

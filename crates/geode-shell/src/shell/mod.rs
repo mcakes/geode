@@ -229,7 +229,7 @@ impl EventEmitter<ShellEvent> for ShellView {}
 /// Distinct` under (spec §3.4). Reserved, not user-reachable: every real
 /// tile's query key comes from `TileId` (spec §2.4), which is a small
 /// sequential counter nowhere near `u64::MAX`, so this can never collide
-/// with a live tile. `ShellView::deliver` (the `QueryOutcome` route) never
+/// with a live tile. `ShellView::deliver` (the `Delivery` route) never
 /// sees this key — a picker's own outcome arrives as `DataEvent::Distinct`
 /// instead and is routed to [`ShellView::deliver_distinct`], a separate
 /// method with its own stale-tag/stale-column guard.

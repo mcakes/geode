@@ -15,6 +15,7 @@ use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink};
 use geode_shell::diagnostics::SourceSummary;
+use geode_shell::module::Delivery;
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, WindowHandle};
@@ -494,7 +495,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 }
                 match event {
                     DataEvent::Query(outcome) => {
-                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
+                        shell.update(cx, |s, cx| {
+                            s.deliver(Delivery::Query(outcome), window, cx)
+                        });
                     }
                     DataEvent::Published {
                         dataset,

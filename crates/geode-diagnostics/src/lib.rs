@@ -15,12 +15,11 @@ use std::sync::Arc;
 
 use geode_core::config::Config;
 use geode_core::log::Ring;
-use geode_core::query::QueryOutcome;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::{FindEvent, ModuleFactory, TileContent, TileOccupant};
+use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent, TileOccupant};
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{App, Entity, Window};
@@ -74,8 +73,12 @@ impl TileContent for DiagnosticsContent {
     fn find(&self, event: FindEvent, _window: &mut Window, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.find(event, cx))
     }
-    fn deliver(&self, _outcome: QueryOutcome, _window: &mut Window, _cx: &mut App) {
-        // This tile never queries — nothing addressed to it ever arrives.
+    fn deliver(&self, delivery: Delivery, _window: &mut Window, _cx: &mut App) {
+        match delivery {
+            // This tile never queries — nothing addressed to it ever
+            // arrives, so there is nothing to do with the outcome itself.
+            Delivery::Query(_) => {}
+        }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))

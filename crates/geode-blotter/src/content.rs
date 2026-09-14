@@ -6,7 +6,6 @@
 use crate::tile::{ACTIONS, BlotterTile};
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::query::QueryOutcome;
 use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
 use geode_data::DataHandle;
@@ -14,7 +13,7 @@ use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::{FindEvent, ModuleFactory, TileContent, TileOccupant};
+use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent, TileOccupant};
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::FindStyle;
 use gpui::prelude::*;
@@ -50,8 +49,10 @@ impl TileContent for BlotterContent {
     fn find(&self, event: FindEvent, _window: &mut Window, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.find(event, cx))
     }
-    fn deliver(&self, outcome: QueryOutcome, _window: &mut Window, cx: &mut App) {
-        self.tile.update(cx, |t, cx| t.deliver(outcome, cx))
+    fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
+        match delivery {
+            Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
+        }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))

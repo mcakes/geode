@@ -17,8 +17,7 @@ use crate::tiling::Orientation;
 mod watching {
     use super::*;
     use crate::keymap::KeyContext;
-    use crate::module::{FindEvent, ModuleFactory, TileContent, TileOccupant};
-    use geode_core::query::QueryOutcome;
+    use crate::module::{Delivery, FindEvent, ModuleFactory, TileContent, TileOccupant};
     use gpui::{App, Context, FocusHandle, Render, div};
 
     pub const WATCHING_KIND: &str = "watching";
@@ -61,7 +60,11 @@ mod watching {
             Vec::new()
         }
         fn find(&self, _: FindEvent, _: &mut Window, _: &mut App) {}
-        fn deliver(&self, _: QueryOutcome, _: &mut Window, _: &mut App) {}
+        fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
+            match delivery {
+                Delivery::Query(_) => {}
+            }
+        }
         fn set_visible(&self, visible: bool, cx: &mut App) {
             if self.visible.get() == visible {
                 return;
@@ -1305,6 +1308,61 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
         diagnostics.len(),
         1,
         "a dropped request leaves the kind openable: {diagnostics:?}"
+    );
+}
+
+/// `ShellView::deliver` routes solely on `delivery.key()` (§5.1): a
+/// `Delivery` addressed to one tile must reach that tile's occupant and
+/// no other's, even when a second tile is live and could just as easily
+/// have been the one mistakenly picked.
+#[gpui::test]
+fn a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other(cx: &mut gpui::TestAppContext) {
+    use crate::module::Delivery;
+    use geode_core::query::{QueryKey, QueryOutcome};
+    use std::time::Instant;
+
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let first = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let second = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_ne!(first, second, "sanity: two distinct tiles are live");
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::Query(QueryOutcome {
+                    key: QueryKey(first.0),
+                    tag: 42,
+                    snapshot: Err("test outcome".into()),
+                    submitted: Instant::now(),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+
+    assert!(
+        log.borrow().iter().any(
+            |r| matches!(r, crate::module::recording::Recorded::Delivered(t, 42) if *t == first)
+        ),
+        "the addressed tile must be delivered to: {:?}",
+        log.borrow()
+    );
+    assert!(
+        !log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Delivered(t, _) if *t == second
+        )),
+        "the other tile must not be delivered to: {:?}",
+        log.borrow()
     );
 }
 

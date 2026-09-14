@@ -6,15 +6,15 @@
 //! only — the tile id and the frame entity — and a module that needs
 //! data carries its own handle as a field of its factory, built in
 //! `geode-app` where both sides meet (§2.1). The one data type that
-//! crosses is `geode_core::query::QueryOutcome`, which the shell routes
-//! to the tile whose id is the outcome's key.
+//! crosses is [`Delivery`], which the shell routes to the tile whose id
+//! is `Delivery::key()`.
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::diagnostics::Diagnostics;
 use crate::frame::Frame;
 use crate::keymap::KeyContext;
 use crate::tiling::TileId;
-use geode_core::query::QueryOutcome;
+use geode_core::query::{QueryKey, QueryOutcome};
 use gpui::{AnyView, App, Entity, Window};
 
 /// What the `/` line tells the occupant (§3.4).
@@ -23,6 +23,31 @@ pub enum FindEvent {
     Changed(String),
     Committed(String),
     Cancelled,
+}
+
+/// What the shell routes to a tile by its id (market-data spec §8.6).
+/// One variant today — a query result addressed by its `QueryKey`
+/// (§5.1) — but Part 4 adds `Upload(UploadOutcome)` for a document
+/// upload's own outcome, carried through this same door. An enum
+/// rather than a second `TileContent` method: every existing `match` on
+/// `Delivery` then refuses to compile the instant a new variant lands,
+/// until the occupant it belongs to grows an arm for it — an occupant
+/// cannot silently ignore a delivery kind it was never taught about, the
+/// way an unmatched second method could be forgotten and no compiler
+/// would say a word.
+#[derive(Debug)]
+pub enum Delivery {
+    Query(QueryOutcome),
+}
+
+impl Delivery {
+    /// The tile id (as a bare `QueryKey`) this delivery is addressed to.
+    /// `ShellView::deliver` routes on this alone, never on the variant.
+    pub fn key(&self) -> QueryKey {
+        match self {
+            Delivery::Query(outcome) => outcome.key,
+        }
+    }
 }
 
 pub trait TileContent {
@@ -51,8 +76,14 @@ pub trait TileContent {
     /// one candidate rather than guessing.
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String>;
     fn find(&self, event: FindEvent, window: &mut Window, cx: &mut App);
-    /// A query result addressed to this tile (§5.1).
-    fn deliver(&self, outcome: QueryOutcome, window: &mut Window, cx: &mut App);
+    /// What the shell routed to this tile (§5.1): a query result today,
+    /// with more kinds to come through the same door (Part 4 adds a
+    /// document upload's own outcome). [`Delivery`] is an enum rather
+    /// than a second trait method precisely so this `match` — and every
+    /// other occupant's — refuses to compile the moment a new variant
+    /// lands, until it has an arm for it; silently ignoring a delivery
+    /// kind is not an option a wildcard arm could reach for.
+    fn deliver(&self, delivery: Delivery, window: &mut Window, cx: &mut App);
     /// Hidden tiles may drop subscriptions; shown tiles requery if stale.
     ///
     /// **Contract (I2, final review):** an occupant is told its
@@ -193,7 +224,11 @@ pub mod placeholder {
             Vec::new()
         }
         fn find(&self, _: FindEvent, _: &mut Window, _: &mut App) {}
-        fn deliver(&self, _: QueryOutcome, _: &mut Window, _: &mut App) {}
+        fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
+            match delivery {
+                Delivery::Query(_) => {}
+            }
+        }
         fn set_visible(&self, _: bool, _: &mut App) {}
         fn serialize(&self, _: &App) -> toml::Table {
             toml::Table::new()
@@ -328,10 +363,14 @@ pub mod recording {
         fn find(&self, event: FindEvent, _: &mut Window, _: &mut App) {
             self.log.borrow_mut().push(Recorded::Find(self.tile, event));
         }
-        fn deliver(&self, outcome: QueryOutcome, _: &mut Window, _: &mut App) {
-            self.log
-                .borrow_mut()
-                .push(Recorded::Delivered(self.tile, outcome.tag));
+        fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
+            match delivery {
+                Delivery::Query(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Delivered(self.tile, outcome.tag));
+                }
+            }
         }
         fn set_visible(&self, visible: bool, _: &mut App) {
             self.log
