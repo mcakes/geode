@@ -746,11 +746,15 @@ first and last column, `gg`/`G` first and last row, `y` yanks the
 cell, `yy` the row, `yc` the column, in the blotter's tab-separated
 spelling. `i` or `enter` opens a cell input in place (insert mode:
 enter commits, escape cancels, the value is parsed to the column's
-type and a refusal shows inline). `/` finds a row or column label
+type and a refusal shows inline). Insert mode is a tile-owned
+gpui-component `Input` painted in the cell, and it works only because
+of the shell rule in §8.6: the shell's key handler sits on the window
+root and sees every keystroke, so without that rule a typed `j` would
+also move the cursor. `/` finds a row or column label
 through the shared find line. `:` commands: `key <value>` (completions
 from the catalog's keys), `revert`, `bump <delta> [row|col]` (adds
 `delta` to every cell in the cursor's row or column, default row),
-`upload`, `rebase`, `discard`. `rebase` and `discard` are completions
+`upload` (Part 4; in Part 3 the command answers "upload is not built yet"), `rebase`, `discard`. `rebase` and `discard` are completions
 only while a newer generation sits under the draft.
 
 The factory registers `marketdata::*` actions and ships its default
@@ -758,9 +762,15 @@ bindings as a keymap fragment (§8.6).
 
 ### 8.4 The draft
 
-`Draft { base: i64, edits: BTreeMap<(usize, usize), f64>, state }`
-over the received snapshot, where `base` is the `gen_id` (from the
-snapshot's provenance) the edits were made against. A cell with an edit paints in the edited
+`Draft { base: String, edits: BTreeMap<(usize, usize), f64>, state }`
+over the received snapshot, where `base` is the document's source
+time (the snapshot's `Provenance.datasets[0].as_of`, RFC 3339) the
+edits were made against — not a `gen_id`: a live query's provenance
+carries the dataset-wide latest generation, not the document's own
+(Part 1 §4.5), while its `as_of` is per document (`live_source_time`),
+so the source time is the identity a panel can actually compare. A
+delivered snapshot whose `as_of` differs from `base` is a newer
+generation. A cell with an edit paints in the edited
 style and the header reads "3 edits on 14:02's document". States:
 
 - **Clean** — no edits.
@@ -782,16 +792,30 @@ slice 1; editing `spotRef` is a plausible later verb and is not built.
 
 `serialize` writes `key`, `edits` (as label pairs, so a restart onto a
 newer generation restores into `Behind` rather than misaligning), and
-`base` generation id. Unsent edits are work and survive a restart.
+`base` (the source time string). Unsent edits are work and survive a restart.
 
 ### 8.6 Shell changes
 
-- **`Delivery`.** `TileContent::deliver` takes
-  `Delivery::Query(QueryOutcome) | Delivery::Upload(UploadOutcome)`.
-  The bridge routes `DataEvent::Upload` to `ShellView::deliver` the way
-  it routes `DataEvent::Query`. The blotter, diagnostics, placeholder
-  and recording occupants match on the enum; the compiler refuses an
-  occupant that forgets the new arm.
+- **`Delivery`.** `TileContent::deliver` takes a `Delivery` enum.
+  Part 3 introduces it with the one variant `Query(QueryOutcome)` and
+  routes it through `ShellView::deliver`; Part 4 adds
+  `Upload(UploadOutcome)` and the bridge's `DataEvent::Upload` route.
+  The blotter, diagnostics, placeholder and recording occupants match
+  on the enum, so the compiler refuses an occupant that forgets Part
+  4's arm.
+- **Insert mode.** While the focused tile's key context carries
+  `mode == insert` and window focus is on a handle the shell does not
+  own (`holds_shell_focus` is false), `ShellView::handle_key_down`
+  resolves only *single-keystroke* bindings against the context stack
+  — the module fragment's `escape`/`enter` in `marketdata && mode ==
+  insert`, and chords — and lets every other keystroke propagate to
+  the focused input, exactly as the scope bar's filter field already
+  does for itself; the matcher's sequence and count state is never
+  fed. The tile drops its `InputState` on commit or cancel, and that
+  dropped handle is what returns focus to the shell root through the
+  existing `window.focused(cx).is_none()` net in `render` — no module
+  ever touches the shell's focus handle. A second module wanting text
+  entry (the pricer) inherits the rule unchanged.
 - **Keymap fragments.** `ModuleFactory::default_keymap(&self) ->
   Option<&'static str>` returns a keymap TOML fragment. `build_keymap`
   merges every factory's fragment as one layer above the built-in
