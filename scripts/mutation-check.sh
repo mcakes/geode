@@ -9868,6 +9868,12 @@ run_mutation "parked: the expiry ladder never skips a month whose third Friday a
   '        if false {' \
   geode-demo-data expiries_skip_a_month_whose_third_friday_has_already_passed
 
+run_mutation "delivery: ShellView::deliver routes to the tile addressed by delivery.key(), not always tile 0" \
+  crates/geode-shell/src/shell/occupants.rs \
+  'TileId(delivery.key().0)' \
+  'TileId(0)' \
+  geode-shell a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
