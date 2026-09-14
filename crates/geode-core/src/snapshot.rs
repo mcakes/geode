@@ -785,6 +785,23 @@ impl Snapshot {
     /// The first `grouping_len` columns are the grouping columns, which is
     /// the order the compiler emits.
     pub fn for_tests(columns: Vec<(ColumnMeta, TestColumn)>, grouping_len: usize) -> Snapshot {
+        Snapshot::for_tests_with_provenance(columns, grouping_len, Provenance::default())
+    }
+
+    /// The same builder with a provenance of the caller's choosing.
+    ///
+    /// A document panel reads its generation's source time off
+    /// `Provenance.datasets[0].as_of` (market-data spec §8.4 — the source
+    /// time, not a `gen_id`, is the identity a draft compares), so a
+    /// fixture with the default empty provenance cannot exercise
+    /// anything that depends on it: the freshness line, the draft's
+    /// `base`, or `Behind`. `for_tests` keeps its two-argument spelling
+    /// because most fixtures do not care.
+    pub fn for_tests_with_provenance(
+        columns: Vec<(ColumnMeta, TestColumn)>,
+        grouping_len: usize,
+        provenance: Provenance,
+    ) -> Snapshot {
         use arrow::array::{ArrayRef, Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
@@ -815,8 +832,7 @@ impl Snapshot {
         let meta = columns.into_iter().map(|(m, _)| m).collect();
         let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
             .expect("fixture columns must be the same length");
-        Snapshot::from_batches(vec![batch], meta, grouping, Provenance::default())
-            .expect("fixture snapshot")
+        Snapshot::from_batches(vec![batch], meta, grouping, provenance).expect("fixture snapshot")
     }
 }
 

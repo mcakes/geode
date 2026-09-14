@@ -2490,14 +2490,14 @@ run_mutation "cache: a window move keeps overlapping rows" \
   a_window_move_refills_only_the_rows_that_entered
 
 run_mutation "format: the sign is of the rounded value" \
-  crates/geode-blotter/src/core/format.rs \
+  crates/geode-core/src/format.rs \
   '    let sign = if rounded == 0.0 {' \
   '    let sign = if scaled == 0.0 {' \
   geode-blotter \
   precision_thousands_and_sign
 
 run_mutation "format: scale divides before precision" \
-  crates/geode-blotter/src/core/format.rs \
+  crates/geode-core/src/format.rs \
   '        s => value / s.divisor(),' \
   '        s => { let _ = s; value }' \
   geode-blotter \
@@ -9988,6 +9988,88 @@ run_mutation "insert: a bare key in insert mode resolves against the full stack"
   '    if keystroke.mods.is_chord() {' \
   '    if true {' \
   geode-shell bare_shell_keys_are_text_in_insert_mode
+
+# Market-data documents Part 3 Task 5: the panel's pure core.
+#
+# A hole in a pivot is refused, never painted. Mutated to a zero cell, the
+# model is built happily and a term/node pair the document never sent reads
+# as a real 0.0000 — a wrong VALUE, not a missing marker, which is why the
+# test asserts on the error rather than on anything about the cell.
+run_mutation "matrix: a hole in the pivot is an error, not a zero" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '                None => {
+                    return Err(format!(
+                        "the document has no cell for {}='"'"'{row_label}'"'"' {axis}='"'"'{col_label}'"'"'",
+                        spec.rows
+                    ));
+                }' \
+  '                None => cells.push(Cell {
+                    text: SharedString::from(format_number(0.0, &spec.format).text),
+                    value: Some(0.0),
+                    edited: false,
+                    sent: false,
+                    cell_ref: (ri, ci),
+                }),' \
+  geode-marketdata \
+  a_missing_cell_is_a_hole_and_the_error_names_the_pair
+
+# The axis order is the document's own. Mutated to sorted, the grid is
+# still self-consistent (`Grid::at` is keyed by the labels, not by their
+# indices), so ONLY an order assertion sees it — and a trader's term
+# ladder silently reshuffles, lexically, with -20 between -1 and 3.5.
+run_mutation "matrix: the pivot keeps the document's own axis order" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '    let grid = index_grid(snapshot, spec, rows_idx, col_idx, axis)?;' \
+  '    let mut grid = index_grid(snapshot, spec, rows_idx, col_idx, axis)?;
+    grid.rows.sort();
+    grid.columns.sort();' \
+  geode-marketdata \
+  the_pivot_keeps_the_documents_own_axis_order
+
+# An edited cell paints the draft. Mutated to ignore the draft, the panel
+# shows the document's own value under a cell a trader has changed — the
+# edit is still in the draft and would still be uploaded, so the screen
+# and the work disagree with nothing to say so.
+run_mutation "matrix: an edited cell paints the draft's value" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '    if let Some(&edited) = draft.edits.get(&cell_ref) {' \
+  '    if let Some(&edited) = None::<&f64> {' \
+  geode-marketdata \
+  an_edited_cell_paints_the_drafts_value_not_the_documents
+
+# `Behind` only when the delivered generation differs from the base.
+# Mutated to always, every routine redelivery (the frame's `data` version
+# bumps on any publish of any dataset) tips a draft into Behind and stops
+# painting the live document.
+run_mutation "draft: on_delivered goes Behind only on a different as_of" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            DraftState::Editing if self.base.as_deref() != Some(as_of) => {' \
+  '            DraftState::Editing => {' \
+  geode-marketdata \
+  on_delivered_stays_editing_on_the_same_generation_and_goes_behind_on_a_newer_one
+
+# A rebase matches by LABEL. Mutated to keep each edit's old index, a term
+# that moved up a row has its edit reassigned to a different expiry, and a
+# label the new document lacks is never reported dropped.
+run_mutation "draft: rebase matches a cell by label, not by index" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            let target = index
+                .get(&(row_label.as_str(), col_label.as_str()))
+                .copied();' \
+  '            let target = Some(*cell);' \
+  geode-marketdata \
+  rebase_moves_an_edit_to_its_new_index_by_label_and_reports_a_dropped_one
+
+# A restored draft carries its base. Mutated to None, the first delivery
+# after a restart compares against nothing, so a newer document never
+# reads as newer: the restored edits are painted over a generation they
+# were not made against, silently.
+run_mutation "draft: from_toml restores the base" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        let base = t.get("base").and_then(|v| v.as_str()).map(str::to_string);' \
+  '        let base = None;' \
+  geode-marketdata \
+  to_toml_and_from_toml_round_trip_the_edits_by_label_and_the_base
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

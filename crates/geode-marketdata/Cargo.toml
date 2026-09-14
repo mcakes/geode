@@ -1,0 +1,31 @@
+[package]
+name = "geode-marketdata"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# Task 5 is the pure core only, so the dependency list is the core's:
+# `geode-core` for `Snapshot`/`ColumnFormat`/`format_number`, `gpui` for
+# `SharedString` alone (a refcounted string a prepared cell can hand to a
+# frame without allocating — no element, entity or window is named here,
+# which is why these tests run without one), `chrono` for the local-clock
+# `HH:MM` in `Draft::summary` and `toml` for the session round trip.
+# Task 6 adds `geode-shell`, `geode-data` and `gpui-component` when the
+# tile lands.
+[dependencies]
+geode-core.workspace = true
+gpui.workspace = true
+chrono = "0.4.42"
+toml = "1.1.4"
+
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+criterion = "0.8.2"
+proptest = "1"
+
+[[bench]]
+name = "matrix"
+harness = false

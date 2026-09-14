@@ -6,6 +6,7 @@ pub mod colour;
 pub mod config;
 pub mod dimensions;
 pub mod document;
+pub mod format;
 pub mod groupings;
 pub mod health;
 pub mod log;

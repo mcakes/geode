@@ -5,6 +5,7 @@ members = [
     "crates/geode-data",
     "crates/geode-shell",
     "crates/geode-blotter",
+    "crates/geode-marketdata",
     "crates/geode-diagnostics",
     "crates/geode-documents",
     "crates/geode-demo-data",
