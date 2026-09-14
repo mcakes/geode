@@ -10053,9 +10053,10 @@ run_mutation "draft: on_delivered goes Behind only on a different as_of" \
 # label the new document lacks is never reported dropped.
 run_mutation "draft: rebase matches a cell by label, not by index" \
   crates/geode-marketdata/src/core/draft.rs \
-  '            let target = index
-                .get(&(row_label.as_str(), col_label.as_str()))
-                .copied();' \
+  '            let target = rows
+                .get(row_label.as_str())
+                .zip(columns.get(col_label.as_str()))
+                .map(|(&ri, &ci)| (ri, ci));' \
   '            let target = Some(*cell);' \
   geode-marketdata \
   rebase_moves_an_edit_to_its_new_index_by_label_and_reports_a_dropped_one
@@ -10070,6 +10071,26 @@ run_mutation "draft: from_toml restores the base" \
   '        let base = None;' \
   geode-marketdata \
   to_toml_and_from_toml_round_trip_the_edits_by_label_and_the_base
+
+# Fix round 1's Important: the flat shape's row labels must be unique,
+# because a draft resolves an edit by label. Mutated to accept a repeat,
+# `Draft::rebase`'s label index (last wins) silently collapses every edit
+# on a repeated label onto the last row bearing it: `kept` shrinks, the
+# dropped list stays EMPTY, and an edit can land on a different document
+# row. This is the ONE defence — `rebase` deliberately has no collision
+# check of its own, so nothing else can catch this.
+run_mutation "matrix: flatten refuses a repeated row label" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        if let Some(previous) = seen.insert(label.clone(), row) {
+            return Err(format!(
+                "the document repeats {}='"'"'{label}'"'"' (rows {previous} and {row}): a row \
+                 label identifies an edit, so it must name one row",
+                spec.rows
+            ));
+        }' \
+  '        seen.insert(label.clone(), row);' \
+  geode-marketdata \
+  a_repeated_row_label_is_refused_when_the_columns_are_flat
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

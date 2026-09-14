@@ -103,9 +103,23 @@ const SCHEDULE: PanelSpec = PanelSpec {
 };
 
 /// A dividend schedule: `rows` dated rows, five value columns each.
+///
+/// The dates are strictly increasing on a 28-day-month calendar, so every
+/// row label is distinct: a row label identifies an edit, so
+/// `MatrixModel::build` refuses a repeat outright — and a fixture whose
+/// dates cycled would measure a refusal rather than a build (and, before
+/// that refusal existed, a `rebase` that quietly collapsed most of its
+/// 1,000 edits onto the last row sharing each label).
 fn schedule(rows: usize) -> Snapshot {
     let dates: Vec<Option<String>> = (0..rows)
-        .map(|i| Some(format!("2026-{:02}-{:02}", i % 12 + 1, i % 28 + 1)))
+        .map(|i| {
+            Some(format!(
+                "{:04}-{:02}-{:02}",
+                2026 + i / 336,
+                i / 28 % 12 + 1,
+                i % 28 + 1
+            ))
+        })
         .collect();
     let mut columns = vec![
         (
@@ -145,10 +159,12 @@ fn bench(c: &mut Criterion) {
     });
 
     // 1,000 edits over the flat shape, then rebased onto the same labels.
-    // `rebase` is run on one draft repeatedly rather than on a fresh clone
-    // per iteration: it is idempotent in cost (the labels resolve to the
-    // same cells every time, nothing is dropped), so this measures the
-    // rebase and not a clone of a 1,000-entry map.
+    // The cells are 1,000 distinct rows of the schedule, whose labels are
+    // distinct by construction, so every edit resolves and nothing is
+    // dropped — the full-cost path. `rebase` is run on one draft
+    // repeatedly rather than on a fresh clone per iteration: it is
+    // idempotent (the same labels resolve to the same cells every time),
+    // so this measures the rebase and not a clone of a 1,000-entry map.
     let model = MatrixModel::build(&flat, &SCHEDULE, &clean).expect("a flat document");
     let mut draft = Draft::default();
     for i in 0..1_000 {

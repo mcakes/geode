@@ -62,12 +62,18 @@ impl MatrixModel {
     /// painted over the document's own values.
     ///
     /// `Err` is a document that cannot be laid out as a grid at all: a
-    /// missing axis column, no value column, or — for a pivot — a hole or
-    /// a repeated (row, column) pair. A hole is deliberately an error
-    /// rather than a blank cell: the axes say the document claims a value
-    /// there, so a blank would be this model inventing the §6.3 claim
-    /// "this number does not belong to this row" on the document's
-    /// behalf, and a zero would be worse.
+    /// missing axis column, no value column (or more than one under
+    /// `Columns::Axis`), a blank axis or key cell, a repeated row label,
+    /// or — for a pivot — a hole or a repeated (row, column) pair. A hole
+    /// is deliberately an error rather than a blank cell: the axes say the
+    /// document claims a value there, so a blank would be this model
+    /// inventing the §6.3 claim "this number does not belong to this row"
+    /// on the document's behalf, and a zero would be worse.
+    ///
+    /// Between them those refusals are what make the model's row labels
+    /// unique and its column labels unique — the invariant
+    /// [`Draft`]'s own doc states and [`Draft::rebase`] resolves edits
+    /// against.
     pub fn build(
         snapshot: &Snapshot,
         spec: &PanelSpec,
@@ -92,7 +98,7 @@ impl MatrixModel {
         let rows_idx = snapshot
             .column_index(spec.rows)
             .ok_or_else(|| format!("the document has no '{}' column", spec.rows))?;
-        let key = key_of(snapshot, spec, rows_idx);
+        let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec);
         let (columns, rows) = match spec.columns {
             Columns::Axis(axis) => pivot(snapshot, spec, draft, rows_idx, axis)?,
@@ -145,21 +151,34 @@ impl MatrixModel {
 /// prefix ahead of it is the key. The `spec.names` filter is the belt: a
 /// spec whose rows were a *later* axis would otherwise show the earlier
 /// axis as part of the key.
-fn key_of(snapshot: &Snapshot, spec: &PanelSpec, rows_idx: usize) -> Vec<String> {
+///
+/// A NULL key cell is an error, not a shorter key: the key is what the
+/// panel asked for and what the header shows it is displaying, so
+/// dropping a part of it would leave a two-part document reading as a
+/// one-part one — `["SPX.Z"]` where the truth is `["SPX.Z", <nothing>]`.
+fn key_of(snapshot: &Snapshot, spec: &PanelSpec, rows_idx: usize) -> Result<Vec<String>, String> {
     (0..rows_idx)
         .filter(|i| {
             snapshot
                 .meta_at(*i)
                 .is_some_and(|m| !spec.names(&m.name) && !is_value(snapshot, *i))
         })
-        .filter_map(|i| label_at(snapshot, i, 0))
+        .map(|i| {
+            let name = snapshot
+                .meta_at(i)
+                .map_or(String::new(), |m| m.name.clone());
+            required_label(snapshot, i, 0, &name)
+        })
         .collect()
 }
 
 /// The header attributes the spec names, read off row 0 — a document-level
 /// attribute is constant within one document (spec §3.1), so any row would
-/// do. An attribute the document does not carry is left out rather than
-/// shown blank: the panel says what it has.
+/// do. An attribute the document does not carry, or carries as NULL, is
+/// left out rather than shown blank: the panel says what it has. Unlike an
+/// axis or a key cell, a missing attribute identifies nothing, so there is
+/// nothing for it to corrupt — it is display, and absent display is
+/// absence.
 fn header_of(snapshot: &Snapshot, spec: &PanelSpec) -> Vec<(SharedString, SharedString)> {
     spec.header
         .iter()
@@ -209,6 +228,29 @@ fn label_at(snapshot: &Snapshot, idx: usize, row: usize) -> Option<String> {
     snapshot.f64_at(idx, row).map(|v| format!("{v}"))
 }
 
+/// One label that identifies a row, refusing a blank.
+///
+/// A NULL axis or key cell has no honest rendering here. `""` is not one:
+/// two different rows whose axis value is missing would fold into a
+/// single label, so a pivot would report them as a repeat (or, for the
+/// flat shape, collapse two schedule rows into one) and a draft keyed by
+/// that label could not tell them apart. The document is malformed —
+/// `publish_document` requires every axis value — so the panel says so
+/// rather than inventing a row identity.
+fn required_label(
+    snapshot: &Snapshot,
+    idx: usize,
+    row: usize,
+    column: &str,
+) -> Result<String, String> {
+    label_at(snapshot, idx, row).ok_or_else(|| {
+        format!(
+            "the document has no '{column}' value on row {row}: an axis or key cell \
+             identifies a row and cannot be blank"
+        )
+    })
+}
+
 /// Where every (row label, column label) pair lives in the snapshot,
 /// nested so a lookup in the fill loop borrows both labels and allocates
 /// nothing. Label order is the document's own, first appearance first.
@@ -240,8 +282,8 @@ fn index_grid(
     let mut seen_rows: HashMap<String, ()> = HashMap::new();
     let mut seen_cols: HashMap<String, ()> = HashMap::new();
     for row in 0..snapshot.rows() {
-        let row_label = label_at(snapshot, rows_idx, row).unwrap_or_default();
-        let col_label = label_at(snapshot, col_idx, row).unwrap_or_default();
+        let row_label = required_label(snapshot, rows_idx, row, spec.rows)?;
+        let col_label = required_label(snapshot, col_idx, row, axis)?;
         if seen_rows.insert(row_label.clone(), ()).is_none() {
             grid.rows.push(row_label.clone());
         }
@@ -285,9 +327,36 @@ fn pivot(
     let col_idx = snapshot
         .column_index(axis)
         .ok_or_else(|| format!("the document has no '{axis}' column"))?;
-    let value_idx = *value_columns(snapshot)
-        .first()
-        .ok_or_else(|| format!("the document '{}' has no value column", spec.dataset))?;
+    // Exactly one value column, never "the first of several": a pivot
+    // spends both of its axes on the document's own axes, so a second
+    // value has nowhere to go. Taking the first silently and dropping the
+    // rest would paint a grid that looks complete and is missing a
+    // column's worth of numbers — a panel over such a dataset wants
+    // `Columns::Values`, or a spec that names which value it pivots.
+    let values = value_columns(snapshot);
+    let value_idx = match values.as_slice() {
+        [] => {
+            return Err(format!(
+                "the document '{}' has no value column",
+                spec.dataset
+            ));
+        }
+        [one] => *one,
+        many => {
+            let names = many
+                .iter()
+                .filter_map(|i| snapshot.meta_at(*i))
+                .map(|m| format!("'{}'", m.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "a pivot on '{axis}' fills one value per cell, but the document \
+                 '{}' declares {} value columns: {names}",
+                spec.dataset,
+                many.len()
+            ));
+        }
+    };
 
     let grid = index_grid(snapshot, spec, rows_idx, col_idx, axis)?;
 
@@ -337,16 +406,32 @@ fn flatten(
         .filter_map(|i| snapshot.meta_at(*i))
         .map(|m| SharedString::from(m.name.clone()))
         .collect();
-    let rows = (0..snapshot.rows())
-        .map(|row| RowModel {
-            label: SharedString::from(label_at(snapshot, rows_idx, row).unwrap_or_default()),
+    // A row label must name exactly one row, the same rule `index_grid`
+    // applies to a pivot's (row, column) pair and for the same reason: a
+    // draft resolves its edits by label across generations, so a repeated
+    // label makes two different rows one target. One defence, here at the
+    // model boundary, is what lets `Draft::rebase` index the labels
+    // without a collision check of its own.
+    let mut seen: HashMap<String, usize> = HashMap::with_capacity(snapshot.rows());
+    let mut rows = Vec::with_capacity(snapshot.rows());
+    for row in 0..snapshot.rows() {
+        let label = required_label(snapshot, rows_idx, row, spec.rows)?;
+        if let Some(previous) = seen.insert(label.clone(), row) {
+            return Err(format!(
+                "the document repeats {}='{label}' (rows {previous} and {row}): a row \
+                 label identifies an edit, so it must name one row",
+                spec.rows
+            ));
+        }
+        rows.push(RowModel {
+            label: SharedString::from(label),
             cells: value_idxs
                 .iter()
                 .enumerate()
                 .map(|(ci, &idx)| cell_of(snapshot, idx, row, (row, ci), spec, draft))
                 .collect(),
-        })
-        .collect();
+        });
+    }
     Ok((columns, rows))
 }
 
@@ -656,7 +741,12 @@ mod tests {
     };
 
     fn schedule() -> Snapshot {
-        let dates = ["2026-10-16", "2026-11-20", "2026-12-18"];
+        schedule_dated(&["2026-10-16", "2026-11-20", "2026-12-18"])
+    }
+
+    /// The same three-row schedule with the row axis spelled by the caller,
+    /// so a repeat can be delivered.
+    fn schedule_dated(dates: &[&str; 3]) -> Snapshot {
         Snapshot::for_tests_with_provenance(
             vec![
                 (
@@ -744,41 +834,185 @@ mod tests {
         assert_eq!(col.to_string(), "");
     }
 
+    #[test]
+    fn a_repeated_row_label_is_refused_when_the_columns_are_flat() {
+        // Two schedule rows on one date: a draft resolves an edit by label,
+        // so one label naming two rows would make two edits one — the
+        // reviewer's case, where `rebase` silently kept one and reported
+        // nothing dropped.
+        let err = MatrixModel::build(
+            &schedule_dated(&["2026-10-16", "2026-10-16", "2026-12-18"]),
+            &SCHEDULE,
+            &Draft::default(),
+        )
+        .expect_err("a row label must name one row");
+        assert!(err.contains("2026-10-16"), "{err}");
+        assert!(err.contains("ex_date"), "{err}");
+    }
+
+    #[test]
+    fn a_pivot_refuses_a_document_with_more_than_one_value_column() {
+        // The schedule's two value columns pivoted on its own row axis:
+        // both cannot fit one cell, and filling from the first would hide
+        // a whole column of numbers.
+        const PIVOTED: PanelSpec = PanelSpec {
+            kind: "sched",
+            title: "Dividends",
+            dataset: "div_schedule",
+            document: "div_schedule",
+            rows: "ex_date",
+            columns: Columns::Axis("currency"),
+            header: &[],
+            format: ColumnFormat::MEASURE,
+        };
+        let err = MatrixModel::build(&schedule(), &PIVOTED, &Draft::default())
+            .expect_err("one value per cell");
+        assert!(err.contains("gross") && err.contains("net"), "{err}");
+        assert!(err.contains("currency"), "{err}");
+    }
+
+    #[test]
+    fn a_blank_axis_cell_is_refused_rather_than_labelled_with_nothing() {
+        let mut cells = Vec::new();
+        for (t, term) in TERMS.iter().enumerate() {
+            for node in NODES {
+                cells.push(((*term).to_string(), node, Some(t as f64)));
+            }
+        }
+        let snap = document(&cells);
+        // Rebuild the same document with one NULL in the row axis.
+        let mut terms: Vec<Option<String>> = cells.iter().map(|c| Some(c.0.clone())).collect();
+        terms[3] = None;
+        let holed = Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("SPX.Z".into()); cells.len()]),
+                ),
+                (meta("term", Attribution::Additive), TestColumn::Dict(terms)),
+                (
+                    meta("node", Attribution::Additive),
+                    TestColumn::F64(cells.iter().map(|c| Some(c.1)).collect()),
+                ),
+                (
+                    meta("param", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(cells.iter().map(|c| c.2).collect()),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        );
+        assert!(
+            MatrixModel::build(&snap, &CVI, &Draft::default()).is_ok(),
+            "the same document without the NULL builds"
+        );
+        let err = MatrixModel::build(&holed, &CVI, &Draft::default())
+            .expect_err("a blank axis cell identifies no row");
+        assert!(err.contains("term"), "{err}");
+    }
+
+    #[test]
+    fn a_blank_key_cell_is_refused_rather_than_shortening_the_key() {
+        let mut keys: Vec<Option<String>> = vec![Some("SPX.Z".into()); 6];
+        keys[0] = None;
+        let mut cells = Vec::new();
+        for (t, term) in TERMS.iter().enumerate() {
+            for node in NODES {
+                cells.push(((*term).to_string(), node, Some(t as f64)));
+            }
+        }
+        let snap = Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(keys),
+                ),
+                (
+                    meta("term", Attribution::Additive),
+                    TestColumn::Dict(cells.iter().map(|c| Some(c.0.clone())).collect()),
+                ),
+                (
+                    meta("node", Attribution::Additive),
+                    TestColumn::F64(cells.iter().map(|c| Some(c.1)).collect()),
+                ),
+                (
+                    meta("param", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(cells.iter().map(|c| c.2).collect()),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        );
+        let err = MatrixModel::build(&snap, &CVI, &Draft::default())
+            .expect_err("a one-part key that reads as no parts is a lie about the document");
+        assert!(err.contains("underlying_ref"), "{err}");
+    }
+
     proptest! {
         /// The pivot is a bijection between the document's rows and the
-        /// grid's cells: T×N cells out, every value in exactly once.
-        /// A pivot that lost a value would paint a blank where a real
-        /// number is, and one that duplicated a value would show a
-        /// number in a cell it does not belong to — the two failures
-        /// §6.3 exists to forbid, and neither is visible in a spot check
-        /// of one shape.
+        /// grid's cells, and it is POSITIONAL: cell (i, j) holds the value
+        /// the document sent for (row label i, column label j).
+        ///
+        /// Asserted positionally rather than as a multiset, because a
+        /// transposed or rotated grid has exactly the same multiset of
+        /// values as a correct one — every value present exactly once, and
+        /// every one of them in the wrong cell. The document is shuffled
+        /// first (a real one arrives in axis order, so an implementation
+        /// that leaned on that would pass every ordered fixture), which
+        /// also makes first-appearance order something the test has to
+        /// derive rather than assume.
         #[test]
-        fn a_pivot_neither_loses_nor_duplicates_a_cell(t in 1usize..7, n in 1usize..7) {
+        fn a_pivot_is_a_positional_bijection(t in 1usize..7, n in 1usize..7, seed in any::<u64>()) {
             let terms: Vec<String> = (0..t).map(|i| format!("2026-{:02}-01", i + 1)).collect();
             let nodes: Vec<f64> = (0..n).map(|j| j as f64 / 4.0 - 5.0).collect();
             let mut cells = Vec::new();
-            let mut source = Vec::new();
             for (i, term) in terms.iter().enumerate() {
                 for (j, node) in nodes.iter().enumerate() {
-                    let value = (i * n + j + 1) as f64 / 8.0;
-                    source.push(value);
-                    cells.push((term.clone(), *node, Some(value)));
+                    cells.push((term.clone(), *node, Some((i * n + j + 1) as f64 / 8.0)));
                 }
             }
+            // A seeded Fisher-Yates: deterministic per case, and proptest
+            // shrinks the seed like any other input.
+            let mut state = seed | 1;
+            for i in (1..cells.len()).rev() {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let j = (state >> 33) as usize % (i + 1);
+                cells.swap(i, j);
+            }
+
+            // What the document now says, read independently of the model:
+            // first-appearance label order per axis, and the value at each pair.
+            let mut want_rows: Vec<String> = Vec::new();
+            let mut want_columns: Vec<String> = Vec::new();
+            let mut want_value: HashMap<(String, String), f64> = HashMap::new();
+            for (term, node, value) in &cells {
+                let column = format!("{node}");
+                if !want_rows.contains(term) {
+                    want_rows.push(term.clone());
+                }
+                if !want_columns.contains(&column) {
+                    want_columns.push(column.clone());
+                }
+                want_value.insert((term.clone(), column), value.expect("a value"));
+            }
+
             let model = MatrixModel::build(&document(&cells), &CVI, &Draft::default())
                 .expect("a complete grid pivots");
-            prop_assert_eq!(model.rows.len(), t);
-            prop_assert_eq!(model.columns.len(), n);
-            let painted: Vec<f64> = model
-                .rows
-                .iter()
-                .flat_map(|r| r.cells.iter().map(|c| c.value.expect("every cell has a value")))
-                .collect();
-            prop_assert_eq!(painted.len(), t * n);
-            let mut painted_sorted = painted;
-            painted_sorted.sort_by(f64::total_cmp);
-            source.sort_by(f64::total_cmp);
-            prop_assert_eq!(painted_sorted, source);
+            prop_assert_eq!(
+                model.rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(),
+                want_rows.clone()
+            );
+            prop_assert_eq!(columns_of(&model), want_columns.clone());
+            for (i, row) in model.rows.iter().enumerate() {
+                prop_assert_eq!(row.cells.len(), n);
+                for (j, cell) in row.cells.iter().enumerate() {
+                    let want = want_value[&(want_rows[i].clone(), want_columns[j].clone())];
+                    prop_assert_eq!(cell.value, Some(want));
+                    prop_assert_eq!(cell.cell_ref, (i, j));
+                }
+            }
         }
     }
 }

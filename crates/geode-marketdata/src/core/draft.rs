@@ -33,6 +33,17 @@ pub enum DraftState {
 }
 
 /// Edits keyed by grid cell, with the labels that make them portable.
+///
+/// **The invariant this leans on:** a [`MatrixModel`]'s row labels are
+/// unique and so are its column labels. A label is how an edit is
+/// identified across generations, so a repeated one would make two
+/// different rows a single target — and [`MatrixModel::build`] refuses
+/// every way that could happen (a repeated pivot pair, a repeated flat row
+/// label, a blank axis cell). That one defence at the model boundary is
+/// why [`Draft::rebase`] indexes labels without a collision check of its
+/// own: a second check here would be a defence the first one hides, and
+/// neither would then be isolated enough for the mutation harness to say
+/// which is load-bearing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Draft {
     /// The source time of the generation every edit was made against,
@@ -164,12 +175,24 @@ impl Draft {
     /// 3 to row 2 is the same term, and an edit left at index 3 would be
     /// silently reassigned to a different expiry.
     pub fn rebase(&mut self, model_of_newer: &MatrixModel) -> (usize, Vec<(String, String)>) {
-        let mut index: HashMap<(&str, &str), (usize, usize)> = HashMap::new();
-        for (ri, row) in model_of_newer.rows.iter().enumerate() {
-            for (ci, column) in model_of_newer.columns.iter().enumerate() {
-                index.insert((row.label.as_ref(), column.as_ref()), (ri, ci));
-            }
-        }
+        // The two axes are indexed separately — O(R + C), not the R × C
+        // every cell pair would cost, which at a 10,000-row schedule is
+        // 50,000 entries built to resolve a few hundred edits. A model's
+        // grid is rectangular, so a row that exists and a column that
+        // exists are a cell that exists; both maps are unique by the
+        // invariant on this struct.
+        let rows: HashMap<&str, usize> = model_of_newer
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(ri, row)| (row.label.as_ref(), ri))
+            .collect();
+        let columns: HashMap<&str, usize> = model_of_newer
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(ci, column)| (column.as_ref(), ci))
+            .collect();
 
         let mut edits = BTreeMap::new();
         let mut labels = BTreeMap::new();
@@ -182,9 +205,10 @@ impl Draft {
                 dropped.push((format!("row {}", cell.0), format!("column {}", cell.1)));
                 continue;
             };
-            let target = index
-                .get(&(row_label.as_str(), col_label.as_str()))
-                .copied();
+            let target = rows
+                .get(row_label.as_str())
+                .zip(columns.get(col_label.as_str()))
+                .map(|(&ri, &ci)| (ri, ci));
             match target {
                 Some(new_cell) => {
                     edits.insert(new_cell, *value);
