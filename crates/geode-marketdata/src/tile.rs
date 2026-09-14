@@ -186,6 +186,30 @@ pub struct MarketDataTile {
     /// so the staleness rule is a comparison per frame rather than an
     /// RFC-3339 parse.
     source_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// An outcome that arrived while the flip barrier (Phase 4 §3.10)
+    /// still wanted this panel's key — held here, NOT applied, until
+    /// [`Self::promote`] puts it through [`Self::apply`] exactly as an
+    /// un-barriered delivery would have been.
+    ///
+    /// Without this the panel would paint the new as-of — its grid, its
+    /// header, its source-time chip — a frame ahead of every blotter,
+    /// whose own heavier outcomes are still staged: the half-updated
+    /// screen the barrier exists to prevent. A document select is cheap,
+    /// which makes this panel the one most likely to win that race.
+    ///
+    /// Stamped with the versions it was delivered FOR: a second
+    /// scope/as-of mutation inside the same 250 ms window replaces the
+    /// barrier before this panel's own fresh requery lands, so a `flip`
+    /// bump from the NEWER barrier must not promote a snapshot staged for
+    /// the older one (the blotter's fix round 1, Finding 1, reached the
+    /// same way). `requery` also clears it at its own top: a fresh
+    /// question always supersedes whatever was staged before it.
+    staged: Option<(Arc<Snapshot>, FrameVersions)>,
+    /// `versions().flip` as of the last promotion — this panel's own half
+    /// of the bump. Starts at `0` (the blotter's own seed): the first
+    /// observer pass on a frame that has already flipped then calls
+    /// `promote`, which is a no-op with nothing staged.
+    last_flip: u64,
 }
 
 impl MarketDataTile {
@@ -217,10 +241,20 @@ impl MarketDataTile {
             .unwrap_or_default();
 
         cx.observe(&frame, |this, frame, cx| {
+            // A flip released (Phase 4 §3.10): promote whatever is staged,
+            // and do it REGARDLESS of visibility — a panel hidden between
+            // staging and the flip must not come back showing the old
+            // generation. `flip` is checked here and never in
+            // `follows_changed`: it means "you may promote", never
+            // "requery" (CLAUDE.md).
+            let now = frame.read(cx).versions();
+            if now.flip != this.last_flip {
+                this.last_flip = now.flip;
+                this.promote(cx);
+            }
             if !this.visible {
                 return;
             }
-            let now = frame.read(cx).versions();
             // Only `as_of` and `data` are followed (see the module doc);
             // a scope keystroke bumps `scope` on every character and must
             // not cost this panel a requery.
@@ -257,6 +291,8 @@ impl MarketDataTile {
             stale_after,
             chips: Vec::new(),
             source_at: None,
+            staged: None,
+            last_flip: 0,
         };
         this.rebuild_chrome();
         this
@@ -316,15 +352,25 @@ impl MarketDataTile {
     /// (the blotter's rule: one broken tile must never hold every other
     /// tile open until the deadline).
     fn arrive(&mut self, cx: &mut Context<Self>) {
+        let _ = self.arrive_and_release(cx);
+    }
+
+    /// [`Self::arrive`], answering whether this arrival is what EMPTIED
+    /// the barrier — the caller uses that to promote its own staged
+    /// snapshot at once rather than waiting for the `flip` bump to reach
+    /// its observer on a later notify pass.
+    fn arrive_and_release(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(acted) = self.acted else {
-            return;
+            return false;
         };
         let key = QueryKey(self.id.0);
         self.frame.update(cx, |f, cx| {
-            if f.arrived(key, acted) {
+            let released = f.arrived(key, acted);
+            if released {
                 cx.notify();
             }
-        });
+            released
+        })
     }
 
     /// Submit this panel's document request, keyed by the tile so two
@@ -333,6 +379,10 @@ impl MarketDataTile {
         let Some(document_key) = self.key.clone() else {
             return;
         };
+        // A fresh question always supersedes whatever was staged for the
+        // old one, whether or not `promote`'s own version check would
+        // have caught it.
+        self.staged = None;
         let (as_of, versions) = {
             let frame = self.frame.read(cx);
             (frame.as_of().clone(), frame.versions())
@@ -349,6 +399,14 @@ impl MarketDataTile {
         });
         if !queued {
             self.notice = Some("document request refused: the data service is busy or gone".into());
+            // A refused submit means nothing is coming (review fix round
+            // 1, MIN-3): arrive, or an open barrier holds every other tile
+            // to the 250 ms deadline waiting for an outcome that will
+            // never exist — then clear `acted`, so the next frame change
+            // retries rather than deciding this panel is already up to
+            // date. In that order: `arrive` reads `acted`.
+            self.arrive(cx);
+            self.acted = None;
         }
         self.changed(cx);
     }
@@ -363,54 +421,109 @@ impl MarketDataTile {
             // own delivery is what answers it.
             return;
         }
+        let acted = self.acted;
         match outcome.snapshot {
             Ok(snapshot) => {
                 self.notice = None;
-                let as_of = snapshot
-                    .provenance()
-                    .datasets
-                    .first()
-                    .and_then(|f| f.as_of.clone());
-                if let Some(as_of) = &as_of {
-                    self.draft.on_delivered(as_of);
-                }
-                if self.draft.is_behind() {
-                    // Keep painting the generation the edits were made
-                    // against; `snapshot` below still records the newer
-                    // one for `:rebase` (Task 8).
-                    if self.base_snapshot.is_none() {
-                        self.base_snapshot = self.snapshot.take();
+                // Phase 4 §3.10 (review fix round 1, the Important): if a
+                // barrier is open and still wants this key, STAGE rather
+                // than apply. A document select is cheap, so this panel is
+                // the one most likely to paint the new as-of — grid,
+                // header and source-time chip — a frame before every
+                // blotter promotes its own, which is exactly the
+                // half-updated screen the barrier exists to prevent.
+                let wants = acted.is_some_and(|acted| {
+                    self.frame
+                        .read(cx)
+                        .barrier_wants(QueryKey(self.id.0), acted)
+                });
+                if wants {
+                    let acted = acted.expect("`wants` is false without one");
+                    self.staged = Some((snapshot, acted));
+                    // `arrived` may empty the barrier right here — when it
+                    // does, promote at once rather than waiting for the
+                    // `flip` bump to come back round to this panel's own
+                    // observer on a later notify pass.
+                    if self.arrive_and_release(cx) {
+                        self.promote(cx);
                     }
                 } else {
-                    self.base_snapshot = None;
+                    self.apply(snapshot, cx);
+                    self.arrive(cx);
                 }
-                self.snapshot = Some(snapshot);
-                self.rebuild_model();
-                if self.unresolved_restore {
-                    self.unresolved_restore = false;
-                    // A restored draft's edits have no grid position
-                    // until a model resolves them by label (Task 5's own
-                    // note on `Draft::from_toml`). A draft that landed
-                    // `Behind` is not rebased here: moving edits onto a
-                    // generation the trader has not seen is exactly the
-                    // decision `:rebase` exists to ask for (§8.4).
-                    if !self.draft.is_behind() {
-                        self.draft.rebase(&self.model);
-                        self.rebuild_model();
-                    }
-                }
-                self.sync_scroll();
             }
             Err(e) => {
                 // Last good stays on screen: a failed select says nothing
-                // about the document already painted.
+                // about the document already painted. It still counts as
+                // an arrival — one broken tile must never hold every other
+                // tile open until the deadline.
                 self.notice = Some(e.into());
+                self.arrive(cx);
             }
         }
-        // Both arms, before the notify: this panel's answer for the
-        // versions it asked under has landed, whichever way it went.
-        self.arrive(cx);
         self.changed(cx);
+    }
+
+    /// Put a delivered snapshot on screen: the draft's own view of the
+    /// generation, the model, the cursor and the scroll. Called by
+    /// `deliver` for an un-barriered outcome and by [`Self::promote`] for
+    /// a staged one, so the two paths cannot drift.
+    fn apply(&mut self, snapshot: Arc<Snapshot>, _cx: &mut Context<Self>) {
+        let as_of = snapshot
+            .provenance()
+            .datasets
+            .first()
+            .and_then(|f| f.as_of.clone());
+        if let Some(as_of) = &as_of {
+            self.draft.on_delivered(as_of);
+        }
+        if self.draft.is_behind() {
+            // Keep painting the generation the edits were made against;
+            // `snapshot` below still records the newer one for `:rebase`
+            // (Task 8).
+            if self.base_snapshot.is_none() {
+                self.base_snapshot = self.snapshot.take();
+            }
+        } else {
+            self.base_snapshot = None;
+        }
+        self.snapshot = Some(snapshot);
+        self.rebuild_model();
+        if self.unresolved_restore {
+            self.unresolved_restore = false;
+            // A restored draft's edits have no grid position until a model
+            // resolves them by label (Task 5's own note on
+            // `Draft::from_toml`). A draft that landed `Behind` is not
+            // rebased here: moving edits onto a generation the trader has
+            // not seen is exactly the decision `:rebase` exists to ask
+            // for (§8.4).
+            if !self.draft.is_behind() {
+                self.draft.rebase(&self.model);
+                self.rebuild_model();
+            }
+        }
+        self.sync_scroll();
+    }
+
+    /// Apply a staged snapshot, if any — from the `flip` bump in the frame
+    /// observer, or from this panel's own `deliver` when its arrival was
+    /// the one that emptied the barrier. A no-op with nothing staged, so
+    /// calling it on every `flip` costs nothing.
+    ///
+    /// A staged snapshot is only ever valid for the flip identity it was
+    /// staged under: a second mutation inside the same window replaces the
+    /// barrier before this panel's requery for the NEWER versions lands,
+    /// and the `flip` that releases that newer barrier must not promote
+    /// the older snapshot. Dropping it keeps what is already on screen
+    /// (last-good); the requery already in flight paints the real answer.
+    fn promote(&mut self, cx: &mut Context<Self>) {
+        let Some((snapshot, versions)) = self.staged.take() else {
+            return;
+        };
+        if versions.same_flip_identity(self.frame.read(cx).versions()) {
+            self.apply(snapshot, cx);
+            self.changed(cx);
+        }
     }
 
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -430,6 +543,14 @@ impl MarketDataTile {
             // An in-flight document nothing will paint is a round trip
             // spent for nothing.
             self.data.cancel(QueryKey(self.id.0));
+            // And the cancelled request's own `acted` must go with it
+            // (review fix round 1, MIN-2): it records "this panel has
+            // already asked under these versions", which is no longer
+            // true of anything that will arrive — left set, a panel hidden
+            // mid-round-trip comes back and decides it is up to date, and
+            // paints the generation it had before it was hidden until the
+            // next publish happens along.
+            self.acted = None;
         }
         self.changed(cx);
     }
@@ -575,17 +696,29 @@ impl MarketDataTile {
             return false;
         };
         let n = count.unwrap_or(1).max(1) as isize;
-        match verb {
-            "down" => self.move_cursor(n, 0),
-            "up" => self.move_cursor(-n, 0),
-            "left" => self.move_cursor(0, -n),
-            "right" => self.move_cursor(0, n),
-            "page_down" => self.move_cursor(HALF_PAGE * n, 0),
-            "page_up" => self.move_cursor(-HALF_PAGE * n, 0),
-            "top" => self.move_cursor(isize::MIN / 2, 0),
-            "bottom" => self.move_cursor(isize::MAX / 2, 0),
-            "first_col" => self.move_cursor(0, isize::MIN / 2),
-            "last_col" => self.move_cursor(0, isize::MAX / 2),
+        // Whether this action touched something the HEADER paints (review
+        // fix round 1, MIN-5). The cursor is not in the header, so a
+        // motion, a yank and an `n`/`N` step must not re-prepare the
+        // chips — `changed` formats, and a held `j` would then format the
+        // whole header per keystroke for a row number nothing shows.
+        let chrome = match verb {
+            "down" | "up" | "left" | "right" | "page_down" | "page_up" | "top" | "bottom"
+            | "first_col" | "last_col" => {
+                let (rows, cols) = match verb {
+                    "down" => (n, 0),
+                    "up" => (-n, 0),
+                    "left" => (0, -n),
+                    "right" => (0, n),
+                    "page_down" => (HALF_PAGE * n, 0),
+                    "page_up" => (-HALF_PAGE * n, 0),
+                    "top" => (isize::MIN / 2, 0),
+                    "bottom" => (isize::MAX / 2, 0),
+                    "first_col" => (0, isize::MIN / 2),
+                    _ => (0, isize::MAX / 2),
+                };
+                self.move_cursor(rows, cols);
+                false
+            }
             "yank" | "yank_row" | "yank_col" => {
                 let what = match verb {
                     "yank" => Yank::Cell,
@@ -595,12 +728,14 @@ impl MarketDataTile {
                 if let Some(text) = self.yank_text(what) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
+                false
             }
             // Task 7 owns the cell editor; the actions, the fragment's
             // insert context and the `editor` handle are here so that
             // what it has to build is the editing and not the wiring.
             "edit" | "commit" | "cancel" => {
                 self.notice = Some("editing lands in Task 7".into());
+                true
             }
             "find_next" | "find_prev" => {
                 let dir = if verb == "find_next" {
@@ -609,15 +744,21 @@ impl MarketDataTile {
                     FindDirection::Backward
                 };
                 self.repeat_find(dir, count);
+                false
             }
             "escape" => {
                 self.find = None;
-                self.notice = None;
+                // Only when there WAS one: `escape` on a clean header
+                // changes nothing the chips show.
+                self.notice.take().is_some()
             }
             _ => return false,
-        }
+        };
         self.sync_scroll();
-        self.changed(cx);
+        if chrome {
+            self.rebuild_chrome();
+        }
+        cx.notify();
         true
     }
 
@@ -713,7 +854,11 @@ impl MarketDataTile {
             }
         }
         self.sync_scroll();
-        self.changed(cx);
+        // A plain notify, for MIN-5's reason at this site too: `/` moves
+        // the cursor and nothing else, and it does so on every keystroke
+        // of the query — re-preparing the header there would format the
+        // whole thing per character for something no chip shows.
+        cx.notify();
     }
 
     /// `n`/`N`, counted — the committed query stepped from the cursor,
@@ -748,8 +893,17 @@ impl MarketDataTile {
         // the door a `key` line's own catalog request rides — the next
         // completion list is then the fresh one (spec §8.3's "completions
         // from the catalog's keys").
+        //
+        // UNCONDITIONALLY, not `request_catalog_if_needed` (review fix
+        // round 1, MIN-4, controller ruling): a held catalog listing this
+        // dataset is not a FRESH one, and documents arrive while the panel
+        // is open — a subscribed feed publishes a new key every few
+        // seconds. Gated on staleness, the panel asked once and then
+        // offered a completion list that could never grow. `set_visible`'s
+        // own request stays gated: there, one catalog is as good as
+        // another and the point is only to have one at all.
         if line.split_whitespace().next() == Some("key") {
-            self.request_catalog_if_needed(cx);
+            self.request_catalog(cx);
         }
         match commands::parse(line)? {
             Command::Key(key) => self.set_key(key, cx),
@@ -785,6 +939,12 @@ impl MarketDataTile {
         self.key = Some(key);
         self.snapshot = None;
         self.base_snapshot = None;
+        // Including anything STAGED for the old key: a key change bumps no
+        // frame version, so `promote`'s own flip-identity check would
+        // happily put the previous document's grid on screen under the new
+        // key's header. (`requery` below clears it too, but only on the
+        // visible path — a hidden panel would otherwise carry it.)
+        self.staged = None;
         // A different document is a different question: the next
         // delivery is never the one already asked for.
         self.acted = None;
@@ -825,10 +985,14 @@ impl MarketDataTile {
         keys
     }
 
-    /// Whether the held catalog can answer this panel's key completions
-    /// at all. A catalog that simply has no entry for this dataset is as
-    /// good as none: the dataset exists, so the answer is stale, not
-    /// empty.
+    /// Whether the held catalog can answer this panel's key completions at
+    /// all. A catalog with no entry for this dataset is as good as none:
+    /// the dataset exists, so the answer is missing, not empty.
+    ///
+    /// This is a "have I got one" test, never a "is mine current" one —
+    /// nothing in a `CatalogSnapshot` could answer the second (review fix
+    /// round 1, MIN-4), which is why the `:key` line asks unconditionally
+    /// and only `set_visible` consults this.
     fn needs_catalog(&self, cx: &App) -> bool {
         self.diagnostics
             .read(cx)
@@ -837,18 +1001,27 @@ impl MarketDataTile {
             .is_none_or(|c| !c.datasets.iter().any(|d| d.name == self.spec.dataset))
     }
 
+    /// Ask the bridge's drain for a fresh catalog.
+    ///
     /// `cx.notify()` in the SAME update block is mandatory, not tidy:
     /// `Diagnostics::request_catalog` queues the request and deliberately
     /// bumps no version, and the bridge's drain never runs at all without
     /// a notify to wake it — the trap CLAUDE.md names.
-    fn request_catalog_if_needed(&self, cx: &mut Context<Self>) {
-        if !self.needs_catalog(cx) {
-            return;
-        }
+    fn request_catalog(&self, cx: &mut Context<Self>) {
         self.diagnostics.update(cx, |d, cx| {
             d.request_catalog();
             cx.notify();
         });
+    }
+
+    /// [`Self::request_catalog`], but only when this panel has no catalog
+    /// for its dataset at all — `set_visible(true)`'s door, where the
+    /// point is to HAVE one rather than to have the newest.
+    fn request_catalog_if_needed(&self, cx: &mut Context<Self>) {
+        if !self.needs_catalog(cx) {
+            return;
+        }
+        self.request_catalog(cx);
     }
 
     pub fn serialize(&self) -> toml::Table {
@@ -883,6 +1056,14 @@ impl MarketDataTile {
     #[cfg(test)]
     pub(crate) fn cursor(&self) -> (usize, usize) {
         self.cursor
+    }
+
+    /// Whether this panel considers itself to have an outstanding
+    /// question — `false` is what makes the next frame change a real
+    /// retry (the refusal and hidden-mid-flight rules).
+    #[cfg(test)]
+    pub(crate) fn acted_is_none(&self) -> bool {
+        self.acted.is_none()
     }
 
     #[cfg(test)]
@@ -1182,6 +1363,12 @@ mod tests {
         frame: Entity<Frame>,
         diagnostics: Entity<Diagnostics>,
         rx: Receiver<Request>,
+        /// The panel's own handle. `DataHandle::shutdown` on it is how a
+        /// test makes the next submit be REFUSED (the blotter's own
+        /// refusal test and the bridge's picker test use the same trick):
+        /// there is no service behind a `for_tests` handle, so this only
+        /// drops the sender.
+        data: DataHandle,
     }
 
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
@@ -1194,7 +1381,7 @@ mod tests {
     ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         let (data, rx) = DataHandle::for_tests();
-        let factory = MarketDataFactory::new(data, &CVI, Duration::from_secs(15 * 60));
+        let factory = MarketDataFactory::new(data.clone(), &CVI, Duration::from_secs(15 * 60));
         // The occupant's `content` is the harness's only handle on the
         // trait; the window closure can return just one value, so it is
         // parked here on the way out.
@@ -1238,6 +1425,7 @@ mod tests {
                 frame,
                 diagnostics,
                 rx,
+                data,
             },
             vcx,
         )
@@ -1272,13 +1460,48 @@ mod tests {
             };
             vcx.update(|window, cx| self.content.deliver(Delivery::Query(outcome), window, cx));
         }
+        /// The next DOCUMENT request, skipping the `Cancel` a
+        /// `set_visible(false)` puts on the same channel — no test asserts
+        /// on a cancel, and every one of them would otherwise have to know
+        /// whether the panel had been hidden at some point.
         fn document_request(&self) -> Option<geode_core::query::DocumentParams> {
-            match self.rx.try_recv() {
-                Ok(Request::Document(params)) => Some(params),
-                Ok(other) => panic!("expected a document request, got {other:?}"),
-                Err(_) => None,
+            loop {
+                match self.rx.try_recv() {
+                    Ok(Request::Document(params)) => return Some(params),
+                    Ok(Request::Cancel { .. }) => continue,
+                    Ok(other) => panic!("expected a document request, got {other:?}"),
+                    Err(_) => return None,
+                }
             }
         }
+        fn versions(&self, vcx: &gpui::VisualTestContext) -> geode_shell::frame::FrameVersions {
+            self.frame.read_with(vcx, |f, _| f.versions())
+        }
+        fn barrier_open(&self, vcx: &gpui::VisualTestContext) -> bool {
+            self.frame.read_with(vcx, |f, _| f.barrier_open())
+        }
+        fn rows(&self, vcx: &gpui::VisualTestContext) -> usize {
+            self.tile.read_with(vcx, |t, _| t.model().rows.len())
+        }
+    }
+
+    /// The `as_of` mutation + `open_flip` a scope-bar as-of change makes,
+    /// in one update block — the shell's own frame observer is registered
+    /// before any occupant's, so this really is the order a panel sees.
+    fn open_barrier_on_as_of(
+        h: &Harness,
+        vcx: &mut gpui::VisualTestContext,
+        keys: &[QueryKey],
+        secs: u32,
+    ) {
+        let keys = keys.to_vec();
+        h.frame.update(vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(
+                chrono::Utc::now() - chrono::Duration::seconds(secs as i64),
+            ));
+            f.open_flip(keys, Instant::now());
+            cx.notify();
+        });
     }
 
     #[gpui::test]
@@ -1375,6 +1598,220 @@ mod tests {
         });
         assert_eq!(rows, 2, "last good stays on screen");
         assert_eq!(notice.as_deref(), Some("the document select failed"));
+    }
+
+    /// MIN-5 split the dispatch tail: a motion notifies without
+    /// re-preparing the header (nothing there shows the cursor), while an
+    /// action that writes or clears the notice must still rebuild it. This
+    /// pins both halves of that decision — the two `true` arms — since
+    /// getting one wrong leaves a header the trader can read that no
+    /// longer matches the tile.
+    #[gpui::test]
+    fn a_notice_reaches_the_header_and_escape_clears_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        let chips = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.header_chips());
+        let before = chips(&vcx);
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(
+            chips(&vcx),
+            before,
+            "a motion changes nothing in the header"
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(
+            chips(&vcx).iter().any(|c| c == "editing lands in Task 7"),
+            "a notice must reach the chips on the keystroke that set it: {:?}",
+            chips(&vcx)
+        );
+        h.dispatch(&mut vcx, "escape", None);
+        assert_eq!(
+            chips(&vcx),
+            before,
+            "and escape must take it back out again"
+        );
+    }
+
+    /// Review fix round 1, the Important: while a barrier still wants this
+    /// panel's key, a delivery is STAGED, not painted. A document select is
+    /// cheap, so this panel is the one most likely to paint the new as-of
+    /// — grid, header, source-time chip — a frame before every blotter
+    /// promotes its own heavier outcome, which is the half-updated screen
+    /// the barrier exists to prevent.
+    #[gpui::test]
+    fn a_delivery_under_an_open_barrier_is_staged_until_the_flip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        assert_eq!(h.rows(&vcx), 2, "the two-term document is on screen");
+
+        // A second key in the set: a blotter that has not answered yet, so
+        // this panel's own arrival cannot release the barrier.
+        let other = QueryKey(TILE + 1);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), other], 60);
+        let second = h.document_request().expect("an as-of change requeries");
+        h.deliver(
+            &mut vcx,
+            second.tag,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert_eq!(
+            h.rows(&vcx),
+            2,
+            "staged, not painted: the five-term document must wait for the flip"
+        );
+        assert!(h.barrier_open(&vcx), "the other tile has not arrived yet");
+
+        // The other tile answers; the barrier empties, `flip` bumps, and
+        // this panel's observer promotes what it staged.
+        let now = h.versions(&vcx);
+        h.frame.update(&mut vcx, |f, cx| {
+            assert!(f.arrived(other, now), "that arrival empties the barrier");
+            cx.notify();
+        });
+        assert!(!h.barrier_open(&vcx));
+        assert_eq!(h.rows(&vcx), 5, "the flip is what puts it on screen");
+    }
+
+    /// Found while writing the staging path, not by the review: a key
+    /// change bumps no frame version, so a snapshot staged for the OLD key
+    /// still passes `promote`'s flip-identity check — and `promote` runs
+    /// regardless of visibility (a panel hidden between staging and the
+    /// flip must not come back stale), so a hidden panel could put the
+    /// previous document's grid on screen under the new key's header.
+    #[gpui::test]
+    fn a_key_change_drops_what_was_staged_for_the_old_key(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+
+        let other = QueryKey(TILE + 1);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), other], 60);
+        let second = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            second,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert_eq!(h.rows(&vcx), 2, "staged, as the test above pins");
+
+        // Hidden, then pointed at another document, then the barrier
+        // releases: the promote that fires must find nothing.
+        h.visible(&mut vcx, false);
+        h.command(&mut vcx, "key NDX.Z").unwrap();
+        let now = h.versions(&vcx);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.arrived(other, now);
+            cx.notify();
+        });
+        assert_eq!(
+            h.rows(&vcx),
+            0,
+            "SPX.Z's document must not be painted under NDX.Z"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t
+                .header_chips()
+                .iter()
+                .any(|c| c == "CVI NDX.Z")),
+            "and the header is the new key's"
+        );
+    }
+
+    /// The other half: when this panel's own arrival is what empties the
+    /// barrier, it promotes on the spot rather than waiting for the `flip`
+    /// bump to come back round to its observer on a later notify pass.
+    #[gpui::test]
+    fn a_delivery_that_releases_the_barrier_promotes_at_once(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], 60);
+        let second = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            second,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert!(!h.barrier_open(&vcx), "the only awaited key has arrived");
+        assert_eq!(
+            h.rows(&vcx),
+            5,
+            "and nothing is left staged: the release promoted it in the same pass"
+        );
+    }
+
+    /// MIN-2: `set_visible(false)` cancels the in-flight request, so no
+    /// outcome will ever arrive for the versions `acted` records — leaving
+    /// it set makes the re-shown panel decide it is already up to date and
+    /// keep painting whatever it had before it was hidden.
+    #[gpui::test]
+    fn a_tile_hidden_mid_flight_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().expect("the first request");
+        // Hidden before the outcome lands, then shown again with nothing
+        // about the frame having changed.
+        h.visible(&mut vcx, false);
+        h.visible(&mut vcx, true);
+        let second = h
+            .document_request()
+            .expect("a cancelled request must be asked again");
+        assert!(second.tag > first.tag);
+    }
+
+    /// MIN-3, the panel's half (the blotter's own is
+    /// `a_refused_query_arrives_at_the_barrier_and_retries_on_the_next_change`):
+    /// a refused submit means nothing is coming, so it answers the barrier
+    /// at once and clears `acted` so the next frame change is a real retry.
+    #[gpui::test]
+    fn a_refused_request_arrives_at_the_barrier_and_retries(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+
+        // Nothing can be queued from here on.
+        h.data.shutdown();
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], 60);
+        assert!(
+            !h.barrier_open(&vcx),
+            "a refusal must answer the barrier: nothing is coming for it"
+        );
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("document request refused: the data service is busy or gone".to_string())
+        );
+        // The next frame change tries again rather than reading as
+        // already-answered.
+        h.frame.update(&mut vcx, |f, cx| {
+            f.note_published(Publish {
+                dataset: "cvi_params".into(),
+                batch: "SPX.Z".into(),
+                books: 0,
+                at: chrono::Utc::now(),
+            });
+            cx.notify();
+        });
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.acted_is_none()),
+            "still nothing acted on: every submit is refused, and each one retries"
+        );
     }
 
     /// Phase 4 §3.10: `ShellView::visible_tile_keys` puts every visible
@@ -1646,6 +2083,23 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.tile.read_with(&vcx, |t, cx| t.completions("", 0, cx)),
             commands::completions("", 0, &[], false),
             "the verb position is the pure core's vocabulary"
+        );
+
+        // MIN-4 (controller ruling): a `:key` line asks for a fresh
+        // catalog EVEN THOUGH one is already held — documents arrive while
+        // the panel is open (a subscribed feed publishes a new key every
+        // few seconds), and nothing in a held `CatalogSnapshot` can say
+        // whether it is still current. Gated on staleness, the panel asked
+        // once and then offered a list that could never grow.
+        let already = h
+            .diagnostics
+            .update(&mut vcx, |d, _| d.take_pending_catalog_request());
+        assert!(already, "the request from `set_visible` — drained");
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        assert!(
+            h.diagnostics
+                .read_with(&vcx, |d, _| d.pending_catalog_request()),
+            "a `:key` line asks again regardless"
         );
     }
 

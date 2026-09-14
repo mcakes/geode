@@ -505,6 +505,23 @@ impl BlotterTile {
         if !queued {
             self.error = Some("query refused: the data service is busy or gone".into());
             self.in_flight = None;
+            // A refused submit means nothing is ever coming for these
+            // versions (market-data Part 3 Task 6 review, MIN-3, fixed at
+            // both sites under the mechanism rule): arrive, or an open
+            // barrier (§3.10) holds every other following tile to
+            // `FLIP_DEADLINE` waiting for an outcome that will never
+            // exist. Then clear `acted`, so the next frame change is a
+            // real retry rather than `follows_changed` deciding this tile
+            // is already up to date — without it, one refusal (a full
+            // queue during a burst) left the tile on last-good until
+            // something else happened to move the frame.
+            let key = QueryKey(self.tile.0);
+            self.frame.update(cx, |f, cx| {
+                if f.arrived(key, versions) {
+                    cx.notify();
+                }
+            });
+            self.acted = None;
         }
         // Repaint once the in-flight affordance is due, if still waiting.
         cx.spawn(async move |this, cx| {
@@ -1566,6 +1583,12 @@ mod tests {
         tile: Entity<BlotterTile>,
         frame: Entity<Frame>,
         requests: Receiver<Request>,
+        /// The tile's own handle. `DataHandle::shutdown` on it is how a
+        /// test makes the next submit be REFUSED (the bridge's own
+        /// `a_refused_distinct_request_errors_the_picker` uses the same
+        /// trick): there is no service behind a `for_tests` handle, so
+        /// this only drops the sender.
+        data: DataHandle,
     }
 
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
@@ -1633,6 +1656,7 @@ mod tests {
                 tile,
                 frame,
                 requests,
+                data,
             },
             vcx,
         )
@@ -1701,6 +1725,7 @@ mod tests {
                 tile,
                 frame,
                 requests,
+                data,
             },
             vcx,
         )
@@ -1925,6 +1950,44 @@ mod tests {
             p.grouping.as_deref(),
             Some(&["lhu".to_string()][..]),
             "rejoined slot 1"
+        );
+    }
+
+    /// Market-data Part 3 Task 6 review, MIN-3, fixed at both sites under
+    /// the mechanism rule: a REFUSED submit (a full request queue, or a
+    /// gone service) means no outcome will ever arrive for those versions.
+    /// Left unanswered it holds an open flip barrier (§3.10) to
+    /// `FLIP_DEADLINE`, and left with `acted` set it is never retried
+    /// either — the tile sits on last-good until something else happens to
+    /// move the frame.
+    #[gpui::test]
+    fn a_refused_query_arrives_at_the_barrier_and_retries_on_the_next_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let first = next_query(&h.requests);
+        deliver(&h, &mut vcx, first.tag, Ok(snapshot()));
+
+        // Nothing can be queued from here on: the handle's sender is
+        // dropped, so the next submit is refused.
+        h.data.shutdown();
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.open_flip([QueryKey(7)], std::time::Instant::now());
+            cx.notify();
+        });
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "a refusal must answer the barrier: nothing is coming for it"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.error.is_some()),
+            "and it must still say so"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.acted.is_none()),
+            "`acted` is cleared, so the next frame change is a real retry"
         );
     }
 

@@ -10195,12 +10195,99 @@ run_mutation "mdtile: a panel self-arrives on a change it does not requery for" 
 # deadline even though the panel's document arrived — and a failed select
 # holds it just as long, which is the case the blotter's own rule ("one
 # broken tile must never hold every other tile open") exists for.
+#
+# Anchored on the `arrive_and_release` CALL, not on `self.arrive(cx);`:
+# after fix round 1 that text appears at three sites (the refusal, the
+# un-barriered Ok arm, the Err arm), and an ambiguous anchor mutates
+# whichever comes first.
 run_mutation "mdtile: a delivery answers the flip barrier" \
   crates/geode-marketdata/src/tile.rs \
-  '        self.arrive(cx);' \
-  '        let _ = &self.frame;' \
+  '                    if self.arrive_and_release(cx) {' \
+  '                    if false {' \
   geode-marketdata \
   a_panel_arrives_on_delivery_after_an_as_of_change
+
+# The same rule for a FAILED delivery, which is a separate arm and a
+# separate promise: one broken tile must never hold every other tile open
+# until the deadline. Mutated away, a document whose select failed holds
+# every blotter for the full 250 ms.
+run_mutation "mdtile: a failed delivery answers the barrier too" \
+  crates/geode-marketdata/src/tile.rs \
+  '                self.notice = Some(e.into());
+                self.arrive(cx);' \
+  '                self.notice = Some(e.into());' \
+  geode-marketdata \
+  a_failed_delivery_still_arrives
+
+# A REFUSED submit means no outcome will ever exist for those versions
+# (fix round 1, MIN-3). Mutated away, an open barrier waits the full
+# deadline for it, and `acted` stays set so the panel never asks again
+# either — it sits on last-good until something else moves the frame.
+run_mutation "mdtile: a refused submit arrives and clears acted" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.arrive(cx);
+            self.acted = None;' \
+  '            // refused: neither answered nor retried' \
+  geode-marketdata \
+  a_refused_request_arrives_at_the_barrier_and_retries
+
+# Hiding a panel cancels its in-flight request, so `acted` — "I have
+# already asked under these versions" — is no longer true of anything
+# that will arrive (fix round 1, MIN-2). Mutated away, a panel hidden
+# mid-round-trip comes back deciding it is up to date and paints the
+# generation it had before it was hidden until the next publish.
+run_mutation "mdtile: hiding a panel clears what it acted on" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.data.cancel(QueryKey(self.id.0));' \
+  '            self.data.cancel(QueryKey(self.id.0));
+            return;' \
+  geode-marketdata \
+  a_tile_hidden_mid_flight_requeries_on_reshow
+
+# Found while building the staging path, not by the review: a key change
+# bumps no frame version, so a snapshot staged for the OLD key passes
+# `promote`'s flip-identity check — and `promote` runs regardless of
+# visibility. Mutated away, a hidden panel pointed at another document
+# paints the previous one's grid under the new key's header the moment the
+# barrier releases. Two lines, since `requery`'s own clear is the same
+# text.
+run_mutation "mdtile: a key change drops what was staged for the old key" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.staged = None;
+        // A different document is a different question: the next' \
+  '        // A different document is a different question: the next' \
+  geode-marketdata \
+  a_key_change_drops_what_was_staged_for_the_old_key
+
+# A `:key` line asks for a FRESH catalog even when one is held (fix round
+# 1, MIN-4, controller ruling): documents arrive while the panel is open,
+# and nothing in a held snapshot says whether it is current. Mutated back
+# to the staleness gate, the completion list is whatever the first
+# catalog happened to hold and can never grow.
+run_mutation "mdtile: a key line always asks for a fresh catalog" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.request_catalog(cx);' \
+  '            self.request_catalog_if_needed(cx);' \
+  geode-marketdata \
+  key_completions_come_from_the_catalog
+
+# Review fix round 1, the Important: a delivery under an open barrier is
+# STAGED, not painted. Mutated to apply at once, the panel paints the new
+# as-of — its grid, its header, its source-time chip — a frame ahead of
+# every blotter, whose heavier outcomes are still staged: the
+# half-updated screen Phase 4a's barrier exists to prevent, and a
+# document select being cheap is exactly what makes this panel win that
+# race.
+run_mutation "mdtile: a delivery under an open barrier is staged" \
+  crates/geode-marketdata/src/tile.rs \
+  '                let wants = acted.is_some_and(|acted| {
+                    self.frame
+                        .read(cx)
+                        .barrier_wants(QueryKey(self.id.0), acted)
+                });' \
+  '                let wants = false;' \
+  geode-marketdata \
+  a_delivery_under_an_open_barrier_is_staged_until_the_flip
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
