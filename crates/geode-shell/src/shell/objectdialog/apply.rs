@@ -381,15 +381,17 @@ fn edits_for(shell: &ShellView) -> BTreeMap<(&'static str, String), ObjectEdit> 
 /// [`Destination::Doc`] change into the user layer for an object the user
 /// layer does not already own?
 ///
-/// The one question this design still asks before acting, because a fork
-/// *freezes*: a user-layer `views.toml` copy of a desk view stops
-/// receiving the column the desk adds next week (spec §4.1). Everything
-/// else — order, inclusion, width — is presentation, forks nothing, and
-/// goes onto the batch unasked.
+/// A fork *freezes*: a user-layer `views.toml` copy of a desk view stops
+/// receiving the column the desk adds next week (spec §4.1). It is
+/// applied on the keystroke like every other edit and *announced*
+/// ([`fork_notice`]) rather than asked about (user ruling 2026-09-14);
+/// `commit_edit` also reads it to record what the fork shadows (§19.6).
+/// Everything else — order, inclusion, width — is presentation and forks
+/// nothing.
 ///
 /// It reads `services.config`, which the debounce leaves up to 250 ms
-/// behind, so two definitional edits inside one window each ask rather
-/// than the second seeing the first already applied. That is the safe
+/// behind, so two definitional edits inside one window each announce
+/// rather than the second seeing the first already applied. That is the safe
 /// direction — asking twice loses nothing — and it needs a `Choice`
 /// stepped twice inside a quarter second to happen at all.
 ///
@@ -416,6 +418,34 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
         .into_iter()
         .find(|row| row.name == draft.name)
         .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User))
+}
+
+/// What a fork says instead of asking (user ruling 2026-09-14: the
+/// confirm was "too distracting — tell the user what is happening but
+/// just do it"): the copy, the layer it shadows, and the verb that undoes
+/// it. Read before [`commit_edit`] moves the baseline — [`would_fork`] is
+/// answered from the draft's pending writes, which the commit empties.
+///
+/// `layer` is the shadowed layer's own name ([`super::shadow_of`]), so a
+/// builtin object is not called the desk's; with no shadow to name
+/// (unreachable when `would_fork` holds, since that is what it checks)
+/// the notice still says what happened and what undoes it.
+pub(super) fn fork_notice(shell: &ShellView, domain: Domain) -> String {
+    let Some(name) = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .map(|draft| draft.name.clone())
+    else {
+        return String::new();
+    };
+    match super::shadow_of(&shell.services.config, domain.doc(), &name) {
+        Some((layer, _)) => format!(
+            "copied '{name}' to your config — r restores the {} copy",
+            layer.name()
+        ),
+        None => format!("copied '{name}' to your config — r restores it"),
+    }
 }
 
 /// The open draft's first error-severity diagnostic, formatted as the
@@ -466,12 +496,12 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
     // The actual gate: checked here, inside the one function every EDIT
     // reaches before it can queue a batch, rather than trusted to each
     // caller. `render::commit_or_confirm` also checks this early (see
-    // `blocking_diagnostic`'s own doc) so a `Confirm::Fork` question is
-    // never asked over an edit that can never be saved — but that early
-    // check is a UX nicety, not the safety property. This one is: it
-    // covers `run_confirmed`'s `Confirm::Fork` arm, which calls this
-    // function directly, and any future caller, without depending on
-    // anything about how keys are dispatched while a confirm is armed.
+    // `blocking_diagnostic`'s own doc) so a fork is never announced over
+    // an edit that can never be saved — but that early check is a UX
+    // nicety, not the safety property. This one is: it covers
+    // `render::run_overwrite` (Scopes' `o`), which calls this function
+    // directly, and any future caller, without depending on anything
+    // about how keys are dispatched.
     //
     // A removal never reaches this function — see [`commit_removal`],
     // which joins the same batch through a deliberately ungated path.
@@ -518,9 +548,9 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
     // **Before the baseline moves.** A shell with nowhere to write queues
     // nothing, so nothing has been accounted for and the draft must stay
     // dirty: a `mark_saved()` here would make the unqueued value the
-    // baseline, and a later declined `Confirm::Fork` would then
-    // `revert_to_baseline` onto a forked value that was never applied and
-    // never persisted — exactly what `cancel_confirm` exists to prevent.
+    // baseline, and the revert of a failed write (`revert_failed_write`)
+    // or a later successful commit would then treat a value that was
+    // never applied and never persisted as accounted for.
     let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };

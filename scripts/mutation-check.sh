@@ -4201,18 +4201,40 @@ run_mutation "objectdialog: a user doc created in memory carries no config_versi
   geode-shell \
   the_watchers_reload_of_our_own_write_changes_nothing
 
-# The one edit that still asks first. Forking is instant and irreversible
-# in the direction that matters — a user-layer copy of a desk view stops
-# receiving the desk's changes — and applying it without the confirm is
-# green against every test that only checks the value landed: it DID
-# land, in the user's own `views.toml`, weeks before anyone notices the
-# desk's new column never arrived.
-run_mutation "objectdialog: a definitional change forks without asking" \
+# A fork no longer asks (user ruling 2026-09-14) — it is applied on the
+# keystroke and ANNOUNCED, because a user-layer copy of a desk view stops
+# receiving the desk's changes and the trader has to be told that on the
+# keystroke rather than weeks later. Two halves, each with its own entry.
+# Silencing the notice is green against every test that only checks the
+# value landed (it DID land, in the user's own `views.toml`); only a test
+# reading the notice can see it.
+run_mutation "objectdialog: a fork says nothing" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if super::apply::would_fork(shell, domain) {' \
-  '    if false {' \
+  '    let fork =
+        super::apply::would_fork(shell, domain).then(|| super::apply::fork_notice(shell, domain));' \
+  '    let fork: Option<String> = None;' \
   geode-shell \
-  a_definitional_change_to_a_desk_view_confirms_before_forking
+  a_definitional_change_to_a_desk_view_forks_and_says_so
+
+# And the other half: reinstating a confirm in front of the fork — the
+# behaviour the ruling removed. Every test that flushes and reads the
+# file back would hang on an unanswered question rather than fail
+# cleanly, so the named test asserts the write is QUEUED on the keystroke
+# and no confirm is armed.
+run_mutation "objectdialog: a fork asks first" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    match super::apply::commit_edit(shell, cx) {
+        Some(refusal) => set_notice(shell, refusal),' \
+  '    if fork.is_some() {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Overwrite);
+        }
+        return;
+    }
+    match super::apply::commit_edit(shell, cx) {
+        Some(refusal) => set_notice(shell, refusal),' \
+  geode-shell \
+  a_definitional_change_to_a_desk_view_forks_and_says_so
 
 # Spec §7.1's no-carry-forward rule means `reload::decide` rejects any
 # config holding an error diagnostic, so an error-severity edit that
@@ -4224,7 +4246,7 @@ run_mutation "objectdialog: a definitional change forks without asking" \
 # refuse. Every other objectdialog test stays green (none of them ever
 # put an error diagnostic on a draft); only a test that does can see it.
 # `blocking_diagnostic` (apply.rs) is the one check both call sites into
-# `commit_edit` share (render.rs's `commit_or_confirm` peeks it early for
+# `commit_edit` share (render.rs's `commit_change` once peeked it early for
 # UX; `commit_edit` itself checks it again, unconditionally). Disabling
 # it here disables the gate everywhere at once — this is CI's regression
 # test for the whole rule, not just one caller of it.
@@ -6191,8 +6213,8 @@ run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" 
 # MIN-1: `commit_edit` resolves the user directory BEFORE it moves the
 # draft's baseline. Marking the draft saved on the way out of a shell with
 # nowhere to write makes an unqueued value the baseline, and a later
-# declined `Confirm::Fork` then reverts onto a value that was never
-# applied and never persisted. Needs `user_dir: None`, which only one
+# later commit then treats a value that was never applied and never
+# persisted as accounted for. Needs `user_dir: None`, which only one
 # fixture in the suite has.
 #
 # Re-anchored on the preceding "Before the baseline moves" comment (Task
@@ -6204,18 +6226,18 @@ run_mutation "objectdialog: a shell with nowhere to write still marks the draft 
   '    // **Before the baseline moves.** A shell with nowhere to write queues
     // nothing, so nothing has been accounted for and the draft must stay
     // dirty: a `mark_saved()` here would make the unqueued value the
-    // baseline, and a later declined `Confirm::Fork` would then
-    // `revert_to_baseline` onto a forked value that was never applied and
-    // never persisted — exactly what `cancel_confirm` exists to prevent.
+    // baseline, and the revert of a failed write (`revert_failed_write`)
+    // or a later successful commit would then treat a value that was
+    // never applied and never persisted as accounted for.
     let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };' \
   '    // **Before the baseline moves.** A shell with nowhere to write queues
     // nothing, so nothing has been accounted for and the draft must stay
     // dirty: a `mark_saved()` here would make the unqueued value the
-    // baseline, and a later declined `Confirm::Fork` would then
-    // `revert_to_baseline` onto a forked value that was never applied and
-    // never persisted — exactly what `cancel_confirm` exists to prevent.
+    // baseline, and the revert of a failed write (`revert_failed_write`)
+    // or a later successful commit would then treat a value that was
+    // never applied and never persisted as accounted for.
     let user_dir = match shell.user_dir.clone() {
         Some(dir) => dir,
         None => {
@@ -6238,10 +6260,10 @@ run_mutation "objectdialog: a shell with nowhere to write still marks the draft 
 # a scope that really differs.
 run_mutation "objectdialog: a confirmed o that changes nothing says nothing" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            revalidate(shell);
-            if !changed {' \
-  '            revalidate(shell);
-            if false {' \
+  '    revalidate(shell);
+    let queued = if !changed {' \
+  '    revalidate(shell);
+    let queued = if false {' \
   geode-shell o_on_a_scope_that_already_matches_the_frame_says_so
 
 # The review's one missing entry, smaller than MAJ-1: `commit_removal`
@@ -6298,47 +6320,50 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
 # from `draft.source` and never fed back into `to_table`), and its one
 # new verb: `o` overwrites the saved scope under the cursor with the
 # frame's current one. Two properties nothing else in this suite can
-# see: that `o` asks before acting (the same "confirm, not immediate"
-# shape `d`/`r`/the fork question all share, but this is the one test
-# that exercises *this* verb's own arm/confirm wiring), and that the
-# write lands in `scopes.toml` rather than in the frame it reads from.
+# see: that `o` on a USER-owned scope asks before acting (the same
+# "confirm, not immediate" shape `d`/`r` share — since the 2026-09-14
+# ruling a desk-owned scope writes at once instead, so the fixture is the
+# user-owned one), and that the write lands in `scopes.toml` rather than
+# in the frame it reads from.
 
-run_mutation "objectdialog: o overwrites immediately instead of asking first" \
+run_mutation "objectdialog: o overwrites a user-owned scope instead of asking first" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  "        NormalCommand::Verb('o') => arm_overwrite(shell)," \
-  "        NormalCommand::Verb('o') => {
-            arm_overwrite(shell);
-            let armed = shell
-                .object_dialog
-                .as_ref()
-                .and_then(|state| state.draft.as_ref())
-                .and_then(|draft| draft.confirm);
-            if let Some(confirm) = armed {
-                disarm_confirm(shell);
-                run_confirmed(shell, confirm, window, cx);
-            }
-        }" \
+  '    if !forks {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Overwrite);
+        }
+        return;
+    }' \
+  '    if false {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Overwrite);
+        }
+        return;
+    }' \
   geode-shell o_confirms_before_overwriting
 
 run_mutation "objectdialog: o writes the frame instead of the saved scope" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            let changed = draft_mut(shell).is_some_and(|draft| {
-                scopes::overwrite_with(draft, &scope);
-                draft.is_dirty()
-            });' \
-  '            let changed = true;
-            shell.frame.update(cx, |f, _| {
-                f.set_scope(scope.clone());
-            });' \
+  '    let changed = draft_mut(shell).is_some_and(|draft| {
+        scopes::overwrite_with(draft, &scope);
+        draft.is_dirty()
+    });' \
+  '    let changed = true;
+    shell.frame.update(cx, |f, _| {
+        f.set_scope(scope.clone());
+    });' \
   geode-shell o_overwrites_the_saved_scope_with_the_frames_current_one
 
 # ---- Phase 4c part 2a, Task 5 review round 1: fork disclosure + -------
 # ---- source-based dirtiness --------------------------------------------
 #
 # The Major: `o` used to fork a desk-owned scope into the user layer with
-# no disclosure at all — `arm_overwrite` decides `forks` from whether the
-# user layer already owns the object, independently of the prompt it
-# feeds, so this is the one line that decision collapses to.
+# no disclosure at all. `overwrite_scope` decides `forks` from whether
+# the user layer already owns the object, and since the 2026-09-14
+# ruling that decision is "write at once and announce the fork" versus
+# "ask, since the previous selection is lost" — so this is the one line
+# both the disclosure and the no-confirm land on: mutated, a desk-owned
+# scope asks instead of writing, and nothing is announced.
 #
 # The Minor: `is_dirty`/`writes_by_destination` used to compare only the
 # painted `Selects`/`Text filter` summaries, which are lossy on purpose
@@ -6347,11 +6372,11 @@ run_mutation "objectdialog: o writes the frame instead of the saved scope" \
 # comparison would call that pair "no change" and `o` would silently
 # refuse to write. Comparing `source` (the actual object) closes it.
 
-run_mutation "objectdialog: o discloses no fork for a desk-owned scope" \
+run_mutation "objectdialog: o asks before forking a desk-owned scope" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    let forks = editing_row(shell).is_some_and(|row| row.layer != Some(Layer::User));' \
   '    let forks = false;' \
-  geode-shell o_on_a_desk_owned_scope_discloses_the_fork_before_writing
+  geode-shell o_on_a_desk_owned_scope_forks_without_asking_and_says_so
 
 run_mutation "objectdialog: is_dirty ignores a source-only change" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -7372,7 +7397,7 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
 # Review finding on Task 5: a tick click must be claimed and dropped
 # while a confirm is armed, exactly as `handle_edit_key`'s bare-letter
 # case is — otherwise it can act on the object behind a pending
-# Delete/Revert/Fork. Mutated away, the guard never fires.
+# Delete/Revert/Overwrite. Mutated away, the guard never fires.
 run_mutation "objectdialog: a tick click is claimed and dropped while a confirm is armed" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if draft.confirm.is_some() {

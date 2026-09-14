@@ -1103,30 +1103,18 @@ pub struct RowDrag {
 pub enum Confirm {
     Delete,
     Revert,
-    /// A definitional change to an object the user's layer does not own.
-    /// Applying it copies the object into the user layer — which
-    /// **freezes** it: the desk's later changes stop reaching this trader
-    /// (spec §4.1). The one edit in this dialog that asks before acting,
-    /// and the reason it asks is that the cost lands weeks later.
-    Fork,
-    /// `o` on a saved scope (`Domain::Scopes` only): overwrite its
-    /// contents with whatever the frame currently holds.
-    ///
-    /// `forks` is decided at arm time (`render::arm_overwrite`), from
-    /// whether the scope under the cursor is the user layer's own —
-    /// never from destructiveness alone. When it is not, the write does
-    /// two things at once: it replaces the scope's content, and it
-    /// forks it into the user layer, which **freezes** the desk's copy
-    /// out the same way `Fork` does (spec §4.1) — invisible until weeks
-    /// later if the prompt does not say so (spec §16). One confirm
-    /// either way, not two in sequence (§16 keeps every confirm to a
-    /// single row that never changes length): the payload is what lets
-    /// one prompt disclose whichever consequence is real for *this*
-    /// object, since "saved selection is lost" is true only when there
-    /// is no desk copy underneath to fall back to.
-    Overwrite {
-        forks: bool,
-    },
+    /// `o` on a saved scope the user layer already owns (`Domain::Scopes`
+    /// only): overwrite its contents with whatever the frame currently
+    /// holds. Armed only there, because only there is something lost —
+    /// with no desk copy underneath, the scope's previous selection is
+    /// gone for good. On a desk- or builtin-owned scope `o` writes at
+    /// once and says so instead (`render::overwrite_scope`): nothing is
+    /// lost, the desk's copy is still there and `r` restores it, and the
+    /// fork it makes is announced rather than asked about, exactly as a
+    /// field edit's is (user ruling 2026-09-14). There used to be a
+    /// `Fork` confirm for those field edits and a `forks` payload here
+    /// so one prompt could disclose the fork; both went with that ruling.
+    Overwrite,
 }
 
 impl Confirm {
@@ -1137,21 +1125,12 @@ impl Confirm {
         match self {
             Confirm::Delete => format!("Delete '{name}' from your config?"),
             Confirm::Revert => format!("Throw away your changes to '{name}'?"),
-            Confirm::Fork => {
-                format!("Copy '{name}' to your config?")
-            }
-            // User-owned: nothing underneath to fall back to, so the
-            // scope's previous contents really are gone.
-            Confirm::Overwrite { forks: false } => format!(
+            // User-owned (the only case that arms it): nothing underneath
+            // to fall back to, so the scope's previous contents really
+            // are gone.
+            Confirm::Overwrite => format!(
                 "Replace '{name}' with the frame's current scope? Its saved selection is lost."
             ),
-            // Not user-owned: nothing is lost — the desk's own copy is
-            // still there — but the write forks this one into the user
-            // layer, exactly like `Fork`'s own consequence, and `r`
-            // reverts it same as any other fork.
-            Confirm::Overwrite { forks: true } => {
-                format!("Replace '{name}' with the frame's current scope? 'r' reverts.")
-            }
         }
     }
 }
@@ -1208,9 +1187,7 @@ pub struct Draft {
     /// The fields as they were when the draft was built, or as the last
     /// applied edit left them. Which files an edit touches is this
     /// comparison and nothing else, so a keystroke that puts a value back
-    /// where it started changes nothing and writes nothing — and a
-    /// declined [`Confirm::Fork`] restores from here
-    /// ([`Draft::revert_to_baseline`]).
+    /// where it started changes nothing and writes nothing.
     baseline: Vec<Field>,
     /// `source` as it stood at the same moment `baseline` did. For every
     /// domain but Scopes this never diverges from `source` after
@@ -1531,14 +1508,12 @@ impl Draft {
     /// the baseline rather than tracked with a flag, so putting a value
     /// back where it started changes nothing and writes nothing.
     ///
-    /// `true` in exactly three situations, and a reader relying on this
+    /// `true` in exactly two situations, and a reader relying on this
     /// invariant should count on no others:
     ///
     /// 1. *within* the keystroke that changed a field, before
     ///    [`apply::commit_edit`] records it and moves the baseline;
-    /// 2. while a [`Confirm::Fork`] is waiting on its answer — the change
-    ///    is on the draft and not yet recorded anywhere else;
-    /// 3. indefinitely, for a change `commit_edit` **refused**: an error
+    /// 2. indefinitely, for a change `commit_edit` **refused**: an error
     ///    diagnostic (`apply::blocking_diagnostic`) or a shell with no
     ///    writable user directory both return before `mark_saved()`, so
     ///    the value stays on the draft, painted and dirty, until a later
@@ -1552,14 +1527,6 @@ impl Draft {
     /// `source` out from under a painted summary.
     pub fn is_dirty(&self) -> bool {
         self.fields != self.baseline || self.source != self.baseline_source
-    }
-
-    /// Put every field, and `source`, back to the last applied state —
-    /// what a declined [`Confirm::Fork`] leaves behind, so the screen
-    /// never shows a value that is neither applied nor persisted.
-    pub fn revert_to_baseline(&mut self) {
-        self.fields = self.baseline.clone();
-        self.source = self.baseline_source.clone();
     }
 
     /// The column whose presentation is open, if [`Stage::Column`] is
@@ -4737,47 +4704,20 @@ mod tests {
     fn a_confirm_names_the_object_and_the_consequence() {
         assert!(Confirm::Delete.prompt("tree").contains("tree"));
         assert!(Confirm::Revert.prompt("tree").contains("tree"));
-        // The fork prompt names the object and the act; it deliberately
-        // does not spell out "it stops following the desk" (user ruling
-        // 2026-09-11: that clause read as a warning about the act rather
-        // than a description of it).
-        let fork = Confirm::Fork.prompt("tree");
-        assert!(fork.contains("tree"), "{fork}");
-        assert!(fork.starts_with("Copy"), "{fork}");
-        assert!(!fork.contains("desk"), "{fork}");
     }
 
-    /// `Confirm::Overwrite`'s two prompts must each be true of the case
-    /// they describe (Part 2a Task 5 review round 1, the Major): a
-    /// user-owned scope really does lose its previous contents, but a
-    /// desk/builtin-owned one does not — the desk's copy is still there,
-    /// `r`-revertible — so it must say so instead of claiming a loss.
-    /// Neither prompt spells out "it stops following the desk" any more
-    /// (user ruling 2026-09-11); the forked case discloses its
-    /// reversibility through `'r' reverts` alone.
+    /// `Confirm::Overwrite` is armed only on a user-owned scope (a
+    /// desk-owned one writes at once, user ruling 2026-09-14), so its one
+    /// prompt must be true of that case alone: the previous contents
+    /// really are lost, and there is no fork to claim.
     #[test]
     fn overwrite_prompts_tell_the_truth_about_what_it_costs() {
-        let owned = Confirm::Overwrite { forks: false }.prompt("mine");
+        let owned = Confirm::Overwrite.prompt("mine");
         assert!(owned.contains("mine"), "{owned}");
         assert!(owned.contains("lost"), "{owned}");
         assert!(
             !owned.contains("reverts"),
             "a user-owned scope's prompt must not claim a fork: {owned}"
-        );
-
-        let forked = Confirm::Overwrite { forks: true }.prompt("mine");
-        assert!(forked.contains("mine"), "{forked}");
-        assert!(
-            !forked.contains("desk"),
-            "the 'stops following the desk' clause was retired: {forked}"
-        );
-        assert!(
-            forked.contains("reverts"),
-            "a desk-owned scope's prompt must say r reverts: {forked}"
-        );
-        assert!(
-            !forked.contains("lost"),
-            "nothing is lost when the desk's own copy is still there: {forked}"
         );
     }
 

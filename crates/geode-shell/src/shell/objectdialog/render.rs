@@ -105,11 +105,12 @@
 //! rows can therefore trail an edit by up to one debounce window; they
 //! self-correct on the flush.
 //!
-//! One edit still asks first, and only one: a change that would **fork**
-//! the object into the user layer (spec §4.1), because a fork freezes the
-//! desk's copy out. That is [`Confirm::Fork`], and it is why the action
-//! bar's remaining verbs are exactly the destructive and structural
-//! ones.
+//! Nothing an edit does asks first. A change that **forks** the object
+//! into the user layer (spec §4.1) is applied on the keystroke like any
+//! other and *announced* — the notice names the copy and the `r` that
+//! undoes it — because the confirm it used to arm was more distracting
+//! than the fork it disclosed (user ruling 2026-09-14). The action bar's
+//! verbs are exactly the destructive ones, and only those confirm.
 
 use std::rc::Rc;
 
@@ -1105,7 +1106,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             disarm_confirm(shell);
             run_confirmed(shell, confirm, cx);
         } else if ks.key == "escape" || (bare && ks.key == "n") {
-            cancel_confirm(shell);
+            disarm_confirm(shell);
         }
         // Anything else is claimed and dropped: while a destructive
         // question is on screen, a stray letter must not act on the
@@ -1359,14 +1360,14 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                     if skipped > 0 {
                         set_notice(shell, format!("moved past {skipped} hidden"));
                     }
-                    commit_or_confirm(shell, cx);
+                    commit_change(shell, cx);
                 }
                 None => set_notice(shell, "that is as far as this row goes".to_string()),
             }
         }
         NormalCommand::Verb('d') => arm_delete(shell),
         NormalCommand::Verb('r') => arm_revert(shell),
-        NormalCommand::Verb('o') => arm_overwrite(shell),
+        NormalCommand::Verb('o') => overwrite_scope(shell, cx),
         // §18.2: take the column under the cursor out of the view.
         // Views-only by what `Draft::remove_selected` itself decides —
         // whether the field's list has an available catalogue at all
@@ -1390,7 +1391,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
                 revalidate(shell);
-                commit_or_confirm(shell, cx);
+                commit_change(shell, cx);
             }
             Some(Step::Refused(reason)) => set_notice(shell, reason),
             _ => set_notice(
@@ -1601,9 +1602,9 @@ fn open_text_field(shell: &mut ShellView) {
 /// parses and range-checks in [`Draft::apply_text_entry`] itself, a
 /// `Text` goes through the domain's `parse_text` — refusing with the
 /// field left open, or closing it, and a `Step::Changed` then rides
-/// exactly the path a tick does, [`revalidate`] and [`commit_or_confirm`],
-/// so a desk field still asks before forking; everything else is the
-/// focused `Input`'s to type (`false`).
+/// exactly the path a tick does, [`revalidate`] and [`commit_change`],
+/// so a desk field forks and says so; everything else is the focused
+/// `Input`'s to type (`false`).
 ///
 /// The chain field (§18.8, Groupings' `i`) is this same field with
 /// `completions: true`: `tab` and the nav keys only mean anything there
@@ -1664,7 +1665,7 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                     scroll_to_cursor(shell);
                 }
                 revalidate(shell);
-                commit_or_confirm(shell, cx);
+                commit_change(shell, cx);
             }
             Some(Step::Inert) => {
                 if let Some(state) = shell.object_dialog.as_mut() {
@@ -1744,7 +1745,7 @@ fn step_selected_row(
             maybe_refresh_available(shell);
             revalidate(shell);
             scroll_to_cursor(shell);
-            commit_or_confirm(shell, cx);
+            commit_change(shell, cx);
         }
         Some(Step::Refused(reason)) => refuse_step(shell, reason),
         _ => {
@@ -1898,41 +1899,25 @@ fn disarm_confirm(shell: &mut ShellView) {
     }
 }
 
-/// Say no to whatever is armed — the one door for `escape`, `n` and the
-/// Cancel button, because a declined [`Confirm::Fork`] has a second half:
-/// the keystroke that armed it already changed the draft, and leaving
-/// that showing would be the one value on screen that is neither applied
-/// nor persisted.
-fn cancel_confirm(shell: &mut ShellView) {
-    let armed = shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .and_then(|draft| draft.confirm);
-    disarm_confirm(shell);
-    if armed == Some(Confirm::Fork)
-        && let Some(draft) = draft_mut(shell)
-    {
-        draft.revert_to_baseline();
-    }
-}
-
-/// Record the change the keystroke just made — or ask first, if applying
-/// it would fork the object.
+/// Record the change the keystroke just made.
 ///
-/// The one door every field edit leaves through, so there is one place
-/// the fork question is asked and one place a change joins the pending
-/// batch. [`super::apply::commit_edit`] does that recording; the merge,
-/// the application and the file write happen together on the debounce
-/// behind it. The trader sees the change immediately regardless — the row
-/// under the cursor is painted from the draft this function was called
-/// after mutating.
+/// The one door every field edit leaves through, so there is one place a
+/// change joins the pending batch and one place a fork is announced.
+/// [`super::apply::commit_edit`] does the recording; the merge, the
+/// application and the file write happen together on the debounce behind
+/// it. The trader sees the change immediately regardless — the row under
+/// the cursor is painted from the draft this function was called after
+/// mutating.
 ///
-/// The fork check runs on the draft *after* the keystroke has changed it
-/// (that is what makes `writes_by_destination` able to see a `Doc`
-/// change at all), so declining the confirm has to put the field back —
-/// `handle_edit_key`'s cancel branch does, from the baseline.
-fn commit_or_confirm(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+/// A change that forks the object into the user layer (spec §4.1) is
+/// applied exactly like one that does not, and *said* rather than asked
+/// (user ruling 2026-09-14): the notice names the copy and the `r` that
+/// undoes it. `would_fork` is read before `commit_edit` moves the
+/// baseline, because it is answered from the draft's pending writes,
+/// which the commit empties; and a refused commit (`commit_edit`'s own
+/// `blocking_diagnostic` gate, or a shell with nowhere to write) reports
+/// its refusal instead, since nothing was copied.
+fn commit_change(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let Some(domain) = shell.object_dialog.as_ref().map(|state| state.domain) else {
         return;
     };
@@ -1944,28 +1929,15 @@ fn commit_or_confirm(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     if !dirty {
         return;
     }
-    // An early, UX-only check: skip the fork question entirely for an
-    // edit that can never be saved, rather than asking the trader to
-    // confirm a fork and then refusing it. The actual gate is
-    // `apply::blocking_diagnostic` itself, checked again inside
-    // `apply::commit_edit` — this call and `run_confirmed`'s
-    // `Confirm::Fork` arm are both refused by that inner check
-    // regardless of this one, so this dialog has exactly one *safety*
-    // gate even though it has two call sites into it.
-    if let Some(notice) = super::apply::blocking_diagnostic(shell) {
-        set_notice(shell, notice);
-        cx.notify();
-        return;
-    }
-    if super::apply::would_fork(shell, domain) {
-        if let Some(draft) = draft_mut(shell) {
-            draft.confirm = Some(Confirm::Fork);
+    let fork =
+        super::apply::would_fork(shell, domain).then(|| super::apply::fork_notice(shell, domain));
+    match super::apply::commit_edit(shell, cx) {
+        Some(refusal) => set_notice(shell, refusal),
+        None => {
+            if let Some(notice) = fork {
+                set_notice(shell, notice);
+            }
         }
-        cx.notify();
-        return;
-    }
-    if let Some(notice) = super::apply::commit_edit(shell, cx) {
-        set_notice(shell, notice);
     }
 }
 
@@ -1996,7 +1968,7 @@ fn scroll_to_cursor(shell: &mut ShellView) {
 /// from.
 ///
 /// The fold lives here because this is the one function every changed
-/// value passes through on its way to [`commit_or_confirm`]: the step
+/// value passes through on its way to [`commit_change`]: the step
 /// arms (`space`/`shift+space`), a committed text field, `x`, and the
 /// tick click all call it, and none of them knows or should know that a
 /// projection is open. A fold anywhere else would be a fold each of those
@@ -2277,20 +2249,21 @@ fn arm_revert(shell: &mut ShellView) {
 /// verb here" wording the general catch-all in [`handle_edit_key`] uses,
 /// worded identically wherever a stray letter fires.
 ///
-/// **Whether the write also forks the object is decided here, not by
-/// how destructive it is.** Overwriting a scope the user layer does not
-/// already own lands through `apply::commit_edit` exactly like any other
-/// definitional edit — which forks it into the user layer (spec §4.1),
-/// freezing the desk's copy out. That has to be *disclosed*, in the
-/// prompt, or a trader learns it weeks later when the desk's changes
-/// stop arriving (spec §16) — it is not enough that the confirm already
-/// asks about something else. `editing_row` (already `arm_delete`'s and
+/// **Whether `o` asks first is decided by who owns the scope, not by how
+/// destructive it is.** On a scope the user layer already owns the
+/// previous selection is lost for good, so it arms [`Confirm::Overwrite`].
+/// On a desk- or builtin-owned scope nothing is lost — the desk's copy is
+/// still there and `r` restores it — and the write lands through
+/// `apply::commit_edit` exactly like any other definitional edit, which
+/// forks it into the user layer (spec §4.1); by the 2026-09-14 ruling a
+/// fork is announced, not asked about, so that case runs at once
+/// ([`run_overwrite`]) and its notice says both what was replaced and
+/// what was copied. `editing_row` (already `arm_delete`'s and
 /// `arm_revert`'s own test for "does the user layer own this") answers
-/// it directly; `apply::would_fork` cannot be used here, because it
-/// reads `draft.writes_by_destination()`, which is still empty at arm
-/// time — `overwrite_with` has not run yet, so it would always say
-/// `false` regardless of who owns the object.
-fn arm_overwrite(shell: &mut ShellView) {
+/// ownership directly; `apply::would_fork` cannot be used here, because
+/// it reads `draft.writes_by_destination()`, which is still empty before
+/// `overwrite_with` has run, so it would always say `false`.
+fn overwrite_scope(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let Some(state) = shell.object_dialog.as_ref() else {
         set_notice(shell, "nothing is open".to_string());
         return;
@@ -2304,9 +2277,72 @@ fn arm_overwrite(shell: &mut ShellView) {
         return;
     }
     let forks = editing_row(shell).is_some_and(|row| row.layer != Some(Layer::User));
-    if let Some(draft) = draft_mut(shell) {
-        draft.confirm = Some(Confirm::Overwrite { forks });
+    if !forks {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Overwrite);
+        }
+        return;
     }
+    let notice = super::apply::fork_notice(shell, Domain::Scopes);
+    if run_overwrite(shell, cx) {
+        set_notice(shell, format!("replaced with the frame's scope; {notice}"));
+    }
+}
+
+/// Overwrite the open scope with the frame's current one, through the
+/// one commit door. `true` when a change was queued; `false` when there
+/// was nothing to write or the commit refused, with the notice already
+/// set to say which.
+///
+/// `shell.frame` (an `Entity<Frame>`) is read here, at the gpui call
+/// site, precisely so `Domain`'s pure core never has to know a `Frame`
+/// exists — the only place a `Frame` is read for this dialog at all (an
+/// `Entity<InputState>` is read elsewhere, e.g. the shared filter field,
+/// so this is narrower than "the only entity"). Re-checks the domain
+/// rather than trusting its callers' own gates — the same "the gate
+/// lives in the acting function, not just the one that arms it" rule
+/// `commit_edit`'s own `blocking_diagnostic` check follows. The new
+/// value replaces the draft's source and fields (`scopes::overwrite_with`),
+/// which is what makes `commit_edit` see a change to write; it goes
+/// through that same door rather than a direct `config_write` call, so a
+/// failed write still reverts the way any other edit's does, and
+/// `revalidate` runs first so the diagnostics on screen describe the new
+/// content rather than the old. `commit_edit` answers `None` both for
+/// "queued" and for "nothing changed", so the no-op case is identified
+/// here instead: a saved scope that already equals the frame's — the
+/// ordinary state straight after `:scope load` — would otherwise answer
+/// a deliberate keystroke with no write, no config change and nothing on
+/// screen. A verb that does visibly nothing is the defect class this
+/// interaction model exists to remove.
+fn run_overwrite(shell: &mut ShellView, cx: &mut Context<ShellView>) -> bool {
+    if shell
+        .object_dialog
+        .as_ref()
+        .is_none_or(|state| state.domain != Domain::Scopes)
+    {
+        cx.notify();
+        return false;
+    }
+    let scope = shell.frame.read(cx).scope().clone();
+    let changed = draft_mut(shell).is_some_and(|draft| {
+        scopes::overwrite_with(draft, &scope);
+        draft.is_dirty()
+    });
+    revalidate(shell);
+    let queued = if !changed {
+        set_notice(
+            shell,
+            "already matches the frame's scope — nothing to write".to_string(),
+        );
+        false
+    } else if let Some(notice) = super::apply::commit_edit(shell, cx) {
+        set_notice(shell, notice);
+        false
+    } else {
+        true
+    };
+    cx.notify();
+    queued
 }
 
 /// Carry out the destructive act the second keystroke just confirmed.
@@ -2324,68 +2360,13 @@ fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<Shell
         None => return,
     };
     match confirm {
-        // The fork was the point of the question; answering yes applies
-        // exactly the edit that armed it, down the one commit path. This
-        // is the second of `commit_edit`'s two call sites — it skips
-        // `commit_or_confirm`'s early `blocking_diagnostic` peek, but
-        // `commit_edit` checks the same thing itself, so an edit an
-        // error diagnostic rejects still cannot join the batch from
-        // here either.
-        Confirm::Fork => {
-            if let Some(notice) = super::apply::commit_edit(shell, cx) {
-                set_notice(shell, notice);
-            }
-            cx.notify();
+        // `o`'s confirmed answer on a user-owned scope — the same act the
+        // desk-owned case runs unasked from `overwrite_scope`.
+        Confirm::Overwrite => {
+            run_overwrite(shell, cx);
         }
-        // `o`'s confirmed answer. `shell.frame` (an `Entity<Frame>`) is
-        // read here, at the gpui call site, precisely so `Domain`'s pure
-        // core never has to know a `Frame` exists — the only place a
-        // `Frame` is read for this dialog at all (an `Entity<InputState>`
-        // is read elsewhere, e.g. the shared filter field, so this is
-        // narrower than "the only entity"). Re-checks the domain rather
-        // than trusting `arm_overwrite`'s own gate — the same "the gate
-        // lives in the acting function, not just the one that arms it"
-        // rule `commit_edit`'s own `blocking_diagnostic` check follows.
-        // The new value replaces the draft's source and fields
-        // (`scopes::overwrite_with`), which is what makes `commit_edit`
-        // see a change to write; it goes through that same door rather
-        // than a direct `config_write` call, so a failed write still
-        // reverts the way any other edit's does, and `revalidate` runs
-        // first so the diagnostics on screen describe the new content
-        // rather than the old. `forks` was already spent on the prompt
-        // (`Confirm::prompt`, chosen back in `arm_overwrite`) — nothing
-        // here needs it again.
-        Confirm::Overwrite { .. } => {
-            if domain != Domain::Scopes {
-                cx.notify();
-                return;
-            }
-            let scope = shell.frame.read(cx).scope().clone();
-            // `commit_edit` answers `None` both for "queued" and for
-            // "nothing changed", so the no-op case is identified here
-            // instead: a saved scope that already equals the frame's — the
-            // ordinary state straight after `:scope load` — would otherwise
-            // answer a deliberate second keystroke with no write, no config
-            // change and nothing on screen. A confirmed verb that does
-            // visibly nothing is the defect class this interaction model
-            // exists to remove.
-            let changed = draft_mut(shell).is_some_and(|draft| {
-                scopes::overwrite_with(draft, &scope);
-                draft.is_dirty()
-            });
-            revalidate(shell);
-            if !changed {
-                set_notice(
-                    shell,
-                    "already matches the frame's scope — nothing to write".to_string(),
-                );
-            } else if let Some(notice) = super::apply::commit_edit(shell, cx) {
-                set_notice(shell, notice);
-            }
-            cx.notify();
-        }
-        // `d`/`r` share `apply::commit_removal` with `Confirm::Fork`'s
-        // `commit_edit` above: same batch, same flush, same failure
+        // `d`/`r` share `apply::commit_removal` with `commit_change`'s
+        // `commit_edit`: same batch, same flush, same failure
         // revert — deliberately without `blocking_diagnostic`'s gate (see
         // `commit_removal`'s own doc for why a removal must never be
         // blocked by the very diagnostic it would resolve).
@@ -2458,18 +2439,18 @@ struct Action {
 /// recorded, and merges, applies and reaches disk on its own timer with
 /// no further keystroke. What is left is exactly the verbs that are
 /// destructive or structural — `d` deletes the user's copy, `r` throws a
-/// personal override away — plus, as a confirm rather than a standing
-/// button, `Copy to user layer` ([`Confirm::Fork`]), which the first
-/// definitional edit to a desk object arms.
+/// personal override away.
 ///
 /// An earlier build put `Save changes` here whenever the draft was dirty,
-/// relabelled `Copy to user layer` when saving would fork. The fork
-/// warning survives; the save does not, because a dirty draft never means
-/// "there is something a save key could do from here" —
-/// [`Draft::is_dirty`](super::Draft::is_dirty) enumerates the three ways it
-/// can be true, and in each one the value is either already recorded,
-/// waiting on a confirm that will record it, or refused by a diagnostic a
-/// save key could not get past either.
+/// relabelled `Copy to user layer` when saving would fork; a later one
+/// kept the fork as a confirm. Neither survives: the save, because a
+/// dirty draft never means "there is something a save key could do from
+/// here" — [`Draft::is_dirty`](super::Draft::is_dirty) enumerates the two
+/// ways it can be true, and in each one the value is either already
+/// recorded or refused by a diagnostic a save key could not get past
+/// either — and the fork confirm because it was more distracting than
+/// the fork it disclosed (user ruling 2026-09-14); the fork is announced
+/// in the notice instead.
 ///
 /// **`d` and `r` are silent for at least one tick right after `n` creates
 /// an object.** Both are gated on [`editing_row`], which derives from
@@ -4035,8 +4016,7 @@ fn confirm_row(
                         .label(match confirm {
                             Confirm::Delete => "Delete",
                             Confirm::Revert => "Revert",
-                            Confirm::Fork => "Copy to user layer",
-                            Confirm::Overwrite { .. } => "Overwrite",
+                            Confirm::Overwrite => "Overwrite",
                         })
                         .on_click(move |_event, window, cx| {
                             go_ahead.update(cx, |shell, cx| {
@@ -4070,7 +4050,7 @@ fn confirm_row(
                         .label("Cancel")
                         .on_click(move |_event, window, cx| {
                             leave_it.update(cx, |shell, cx| {
-                                cancel_confirm(shell);
+                                disarm_confirm(shell);
                                 // Nothing here moves the mode or the query, so
                                 // the sync is a no-op today — present for the
                                 // same reason its twin above is: this closure is
@@ -4136,7 +4116,7 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
     match key {
         "d" => arm_delete(shell),
         "r" => arm_revert(shell),
-        "o" => arm_overwrite(shell),
+        "o" => overwrite_scope(shell, cx),
         _ => {}
     }
     cx.notify();
@@ -4206,7 +4186,7 @@ fn on_edit_row_clicked(
 /// §18.9.2: a click on a row's tick. The cursor moves to the row first,
 /// then exactly `space`'s path runs — `Draft::toggle_selected`, the
 /// available-block refresh, revalidation, the scroll and
-/// `commit_or_confirm` — so every write and every refusal the key gives,
+/// `commit_change` — so every write and every refusal the key gives,
 /// the tick gives. Ends in [`dialog::sync_dialog_text`] like every mouse
 /// handler that mutates the draft (§17.1 rule 3).
 ///
@@ -4216,9 +4196,8 @@ fn on_edit_row_clicked(
 /// screen, but the row list — ticks included — keeps painting underneath
 /// the confirm row, since it is not itself replaced by one. Without this
 /// guard a tick click there would reach `Draft::toggle_selected` and
-/// `commit_or_confirm` regardless, either clobbering an armed
-/// Delete/Revert/Overwrite with a fresh `Confirm::Fork` or committing an
-/// unrelated write to disk while the question the trader is looking at
+/// `commit_change` regardless, committing an unrelated write (a fork
+/// included) to disk while the question the trader is looking at
 /// is still unanswered — the mouse disagreeing with the key on the one
 /// thing that must never be ambiguous. So this returns before touching
 /// the draft at all — not even the cursor moves, the same "claimed and
@@ -4262,7 +4241,7 @@ fn on_tick_clicked(
             maybe_refresh_available(shell);
             revalidate(shell);
             scroll_to_cursor(shell);
-            commit_or_confirm(shell, cx);
+            commit_change(shell, cx);
         }
         Step::Refused(reason) => refuse_step(shell, reason),
         Step::Inert => set_notice(shell, "nothing on this row changes with a tick".to_string()),
@@ -4346,8 +4325,8 @@ impl gpui::Render for DragGhost {
 /// so between the grab and the drop a keystroke can have reordered or
 /// removed either row — and on a change the draft's own cursor follows
 /// the dropped item, so this then revalidates, scrolls to it and commits
-/// through the same `commit_or_confirm` a keystroke takes: a desk-owned
-/// view still asks before a `Doc` write forks it, and the write joins
+/// through the same `commit_change` a keystroke takes: a desk-owned
+/// view is forked (and says so) by a `Doc` write, and the write joins
 /// the same batch behind the same debounce.
 ///
 /// Inert drops say nothing, with two exceptions — the pair a trader
@@ -4369,9 +4348,8 @@ impl gpui::Render for DragGhost {
 /// **Claimed and dropped while a confirm is armed**, the identical guard
 /// [`on_tick_clicked`] carries and for the identical reason: the row
 /// list keeps painting underneath the confirm row, so a drop there would
-/// otherwise clobber an armed Delete/Revert/Overwrite with a fresh
-/// `Confirm::Fork` or commit an unrelated write while the question on
-/// screen is still unanswered. It returns before touching the draft at
+/// otherwise commit an unrelated write (a fork included) while the
+/// question on screen is still unanswered. It returns before touching the draft at
 /// all — not even the cursor moves.
 ///
 /// `pub(in crate::shell)` so the window tests can drive it directly:
@@ -4411,7 +4389,7 @@ pub(in crate::shell) fn on_row_dropped(
         Step::Changed => {
             revalidate(shell);
             scroll_to_cursor(shell);
-            commit_or_confirm(shell, cx);
+            commit_change(shell, cx);
         }
         Step::Refused(reason) => set_notice(shell, reason),
         // A row dropped back on itself is a grab that went nowhere, and

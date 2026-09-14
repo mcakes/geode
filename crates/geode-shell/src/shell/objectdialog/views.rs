@@ -1025,9 +1025,9 @@ const MAX_WIDTH: i64 = 2000;
 /// (Part 2c §5.3).
 ///
 /// **Every field carries `dest`**, which is the whole reason this stage
-/// asks nothing before writing: there is no key here that could fork the
-/// desk's view, so `commit_or_confirm` never reaches its fork question
-/// from inside the stage — whichever overlay the door writes. The Views
+/// never forks: there is no key here that could fork the desk's view, so
+/// `commit_change` never announces one from inside the stage — whichever
+/// overlay the door writes. The Views
 /// door passes [`Destination::Presentation`], the Schema door
 /// [`Destination::DatasetPresentation`] (dataset-presentation spec
 /// §4.1); the seven rows are otherwise identical, which is why one

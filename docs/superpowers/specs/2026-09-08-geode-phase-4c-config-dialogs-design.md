@@ -240,27 +240,35 @@ itself — a click on the tick, a drag on the handle — not a bar button
 that would have to ask which row it meant, so the honest statement is
 the one above rather than three more buttons.
 
-`Copy to user layer` is a **confirm**, not a verb and no longer a
-label. It arms when the edit just made would fork the object — a
-`Doc`-destined field (§4.1) changed on an object whose winning layer is
-builtin or desk — and it is the one edit in these dialogs that asks
-before acting. Everything else applies on the keystroke.
+**A fork applies on the keystroke and is announced, never asked about
+(user ruling 2026-09-14, superseding the confirm below).** An edit to a
+`Doc`-destined field (§4.1) on an object whose winning layer is builtin
+or desk copies the object into the user layer exactly as any other edit
+applies — same batch, same debounce — and the dialog's notice says so:
+`copied 'tree' to your config — r restores the desk copy`
+(`apply::fork_notice`, the shadowed layer named from `shadow_of`). The
+ruling: "the prompt to copy to config is too distracting. It should
+tell the user what is happening but just do it and not ask for a
+confirmation." What the confirm existed to disclose — that a fork
+*freezes*, so the desk's next column never reaches this trader — is
+disclosed by the notice instead, on the keystroke, with the verb that
+undoes it. `Confirm::Fork` is gone, and with it the declined-fork
+`revert_to_baseline` and the two-call-site gate reasoning in
+`commit_or_confirm`, now `commit_change`. The same ruling reaches Scopes'
+`o`: on a desk-owned scope nothing is lost (the desk copy is still there
+and `r` restores it), so it writes at once with a notice naming both the
+replacement and the copy, and `Confirm::Overwrite` (now a unit variant)
+arms only on a user-owned scope, where the previous selection really is
+gone.
 
-It asks because a fork *freezes*: a user-layer copy of a desk view stops
-receiving the column the desk adds next week, and that cost lands weeks
-after the keystroke that caused it. Nothing else on this surface has
-that shape — order, inclusion and width fork nothing (§4.1) — so nothing
-else asks.
-
-Declining puts the field back where it was. That is not politeness: with
-every other edit applying instantly, a declined fork would otherwise be
-the one value on screen that is neither applied nor persisted, which is
-exactly the state this design exists to make unreachable.
-
-Earlier drafts of this paragraph made `Copy to user layer` a *label* on
-`s`, replacing `Save changes` when the save would fork. Both halves are
-gone with `s` itself; what survives is the warning, which was the part
-that mattered.
+*Superseded (2026-09-08 to 2026-09-13):* `Copy to user layer` was a
+**confirm**, not a verb and no longer a label. It armed when the edit
+just made would fork the object, and it was the one edit in these
+dialogs that asked before acting; declining put the field back where it
+was, so a declined fork was never the one value on screen that is
+neither applied nor persisted. Earlier drafts still made `Copy to user
+layer` a *label* on `s`, replacing `Save changes` when the save would
+fork; both halves went with `s` itself.
 
 The bar sits outside the scrolling list, so **the row list never changes
 length as you edit**.
@@ -466,9 +474,9 @@ from `view_presentation.toml` — old 4c's `:cols reset`, now reachable
 from the dialog.
 
 Every write goes to the user layer. Desk and builtin are never written:
-`config_write` refuses them rather than attempting and failing, and a
-builtin-layer object's edit stage offers `Copy to user layer` in place
-of the field rows' save.
+`config_write` refuses them rather than attempting and failing, and an
+edit to a builtin- or desk-layer object copies it into the user layer
+on the keystroke, announced in the notice (§5, as amended 2026-09-14).
 
 ## 6. The write door
 
@@ -1355,10 +1363,10 @@ Per domain:
   `Columns` (the view's members, tick = shown/hidden,
   `Destination::Presentation`) and `Available` (the chosen dataset's
   other columns plus derived dimensions, in schema order). `space` on
-  an available column **adds it to the view**: a `Doc` write, going
-  through `Confirm::Fork` when the view is not the user's. `x` on a
-  member **removes it from the view**, same destination and same
-  confirm. Hidden and removed are different states on purpose: hiding
+  an available column **adds it to the view**: a `Doc` write, forking
+  the view (announced, not asked — §5 as amended 2026-09-14) when it is
+  not the user's. `x` on a member **removes it from the view**, same
+  destination and same fork. Hidden and removed are different states on purpose: hiding
   never forks, and a desk column the trader hid still comes back when
   the desk changes it. Changing the dataset empties `Available` and
   repopulates it; members that the new dataset lacks stay listed, as
@@ -1958,9 +1966,9 @@ spelling so appending is a separator and a name away. The design:
 - **`enter` applies.** The typed names become the chain in typed order
   — ticked and first, every other item after, unticked — and the field
   closes; a `Step::Changed` then rides exactly the path a tick does
-  (`revalidate`, `commit_or_confirm`), so a desk-owned slot still asks
-  before forking and the write joins the same batch behind the same
-  debounce. `Step::Refused` keeps the field open with the text intact
+  (`revalidate`, `commit_change`), so a desk-owned slot forks and says
+  so (no confirm since 2026-09-14) and the write joins the same batch
+  behind the same debounce. `Step::Refused` keeps the field open with the text intact
   and says why — an empty chain (§3.3's "must keep at least one entry"
   refusal, since the config model has no empty chain), a name twice
   (`'book' is listed twice`), or a name no dataset carries. `Step::Inert`
@@ -1982,7 +1990,7 @@ domain's edit stage does; `ObjectDialogState::enter_edit` has no domain
 arm at all. `i` opens the chain field from there: seeded, focused,
 completions below. `escape` walks field → chooser → browse, one visible
 rung at a time, and `enter` applies and closes the field into the
-chooser, so the fork question and the applied chain are seen before
+chooser, so the fork notice and the applied chain are seen before
 leaving. A digit in the chooser jumps straight to another slot; only
 while the field is open is a digit text. The window tests that had
 gained an `escape` after each `enter`/digit under the earlier ruling
@@ -2130,8 +2138,8 @@ a filter the target is a *visible* row the trader pointed at, so unlike
 
 After `Changed` the cursor follows the dropped item by identity
 (`Draft::follow`) and the viewport scrolls to it; then `revalidate` and
-`commit_or_confirm`, so a desk-owned view still asks before a `Doc`
-write forks it, and the write joins the same batch behind the same
+`commit_change`, so a desk-owned view is forked (and told so) by a `Doc`
+write, and the write joins the same batch behind the same
 debounce a keystroke's would. *Rejected:* reorder within the members
 list only, with add and remove left to the tick and `x`. One gesture
 that covers reorder, add and remove is what a trader with a mouse
@@ -2451,8 +2459,8 @@ to complete" notice. `enter` commits:
    intact and the notice says why — the chain field's duplicate-name
    rule, applied to every text.
 2. `Ok(value)` writes the `Text`'s value and is a `Step::Changed` down
-   the tick's own path — `revalidate`, then `commit_or_confirm` — so a
-   desk-owned object still asks before forking, the write joins the
+   the tick's own path — `revalidate`, then `commit_change` — so a
+   desk-owned object forks and says so, the write joins the
    same batch behind the same debounce, and the reader's validation
    remains the safety net for anything `parse_text` let through.
 3. The same text typed back is `Step::Inert`: the field closes with
@@ -2671,9 +2679,10 @@ still says no reader fills the field, is corrected.
   door is needed.
 - An entry is one more `(doc, object)` edit in the **same batch** as the
   fork it records, so it rides `run_writes` in the same flush: it cannot
-  land without the fork, nor before it. Three forks exist — a confirmed
-  `Confirm::Fork`, Scopes' `o` with `forks: true`, and none for `n`,
-  since a taken name is refused.
+  land without the fork, nor before it. Two forks exist — a `Doc` edit
+  through `commit_change` and Scopes' `o` on a desk-owned scope (both
+  unasked and announced since 2026-09-14) — and none for `n`, since a
+  taken name is refused.
 - `r` (revert) removes the entry along with the user copy, and `d`
   (delete) removes it too; both go through `commit_removal`, which gains
   the second key.
