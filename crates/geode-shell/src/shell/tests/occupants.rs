@@ -723,6 +723,77 @@ fn a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell(
     );
 }
 
+/// The same trap with `dispatch` taken OUT of the path — which is what
+/// makes this the backstop's own test rather than a second test of
+/// `note_keyboard_focus_move`.
+///
+/// I-3 (final whole-branch review) put an earlier defence in front of the
+/// backstop: every keyboard verb that moves the focused tile arms
+/// `pending_focus_restore` through `note_keyboard_focus_move`, and
+/// `dispatch`'s workspace branch is one of them. A workspace switch that
+/// is TYPED — as the test above types it, and as the sidebar's own click
+/// handler dispatches it — is therefore handled by the flag at the top of
+/// the next render, and `ensure_occupants`'s backstop could be deleted
+/// with nothing noticing. What neither path can skip is the switch
+/// itself: `Workspaces::switch` is the method both of them end in, and
+/// calling it directly leaves the backstop as the only thing that can
+/// hand the keyboard back.
+#[gpui::test]
+fn a_tile_leaving_the_visible_set_without_a_dispatch_hands_focus_back(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, rec_focus) = services_with_recorder_focus();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let tile_focus = rec_focus
+        .borrow()
+        .clone()
+        .expect("the recorder's view took a focus handle when it was created");
+    cx.update(|window, cx| tile_focus.focus(window, cx));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.update(|window, _| tile_focus.is_focused(window)),
+        "sanity: the tile's own view holds keyboard focus"
+    );
+
+    // The switch, through the method both the chord and the sidebar click
+    // reach — but not through `dispatch`, so nothing arms the restore.
+    cx.update(|_window, cx| {
+        shell.update(cx, |shell, cx| {
+            assert!(shell.services.workspaces.switch(2), "sanity: it switched");
+            cx.notify();
+        });
+    });
+    assert!(
+        !shell.read_with(&cx, |s, _| s.pending_focus_restore),
+        "the premise: no dispatch ran, so `note_keyboard_focus_move` \
+         armed nothing — only the backstop is left"
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+    assert!(
+        cx.update(|window, _| root.is_focused(window)),
+        "the tile left the visible set holding focus, so `ensure_occupants` \
+         took it back inside that very render"
+    );
+    cx.simulate_keystrokes("alt-1");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        1,
+        "and the keyboard still reaches the shell afterwards"
+    );
+}
+
 /// The backstop's own restraint, matched to the net's: a tile leaving the
 /// visible set must NOT pull focus off a live shell surface. The palette
 /// is open (its `Input` focused) when the workspace switches, and the

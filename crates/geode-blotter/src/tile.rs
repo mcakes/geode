@@ -3659,6 +3659,96 @@ mod tests {
         );
     }
 
+    /// The half of Fix round 1, Finding 1 that `promote`'s gate cannot
+    /// reach, and the one `requery`'s clear is now alone in defending.
+    ///
+    /// Every scenario in
+    /// `a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot`
+    /// moves a counter the tile FOLLOWS, and since I-1 (final
+    /// whole-branch review) narrowed `promote`'s gate onto
+    /// `differs_on_followed` — `data` and `config` included — the gate
+    /// now catches all three on its own, Part 3's data-only bump
+    /// included: the clear is masked there. A TILE-LOCAL requery is the
+    /// case it is not. `:filter`, `:group`, `:unpin` and `:unscoped` all
+    /// requery against frame versions that never move, so a stage made
+    /// before one still agrees with `now` on every followed counter and
+    /// the gate waves it through — only the clear stops a snapshot
+    /// answering the pre-filter question from painting over the filtered
+    /// query already in flight.
+    #[gpui::test]
+    fn a_tile_local_requery_clears_the_stage_a_barrier_left_behind(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let pa0 = next_query(&h.requests);
+        let pb0 = next_query(&h.requests);
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
+        let baseline = shown_texts(&h.b, &vcx);
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+
+        // V1: a scope change opens a barrier over both keys; A's query is
+        // left outstanding, so only the deadline will release it.
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("V1".into()));
+            cx.notify();
+        });
+        let _pa1 = next_query(&h.requests);
+        let pb1 = next_query(&h.requests);
+        frame.update(&mut vcx, |f, _| {
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+        });
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            baseline,
+            "V1 is staged, not painted"
+        );
+        assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
+
+        // B's own `:filter` — a tile-local question. It requeries, but no
+        // frame counter moves, so the staged V1 payload and the frame
+        // still agree on every counter B follows.
+        h.b.update(&mut vcx, |t, cx| {
+            t.command("filter text spx", cx).unwrap();
+        });
+        let pb_filter = next_query(&h.requests);
+        assert_eq!(pb_filter.key, QueryKey(8));
+        assert!(
+            h.requests.try_recv().is_err(),
+            "a tile-local filter asks for nothing on A's behalf"
+        );
+        let versions_agree = h.b.read_with(&vcx, |t, cx| {
+            let now = t.frame.read(cx).versions();
+            !t.differs_on_followed(t.acted.unwrap(), now)
+        });
+        assert!(
+            versions_agree,
+            "the premise: `promote`'s gate would wave this stage through — \
+             the tile-local requery moved no counter B follows"
+        );
+
+        // The V1 barrier releases on its deadline and bumps `flip`.
+        frame.update(&mut vcx, |f, cx| {
+            assert!(f.sweep(Instant::now() + FLIP_DEADLINE + Duration::from_millis(1)));
+            cx.notify();
+        });
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            baseline,
+            "the stage answers the pre-filter question — it must never \
+             paint over a filtered query already in flight"
+        );
+
+        // The filtered outcome lands and paints, which is what B asked for.
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb_filter.tag, Ok(snapshot3()));
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            vec!["".to_string(), "N1".into(), "N2".into()],
+            "the filtered payload paints once it actually arrives"
+        );
+    }
+
     /// Regression: `BlotterTile::completions` used to build its
     /// `Vocabulary` from the column plan/view alone (what's
     /// *displayed*), so `:group `/`:scope drop `/`:filter ` never

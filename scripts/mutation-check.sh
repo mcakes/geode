@@ -3767,6 +3767,16 @@ run_mutation "flip: a non-following tile still arrives on its own" \
 # by hand that each mutation is actually caught by this test (not just
 # by the harness's own bug-reproduction run), console output in
 # task-8-report.md's "Fix round 1" section.
+#
+# Re-aimed 2026-09-14 (Part 3's fix wave put a second defence in front of
+# an older one): I-1 narrowed `promote`'s gate onto `differs_on_followed`,
+# which compares `data` and `config` too — so the gate now catches Part 3's
+# data-only bump as well, and the clear's own entry SURVIVED behind it.
+# The clear's remaining, unshared ground is a TILE-LOCAL requery
+# (`:filter`/`:group`/`:unpin`/`:unscoped`): no frame counter moves, so the
+# stage still agrees with `now` on every followed counter and the gate
+# waves it through. `a_tile_local_requery_clears_the_stage_a_barrier_left_
+# behind` is that race, and it is the clear's filter from here on.
 
 # Re-anchored twice: first (F5, the 2026-09-06 fix wave) onto
 # `FrameVersions::same_flip_identity`, and now (I-1, the Part 3 final
@@ -3788,7 +3798,7 @@ run_mutation "flip: a fresh requery clears whatever was staged before it" \
   '        self.staged = None;
 ' \
   '' \
-  geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
+  geode-blotter a_tile_local_requery_clears_the_stage_a_barrier_left_behind
 
 # ---- Final fix wave (whole-branch review, 2026-09-06): F1, F3 ---------
 
@@ -6683,6 +6693,16 @@ run_mutation "focus: the no-focus net never steals from a live focused element" 
 # retained across workspaces, so focus stays `Some`); `ensure_occupants`
 # carries the backstop that can. Same two directions: it must reclaim,
 # and it must not reclaim from a live shell surface.
+#
+# Re-filtered 2026-09-14 (Part 3's fix wave put a second defence in front
+# of an older one): I-3 added `note_keyboard_focus_move`, which arms
+# `pending_focus_restore` on every keyboard focus move — `dispatch`'s
+# workspace branch included — so the old filter's TYPED `alt-2` switch is
+# answered a frame before the backstop runs and this mutation SURVIVED
+# behind it. The sidebar's click handler dispatches too. The filter now
+# names the test that switches through `Workspaces::switch` directly, the
+# method both paths end in and the one path with no dispatch in it, where
+# the backstop is the only thing left.
 run_mutation "focus: a departed tile's focus returns to the shell root" \
   crates/geode-shell/src/shell/occupants.rs \
   '        if any_tile_left_the_screen
@@ -6697,7 +6717,7 @@ run_mutation "focus: a departed tile's focus returns to the shell root" \
         {
             let _ = &focused;
         }' \
-  geode-shell a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell
+  geode-shell a_tile_leaving_the_visible_set_without_a_dispatch_hands_focus_back
 
 run_mutation "focus: the departed-tile backstop spares the shell's own surfaces" \
   crates/geode-shell/src/shell/occupants.rs \
@@ -10435,14 +10455,27 @@ run_mutation "mdedit: a commit whose cell moved under it is refused" \
 # UNDER the trader's still-open edits, which is exactly the half-decided
 # state `Behind` exists to prevent: a cell reading as edited that no
 # longer names the term the trader thinks it does.
+#
+# Re-anchored 2026-09-14 (Part 3's fix wave moved the decision): M-2 made
+# `apply` decide everything on a draft COPY and keep the model already on
+# screen whenever a base is retained (`Some(_) => Rc::clone(&self.model)`),
+# so the delivered generation is built as a validation, not a paint. That
+# retention is now what decides which document a `Behind` panel shows, and
+# the old anchor — `painted_snapshot`'s base-first order — SURVIVED behind
+# it: every path that rebuilds the model calls `leave_behind()` first
+# (`:revert`, `:rebase`, `:discard`) and `edit`/`:bump` are refused while
+# `Behind`, so nothing reaches that `or_else` with a base still set. It
+# stays as the consistency guarantee for any rebuild a later change adds;
+# the mutation now breaks the site that actually paints. Caught by the
+# same test, which asserts the ROW COUNT (the base's two terms against the
+# newer document's one), not just the header chip.
 run_mutation "mddraft: Behind paints the base, not the newer document" \
   crates/geode-marketdata/src/tile.rs \
-  '    fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
-        self.base_snapshot.clone().or_else(|| self.snapshot.clone())
-    }' \
-  '    fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
-        self.snapshot.clone()
-    }' \
+  '        let model = match &retained {
+            Some(_) => Rc::clone(&self.model),
+            None => Rc::new(built),
+        };' \
+  '        let model = Rc::new(built);' \
   geode-marketdata \
   a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base
 
