@@ -1411,3 +1411,40 @@ generations are not yet wired into it — so a `--demo` session (or a
 real desk's subscribed source) left running indefinitely would grow its
 archive unbounded. Out of this task's scope; a candidate for whichever
 of Parts 3–4 next touches retention.
+
+## Market-data panel (spec §8, Part 3)
+
+The panel's pure core (`geode_marketdata::core`) is what the tile's
+render path leans on to stay under the §7.1 8 ms pure-UI budget:
+`MatrixModel::build` runs once per delivery or per draft change, never
+in `render`, and a frame only ever clones the prepared `SharedString`s
+it already produced.
+
+**Bench** (`cargo bench -p geode-marketdata`, criterion medians,
+`--release`, an M-series Mac):
+
+| Benchmark | Result |
+|---|---|
+| `marketdata_core/model_build_pivot_20x30` (CVI's own shape, `Columns::Axis`) | 285 µs |
+| `marketdata_core/model_build_values_10000x5` (a broad-index dividend schedule, `Columns::Values`) | 8.18 ms |
+| `marketdata_core/draft_rebase_1000_edits` (onto the 10,000×5 model) | 297 µs |
+
+CVI, the only panel that exists, costs 285 µs per build and is nowhere
+near the budget. The 10,000×5 flat build at 8.18 ms is the number to
+watch: it is the whole of the §7.1 8 ms pure-UI budget on its own, and
+it is not only a delivery-path cost — `commit_edit` and `:bump` both
+call `rebuild_model` on the committing keystroke, so a hypothetical
+schedule-shaped panel at that size would blow the keystroke budget on
+every edit. **The rule for such a panel (roadmap slice 2): patch the
+touched cells in place rather than call `MatrixModel::build` wholesale
+on every draft change** — `build` stays the delivery path, since
+nothing today needs a second one and an unused patch path would rot.
+
+**Paint at 10,000 rows — not yet measured on a display.** The
+implementation sandbox has no window; the display recipe below is the
+template, in the shape Phase 3's "the painted frame" section used for
+the blotter.
+
+| reading | where read | value |
+| --- | --- | --- |
+| frame time, uniform-list paint over a 10,000-row `Columns::Values` panel, p50/p95/max | perf overlay, counters reset before scrolling | *(template — not yet measured)* |

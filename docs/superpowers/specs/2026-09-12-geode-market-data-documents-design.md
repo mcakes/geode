@@ -813,8 +813,10 @@ newer generation restores into `Behind` rather than misaligning), and
   does for itself; the matcher's sequence and count state is never
   fed. The tile drops its `InputState` on commit or cancel, and that
   dropped handle is what returns focus to the shell root through the
-  existing `window.focused(cx).is_none()` net in `render` — no module
-  ever touches the shell's focus handle. A second module wanting text
+  existing `window.focused(cx).is_none()` net in `render` (superseded
+  — see §8.7: the drop alone does not produce this at the pinned
+  gpui-component rev, and an occupant must blur before dropping) — no
+  module ever touches the shell's focus handle. A second module wanting text
   entry (the pricer) inherits the rule unchanged.
 - **Keymap fragments.** `ModuleFactory::default_keymap(&self) ->
   Option<&'static str>` returns a keymap TOML fragment. `build_keymap`
@@ -829,6 +831,175 @@ newer generation restores into `Behind` rather than misaligning), and
   the two `_DEFS` tables are deleted along with their mirror tests.
   `register_actions` runs before `build_keymap` already, so a
   fragment's actions are registered when the keymap resolves them.
+
+### 8.7 As built (Part 3)
+
+1. **Insert mode is one branch, not a mode-wide takeover.**
+   `ShellView::handle_key_down` (`shell/input.rs`) tests `mode ==
+   insert` and `!holds_shell_focus` before the matcher; a bare key
+   (`Modifiers::is_chord` false — shift alone is typing) resolves only
+   against contexts that themselves carry `mode == insert`
+   (`insert_contexts`), while a chord resolves against the whole
+   stack. §8.6's text did not distinguish the two; without the split a
+   module's bare insert-mode `escape`/`enter` would sit behind the
+   shell's own bare bindings (`/`, `:`, `shift+d`) reachable from the
+   rest of the stack, and a trader could not type those characters
+   into a cell.
+2. **An explicitly unbound chord in insert mode does not
+   `stop_propagation`**, unlike the filter-field branch it otherwise
+   mirrors, so `alt+letter` and any other unbound chord can still type
+   into a cell editor — a deliberate divergence from the filter
+   field's own rule, which claims every chord for itself.
+3. **Dropping an `InputState` does not return focus by itself,
+   superseding the mechanism §8.6 states** (left in place above with a
+   pointer here, per the amendment). At the pinned gpui-component rev,
+   `Root` registers the focused input as a strong `AnyInputState`
+   (`input::state::sync_focused_input_registry`) and only ever
+   unregisters it from that input's own render — which a removed
+   input never reaches, so the last strong clone outlives the drop and
+   `Window::focused` never reports `None`. An occupant must call
+   `window.blur(cx)` (giving up focus, never taking the shell's own
+   handle) and only then drop the entity; `MarketDataTile::close_editor`
+   and `geode_shell::module::recording`'s test fixture both implement
+   the sequence, and a future text-entry module owes it too.
+4. **`Delivery` is `pub enum Delivery { Query(QueryOutcome) }` with
+   `Delivery::key() -> QueryKey`.** `TileContent::deliver` takes it,
+   and the five occupants that implement it (blotter, diagnostics,
+   placeholder, recording, and the shell-test-only `WatchingContent`)
+   match it exhaustively with no wildcard arm, so Part 4's `Upload`
+   variant forces a compile error at every site rather than a silent
+   no-op.
+5. **The fragment no-shadow rule is enforced textually, on the
+   predicate's tokens, not by evaluating the compiled boolean tree.**
+   `check_fragment` refuses a predicate containing `!`, `||` or `(`
+   anywhere in it, not only as a leading token: `blotter || workspace`
+   and `(!blotter)` both pass a naive "starts with my context" scan
+   while binding outside the module's own tile, which a tree
+   evaluation would need a probe stack to catch and a token scan does
+   not. `!=` is refused for the same reason (it contains `!`); neither
+   shipped fragment needs it.
+6. **`splice` partitions the layered docs on `Layer::Builtin`, rather
+   than splicing fragments at a fixed index**, because a binary can
+   compile in more than one builtin keymap doc (a `--demo`-shaped
+   layer, say) and a fixed insertion point would misorder a second
+   one relative to the fragments.
+7. **A fragment's diagnostics are carried on
+   `ShellServices.keymap_fragment_diagnostics`, separately from
+   `ShellServices.keymap_diagnostics`, and folded into the config
+   section by `apply_reload` *after* `reload::decide`** — not merged
+   into the config doc a reload validates against. By the time a
+   reload runs, `check_fragment` has already dropped the offending
+   binding, so `build_keymap` has nothing left to report; without the
+   separate carry, a fragment's diagnostic vanished from the
+   diagnostics tile on the session's first hot reload.
+8. **The reserved-action tables' retirement is total.**
+   `BLOTTER_ACTION_DEFS`/`BLOTTER_ACTIONS`/`DIAGNOSTICS_ACTION_DEFS`/
+   `DIAGNOSTICS_ACTIONS`, their registration loops and both mirror
+   tests are deleted from `geode-shell`; the 56 moved bindings live
+   verbatim in `geode_blotter::content::DEFAULT_KEYMAP` and
+   `geode_diagnostics::DEFAULT_KEYMAP`, each crate now asserting its
+   own fragment binds exactly its own registered actions, in both
+   directions.
+9. **`format_number`/`Formatted`/`Sign` moved from `geode-blotter` to
+   `geode_core::format`**, re-exported at the old path so
+   `geode-blotter`'s own tests (left in place) still cover the rule
+   its cells depend on; `geode-core` carries no test of the formatter
+   of its own, by design.
+10. **`PanelSpec` gained `value_type: ColumnType`** (`F64` for `CVI`),
+    not sketched in §8.1: a cell edit must parse through the column's
+    *declared* type, and nothing the tile otherwise holds carries
+    one — `Snapshot`'s `ColumnMeta` is name, attribution and scope
+    semantics, and reading the arrow array's runtime kind would let
+    an `i64` column whose values all happen to fit an `f64` array
+    silently accept `0.5`.
+11. **`MatrixModel::build` refuses more than §8.2 states**: a hole
+    naming the row/column pair, a repeated pivot pair, a repeated flat
+    row label, a NULL axis or key cell, and — added in review — more
+    than one value column under `Columns::Axis`. A zero-row document
+    is *not* an error; it builds an empty model the tile paints as "no
+    document received."
+12. **`Draft`'s cross-generation identity is `(row label, column
+    label)`, resolved by two separate `HashMap<&str, usize>` lookups
+    (`O(R + C)`), not an `R×C` index.** The first cut built the full
+    cross product (50,000 entries at 10,000×5 to resolve at most a few
+    hundred edits); `Draft::rebase` over 1,000 edits fell from 1.15 ms
+    to 297 µs once split. Both lookups are correct only because a
+    `MatrixModel`'s labels are unique on both axes by construction
+    (the refusal list in 11 above) — `rebase` has no collision check
+    of its own and must not grow one, or it would hide `build`'s own
+    check from the mutation harness.
+13. **Benched** (`cargo bench -p geode-marketdata`, p50): `MatrixModel::build`
+    285 µs at CVI's 20×30 pivot, 8.18 ms at a 10,000×5 flat schedule
+    fixture; `Draft::rebase` over 1,000 edits 297 µs. The flat build
+    sits at the edge of the §7.1 8 ms pure-UI budget and is paid again
+    on the keystroke that commits an edit or runs `:bump` (both call
+    `rebuild_model`) — a schedule-shaped panel (roadmap slice 2) must
+    patch the touched cells in place rather than call `build`
+    wholesale; CVI itself, the only panel that exists, is unaffected
+    at 285 µs. See `docs/perf.md`'s "Market-data panel" section.
+14. **`MarketDataTile` answers the flip barrier honestly, in the
+    blotter's own shape**, which §8.2/§8.6 did not specify:
+    `self_arrive` on a change it does not requery for, staging a
+    delivery under an open barrier and promoting on the flip bump,
+    arriving on an ordinary delivery, a stale tag or an `Err`, and
+    arriving with `acted` cleared (forcing a retry) on a refused
+    submit. **The diagnostics tile had the identical gap since Phase
+    4b** — as a non-placeholder occupant (`visible_tile_keys` filters
+    only on `kind == "placeholder"`) that never calls
+    `Frame::arrived`, one open diagnostics tile held every blotter to
+    the 250 ms `FLIP_DEADLINE` on every scope, grouping or as-of
+    change. This is a pre-existing defect, fixed on this branch — not
+    new panel behaviour.
+15. **`set_key` drops a staged snapshot and `set_visible(false)`
+    clears `acted`**, neither stated in §8.3/§8.5: a key change bumps
+    no frame version, so a snapshot staged for the old key would
+    otherwise still pass the flip-identity check and paint one
+    document's grid under another's header; a request cancelled by
+    hiding the tile must not be remembered as "already asked," or a
+    reshow paints a stale generation until the next unrelated publish.
+16. **`:key` refuses outright while the draft has edits** — a ruling
+    closing an ambiguity §8.3 leaves unstated, rather than the
+    alternative of discarding the draft and reporting it, which would
+    misfile a trader's numbers under a document they never chose to
+    move to. Its completions unconditionally re-request the catalog on
+    every `:key` line rather than gating on staleness, because a
+    subscribed feed can grow the key list within one completion
+    session — `request_catalog()` plus `cx.notify()` in the same
+    update is the trap a maintainer must keep together, since the
+    request is otherwise queued and invisible until some unrelated
+    mutation happens to notify.
+17. **Session restore rebases against the *first delivered* model, not
+    a config-time one.** `from_toml` parks each restored edit at the
+    unaddressable column `usize::MAX` (`UNRESOLVED_COLUMN`) because the
+    session stores label pairs, not grid indices, and no model exists
+    until the first delivery; the tile calls `rebase` there unless the
+    restored `base` already differs from the delivered one, in which
+    case the draft lands directly in `Behind` with the newer document
+    painted and the edits parked.
+18. **A commit whose cell moved out from under it is refused**
+    (`CELL_MOVED`), which §8.3/§8.4 do not mention: `Editing` captures
+    the cell and its labels at open, and a delivery landing mid-edit
+    (which can shorten the document and reflow the grid) is compared
+    against them at commit time rather than cancelling the editor on
+    delivery — the latter would need a `Window` the frame observer
+    does not have.
+19. **`:revert` while `Behind` goes through the same `leave_behind`
+    door `:discard` uses**, added in review: the first cut called
+    `Draft::revert` directly, leaving `base_snapshot` retained with an
+    empty, `Clean` draft and nothing left on screen to explain why the
+    base generation was still painted, and `:rebase`/`:discard` (both
+    gated on `is_behind()`) refused with nothing to move or drop.
+20. **"CVI: Split" is offered whenever a data bridge exists, ungated on
+    the `cvi_params` dataset being declared** — the palette row exists
+    unconditionally, exactly as the blotter's does, and a panel opened
+    with no such dataset shows its own notice rather than the palette
+    hiding the option.
+21. **Display checks are pending on a real window**, as every recent
+    branch's are: the panel's paint at 10,000 rows, the editor `Input`
+    painted in the cursor cell, the diagnostics tile's rows for a
+    subscribed source, and every claim about theme colours in the
+    panel body are all unverified pixel-for-pixel — verified instead
+    against window-test assertions and by reading.
 
 ## 9. Egress
 
@@ -962,17 +1133,19 @@ Four mergeable parts, each reviewed and merged before the next starts.
 1. **Data model and request** — §3, §4, §7, all headless: family,
    validation, `publish_document`, the not-applicable marker, the
    document request, the catalog listing keys. Mutation entries land
-   with each behaviour.
+   with each behaviour. **Done, 2026-09-13 (§4.5).**
 2. **Adapter tier and documents** — §5, §6, §10's generator: traits,
    registry, channel adapter, coalescer, receiver pipeline, the
    `geode-documents` crate with CVI, the demo generator, registration
    in the app. `--demo` publishes documents into the database with no
-   panel yet; the diagnostics tile's data section shows them.
+   panel yet; the diagnostics tile's data section shows them. **Done,
+   2026-09-13 (§5.6).**
 3. **Panel and shell changes** — §8: the crate, the spec, the matrix
    model, keys, the draft with `Behind`/`rebase`/`discard`, session,
-   `Delivery`, keymap fragments, the reserved-list deletion.
+   `Delivery`, keymap fragments, the reserved-list deletion. **Done,
+   2026-09-14 (§8.7).**
 4. **Egress** — §9: config, request, outcome, confirm, `Sent` and the
-   echo.
+   echo. **Remaining.**
 
 ## 13. Open questions
 
