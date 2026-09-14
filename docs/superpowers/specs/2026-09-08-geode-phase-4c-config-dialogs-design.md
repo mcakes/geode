@@ -1268,6 +1268,19 @@ changes underneath them (§18.1). Renaming an existing object stays
 unbuilt everywhere (§8.2's ruling), and the `Text` editing vocabulary
 stays in Part 2b.
 
+**Amended 2026-09-13** (interaction-model spec §4's own amendment, which
+is the statement of record): `l`/`tab` and `h`/`shift+tab` step a value
+beside `space`/`shift+space` on every modal surface, this dialog's two
+stages included, and `tab`/`shift+tab` step in FILTER mode here as they
+always have in the settings dialog — except while a text field is open,
+where the chain field's `tab` still completes a segment. The edit and
+column footers' change group and `i` chip are now computed from the row
+under the cursor (`Draft::selected_vocabulary`) rather than from the
+domain, so a `Choice` row names the step keys and not `i`, an editable
+`Text` row names `i` and not the step keys, a `Number` names both and a
+read-only `Text` names neither; Groupings' `i` is the exception, since
+it opens the slot's whole chain (§18.8) rather than a row's value.
+
 ### 18.1 Visual refresh
 
 The chrome changes are made once, in `shell::dialog`, so the
