@@ -6073,7 +6073,7 @@ run_mutation "pool: the refusal warning is latched once per worker" \
 # what `shift+space` maps to.
 run_mutation "dialogmode: shift+space maps to nothing (forward-only restored)" \
   crates/geode-shell/src/dialogmode.rs \
-  '            "space" => Some(NormalCommand::ToggleBack),' \
+  '            "space" | "tab" => Some(NormalCommand::ToggleBack),' \
   '' \
   geode-shell shift_space_steps_a_value_backward
 
@@ -6969,39 +6969,26 @@ run_mutation "objectdialog: an edit-stage click takes the keyboard off the filte
 
 # `space` promotes a row to the END of the member block — a screenful
 # away on a list that scrolls — so the cursor has to be scrolled back
-# into view, exactly as `shift+j`'s own arm does. Anchored from the
-# `Toggle` arm's head because `ToggleBack`'s body below is character-for-
-# character identical.
-run_mutation "objectdialog: space moves the cursor off screen and leaves it there" \
+# into view, exactly as `shift+j`'s own arm does.
+#
+# This was TWO entries, one per direction, while `Toggle` and
+# `ToggleBack` each carried their own copy of this five-line sequence.
+# The 2026-09-13 step-key ruling merged them into `step_selected_row`
+# (`tab` in filter mode needed the same body a third time), so there is
+# one branch to break and one entry to break it — but still two tests
+# behind it, because the forward and backward spellings reach it
+# separately and only one of them is named here.
+run_mutation "objectdialog: a step moves the cursor off screen and leaves it there" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);
-                scroll_to_cursor(shell);' \
-  '        NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);' \
+  '        Some(Step::Changed) => {
+            maybe_refresh_available(shell);
+            revalidate(shell);
+            scroll_to_cursor(shell);' \
+  '        Some(Step::Changed) => {
+            maybe_refresh_available(shell);
+            revalidate(shell);' \
   geode-shell \
   space_scrolls_the_next_row_into_view
-
-# The same for `shift+space`: one `step_selected` underneath, two arms
-# above it, so a fix applied to one and not the other is exactly the
-# failure this pair of entries exists to notice.
-run_mutation "objectdialog: shift+space moves the cursor off screen and leaves it there" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);
-                scroll_to_cursor(shell);' \
-  '        NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);' \
-  geode-shell \
-  shift_space_scrolls_the_next_row_into_view
 
 # And `x`, which moves the cursor the other way — to the end of the
 # available block, off the BOTTOM of the viewport.
@@ -8514,13 +8501,16 @@ run_mutation "objectdialog: the fork's own entry wins over its stale twin" \
 # footer advertises `i` only where a row can take it. Treating every Text
 # as editable would put the chip on Views, where `i` only refuses — the
 # Views window test asserts the chip is absent, the Sources one that it
-# is present, and the pure test pins the per-domain rule.
+# is present, and the pure test pins the per-domain rule. The
+# 2026-09-13 ruling narrowed the question from the object to the row
+# under the cursor (`Draft::selected_vocabulary` replacing
+# `offers_text_entry`), which is where the rule lives now.
 run_mutation "objectdialog: the footer offers i only for an editable text or a number" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            FieldKind::Text(_) => domain.text_editable(&field.key),' \
-  '            FieldKind::Text(_) => true,' \
+  '                FieldKind::Text(_) if domain.text_editable(&self.fields[i].key) => {' \
+  '                FieldKind::Text(_) if true => {' \
   geode-shell \
-  offers_text_entry_needs_a_number_or_an_editable_text_row
+  selected_vocabulary_answers_for_the_row_under_the_cursor
 
 # ---- market-data documents Part 2 Task 1: the document arm of
 # compile_distinct lowers the text and expression filters grain-free.
@@ -9871,6 +9861,70 @@ run_mutation "objectdialog: enter is named only while the selected row opens a c
   '    let opens_column = true;' \
   geode-shell \
   the_footers_name_enter_where_it_opens_something
+
+# ---- Dialog step keys and the row-sensitive footer (user ruling
+# 2026-09-13, "I'd like cycling to also be done with tab and h/l — I keep
+# reaching for them"). The four aliases are claimed in ONE table, so a
+# dropped alternative there goes dead in every modal dialog at once;
+# these entries name a different surface's test each, so a `caught` says
+# which surface is actually defending the shared arm.
+
+# The forward step's three spellings. `space` survives the mutation, so
+# every existing space test stays green and only the new pure test can
+# see it — which is the isolation this entry is for.
+run_mutation "dialogmode: l and tab step a value forward beside space" \
+  crates/geode-shell/src/dialogmode.rs \
+  '        "space" | "l" | "tab" => Some(NormalCommand::Toggle),' \
+  '        "space" => Some(NormalCommand::Toggle),' \
+  geode-shell \
+  tab_and_h_and_l_step_a_value_beside_space
+
+# `h` is the backward step, and the SETTINGS dialog is what this entry
+# defends: that surface grew no arm of its own for `h`/`l` — `route`'s
+# normal-mode branch already forwarded `Toggle`/`ToggleBack` — so the
+# only thing standing between a trader and a dead `h` there is this one
+# line in `dialogmode` plus the settings test named below.
+run_mutation "settings: h reaches the step table through dialogmode" \
+  crates/geode-shell/src/dialogmode.rs \
+  '        "h" => Some(NormalCommand::ToggleBack),' \
+  '        "h" => None,' \
+  geode-shell \
+  h_and_l_step_in_normal_mode_and_type_in_filter_mode
+
+# The backward step's shift arm, dropping only `tab` — `shift+space`
+# survives, so `shift_space_steps_a_value_backward` stays green and the
+# object dialog's own window test is the one that has to see it.
+run_mutation "dialogmode: shift+tab steps a value backward" \
+  crates/geode-shell/src/dialogmode.rs \
+  '            "space" | "tab" => Some(NormalCommand::ToggleBack),' \
+  '            "space" => Some(NormalCommand::ToggleBack),' \
+  geode-shell \
+  tab_steps_the_selected_row_in_both_modes
+
+# The object dialog's FILTER-mode `tab`, which is a branch of its own
+# rather than a `dialogmode` answer: the `Input` holds the keyboard
+# there, so the step has to be claimed before the handler hands the
+# keystroke to the field. Claiming it and doing nothing is the failure
+# mode this breaks to — the key stays inert and swallowed, which is
+# exactly what it did before the ruling.
+run_mutation "objectdialog: tab steps the selected row in filter mode" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                step_selected_row(shell, forward, cx);' \
+  '                let _ = forward;' \
+  geode-shell \
+  tab_steps_the_selected_row_in_both_modes
+
+# The row-sensitive footer: paint the change group on EVERY row, the
+# fixed group the ruling replaced. A `Text` row that cannot step is where
+# it shows, and the column stage has one (`label`) two rows above a
+# `Choice` that can — which is why that test walks all three kinds rather
+# than asserting on one.
+run_mutation "objectdialog: the edit footer paints the change group on a row nothing changes" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            RowVocabulary::Inert | RowVocabulary::Types => return Vec::new(),' \
+  '            RowVocabulary::Inert | RowVocabulary::Types => "change",' \
+  geode-shell \
+  the_edit_footer_names_only_what_the_selected_row_offers
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
