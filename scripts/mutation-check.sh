@@ -9959,12 +9959,8 @@ run_mutation "insert: the insert branch runs even while a shell surface holds fo
 # the bindings that must win while its input has the keyboard.
 run_mutation "insert: single-keystroke bindings resolve against workspace alone, not the tile's stack" \
   crates/geode-shell/src/shell/input.rs \
-  '                if let Some(ks) = convert_keystroke(&event.keystroke)
-                    && let Some(action) = self
-                        .single_keystroke_binding(&ks, &stack)' \
-  '                if let Some(ks) = convert_keystroke(&event.keystroke)
-                    && let Some(action) = self
-                        .single_keystroke_binding(&ks, &[KeyContext::new("workspace")])' \
+  '                        .single_keystroke_binding(&ks, &insert_contexts(&stack, &ks))' \
+  '                        .single_keystroke_binding(&ks, &[KeyContext::new("workspace")])' \
   geode-shell typed_keys_reach_a_tiles_focused_input_in_insert_mode
 
 # The early return is the "never feed the matcher" half: without it a
@@ -9982,6 +9978,16 @@ run_mutation "insert: a non-binding keystroke falls through to the matcher" \
 
         // Deliberately no analogous "if palette_input is focused, return' \
   geode-shell a_count_prefix_typed_in_insert_mode_is_text_not_a_count
+
+# Controller ruling: a bare key resolves only against the contexts that
+# themselves carry `mode == insert`. Mutated to the full stack, the shell's
+# own bare bindings fire behind a trader's typing — `/` opens the find
+# line, `:` the command line, `shift+d` duplicates the tile.
+run_mutation "insert: a bare key in insert mode resolves against the full stack" \
+  crates/geode-shell/src/shell/input.rs \
+  '    if keystroke.mods.is_chord() {' \
+  '    if true {' \
+  geode-shell bare_shell_keys_are_text_in_insert_mode
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

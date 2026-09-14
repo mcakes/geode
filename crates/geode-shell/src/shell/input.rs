@@ -812,13 +812,33 @@ impl ShellView {
         // leave the matcher holding a count of 5 to multiply whatever
         // motion the trader made after leaving the cell.
         //
-        // Resolved against the WHOLE `context_stack`, unlike the filter
-        // field's `workspace`-only resolution: the keyboard here belongs to
-        // the tile, so the tile's own bindings are exactly the ones that
-        // must win — `escape` and `enter` mean "cancel" and "commit" to the
-        // cell editor and nothing else, and a module says so in its keymap
-        // fragment (`keymap::fragments`), which sits above the compiled-in
-        // layers and so can reclaim even a shell key for the duration.
+        // Which contexts a keystroke resolves against splits on whether it
+        // is a CHORD — the same `Modifiers::is_chord` line the filter field
+        // draws (ctrl, alt or cmd; shift alone is typing, `shift+d` is `D`)
+        // — because the two kinds of key mean opposite things here
+        // (controller ruling):
+        //
+        // * A chord resolves against the WHOLE stack, unlike the filter
+        //   field's `workspace`-only resolution: the keyboard belongs to
+        //   the tile, so the tile's own chords are exactly the ones that
+        //   should win, and a shipped shell chord (`ctrl+k`) is a promise
+        //   that holds while typing.
+        // * A BARE key resolves only against the contexts that themselves
+        //   carry `mode == insert` — in practice the tile's own, the rest
+        //   of the stack filtered out. Every bare key the shell binds is a
+        //   character a trader types into a cell: `/` and `:` open the find
+        //   and command lines from the `tile` context, `shift+d` duplicates
+        //   the tile from `workspace`. None of them may fire behind typing,
+        //   and making every future text-entry module reclaim each one in
+        //   its own fragment is the wrong side of this seam — the shell
+        //   knows it is in insert mode, so the shell answers for it.
+        //
+        // A module's own insert-mode bindings still resolve either way,
+        // because the context they name (`<kind> && mode == insert`, in a
+        // keymap fragment — `keymap::fragments`, spliced above the
+        // compiled-in layers) is precisely the one that is kept: that is
+        // what makes `escape` cancel and `enter` commit while every other
+        // bare key is text.
         //
         // The focus test comes FIRST, ahead of building the stack: focus is
         // on the shell's own root for all but a vanishing minority of
@@ -847,8 +867,13 @@ impl ShellView {
             let stack = self.context_stack(cx);
             if stack.iter().any(|c| c.get("mode") == Some("insert")) {
                 if let Some(ks) = convert_keystroke(&event.keystroke)
+                    // `Cow`, not two `Vec`s: a chord resolves against the
+                    // stack that is already in hand and allocates nothing,
+                    // and the bare path — every keystroke of a trader's
+                    // typing — allocates one short filtered stack rather
+                    // than cloning the whole one.
                     && let Some(action) = self
-                        .single_keystroke_binding(&ks, &stack)
+                        .single_keystroke_binding(&ks, &insert_contexts(&stack, &ks))
                         .map(|binding| binding.action.clone())
                     && action.0 != UNBOUND_ACTION
                 {
@@ -939,5 +964,28 @@ impl ShellView {
                 cx.notify();
             }
         }
+    }
+}
+
+/// The contexts `keystroke` resolves against inside `handle_key_down`'s
+/// insert-mode branch: the whole `stack` for a chord, and only the
+/// contexts carrying `mode == insert` for a bare key (controller ruling,
+/// market-data spec §8.6 — see the branch's own comment for why the two
+/// differ). A free function rather than a method: it reads nothing but its
+/// arguments, which is also what lets it be tested without a window.
+fn insert_contexts<'a>(
+    stack: &'a [KeyContext],
+    keystroke: &crate::keymap::Keystroke,
+) -> std::borrow::Cow<'a, [KeyContext]> {
+    if keystroke.mods.is_chord() {
+        std::borrow::Cow::Borrowed(stack)
+    } else {
+        std::borrow::Cow::Owned(
+            stack
+                .iter()
+                .filter(|c| c.get("mode") == Some("insert"))
+                .cloned()
+                .collect(),
+        )
     }
 }

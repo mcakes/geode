@@ -249,3 +249,50 @@ fn the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode(
         log.borrow()
     );
 }
+
+/// A BARE keystroke in insert mode resolves only against the contexts that
+/// themselves carry `mode == insert` — the tile's own (controller ruling,
+/// market-data spec §8.6). The shell's own bare-key bindings are the
+/// reason: `/` and `:` open the find and command lines from the `tile`
+/// context and `shift+d` duplicates the tile from `workspace`, and every
+/// one of them is an ordinary character a trader types into a cell.
+/// Requiring each future text-entry module to reclaim them one by one in
+/// its own fragment is the wrong side of the seam.
+///
+/// The fragment's `escape`/`enter` still resolve, because the context they
+/// name is exactly the one that is kept — `chords_still_dispatch_from_
+/// insert_mode` pins the other half, a chord against the full stack.
+#[gpui::test]
+fn bare_shell_keys_are_text_in_insert_mode(cx: &mut gpui::TestAppContext) {
+    let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
+    let (window, mut vcx) = open_shell(cx, services);
+    let (shell, _shell_focus) = enter_insert_mode(&window, &mut vcx);
+    let tiles = |vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| {
+            s.services.workspaces.active().tree().tiles().len()
+        })
+    };
+    let before = tiles(&vcx);
+
+    // `/` is `tile::find` and `:` is `tile::command_line` in the shipped
+    // keymap; `shift+d` is `workspace::duplicate_horizontal` (a bare key
+    // by `Modifiers::is_chord`'s rule — shift alone is typing).
+    vcx.simulate_input("1/2:x");
+    vcx.simulate_keystrokes("shift-d");
+
+    let value = rec_input_value(&input, &vcx).expect("the editor must still be open");
+    assert_eq!(
+        value, "1/2:xD",
+        "every bare key must have been typed into the tile's input — `/`, `:` \
+         and the shifted `D` included"
+    );
+    assert!(
+        shell.read_with(&vcx, |s, _| s.command_line.is_none()),
+        "neither the find nor the command line may open behind a trader's typing"
+    );
+    assert_eq!(
+        tiles(&vcx),
+        before,
+        "a typed `D` must not duplicate the tile"
+    );
+}
