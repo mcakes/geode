@@ -334,8 +334,9 @@ pub mod placeholder {
 pub mod recording {
     use super::*;
     use gpui::prelude::*;
-    use gpui::{Context, FocusHandle, Render, div};
-    use std::cell::RefCell;
+    use gpui::{Context, FocusHandle, Focusable as _, Render, div};
+    use gpui_component::input::{Input, InputState};
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -374,6 +375,32 @@ pub mod recording {
         /// every other fixture keeps the ordinary behaviour without
         /// naming a string twice.
         pub contexts: &'static [&'static str],
+        /// The insert-mode toggle (market-data spec §8.6): `true` while
+        /// the hosted view owns a focused `InputState` — this fixture's
+        /// stand-in for the panel's cell editor. [`TileContent::
+        /// key_context`] reports `mode == insert` instead of `mode ==
+        /// normal` while it is set, which is the whole of what the shell's
+        /// insert branch keys on. Shared with the created content, which
+        /// flips it in `dispatch` (`<kind>::edit` sets it, `<kind>::commit`
+        /// and `<kind>::cancel` clear it) — so a test drives it through a
+        /// real keypress rather than poking at it, and can still read what
+        /// the shell was told.
+        pub insert: Rc<Cell<bool>>,
+        /// The `InputState` the hosted view owns while insert mode is on,
+        /// `None` otherwise — the fixture's window into the cell editor,
+        /// for the same reason `last_focus` exists: the view type is
+        /// private and the roster hands back `&dyn ModuleFactory`, so a
+        /// test has no other way to read what typing actually landed in
+        /// the input.
+        ///
+        /// **Cleared on commit/cancel in the same `dispatch` that drops
+        /// the view's own handle**, never left holding the last clone: the
+        /// entity keeps its `FocusHandle` alive, so a clone parked here
+        /// would leave a live `Input` for the window to hand focus back to.
+        /// The `blur` in that same arm is the half that actually makes
+        /// `Window::focused` `None` — see it for why dropping is not
+        /// enough on its own.
+        pub input: Rc<RefCell<Option<Entity<InputState>>>>,
     }
 
     impl RecordingFactory {
@@ -386,6 +413,8 @@ pub mod recording {
                 last_focus: Rc::new(RefCell::new(None)),
                 fragment: None,
                 contexts: &[],
+                insert: Rc::new(Cell::new(false)),
+                input: Rc::new(RefCell::new(None)),
             }
         }
     }
@@ -395,6 +424,15 @@ pub mod recording {
     struct RecordingView {
         tile: TileId,
         focus: FocusHandle,
+        /// The tile-owned `Input` of insert mode (market-data spec §8.6),
+        /// standing in for the panel's cell editor: created and focused
+        /// on `<kind>::edit`, dropped on `<kind>::commit`/`::cancel`. The
+        /// VIEW holds it, not the content, because it has to be rendered
+        /// for typing to reach it at all — gpui installs an input handler
+        /// only for a focused, painted `Input`, and only a painted one
+        /// sits on the dispatch path a keystroke bubbles up through the
+        /// shell's own root listener.
+        input: Option<Entity<InputState>>,
     }
 
     impl Render for RecordingView {
@@ -404,6 +442,7 @@ pub mod recording {
                 .track_focus(&self.focus)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
                 .child(format!("rec {}", self.tile.0))
+                .children(self.input.as_ref().map(Input::new))
         }
     }
 
@@ -413,22 +452,90 @@ pub mod recording {
         completions: Vec<String>,
         command_result: Result<(), String>,
         pub state: RefCell<toml::Table>,
+        /// The view this content speaks for — `<kind>::edit` has to put an
+        /// `InputState` somewhere that is PAINTED, and the view is the only
+        /// thing the shell renders.
+        view: Entity<RecordingView>,
+        /// Shared with [`RecordingFactory::insert`] and
+        /// [`RecordingFactory::input`]; see those two fields for what a
+        /// test reads them for.
+        insert: Rc<Cell<bool>>,
+        input: Rc<RefCell<Option<Entity<InputState>>>>,
     }
 
     impl TileContent for RecordingContent {
         fn key_context(&self, _cx: &App) -> KeyContext {
-            KeyContext::new("rec").pair("mode", "normal").counts()
+            let mode = if self.insert.get() {
+                "insert"
+            } else {
+                "normal"
+            };
+            // `counts()` stays on in insert mode deliberately: the shell's
+            // insert branch, not this context, is what must stop a typed
+            // `3` from becoming a count prefix (spec §8.6), and a fixture
+            // that quietly dropped the flag would let a shell with no
+            // branch at all pass that test.
+            KeyContext::new("rec").pair("mode", mode).counts()
         }
         fn dispatch(
             &self,
             action: &ActionId,
             count: Option<u32>,
-            _: &mut Window,
-            _: &mut App,
+            window: &mut Window,
+            cx: &mut App,
         ) -> bool {
             self.log
                 .borrow_mut()
                 .push(Recorded::Dispatch(self.tile, action.clone(), count));
+            // Matched on the VERB, never on the whole id: this factory's
+            // kind is a constructor argument, so `rec::edit` and
+            // `other::edit` are the same verb to the same fixture.
+            match action.0.rsplit_once("::").map(|(_, verb)| verb) {
+                Some("edit") => {
+                    let state = cx.new(|cx| InputState::new(window, cx));
+                    let handle = state.read(cx).focus_handle(cx);
+                    handle.focus(window, cx);
+                    self.insert.set(true);
+                    *self.input.borrow_mut() = Some(state.clone());
+                    self.view.update(cx, |view, cx| {
+                        view.input = Some(state);
+                        cx.notify();
+                    });
+                }
+                Some("commit") | Some("cancel") => {
+                    self.insert.set(false);
+                    // Give the keyboard up, then drop the input — in that
+                    // order, and BOTH halves (a real panel's cell editor
+                    // must do the same, market-data spec §8.6):
+                    //
+                    // `blur` is what the shell's dropped-focus net
+                    // (`render`'s `window.focused(cx).is_none()`) is
+                    // waiting for, and dropping the entity is NOT enough to
+                    // produce it at this pinned gpui-component rev —
+                    // `Root` registers the focused input as a strong
+                    // `AnyInputState` (`input::state::sync_focused_input_
+                    // registry`) and only ever unregisters it from the
+                    // Input's own render, which an input removed from the
+                    // tree never reaches. So the last clone would outlive
+                    // this call, `Window::focused` would stay `Some`, and
+                    // the net could never fire. Blurring is a module
+                    // GIVING UP focus, never taking the shell's — no module
+                    // touches the shell's own handle (CLAUDE.md's focus
+                    // rule); the shell decides where focus lands next.
+                    //
+                    // Dropping both clones still matters: the fixture's own
+                    // cell is a test's window into "is an editor open", and
+                    // the view must stop painting the `Input` or it would
+                    // simply re-focus itself on the next frame.
+                    window.blur(cx);
+                    *self.input.borrow_mut() = None;
+                    self.view.update(cx, |view, cx| {
+                        view.input = None;
+                        cx.notify();
+                    });
+                }
+                _ => {}
+            }
             action.0.starts_with("rec::")
         }
         fn command(&self, line: &str, _: &mut Window, _: &mut App) -> Result<(), String> {
@@ -479,12 +586,27 @@ pub mod recording {
         fn default_keymap(&self) -> Option<&'static str> {
             self.fragment
         }
+        /// `noop`, plus the four verbs a keymap fragment needs to drive
+        /// insert mode through real keypresses (market-data spec §8.6):
+        /// `edit` opens the tile-owned input, `commit`/`cancel` drop it,
+        /// and `down` is the normal-mode motion that must NOT fire while a
+        /// trader is typing. Registered here because `build_keymap` drops
+        /// any binding whose action nothing registered, so a fragment
+        /// naming them would otherwise compile away to nothing.
         fn register_actions(&self, registry: &mut ActionRegistry) {
-            let _ = registry.register(crate::actions::ActionDef {
-                id: ActionId(format!("{}::noop", self.kind)),
-                title: "Recording no-op".into(),
-                category: "Test".into(),
-            });
+            for (verb, title) in [
+                ("noop", "Recording no-op"),
+                ("edit", "Recording edit cell"),
+                ("commit", "Recording commit edit"),
+                ("cancel", "Recording cancel edit"),
+                ("down", "Recording cursor down"),
+            ] {
+                let _ = registry.register(crate::actions::ActionDef {
+                    id: ActionId(format!("{}::{verb}", self.kind)),
+                    title: title.into(),
+                    category: "Test".into(),
+                });
+            }
         }
         fn create(
             &self,
@@ -500,16 +622,23 @@ pub mod recording {
                 .push(Recorded::Created(tile, restored.cloned()));
             let focus = cx.focus_handle();
             *self.last_focus.borrow_mut() = Some(focus.clone());
-            let view = cx.new(|_| RecordingView { tile, focus });
+            let view = cx.new(|_| RecordingView {
+                tile,
+                focus,
+                input: None,
+            });
             TileOccupant {
                 kind: self.kind,
-                view: view.into(),
+                view: view.clone().into(),
                 content: Box::new(RecordingContent {
                     tile,
                     log: self.log.clone(),
                     completions: self.completions.clone(),
                     command_result: self.command_result.clone(),
                     state: RefCell::new(restored.cloned().unwrap_or_default()),
+                    view,
+                    insert: self.insert.clone(),
+                    input: self.input.clone(),
                 }),
             }
         }
@@ -538,11 +667,14 @@ mod tests {
         let mut registry = ActionRegistry::default();
         roster.register_actions(&mut registry);
         assert!(registry.contains(&ActionId("rec::noop".into())));
+        assert!(registry.contains(&ActionId("rec::edit".into())));
         // Registering twice is the roster's caller's mistake, and the
-        // registry says so rather than silently duplicating.
+        // registry says so rather than silently duplicating: one entry per
+        // verb the factory registers (`noop` plus the four insert-mode
+        // verbs), not two sets of them.
         let mut again = ActionRegistry::default();
         roster.register_actions(&mut again);
-        assert_eq!(again.iter().count(), 1);
+        assert_eq!(again.iter().count(), 5);
     }
 
     /// One doc per factory that ships a fragment, in roster order, each

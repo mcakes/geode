@@ -349,9 +349,12 @@ impl ShellView {
     /// Is `handle` one of the shell's own focusable surfaces — the root,
     /// or one of the four `Entity<InputState>`s a user can be typing
     /// into? Anything else that holds window focus belongs to a tile's
-    /// occupant view (see `ensure_occupants`'s backstop, the only
-    /// caller, for why that distinction is the whole decision).
-    fn holds_shell_focus(&self, handle: &FocusHandle, cx: &App) -> bool {
+    /// occupant view. Two callers read it for that one distinction:
+    /// `ensure_occupants`'s backstop above (see it for why the distinction
+    /// is the whole decision) and `handle_key_down`'s insert-mode branch,
+    /// which routes typing at a tile only while a tile — never a shell
+    /// surface — actually holds the keyboard.
+    pub(super) fn holds_shell_focus(&self, handle: &FocusHandle, cx: &App) -> bool {
         *handle == self.focus_handle
             || [
                 &self.palette_input,

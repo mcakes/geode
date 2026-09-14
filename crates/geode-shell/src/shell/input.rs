@@ -680,6 +680,13 @@ impl ShellView {
 
         // The filter field (Task 4) owns its own key handling while it has
         // focus — typing must reach it, not the shell's keymap `Matcher`.
+        // One of TWO such rules now: the insert-mode branch just below
+        // generalises this same shape to a tile that owns a focused
+        // `Input` of its own (market-data spec §8.6, the panel's cell
+        // editor). They are deliberately separate branches rather than one
+        // merged guard — this one resolves chords against the `workspace`
+        // context alone and reflects the frame's text back into the field
+        // afterwards, neither of which is true of a tile's own input.
         // This has to be handled explicitly rather than relying on gpui's
         // dispatch to simply not reach here: gpui-component's `Input`
         // binds most editing keys (typing, backspace, arrows, ctrl+v
@@ -785,6 +792,77 @@ impl ShellView {
                 cx.notify();
             }
             return;
+        }
+
+        // Insert mode (market-data spec §8.6): a tile occupant that owns a
+        // focused `Input` — the market-data panel's cell editor — reports
+        // `mode == insert` in its key context. While it does, and window
+        // focus is on a handle the shell does not own, only SINGLE-
+        // keystroke bindings resolve against the context stack (the module
+        // fragment's own `escape`/`enter` in `<kind> && mode == insert`,
+        // and chords); every other keystroke propagates untouched to the
+        // focused input, and the matcher's sequence and count state is
+        // never fed — the same shape as the filter-field branch above,
+        // generalised to a tile.
+        //
+        // This exists because this listener sits on the window root and
+        // sees every raw keystroke, focused element or not (the filter
+        // branch's own comment has the gpui mechanics): without it a typed
+        // `j` would also move the panel's cursor, and a typed `5` would
+        // leave the matcher holding a count of 5 to multiply whatever
+        // motion the trader made after leaving the cell.
+        //
+        // Resolved against the WHOLE `context_stack`, unlike the filter
+        // field's `workspace`-only resolution: the keyboard here belongs to
+        // the tile, so the tile's own bindings are exactly the ones that
+        // must win — `escape` and `enter` mean "cancel" and "commit" to the
+        // cell editor and nothing else, and a module says so in its keymap
+        // fragment (`keymap::fragments`), which sits above the compiled-in
+        // layers and so can reclaim even a shell key for the duration.
+        //
+        // The focus test comes FIRST, ahead of building the stack: focus is
+        // on the shell's own root for all but a vanishing minority of
+        // keystrokes, so the cheap comparison short-circuits before the
+        // stack's allocation on the ordinary path. The two conditions are a
+        // conjunction either way — an insert-mode context is meaningless
+        // while the shell itself holds the keyboard (a modal, the palette,
+        // the command line and the scope bar all returned above, but a
+        // shell surface focused with none of them OPEN would otherwise
+        // route its typing at a tile).
+        //
+        // On commit or cancel the occupant gives the keyboard up and drops
+        // its `InputState`, and `render`'s `window.focused(cx).is_none()`
+        // net is what turns that into shell focus — no module touches the
+        // shell's own focus handle (CLAUDE.md's focus rule). Giving it up
+        // takes a `Window::blur`, not just the drop: gpui-component's
+        // `Root` holds the focused input as a strong `AnyInputState` and
+        // unregisters it only from that input's own render, which an input
+        // removed from the tree never reaches (`module::recording`'s
+        // commit/cancel arm has the full note; a real panel owes the same
+        // two steps).
+        if window
+            .focused(cx)
+            .is_some_and(|focused| !self.holds_shell_focus(&focused, cx))
+        {
+            let stack = self.context_stack(cx);
+            if stack.iter().any(|c| c.get("mode") == Some("insert")) {
+                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && let Some(action) = self
+                        .single_keystroke_binding(&ks, &stack)
+                        .map(|binding| binding.action.clone())
+                    && action.0 != UNBOUND_ACTION
+                {
+                    self.dispatch(&action, None, window, cx);
+                    // Stopped for the same reason the filter field stops a
+                    // dispatched chord: a claimed keystroke must not ALSO
+                    // reach the window's text-input phase and type itself
+                    // into the input behind the action (gpui runs that
+                    // phase only while the event still propagates).
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                return;
+            }
         }
 
         // Deliberately no analogous "if palette_input is focused, return

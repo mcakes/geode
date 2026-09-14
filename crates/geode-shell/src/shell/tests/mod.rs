@@ -83,7 +83,8 @@ fn services_with_rec_roster() -> (
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
     RecFocus,
 ) {
-    services_with_rec_roster_shipping(None)
+    let (services, log, focus, _input) = services_with_rec_roster_shipping(None);
+    (services, log, focus)
 }
 
 /// The default bindings the fixture recorder ships when asked to
@@ -104,13 +105,67 @@ pub(super) fn services_with_a_module_fragment(
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
 ) {
-    let (services, log, _focus) = services_with_rec_roster_shipping(Some(fragment));
+    let (services, log, _focus, _input) = services_with_rec_roster_shipping(Some(fragment));
     assert!(
         services.keymap_fragment_diagnostics.is_empty(),
         "{:?}",
         services.keymap_fragment_diagnostics
     );
     (services, log)
+}
+
+/// The fixture for insert mode (market-data spec §8.6): the recorder's
+/// own fragment, in the exact shape the market-data panel's will take —
+/// one table per mode, so the two vocabularies cannot bleed into each
+/// other. `i` opens the tile-owned input (and with it insert mode), `j`
+/// is the normal-mode motion that must NOT fire while a trader is typing
+/// in it, and `escape`/`enter` are the only two keys the module claims
+/// back while it does.
+pub(super) const REC_INSERT_FRAGMENT: &str = "\
+[[bindings]]
+context = \"rec && mode == normal\"
+[bindings.keys]
+\"i\" = \"rec::edit\"
+\"j\" = \"rec::down\"
+
+[[bindings]]
+context = \"rec && mode == insert\"
+[bindings.keys]
+\"escape\" = \"rec::cancel\"
+\"enter\" = \"rec::commit\"
+";
+
+/// The cell a `RecordingFactory` publishes its hosted view's live
+/// `InputState` into — see that field's doc comment for why a test can
+/// reach it no other way, and why nothing outside it may hold a clone.
+pub(super) type RecInput = std::rc::Rc<std::cell::RefCell<Option<Entity<InputState>>>>;
+
+/// [`services_with_a_module_fragment`] plus the recorder's input cell —
+/// for the insert-mode tests, which have to read what typing landed in
+/// the tile's own `Input`.
+pub(super) fn services_with_an_insert_recorder(
+    fragment: &'static str,
+) -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    RecInput,
+) {
+    let (services, log, _focus, input) = services_with_rec_roster_shipping(Some(fragment));
+    assert!(
+        services.keymap_fragment_diagnostics.is_empty(),
+        "{:?}",
+        services.keymap_fragment_diagnostics
+    );
+    (services, log, input)
+}
+
+/// The value in the recorder's own `Input`, or `None` when it has none.
+/// Takes and drops a temporary clone of the entity deliberately: a clone
+/// kept by a test would keep the `FocusHandle` alive and disprove the
+/// dropped-focus net it is meant to observe (`RecordingFactory::input`).
+pub(super) fn rec_input_value(input: &RecInput, cx: &gpui::VisualTestContext) -> Option<String> {
+    let state = input.borrow().clone();
+    state.map(|state| state.read_with(cx, |state, _| state.value().to_string()))
 }
 
 /// A fragment one of whose bindings `check_fragment` DROPS — it names
@@ -124,7 +179,7 @@ pub(super) const REC_FRAGMENT_WITH_A_FOREIGN_BINDING: &str = "[[bindings]]\ncont
 /// error diagnostic is asserted here, so a test can be about what happens
 /// to it rather than about whether it was produced.
 pub(super) fn services_with_a_dropped_fragment_binding() -> ShellServices {
-    let (services, _log, _focus) =
+    let (services, _log, _focus, _input) =
         services_with_rec_roster_shipping(Some(REC_FRAGMENT_WITH_A_FOREIGN_BINDING));
     assert_eq!(
         services.keymap_fragment_diagnostics.len(),
@@ -145,6 +200,7 @@ fn services_with_rec_roster_shipping(
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
     RecFocus,
+    RecInput,
 ) {
     // No compiled-in builtin layer in this fixture, so a reload has
     // nothing to preserve. `ShellServices::config_and_builtin` is the
@@ -182,6 +238,7 @@ fn services_with_rec_roster_shipping(
     recorder.fragment = fragment;
     let log = recorder.log.clone();
     let last_focus = recorder.last_focus.clone();
+    let input = recorder.input.clone();
     let mut roster = crate::module::ModuleRoster::new();
     roster.add(Box::new(recorder));
     // Module actions exist before `build_keymap`, exactly as `main.rs`
@@ -220,7 +277,7 @@ fn services_with_rec_roster_shipping(
         keymap_fragments,
         keymap_fragment_diagnostics,
     };
-    (services, log, last_focus)
+    (services, log, last_focus, input)
 }
 
 /// [`test_services`] plus a binding into the recording module's own key

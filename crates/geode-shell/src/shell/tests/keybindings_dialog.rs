@@ -1727,7 +1727,14 @@ fn clicking_the_frozen_filter_row_while_listening_cancels_the_capture(
 /// Filter down to the recording module's own row and leave filter mode —
 /// the fragment twin of [`select_the_palette_row`].
 fn select_the_module_row(cx: &mut gpui::VisualTestContext) {
-    cx.simulate_keystrokes("/ r e c o r d i n g");
+    // `noop`, not `recording`: the fixture factory registers five actions
+    // now (Part 3 Task 4's insert-mode verbs), all titled "Recording …",
+    // and rows sort by category then TITLE — so `recording` selects
+    // "Recording cancel edit", an unbound row, and the assertions below
+    // would be about the wrong action. `no-op` is the only one of the five
+    // whose title fuzzy-matches this query at all (it is the only one with
+    // a `p`).
+    cx.simulate_keystrokes("/ n o o p");
     cx.run_until_parked();
     cx.simulate_keystrokes("escape");
 }
