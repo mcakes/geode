@@ -129,10 +129,14 @@ lie in its most ordinary form. The object dialog's edit and column
 stages compute both groups from `Draft::selected_vocabulary` — the
 change group on a `Choice`/`Bool`/`Number` row, `i` on a `Number` or an
 editable `Text`, both on a `Number`, neither on a read-only one; a list
-row gets `space` alone with the word (`toggle`, `add`) that says which
-way it travels. Groupings' `i` is the one thing that is not row-derived:
-there it opens the slot's whole chain rather than a row's value, so it
-is live everywhere and stated unconditionally.
+row gets the forward key alone with the word (`toggle`, `add`) that says
+which way it travels. The filter-mode footer names the same group
+shrunk to `tab`/`shift+tab`, since those are the only two spellings that
+step with the `Input` focused — the same rule read the other way round,
+about keys that type rather than keys that are dead. Groupings' `i` is
+the one thing that is not row-derived: there it opens the slot's whole
+chain rather than a row's value, so it is live everywhere and stated
+unconditionally.
 
 `shift+j`/`shift+k` replaces Phase 4c §3.3's pick-up sub-mode
 (`enter` to grab, arrows to move, `enter` to drop), which existed only

@@ -3551,24 +3551,34 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     );
     // `space` `shift+space` `tab` `h` `l` · change — the five spellings
     // `Draft::step_selected` answers to, on a row that has a value to
-    // step. A list row takes `space` alone, with the word that says
-    // which way the row travels. EMPTY on a row nothing changes, which
-    // is what makes the group droppable; `trailing` adds the ` ·` that
-    // joins it to whatever follows, and the one caller whose motion row
-    // ENDS here passes `false`.
-    let change_group = |trailing: bool| -> Vec<AnyElement> {
+    // step. A list row takes the forward key alone, with the word that
+    // says which way the row travels. EMPTY on a row nothing changes,
+    // which is what makes the group droppable; `trailing` adds the ` ·`
+    // that joins it to whatever follows, and the one caller whose motion
+    // row ENDS here passes `false`.
+    //
+    // In FILTER mode the group shrinks to `tab`/`shift+tab`: those are
+    // the only two spellings that step there, and `space`, `h` and `l`
+    // are characters on their way to the focused `Input` — naming them
+    // would be this footer's own lie told the other way round, about
+    // keys that type rather than keys that are dead.
+    let change_group = |trailing: bool, filtering: bool| -> Vec<AnyElement> {
         let word = match vocabulary {
             RowVocabulary::Steps | RowVocabulary::StepsAndTypes => "change",
             RowVocabulary::Item => "toggle",
             RowVocabulary::Available => "add",
             RowVocabulary::Inert | RowVocabulary::Types => return Vec::new(),
         };
-        let mut out = vec![hint_change(chip("space"))];
+        let mut out = vec![hint_change(chip(if filtering { "tab" } else { "space" }))];
         if matches!(
             vocabulary,
             RowVocabulary::Steps | RowVocabulary::StepsAndTypes
         ) {
-            out.extend([chip("shift+space"), chip("tab"), chip("h"), chip("l")]);
+            if filtering {
+                out.push(chip("shift+tab"));
+            } else {
+                out.extend([chip("shift+space"), chip("tab"), chip("h"), chip("l")]);
+            }
         }
         out.push(
             div()
@@ -3627,7 +3637,16 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     } else if state.mode == DialogMode::Filter {
         // §18.3: the same filter-mode hints browse paints, since the
         // vocabulary — type to narrow, the shared nav keys, `escape` back
-        // to normal — is identical in both stages.
+        // to normal — is identical in both stages. Plus, since
+        // 2026-09-13, the one stepping pair that survives a focused
+        // `Input` (`tab`/`shift+tab`), on a writable domain and a row
+        // that has something to step; browse has no such row, which is
+        // why only this copy of the hints grew it.
+        let mut action = Vec::new();
+        if state.domain.writable(&state.stage) {
+            action.extend(change_group(true, true));
+        }
+        action.extend([chip("escape"), sep("back to normal")]);
         (
             vec![
                 sep("type to filter ·"),
@@ -3641,7 +3660,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 chip("ctrl+b"),
                 sep("±10"),
             ],
-            vec![chip("escape"), sep("back to normal")],
+            action,
         )
     } else if !state.domain.writable(&state.stage) {
         // §19.4: a read-only domain's normal-mode vocabulary is reading
@@ -3682,7 +3701,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // The motion row ENDS with the change group here, so the group
         // takes no trailing `·` and `move` only gets one when something
         // actually follows it.
-        let change = change_group(false);
+        let change = change_group(false, false);
         let mut motion = vec![
             chip("j"),
             chip("k"),
@@ -3711,7 +3730,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // a list's own header row — where `shift+j`/`shift+k` still
         // follow, so `move ·` keeps its separator either way.
         let mut motion = vec![chip("j"), chip("k"), sep("move ·")];
-        motion.extend(change_group(true));
+        motion.extend(change_group(true, false));
         motion.extend([chip("shift+j"), chip("shift+k")]);
         // `x` is Views-only (§18.2 — see `mod.rs`'s `Draft::remove_selected`
         // doc): a hint for a verb every other domain's `x` merely refuses

@@ -9926,6 +9926,17 @@ run_mutation "objectdialog: the edit footer paints the change group on a row not
   geode-shell \
   the_edit_footer_names_only_what_the_selected_row_offers
 
+# The filter-mode half of the same footer, which is a separate arm
+# because the group shrinks there to the one pair a focused `Input`
+# leaves free. Dropping it is the state this branch started from: `tab`
+# steps and nothing on screen says so.
+run_mutation "objectdialog: the filter-mode footer names the pair that still steps" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            action.extend(change_group(true, true));' \
+  '            let _ = &change_group;' \
+  geode-shell \
+  the_edit_footer_names_only_what_the_selected_row_offers
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

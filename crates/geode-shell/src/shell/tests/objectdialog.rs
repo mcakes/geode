@@ -6203,4 +6203,27 @@ fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAp
         cx.debug_bounds("objectdialog-hint-i").is_some(),
         "and takes a typed value"
     );
+
+    // Filter mode names the one stepping pair a focused `Input` leaves
+    // free, and drops `i` — which types an `i` there rather than opening
+    // anything.
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_some(),
+        "tab still steps the Number with the filter focused"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_none(),
+        "i is a character in filter mode, so the footer must not name it"
+    );
+    // And on a row nothing steps, the filter footer names no step key
+    // either: `escape` back to normal is the whole of it.
+    cx.simulate_keystrokes("escape k k k"); // precision → scale → width → label
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_none(),
+        "label has nothing tab could step"
+    );
 }
