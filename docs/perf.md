@@ -1450,8 +1450,8 @@ The body is gpui-component's table since the user's ruling of
 being measured is the same component the blotter's own painted-frame
 numbers were taken through: one `render_td` per visible cell over the
 prepared `MatrixModel`, only the visible rows laid out. Nothing above
-changes — `MatrixModel::build` is the same function, called from the
-same two places — and nothing below has been measured yet.
+changes — `MatrixModel::build` is untouched, and so is every site that
+calls it — and nothing below has been measured yet.
 
 | reading | where read | value |
 | --- | --- | --- |
