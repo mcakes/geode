@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod dialogmode;
 pub mod fonts;
 pub mod fontsize;
+pub mod footer;
 pub mod frame;
 pub mod keymap;
 pub mod keymap_edit;

@@ -133,6 +133,7 @@ use super::{
     Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
+use crate::footer::{Hint, HintRow};
 use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter;
 use crate::vimnav;
@@ -2749,22 +2750,6 @@ fn build(
         );
     }
 
-    let chip = move |spec: &str| {
-        let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
-            .expect("footer hint keystrokes are hardcoded valid");
-        key_chip(&ks, chip_fg, chip_bg)
-    };
-    let sep = |text: &'static str| div().child(text).into_any_element();
-    // `enter` opens the selected row's edit stage in BOTH modes (the
-    // browse rule) and was the one verb this footer never named; it
-    // carries a selector so a test can find it, like the edit footer's `i`.
-    let hint_enter = |chip: AnyElement| {
-        div()
-            .debug_selector(|| "objectdialog-hint-enter".to_string())
-            .child(chip)
-            .into_any_element()
-    };
-
     // §18.2: the naming stage replaces the filter row with the name field
     // and states its own two-verb vocabulary — never the browse footer's,
     // even though `begin_naming` leaves `state.mode` at `Filter` (the
@@ -2773,93 +2758,71 @@ fn build(
     // field, not this handler, would consume.
     let naming = matches!(state.stage, Stage::Naming);
 
-    // The hint row states the CURRENT mode's vocabulary, never the union
+    // The hint rows state the CURRENT mode's vocabulary, never the union
     // of both: a modal surface's whole risk is a user who cannot tell
     // which mode they are in, and a footer listing keys that are inert
-    // right now is exactly the lie the mode pill exists to prevent.
-    let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = if naming {
-        (
-            Vec::new(),
-            vec![
-                chip("enter"),
-                sep("create ·"),
-                chip("escape"),
-                sep("cancel"),
-            ],
-        )
+    // right now is exactly the lie the mode pill exists to prevent. Which
+    // row a hint paints on is `crate::footer`'s call (move / edit / go,
+    // spec §19), never this stage's. `enter` opens the selected row's
+    // edit stage in BOTH modes (the browse rule) and carries the
+    // `objectdialog-hint-enter` selector so a test can find it, like the
+    // edit footer's `i`.
+    let hints: Vec<Hint> = if naming {
+        vec![
+            Hint::new(HintRow::Go, &["enter"], "create"),
+            Hint::new(HintRow::Go, &["escape"], "cancel"),
+        ]
     } else {
         match state.mode {
-            DialogMode::Normal => (
-                vec![
-                    chip("j"),
-                    chip("k"),
-                    sep("move ·"),
-                    chip("ctrl+d"),
-                    chip("ctrl+u"),
-                    sep("±5 ·"),
-                    chip("ctrl+f"),
-                    chip("ctrl+b"),
-                    sep("±10"),
-                ],
-                {
-                    let mut action = Vec::new();
-                    // `n` is not on the footer at all for a domain whose
-                    // roster is fixed (Groupings) — advertising a key that
-                    // only ever says "the slots are fixed" teaches a verb
-                    // with nothing behind it — nor for a read-only domain
-                    // (Schema, §19.4), for the same reason: `n` there only
-                    // ever says the surface cannot be written to.
-                    if state.domain.writable(&state.stage) && state.domain.roster().is_none() {
-                        action.push(chip("n"));
-                        action.push(sep("new ·"));
-                    }
-                    // §18.8: a digit opens that slot — Groupings only,
-                    // the one domain whose objects are numbered.
-                    if state.domain == Domain::Groupings {
-                        action.push(chip("1"));
-                        action.push(sep("–"));
-                        action.push(chip("9"));
-                        action.push(sep("open slot ·"));
-                    }
-                    action.push(hint_enter(chip("enter")));
-                    action.push(sep("open ·"));
-                    action.push(chip("/"));
-                    action.push(sep("filter ·"));
-                    action.push(chip("escape"));
-                    // Honest about which rung the next escape takes: with
-                    // a query still applied it clears the query, and only
-                    // then closes.
-                    action.push(sep(if state.query.is_empty() {
+            DialogMode::Normal => {
+                let mut hints = vec![
+                    Hint::new(HintRow::Move, &["j", "k"], "move"),
+                    Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+                    Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+                ];
+                // `n` is not on the footer at all for a domain whose
+                // roster is fixed (Groupings) — advertising a key that
+                // only ever says "the slots are fixed" teaches a verb
+                // with nothing behind it — nor for a read-only domain
+                // (Schema, §19.4), for the same reason: `n` there only
+                // ever says the surface cannot be written to.
+                if state.domain.writable(&state.stage) && state.domain.roster().is_none() {
+                    hints.push(Hint::new(HintRow::Edit, &["n"], "new"));
+                }
+                // §18.8: a digit opens that slot — Groupings only, the
+                // one domain whose objects are numbered.
+                if state.domain == Domain::Groupings {
+                    hints.push(Hint::range(HintRow::Go, "1", "9", "open slot"));
+                }
+                hints.push(
+                    Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),
+                );
+                hints.push(Hint::new(HintRow::Go, &["/"], "filter"));
+                // Honest about which rung the next escape takes: with a
+                // query still applied it clears the query, and only then
+                // closes.
+                hints.push(Hint::new(
+                    HintRow::Go,
+                    &["escape"],
+                    if state.query.is_empty() {
                         "close"
                     } else {
                         "clear the filter"
-                    }));
-                    action
-                },
-            ),
-            DialogMode::Filter => (
-                vec![
-                    sep("type to filter ·"),
-                    chip("up"),
-                    chip("down"),
-                    sep("move ·"),
-                    chip("ctrl+d"),
-                    chip("ctrl+u"),
-                    sep("±5 ·"),
-                    chip("ctrl+f"),
-                    chip("ctrl+b"),
-                    sep("±10"),
-                ],
-                vec![
-                    hint_enter(chip("enter")),
-                    sep("open ·"),
-                    chip("escape"),
-                    sep("back to normal"),
-                ],
-            ),
+                    },
+                ));
+                hints
+            }
+            DialogMode::Filter => vec![
+                Hint::prose(HintRow::Move, "type to filter"),
+                Hint::new(HintRow::Move, &["up", "down"], "move"),
+                Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+                Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+                Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),
+                Hint::new(HintRow::Go, &["escape"], "back to normal"),
+            ],
         }
     };
-
+    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg);
     let footer = v_flex()
         .w(px(WIDTH))
         .gap_1()
@@ -2877,12 +2840,10 @@ fn build(
                 .child(notice.clone())
         }))
         .child(
-            div().text_sm().text_color(theme.muted_foreground).child(
-                v_flex()
-                    .gap_0p5()
-                    .child(h_flex().gap_1().items_center().flex_wrap().children(motion))
-                    .child(h_flex().gap_1().items_center().flex_wrap().children(action)),
-            ),
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(hint_line),
         );
 
     // The live `Input` renders only when it actually owns the keystrokes.
@@ -3498,48 +3459,6 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             .collect::<Vec<_>>(),
     );
 
-    let chip = move |spec: &str| {
-        let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
-            .expect("footer hint keystrokes are hardcoded valid");
-        key_chip(&ks, chip_fg, chip_bg)
-    };
-    let sep = |text: &'static str| div().child(text).into_any_element();
-    // The one chip a test can find by name: `i` is the verb this footer
-    // shows or withholds per draft, so it carries a selector the way a
-    // row does.
-    let hint_i = |chip: AnyElement| {
-        div()
-            .debug_selector(|| "objectdialog-hint-i".to_string())
-            .child(chip)
-            .into_any_element()
-    };
-    // `enter` opens a member row's (Views) or a column row's (Schema)
-    // column stage — the two doors `column_stage_target` serves — and
-    // is named only on those two domains outside a column stage, where
-    // on any other row it only gives a notice.
-    let hint_enter = |chip: AnyElement| {
-        div()
-            .debug_selector(|| "objectdialog-hint-enter".to_string())
-            .child(chip)
-            .into_any_element()
-    };
-    // The change group's own selector, on its first chip, for the same
-    // reason `hint_i` carries one: whether that group is painted at all
-    // is now a per-row decision, and a test has to be able to read it.
-    let hint_change = |chip: AnyElement| {
-        div()
-            .debug_selector(|| "objectdialog-hint-change".to_string())
-            .child(chip)
-            .into_any_element()
-    };
-    // Likewise the reorder group, which became per-row in the same
-    // review: `shift+j`/`shift+k` only move a list ITEM.
-    let hint_reorder = |chip: AnyElement| {
-        div()
-            .debug_selector(|| "objectdialog-hint-reorder".to_string())
-            .child(chip)
-            .into_any_element()
-    };
     // User ruling 2026-09-13: the change group and `i` are computed from
     // the row under the CURSOR, not from the domain — see
     // [`RowVocabulary`]. Computed once, here, so the column stage and the
@@ -3556,63 +3475,78 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // `space` `shift+space` `tab` `h` `l` · change — the five spellings
     // `Draft::step_selected` answers to, on a row that has a value to
     // step. A list row takes the forward key alone, with the word that
-    // says which way the row travels. EMPTY on a row nothing changes,
-    // which is what makes the group droppable; `trailing` adds the ` ·`
-    // that joins it to whatever follows, and the one caller whose motion
-    // row ENDS here passes `false`.
+    // says which way the row travels. `None` on a row nothing changes,
+    // which is what makes the group droppable. It carries the
+    // `objectdialog-hint-change` selector on its first chip, for the same
+    // reason `i` carries one: whether it is painted at all is a per-row
+    // decision, and a test has to be able to read it.
     //
     // In FILTER mode the group shrinks to `tab`/`shift+tab`: those are
     // the only two spellings that step there, and `space`, `h` and `l`
     // are characters on their way to the focused `Input` — naming them
     // would be this footer's own lie told the other way round, about
     // keys that type rather than keys that are dead.
-    let change_group = |trailing: bool, filtering: bool| -> Vec<AnyElement> {
+    let change_hint = |filtering: bool| -> Option<Hint> {
         let word = match vocabulary {
             RowVocabulary::Steps | RowVocabulary::StepsAndTypes => "change",
             RowVocabulary::Item => "toggle",
             RowVocabulary::Available => "add",
-            RowVocabulary::Inert | RowVocabulary::Types => return Vec::new(),
+            RowVocabulary::Inert | RowVocabulary::Types => return None,
         };
-        let mut out = vec![hint_change(chip(if filtering { "tab" } else { "space" }))];
-        if matches!(
+        let steps = matches!(
             vocabulary,
             RowVocabulary::Steps | RowVocabulary::StepsAndTypes
-        ) {
-            if filtering {
-                out.push(chip("shift+tab"));
-            } else {
-                out.extend([chip("shift+space"), chip("tab"), chip("h"), chip("l")]);
-            }
-        }
-        out.push(
-            div()
-                .child(if trailing {
-                    format!("{word} ·")
-                } else {
-                    word.to_string()
-                })
-                .into_any_element(),
         );
-        out
+        let keys: &[&'static str] = match (filtering, steps) {
+            (true, true) => &["tab", "shift+tab"],
+            (true, false) => &["tab"],
+            (false, true) => &["space", "shift+space", "tab", "h", "l"],
+            (false, false) => &["space"],
+        };
+        Some(Hint::new(HintRow::Edit, keys, word).selector("objectdialog-hint-change"))
     };
-    // The hint row states this stage's vocabulary and only this stage's —
-    // the same rule the browse footer keeps.
+    // `/` filter and `escape` with its honest rung — the same rule
+    // browse's own footer keeps (§18.3): with a query still applied it
+    // clears the query, and only then goes back.
+    let leave = |back: String| -> [Hint; 2] {
+        [
+            Hint::new(HintRow::Go, &["/"], "filter"),
+            Hint::new(
+                HintRow::Go,
+                &["escape"],
+                if draft.query.is_empty() {
+                    back
+                } else {
+                    "clear the filter".to_string()
+                },
+            ),
+        ]
+    };
+    let filter_motion = || {
+        vec![
+            Hint::prose(HintRow::Move, "type to filter"),
+            Hint::new(HintRow::Move, &["up", "down"], "move"),
+            Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+            Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+        ]
+    };
+    // The hint rows state this stage's vocabulary and only this stage's —
+    // the same rule the browse footer keeps — and which row a hint paints
+    // on is `crate::footer`'s call (move / edit / go, spec §19).
     // `enter` is named only while the SELECTED row opens a column stage —
     // the same test `commit_selected_row` makes — never by domain alone:
     // on Views' `dataset` row or a Schema derived row it only gives a
     // notice, and a chip there is the inert-key lie this footer exists to
-    // avoid (review 2026-09-13).
+    // avoid (review 2026-09-13). It carries `objectdialog-hint-enter`.
     let opens_column = column_stage_target(shell).is_some();
-    let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = if draft.confirm.is_some() {
-        (
-            vec![sep("this needs an answer first")],
-            vec![
-                chip("enter"),
-                sep("go ahead ·"),
-                chip("escape"),
-                sep("leave it alone"),
-            ],
-        )
+    let open_column =
+        || Hint::new(HintRow::Go, &["enter"], "open column").selector("objectdialog-hint-enter");
+    let hints: Vec<Hint> = if draft.confirm.is_some() {
+        vec![
+            Hint::prose(HintRow::Go, "this needs an answer first"),
+            Hint::new(HintRow::Go, &["enter"], "go ahead"),
+            Hint::new(HintRow::Go, &["escape"], "leave it alone"),
+        ]
     } else if let Some(entry) = draft.text_entry {
         // §19.1: a value field's own vocabulary — never filter mode's,
         // even though the `Input` is focused the same way, because
@@ -3620,24 +3554,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // list". The chain field (§18.8) is `completions: true` and
         // additionally has `tab` to complete a segment and the nav keys
         // to move the highlight; a plain field has neither.
+        let mut hints = Vec::new();
         if entry.completions {
-            (
-                vec![
-                    sep("type a chain · book / lhu ·"),
-                    chip("tab"),
-                    sep("complete ·"),
-                    chip("up"),
-                    chip("down"),
-                    sep("move"),
-                ],
-                vec![chip("enter"), sep("apply ·"), chip("escape"), sep("cancel")],
-            )
+            hints.push(Hint::prose(HintRow::Move, "type a chain · book / lhu"));
+            hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
+            hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
         } else {
-            (
-                vec![sep("type a value")],
-                vec![chip("enter"), sep("apply ·"), chip("escape"), sep("cancel")],
-            )
+            hints.push(Hint::prose(HintRow::Move, "type a value"));
         }
+        hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
+        hints.push(Hint::new(HintRow::Go, &["escape"], "cancel"));
+        hints
     } else if state.mode == DialogMode::Filter {
         // §18.3: the same filter-mode hints browse paints, since the
         // vocabulary — type to narrow, the shared nav keys, `escape` back
@@ -3646,49 +3573,23 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // `Input` (`tab`/`shift+tab`), on a writable domain and a row
         // that has something to step; browse has no such row, which is
         // why only this copy of the hints grew it.
-        let mut action = Vec::new();
+        let mut hints = filter_motion();
         if state.domain.writable(&state.stage) {
-            action.extend(change_group(true, true));
+            hints.extend(change_hint(true));
         }
-        action.extend([chip("escape"), sep("back to normal")]);
-        (
-            vec![
-                sep("type to filter ·"),
-                chip("up"),
-                chip("down"),
-                sep("move ·"),
-                chip("ctrl+d"),
-                chip("ctrl+u"),
-                sep("±5 ·"),
-                chip("ctrl+f"),
-                chip("ctrl+b"),
-                sep("±10"),
-            ],
-            action,
-        )
+        hints.push(Hint::new(HintRow::Go, &["escape"], "back to normal"));
+        hints
     } else if !state.domain.writable(&state.stage) {
         // §19.4: a read-only domain's normal-mode vocabulary is reading
         // and filtering alone — no `space`/`shift+space` to change a row,
         // no `shift+j`/`shift+k` to reorder, none of `d`/`r`/`x`/`n`/`o`,
         // since every one of those is refused by the gate above.
-        (vec![chip("j"), chip("k"), sep("move")], {
-            let mut action = Vec::new();
-            if opens_column {
-                action.push(hint_enter(chip("enter")));
-                action.push(sep("open column ·"));
-            }
-            action.extend([
-                chip("/"),
-                sep("filter ·"),
-                chip("escape"),
-                sep(if draft.query.is_empty() {
-                    "back to the list"
-                } else {
-                    "clear the filter"
-                }),
-            ]);
-            action
-        })
+        let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
+        if opens_column {
+            hints.push(open_column());
+        }
+        hints.extend(leave("back to the list".to_string()));
+        hints
     } else if draft.column().is_some() {
         // Part 2c §5.2: the column stage's own vocabulary. No
         // `shift+j`/`shift+k` and no `x` — there is no list here to
@@ -3701,33 +3602,15 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // `i` was here before. `escape` names the object it goes back
         // to, since "back to the list" would be a lie about a rung that
         // stops at the view.
-        let back = format!("back to {}", draft.name);
-        // The motion row ENDS with the change group here, so the group
-        // takes no trailing `·` and `move` only gets one when something
-        // actually follows it.
-        let change = change_group(false, false);
-        let mut motion = vec![
-            chip("j"),
-            chip("k"),
-            sep(if change.is_empty() { "move" } else { "move ·" }),
-        ];
-        motion.extend(change);
-        let mut action = Vec::new();
+        let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
+        hints.extend(change_hint(false));
         if types {
-            action.push(hint_i(chip("i")));
-            action.push(sep("type a value ·"));
+            hints.push(
+                Hint::new(HintRow::Edit, &["i"], "type a value").selector("objectdialog-hint-i"),
+            );
         }
-        action.extend([
-            chip("/"),
-            sep("filter ·"),
-            chip("escape"),
-            if draft.query.is_empty() {
-                div().child(back).into_any_element()
-            } else {
-                sep("clear the filter")
-            },
-        ]);
-        (motion, action)
+        hints.extend(leave(format!("back to {}", draft.name)));
+        hints
     } else {
         // The change group is row-sensitive (2026-09-13) and can be
         // empty — Scopes' two display-only summaries, Groupings' `slot`,
@@ -3741,75 +3624,41 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // refuses, so a chip there would teach a trader on Groupings or
         // Scopes a key that does nothing.
         let reorders = vocabulary == RowVocabulary::Item;
-        // The change group takes its trailing separator only when the
-        // reorder group really follows it, and `move` takes its own only
-        // when anything follows at all — the whole point of building
-        // this row group by group rather than as one literal.
-        let change = change_group(reorders, false);
-        let mut motion = vec![
-            chip("j"),
-            chip("k"),
-            sep(if change.is_empty() && !reorders {
-                "move"
-            } else {
-                "move ·"
-            }),
-        ];
-        motion.extend(change);
+        let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
+        hints.extend(change_hint(false));
         if reorders {
-            motion.extend([
-                hint_reorder(chip("shift+j")),
-                chip("shift+k"),
-                if state.domain == Domain::Views {
-                    sep("reorder ·")
-                } else {
-                    sep("reorder")
-                },
-            ]);
+            hints.push(
+                Hint::new(HintRow::Edit, &["shift+j", "shift+k"], "reorder")
+                    .selector("objectdialog-hint-reorder"),
+            );
             if state.domain == Domain::Views {
-                motion.push(chip("x"));
-                motion.push(sep("remove"));
+                hints.push(Hint::new(HintRow::Edit, &["x"], "remove"));
             }
         }
-        let mut action = Vec::new();
         // §18.8: Groupings' two extra verbs, advertised only where they
         // work — the same rule that keeps `n` off Groupings' browse
-        // footer and `x` off every non-Views edit footer.
+        // footer and `x` off every non-Views edit footer. §19.1's `i`,
+        // elsewhere, is advertised only where the row UNDER THE CURSOR
+        // can take it (user ruling 2026-09-13; it used to ask whether
+        // the object had such a row anywhere, which put the chip on
+        // Sources' `Dataset` row, a `Choice` `i` refuses).
         if state.domain == Domain::Groupings {
-            action.push(hint_i(chip("i")));
-            action.push(sep("type a chain ·"));
-            action.push(chip("1"));
-            action.push(sep("–"));
-            action.push(chip("9"));
-            action.push(sep("jump to slot ·"));
+            hints.push(
+                Hint::new(HintRow::Edit, &["i"], "type a chain").selector("objectdialog-hint-i"),
+            );
+            hints.push(Hint::range(HintRow::Go, "1", "9", "jump to slot"));
         } else if types {
-            // §19.1's `i`, advertised only where the row UNDER THE
-            // CURSOR can take it (user ruling 2026-09-13; it used to ask
-            // whether the object had such a row anywhere, which put the
-            // chip on Sources' `Dataset` row, a `Choice` `i` refuses).
-            action.push(hint_i(chip("i")));
-            action.push(sep("type a value ·"));
+            hints.push(
+                Hint::new(HintRow::Edit, &["i"], "type a value").selector("objectdialog-hint-i"),
+            );
         }
         if opens_column {
-            action.push(hint_enter(chip("enter")));
-            action.push(sep("open column ·"));
+            hints.push(open_column());
         }
-        action.extend([
-            chip("/"),
-            sep("filter ·"),
-            chip("escape"),
-            // Honest about which rung the next escape takes — the same
-            // rule browse's own footer keeps (§18.3): with a query still
-            // applied it clears the query, and only then goes back.
-            sep(if draft.query.is_empty() {
-                "back to the list"
-            } else {
-                "clear the filter"
-            }),
-        ]);
-        (motion, action)
+        hints.extend(leave("back to the list".to_string()));
+        hints
     };
-
+    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg);
     let footer = v_flex()
         .w(px(WIDTH))
         .gap_1()
@@ -3824,12 +3673,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .child(notice.clone())
         }))
         .child(
-            div().text_sm().text_color(theme.muted_foreground).child(
-                v_flex()
-                    .gap_0p5()
-                    .child(h_flex().gap_1().items_center().flex_wrap().children(motion))
-                    .child(h_flex().gap_1().items_center().flex_wrap().children(action)),
-            ),
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(hint_line),
         );
 
     // The live `Input` renders only when it actually owns the keystrokes

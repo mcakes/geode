@@ -794,16 +794,23 @@ fn l_and_h_step_the_selected_value_in_settings_normal_mode(cx: &mut gpui::TestAp
     );
     // And the footer teaches `tab` in normal mode, where it has always
     // stepped and was withheld until the same ruling (review
-    // 2026-09-13). The selector rides the `tab` chip, so its presence in
-    // normal mode IS the claim.
+    // 2026-09-13). Since 2026-09-14 the group is one hint in the object
+    // dialog's spelling (`space shift+space tab h l · change`, spec §19);
+    // `settings-hint-change` says the group is painted and
+    // `settings-hint-change-tab` says `tab` is one of its chips, which is
+    // the claim.
     assert!(
         cx.debug_bounds("settings-hint-change").is_some(),
-        "the normal-mode footer names tab beside space and l"
+        "the normal-mode footer names the stepping group"
+    );
+    assert!(
+        cx.debug_bounds("settings-hint-change-tab").is_some(),
+        "and tab is among its chips"
     );
     cx.simulate_keystrokes("/");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("settings-hint-change").is_some(),
+        cx.debug_bounds("settings-hint-change-tab").is_some(),
         "and filter mode still names it, where it is the only stepping key"
     );
 }

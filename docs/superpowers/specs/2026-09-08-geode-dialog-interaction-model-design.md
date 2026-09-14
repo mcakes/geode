@@ -947,3 +947,50 @@ the settings state.
 The display check on a real window is pending, as it is for every
 dialog change on this branch's lineage.
 
+## 19. Amendment — footer rows by category (2026-09-14)
+
+User request, 2026-09-14: "the dialog footer could be organized more
+consistently, grouping together on lines commands for navigation,
+interaction, etc so user can quickly know where to look to find what
+they want. Sometimes the `space`/`shift+space` is on the same row as
+`j`/`k`, sometimes not." Labelled rows were chosen over unlabelled ones.
+
+**The rule.** Every modal dialog's footer is a flat list of hints, each
+tagged with the row it belongs to, and one shared renderer lays them out
+as fixed rows in a fixed order, each led by a dim label:
+
+- **move** — the cursor and the viewport: `j`/`k` or `up`/`down`, the
+  `ctrl+d`/`ctrl+u`/`ctrl+f`/`ctrl+b` scroll chords, the chain field's
+  `up`/`down`, and the prose "type to filter" / "type a value".
+- **edit** — anything that changes a value or an object: the stepping
+  group (`space shift+space tab h l · change`, or `toggle`/`add` on a
+  list row, `tab shift+tab` in filter mode), `shift+j`/`shift+k`
+  reorder, `x` remove, `i` type, `n` new, and the keybindings dialog's
+  `enter` rebind / `d` unbind / `r` reset.
+- **go** — stage and mode changes: `enter` open, `1`–`9` open or jump to
+  a slot, `/` filter, `escape` with its honest next rung, the chain
+  field's `tab` complete, `enter` apply / `escape` cancel in a field, and
+  `enter` go ahead / `escape` leave it alone under a confirm.
+
+A row with nothing in it is not painted (a read-only Schema stage has no
+edit row; the naming stage and an armed confirm have only a go row). The
+dialogs decide *which* hints are live — §9's mode-honesty rule is
+untouched — and never which row a hint sits on; that is the whole point.
+
+**As built.** `geode_shell::footer` is the pure core (`HintRow`, `Hint`,
+`rows`), in `dialogmode`'s mould; `dialog::hint_rows` is the one
+renderer, taking the hints and the chip colours. The four hand-built
+footers — settings, keybindings, the object dialog's browse and edit
+stages — now declare hints and call it. Two spellings changed to make
+the surfaces read the same: the settings dialog's stepping group is the
+object dialog's (`space shift+space tab h l · change`, and `tab shift+tab
+· change` in filter mode) rather than its own "next value / previous
+value" pair, and the keybindings dialog's capture line is three go hints
+rather than one sentence. A hint with a selector gives every chip
+`"<selector>-<key>"` and its first chip the bare `"<selector>"`, so a
+window test can ask whether a particular key is taught, not only whether
+its group is (`settings-hint-change-tab` is how the settings test proves
+`tab` is named in normal mode now that the selector no longer rides the
+`tab` chip itself). Harness: "footer: a hint's row is its position, not
+its category" and "footer: an empty row is painted anyway". Display check
+pending on a real window, as §16.6's and §18.3's are.

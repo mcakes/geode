@@ -115,6 +115,7 @@ use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::fontsize::FontSize;
+use crate::footer::{Hint, HintRow};
 use crate::keymap::Keystroke;
 use crate::keymap::Modifiers;
 use crate::linenumbers::LineNumbers;
@@ -126,7 +127,7 @@ use crate::vimfind::FindStyle;
 use crate::vimnav;
 use crate::vimnav::NavCommand;
 
-use super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
+use super::keybindings_view::{highlighted_text, split_label_indices};
 
 // ---------------------------------------------------------------------
 // Pure core — no gpui. Row derivation, value stepping, session state.
@@ -914,104 +915,58 @@ fn build(
 
     // Footer hint chips — `keybindings_view::key_chip`, reused so key
     // names in helper text look identical across the two sibling dialogs.
-    let chip = move |spec: &str| {
-        let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
-            .expect("footer hint keystrokes are hardcoded valid");
-        key_chip(&ks, chip_fg, chip_bg)
-    };
-    let sep = |text: &'static str| div().child(text).into_any_element();
-    // The stepping group's own selector — the settings twin of the
-    // object dialog's `objectdialog-hint-change`. It rides the `tab`
-    // chip specifically rather than the group's first, because `tab` is
-    // the one spelling whose presence differed between the two modes'
-    // groups (normal mode withheld it until 2026-09-13) and so the one a
-    // test needs to be able to find. In filter mode `tab` *is* the
-    // group's first chip, so the two readings agree there.
-    let hint_change = |chip: AnyElement| {
-        div()
-            .debug_selector(|| "settings-hint-change".to_string())
-            .child(chip)
-            .into_any_element()
-    };
-
-    // The hint row states the CURRENT mode's vocabulary, not the union of
+    // The hint rows state the CURRENT mode's vocabulary, not the union of
     // both (the keybinding dialog's rule): a footer listing keys that
     // are inert right now is exactly the lie the mode pill exists to
-    // prevent. Normal mode names all four stepping spellings —
-    // `space`/`shift+space`, `l`/`h` and `tab`/`shift+tab` — since the
-    // 2026-09-13 ruling made them one vocabulary and the object dialog's
-    // own group names them together; `tab` used to be withheld here on
-    // the grounds that it was filter mode's only stepping key, which
-    // withheld a live key from the mode that has the most of them.
-    // Filter mode still shows `tab`/`shift+tab` alone, because there
-    // `space`, `l` and `h` are characters on their way to the `Input`.
+    // prevent. Normal mode names all five stepping spellings in the
+    // object dialog's own order and word — `space shift+space tab h l ·
+    // change` — since the 2026-09-13 ruling made them one vocabulary and
+    // the 2026-09-14 one made every footer read the same way; filter
+    // mode shows `tab`/`shift+tab` alone, because there `space`, `l` and
+    // `h` are characters on their way to the `Input`. WHERE each hint
+    // paints is not decided here: `crate::footer` files it by category
+    // (move / edit / go, spec §19) and `dialog::hint_rows` lays the rows
+    // out.
     //
-    // Both groups carry a `settings-hint-change` selector on their `tab`
-    // chip (see its closure above), so a test can read that normal mode
-    // really does teach `tab` now.
-    let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = match state.mode {
-        DialogMode::Normal => (
-            vec![
-                chip("j"),
-                chip("k"),
-                sep("move ·"),
-                chip("ctrl+d"),
-                chip("ctrl+u"),
-                sep("±5 ·"),
-                chip("ctrl+f"),
-                chip("ctrl+b"),
-                sep("±10"),
-            ],
-            vec![
-                chip("space"),
-                chip("l"),
-                hint_change(chip("tab")),
-                sep("next value ·"),
-                chip("shift+space"),
-                chip("h"),
-                chip("shift+tab"),
-                sep("previous value ·"),
-                chip("/"),
-                sep("filter ·"),
-                chip("escape"),
-                // Honest about which rung the next escape takes: with a
-                // query still applied it clears the query, and only then
-                // closes.
-                sep(if state.query.is_empty() {
+    // Both modes' stepping groups carry the `settings-hint-change`
+    // selector on their first chip, so a test can read that the group is
+    // taught in both.
+    let hints: Vec<Hint> = match state.mode {
+        DialogMode::Normal => vec![
+            Hint::new(HintRow::Move, &["j", "k"], "move"),
+            Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+            Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+            Hint::new(
+                HintRow::Edit,
+                &["space", "shift+space", "tab", "h", "l"],
+                "change",
+            )
+            .selector("settings-hint-change"),
+            Hint::new(HintRow::Go, &["/"], "filter"),
+            // Honest about which rung the next escape takes: with a
+            // query still applied it clears the query, and only then
+            // closes.
+            Hint::new(
+                HintRow::Go,
+                &["escape"],
+                if state.query.is_empty() {
                     "close"
                 } else {
                     "clear the filter"
-                }),
-            ],
-        ),
-        DialogMode::Filter => (
-            vec![
-                sep("type to filter ·"),
-                chip("up"),
-                chip("down"),
-                sep("move ·"),
-                chip("ctrl+d"),
-                chip("ctrl+u"),
-                sep("±5 ·"),
-                chip("ctrl+f"),
-                chip("ctrl+b"),
-                sep("±10"),
-            ],
-            vec![
-                hint_change(chip("tab")),
-                sep("next value ·"),
-                chip("shift+tab"),
-                sep("previous value ·"),
-                chip("escape"),
-                sep("back to normal"),
-            ],
-        ),
+                },
+            ),
+        ],
+        DialogMode::Filter => vec![
+            Hint::prose(HintRow::Move, "type to filter"),
+            Hint::new(HintRow::Move, &["up", "down"], "move"),
+            Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+            Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+            Hint::new(HintRow::Edit, &["tab", "shift+tab"], "change")
+                .selector("settings-hint-change"),
+            Hint::new(HintRow::Go, &["escape"], "back to normal"),
+        ],
     };
-    let hint_line: AnyElement = v_flex()
-        .gap_0p5()
-        .child(h_flex().gap_1().items_center().flex_wrap().children(motion))
-        .child(h_flex().gap_1().items_center().flex_wrap().children(action))
-        .into_any_element();
+    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg);
 
     let footer = v_flex()
         .w(px(WIDTH))
