@@ -1421,3 +1421,41 @@ fn a_reload_keeps_the_modules_fragment_bindings(cx: &mut gpui::TestAppContext) {
         log.borrow()
     );
 }
+
+/// Fix round 1, Minor 1: a dropped fragment binding's diagnostic must
+/// still be in the diagnostics tile's config section after a hot reload.
+/// It cannot be recomputed there — `check_fragment` removed the offending
+/// binding before `build_keymap` ever saw it, so the fresh keymap build a
+/// reload runs has nothing to say about it — and the reload replaces the
+/// whole config batch, so without `ShellServices::
+/// keymap_fragment_diagnostics` being folded back in the entry silently
+/// vanished at the first reload of the session.
+///
+/// Also pins the other half of that fold: the reload is still APPLIED. A
+/// compiled-in fragment's error is the module author's mistake, not the
+/// trader's, so it must not join `new_config.diagnostics` and make
+/// `reload::decide` keep last-good over something no file they can edit
+/// would fix.
+#[gpui::test]
+fn a_dropped_fragment_bindings_diagnostic_survives_a_reload(cx: &mut gpui::TestAppContext) {
+    let services = services_with_a_dropped_fragment_binding();
+    let expected = services.keymap_fragment_diagnostics[0].clone();
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+
+    shell.update(&mut vcx, |shell, cx| {
+        shell.apply_reload(config_with_theme("Gruvbox Dark"), cx)
+    });
+
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.services.theme.active_name().to_string()),
+        "Gruvbox Dark",
+        "a fragment's own error must not reject the trader's reload"
+    );
+    assert!(
+        diagnostics.read_with(&vcx, |d, _| d.config.contains(&expected)),
+        "the fragment diagnostic must still be in the config section: {:?}",
+        diagnostics.read_with(&vcx, |d, _| d.config.clone())
+    );
+}

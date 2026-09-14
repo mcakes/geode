@@ -158,6 +158,21 @@ pub struct ShellServices {
     /// every fragment diagnostic each time, and `main.rs` has already
     /// logged them once.
     pub keymap_fragments: Vec<LayerDoc>,
+    /// What `ModuleRoster::keymap_fragments` reported while checking those
+    /// fragments — a binding dropped for naming a context its module does
+    /// not declare, or a fragment that does not parse.
+    ///
+    /// Carried separately from [`Self::keymap_diagnostics`] (which
+    /// `main.rs` also folds these into, for `ShellView::new`'s startup
+    /// seeding) because a RELOAD has to re-state them: `apply_reload`
+    /// rebuilds the config section from the freshly loaded config plus the
+    /// fresh `build_keymap` diagnostics, and `check_fragment` has already
+    /// removed the offending binding by then — so `build_keymap` has
+    /// nothing to say about it and the diagnostic would vanish from the
+    /// diagnostics tile at the first hot reload of the session. They are
+    /// folded in AFTER `reload::decide`: a compiled-in fragment's mistake
+    /// is not the trader's config and must never reject their reload.
+    pub keymap_fragment_diagnostics: Vec<Diagnostic>,
 }
 
 /// The pieces of the installed `tracing` subscriber the shell needs at

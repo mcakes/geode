@@ -743,7 +743,10 @@ fn build_shell_services(
     for diag in &keymap_diags {
         print_diagnostic(diag);
     }
-    keymap_diags.extend(frag_diags);
+    // Into `keymap_diagnostics` for `ShellView::new`'s startup seeding,
+    // and kept as their own list for `apply_reload` to re-state on every
+    // reload — see `ShellServices::keymap_fragment_diagnostics`.
+    keymap_diags.extend(frag_diags.iter().cloned());
 
     let (theme, theme_warnings) = theme::load_bundled();
     for warning in &theme_warnings {
@@ -788,6 +791,7 @@ fn build_shell_services(
         // the same ones back in at every hot reload — see the field's own
         // doc comment for why they are carried rather than recomputed.
         keymap_fragments: fragments,
+        keymap_fragment_diagnostics: frag_diags,
     };
     (services, desk, user, bridge, diagnostics_factory)
 }

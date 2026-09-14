@@ -105,7 +105,38 @@ pub(super) fn services_with_a_module_fragment(
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
 ) {
     let (services, log, _focus) = services_with_rec_roster_shipping(Some(fragment));
+    assert!(
+        services.keymap_fragment_diagnostics.is_empty(),
+        "{:?}",
+        services.keymap_fragment_diagnostics
+    );
     (services, log)
+}
+
+/// A fragment one of whose bindings `check_fragment` DROPS — it names
+/// `workspace`, which the recorder does not declare. The fixture for
+/// "does that diagnostic survive a hot reload": by then the offending
+/// binding is long gone from the doc, so nothing but
+/// `ShellServices::keymap_fragment_diagnostics` still knows about it.
+pub(super) const REC_FRAGMENT_WITH_A_FOREIGN_BINDING: &str = "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n\n[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"ctrl+q\" = \"rec::noop\"\n";
+
+/// [`services_with_a_module_fragment`]'s twin for that fragment: the one
+/// error diagnostic is asserted here, so a test can be about what happens
+/// to it rather than about whether it was produced.
+pub(super) fn services_with_a_dropped_fragment_binding() -> ShellServices {
+    let (services, _log, _focus) =
+        services_with_rec_roster_shipping(Some(REC_FRAGMENT_WITH_A_FOREIGN_BINDING));
+    assert_eq!(
+        services.keymap_fragment_diagnostics.len(),
+        1,
+        "{:?}",
+        services.keymap_fragment_diagnostics
+    );
+    assert_eq!(
+        services.keymap_fragment_diagnostics[0].severity,
+        geode_core::config::Severity::Error
+    );
+    services
 }
 
 fn services_with_rec_roster_shipping(
@@ -159,8 +190,11 @@ fn services_with_rec_roster_shipping(
     roster.register_actions(&mut registry);
     // And the modules' fragments are collected right after, from the
     // finished roster, in `main.rs`'s own order (§8.4).
-    let (keymap_fragments, frag_diags) = roster.keymap_fragments();
-    assert!(frag_diags.is_empty(), "{frag_diags:?}");
+    // Not asserted clean here: one fixture below ships a fragment that
+    // is MEANT to have a binding dropped. The callers assert what they
+    // expect instead (`services_with_a_module_fragment` clean, the
+    // dropping fixture exactly one error).
+    let (keymap_fragments, keymap_fragment_diagnostics) = roster.keymap_fragments();
     let mod_alias = default_mod();
     let keymap = test_keymap_with_fragments(&registry, &keymap_fragments, &[]);
     let (theme, warnings) = crate::theme::load_bundled();
@@ -184,6 +218,7 @@ fn services_with_rec_roster_shipping(
         )),
         keymap_diagnostics: Vec::new(),
         keymap_fragments,
+        keymap_fragment_diagnostics,
     };
     (services, log, last_focus)
 }

@@ -9925,6 +9925,22 @@ run_mutation "fragments: the blotter's own fragment binds outside its own key co
   'context = "workspace"' \
   geode-blotter the_default_keymap_binds_exactly_the_actions_this_module_registers
 
+# Fix round 1. The `||` half of the conjunction-only rule is the one that
+# a textual first-identifier check gets wrong while looking right:
+# `blotter || workspace` names `blotter` first and fires everywhere.
+run_mutation "fragments: refuses || in a fragment predicate" \
+  crates/geode-shell/src/keymap/fragments.rs \
+  'for token in ["!", "||", "("] {' \
+  'for token in ["!", "("] {' \
+  geode-shell a_fragment_predicate_that_is_not_a_plain_conjunction_is_refused
+
+run_mutation "fragments: a reload re-states the fragment diagnostics in the config section" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '        config_section.extend(self.services.keymap_fragment_diagnostics.iter().cloned());
+' \
+  '' \
+  geode-shell a_dropped_fragment_bindings_diagnostic_survives_a_reload
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

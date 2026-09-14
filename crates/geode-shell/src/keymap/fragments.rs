@@ -28,14 +28,19 @@
 //! a user-layer `"none"` shadow over it — no third layer kind, and no
 //! dialog branch that has to know a module exists.
 //!
-//! [`check_fragment`] is what keeps the promise narrow: a fragment
-//! binding must name one of its factory's own
-//! [`contexts`](crate::module::ModuleFactory::contexts) as the FIRST
-//! identifier of its predicate, or it is dropped with an error
-//! diagnostic. Without that check a module could bind in `workspace` — or
-//! inside another module's context — from a layer that appears in no file
-//! the trader can open, which is exactly the invisible shadowing the
-//! layer order above exists to prevent.
+//! **A fragment can never shadow a shell binding or another module's, and
+//! [`check_fragment`] is the rule that delivers it: a fragment predicate
+//! must be a plain CONJUNCTION whose first identifier is one of its
+//! factory's own [`contexts`](crate::module::ModuleFactory::contexts).**
+//! The two halves are one promise. With `&&` as the only connective, a
+//! first identifier in `contexts` makes the whole predicate *require*
+//! that context, so the binding cannot fire outside the module's own
+//! tile — which is why `!`, `||` and `(` are refused anywhere in the text
+//! (`blotter || workspace` fires everywhere; `(!blotter)` fires
+//! everywhere but the blotter). Without the check a module could bind in
+//! `workspace` — or inside another module's context — from a layer that
+//! appears in no file the trader can open, which is exactly the invisible
+//! shadowing the layer order above exists to prevent.
 //!
 //! [`ModuleFactory::default_keymap`]: crate::module::ModuleFactory::default_keymap
 
@@ -76,8 +81,9 @@ pub fn fragment_doc(kind: &str, text: &str) -> Result<LayerDoc, Diagnostic> {
     })
 }
 
-/// Drop every `[[bindings]]` entry whose predicate does not name one of
-/// `contexts` as its first identifier, with an error diagnostic each.
+/// Drop every `[[bindings]]` entry that is not a plain conjunction naming
+/// one of `contexts` as its first identifier, with an error diagnostic
+/// each.
 ///
 /// The kept doc is otherwise untouched: `build_keymap` still validates
 /// the keys, the actions and the predicate itself, and still reports its
@@ -86,13 +92,32 @@ pub fn fragment_doc(kind: &str, text: &str) -> Result<LayerDoc, Diagnostic> {
 /// the one question `build_keymap` cannot answer: it has never heard of a
 /// module.
 ///
-/// A predicate opening with a negation (`!blotter && …`) is refused
-/// outright rather than read through to the identifier behind it. The
-/// first-identifier rule is about which context a fragment *claims*, and
-/// a negation claims every context except one — the widest possible
-/// shadow, from the one layer a trader cannot open. It is its own branch
-/// rather than folded into the foreign-context one so the diagnostic can
-/// say which of the two mistakes was made.
+/// **A fragment predicate may only be a conjunction** — `ctx`, or
+/// `ctx && key == value`, and nothing else. Any `!`, `||` or `(` anywhere
+/// in the text is refused outright, naming the token. That restriction IS
+/// the no-shadowing promise: with `&&` alone, a first identifier that is
+/// one of the module's own contexts makes the WHOLE predicate require
+/// that context, so the binding can only ever fire inside this module's
+/// own tile. Every other connective breaks that implication, and the
+/// first-identifier scan cannot see it:
+///
+/// * `blotter || workspace` — first identifier `blotter`, and
+///   `Predicate::Or` fires whenever `workspace` is on the stack, which it
+///   always is.
+/// * `(!blotter)` — a leading `(` hides the negation from any
+///   "starts with `!`" guard, and `Predicate::Not` then matches every
+///   context EXCEPT the module's own.
+/// * `(blotter) && mode == normal` — harmless in itself, refused by the
+///   same rule rather than by a parenthesis-aware special case: a
+///   textual check that tries to decide which parentheses are safe is
+///   exactly the check that got the two above wrong. Spell it without.
+///
+/// Refused on the text rather than on a parsed
+/// [`Predicate`](crate::keymap::Predicate) deliberately: the alternative
+/// is evaluating the compiled tree against probe stacks to see where it
+/// fires, which is a search over contexts this function does not know
+/// (any module's, any future shell context) and would answer "seems safe"
+/// rather than "is a conjunction".
 ///
 /// An entry with no `context` at all is dropped for the same reason: a
 /// context-free binding applies in every context on the stack, the
@@ -112,11 +137,12 @@ pub fn check_fragment(doc: LayerDoc, contexts: &[&str]) -> (LayerDoc, Vec<Diagno
     for entry in entries {
         match entry.as_table().and_then(|t| t.get("context")) {
             Some(toml::Value::String(predicate)) => {
-                if predicate.trim_start().starts_with('!') {
+                if let Some(token) = non_conjunction_token(predicate) {
                     diags.push(refuse(format!(
-                        "keymap fragment binds in context '{predicate}', which begins with a \
-                         negation: a fragment may only bind inside its own contexts ({listed}) \
-                         — binding dropped"
+                        "keymap fragment binds in context '{predicate}', which uses '{token}': a \
+                         fragment predicate must be a plain conjunction ('ctx' or \
+                         'ctx && key == value'), so that naming one of this module's own \
+                         contexts ({listed}) confines the binding to it — binding dropped"
                     )));
                     continue;
                 }
@@ -142,6 +168,28 @@ pub fn check_fragment(doc: LayerDoc, contexts: &[&str]) -> (LayerDoc, Vec<Diagno
     doc.table
         .insert("bindings".to_string(), toml::Value::Array(kept));
     (doc, diags)
+}
+
+/// The connective that makes `predicate` more than a conjunction, if it
+/// has one: `"!"`, `"||"` or `"("`, whichever appears first in the text.
+///
+/// A closing `)` is not listed: it cannot appear without an opening one in
+/// anything `parse_predicate` accepts, and `build_keymap`'s own
+/// `invalid context` diagnostic covers the unbalanced case. `&&` and
+/// `==`/`!=` are the whole of what remains — note that `!=` contains a
+/// `!`, so it is refused too: `mode != visual` inside a fragment is a
+/// negation of the same kind, and `mode == normal` says what a module
+/// actually means.
+fn non_conjunction_token(predicate: &str) -> Option<&'static str> {
+    let mut found: Option<(usize, &'static str)> = None;
+    for token in ["!", "||", "("] {
+        if let Some(at) = predicate.find(token)
+            && found.is_none_or(|(first, _)| at < first)
+        {
+            found = Some((at, token));
+        }
+    }
+    found.map(|(_, token)| token)
 }
 
 /// The first identifier of a context predicate: `blotter` in
@@ -172,9 +220,12 @@ fn first_identifier(predicate: &str) -> Option<&str> {
 /// defaults enter that order, and it is a pure function over the two
 /// lists so the ordering can be tested without a config directory.
 /// Partitioning on [`Layer::Builtin`] rather than splicing at a fixed
-/// index is what keeps it right for a binary with more than one
-/// compiled-in keymap doc (the shell's own plus, under `--demo`, a whole
-/// generated desk).
+/// index is future-proofing, not a live case: exactly one compiled-in
+/// keymap doc exists today (`defaults::BUILTIN_KEYMAP` — `--demo`'s
+/// generated desk layer ships `app`, `datasets`, `dimensions`,
+/// `groupings`, `sources` and `views`, but no `keymap`). Should a second
+/// one ever ship, a fixed index would bury it under the fragments, where
+/// the partition keeps every builtin doc ahead of them by construction.
 pub fn splice(layered: &[LayerDoc], fragments: &[LayerDoc]) -> Vec<LayerDoc> {
     let mut out = Vec::with_capacity(layered.len() + fragments.len());
     out.extend(
@@ -247,28 +298,62 @@ mod tests {
         assert_eq!(kept.table["bindings"].as_array().unwrap().len(), 1);
     }
 
-    /// A negation is the widest shadow a predicate can spell, so it is
-    /// refused on its own terms rather than read through to the
-    /// identifier behind it (which would pass the membership test and
-    /// bind everywhere BUT the module's own tile).
+    /// Only a conjunction confines a binding to the context its first
+    /// identifier names, so every other connective is refused — each of
+    /// these spellings passes the first-identifier membership test and
+    /// binds OUTSIDE the module's own tile (or, for the last, is merely
+    /// parenthesised, and refused by the same rule rather than by a
+    /// parenthesis-aware special case that would have to get the first
+    /// two right too).
+    ///
+    /// `blotter || workspace`: `Predicate::Or` fires whenever `workspace`
+    /// is on the stack, which it always is. `(!blotter)`: the leading `(`
+    /// hides the negation from a "starts with `!`" guard, and
+    /// `Predicate::Not` then matches every context except the module's.
     #[test]
-    fn a_fragment_predicate_beginning_with_a_negation_is_refused() {
-        let doc = fragment_doc(
-            "rec",
-            "[[bindings]]\ncontext = \"!rec\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n",
-        )
-        .unwrap();
-        let (kept, diags) = check_fragment(doc, &["rec"]);
-        assert!(
-            kept.table["bindings"].as_array().unwrap().is_empty(),
-            "{kept:?}"
-        );
-        assert_eq!(diags.len(), 1);
-        assert!(
-            diags[0].message.contains("negation"),
-            "{}",
-            diags[0].message
-        );
+    fn a_fragment_predicate_that_is_not_a_plain_conjunction_is_refused() {
+        for (predicate, token) in [
+            ("!rec", "!"),
+            ("rec || workspace", "||"),
+            ("(!rec)", "("),
+            ("(rec) && mode == normal", "("),
+            ("rec && mode != visual", "!"),
+        ] {
+            let doc = fragment_doc(
+                "rec",
+                &format!(
+                    "[[bindings]]\ncontext = \"{predicate}\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n"
+                ),
+            )
+            .unwrap();
+            let (kept, diags) = check_fragment(doc, &["rec"]);
+            assert!(
+                kept.table["bindings"].as_array().unwrap().is_empty(),
+                "{predicate} must bind nothing: {kept:?}"
+            );
+            assert_eq!(diags.len(), 1, "{predicate}");
+            assert_eq!(diags[0].severity, Severity::Error, "{predicate}");
+            assert!(
+                diags[0].message.contains(predicate)
+                    && diags[0].message.contains(&format!("'{token}'")),
+                "the diagnostic must name the predicate and the offending token: {}",
+                diags[0].message
+            );
+        }
+        // And the conjunction spellings the rule exists to allow still
+        // pass, so the refusal is not simply "nothing gets through".
+        for predicate in ["rec", "rec && mode == normal"] {
+            let doc = fragment_doc(
+                "rec",
+                &format!(
+                    "[[bindings]]\ncontext = \"{predicate}\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n"
+                ),
+            )
+            .unwrap();
+            let (kept, diags) = check_fragment(doc, &["rec"]);
+            assert!(diags.is_empty(), "{predicate}: {diags:?}");
+            assert_eq!(kept.table["bindings"].as_array().unwrap().len(), 1);
+        }
     }
 
     /// A multi-context module keeps a binding in each of its own contexts
@@ -332,10 +417,10 @@ mod tests {
     }
 
     /// Every compiled-in doc stays ahead of every fragment, whatever
-    /// order they arrive in: a binary can compile in more than one
-    /// builtin keymap doc (`--demo`'s generated desk layer is a whole
-    /// set), and a splice at a fixed index would bury the later ones
-    /// under the fragments.
+    /// order they arrive in. Future-proofing rather than a live case —
+    /// exactly one builtin keymap doc ships today — but a splice at a
+    /// fixed index would bury a second compiled-in keymap doc, should one
+    /// ever ship, under the fragments; the partition cannot.
     #[test]
     fn splice_keeps_every_builtin_doc_ahead_of_every_fragment() {
         let a = LayerDoc {

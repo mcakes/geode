@@ -116,10 +116,19 @@ pub trait ModuleFactory {
     /// binding whose action is unregistered.
     fn register_actions(&self, registry: &mut ActionRegistry);
     /// The key contexts this module's [`TileContent::key_context`] can
-    /// name (`["blotter"]`). A fragment binding whose predicate does not
-    /// name one of these as its FIRST identifier is dropped with an error
-    /// diagnostic ([`crate::keymap::fragments::check_fragment`]), so a
-    /// fragment can never shadow a shell binding or another module's.
+    /// name (`["blotter"]`).
+    ///
+    /// **A fragment can never shadow a shell binding or another module's**
+    /// — and the rule that delivers it is stated here rather than left
+    /// implicit: a fragment binding's predicate must be a plain
+    /// CONJUNCTION (`ctx`, or `ctx && key == value`) whose FIRST
+    /// identifier is one of these contexts, or
+    /// [`crate::keymap::fragments::check_fragment`] drops it with an error
+    /// diagnostic. With `&&` as the only connective, naming one of these
+    /// makes the whole predicate require that context; `!`, `||` and `(`
+    /// are refused anywhere in the text precisely because they break that
+    /// implication (`blotter || workspace` fires everywhere,
+    /// `(!blotter)` everywhere but the blotter).
     ///
     /// Defaults to the kind, which is what every module whose context and
     /// kind are the same word wants — but it is a separate answer on

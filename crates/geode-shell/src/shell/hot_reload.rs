@@ -204,9 +204,23 @@ impl ShellView {
         // regardless of whether `decide` applies or rejects the reload —
         // a rejected reload's own fatal diagnostic is exactly the kind of
         // thing a trader watching the diagnostics tile needs to see.
+        //
+        // The modules' fragment diagnostics (§8.4) join that batch here,
+        // AFTER `decide` and without touching `new_config.diagnostics`, on
+        // both counts deliberately. They must be re-stated every reload
+        // because `check_fragment` already dropped the offending binding,
+        // so `build_keymap` has nothing left to report about it and the
+        // diagnostic would otherwise disappear from the tile at the first
+        // reload of the session. And they must NOT reach `decide` (nor
+        // the `rejected` list below): a compiled-in fragment's mistake is
+        // the module author's, not the trader's, and rejecting their
+        // config reload over it would be both wrong and unfixable from
+        // any file they can edit.
+        let mut config_section = new_config.diagnostics.clone();
+        config_section.extend(self.services.keymap_fragment_diagnostics.iter().cloned());
         self.diagnostics.update(cx, |d, cx| {
             let before = d.version();
-            d.note_config(new_config.diagnostics.clone(), SystemTime::now());
+            d.note_config(config_section, SystemTime::now());
             if d.version() != before {
                 cx.notify();
             }
