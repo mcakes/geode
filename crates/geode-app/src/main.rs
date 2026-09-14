@@ -16,6 +16,7 @@ use geode_blotter::BlotterFactory;
 use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
 use geode_diagnostics::DiagnosticsFactory;
+use geode_marketdata::MarketDataFactory;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, modules_default_diagnostic, register_add_actions,
@@ -531,6 +532,47 @@ impl ModuleFactory for BlotterFactoryHandle {
     }
 }
 
+/// Same shape as [`BlotterFactoryHandle`], for the market-data panel's
+/// factory (market-data spec §8.1): the bridge's reload handler holds a
+/// clone for `set_stale_after`, so the roster gets a forwarder rather
+/// than the factory itself.
+///
+/// **Every defaulted trait method is forwarded**, for the reason
+/// [`BlotterFactoryHandle::contexts`] gives — and it bites harder here
+/// than anywhere else: this factory's kind (`cvi`) and its key context
+/// (`marketdata`) are DIFFERENT words, so a wrapper answering the
+/// trait's default would declare the context `cvi`, every one of the
+/// fragment's bindings would be dropped with an error diagnostic, and
+/// the panel would have no keys at all.
+struct MarketDataFactoryHandle(Rc<MarketDataFactory>);
+
+impl ModuleFactory for MarketDataFactoryHandle {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    fn register_actions(&self, registry: &mut ActionRegistry) {
+        self.0.register_actions(registry)
+    }
+    fn contexts(&self) -> Vec<&'static str> {
+        self.0.contexts()
+    }
+    fn default_keymap(&self) -> Option<&'static str> {
+        self.0.default_keymap()
+    }
+    fn create(
+        &self,
+        tile: TileId,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> TileOccupant {
+        self.0
+            .create(tile, restored, frame, diagnostics, window, cx)
+    }
+}
+
 /// Same shape as [`BlotterFactoryHandle`], for the diagnostics factory:
 /// `main`'s config-reload subscription (set up once a window exists, in
 /// the `cx.spawn` block below) also holds a clone, for `set_config`.
@@ -699,6 +741,12 @@ fn build_shell_services(
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);
         roster.add(Box::new(BlotterFactoryHandle(bridge.factory.clone())));
+        // The market-data panel (spec §8.1), registered on the same
+        // condition and for the same reason as the blotter: it asks for
+        // its document through the bridge's `DataHandle`, so with no
+        // bridge there is nothing for it to ask, and the palette then
+        // lists no "CVI: Split" row either.
+        roster.add(Box::new(MarketDataFactoryHandle(bridge.marketdata.clone())));
         bridge
     });
 

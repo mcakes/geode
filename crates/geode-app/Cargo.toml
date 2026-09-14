@@ -28,6 +28,10 @@ geode-core.workspace = true
 # Phase 3c.
 geode-data = { path = "../geode-data" }
 geode-blotter = { path = "../geode-blotter" }
+# The market-data panel (market-data spec §8): one roster factory per
+# panel spec, built beside the blotter's in `bridge::start` because it
+# needs the same `DataHandle`.
+geode-marketdata = { path = "../geode-marketdata" }
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-demo-data = { path = "../geode-demo-data" }
 # The demo bus (`src/demo_bus.rs`, market-data-documents plan Task 10)

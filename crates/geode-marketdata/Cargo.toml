@@ -7,22 +7,27 @@ publish.workspace = true
 [lib]
 bench = false
 
-# Task 5 is the pure core only, so the dependency list is the core's:
-# `geode-core` for `Snapshot`/`ColumnFormat`/`format_number`, `gpui` for
-# `SharedString` alone (a refcounted string a prepared cell can hand to a
-# frame without allocating — no element, entity or window is named here,
-# which is why these tests run without one), `chrono` for the local-clock
-# `HH:MM` in `Draft::summary` and `toml` for the session round trip.
-# Task 6 adds `geode-shell`, `geode-data` and `gpui-component` when the
-# tile lands.
+# `geode-core` for `Snapshot`/`ColumnFormat`/`format_number`, `geode-shell`
+# for the module-hosting contract the tile plugs into (`TileContent`,
+# `Frame`, `Diagnostics`, the keymap vocabulary), `geode-data` for
+# `DataHandle` alone — the one door a module asks for data through (global
+# constraints: never `geode-blotter`, never `geode-diagnostics`) —
+# `gpui`/`gpui-component` for the tile itself, `chrono` for the local-clock
+# header and the staleness reading, `toml` for the session round trip.
 [dependencies]
 geode-core.workspace = true
+geode-shell.workspace = true
+geode-data = { path = "../geode-data" }
 gpui.workspace = true
+gpui-component.workspace = true
 chrono = "0.4.42"
 toml = "1.1.4"
 
 [dev-dependencies]
 geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
 proptest = "1"
 

@@ -8,7 +8,19 @@
 //! element, entity or window, so its tests run without one — the sole
 //! `gpui` type it borrows is `SharedString`, a refcounted string, so that
 //! a prepared cell hands a frame its text without allocating.
+//! [`commands`] is the second pure half: the `:` vocabulary.
 //!
-//! The tile, the factory and the `:` vocabulary land in Task 6.
+//! [`tile`] and [`content`] are the gpui half: the entity that requests
+//! its document through `DataHandle` and paints it, and the
+//! `TileContent`/`ModuleFactory` pair the shell hosts it through. Cell
+//! editing (insert mode, `:bump`, `:revert`) is Task 7 and the draft
+//! states (`Behind`, `:rebase`, `:discard`) are Task 8; the vocabulary and
+//! the plumbing for both are here, answering which task lands them.
 
+pub mod commands;
+pub mod content;
 pub mod core;
+pub mod tile;
+
+pub use content::{ACTIONS, DEFAULT_KEYMAP, MarketDataFactory};
+pub use tile::MarketDataTile;

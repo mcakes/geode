@@ -2579,6 +2579,7 @@ dependencies = [
  "geode-demo-data",
  "geode-diagnostics",
  "geode-documents",
+ "geode-marketdata",
  "geode-shell",
  "gpui",
  "gpui-component",
@@ -2684,7 +2685,10 @@ dependencies = [
  "chrono",
  "criterion",
  "geode-core",
+ "geode-data",
+ "geode-shell",
  "gpui",
+ "gpui-component",
  "proptest 1.11.0",
  "toml 1.1.4+spec-1.1.0",
 ]

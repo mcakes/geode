@@ -616,6 +616,18 @@ impl Diagnostics {
         std::mem::take(&mut self.pending_catalog_request)
     }
 
+    /// Whether a catalog request is queued, without consuming it — for
+    /// tests alone (market-data Part 3 Task 6): a module that asks for a
+    /// catalog ([`Self::request_catalog`]) has no other way to prove it
+    /// did, and [`Self::take_pending_catalog_request`] is the bridge
+    /// drain's own door — a test calling that would both answer its
+    /// question and cancel the request it was asking about, so the very
+    /// next assertion (or the real drain) would see nothing pending.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_catalog_request(&self) -> bool {
+        self.pending_catalog_request
+    }
+
     /// `"sources 3 ok · 1 degraded · config 2 errors · data 1 error ·
     /// 5 dropped"` — every segment optional, omitted when its count is
     /// zero; `""` (never shown by the status bar — `(!s.is_empty())

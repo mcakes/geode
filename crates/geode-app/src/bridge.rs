@@ -14,6 +14,8 @@ use geode_data::adapter::AdapterRegistry;
 use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink};
+use geode_marketdata::MarketDataFactory;
+use geode_marketdata::core::CVI;
 use geode_shell::diagnostics::SourceSummary;
 use geode_shell::module::Delivery;
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
@@ -194,6 +196,12 @@ fn make_sink(tx: async_channel::Sender<DataEvent>, dropped: Arc<AtomicU64>) -> E
 pub struct Bridge {
     pub handle: DataHandle,
     pub factory: Rc<BlotterFactory>,
+    /// The CVI panel's factory (market-data spec §8.1), built here for
+    /// the same reason the blotter's is: it needs this bridge's
+    /// `DataHandle`, and `attach`'s reload handler needs a clone of it to
+    /// refresh `stale_after` on. One factory per panel spec — a second
+    /// document kind's panel is a second field here, not a second crate.
+    pub marketdata: Rc<MarketDataFactory>,
     events: async_channel::Receiver<DataEvent>,
     dropped: Arc<AtomicU64>,
     /// The sources the running service was actually built from (Phase 4b
@@ -233,6 +241,14 @@ pub fn start(
         stale_after,
     ));
     Bridge {
+        marketdata: Rc::new(MarketDataFactory::new(
+            handle.clone(),
+            &CVI,
+            // One threshold, one config key: a document's own freshness
+            // means exactly what a dataset's does to the blotter, and two
+            // keys for one idea would be two things to keep in step.
+            stale_after,
+        )),
         handle,
         factory,
         events: rx,
@@ -249,6 +265,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let dropped = bridge.dropped.clone();
     let handle = bridge.handle.clone();
     let factory = bridge.factory.clone();
+    let marketdata = bridge.marketdata.clone();
 
     let shell = window
         .read(cx)
@@ -334,6 +351,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     cx.subscribe(&shell, {
         let handle = handle.clone();
         let factory = factory.clone();
+        let marketdata = marketdata.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
@@ -399,7 +417,14 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // restart, same as `sources`/`datasets`.
                 factory.set_views(views.clone());
                 factory.set_find_style(FindStyle::from_config(config));
-                factory.set_stale_after(stale_after_from_config(config));
+                let stale_after = stale_after_from_config(config);
+                factory.set_stale_after(stale_after);
+                // The panel reads the same key, and piggybacks on the
+                // same reload for the same reason (the paragraph above):
+                // `stale_after` is not itself a `ConfigReloaded` trigger,
+                // so this can only ever drift as far as the next
+                // views/dimensions reload.
+                marketdata.set_stale_after(stale_after);
                 // `:filter`/`:scope` validation (Phase 4a §3.7): the
                 // `datasets` doc is re-read here too — `ConfigReloaded`
                 // doesn't fire for a `datasets`-only edit (that instead
@@ -858,6 +883,11 @@ role = "key"
         let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
         let dropped = Arc::new(AtomicU64::new(0));
         let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
             handle,
             factory,
             events: rx,
@@ -928,6 +958,11 @@ role = "key"
         ));
         let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
         let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
             handle,
             factory,
             events: rx,
@@ -996,6 +1031,11 @@ role = "key"
         ));
         let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
         let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
             handle,
             factory,
             events: rx,
@@ -1054,6 +1094,11 @@ role = "key"
         ));
         let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
         let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
             handle,
             factory: factory.clone(),
             events: rx,
@@ -1106,6 +1151,11 @@ role = "key"
         ));
         let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
         let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
             handle,
             factory,
             events: rx,
@@ -1196,6 +1246,11 @@ role = "key"
         ));
         let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
         let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
             handle,
             factory,
             events: rx,
@@ -1258,6 +1313,11 @@ role = "key"
         ));
         let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
         let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
             handle,
             factory,
             events: rx,
@@ -1348,6 +1408,11 @@ role = "key"
         ));
         let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
         let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
             handle,
             factory,
             events: rx,
