@@ -25,9 +25,18 @@
 //! insert`, which is what makes the shell hand every bare keystroke to
 //! that input instead of matching it; `commit` parses the text through the
 //! column's declared type and writes the [`Draft`]; `:bump` and `:revert`
-//! are the same draft from the `:` line. The draft STATES (`Behind`,
-//! `:rebase`, `:discard`) are Task 8 — what is here for them is the
-//! plumbing and nothing that pretends to be them.
+//! are the same draft from the `:` line.
+//!
+//! The draft STATES (spec §8.4) are here too: a delivery whose `as_of`
+//! differs from the draft's own base goes `Behind`, and the panel keeps
+//! painting the BASE generation (`base_snapshot`) under the edits rather
+//! than the newer one it just received — `:rebase` moves the edits onto
+//! the newer document by label (a dropped label is reported, never
+//! silently lost) and starts painting it; `:discard` drops the edits and
+//! shows the newer document, clean. Both are refused outside `Behind`
+//! (there is no "newer" to move onto), and so are `edit`/`:bump`
+//! (controller ruling 2026-09-14) — an edit made now would be keyed
+//! against a grid `:rebase` is about to move away from underneath it.
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::{Draft, MatrixModel, PanelSpec, parse_cell};
@@ -109,6 +118,20 @@ const NO_DOCUMENT: &str = "no document to edit";
 /// What a commit answers when the grid moved under the open editor — see
 /// [`Editing::labels`] for how that happens and why it is refused.
 const CELL_MOVED: &str = "the document changed under the edit — nothing was written";
+
+/// What `edit` and `:bump` answer while the draft is `Behind` (controller
+/// ruling 2026-09-14): an edit made now would be keyed against the BASE
+/// generation's grid while a newer one already sits underneath it, and
+/// `:rebase` would then map that parked value onto whatever cell the same
+/// label resolves to in the newer document — a live edit and a restored
+/// one are exactly the same risk here, so this checks the draft's state
+/// and not how it got there. `:rebase`/`:discard` are the only doors
+/// forward, and the notice names both.
+const BEHIND_REFUSED: &str = "the draft is behind — :rebase or :discard first";
+
+/// What `:rebase`/`:discard` answer outside `Behind` — there is no
+/// "newer" document to move onto or fall back to.
+const NOT_BEHIND: &str = "nothing to rebase — the draft is on the live document";
 
 /// One cell a `:bump` writes: where it is, the labels that make the edit
 /// portable across generations, and the value being added to — the shape
@@ -855,6 +878,10 @@ impl MarketDataTile {
             // the trader has typed.
             return;
         }
+        if self.draft.is_behind() {
+            self.notice = Some(BEHIND_REFUSED.into());
+            return;
+        }
         if let Err(e) = self.edit_base() {
             self.notice = Some(e.into());
             return;
@@ -968,6 +995,9 @@ impl MarketDataTile {
     /// number to add to, and inventing one would put a value on screen the
     /// document never carried.
     fn bump(&mut self, delta: f64, axis: BumpAxis, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.draft.is_behind() {
+            return Err(BEHIND_REFUSED.to_string());
+        }
         let base = self.edit_base()?;
         let (row, col) = self.cursor;
         let values: Vec<((usize, usize), f64)> = match axis {
@@ -1005,6 +1035,53 @@ impl MarketDataTile {
             })
             .collect();
         self.draft.bump(cells.into_iter(), delta, &base);
+        self.rebuild_model();
+        self.changed(cx);
+        Ok(())
+    }
+
+    /// `:rebase` (spec §8.4): move every edit onto the newer document,
+    /// by label, and start painting it.
+    ///
+    /// `self.snapshot` is the newer generation — while `Behind`,
+    /// `base_snapshot` is what is on screen and `snapshot` is what just
+    /// arrived (see the module doc and the two fields' own docs). Built
+    /// against an EMPTY draft, deliberately: `Draft::rebase` reads only a
+    /// model's row/column labels and its source time, never a cell's
+    /// painted value, so the draft about to be replaced has nothing to
+    /// contribute here and using it would only invite confusion about
+    /// which draft a reader is looking at.
+    fn rebase(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if !self.draft.is_behind() {
+            return Err(NOT_BEHIND.to_string());
+        }
+        let snapshot = self
+            .snapshot
+            .clone()
+            .expect("`Behind` implies a newer generation was delivered");
+        let newer_model = MatrixModel::build(&snapshot, self.spec, &Draft::default())?;
+        let (_, dropped) = self.draft.rebase(&newer_model);
+        self.base_snapshot = None;
+        self.notice = if dropped.is_empty() {
+            None
+        } else {
+            Some(dropped_notice(&dropped).into())
+        };
+        self.rebuild_model();
+        self.changed(cx);
+        Ok(())
+    }
+
+    /// `:discard` (spec §8.4): drop the edits outright and show the newer
+    /// document — a trader saying "show me the new document" rather than
+    /// "move my numbers onto it".
+    fn discard(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if !self.draft.is_behind() {
+            return Err(NOT_BEHIND.to_string());
+        }
+        self.draft.discard();
+        self.base_snapshot = None;
+        self.notice = None;
         self.rebuild_model();
         self.changed(cx);
         Ok(())
@@ -1157,11 +1234,10 @@ impl MarketDataTile {
             Command::Key(key) => self.set_key(key, cx),
             Command::Revert => self.revert(cx),
             Command::Bump { delta, axis } => self.bump(delta, axis, cx),
+            Command::Rebase => self.rebase(cx),
+            Command::Discard => self.discard(cx),
             // Parsed, not executed: the grammar a trader types is the one
-            // Task 8 wires up, so a typo is still a typo here and only a
-            // real verb answers this.
-            Command::Rebase => Err("rebase lands in Task 8".into()),
-            Command::Discard => Err("discard lands in Task 8".into()),
+            // Part 4 wires up.
             Command::Upload => Err("upload is not built yet".into()),
         }
     }
@@ -1357,6 +1433,21 @@ impl MarketDataTile {
 /// what a trader sees or types.
 fn display_key(key: &[String]) -> String {
     key.join(&KEY_DISPLAY_SEPARATOR.to_string())
+}
+
+/// `:rebase`'s notice about the edits it could not carry over — a row or
+/// column label the newer document no longer has. Each pair is spelled
+/// `row/col` (the same display separator a document key uses), since a
+/// bare pair of labels with nothing between them reads as one run-on word.
+fn dropped_notice(dropped: &[(String, String)]) -> String {
+    let n = dropped.len();
+    let plural = if n == 1 { "" } else { "s" };
+    let list = dropped
+        .iter()
+        .map(|(row, col)| format!("{row}{KEY_DISPLAY_SEPARATOR}{col}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("dropped {n} edit{plural} whose rows or columns the new document lacks: {list}")
 }
 
 impl gpui::Render for MarketDataTile {
@@ -2535,7 +2626,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     }
 
     #[gpui::test]
-    fn a_restored_draft_against_a_newer_generation_lands_behind(cx: &mut gpui::TestAppContext) {
+    fn a_restored_draft_lands_in_behind_on_a_newer_delivery(cx: &mut gpui::TestAppContext) {
         let restored: toml::Table = format!(
             r#"
 key = ["SPX.Z"]
@@ -2954,5 +3045,323 @@ edits = [["2026-11-20", "-1", 9.5]]
             Some("the document changed under the edit — nothing was written".to_string())
         );
         assert!(h.editor_value(&vcx).is_none(), "and the editor is dropped");
+    }
+
+    /// One committed edit, then a delivery for the SAME tag under a
+    /// different `as_of` (a subscribed feed republishing without this
+    /// panel ever requerying) — spec §8.4's core rule: `Behind` keeps
+    /// painting the base generation under the edit rather than the newer
+    /// one that just arrived.
+    #[gpui::test]
+    fn a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+
+        let (state, rows, cell) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+            )
+        });
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            "got {state:?}"
+        );
+        assert_eq!(rows, 2, "still the base generation's two terms");
+        assert_eq!(
+            cell.text.to_string(),
+            "0.5000",
+            "the edit is still on screen"
+        );
+        assert!(cell.edited);
+        let local = chrono::DateTime::parse_from_rfc3339(NEWER)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string();
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        assert!(
+            chips
+                .iter()
+                .any(|c| c == &format!("newer document received {local}")),
+            "{chips:?}"
+        );
+    }
+
+    /// A SECOND newer generation arriving on top of an already-`Behind`
+    /// draft moves the header's own `newer` marker forward — but the
+    /// `base_snapshot` a trader is still looking at must not move: they
+    /// have not chosen `:rebase`/`:discard` for the FIRST newer document
+    /// yet, let alone this one.
+    #[gpui::test]
+    fn a_second_newer_generation_keeps_the_base_and_updates_newer(cx: &mut gpui::TestAppContext) {
+        const NEWEST: &str = "2026-09-12T14:15:00Z";
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-25"], &NODES, NEWEST)),
+        );
+
+        let (state, rows, cell) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+            )
+        });
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWEST),
+            "moves to the LATEST as_of, got {state:?}"
+        );
+        assert_eq!(rows, 2, "still the ORIGINAL base generation's two terms");
+        assert_eq!(cell.text.to_string(), "0.5000", "the edit is untouched");
+        let local = chrono::DateTime::parse_from_rfc3339(NEWEST)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string();
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        assert!(
+            chips
+                .iter()
+                .any(|c| c == &format!("newer document received {local}")),
+            "{chips:?}"
+        );
+    }
+
+    /// `:rebase` moves each edit onto the newer document by label — one
+    /// dropped (its term disappeared) and one kept at a NEW grid index
+    /// (the newer document's only term sorts first) — and starts painting
+    /// it.
+    #[gpui::test]
+    fn rebase_reapplies_edits_by_label_and_reports_dropped_ones(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        // Two edits on term 0 (dropped by the newer document) and one on
+        // term 1 (kept — the newer document's only row).
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.6");
+        h.dispatch(&mut vcx, "commit", None);
+        h.dispatch(&mut vcx, "left", None);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.7");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 3);
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+
+        h.command(&mut vcx, "rebase")
+            .expect("behind: rebase applies");
+
+        let (state, len, rows, cell) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.draft().len(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+            )
+        });
+        assert_eq!(state, DraftState::Editing, "one edit survived the rebase");
+        assert_eq!(len, 1);
+        assert_eq!(rows, 1, "now painting the newer document");
+        assert_eq!(
+            cell.text.to_string(),
+            "0.7000",
+            "the kept edit, at its new index"
+        );
+        assert!(cell.edited);
+
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        assert!(
+            chips.iter().any(|c| c
+                == "dropped 2 edits whose rows or columns the new document lacks: \
+2026-10-16/-20, 2026-10-16/-1"),
+            "{chips:?}"
+        );
+    }
+
+    /// `:discard` drops the edits outright and shows the newer document —
+    /// clean, no `base_snapshot` left behind.
+    #[gpui::test]
+    fn discard_shows_the_newer_document_clean(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+
+        h.command(&mut vcx, "discard")
+            .expect("behind: discard applies");
+
+        let (state, rows, cell) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+            )
+        });
+        assert_eq!(state, DraftState::Clean);
+        assert_eq!(rows, 1, "the newer document, its one term");
+        assert_eq!(cell.text.to_string(), "0.1000", "the document's own value");
+        assert!(!cell.edited);
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        assert!(
+            !chips.iter().any(|c| c.contains("edit")),
+            "no draft chip left: {chips:?}"
+        );
+    }
+
+    /// Outside `Behind` — a clean panel and one with edits still against
+    /// the live document alike — there is no "newer" to move onto or
+    /// fall back to.
+    #[gpui::test]
+    fn rebase_outside_behind_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        assert_eq!(
+            h.command(&mut vcx, "rebase"),
+            Err("nothing to rebase — the draft is on the live document".to_string())
+        );
+        assert_eq!(
+            h.command(&mut vcx, "discard"),
+            Err("nothing to rebase — the draft is on the live document".to_string())
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.command(&mut vcx, "rebase"),
+            Err("nothing to rebase — the draft is on the live document".to_string()),
+            "edits present, but still on the document they were made against"
+        );
+        assert_eq!(
+            h.command(&mut vcx, "discard"),
+            Err("nothing to rebase — the draft is on the live document".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn completions_offer_rebase_and_discard_only_while_behind(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        let before = h.tile.read_with(&vcx, |t, cx| t.completions("", 0, cx));
+        assert!(!before.contains(&"rebase".to_string()));
+        assert!(!before.contains(&"discard".to_string()));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+
+        let behind = h.tile.read_with(&vcx, |t, cx| t.completions("", 0, cx));
+        assert!(behind.contains(&"rebase".to_string()));
+        assert!(behind.contains(&"discard".to_string()));
+    }
+
+    /// Controller ruling 2026-09-14: an edit on top of a `Behind` draft —
+    /// live or restored — can double-count a cell and lets `:rebase` map a
+    /// parked value over a newer one, so both surfaces refuse outright
+    /// rather than opening an editor or writing another edit.
+    #[gpui::test]
+    fn edit_and_bump_are_refused_while_behind(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(
+            h.editor_value(&vcx).is_none(),
+            "no editor opens while behind"
+        );
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("the draft is behind — :rebase or :discard first".to_string())
+        );
+        assert_eq!(
+            h.command(&mut vcx, "bump 1"),
+            Err("the draft is behind — :rebase or :discard first".to_string())
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().len()),
+            1,
+            "no second edit was written"
+        );
     }
 }
