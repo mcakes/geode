@@ -5963,3 +5963,63 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
     let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
     assert!(written.contains("[delta]\nhue = 255"), "{written}");
 }
+
+/// `enter` is named wherever it opens something and nowhere else (user
+/// ruling 2026-09-13): browse in both modes (it opens the edit stage),
+/// the Views edit stage (a member row opens its column stage), the
+/// Schema edit stage (a column row opens the dataset-level stage) — and
+/// not inside a column stage, where `enter` on a field only gives a
+/// notice.
+#[gpui::test]
+fn the_footers_name_enter_where_it_opens_something(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "browse, normal mode: enter opens the edit stage"
+    );
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "browse, filter mode: enter still opens the highlighted row"
+    );
+    cx.simulate_keystrokes("escape enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "the Views edit stage: enter opens a member row's column stage"
+    );
+    cx.simulate_keystrokes("j j enter");
+    cx.run_until_parked();
+    assert!(
+        matches!(
+            dialog_state(&shell, &cx, |s| s.stage.clone()),
+            objectdialog::Stage::Column { .. }
+        ),
+        "the column stage opened"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_none(),
+        "inside a column stage enter only gives a notice, so it is not named"
+    );
+}
+
+#[gpui::test]
+fn the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "the Schema edit stage: enter opens a column row's stage"
+    );
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("open a column"), "{notice}");
+    assert!(notice.contains("enter"), "{notice}");
+}

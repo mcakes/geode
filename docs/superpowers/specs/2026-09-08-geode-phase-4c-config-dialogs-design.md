@@ -2599,6 +2599,14 @@ settled:
   (§19.5). `to_table` is unreachable behind `writable()` and returns the
   source unchanged.
 
+> **Amended (as built, 2026-09-13).** The inspector is no longer labelled
+> read-only: its column rows open the dataset-level column stage (see
+> `2026-09-13-geode-dataset-column-presentation-design.md` §4, §9.10),
+> `Domain::writable(stage)` is true there alone, the palette title is
+> `Schema`, and the refusal notice on its own rows names that door
+> (`open a column (enter) to set how it paints`). Every footer now names
+> `enter` where it opens something.
+
 ### 19.5 Per-field diagnostics: readers fill `Diagnostic.path`
 
 §8.5's other half. Every reader fills `path` where it knows the key, in

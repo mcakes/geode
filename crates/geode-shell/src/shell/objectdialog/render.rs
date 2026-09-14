@@ -2695,6 +2695,15 @@ fn build(
         key_chip(&ks, chip_fg, chip_bg)
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
+    // `enter` opens the selected row's edit stage in BOTH modes (the
+    // browse rule) and was the one verb this footer never named; it
+    // carries a selector so a test can find it, like the edit footer's `i`.
+    let hint_enter = |chip: AnyElement| {
+        div()
+            .debug_selector(|| "objectdialog-hint-enter".to_string())
+            .child(chip)
+            .into_any_element()
+    };
 
     // §18.2: the naming stage replaces the filter row with the name field
     // and states its own two-verb vocabulary — never the browse footer's,
@@ -2752,6 +2761,8 @@ fn build(
                         action.push(chip("9"));
                         action.push(sep("open slot ·"));
                     }
+                    action.push(hint_enter(chip("enter")));
+                    action.push(sep("open ·"));
                     action.push(chip("/"));
                     action.push(sep("filter ·"));
                     action.push(chip("escape"));
@@ -2779,7 +2790,12 @@ fn build(
                     chip("ctrl+b"),
                     sep("±10"),
                 ],
-                vec![chip("escape"), sep("back to normal")],
+                vec![
+                    hint_enter(chip("enter")),
+                    sep("open ·"),
+                    chip("escape"),
+                    sep("back to normal"),
+                ],
             ),
         }
     };
@@ -3437,6 +3453,16 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             .child(chip)
             .into_any_element()
     };
+    // `enter` opens a member row's (Views) or a column row's (Schema)
+    // column stage — the two doors `column_stage_target` serves — and
+    // is named only on those two domains outside a column stage, where
+    // on any other row it only gives a notice.
+    let hint_enter = |chip: AnyElement| {
+        div()
+            .debug_selector(|| "objectdialog-hint-enter".to_string())
+            .child(chip)
+            .into_any_element()
+    };
     // The hint row states this stage's vocabulary and only this stage's —
     // the same rule the browse footer keeps.
     let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = if draft.confirm.is_some() {
@@ -3501,6 +3527,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         (
             vec![chip("j"), chip("k"), sep("move")],
             vec![
+                hint_enter(chip("enter")),
+                sep("open column ·"),
                 chip("/"),
                 sep("filter ·"),
                 chip("escape"),
@@ -3585,6 +3613,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             // a chip there would name a key that only refuses.
             action.push(hint_i(chip("i")));
             action.push(sep("type a value ·"));
+        }
+        if state.domain == Domain::Views {
+            action.push(hint_enter(chip("enter")));
+            action.push(sep("open column ·"));
         }
         action.extend([
             chip("/"),

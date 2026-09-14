@@ -88,7 +88,8 @@ use crate::dialogmode::DialogMode;
 /// verb gate, and `render::edit_commit_notice` all read this same
 /// string, so a trader sees one consistent answer wherever they reach
 /// for a key the schema inspector cannot honour.
-pub const READ_ONLY_NOTICE: &str = "the schema is read-only";
+pub const READ_ONLY_NOTICE: &str =
+    "the datasets doc is read-only — open a column (enter) to set how it paints";
 
 /// Which config domain a dialog is browsing. One variant per adapter
 /// module under this directory.

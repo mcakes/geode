@@ -981,3 +981,21 @@ Unverified pixel-for-pixel:
 
 Everything else in this section is verified against window-test
 assertions, unit tests, the harness and the code directly.
+
+### 9.10 Post-merge: `enter` named, the read-only label dropped
+
+User ruling 2026-09-13, on seeing the merged dialog: a surface with a
+writable door must not call itself read-only, and `enter` — which opens
+the edit stage from the browse list in both modes, a member row's column
+stage in the Views edit stage and a column row's stage in the Schema edit
+stage — was named in no footer at all. The palette title `Schema
+(read-only)` is now `Schema`; `READ_ONLY_NOTICE` reads `the datasets doc
+is read-only — open a column (enter) to set how it paints`, so a refused
+`d`/`n`/tick on a dataset row teaches the door; and both footers name
+`enter` exactly where it opens something (`open` in browse, `open column`
+in the two edit stages) through an `objectdialog-hint-enter` chip, and
+nowhere else — inside a column stage `enter` on a field only gives a
+notice. Pinned by `the_footers_name_enter_where_it_opens_something` and
+`the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door`, and
+by two harness entries (`objectdialog: the Schema edit footer names
+enter`, `objectdialog: the browse footer names enter`). 827 entries.

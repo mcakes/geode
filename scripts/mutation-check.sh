@@ -9840,6 +9840,28 @@ run_mutation "objectdialog: a column stage offers no destructive action" \
   geode-shell \
   a_column_stage_offers_no_destructive_action
 
+
+# User ruling 2026-09-13: `enter` is named wherever it opens something —
+# the Schema edit stage's column rows were the one door with no chip at
+# all, on a dialog the palette still called read-only.
+run_mutation "objectdialog: the Schema edit footer names enter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                hint_enter(chip("enter")),
+                sep("open column ·"),' \
+  '                sep("open column ·"),' \
+  geode-shell \
+  the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door
+
+# Same ruling, the browse list: `enter` opens the edit stage in both modes
+# and the normal-mode footer never said so.
+run_mutation "objectdialog: the browse footer names enter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                    action.push(hint_enter(chip("enter")));
+                    action.push(sep("open ·"));' \
+  '                    action.push(sep("open ·"));' \
+  geode-shell \
+  the_footers_name_enter_where_it_opens_something
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
