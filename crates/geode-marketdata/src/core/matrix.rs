@@ -475,6 +475,7 @@ mod tests {
     use crate::core::draft::{Draft, DraftState};
     use crate::core::spec::{CVI, Columns, PanelSpec};
     use geode_core::attribution::{Attribution, ScopeSemantics};
+    use geode_core::schema::ColumnType;
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
     use geode_core::view::ColumnFormat;
     use proptest::prelude::*;
@@ -737,6 +738,7 @@ mod tests {
         rows: "ex_date",
         columns: Columns::Values,
         header: &["currency"],
+        value_type: ColumnType::F64,
         format: ColumnFormat::MEASURE,
     };
 
@@ -863,6 +865,7 @@ mod tests {
             rows: "ex_date",
             columns: Columns::Axis("currency"),
             header: &[],
+            value_type: ColumnType::F64,
             format: ColumnFormat::MEASURE,
         };
         let err = MatrixModel::build(&schedule(), &PIVOTED, &Draft::default())

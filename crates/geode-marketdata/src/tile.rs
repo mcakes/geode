@@ -20,15 +20,17 @@
 //! hold every blotter on screen to the 250 ms deadline on every scope
 //! keystroke.
 //!
-//! Cell EDITING is Task 7 and the draft states (`Behind`, `:rebase`,
-//! `:discard`) are Task 8. What is here for them is the plumbing they
-//! need and nothing that pretends to be them: [`MarketDataTile::editor`]
-//! is the insert-mode handle `key_context` already reports on, the
-//! `:` grammar already parses their verbs, and the draft is already
-//! restored, rebased, painted and serialised.
+//! Cell EDITING is here (spec §8.3/§8.6): `edit` opens one tile-owned
+//! `InputState` in the cursor cell and `key_context` reports `mode ==
+//! insert`, which is what makes the shell hand every bare keystroke to
+//! that input instead of matching it; `commit` parses the text through the
+//! column's declared type and writes the [`Draft`]; `:bump` and `:revert`
+//! are the same draft from the `:` line. The draft STATES (`Behind`,
+//! `:rebase`, `:discard`) are Task 8 — what is here for them is the
+//! plumbing and nothing that pretends to be them.
 
-use crate::commands::{self, Command, KEY_DISPLAY_SEPARATOR};
-use crate::core::{Draft, MatrixModel, PanelSpec};
+use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
+use crate::core::{Draft, MatrixModel, PanelSpec, parse_cell};
 use geode_core::document::split_key;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::snapshot::Snapshot;
@@ -43,7 +45,7 @@ use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, Entity, IntoElement, ScrollStrategy, SharedString,
+    App, ClipboardItem, Context, Entity, Focusable as _, IntoElement, ScrollStrategy, SharedString,
     UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use gpui_component::input::{Input, InputState};
@@ -96,6 +98,46 @@ enum Tone {
 struct Chip {
     text: SharedString,
     tone: Tone,
+}
+
+/// What `edit` and `:bump` answer with nothing on screen (controller
+/// ruling): an edit is keyed by a grid cell and recorded against the
+/// generation that grid came from, so with neither there is nothing
+/// honest to open an editor over.
+const NO_DOCUMENT: &str = "no document to edit";
+
+/// What a commit answers when the grid moved under the open editor — see
+/// [`Editing::labels`] for how that happens and why it is refused.
+const CELL_MOVED: &str = "the document changed under the edit — nothing was written";
+
+/// One cell a `:bump` writes: where it is, the labels that make the edit
+/// portable across generations, and the value being added to — the shape
+/// [`Draft::bump`] consumes.
+type BumpCell = ((usize, usize), (String, String), f64);
+
+/// The open cell editor (spec §8.6): the input the trader is typing into,
+/// and which cell it belongs to.
+struct Editing {
+    /// Tile-owned, and PAINTED in the cell (see `render`): gpui installs a
+    /// text-input handler only for a focused `Input` that has been drawn,
+    /// so an editor kept off the element tree would take no characters at
+    /// all.
+    state: Entity<InputState>,
+    /// The cell this editor was opened on, captured rather than read back
+    /// off the cursor at commit time.
+    cell: (usize, usize),
+    /// That cell's labels when the editor opened.
+    ///
+    /// The grid can move underneath an open editor: a delivery lands while
+    /// a trader is typing, a shorter generation clamps the cursor
+    /// (`clamp_cursor`), and a commit that wrote to whatever the cursor now
+    /// points at would file a typed number against a different term.
+    /// `commit` compares these against the model's CURRENT pair for the
+    /// same cell and refuses when they differ — one comparison, at the one
+    /// moment the answer matters, rather than a cancel-on-delivery path
+    /// (which `promote` could not take: it runs from the frame observer,
+    /// where there is no `Window` to blur).
+    labels: (SharedString, SharedString),
 }
 
 /// Which of the three yanks (spec §8.3) is being taken.
@@ -168,10 +210,9 @@ pub struct MarketDataTile {
     scroll: UniformListScrollHandle,
     /// `Some` while the cell editor holds the keyboard, which is the
     /// whole of what `mode == insert` means to the shell (spec §8.6).
-    /// Task 7 fills it; Part 3 only reports and paints it, so that the
-    /// insert-mode fragment and the shell's own branch are wired and
-    /// provable before the editing that depends on them lands.
-    editor: Option<Entity<InputState>>,
+    /// Opened by `marketdata::edit`, closed by `commit`/`cancel` through
+    /// the one door [`Self::close_editor`] — blur, then drop.
+    editor: Option<Editing>,
     find: Option<FindState>,
     /// The one line the header says about the last thing that went wrong
     /// or is not built yet. `SharedString` rather than `String`: `render`
@@ -686,10 +727,14 @@ impl MarketDataTile {
 
     // ---- keys --------------------------------------------------------
 
+    /// `window` is here for the cell editor alone: creating an
+    /// `InputState`, giving it the keyboard and giving the keyboard back up
+    /// all need one (spec §8.6). Nothing else in this match touches it.
     pub fn dispatch(
         &mut self,
         action: &ActionId,
         count: Option<u32>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(verb) = action.0.strip_prefix("marketdata::") else {
@@ -730,12 +775,22 @@ impl MarketDataTile {
                 }
                 false
             }
-            // Task 7 owns the cell editor; the actions, the fragment's
-            // insert context and the `editor` handle are here so that
-            // what it has to build is the editing and not the wiring.
-            "edit" | "commit" | "cancel" => {
-                self.notice = Some("editing lands in Task 7".into());
+            "edit" => {
+                self.begin_edit(window, cx);
                 true
+            }
+            "commit" => self.commit_edit(window, cx),
+            "cancel" => {
+                // Only when there WAS an editor: `marketdata::cancel` is
+                // bound in insert mode alone, so a normal-mode arrival is
+                // the palette's, and it has nothing to say.
+                match self.editor.is_some() {
+                    true => {
+                        self.close_editor(window, cx);
+                        true
+                    }
+                    false => false,
+                }
             }
             "find_next" | "find_prev" => {
                 let dir = if verb == "find_next" {
@@ -760,6 +815,199 @@ impl MarketDataTile {
         }
         cx.notify();
         true
+    }
+
+    // ---- the cell editor ---------------------------------------------
+
+    /// The generation an edit is recorded against, or why there can be no
+    /// edit at all.
+    ///
+    /// An absent `source_time` gives an EMPTY base rather than a refusal:
+    /// `compile_document` always stamps one (Part 1 §4.5 — a document
+    /// request reports its own resolved generation's source time), so this
+    /// is unreachable from the real query path, and refusing here would
+    /// turn a provenance gap into a panel a trader cannot type into at all.
+    /// An empty base simply never matches a delivered `as_of`, so such a
+    /// draft reads `Behind` on the next delivery — visible and
+    /// recoverable, never a silently restamped edit.
+    fn edit_base(&self) -> Result<String, String> {
+        if self.model.rows.is_empty() || self.model.columns.is_empty() {
+            return Err(NO_DOCUMENT.to_string());
+        }
+        Ok(self.model.source_time.clone().unwrap_or_default())
+    }
+
+    /// `marketdata::edit` (`i`/`enter`): open an input in the cursor cell,
+    /// seeded with what that cell already reads — the draft's own value
+    /// where one has been made, since that is what `MatrixModel::build`
+    /// painted there — and give it the keyboard.
+    ///
+    /// Every painted cell is editable, in both pivots: `Columns::Axis`
+    /// fills the grid from the document's one value column, and
+    /// `Columns::Values` lays out the value columns and nothing else, so
+    /// there is no attribute cell for a refusal to be about. A NULL cell is
+    /// editable on purpose — filling a hole the desk left is an edit like
+    /// any other, and it opens on the empty text it paints.
+    fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.is_some() {
+            // Already editing. `i` is not bound in insert mode, so this is
+            // the palette's route in, and re-seeding would throw away what
+            // the trader has typed.
+            return;
+        }
+        if let Err(e) = self.edit_base() {
+            self.notice = Some(e.into());
+            return;
+        }
+        let cell = self.cursor;
+        let text = self.model.rows[cell.0].cells[cell.1].text.clone();
+        let state = cx.new(|cx| InputState::new(window, cx));
+        state.update(cx, |s, cx| s.set_value(text, window, cx));
+        state.read(cx).focus_handle(cx).focus(window, cx);
+        self.editor = Some(Editing {
+            state,
+            cell,
+            labels: self.model.label_of(cell),
+        });
+        self.notice = None;
+    }
+
+    /// `marketdata::commit` (`enter` in insert mode). Answers whether the
+    /// header needs re-preparing.
+    ///
+    /// The text is PARSED before anything is written, through the column's
+    /// declared type ([`PanelSpec::value_type`]) — a `'wide'` refused
+    /// inline, with the editor left open and focused, because retyping a
+    /// value is one keystroke away where dropping the editor would throw
+    /// the whole line back at the trader.
+    fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(editing) = self.editor.as_ref() else {
+            return false;
+        };
+        let text = editing.state.read(cx).value().to_string();
+        let cell = editing.cell;
+        let labels = editing.labels.clone();
+
+        if self.model.label_of(cell) != labels {
+            // The grid moved under the editor (see `Editing::labels`).
+            self.close_editor(window, cx);
+            self.notice = Some(CELL_MOVED.into());
+            return true;
+        }
+        let value = match parse_cell(&text, self.spec.value_type) {
+            Ok(value) => value,
+            Err(e) => {
+                // Stay in insert mode, with the text as typed.
+                self.notice = Some(e.into());
+                return true;
+            }
+        };
+        let base = match self.edit_base() {
+            Ok(base) => base,
+            Err(e) => {
+                self.close_editor(window, cx);
+                self.notice = Some(e.into());
+                return true;
+            }
+        };
+        self.draft.set(
+            cell,
+            (labels.0.to_string(), labels.1.to_string()),
+            value,
+            &base,
+        );
+        self.close_editor(window, cx);
+        self.notice = None;
+        // The draft's values are what `MatrixModel::build` paints, so an
+        // edit that does not rebuild is an edit nobody can see.
+        self.rebuild_model();
+        true
+    }
+
+    /// Give the keyboard up, then drop the editor — in that order, and
+    /// BOTH halves (Task 4's own note in `geode_shell::module::recording`,
+    /// verified at the pinned gpui-component rev):
+    ///
+    /// `blur` is what the shell's dropped-focus net (`render`'s
+    /// `focused(cx).is_none()`) is waiting for, and dropping the entity is
+    /// NOT enough to produce it — `Root` registers the focused input as a
+    /// strong `AnyInputState` (`input::state::sync_focused_input_registry`)
+    /// and only ever unregisters it from the `Input`'s own render, which an
+    /// input removed from the tree never reaches. So the last clone would
+    /// outlive this call, `Window::focused` would stay `Some`, and the net
+    /// could never fire — leaving every chord dead for the rest of the
+    /// session. Blurring is a module GIVING UP focus, never taking the
+    /// shell's: no module touches the shell's own handle (CLAUDE.md's focus
+    /// rule), and the shell decides where focus lands next.
+    fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.blur(cx);
+        self.editor = None;
+    }
+
+    /// `:revert` (spec §8.4) — drop every edit. The document's own numbers
+    /// are back on the same keystroke, so the only thing worth reporting is
+    /// the nothing-to-do case.
+    fn revert(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.draft.is_empty() {
+            return Err("no edits to revert".to_string());
+        }
+        self.draft.revert();
+        self.rebuild_model();
+        self.changed(cx);
+        Ok(())
+    }
+
+    /// `:bump <delta> [row|col]` — add `delta` to every cell along the
+    /// cursor's ROW by default (a term's whole node ladder is the shape a
+    /// trader nudges) or down its column on request.
+    ///
+    /// Each cell's CURRENT painted value is what is added to, which is the
+    /// draft's own value wherever one exists, so two bumps compose instead
+    /// of the second reading through to the document underneath
+    /// (`Draft::bump`'s own contract). A NULL cell is skipped: there is no
+    /// number to add to, and inventing one would put a value on screen the
+    /// document never carried.
+    fn bump(&mut self, delta: f64, axis: BumpAxis, cx: &mut Context<Self>) -> Result<(), String> {
+        let base = self.edit_base()?;
+        let (row, col) = self.cursor;
+        let values: Vec<((usize, usize), f64)> = match axis {
+            BumpAxis::Row => self.model.rows[row]
+                .cells
+                .iter()
+                .enumerate()
+                .filter_map(|(ci, cell)| cell.value.map(|v| ((row, ci), v)))
+                .collect(),
+            BumpAxis::Col => self
+                .model
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(ri, r)| {
+                    r.cells
+                        .get(col)
+                        .and_then(|cell| cell.value)
+                        .map(|v| ((ri, col), v))
+                })
+                .collect(),
+        };
+        if values.is_empty() {
+            return Err("no values to bump".to_string());
+        }
+        // Collected rather than handed to `Draft::bump` as a lazy iterator:
+        // the labels come off `self.model` while the draft is borrowed
+        // mutably, which the borrow checker refuses — and one `Vec` per
+        // `:bump` line is a keystroke's worth of work, not a per-frame one.
+        let cells: Vec<BumpCell> = values
+            .into_iter()
+            .map(|(cell, value)| {
+                let labels = self.model.label_of(cell);
+                (cell, (labels.0.to_string(), labels.1.to_string()), value)
+            })
+            .collect();
+        self.draft.bump(cells.into_iter(), delta, &base);
+        self.rebuild_model();
+        self.changed(cx);
+        Ok(())
     }
 
     /// Move by cells, clamped. The extremes are the same door with a
@@ -907,11 +1155,11 @@ impl MarketDataTile {
         }
         match commands::parse(line)? {
             Command::Key(key) => self.set_key(key, cx),
+            Command::Revert => self.revert(cx),
+            Command::Bump { delta, axis } => self.bump(delta, axis, cx),
             // Parsed, not executed: the grammar a trader types is the one
-            // Tasks 7 and 8 wire up, so a typo is still a typo here and
-            // only a real verb answers this.
-            Command::Revert => Err("revert lands in Task 7".into()),
-            Command::Bump { .. } => Err("bump lands in Task 7".into()),
+            // Task 8 wires up, so a typo is still a typo here and only a
+            // real verb answers this.
             Command::Rebase => Err("rebase lands in Task 8".into()),
             Command::Discard => Err("discard lands in Task 8".into()),
             Command::Upload => Err("upload is not built yet".into()),
@@ -1066,6 +1314,21 @@ impl MarketDataTile {
         self.acted.is_none()
     }
 
+    /// The open editor's own entity — a test seeds a value through it,
+    /// which is the one thing it cannot do with a key press.
+    #[cfg(test)]
+    pub(crate) fn editor_state(&self) -> Option<Entity<InputState>> {
+        self.editor.as_ref().map(|e| e.state.clone())
+    }
+
+    /// What the open editor holds, `None` when none is open.
+    #[cfg(test)]
+    pub(crate) fn editor_value(&self, cx: &App) -> Option<String> {
+        self.editor
+            .as_ref()
+            .map(|e| e.state.read(cx).value().to_string())
+    }
+
     #[cfg(test)]
     pub(crate) fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
@@ -1168,7 +1431,13 @@ impl gpui::Render for MarketDataTile {
         // the closure — never the model itself (a `MatrixModel` clone
         // here would reallocate every row on every paint).
         let model = self.model.clone();
-        let editor = self.editor.clone();
+        // The cell the editor is ON travels with it, rather than the paint
+        // reading the cursor: the two are the same under every binding
+        // (insert mode binds nothing that moves a cursor), but a palette
+        // dispatch can move one under an open editor, and a commit writes
+        // to the cell it OPENED on — so painting at the cursor would show
+        // the input over a cell it is not about to write.
+        let editor = self.editor.as_ref().map(|e| (e.cell, e.state.clone()));
         let cursor = self.cursor;
         let list = uniform_list(
             "marketdata-rows",
@@ -1209,12 +1478,12 @@ impl gpui::Render for MarketDataTile {
                             } else {
                                 d.text_color(foreground)
                             };
-                            // The editor is painted IN the cursor cell
-                            // (spec §8.3) — Task 7 is what puts one
-                            // there; a `None` editor paints the text, as
-                            // every other cell does.
-                            el = el.child(match (at_cursor, &editor) {
-                                (true, Some(state)) => d.child(Input::new(state)),
+                            // The editor is painted IN the cell it edits
+                            // (spec §8.3), and painted is what makes it
+                            // typeable at all (`Editing::state`); every
+                            // other cell paints its text.
+                            el = el.child(match &editor {
+                                Some((at, state)) if *at == (i, c) => d.child(Input::new(state)),
                                 _ => d.child(cell.text.clone()),
                             });
                         }
@@ -1337,12 +1606,10 @@ mod tests {
         document_of(&TERMS, &NODES, as_of)
     }
 
-    /// The window root: renders the tile and holds what the harness reads
-    /// back out of the window closure.
+    /// The view under the window's `Root`: renders the tile, and nothing
+    /// else — what a test reads comes out of [`Built`], not out of here.
     struct Host {
         tile: Entity<MarketDataTile>,
-        frame: Entity<Frame>,
-        diagnostics: Entity<Diagnostics>,
     }
     impl gpui::Render for Host {
         fn render(
@@ -1352,6 +1619,15 @@ mod tests {
         ) -> impl gpui::IntoElement {
             gpui::div().size_full().child(self.tile.clone())
         }
+    }
+
+    /// What the window closure hands back: it can return only one value,
+    /// so everything a test drives or reads is parked here on the way out.
+    struct Built {
+        content: Box<dyn TileContent>,
+        tile: Entity<MarketDataTile>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
     }
 
     struct Harness {
@@ -1382,10 +1658,7 @@ mod tests {
         cx.update(gpui_component::init);
         let (data, rx) = DataHandle::for_tests();
         let factory = MarketDataFactory::new(data.clone(), &CVI, Duration::from_secs(15 * 60));
-        // The occupant's `content` is the harness's only handle on the
-        // trait; the window closure can return just one value, so it is
-        // parked here on the way out.
-        let slot: Rc<RefCell<Option<Box<dyn TileContent>>>> = Rc::new(RefCell::new(None));
+        let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
         let window = cx
             .update(|cx| {
                 let slot = slot.clone();
@@ -1402,28 +1675,37 @@ mod tests {
                         cx,
                     );
                     let tile = occupant.view.clone().downcast::<MarketDataTile>().unwrap();
-                    *slot.borrow_mut() = Some(occupant.content);
-                    cx.new(|_| Host {
-                        tile,
+                    *slot.borrow_mut() = Some(Built {
+                        content: occupant.content,
+                        tile: tile.clone(),
                         frame,
                         diagnostics,
-                    })
+                    });
+                    let host = cx.new(|_| Host { tile });
+                    // Wrapped in `Root`, exactly as `main.rs` wraps the
+                    // shell — and load-bearing here rather than decorative:
+                    // gpui-component registers the FOCUSED `InputState` on
+                    // the `Root` as a strong `AnyInputState`
+                    // (`input::state::sync_focused_input_registry`), so
+                    // without one a dropped cell editor would read as
+                    // blurred whether or not it was blurred, and
+                    // `the_editor_gives_up_focus_before_it_is_dropped`
+                    // could not tell R1's two-step order from a bare drop.
+                    cx.new(|cx| gpui_component::Root::new(host, window, cx))
                 })
             })
             .unwrap();
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
-        let (tile, frame, diagnostics) = window.root(&mut vcx).unwrap().read_with(&vcx, |h, _| {
-            (h.tile.clone(), h.frame.clone(), h.diagnostics.clone())
-        });
+        let built = slot.borrow_mut().take().expect("the factory built one");
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         (
             Harness {
-                tile,
-                content: slot.borrow_mut().take().expect("the factory built one"),
-                frame,
-                diagnostics,
+                tile: built.tile,
+                content: built.content,
+                frame: built.frame,
+                diagnostics: built.diagnostics,
                 rx,
                 data,
             },
@@ -1482,6 +1764,69 @@ mod tests {
         }
         fn rows(&self, vcx: &gpui::VisualTestContext) -> usize {
             self.tile.read_with(vcx, |t, _| t.model().rows.len())
+        }
+        /// What the keymap engine is told — `insert` exactly while the cell
+        /// editor holds the keyboard (spec §8.6), read through the trait
+        /// rather than off the field, since the context is the only thing
+        /// the shell ever sees.
+        fn mode(&self, vcx: &gpui::VisualTestContext) -> String {
+            self.tile.read_with(vcx, |_, cx| {
+                self.content
+                    .key_context(cx)
+                    .get("mode")
+                    .unwrap_or("")
+                    .to_string()
+            })
+        }
+        /// The open editor's text, `None` when none is open.
+        fn editor_value(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+            self.tile.read_with(vcx, |t, cx| t.editor_value(cx))
+        }
+        /// Seed the open editor — the one thing a test cannot do through a
+        /// key press. Typing for real is exercised in
+        /// `typed_text_reaches_the_cell_editor`.
+        fn set_editor(&self, vcx: &mut gpui::VisualTestContext, text: &str) {
+            let state = self
+                .tile
+                .read_with(vcx, |t, _| t.editor_state())
+                .expect("an open editor");
+            vcx.update(|window, cx| {
+                state.update(cx, |s, cx| s.set_value(text, window, cx));
+            });
+        }
+        /// One cell as painted: its text and whether it reads as an edit.
+        fn cell(&self, vcx: &gpui::VisualTestContext, row: usize, col: usize) -> (String, bool) {
+            self.tile.read_with(vcx, |t, _| {
+                let cell = &t.model().rows[row].cells[col];
+                (cell.text.to_string(), cell.edited)
+            })
+        }
+        /// Every cell's text along one row, and down one column.
+        fn row_texts(&self, vcx: &gpui::VisualTestContext, row: usize) -> Vec<String> {
+            self.tile.read_with(vcx, |t, _| {
+                t.model().rows[row]
+                    .cells
+                    .iter()
+                    .map(|c| c.text.to_string())
+                    .collect()
+            })
+        }
+        fn col_texts(&self, vcx: &gpui::VisualTestContext, col: usize) -> Vec<String> {
+            self.tile.read_with(vcx, |t, _| {
+                t.model()
+                    .rows
+                    .iter()
+                    .map(|r| r.cells[col].text.to_string())
+                    .collect()
+            })
+        }
+        /// Key, shown, requested, delivered — the four lines every editing
+        /// test starts with.
+        fn with_document(&self, vcx: &mut gpui::VisualTestContext) {
+            self.command(vcx, "key SPX.Z").expect("a valid key");
+            self.visible(vcx, true);
+            let tag = self.document_request().expect("one request").tag;
+            self.deliver(vcx, tag, Arc::new(cvi(BASE)));
         }
     }
 
@@ -1606,13 +1951,14 @@ mod tests {
     /// pins both halves of that decision — the two `true` arms — since
     /// getting one wrong leaves a header the trader can read that no
     /// longer matches the tile.
+    ///
+    /// The notice is written here by a REFUSED commit (Task 7): `edit`
+    /// itself no longer writes one now that it opens a real editor instead
+    /// of saying which task the editing lands in.
     #[gpui::test]
     fn a_notice_reaches_the_header_and_escape_clears_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
-        h.command(&mut vcx, "key SPX.Z").unwrap();
-        h.visible(&mut vcx, true);
-        let tag = h.document_request().unwrap().tag;
-        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        h.with_document(&mut vcx);
 
         let chips = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.header_chips());
         let before = chips(&vcx);
@@ -1624,11 +1970,14 @@ mod tests {
         );
 
         h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "wide");
+        h.dispatch(&mut vcx, "commit", None);
         assert!(
-            chips(&vcx).iter().any(|c| c == "editing lands in Task 7"),
+            chips(&vcx).iter().any(|c| c == "'wide' is not a number"),
             "a notice must reach the chips on the keystroke that set it: {:?}",
             chips(&vcx)
         );
+        h.dispatch(&mut vcx, "cancel", None);
         h.dispatch(&mut vcx, "escape", None);
         assert_eq!(
             chips(&vcx),
@@ -2267,5 +2616,343 @@ edits = [["2026-11-20", "-1", 9.5]]
             0,
             "escape restores the origin"
         );
+    }
+    // ---- Task 7: cell editing ---------------------------------------
+
+    /// The whole round trip (spec §8.3/§8.6): `edit` opens a tile-owned
+    /// input seeded with the cell's own text, `commit` parses it through
+    /// the column's DECLARED type and writes the draft, and the header
+    /// counts it. The value assertion is the point — a commit that wrote
+    /// the raw text without parsing it would put `0.0` in the cell and
+    /// every marker assertion here would still pass.
+    #[gpui::test]
+    fn edit_commit_paints_the_cell_as_edited_and_the_header_counts_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&vcx), "insert", "the shell is told to stop matching");
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("0.1000"),
+            "seeded with the cell's own text, so a small correction is a small edit"
+        );
+
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        assert_eq!(
+            h.cell(&vcx, 0, 0),
+            ("0.5000".to_string(), true),
+            "the parsed value, formatted by the panel's own format, marked as an edit"
+        );
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.header_chips())
+                .iter()
+                .any(|c| c.contains("1 edit")),
+            "the header counts it: {:?}",
+            h.tile.read_with(&vcx, |t, _| t.header_chips())
+        );
+        assert!(h.editor_value(&vcx).is_none(), "the editor is gone");
+        assert_eq!(
+            h.mode(&vcx),
+            "normal",
+            "and the keyboard is the panel's again"
+        );
+        let (len, base) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().len(), t.draft().base.clone()));
+        assert_eq!(len, 1);
+        assert_eq!(
+            base.as_deref(),
+            Some(BASE),
+            "recorded against the generation on screen, which is what makes it Behind-able"
+        );
+    }
+
+    /// R1 (Task 4, verified at the pinned gpui-component rev): `blur`
+    /// FIRST, then drop. Dropping the `InputState` alone does not make
+    /// `Window::focused` `None` — `Root` holds the focused input as a
+    /// strong `AnyInputState` and only ever unregisters it from the
+    /// `Input`'s own render, which an input removed from the tree never
+    /// reaches. Without the blur the window keeps handing focus to a dead
+    /// editor, the shell's `render` net (`window.focused(cx).is_none()`)
+    /// never fires, and every chord is gone for the rest of the session.
+    /// A module gives focus UP; it never takes the shell's (CLAUDE.md).
+    #[gpui::test]
+    fn the_editor_gives_up_focus_before_it_is_dropped(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+
+        h.dispatch(&mut vcx, "edit", None);
+        // The draw matters: gpui installs a text-input handler only for a
+        // focused `Input` that has been painted, and it is that paint which
+        // registers it on the `Root`.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let handle = h
+            .tile
+            .read_with(&vcx, |t, cx| {
+                t.editor_state().map(|s| s.read(cx).focus_handle(cx))
+            })
+            .expect("an open editor");
+        assert!(
+            vcx.update(|window, _cx| handle.is_focused(window)),
+            "`edit` must give the cell editor the keyboard"
+        );
+
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "commit must blur before dropping: focus has to be free for the shell's own net"
+        );
+
+        // And the same on the way out through `cancel`.
+        h.dispatch(&mut vcx, "edit", None);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "cancel must blur before dropping too"
+        );
+    }
+
+    /// The keys really do reach the cell (spec §8.6): the shell's insert
+    /// branch hands a bare keystroke to the focused input, and this is the
+    /// panel's own half of that — a painted, focused `Input` that takes
+    /// characters.
+    #[gpui::test]
+    fn typed_text_reaches_the_cell_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        h.set_editor(&mut vcx, "");
+        vcx.simulate_input("0.5");
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("0.5"),
+            "every typed character must land in the cell's own input"
+        );
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 0, 0), ("0.5000".to_string(), true));
+    }
+
+    #[gpui::test]
+    fn cancel_drops_the_editor_without_a_change(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.75");
+        h.dispatch(&mut vcx, "cancel", None);
+
+        assert!(h.editor_value(&vcx).is_none(), "the editor is dropped");
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.cell(&vcx, 0, 0),
+            ("0.1000".to_string(), false),
+            "and the typed value went nowhere"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    }
+
+    /// A refusal is inline and the trader stays in the cell — retyping is
+    /// one keystroke away, where dropping the editor would throw the whole
+    /// value back at them.
+    #[gpui::test]
+    fn a_non_numeric_commit_refuses_inline_and_stays_in_insert_mode(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "wide");
+        h.dispatch(&mut vcx, "commit", None);
+
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("'wide' is not a number".to_string()),
+            "the refusal quotes what was typed"
+        );
+        assert_eq!(h.mode(&vcx), "insert", "and the cell keeps the keyboard");
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("wide"));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.header_chips())
+                .iter()
+                .any(|c| c == "'wide' is not a number"),
+            "the notice reaches the header on the keystroke that set it"
+        );
+    }
+
+    /// `:bump <delta> [row|col]` — the cursor's ROW by default, because a
+    /// term's whole node ladder is the shape a trader nudges.
+    #[gpui::test]
+    fn bump_adds_to_the_cursors_row_by_default_and_to_its_column_on_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+
+        h.command(&mut vcx, "bump 0.25")
+            .expect("a bump with a document");
+        assert_eq!(
+            h.row_texts(&vcx, 0),
+            vec!["0.3500", "0.4500", "0.5500"],
+            "the cursor's whole row moved"
+        );
+        assert_eq!(
+            h.row_texts(&vcx, 1),
+            vec!["0.4000", "0.5000", "0.6000"],
+            "and nothing else did"
+        );
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 3);
+
+        h.command(&mut vcx, "revert").unwrap();
+        h.command(&mut vcx, "bump 1 col").unwrap();
+        assert_eq!(
+            h.col_texts(&vcx, 0),
+            vec!["1.1000", "1.4000"],
+            "`col` walks the cursor's column instead"
+        );
+        assert_eq!(
+            h.row_texts(&vcx, 0),
+            vec!["1.1000", "0.2000", "0.3000"],
+            "and only that column"
+        );
+
+        // It composes with an edit already made rather than reading through
+        // to the document underneath it.
+        h.command(&mut vcx, "bump 1 col").unwrap();
+        assert_eq!(h.col_texts(&vcx, 0), vec!["2.1000", "2.4000"]);
+    }
+
+    #[gpui::test]
+    fn revert_clears_every_edit(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "bump 0.25").unwrap();
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 3);
+
+        h.command(&mut vcx, "revert").expect("edits to clear");
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+        assert_eq!(
+            h.row_texts(&vcx, 0),
+            vec!["0.1000", "0.2000", "0.3000"],
+            "the document's own numbers are back"
+        );
+        assert!(
+            !h.tile
+                .read_with(&vcx, |t, _| t.header_chips())
+                .iter()
+                .any(|c| c.contains("edit")),
+            "and the header says nothing about a draft: {:?}",
+            h.tile.read_with(&vcx, |t, _| t.header_chips())
+        );
+        assert_eq!(
+            h.command(&mut vcx, "revert"),
+            Err("no edits to revert".to_string()),
+            "a second revert has nothing to do and says so"
+        );
+    }
+
+    /// `mode == insert` is exactly "an editor is open", and the shell keys
+    /// its whole insert branch on that one pair — so BOTH ways out have to
+    /// be covered: an editor still open after a commit leaves the panel
+    /// swallowing every keystroke as text with nothing on screen to say
+    /// why, which is the same failure as never closing it at all.
+    #[gpui::test]
+    fn key_context_reports_insert_while_the_editor_exists(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        assert_eq!(h.mode(&vcx), "normal");
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal", "a commit closes the editor");
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(h.mode(&vcx), "normal", "and so does a cancel");
+    }
+
+    /// Controller ruling: an edit needs a document. With no grid there is
+    /// no cell to key an edit by and no generation to record it against, so
+    /// `edit` and `:bump` refuse rather than opening an editor over
+    /// nothing — a draft whose base were the empty string could never be
+    /// told from one made against a real generation.
+    #[gpui::test]
+    fn editing_with_no_document_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(
+            h.editor_value(&vcx).is_none(),
+            "no editor over an empty grid"
+        );
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("no document to edit".to_string())
+        );
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.command(&mut vcx, "bump 1"),
+            Err("no document to edit".to_string()),
+            "and the `:` line says the same thing on its own surface"
+        );
+    }
+
+    /// The defence beyond the brief: a delivery can land while the editor
+    /// is open, and a shorter generation clamps the cursor under it
+    /// (`a_shorter_document_clamps_the_cursor`). An edit belongs to the
+    /// cell the trader OPENED, so `commit` checks that cell's labels are
+    /// still the ones it opened on and refuses otherwise — writing to
+    /// whatever the clamped cursor now points at would file a typed number
+    /// against a different term.
+    #[gpui::test]
+    fn a_commit_whose_cell_moved_under_it_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        h.dispatch(&mut vcx, "bottom", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (4, 0));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+
+        // Two terms now: the cursor is clamped to row 1 under the open
+        // editor, which is a different term entirely.
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "the typed value must not land on the term the cursor was clamped to"
+        );
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("the document changed under the edit — nothing was written".to_string())
+        );
+        assert!(h.editor_value(&vcx).is_none(), "and the editor is dropped");
     }
 }

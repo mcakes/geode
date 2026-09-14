@@ -103,14 +103,19 @@ impl TileContent for MarketDataContent {
     fn key_context(&self, cx: &App) -> KeyContext {
         self.tile.read(cx).key_context()
     }
+    /// The `window` is forwarded rather than dropped: `marketdata::edit`
+    /// creates the cell editor's `InputState` and focuses it, and
+    /// `commit`/`cancel` blur it (spec §8.6) — none of which is reachable
+    /// from `&mut App` alone.
     fn dispatch(
         &self,
         action: &ActionId,
         count: Option<u32>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        self.tile.update(cx, |t, cx| t.dispatch(action, count, cx))
+        self.tile
+            .update(cx, |t, cx| t.dispatch(action, count, window, cx))
     }
     fn command(&self, line: &str, _window: &mut Window, cx: &mut App) -> Result<(), String> {
         self.tile.update(cx, |t, cx| t.command(line, cx))

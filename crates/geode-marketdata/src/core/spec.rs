@@ -6,6 +6,7 @@
 //! carries, which is why every field is `&'static` — a spec is never
 //! built at runtime.
 
+use geode_core::schema::ColumnType;
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 
 /// How the columns across the top are chosen.
@@ -37,6 +38,20 @@ pub struct PanelSpec {
     /// Document-level attributes shown in the header, in this order.
     pub header: &'static [&'static str],
     pub format: ColumnFormat,
+    /// The declared type of the value column(s) this panel's cells hold —
+    /// what a typed cell edit is parsed as
+    /// ([`crate::core::draft::parse_cell`]).
+    ///
+    /// It lives on the SPEC rather than being read off a delivered
+    /// snapshot because a `Snapshot` carries no declared type at all
+    /// (`ColumnMeta` is name + attribution + scope semantics): the type is
+    /// the dataset's own declaration, and the panel — which already names
+    /// its dataset, its axes and its format — is the one place in this
+    /// crate that knows it. Reading it off the arrow array's runtime kind
+    /// would be the wrong answer for the same reason a formatter is not a
+    /// schema: an `i64` column whose values all happen to fit a `f64`
+    /// array would then silently accept `0.5`.
+    pub value_type: ColumnType,
 }
 
 impl PanelSpec {
@@ -71,6 +86,7 @@ pub const CVI: PanelSpec = PanelSpec {
     rows: "term",
     columns: Columns::Axis("node"),
     header: &["anchor_date", "spot_ref"],
+    value_type: ColumnType::F64,
     format: ColumnFormat {
         precision: 4,
         thousands: false,

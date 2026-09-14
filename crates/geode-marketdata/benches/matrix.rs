@@ -13,6 +13,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::attribution::{Attribution, ScopeSemantics};
+use geode_core::schema::ColumnType;
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
 use geode_core::view::ColumnFormat;
 use geode_marketdata::core::draft::Draft;
@@ -99,6 +100,7 @@ const SCHEDULE: PanelSpec = PanelSpec {
     rows: "ex_date",
     columns: Columns::Values,
     header: &["currency"],
+    value_type: ColumnType::F64,
     format: ColumnFormat::MEASURE,
 };
 
