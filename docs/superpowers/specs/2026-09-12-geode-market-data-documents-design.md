@@ -55,7 +55,7 @@ document arrives. A publish landing under an open draft marks the
 draft as based on an older generation and offers `:rebase` and
 `:discard`. Every behaviour has a test, every data-tier behaviour a
 mutation entry, and the parse-plus-publish cost per document and the
-panel's paint cost at the largest sketched matrix are in `docs/perf.md`.
+panel's model build and paint at 20×30 and at 10,000 rows are in `docs/perf.md`.
 
 ### 1.3 Explicitly not in slice 1
 
@@ -725,12 +725,18 @@ pub struct PanelSpec {
 
 A header row: key, each header attribute, the generation's source
 time, the staleness style the blotter uses, and the draft state
-(§8.4). Below it, column labels across the top, row labels down the
-side, and cells — painted with plain gpui elements from a
-`MatrixModel` built once per snapshot or draft change and cached, so a
-frame paints from prepared strings and never formats. The panel is
-not virtualised (roadmap ruling 6); §11 records its paint cost at the
-largest matrix the sketch implies so the decision is measured.
+(§8.4). Below it, column labels across the top, and the body: a gpui
+`uniform_list` over the row axis (roadmap ruling 6 as revised
+2026-09-13), each row painting its label and a fixed strip of cells
+from a `MatrixModel` built once per snapshot or draft change and
+cached, so a frame paints from prepared strings and never formats and
+only the visible rows are laid out. A `UniformListScrollHandle` keeps
+the cursor row in view on every cursor move. Row height is fixed (one
+line of the data face); there is no horizontal virtualisation, since
+no sketched document has more than a few dozen columns. §11 records
+the model build and the paint at 20×30 and at 10,000 rows × 5
+columns — the dividend-schedule shape that forced the revision — so
+the decision is measured.
 
 ### 8.3 Keys
 
@@ -919,9 +925,11 @@ binding; the reserved lists are gone (compile-time).
 **Benchmarks (`docs/perf.md`, new section).** Parse plus publish per
 CVI document at the sketch's size (order of 20 terms × 30 nodes) and at
 ten times that; archive growth per hour at the demo cadence; the
-panel's `MatrixModel` build and its paint at 20×30 and at the largest
-matrix the scenario panel will need (measured now so slice 2 inherits
-a number, not a guess).
+panel's `MatrixModel` build and its paint at 20×30 and at 10,000 rows
+× 5 columns (a broad-index dividend schedule), which the uniform list
+must hold under the 8 ms pure-UI budget because only the visible rows
+are laid out; the scenario panel's T×S grid (slice 2) inherits the
+same list.
 
 ## 12. Sequencing
 

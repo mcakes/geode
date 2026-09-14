@@ -63,14 +63,24 @@ on every slice below.
    is built against a simulator that is a first-class adapter in the
    mould of `--demo`'s generated CSVs. The vendor client is a thin shim
    written later, blind, against a deliberately tiny trait.
-6. **Small matrices are painted directly.** The CVI, repo, dividend,
+6. **Matrices are painted through a uniform row list — no shared table
+   component, no blotter embedding.** The CVI, repo, dividend,
    correlation and index-composition panels are a header block plus a
-   few dozen to a few hundred cells. They are painted with plain gpui
-   elements — no virtualised table, no shared table component, no
-   blotter embedding. An earlier proposal to lift the blotter's table
-   into a shared crate and build these panels on it was rejected as
-   overcomplicating: the data is not aggregatable and the cell counts
-   do not need virtualisation. The blotter stays exactly as it is.
+   matrix whose column set is small and fixed and whose row count is
+   not: a CVI set is a few dozen rows, a dividend schedule for a broad
+   index (Russell 2000) is tens of thousands. Every panel's body is a
+   gpui `uniform_list` over the row axis (fixed row height, only the
+   visible rows laid out, a scroll handle keeping the cursor row in
+   view) with the columns painted as a fixed strip per row; there is
+   no horizontal virtualisation because no sketched document has more
+   than a few dozen columns. An earlier proposal to lift the blotter's
+   table into a shared crate and build these panels on it was rejected
+   as overcomplicating: the data is not aggregatable, and the
+   component's delegate model would fight a draft-diff cell style. An
+   earlier form of this ruling (2026-09-12) said "painted directly, no
+   virtualisation" on the belief that every document was small; the
+   dividend-schedule cardinality (user, 2026-09-13) revised it before
+   the panel was built. The blotter stays exactly as it is.
 7. **Two dataset families, side by side.** Measure datasets keep the
    grain vocabulary untouched. A new *document* family declares an
    identity key, axes and document-level attributes, and is served by a
