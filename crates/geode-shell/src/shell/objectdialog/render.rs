@@ -128,7 +128,8 @@ use super::sources;
 use super::views;
 use super::{
     ColumnContext, ColumnDoor, ColumnLayers, Confirm, Destination, Domain, Draft, EditRow, FellTo,
-    Field, FieldKind, Fold, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag, Stage, Step,
+    Field, FieldKind, Fold, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag, RowVocabulary,
+    Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Keystroke, Modifiers};
@@ -1175,8 +1176,49 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             cx.notify();
             return true;
         }
-        // `tab`/`shift+tab`: reserved and inert, same reasoning as browse.
+        // `tab`/`shift+tab` STEP the selected row here (user ruling
+        // 2026-09-13), which is the settings dialog's own "tab steps in
+        // both modes" rule arriving at this stage: exactly the path
+        // `space`/`shift+space` take in normal mode, so a step is a step
+        // whichever mode the trader is in. The `Input` keeps focus and
+        // the query is untouched — `dialog::sync_dialog_text` writes the
+        // unchanged `effective_query` back on this handler's return —
+        // because this is a value change, not a filter keystroke. `h`
+        // and `l` are NOT claimed: they are letters on their way to the
+        // field, which a trader typing `hidden` depends on.
+        //
+        // An open text field never reaches here: the `text_entry` branch
+        // above claims every key first, so the chain field's `tab` still
+        // completes a segment (§18.8) and a plain field's stays inert.
         if ks.key == "tab" {
+            let forward = match ks.mods {
+                Modifiers::NONE => true,
+                m if m
+                    == (Modifiers {
+                        shift: true,
+                        ..Modifiers::NONE
+                    }) =>
+                {
+                    false
+                }
+                // Any other modifier: claimed and dropped, as it was
+                // before this key did anything at all here.
+                _ => return true,
+            };
+            // §19.4's gate, which the normal-mode arms get from the
+            // `writable` check below: a read-only domain refuses every
+            // key that would change the object, and reaching this one
+            // through filter mode must not be the way around it.
+            if !shell
+                .object_dialog
+                .as_ref()
+                .is_some_and(|s| s.domain.writable(&s.stage))
+            {
+                set_notice(shell, READ_ONLY_NOTICE.to_string());
+            } else {
+                step_selected_row(shell, forward, cx);
+            }
+            cx.notify();
             return true;
         }
         return false;
@@ -1288,29 +1330,15 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 shell.object_dialog_scroll.scroll_to_item(selected);
             }
         }
-        NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);
-                scroll_to_cursor(shell);
-                commit_or_confirm(shell, cx);
-            }
-            Some(Step::Refused(reason)) => refuse_step(shell, reason),
-            _ => set_notice(shell, "nothing on this row changes with space".to_string()),
-        },
-        NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);
-                scroll_to_cursor(shell);
-                commit_or_confirm(shell, cx);
-            }
-            Some(Step::Refused(reason)) => refuse_step(shell, reason),
-            _ => set_notice(
-                shell,
-                "nothing on this row changes with shift+space".to_string(),
-            ),
-        },
+        // `space`, `l` and `tab` forward; `shift+space`, `h` and
+        // `shift+tab` back (user ruling 2026-09-13) — the aliases arrive
+        // already resolved from `dialogmode::normal_command`, so there
+        // is one arm per direction rather than one per spelling. The
+        // notice names `space`/`shift+space` whichever alias was
+        // pressed: naming the alias would need the keystroke down here,
+        // and the two canonical keys are the ones the footer teaches.
+        NormalCommand::Toggle => step_selected_row(shell, true, cx),
+        NormalCommand::ToggleBack => step_selected_row(shell, false, cx),
         NormalCommand::MoveItem(delta) if in_column_stage(shell) => {
             // Part 2c §5.2: there is no list in this stage to reorder, so
             // the ordinary "that is as far as this row goes" would answer
@@ -1693,6 +1721,42 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
 /// [`editing_row`] the action bar builds `d` and `r` from — a row that
 /// offers neither (a desk-owned slot the user has not forked) gets the
 /// reason alone rather than an invented verb.
+/// Step the selected row and record it — the ONE path every stepping
+/// key takes: `space`/`shift+space` and their 2026-09-13 aliases
+/// `l`/`h`/`tab`/`shift+tab` in normal mode, and `tab`/`shift+tab` in
+/// filter mode. Factored out when the filter-mode spelling arrived,
+/// because two copies of this five-line sequence is exactly the drift
+/// this crate keeps paying for (`Draft::toggle_selected_back`'s own doc
+/// records the same lesson one layer down).
+///
+/// The `Step::Inert` notice names `space`/`shift+space` rather than the
+/// key actually pressed: those two are what the footer teaches, and a
+/// notice about `l` would be a sentence about a key the trader may never
+/// have seen advertised. The caller has already decided the row is
+/// writable.
+fn step_selected_row(shell: &mut ShellView, forward: bool, cx: &mut Context<ShellView>) {
+    let stepped = draft_mut(shell).map(|draft| {
+        if forward {
+            draft.toggle_selected()
+        } else {
+            draft.toggle_selected_back()
+        }
+    });
+    match stepped {
+        Some(Step::Changed) => {
+            maybe_refresh_available(shell);
+            revalidate(shell);
+            scroll_to_cursor(shell);
+            commit_or_confirm(shell, cx);
+        }
+        Some(Step::Refused(reason)) => refuse_step(shell, reason),
+        _ => {
+            let key = if forward { "space" } else { "shift+space" };
+            set_notice(shell, format!("nothing on this row changes with {key}"));
+        }
+    }
+}
+
 fn refuse_step(shell: &mut ShellView, reason: String) {
     let hint = match editing_row(shell) {
         // `overridden` implies the user layer has it too, so both verbs
@@ -3463,6 +3527,60 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             .child(chip)
             .into_any_element()
     };
+    // The change group's own selector, on its first chip, for the same
+    // reason `hint_i` carries one: whether that group is painted at all
+    // is now a per-row decision, and a test has to be able to read it.
+    let hint_change = |chip: AnyElement| {
+        div()
+            .debug_selector(|| "objectdialog-hint-change".to_string())
+            .child(chip)
+            .into_any_element()
+    };
+    // User ruling 2026-09-13: the change group and `i` are computed from
+    // the row under the CURSOR, not from the domain — see
+    // [`RowVocabulary`]. Computed once, here, so the column stage and the
+    // object stage cannot drift about what a row offers.
+    let vocabulary = draft.selected_vocabulary(state.domain);
+    // Can `i` open a field on this row? Groupings is the exception the
+    // vocabulary cannot answer for: there `i` opens the slot's whole
+    // chain (§18.8) rather than the selected row's own value, so it is
+    // live on every row and that arm states it unconditionally below.
+    let types = matches!(
+        vocabulary,
+        RowVocabulary::StepsAndTypes | RowVocabulary::Types
+    );
+    // `space` `shift+space` `tab` `h` `l` · change — the five spellings
+    // `Draft::step_selected` answers to, on a row that has a value to
+    // step. A list row takes `space` alone, with the word that says
+    // which way the row travels. EMPTY on a row nothing changes, which
+    // is what makes the group droppable; `trailing` adds the ` ·` that
+    // joins it to whatever follows, and the one caller whose motion row
+    // ENDS here passes `false`.
+    let change_group = |trailing: bool| -> Vec<AnyElement> {
+        let word = match vocabulary {
+            RowVocabulary::Steps | RowVocabulary::StepsAndTypes => "change",
+            RowVocabulary::Item => "toggle",
+            RowVocabulary::Available => "add",
+            RowVocabulary::Inert | RowVocabulary::Types => return Vec::new(),
+        };
+        let mut out = vec![hint_change(chip("space"))];
+        if matches!(
+            vocabulary,
+            RowVocabulary::Steps | RowVocabulary::StepsAndTypes
+        ) {
+            out.extend([chip("shift+space"), chip("tab"), chip("h"), chip("l")]);
+        }
+        out.push(
+            div()
+                .child(if trailing {
+                    format!("{word} ·")
+                } else {
+                    word.to_string()
+                })
+                .into_any_element(),
+        );
+        out
+    };
     // The hint row states this stage's vocabulary and only this stage's —
     // the same rule the browse footer keeps.
     // `enter` is named only while the SELECTED row opens a column stage —
@@ -3552,47 +3670,49 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // Part 2c §5.2: the column stage's own vocabulary. No
         // `shift+j`/`shift+k` and no `x` — there is no list here to
         // reorder or demote from, and this footer's standing rule is to
-        // name only the keys that act on THESE rows. `i` is always live
-        // (`label` and `width` are both editable `Text`s), so it is
-        // stated unconditionally rather than through
-        // `offers_text_entry`, which would answer the same thing one
-        // indirection later. `escape` names the object it goes back to,
-        // since "back to the list" would be a lie about a rung that
+        // name only the keys that act on THESE rows. Its seven rows are
+        // exactly where the 2026-09-13 ruling bites: `label` and `width`
+        // take `i` and nothing else, `scale` steps and `i` would only
+        // refuse, `precision` does both — so both groups come from
+        // `vocabulary` rather than being stated unconditionally the way
+        // `i` was here before. `escape` names the object it goes back
+        // to, since "back to the list" would be a lie about a rung that
         // stops at the view.
         let back = format!("back to {}", draft.name);
-        (
-            vec![
-                chip("j"),
-                chip("k"),
-                sep("move ·"),
-                chip("space"),
-                chip("shift+space"),
-                sep("change"),
-            ],
-            vec![
-                hint_i(chip("i")),
-                sep("type a value ·"),
-                chip("/"),
-                sep("filter ·"),
-                chip("escape"),
-                if draft.query.is_empty() {
-                    div().child(back).into_any_element()
-                } else {
-                    sep("clear the filter")
-                },
-            ],
-        )
-    } else {
+        // The motion row ENDS with the change group here, so the group
+        // takes no trailing `·` and `move` only gets one when something
+        // actually follows it.
+        let change = change_group(false);
         let mut motion = vec![
             chip("j"),
             chip("k"),
-            sep("move ·"),
-            chip("space"),
-            chip("shift+space"),
-            sep("change ·"),
-            chip("shift+j"),
-            chip("shift+k"),
+            sep(if change.is_empty() { "move" } else { "move ·" }),
         ];
+        motion.extend(change);
+        let mut action = Vec::new();
+        if types {
+            action.push(hint_i(chip("i")));
+            action.push(sep("type a value ·"));
+        }
+        action.extend([
+            chip("/"),
+            sep("filter ·"),
+            chip("escape"),
+            if draft.query.is_empty() {
+                div().child(back).into_any_element()
+            } else {
+                sep("clear the filter")
+            },
+        ]);
+        (motion, action)
+    } else {
+        // The change group is row-sensitive (2026-09-13) and can be
+        // empty — Scopes' two display-only summaries, Groupings' `slot`,
+        // a list's own header row — where `shift+j`/`shift+k` still
+        // follow, so `move ·` keeps its separator either way.
+        let mut motion = vec![chip("j"), chip("k"), sep("move ·")];
+        motion.extend(change_group(true));
+        motion.extend([chip("shift+j"), chip("shift+k")]);
         // `x` is Views-only (§18.2 — see `mod.rs`'s `Draft::remove_selected`
         // doc): a hint for a verb every other domain's `x` merely refuses
         // would teach a trader on Groupings or Scopes a key that does
@@ -3615,11 +3735,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             action.push(sep("–"));
             action.push(chip("9"));
             action.push(sep("jump to slot ·"));
-        } else if draft.offers_text_entry(state.domain) {
-            // §19.1's `i`, advertised only where a row can take it
-            // (`Draft::offers_text_entry`): Sources' durations, paths and
-            // polls today. Views, Scopes and Schema have no such row, and
-            // a chip there would name a key that only refuses.
+        } else if types {
+            // §19.1's `i`, advertised only where the row UNDER THE
+            // CURSOR can take it (user ruling 2026-09-13; it used to ask
+            // whether the object had such a row anywhere, which put the
+            // chip on Sources' `Dataset` row, a `Choice` `i` refuses).
             action.push(hint_i(chip("i")));
             action.push(sep("type a value ·"));
         }

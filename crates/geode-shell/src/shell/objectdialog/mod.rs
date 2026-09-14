@@ -1040,6 +1040,38 @@ pub enum EditRow {
     },
 }
 
+/// What the row under the cursor answers to — the footer's whole
+/// question (user ruling 2026-09-13, "when we're highlighting a row that
+/// is text based, show the `press i` helper text; when it's on something
+/// we cycle, show the space/shift+space etc").
+///
+/// Derived from the row rather than from the domain, which is the point:
+/// a footer that named `space` on a read-only `Text`, or `i` on a
+/// `Choice`, would teach a key that is inert on the row the trader is
+/// actually looking at — the defect class this interaction model exists
+/// to remove. Answered by [`Draft::selected_vocabulary`], which is the
+/// same match [`Draft::step_selected`] and [`super::render::
+/// open_text_field`] make, in the same order, so the footer cannot
+/// promise a key those two would refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowVocabulary {
+    /// Nothing on this row changes and nothing types: a display-only
+    /// `Text` (Groupings' `slot`, Scopes' two summaries, every Schema
+    /// row), an `OrderedList`'s own header row, a `MultiChoice`, or no
+    /// row at all under an over-narrow filter.
+    Inert,
+    /// A value the step keys cycle and `i` cannot open: `Choice`, `Bool`.
+    Steps,
+    /// Both: a `Number`, which steps by one and takes a typed value.
+    StepsAndTypes,
+    /// `i` alone: a `Text` row the domain marks editable.
+    Types,
+    /// One of the object's own list entries — `space` ticks it.
+    Item,
+    /// A catalogue row — `space` adds it to the object's list.
+    Available,
+}
+
 /// What a dragged list row carries (4c §18.9.1): the field's key, which
 /// block it came from, and the item's NAME — never an index. The keyboard
 /// stays live during a drag, so a keystroke can reorder or remove between
@@ -1429,25 +1461,47 @@ impl Draft {
     /// The row the cursor is on, if the cursor is in range — indexed
     /// through [`Draft::visible_rows`], so every verb acts on the row the
     /// trader is actually looking at, filtered or not (§18.3).
-    /// Can `i` open a value field on some row of this draft? A `Number`
-    /// row on any domain, or a `Text` row the domain marks editable
-    /// (`Domain::text_editable`). What the edit footer reads to decide
-    /// whether to advertise `i` at all: a chip for a verb that only
-    /// refuses would teach a trader a key that does nothing on this
-    /// object — the same rule that keeps `x` off every non-Views footer.
-    pub fn offers_text_entry(&self, domain: Domain) -> bool {
-        self.fields.iter().any(|field| match &field.kind {
-            FieldKind::Number { .. } => true,
-            FieldKind::Text(_) => domain.text_editable(&field.key),
-            _ => false,
-        })
-    }
-
     pub fn selected_row(&self) -> Option<EditRow> {
         let rows = self.rows();
         self.visible_rows()
             .get(self.selected)
             .and_then(|m| rows.get(m.row).copied())
+    }
+
+    /// What the row under the cursor answers to (user ruling
+    /// 2026-09-13) — see [`RowVocabulary`] for why the footer asks the
+    /// row rather than the domain.
+    ///
+    /// Groupings is the one domain whose footer must NOT take `i` from
+    /// this answer: there `i` reaches past the selected row to the
+    /// slot's whole chain (§18.8), so it is live on every row including
+    /// the display-only `slot`. That exception lives at the one call
+    /// site in `render`, not here, because it is a fact about the
+    /// domain's `i` and not about any row.
+    pub fn selected_vocabulary(&self, domain: Domain) -> RowVocabulary {
+        match self.selected_row() {
+            None => RowVocabulary::Inert,
+            Some(EditRow::Item { .. }) => RowVocabulary::Item,
+            Some(EditRow::Available { .. }) => RowVocabulary::Available,
+            Some(EditRow::Field(i)) => match &self.fields[i].kind {
+                // `step_selected`'s own guard, mirrored: a `Choice` with
+                // one option (a config with a single dataset) steps
+                // nowhere in either direction, so naming the step keys
+                // there would be the inert-key lie again. A `Number` at
+                // the end of its range is not the same case — the other
+                // direction still moves, and an out-of-range one refuses
+                // out loud rather than doing nothing.
+                FieldKind::Choice { options, .. } if options.len() < 2 => RowVocabulary::Inert,
+                FieldKind::Choice { .. } | FieldKind::Bool(_) => RowVocabulary::Steps,
+                FieldKind::Number { .. } => RowVocabulary::StepsAndTypes,
+                FieldKind::Text(_) if domain.text_editable(&self.fields[i].key) => {
+                    RowVocabulary::Types
+                }
+                FieldKind::Text(_)
+                | FieldKind::MultiChoice { .. }
+                | FieldKind::OrderedList { .. } => RowVocabulary::Inert,
+            },
+        }
     }
 
     /// Re-point the cursor at `row`'s own position in the FILTERED list,
@@ -5690,47 +5744,128 @@ mod tests {
         );
     }
 
-    /// The edit footer advertises `i` only where a row can take it
-    /// (user request 2026-09-12: "i for edit text isn't discoverable"):
-    /// a `Number` on any domain, a `Text` only where the domain marks
-    /// the key editable — never on a domain whose `i` merely refuses.
+    /// The edit footer's row-sensitive question (user ruling 2026-09-13,
+    /// superseding the 2026-09-12 "i for edit text isn't discoverable"
+    /// answer, which asked whether the OBJECT had such a row anywhere
+    /// and so put the `i` chip on `Choice` rows `i` refuses): what the
+    /// row under the CURSOR answers to. Every arm, because the footer
+    /// paints a different pair of chip groups for each.
     #[test]
-    fn offers_text_entry_needs_a_number_or_an_editable_text_row() {
-        let text = |key: &str| Field {
+    fn selected_vocabulary_answers_for_the_row_under_the_cursor() {
+        let field = |key: &str, kind: FieldKind| Field {
             key: key.to_string(),
             label: key.to_string(),
-            kind: FieldKind::Text("2s".to_string()),
+            kind,
             dest: Destination::Doc,
             layer: None,
         };
-        let number = Field {
-            key: "polls".to_string(),
-            label: "polls".to_string(),
-            kind: FieldKind::Number {
-                value: 3,
-                min: 1,
-                max: 100,
-                step: 1,
-                wrap: false,
-            },
-            dest: Destination::Doc,
-            layer: None,
+        let choice = |options: &[&str]| FieldKind::Choice {
+            options: options.iter().map(|o| (*o).to_string()).collect(),
+            selected: 0,
         };
-        let sources = Draft::new_object("live", vec![text("poll_interval")], toml::Table::new());
-        assert!(sources.offers_text_entry(Domain::Sources));
-        assert!(
-            !sources.offers_text_entry(Domain::Views),
-            "the same key is read-only on Views"
+
+        // A `Text` row takes `i` where the domain marks the key editable
+        // and offers nothing at all where it does not — the same
+        // `Domain::text_editable` door `open_text_field` asks.
+        let text = Draft::new_object(
+            "live",
+            vec![field("poll_interval", FieldKind::Text("2s".to_string()))],
+            toml::Table::new(),
         );
-        let views = Draft::new_object("tree", vec![text("dataset")], toml::Table::new());
-        assert!(!views.offers_text_entry(Domain::Views));
-        let with_number = Draft::new_object("x", vec![number], toml::Table::new());
-        assert!(
-            with_number.offers_text_entry(Domain::Views),
-            "a Number types anywhere"
+        assert_eq!(
+            text.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Types
         );
+        assert_eq!(
+            text.selected_vocabulary(Domain::Views),
+            RowVocabulary::Inert,
+            "the same key is read-only on Views, where i only refuses"
+        );
+
+        // A `Number` is the one row that does both.
+        let number = Draft::new_object(
+            "live",
+            vec![field(
+                "polls",
+                FieldKind::Number {
+                    value: 3,
+                    min: 1,
+                    max: 100,
+                    step: 1,
+                    wrap: false,
+                },
+            )],
+            toml::Table::new(),
+        );
+        assert_eq!(
+            number.selected_vocabulary(Domain::Views),
+            RowVocabulary::StepsAndTypes,
+            "a Number steps and takes a typed value on any domain"
+        );
+
+        // `Choice` and `Bool` step and nothing more — except a `Choice`
+        // with one option, which steps nowhere in either direction.
+        let steps = Draft::new_object(
+            "live",
+            vec![
+                field("dataset", choice(&["risk", "vol"])),
+                field("thousands", FieldKind::Bool(true)),
+                field("only", choice(&["risk"])),
+            ],
+            toml::Table::new(),
+        );
+        assert_eq!(
+            steps.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Steps
+        );
+        let mut on_bool = steps.clone();
+        on_bool.selected = 1;
+        assert_eq!(
+            on_bool.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Steps
+        );
+        let mut on_lone = steps.clone();
+        on_lone.selected = 2;
+        assert_eq!(
+            on_lone.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Inert,
+            "a one-option Choice steps nowhere, so the footer must not say it does"
+        );
+
+        // The list rows: the header itself has no value, an item ticks
+        // and an available row adds.
+        let mut list = two_column_draft_with_one_available();
+        assert_eq!(
+            list.rows(),
+            vec![
+                EditRow::Field(0),
+                EditRow::Field(1),
+                EditRow::Item { field: 1, item: 0 },
+                EditRow::Item { field: 1, item: 1 },
+                EditRow::Available { field: 1, item: 0 },
+            ],
+            "sanity: the fixture's row order, which the indices below rely on"
+        );
+        list.selected = 1;
+        assert_eq!(
+            list.selected_vocabulary(Domain::Views),
+            RowVocabulary::Inert,
+            "an OrderedList's own header row has no value to change"
+        );
+        list.selected = 2;
+        assert_eq!(list.selected_vocabulary(Domain::Views), RowVocabulary::Item);
+        list.selected = 4;
+        assert_eq!(
+            list.selected_vocabulary(Domain::Views),
+            RowVocabulary::Available
+        );
+
+        // No row at all — an over-narrow filter — is inert, not a panic.
         let empty = Draft::new_object("x", Vec::new(), toml::Table::new());
-        assert!(!empty.offers_text_entry(Domain::Sources));
+        assert_eq!(
+            empty.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Inert
+        );
     }
 
     /// Part 2c §5.2: the column stage is a PROJECTION over the same draft

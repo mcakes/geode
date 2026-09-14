@@ -5510,16 +5510,32 @@ fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppConte
     );
 }
 
-/// The edit footer names `i` where a row can take it (Sources has editable
-/// text and a number) and stays silent where `i` only refuses (Views).
+/// The edit footer names `i` on the row that can take it and on no
+/// other (user ruling 2026-09-13, narrowing the 2026-09-12 rule from the
+/// object to the row): Sources' `Paths` is an editable `Text`, but the
+/// `Dataset` row the stage opens on is a `Choice` that `i` refuses.
 #[gpui::test]
 fn the_edit_footer_offers_i_only_where_a_row_can_take_it(cx: &mut gpui::TestAppContext) {
     let (_shell, mut cx) = dialog_test_shell_with(cx, services_with_sources(), "config::sources");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_none(),
+        "Sources opens on Dataset, a Choice i cannot open"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_some(),
+        "which the step keys do change"
+    );
+    cx.simulate_keystrokes("j"); // Paths, an editable Text
+    cx.run_until_parked();
+    assert!(
         cx.debug_bounds("objectdialog-hint-i").is_some(),
-        "Sources' footer advertises i"
+        "Paths takes a typed value"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_none(),
+        "and nothing on it steps"
     );
 }
 
@@ -6028,4 +6044,163 @@ fn the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door(
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
     assert!(notice.contains("open a column"), "{notice}");
     assert!(notice.contains("enter"), "{notice}");
+}
+
+// ---- Step keys and the row-sensitive footer (user ruling 2026-09-13) ---
+
+/// The `scale` `Choice`'s selected index in an open column stage — the
+/// one number every stepping-key assertion below reads. Found by key
+/// rather than by position so a seventh column key inserted ahead of it
+/// does not silently move the assertion onto another row.
+fn scale_index(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> usize {
+    edit_draft(shell, cx, |draft| {
+        let field = draft
+            .fields
+            .iter()
+            .find(|f| f.key == "scale")
+            .expect("the column stage has a scale row");
+        match &field.kind {
+            objectdialog::FieldKind::Choice { selected, .. } => *selected,
+            other => panic!("scale should be a Choice, got {other:?}"),
+        }
+    })
+}
+
+/// User ruling 2026-09-13 ("I keep reaching for them"): `l`/`h` step the
+/// row under the cursor forward and back in normal mode, exactly as
+/// `space`/`shift+space` do — one path, `Draft::step_selected`, so the
+/// aliases cannot drift from the keys they alias.
+#[gpui::test]
+fn l_and_h_step_the_selected_row_in_the_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // `npv`'s column stage, then past `label` and `width` onto `scale`.
+    cx.simulate_keystrokes("j enter j j");
+    cx.run_until_parked();
+    let before = scale_index(&shell, &cx);
+
+    cx.simulate_keystrokes("l");
+    cx.run_until_parked();
+    let forward = scale_index(&shell, &cx);
+    assert_ne!(forward, before, "l steps the Choice forward");
+
+    cx.simulate_keystrokes("h");
+    cx.run_until_parked();
+    assert_eq!(
+        scale_index(&shell, &cx),
+        before,
+        "h steps it back to where it started"
+    );
+    assert!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).is_none(),
+        "neither key is announced as 'not a verb here'"
+    );
+}
+
+/// `tab`/`shift+tab` step in BOTH modes — the settings dialog's own rule,
+/// now this stage's. The filter keeps focus and the query is untouched:
+/// a step is a value change, not a filter keystroke. `h`/`l` stay
+/// letters in filter mode, which is what a trader typing `hidden` into
+/// the query depends on.
+#[gpui::test]
+fn tab_steps_the_selected_row_in_both_modes(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter j j");
+    cx.run_until_parked();
+    let start = scale_index(&shell, &cx);
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let forward = scale_index(&shell, &cx);
+    assert_ne!(forward, start, "tab steps forward in normal mode");
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert_eq!(scale_index(&shell, &cx), start, "shift+tab steps back");
+
+    // Into filter mode, where the shared `Input` holds the keyboard.
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(
+        scale_index(&shell, &cx),
+        forward,
+        "tab steps forward in filter mode too"
+    );
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert_eq!(scale_index(&shell, &cx), start, "and shift+tab back");
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Filter,
+        "stepping never leaves filter mode"
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "nor moves focus off the field the trader is typing into"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "",
+        "and puts no character into the query"
+    );
+
+    // The other two aliases are ordinary letters here.
+    cx.simulate_keystrokes("l h");
+    cx.run_until_parked();
+    assert_eq!(
+        scale_index(&shell, &cx),
+        start,
+        "h and l type in filter mode rather than stepping"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "lh",
+        "they reached the field as text"
+    );
+}
+
+/// The footer names the keys the row under the CURSOR answers to, not
+/// the ones its domain has somewhere (user ruling 2026-09-13). The
+/// column stage is where all three cases sit side by side: `label` is an
+/// editable `Text` (`i` only), `scale` a `Choice` (the step keys only),
+/// `precision` a `Number` (both).
+#[gpui::test]
+fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter"); // npv's column stage, cursor on `label`
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "label is an editable Text: i types a value"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_none(),
+        "and nothing on it steps, so the change keys must not be named"
+    );
+
+    cx.simulate_keystrokes("j j"); // width → scale
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_some(),
+        "scale is a Choice: the step keys change it"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_none(),
+        "and i has nothing to open on a Choice"
+    );
+
+    cx.simulate_keystrokes("j"); // precision
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_some(),
+        "a Number steps"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "and takes a typed value"
+    );
 }
