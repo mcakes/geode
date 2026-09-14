@@ -1411,8 +1411,9 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // `Number` or an editable `Text` row (`open_text_field`), or
         // gives that same notice when the row has none. Groupings is the
         // one domain where `i` reaches past a single row to the slot's
-        // whole object (§18.8) — the typed line is the primary way to
-        // set a chain — so it is checked first and given its own path
+        // whole object (§18.8) — the typed line is the fast way to set a
+        // chain, entered from the chooser the slot opens in (user ruling
+        // 2026-09-14) — so it is checked first and given its own path
         // through `begin_chain_entry` rather than `Draft::begin_text_entry`.
         NormalCommand::EditText
             if shell

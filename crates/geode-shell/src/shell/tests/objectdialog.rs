@@ -1979,9 +1979,7 @@ fn ticking_a_dimension_in_an_empty_slot_writes_it_without_asking(cx: &mut gpui::
     // `reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order`
     // needs to reach a configured slot's first item), then tick the
     // first dimension.
-    // `escape` first: a slot opens in the chain field (§18.8), and the
-    // chooser this test drives is one rung behind it.
-    cx.simulate_keystrokes("enter escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j space");
     cx.run_until_parked();
@@ -2023,7 +2021,7 @@ fn d_on_an_empty_slot_says_there_is_nothing_to_delete(cx: &mut gpui::TestAppCont
         dir.path(),
         "config::groupings",
     );
-    cx.simulate_keystrokes("enter escape d");
+    cx.simulate_keystrokes("enter d");
     cx.run_until_parked();
     assert!(cx.debug_bounds("objectdialog-confirm").is_none());
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
@@ -2055,9 +2053,7 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     // down to slot 3, then into its edit stage.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
-    // `escape` leaves the chain field a slot opens in (§18.8) for the
-    // chooser this test reorders in.
-    cx.simulate_keystrokes("enter escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
 
     // Past `Slot` and the `Dimensions` header row, onto `book` — the
@@ -2135,9 +2131,7 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
     // down to slot 3 first.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
-    // `escape` leaves the chain field a slot opens in (§18.8) for the
-    // chooser this test reorders in.
-    cx.simulate_keystrokes("enter escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
@@ -2194,8 +2188,7 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
     // `Dimensions` header, onto `book` — the chain's only ticked item.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
-    // `escape` leaves the chain field a slot opens in (§18.8).
-    cx.simulate_keystrokes("enter escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
@@ -2991,9 +2984,7 @@ fn a_digit_in_the_edit_stage_jumps_to_that_slot(cx: &mut gpui::TestAppContext) {
             object: "1".to_string()
         }
     );
-    // Out of the chain field a slot opens in (§18.8): a digit typed
-    // there is text, so the jump is `escape` then the digit.
-    cx.simulate_keystrokes("escape 3");
+    cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -3006,9 +2997,7 @@ fn a_digit_in_the_edit_stage_jumps_to_that_slot(cx: &mut gpui::TestAppContext) {
         .unwrap()[0]
         .included));
 
-    // The landing is the chain field again; "already editing" is the
-    // chooser's answer, so `escape` first here too.
-    cx.simulate_keystrokes("escape 3");
+    cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -3039,13 +3028,11 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
     );
     // Slot 1 is empty: ticking `book` queues a user-layer write with no
     // fork to confirm.
-    // Each slot opens in its chain field (§18.8); `escape` reaches the
-    // chooser the tick and the second digit belong to.
-    cx.simulate_keystrokes("1 escape j j space");
+    cx.simulate_keystrokes("1 j j space");
     cx.run_until_parked();
     assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_some()));
 
-    cx.simulate_keystrokes("2 escape 1 escape");
+    cx.simulate_keystrokes("2 1");
     cx.run_until_parked();
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -3085,15 +3072,14 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
     );
 }
 
-/// §18.8 (user ruling 2026-09-12): opening a slot lands IN the chain
-/// field — seeded, focused, completions below — and `escape` walks
-/// field → chooser → browse, one visible rung at a time. The chooser
-/// (tick, reorder) is still there behind the first `escape`, and `i`
-/// reopens the field from it.
+/// Opening a slot lands in the chooser (user ruling 2026-09-14,
+/// superseding §18.8's 2026-09-12 chain-field landing): normal mode, no
+/// field open, the action bar up. `i` opens the chain field — seeded,
+/// focused, completions below — and `escape` walks field → chooser →
+/// browse, one visible rung at a time. The same holds by digit, by
+/// `enter` and by a click (`clicking_a_groupings_row_opens_the_chooser`).
 #[gpui::test]
-fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
-    cx: &mut gpui::TestAppContext,
-) {
+fn opening_a_slot_lands_in_the_chooser_and_i_opens_the_chain_field(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = dialog_test_shell_in_dir(
         cx,
@@ -3105,6 +3091,27 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert!(
+        !edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "the chooser, not the chain field"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
+    assert_eq!(dialog_input_text(&shell, &cx), "");
+    assert!(cx.debug_bounds("dialog-mode-pill-normal").is_some());
+    assert!(cx.debug_bounds("dialog-mode-pill-chain").is_none());
+    assert!(cx.debug_bounds("objectdialog-actions").is_some());
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+
+    // `i` opens the field, seeded with the chain and holding the keys;
+    // a digit typed there is text, not a jump.
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(
         edit_draft(&shell, &cx, |d| d.chain_entry()),
         "the field is open"
     );
@@ -3113,8 +3120,6 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     assert_eq!(dialog_input_text(&shell, &cx), "book");
     assert!(cx.debug_bounds("dialog-mode-pill-chain").is_some());
     assert!(cx.debug_bounds("objectdialog-actions").is_none());
-
-    // Typing goes into the field — a digit here is text, not a jump.
     cx.simulate_input(" 4");
     cx.run_until_parked();
     assert_eq!(dialog_input_text(&shell, &cx), "book 4");
@@ -3125,7 +3130,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
         }
     );
 
-    // First escape: the chooser, with the chain untouched.
+    // First escape: back to the chooser, with the chain untouched.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
@@ -3139,7 +3144,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     assert!(cx.debug_bounds("objectdialog-actions").is_some());
     assert!(!edit_draft(&shell, &cx, |d| d.is_dirty()));
 
-    // `i` reopens it; second escape from the chooser goes back a stage.
+    // `i` reopens it; two escapes from there go field → chooser → browse.
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
@@ -3153,8 +3158,9 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     // By `enter` from the list, the same landing.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
-    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
 }
 
 /// The text the shared dialog `Input` currently holds.
@@ -3179,8 +3185,7 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
         dir.path(),
         "config::groupings",
     );
-    // The field is open on arrival (§18.8); `i` is only the way BACK in.
-    cx.simulate_keystrokes("3");
+    cx.simulate_keystrokes("3 i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert!(
@@ -3282,8 +3287,7 @@ fn a_refused_chain_keeps_the_field_open_and_escape_cancels_it(cx: &mut gpui::Tes
         dir.path(),
         "config::groupings",
     );
-    // The field is open on arrival (§18.8); `i` is only the way BACK in.
-    cx.simulate_keystrokes("3");
+    cx.simulate_keystrokes("3 i");
     cx.simulate_input(" npv");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -4122,10 +4126,11 @@ fn clicking_a_browse_row_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
-/// On Groupings the door lands in the chain field (§18.8), because the
-/// door decides, not the click.
+/// On Groupings a click lands in the chooser like every other door
+/// (user ruling 2026-09-14): the door decides, not the click, and the
+/// door opens no field.
 #[gpui::test]
-fn clicking_a_groupings_row_lands_in_the_chain_field(cx: &mut gpui::TestAppContext) {
+fn clicking_a_groupings_row_opens_the_chooser(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = dialog_test_shell_in_dir(
         cx,
@@ -4142,9 +4147,16 @@ fn clicking_a_groupings_row_lands_in_the_chain_field(cx: &mut gpui::TestAppConte
         gpui::Modifiers::none(),
     );
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
-    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "book / lhu");
-    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        },
+        "the click opened slot 3"
+    );
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "");
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
 /// While the naming row is open a click only selects: a typed name must
@@ -4485,7 +4497,7 @@ fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) 
         dir.path(),
         "config::groupings",
     );
-    cx.simulate_keystrokes("3");
+    cx.simulate_keystrokes("3 i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     // Open a fresh segment so `lhu` is offered.

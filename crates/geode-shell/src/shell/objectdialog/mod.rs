@@ -3074,8 +3074,8 @@ impl ObjectDialogState {
     ///   the `LeaveFilter` rung — which the edit handler does not claim,
     ///   so the shell's modal branch closes the whole dialog instead of
     ///   stepping back to the list, without ever asking. `Normal` for
-    ///   every domain but Groupings; `Filter` there, because a slot opens
-    ///   IN its chain field (§18.8) and that field owns `escape`.
+    ///   every domain, Groupings included (user ruling 2026-09-14): a
+    ///   slot opens in its chooser, and `i` opens the chain field.
     ///
     /// Both are pure, and that is now the whole transition: the shared
     /// `Input` is emptied and blurred to match by `dialog::
@@ -3093,27 +3093,17 @@ impl ObjectDialogState {
     pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
         let mut draft = self.domain.draft(config, object);
         draft.query.clear();
-        // §18.8 (user ruling 2026-09-12): a Groupings slot opens IN its
-        // chain field — the typed line is the primary way to set a
-        // chain, and the chooser is one `escape` behind it. `Filter` is
-        // what hands the shared `Input` the keys through the sync, and
-        // `begin_chain_entry` is what seeds the text it writes there.
-        // Every other domain still opens in normal mode, for the reason
-        // the paragraph above gives.
-        let opens_in_chain_field = self.domain == Domain::Groupings;
-        if opens_in_chain_field {
-            draft.begin_chain_entry();
-        }
+        // Every domain opens in normal mode with no field open — a
+        // Groupings slot lands in the chooser and `i` opens its chain
+        // field (user ruling 2026-09-14, superseding §18.8's 2026-09-12
+        // chain-field landing). There is deliberately no domain arm here:
+        // the one door every entry goes through has one answer.
         self.draft = Some(draft);
         self.stage = Stage::Edit {
             object: object.to_string(),
         };
         self.query.clear();
-        self.mode = if opens_in_chain_field {
-            DialogMode::Filter
-        } else {
-            DialogMode::Normal
-        };
+        self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
     }
@@ -3870,13 +3860,13 @@ mod tests {
         assert!(state.notice.is_none());
     }
 
-    /// §18.8 (user ruling 2026-09-12): a Groupings slot opens IN the
-    /// chain field — `text_entry` set with `completions: true`, the text
-    /// seeded, the mode at `Filter` so the sync hands the field the keys
-    /// — where every other domain still opens in normal mode with no
-    /// field at all.
+    /// Every domain opens its edit stage in normal mode with no field
+    /// open — Groupings included (user ruling 2026-09-14, superseding
+    /// 2026-09-12's chain-field landing, §18.8): a slot opens in the
+    /// chooser, and `i` is the way into the chain field. The Views half
+    /// pins that the rule has no domain arm at all.
     #[test]
-    fn a_groupings_slot_opens_in_the_chain_field_and_a_view_does_not() {
+    fn every_domain_opens_in_normal_mode_with_no_field_open() {
         let config = config_from(&[
             (Layer::Desk, "groupings", "3 = [\"book\"]\n"),
             (
@@ -3888,9 +3878,10 @@ mod tests {
         let mut state = ObjectDialogState::new(Domain::Groupings);
         state.enter_edit(&config, "3");
         let draft = state.draft.as_ref().unwrap();
-        assert!(draft.chain_entry());
-        assert_eq!(state.mode, DialogMode::Filter);
-        assert_eq!(state.effective_query(), "book", "seeded with the chain");
+        assert!(!draft.chain_entry(), "the chooser, not the chain field");
+        assert!(draft.text_entry.is_none());
+        assert_eq!(state.mode, DialogMode::Normal);
+        assert_eq!(state.effective_query(), "");
 
         let mut state = ObjectDialogState::new(Domain::Views);
         state.enter_edit(&config, "tree");

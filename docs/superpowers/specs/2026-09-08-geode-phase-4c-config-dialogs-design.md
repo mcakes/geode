@@ -1973,21 +1973,22 @@ spelling so appending is a separator and a name away. The design:
   applied before `i` is dropped with it — `i` overwrote `query` with the
   seed, and the filter had no meaning while the field was open.
 
-**The field is the landing, not a verb (user ruling 2026-09-12, "let's
-have the type-a-chain mode be the default, rather than filter mode").**
+**The chooser is the landing; the field is `i`'s (user ruling
+2026-09-14, "Edit grouping should open in normal mode, not chain mode",
+reversing the 2026-09-12 ruling that the typed line was the default).**
 Opening a Groupings slot — by `enter`, by a digit, or by a click — lands
-in the chain field: seeded, focused, completions below. The rule is one
-line in `ObjectDialogState::enter_edit`, keyed on the domain, so every
-door into the stage agrees (`enter_edit_with` is `n`'s door and Groupings
-has no `n`). `escape` then walks field → chooser → browse, one visible
-rung at a time — the chooser (tick, `shift+j`/`shift+k`) is one `escape`
-behind the field and `i` reopens the field from it, so nothing the
-chooser could do is lost. `enter` still applies and closes the field
-into the chooser, so the fork question and the applied chain are seen
-before leaving. The one consequence: while the field is open a digit is
-text, so jumping slot to slot from a freshly opened slot is `escape` then
-the digit. The pre-existing Groupings window tests gained exactly that
-`escape` after each `enter`/digit.
+in the chooser in normal mode with no field open, exactly as every other
+domain's edit stage does; `ObjectDialogState::enter_edit` has no domain
+arm at all. `i` opens the chain field from there: seeded, focused,
+completions below. `escape` walks field → chooser → browse, one visible
+rung at a time, and `enter` applies and closes the field into the
+chooser, so the fork question and the applied chain are seen before
+leaving. A digit in the chooser jumps straight to another slot; only
+while the field is open is a digit text. The window tests that had
+gained an `escape` after each `enter`/digit under the earlier ruling
+lost it again, and `opening_a_slot_lands_in_the_chooser_and_i_opens_the_chain_field`
+plus `every_domain_opens_in_normal_mode_with_no_field_open` pin the
+landing (harness: "a Groupings slot opens in its chain field").
 
 **State shape.** `Draft::chain_entry: bool` beside `confirm`, not a
 `Stage` — the escape ladder and the browse cursor restore key on
@@ -2140,9 +2141,9 @@ costs two more arms.
 ### 18.9.4 Browse and the chain field
 
 - **Browse:** a click opens (§17 rule 2), through `enter_edit_stage`.
-  On Groupings that lands in the chain field per §18.8's ruling; on
-  Scopes it opens the two read-only rows with `o` on the action bar,
-  which already has a button.
+  On Groupings that lands in the chooser like every other door (§18.8,
+  as amended 2026-09-14); on Scopes it opens the two read-only rows with
+  `o` on the action bar, which already has a button.
 - **The chain field:** clicking a completion row is the mouse form of
   `tab` — `selected` moves to that row and `Draft::complete_chain` runs
   unchanged, so the trailing segment is replaced and the next opened
@@ -2533,8 +2534,8 @@ not a placeholder row here.
 `validate` runs `SourceSpec::from_doc` over the rendered draft, as
 Views runs its reader, plus the one cross-check the reader cannot make
 (the dataset exists in the schema). Sources opens in the chooser, not a
-field: there is no chain field here (§18.8's landing rule is Groupings'
-alone).
+field: there is no chain field here (and since 2026-09-14 Groupings
+opens in its chooser too, §18.8).
 
 **`n` creates an idle source (ruling 2026-09-12).** The reader today
 makes empty `paths` an error and skips the source, and `commit_create`
