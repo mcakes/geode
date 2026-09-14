@@ -5988,10 +5988,16 @@ fn the_footers_name_enter_where_it_opens_something(cx: &mut gpui::TestAppContext
     cx.simulate_keystrokes("escape enter");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("objectdialog-hint-enter").is_some(),
-        "the Views edit stage: enter opens a member row's column stage"
+        cx.debug_bounds("objectdialog-hint-enter").is_none(),
+        "the Views edit stage lands on the dataset row, where enter only gives a notice"
     );
-    cx.simulate_keystrokes("j j enter");
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "on a member row enter opens its column stage"
+    );
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(
         matches!(

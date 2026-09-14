@@ -994,8 +994,10 @@ is read-only — open a column (enter) to set how it paints`, so a refused
 `d`/`n`/tick on a dataset row teaches the door; and both footers name
 `enter` exactly where it opens something (`open` in browse, `open column`
 in the two edit stages) through an `objectdialog-hint-enter` chip, and
-nowhere else — inside a column stage `enter` on a field only gives a
-notice. Pinned by `the_footers_name_enter_where_it_opens_something` and
+only while the selected row opens one (`column_stage_target`) — Views'
+`dataset` row, a Schema derived row and a column stage show no chip,
+since `enter` there only gives a notice (the change's review caught the
+first cut gating by domain alone). Pinned by `the_footers_name_enter_where_it_opens_something` and
 `the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door`, and
 by two harness entries (`objectdialog: the Schema edit footer names
-enter`, `objectdialog: the browse footer names enter`). 827 entries.
+enter`, `objectdialog: the browse footer names enter`, `objectdialog: enter is named only while the selected row opens a column`). 828 entries.

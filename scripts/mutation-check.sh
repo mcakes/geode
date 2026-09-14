@@ -9846,9 +9846,9 @@ run_mutation "objectdialog: a column stage offers no destructive action" \
 # all, on a dialog the palette still called read-only.
 run_mutation "objectdialog: the Schema edit footer names enter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                hint_enter(chip("enter")),
-                sep("open column ·"),' \
-  '                sep("open column ·"),' \
+  '                action.push(hint_enter(chip("enter")));
+                action.push(sep("open column ·"));' \
+  '                action.push(sep("open column ·"));' \
   geode-shell \
   the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door
 
@@ -9859,6 +9859,16 @@ run_mutation "objectdialog: the browse footer names enter" \
   '                    action.push(hint_enter(chip("enter")));
                     action.push(sep("open ·"));' \
   '                    action.push(sep("open ·"));' \
+  geode-shell \
+  the_footers_name_enter_where_it_opens_something
+
+# Review 2026-09-13: the chip is gated on the SELECTED row opening a
+# column stage, not on the domain — gated by domain, Views' landing row
+# (`dataset`, where enter only gives a notice) would advertise it.
+run_mutation "objectdialog: enter is named only while the selected row opens a column" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let opens_column = column_stage_target(shell).is_some();' \
+  '    let opens_column = true;' \
   geode-shell \
   the_footers_name_enter_where_it_opens_something
 

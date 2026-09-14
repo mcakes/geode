@@ -798,7 +798,7 @@ Five palette actions, no default key bindings:
 | `config::sources` | Sources | Config |
 | `config::scopes` | Saved scopes | Config |
 | `config::groupings` | Grouping slots | Config |
-| `config::schema` | Schema (read-only) | Config |
+| `config::schema` | Schema (retitled from "Schema (read-only)" 2026-09-13 — §19.4) | Config |
 
 No defaults, because `keybindings::open` has none either — it is
 palette-only, and the user binds it if they want it (this repo's own
@@ -2549,7 +2549,7 @@ delivery path. A live restart, if ever wanted, is its own design.
 
 ### 19.4 The schema inspector
 
-`Domain::Schema`, palette `config::schema` ("Schema (read-only)",
+`Domain::Schema`, palette `config::schema` ("Schema" since 2026-09-13, was "Schema (read-only)",
 category Configuration), over `datasets`. §9 as written, with three mechanics
 settled:
 

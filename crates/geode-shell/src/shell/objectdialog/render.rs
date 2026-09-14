@@ -3465,6 +3465,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     };
     // The hint row states this stage's vocabulary and only this stage's —
     // the same rule the browse footer keeps.
+    // `enter` is named only while the SELECTED row opens a column stage —
+    // the same test `commit_selected_row` makes — never by domain alone:
+    // on Views' `dataset` row or a Schema derived row it only gives a
+    // notice, and a chip there is the inert-key lie this footer exists to
+    // avoid (review 2026-09-13).
+    let opens_column = column_stage_target(shell).is_some();
     let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = if draft.confirm.is_some() {
         (
             vec![sep("this needs an answer first")],
@@ -3524,11 +3530,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // and filtering alone — no `space`/`shift+space` to change a row,
         // no `shift+j`/`shift+k` to reorder, none of `d`/`r`/`x`/`n`/`o`,
         // since every one of those is refused by the gate above.
-        (
-            vec![chip("j"), chip("k"), sep("move")],
-            vec![
-                hint_enter(chip("enter")),
-                sep("open column ·"),
+        (vec![chip("j"), chip("k"), sep("move")], {
+            let mut action = Vec::new();
+            if opens_column {
+                action.push(hint_enter(chip("enter")));
+                action.push(sep("open column ·"));
+            }
+            action.extend([
                 chip("/"),
                 sep("filter ·"),
                 chip("escape"),
@@ -3537,8 +3545,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 } else {
                     "clear the filter"
                 }),
-            ],
-        )
+            ]);
+            action
+        })
     } else if draft.column().is_some() {
         // Part 2c §5.2: the column stage's own vocabulary. No
         // `shift+j`/`shift+k` and no `x` — there is no list here to
@@ -3614,7 +3623,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             action.push(hint_i(chip("i")));
             action.push(sep("type a value ·"));
         }
-        if state.domain == Domain::Views {
+        if opens_column {
             action.push(hint_enter(chip("enter")));
             action.push(sep("open column ·"));
         }
