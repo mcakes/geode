@@ -325,7 +325,7 @@ impl Draft {
     pub fn on_delivered(&mut self, as_of: &str) -> bool;   // Editing + as_of != base → Behind { newer }; returns whether state changed
     pub fn rebase(&mut self, model_of_newer: &MatrixModel) -> (usize /* kept */, Vec<(String, String)> /* dropped labels */);
     pub fn discard(&mut self);
-    pub fn summary(&self) -> String;   // "3 edits on 14:02's document" / "newer document received 14:07" / ""
+    pub fn summary(&self) -> String;   // "3 edits on 14:02's document" / "newer document received 14:07" (shipped as "different document received HH:MM" — final review M-4) / ""
     pub fn to_toml(&self) -> toml::Table; pub fn from_toml(t: &toml::Table) -> Draft;   // edits as label pairs + base
 }
 pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String>;   // f64/i64 only; message names the text
@@ -455,7 +455,7 @@ Behaviour: `marketdata::edit` on a value cell (`Axis` pivot: every cell is a val
 - Modify: `crates/geode-marketdata/src/tile.rs`, `src/commands.rs`
 - Test: `tile.rs`
 
-Behaviour per spec §8.4: a delivery whose `as_of` differs from `draft.base` while `Editing` → `Behind { newer }`; the tile keeps painting the BASE snapshot under the edits (retain `base_snapshot`), the header says `newer document received HH:MM`; `:rebase` rebuilds the model from the newer snapshot and `draft.rebase(&new_model)` (dropped labels → notice `"dropped N edits whose rows or columns the new document lacks: …"`), state → `Editing` with `base = newer`; `:discard` drops the edits and shows the newer snapshot, `Clean`. `rebase`/`discard` are `Err("nothing to rebase — the draft is on the live document")` outside `Behind`. Restoring a session with a draft and receiving a newer document lands in `Behind` on the first delivery.
+Behaviour per spec §8.4: a delivery whose `as_of` differs from `draft.base` while `Editing` → `Behind { newer }`; the tile keeps painting the BASE snapshot under the edits (retain `base_snapshot`), the header says `newer document received HH:MM` (shipped as `different document received HH:MM` — final review M-4); `:rebase` rebuilds the model from the newer snapshot and `draft.rebase(&new_model)` (dropped labels → notice `"dropped N edits whose rows or columns the new document lacks: …"`), state → `Editing` with `base = newer`; `:discard` drops the edits and shows the newer snapshot, `Clean`. `rebase`/`discard` are `Err("nothing to rebase — the draft is on the live document")` outside `Behind`. Restoring a session with a draft and receiving a newer document lands in `Behind` on the first delivery.
 
 - [ ] **Tests:** `a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base`; `rebase_reapplies_edits_by_label_and_reports_dropped_ones`; `discard_shows_the_newer_document_clean`; `rebase_outside_behind_is_refused`; `a_restored_draft_lands_in_behind_on_a_newer_delivery`; `completions_offer_rebase_and_discard_only_while_behind`.
 - [ ] **Implement, gates, commit** `marketdata: draft states — Behind keeps the base painted; :rebase by label; :discard`. Mutation entries: `Behind` paints the base (→ the newer); `rebase` drops a missing label (→ keeps a stale index); `discard` clears edits.

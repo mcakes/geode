@@ -250,6 +250,77 @@ fn the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode(
     );
 }
 
+/// I-3 (final whole-branch review): a KEYBOARD focus move out of a tile
+/// that owns a focused editor must hand the keyboard back to the shell,
+/// exactly as a tile click already does. `mod+h` moves the FOCUSED TILE
+/// without touching WINDOW focus, so the abandoned editor stayed focused
+/// and painted: the next bare key was dispatched by the matcher against
+/// the newly focused tile AND typed itself into the old tile's cell (the
+/// insert branch skips, because the stack no longer carries `mode ==
+/// insert`, and the matcher path does not `stop_propagation`), and a
+/// count prefix leaked into both.
+///
+/// The editor itself is left open on purpose (the ruling): it persists
+/// until commit or cancel, and `escape` on the tile once focus returns
+/// there still cancels it through the module's own fragment binding.
+#[gpui::test]
+fn a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell(cx: &mut gpui::TestAppContext) {
+    let (services, log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
+    let (window, mut vcx) = open_shell(cx, services);
+    // A second tile to move to — `enter_insert_mode` adds the first and
+    // opens its editor.
+    vcx.simulate_keystrokes("ctrl-v");
+    let (shell, shell_focus) = enter_insert_mode(&window, &mut vcx);
+
+    // `mod` is alt (`defaults::default_mod`): `alt+h` is
+    // `workspace::focus_left`, a chord, so it resolves against the whole
+    // stack even from inside the editor. It moves focus to the FIRST
+    // tile, which is in normal mode — the second one keeps its editor.
+    let editing_tile =
+        shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().focused());
+    vcx.simulate_keystrokes("alt-h");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_ne!(
+        shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().focused()),
+        editing_tile,
+        "fixture check: the focused tile must really have moved"
+    );
+    assert!(
+        vcx.update(|window, _cx| shell_focus.is_focused(window)),
+        "the keyboard belongs to the shell once the focused tile moved"
+    );
+    assert!(
+        rec_input_value(&input, &vcx).is_some(),
+        "the editor is orphaned, not closed: commit or cancel owns that"
+    );
+
+    // The matcher governs the keyboard again — the same state a tile
+    // CLICK already produced, and the same assertions
+    // `the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode`
+    // makes about it. Before the fix the `3` went into the abandoned
+    // cell instead and the count stayed `None`.
+    vcx.simulate_input("3");
+    assert_eq!(
+        rec_input_value(&input, &vcx).as_deref(),
+        Some(""),
+        "nothing may type itself into the abandoned cell"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.matcher.count()),
+        Some(3),
+        "the count belongs to the matcher once the shell holds the keyboard"
+    );
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(
+        dispatched(&log, "rec::commit"),
+        vec![Some(3)],
+        "and it reaches the action, exactly as it would after a click: {:?}",
+        log.borrow()
+    );
+}
+
 /// A BARE keystroke in insert mode resolves only against the contexts that
 /// themselves carry `mode == insert` — the tile's own (controller ruling,
 /// market-data spec §8.6). The shell's own bare-key bindings are the

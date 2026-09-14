@@ -143,6 +143,17 @@ impl ShellView {
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
         if handled {
             self.session_dirty = true;
+            // Every workspace verb that can move which tile has focus
+            // comes through here — the four directions, the workspace
+            // switch, a dock show/toggle/move, a close — so this is the
+            // one door I-3's rule needs (see
+            // `note_keyboard_focus_move`). A verb that moves nothing but
+            // geometry (a resize) reaches it too and costs one comparison:
+            // narrowing the list by action id would be a second table of
+            // verb names to keep in step with `apply_workspace_action`'s
+            // own, which is exactly the kind of drift the mechanism rule
+            // is against.
+            self.note_keyboard_focus_move(window, cx);
         } else if action.0 == "palette::toggle" {
             self.toggle_palette(window, cx);
         } else if action.0 == "settings::open" {

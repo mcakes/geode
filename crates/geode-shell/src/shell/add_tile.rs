@@ -138,6 +138,11 @@ impl ShellView {
                 }
             }
             self.session_dirty = true;
+            // A focus move by keyboard, exactly like a directional verb's
+            // (I-3): this arm focuses an existing tile, and a tile
+            // occupant still holding the window's focus must give the
+            // keyboard back.
+            self.note_keyboard_focus_move(window, cx);
             cx.notify();
             return;
         }

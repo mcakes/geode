@@ -23,9 +23,13 @@ pub enum DraftState {
     Clean,
     /// Edits present, against the generation being painted.
     Editing,
-    /// Edits present and a newer generation has been delivered. The panel
-    /// keeps painting the base generation under the edits; `:rebase` moves
-    /// them onto the newer one and `:discard` drops them.
+    /// Edits present and a DIFFERENT generation has been delivered —
+    /// usually a newer one, but an as-of step back delivers an older one
+    /// and is the same situation. The panel keeps painting the base
+    /// generation under the edits; `:rebase` moves them onto the
+    /// delivered one and `:discard` drops them. The edits' own base
+    /// generation coming back (an as-of round trip) returns the draft to
+    /// `Editing` — see [`Draft::on_delivered`].
     Behind { newer: String },
     /// An upload succeeded; the edits are kept and painted as sent until
     /// the echo clears them (§9.4, Part 4).
@@ -140,6 +144,17 @@ impl Draft {
     /// A generation was delivered. Answers whether the state changed, so
     /// the caller knows whether anything needs repainting.
     ///
+    /// **A generation's identity here is its source time alone** (M-3,
+    /// final whole-branch review): a republish that keeps its source
+    /// time — `source_time = "document"` stamping every republish of one
+    /// date at that date's midnight, or a corrected file republish,
+    /// which ties its predecessor's `source_time` — reads as the same
+    /// generation and swaps the grid under index-keyed edits. Harmless
+    /// while the row/column set is unchanged (CVI's ladder is fixed per
+    /// date) and not reachable under `--demo` (`source_time = "receive"`);
+    /// a `gen_id` in the provenance is the fix, when Part 4 touches
+    /// `compile_document`.
+    ///
     /// Only a draft with edits can go `Behind`, and only when the
     /// delivered source time differs from the one the edits were made
     /// against — the same document redelivered (a requery on any
@@ -153,11 +168,23 @@ impl Draft {
                 };
                 true
             }
+            // I-4 (final whole-branch review): the edits' OWN generation
+            // came back — an as-of step back and `:asof undo` is an
+            // ordinary round trip, and the panel is now painting exactly
+            // what the edits were made on. Nothing is behind anything, so
+            // the draft is `Editing` again with every edit untouched
+            // (they are index-keyed against this very generation) and
+            // `edit`/`:bump` open again. Placed ABOVE the "a further
+            // generation arrived" arm, whose guard would otherwise fall
+            // through to `_ => false` and leave the header claiming a
+            // document had been received that the panel is not showing.
+            DraftState::Behind { .. } if self.base.as_deref() == Some(as_of) => {
+                self.state = DraftState::Editing;
+                true
+            }
             // Already behind, and a *further* generation arrived: the
             // header must name the newest one, not the first one missed.
-            DraftState::Behind { newer }
-                if newer != as_of && self.base.as_deref() != Some(as_of) =>
-            {
+            DraftState::Behind { newer } if newer != as_of => {
                 self.state = DraftState::Behind {
                     newer: as_of.to_string(),
                 };
@@ -243,8 +270,13 @@ impl Draft {
         let count = self.edits.len();
         match &self.state {
             DraftState::Clean => String::new(),
+            // "different", never "newer" (M-4, final whole-branch
+            // review): an as-of step back delivers an OLDER generation
+            // and lands here too, so the one word this line can honestly
+            // say about the delivered document is that it is not the one
+            // the edits were made on.
             DraftState::Behind { newer } => {
-                format!("newer document received {}", local_hhmm(newer))
+                format!("different document received {}", local_hhmm(newer))
             }
             DraftState::Editing => self.count_phrase(count, ""),
             DraftState::Sent => self.count_phrase(count, " sent"),
@@ -467,6 +499,40 @@ mod tests {
         );
     }
 
+    /// I-4 (final whole-branch review): an as-of round trip — step back
+    /// to a historical generation and then return to live — redelivers
+    /// the very generation the edits were made on, and the draft must
+    /// come back to `Editing`. Without the arm the header kept claiming
+    /// a different document had been received and `edit`/`:bump` stayed
+    /// refused while the panel was painting the edits' own base.
+    #[test]
+    fn the_base_generation_redelivered_brings_a_behind_draft_back_to_editing() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        let older = "2026-09-12T09:00:00Z";
+
+        assert!(draft.on_delivered(older), "an as-of step back is Behind");
+        assert_eq!(
+            draft.state,
+            DraftState::Behind {
+                newer: older.to_string()
+            }
+        );
+
+        assert!(
+            draft.on_delivered(BASE),
+            "the base coming back is a real transition"
+        );
+        assert_eq!(draft.state, DraftState::Editing);
+        assert_eq!(draft.edits.len(), 1, "the edits are untouched");
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&1.0));
+        assert_eq!(draft.base.as_deref(), Some(BASE));
+        assert!(
+            !draft.on_delivered(BASE),
+            "and the base again is no transition at all"
+        );
+    }
+
     #[test]
     fn on_delivered_does_nothing_to_a_clean_draft() {
         let mut draft = Draft::default();
@@ -594,7 +660,9 @@ mod tests {
         };
         assert_eq!(
             draft.summary(),
-            format!("newer document received {}", local(NEWER))
+            format!("different document received {}", local(NEWER)),
+            "M-4: an as-of step back delivers an OLDER document, so the \
+             chip cannot claim the delivered one is newer"
         );
     }
 

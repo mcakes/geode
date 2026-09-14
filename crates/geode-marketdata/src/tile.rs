@@ -387,7 +387,16 @@ impl MarketDataTile {
         let Some(acted) = self.acted else {
             return true;
         };
-        acted.as_of != now.as_of || acted.data != now.data
+        Self::differs_on_followed(acted, now)
+    }
+
+    /// Whether `versions` and `now` disagree on any counter this panel
+    /// follows. The one comparison [`Self::follows_changed`] and
+    /// [`Self::promote`]'s own gate both go through, so "what this panel
+    /// requeries for" and "what invalidates something it has already
+    /// staged" can never drift apart (I-1, final whole-branch review).
+    fn differs_on_followed(versions: FrameVersions, now: FrameVersions) -> bool {
+        versions.as_of != now.as_of || versions.data != now.data
     }
 
     /// Answer an open flip barrier for a change this panel is NOT going
@@ -488,7 +497,13 @@ impl MarketDataTile {
         let acted = self.acted;
         match outcome.snapshot {
             Ok(snapshot) => {
-                self.notice = None;
+                // The notice is cleared in `apply`, on the delivery that
+                // PAINTS (M-5, final whole-branch review): clearing it
+                // here wiped a `:rebase` dropped-edit report or a
+                // `BEHIND_REFUSED` line on any unrelated publish — and
+                // would wipe the restored-draft report `apply` itself
+                // writes, on the very next `data` bump.
+                //
                 // Phase 4 §3.10 (review fix round 1, the Important): if a
                 // barrier is open and still wants this key, STAGE rather
                 // than apply. A document select is cheap, so this panel is
@@ -533,37 +548,99 @@ impl MarketDataTile {
     /// `deliver` for an un-barriered outcome and by [`Self::promote`] for
     /// a staged one, so the two paths cannot drift.
     fn apply(&mut self, snapshot: Arc<Snapshot>, _cx: &mut Context<Self>) {
-        let as_of = snapshot
-            .provenance()
-            .datasets
-            .first()
-            .and_then(|f| f.as_of.clone());
+        let as_of = source_time_of(&snapshot);
+        // Everything below is decided on a COPY of the draft and built
+        // before a single field is committed (M-2, final whole-branch
+        // review): a generation `MatrixModel::build` refuses must change
+        // NOTHING but the notice. The last good model always stayed on
+        // screen, but `self.snapshot` and the draft's own state used to
+        // move anyway — so the panel went `Behind` against a generation it
+        // never painted, and `:rebase` was left pointed at a document that
+        // cannot be laid out as a grid.
+        let mut draft = self.draft.clone();
         if let Some(as_of) = &as_of {
-            self.draft.on_delivered(as_of);
+            draft.on_delivered(as_of);
         }
-        if self.draft.is_behind() {
-            // Keep painting the generation the edits were made against;
-            // `snapshot` below still records the newer one for `:rebase`
-            // (Task 8).
-            if self.base_snapshot.is_none() {
-                self.base_snapshot = self.snapshot.take();
+        // While `Behind`, keep painting the generation the edits were made
+        // against; `snapshot` below still records the delivered one for
+        // `:rebase` (Task 8). Retained only when the OUTGOING snapshot
+        // really IS that base (M-1): a restored draft lands `Behind` with
+        // its base never delivered at all, and pinning whatever happened
+        // to be painted froze the panel on a generation that was neither
+        // the base nor the newest, with the header naming a third.
+        let retained = if draft.is_behind() {
+            match &self.base_snapshot {
+                Some(base) => Some(Arc::clone(base)),
+                None => self
+                    .snapshot
+                    .clone()
+                    .filter(|s| draft.base.is_some() && source_time_of(s) == draft.base),
             }
         } else {
-            self.base_snapshot = None;
-        }
+            None
+        };
+        // The DELIVERED snapshot is what gets recorded, so it is what has
+        // to build (M-2) — while `Behind` it is not the one painted, but
+        // it is the one `:rebase` will be run against, and recording a
+        // generation that cannot be laid out as a grid is how `:rebase`
+        // came to fail against a document the panel never showed.
+        let built = match MatrixModel::build(&snapshot, self.spec, &draft) {
+            Ok(model) => model,
+            Err(e) => {
+                self.notice = Some(e.into());
+                return;
+            }
+        };
+        // With a base retained, the screen keeps the model it already has:
+        // `self.model` is by construction the model of `painted_snapshot()`
+        // under these very edits, and `on_delivered` moves only the
+        // draft's STATE, which `MatrixModel::build` never reads (it reads
+        // `edits` and `is_sent()`, and a delivery moves neither). Keeping
+        // it is also what makes this one build per delivery rather than
+        // two — the freshly built model above is a validation of the
+        // delivered generation, not a paint.
+        let model = match &retained {
+            Some(_) => Rc::clone(&self.model),
+            None => Rc::new(built),
+        };
+
+        // Committed from here down. The notice is cleared here rather than
+        // in `deliver`'s `Ok` arm (M-5) — on the delivery that paints, and
+        // ahead of every notice this method itself writes below.
+        self.notice = None;
+        self.draft = draft;
+        self.base_snapshot = retained;
         self.snapshot = Some(snapshot);
-        self.rebuild_model();
-        if self.unresolved_restore {
+        self.model = model;
+        self.clamp_cursor();
+        // A restored draft's edits have no grid position until a model
+        // resolves them by label (Task 5's own note on `Draft::from_toml`)
+        // — and only a NON-EMPTY, successfully built model can resolve
+        // one (I-2's ruling, final whole-branch review). An empty snapshot
+        // (no document for this key in this database, or a persisted
+        // as-of that predates its first publish — `compile_document`'s
+        // `and false` arm) and a refused build both leave the model empty,
+        // and rebasing against one dropped every restored edit silently:
+        // the one path on this branch that lost unsent work, which §8.5
+        // says survives a restart. Until then the draft stays parked and
+        // `rebuild_chrome` says so.
+        if self.unresolved_restore && !self.model.rows.is_empty() {
             self.unresolved_restore = false;
-            // A restored draft's edits have no grid position until a model
-            // resolves them by label (Task 5's own note on
-            // `Draft::from_toml`). A draft that landed `Behind` is not
-            // rebased here: moving edits onto a generation the trader has
-            // not seen is exactly the decision `:rebase` exists to ask
-            // for (§8.4).
+            // A draft that landed `Behind` is not rebased here: moving
+            // edits onto a generation the trader has not seen is exactly
+            // the decision `:rebase` exists to ask for (§8.4).
             if !self.draft.is_behind() {
-                self.draft.rebase(&self.model);
+                let (_, dropped) = self.draft.rebase(&self.model);
                 self.rebuild_model();
+                // Reported, never pruned in silence — `:rebase` names
+                // every dropped pair on the same situation, and a reader
+                // of §8.7.17 would expect the same disclosure here.
+                // Written after the rebuild so a build failure's own
+                // message wins by arriving first, exactly as `rebase`
+                // orders its own two.
+                if !dropped.is_empty() && self.notice.is_none() {
+                    self.notice = Some(dropped_notice(&dropped).into());
+                }
             }
         }
         self.sync_scroll();
@@ -574,17 +651,27 @@ impl MarketDataTile {
     /// the one that emptied the barrier. A no-op with nothing staged, so
     /// calling it on every `flip` costs nothing.
     ///
-    /// A staged snapshot is only ever valid for the flip identity it was
-    /// staged under: a second mutation inside the same window replaces the
-    /// barrier before this panel's requery for the NEWER versions lands,
-    /// and the `flip` that releases that newer barrier must not promote
-    /// the older snapshot. Dropping it keeps what is already on screen
-    /// (last-good); the requery already in flight paints the real answer.
+    /// The gate asks "does this still answer what I FOLLOW", never "is
+    /// the barrier's identity unchanged" (I-1, final whole-branch
+    /// review). `requery` and `set_key` both clear `staged`, so a staged
+    /// snapshot is by construction the answer to this panel's latest
+    /// question; the flip identity (`scope`, `grouping`, `as_of`) is the
+    /// blotter's rule, and the blotter can afford it only because it
+    /// follows scope and grouping. This panel follows neither — a barrier
+    /// replaced by a scope keystroke or a grouping step comes with no
+    /// requery at all, so the snapshot thrown away here was the only
+    /// answer the panel would ever get for the new as-of, and what stayed
+    /// painted was the PRE-as-of generation under the window-wide
+    /// historical stripe, with `acted` claiming the panel was current.
+    ///
+    /// A stage IS dropped when a counter this panel follows has moved
+    /// under it — reachable while hidden, where no requery replaces it —
+    /// because it answers a question nobody is asking any more.
     fn promote(&mut self, cx: &mut Context<Self>) {
         let Some((snapshot, versions)) = self.staged.take() else {
             return;
         };
-        if versions.same_flip_identity(self.frame.read(cx).versions()) {
+        if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {
             self.apply(snapshot, cx);
             self.changed(cx);
         }
@@ -724,12 +811,25 @@ impl MarketDataTile {
                 tone: Tone::Warn,
             });
         }
-        let summary = self.draft.summary();
-        if !summary.is_empty() {
+        if self.unresolved_restore && !self.draft.is_empty() {
+            // Parked, not lost (I-2): the restored edits have no grid
+            // position until a non-empty model resolves them by label, and
+            // the draft's own summary would otherwise claim they are on a
+            // document the panel has not received.
+            let n = self.draft.len();
+            let plural = if n == 1 { "" } else { "s" };
             self.chips.push(Chip {
-                text: summary.into(),
+                text: format!("{n} restored edit{plural} awaiting a document").into(),
                 tone: Tone::Warn,
             });
+        } else {
+            let summary = self.draft.summary();
+            if !summary.is_empty() {
+                self.chips.push(Chip {
+                    text: summary.into(),
+                    tone: Tone::Warn,
+                });
+            }
         }
         if let Some(notice) = &self.notice {
             self.chips.push(Chip {
@@ -1478,6 +1578,17 @@ fn display_key(key: &[String]) -> String {
 /// column label the newer document no longer has. Each pair is spelled
 /// `row/col` (the same display separator a document key uses), since a
 /// bare pair of labels with nothing between them reads as one run-on word.
+/// A delivered document's own source time — the identity a [`Draft`]
+/// compares its `base` against (§8.4: per-document `as_of`, never the
+/// dataset-wide `gen_id` a live query's provenance carries).
+fn source_time_of(snapshot: &Snapshot) -> Option<String> {
+    snapshot
+        .provenance()
+        .datasets
+        .first()
+        .and_then(|f| f.as_of.clone())
+}
+
 fn dropped_notice(dropped: &[(String, String)]) -> String {
     let n = dropped.len();
     let plural = if n == 1 { "" } else { "s" };
@@ -2690,7 +2801,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             chips
                 .iter()
-                .any(|c| c.starts_with("newer document received")),
+                .any(|c| c.starts_with("different document received")),
             "the header says so: {chips:?}"
         );
     }
@@ -3195,7 +3306,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             chips
                 .iter()
-                .any(|c| c == &format!("newer document received {local}")),
+                .any(|c| c == &format!("different document received {local}")),
             "{chips:?}"
         );
     }
@@ -3251,7 +3362,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             chips
                 .iter()
-                .any(|c| c == &format!("newer document received {local}")),
+                .any(|c| c == &format!("different document received {local}")),
             "{chips:?}"
         );
     }
@@ -3458,6 +3569,365 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.tile.read_with(&vcx, |t, _| t.draft().len()),
             1,
             "no second edit was written"
+        );
+    }
+
+    /// I-1 (final whole-branch review): a stage taken under an as-of
+    /// barrier must survive the barrier being REPLACED by a mutation this
+    /// panel does not follow. A scope keystroke (or a grouping step, or
+    /// `mod+z`) within the 250 ms window replaces the barrier without
+    /// bumping `flip`; the panel does not requery for it — so the staged
+    /// snapshot is the only answer it will ever get for the new as-of,
+    /// and dropping it left the PRE-as-of generation painted under the
+    /// window-wide historical stripe with `acted` claiming the panel was
+    /// current (no requery until some dataset's next publish).
+    #[gpui::test]
+    fn a_stage_survives_a_barrier_replaced_by_a_change_the_panel_does_not_follow(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        assert_eq!(h.rows(&vcx), 2, "the two-term document is on screen");
+
+        // B1 over this panel and one blotter that has not answered yet.
+        let other = QueryKey(TILE + 1);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), other], 60);
+        let second = h.document_request().expect("an as-of change requeries");
+        h.deliver(
+            &mut vcx,
+            second.tag,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert_eq!(h.rows(&vcx), 2, "staged, not painted");
+
+        // A scope keystroke inside the window: B1 is replaced by B2 over
+        // the NEW scope. The panel follows neither `scope` nor
+        // `grouping`, so it never requeries — it self-arrives on B2.
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("SPX".into()));
+            f.open_flip([QueryKey(TILE), other], Instant::now());
+            cx.notify();
+        });
+        assert!(
+            h.document_request().is_none(),
+            "a scope bump is not something this panel requeries for"
+        );
+
+        // The blotter answers B2, which releases it and bumps `flip`.
+        let now = h.versions(&vcx);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.arrived(other, now);
+            cx.notify();
+        });
+        assert!(!h.barrier_open(&vcx));
+        assert_eq!(
+            h.rows(&vcx),
+            5,
+            "the staged as-of answer must still promote: nothing this panel \
+             follows moved, and no other answer is coming"
+        );
+    }
+
+    /// The other side of the same gate, and why it is still load-bearing:
+    /// a stage whose own `as_of` no longer matches the frame's must NOT
+    /// promote. Reachable while HIDDEN — `set_visible(false)` cancels the
+    /// request but a stage already taken stays, and a hidden panel does
+    /// not requery for the as-of change that follows.
+    #[gpui::test]
+    fn a_stage_is_dropped_when_a_counter_the_panel_follows_has_moved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+
+        let other = QueryKey(TILE + 1);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), other], 60);
+        let second = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            second,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert_eq!(h.rows(&vcx), 2, "staged");
+
+        // Hidden, then a SECOND as-of change — a counter this panel does
+        // follow — and finally the barrier releases.
+        h.visible(&mut vcx, false);
+        open_barrier_on_as_of(&h, &mut vcx, &[other], 120);
+        let now = h.versions(&vcx);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.arrived(other, now);
+            cx.notify();
+        });
+        assert_eq!(
+            h.rows(&vcx),
+            2,
+            "the stage answers an as-of nobody is looking at any more"
+        );
+    }
+
+    /// I-2 (final whole-branch review), trace 1: the first delivery is an
+    /// EMPTY snapshot — the key has no document in this database, or the
+    /// session's persisted as-of predates the document's first publish
+    /// (`compile_document`'s `and false` arm). Rebasing a restored draft
+    /// against that model dropped every edit silently and left a clean
+    /// panel: the one path on the branch that lost unsent work (§8.5).
+    #[gpui::test]
+    fn a_restored_draft_survives_an_empty_first_delivery(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(document_of(&[], &NODES, BASE)));
+
+        let (edits, chips) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().len(), t.header_chips()));
+        assert_eq!(
+            edits, 1,
+            "an empty document resolves nothing — and drops nothing"
+        );
+        assert!(
+            chips
+                .iter()
+                .any(|c| c == "1 restored edit awaiting a document"),
+            "and the header says the edits are parked: {chips:?}"
+        );
+
+        // The real document arrives on a later delivery and resolves them.
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        let cell = h
+            .tile
+            .read_with(&vcx, |t, _| t.model().rows[1].cells[1].clone());
+        assert_eq!(cell.text.to_string(), "9.5000");
+        assert!(cell.edited, "the restored edit is placed by label at last");
+    }
+
+    /// I-2, trace 2: the first delivery is a malformed generation that
+    /// `MatrixModel::build` refuses (a repeated pivot pair). The model
+    /// stays empty, so the restored draft must stay parked — rebasing
+    /// against an unbuildable delivery's empty last-good model destroyed
+    /// it just as silently.
+    #[gpui::test]
+    fn a_restored_draft_survives_a_first_delivery_that_cannot_be_built(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            first,
+            // Two identical terms: a repeated pivot pair, refused.
+            Arc::new(document_of(&["2026-10-16", "2026-10-16"], &NODES, BASE)),
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().len()),
+            1,
+            "a refused build resolves nothing"
+        );
+
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        let cell = h
+            .tile
+            .read_with(&vcx, |t, _| t.model().rows[1].cells[1].clone());
+        assert_eq!(cell.text.to_string(), "9.5000");
+        assert!(cell.edited);
+    }
+
+    /// I-2, trace 3: a restored edit whose row or column the delivered
+    /// document no longer has is DROPPED — and the trader is told, as
+    /// `:rebase` tells them on the same situation. It used to be pruned
+    /// with nothing said at all.
+    #[gpui::test]
+    fn a_restored_edit_the_document_lacks_is_named_in_the_notice(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5], ["2099-01-01", "-1", 1.0]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        assert!(
+            chips.iter().any(|c| c.contains("2099-01-01")),
+            "the dropped pair is named: {chips:?}"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().len()),
+            1,
+            "the one whose labels the document still has is kept"
+        );
+    }
+
+    /// M-1 (final whole-branch review): once a restored draft has landed
+    /// `Behind` with the newest generation painted (§8.7.17 — no base was
+    /// ever delivered, so there is nothing to retain), a LATER delivery
+    /// must not pin that painted generation as if it were the edits'
+    /// base. It is not: the base is `2026-09-12T14:00:00Z`, which this
+    /// session has never seen. Pinning it froze the panel on a generation
+    /// that was neither the base nor the newest.
+    #[gpui::test]
+    fn a_restored_behind_draft_keeps_following_the_feed(cx: &mut gpui::TestAppContext) {
+        const NEWEST: &str = "2026-09-12T14:15:00Z";
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_behind()),
+            "a base this session never saw is Behind on the first delivery"
+        );
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["t0", "t1", "t2"], &NODES, NEWEST)),
+        );
+        assert_eq!(
+            h.rows(&vcx),
+            3,
+            "the newest generation keeps painting: nothing here is the \
+             edits' own base"
+        );
+    }
+
+    /// M-2 (final whole-branch review): a generation that cannot be laid
+    /// out as a grid must change NOTHING but the notice. The last good
+    /// model stays on screen (it always did) and so must `self.snapshot`
+    /// and the draft's own state — otherwise the panel goes `Behind`
+    /// against a generation it never painted and `:rebase` has an
+    /// unbuildable document to rebase onto.
+    #[gpui::test]
+    fn a_delivery_that_cannot_be_built_changes_nothing_but_the_notice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["t0", "t0"], &NODES, NEWER)),
+        );
+
+        let (state, rows, chips) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().rows.len(),
+                t.header_chips(),
+            )
+        });
+        assert_eq!(
+            state,
+            DraftState::Editing,
+            "an unbuildable generation is not a delivery the draft heard about"
+        );
+        assert_eq!(rows, 2, "the last good model stays on screen");
+        assert!(
+            chips.iter().any(|c| c.contains("repeats")),
+            "and the refusal is reported: {chips:?}"
+        );
+        // The draft is still against the painted generation, so `:bump`
+        // (refused while `Behind`) still works.
+        h.command(&mut vcx, "bump 0.1")
+            .expect("the draft is not behind");
+    }
+
+    /// The other half of M-5's move: the delivery notice is cleared on
+    /// the delivery that PAINTS (in `apply`) rather than in `deliver`'s
+    /// `Ok` arm, so a select failure's message goes away exactly when the
+    /// document that replaces it reaches the screen.
+    #[gpui::test]
+    fn a_painting_delivery_clears_the_previous_deliverys_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver_err(&mut vcx, tag, "the document select failed");
+        assert!(h.tile.read_with(&vcx, |t, _| t.notice().is_some()));
+
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            None,
+            "the document that replaced it is on screen"
+        );
+    }
+
+    /// M-5 (final whole-branch review): the notice a delivery's own
+    /// `apply` sets — the restored-draft dropped-edit report here —
+    /// survives that delivery. The `Ok` arm used to clear `notice` before
+    /// staging, so the clear now happens on the delivery that PAINTS, in
+    /// `apply`, ahead of every notice `apply` itself writes.
+    #[gpui::test]
+    fn a_notice_set_while_applying_a_delivery_survives_it(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2099-01-01", "-1", 1.0]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        assert!(
+            chips.iter().any(|c| c.contains("2099-01-01")),
+            "the dropped-edit report is on screen after the delivery that \
+             produced it: {chips:?}"
         );
     }
 }

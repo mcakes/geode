@@ -778,7 +778,9 @@ style and the header reads "3 edits on 14:02's document". States:
 - **Behind** — edits present and a newer generation has been
   delivered. The panel keeps painting the *base* generation under the
   edits (a newer document never clobbers a draft, roadmap ruling 9),
-  the header says "newer document received 14:07", and `:rebase`
+  the header says "different document received 14:07" (§8.7.24 — an
+  as-of step back delivers an OLDER one into this very state), and
+  `:rebase`
   re-applies the edits by row and column *label* onto the new
   generation (a label the new document lacks drops that edit and says
   so), while `:discard` drops the edits and shows the new generation.
@@ -944,7 +946,9 @@ newer generation restores into `Behind` rather than misaligning), and
 14. **`MarketDataTile` answers the flip barrier honestly, in the
     blotter's own shape**, which §8.2/§8.6 did not specify:
     `self_arrive` on a change it does not requery for, staging a
-    delivery under an open barrier and promoting on the flip bump,
+    delivery under an open barrier and promoting on the flip bump
+    whenever the staged versions still agree with the frame on every
+    counter the tile FOLLOWS (§8.7.24),
     arriving on an ordinary delivery, a stale tag or an `Err`, and
     arriving with `acted` cleared (forcing a retry) on a refused
     submit. **The diagnostics tile had the identical gap since Phase
@@ -973,14 +977,21 @@ newer generation restores into `Behind` rather than misaligning), and
     only `&App` and can queue nothing), is the trap a maintainer must
     keep together, since the request is otherwise queued and invisible
     until some unrelated mutation happens to notify.
-17. **Session restore rebases against the *first delivered* model, not
-    a config-time one.** `from_toml` parks each restored edit at the
-    unaddressable column `usize::MAX` (`UNRESOLVED_COLUMN`) because the
-    session stores label pairs, not grid indices, and no model exists
-    until the first delivery; the tile calls `rebase` there unless the
-    restored `base` already differs from the delivered one, in which
-    case the draft lands directly in `Behind` with the newer document
-    painted and the edits parked.
+17. **Session restore rebases against the first NON-EMPTY,
+    successfully built model, not a config-time one.** `from_toml`
+    parks each restored edit at the unaddressable column `usize::MAX`
+    (`UNRESOLVED_COLUMN`) because the session stores label pairs, not
+    grid indices, and no model exists until the first delivery; the
+    tile calls `rebase` there unless the restored `base` already
+    differs from the delivered one, in which case the draft lands
+    directly in `Behind` with the newer document painted and the edits
+    parked. **An empty snapshot and a refused build both leave the
+    draft parked for the next delivery** (§8.7.24): rebasing against
+    an empty grid dropped every restored edit silently, and §8.5 says
+    unsent edits survive a restart. While parked the header reads
+    `N restored edits awaiting a document`, and a label pair the
+    delivered document cannot place is named in the notice exactly as
+    `:rebase` names one.
 18. **A commit whose cell moved out from under it is refused**
     (`CELL_MOVED`), which §8.3/§8.4 do not mention: `Editing` captures
     the cell and its labels at open, and a delivery landing mid-edit
@@ -1023,6 +1034,63 @@ newer generation restores into `Behind` rather than misaligning), and
     `d_over_a_modules_fragment_binding_writes_a_user_layer_shadow` and
     `r_removes_a_user_override_and_the_modules_fragment_shows_through`
     (`shell/tests/keybindings_dialog.rs`).
+24. **The final whole-branch review's fix wave (2026-09-14)** — nine
+    findings, and the five that changed behaviour a maintainer must
+    know about:
+    - **A staged snapshot promotes when it still answers what the tile
+      FOLLOWS**, never on the barrier's own flip identity
+      (`differs_on_followed`, shared with `follows_changed` at both
+      sites so the two cannot drift). `FlipBarrier`'s doc says a later
+      mutation "simply replaces it outright", and a replacement over a
+      counter the tile does not follow comes with no requery at all —
+      so the identity check threw away the only answer that tile would
+      ever get, leaving the pre-mutation generation painted with
+      `acted` claiming it was current. The panel follows `as_of`/`data`
+      (a scope keystroke or a grouping step is the everyday case); the
+      blotter has the same hole for an `unscoped` or pinned tile, fixed
+      under the mechanism rule. The gate still drops a stage whose own
+      followed counters moved — reachable while HIDDEN, where no
+      requery supersedes it.
+    - **A restored draft resolves only against a model that can resolve
+      it** (§8.7.17 above), is reported rather than pruned in silence,
+      and — since its base was never delivered — never lets a later
+      delivery pin the painted generation as that base: a generation is
+      retained under `Behind` only when the outgoing snapshot's own
+      source time IS `draft.base`.
+    - **A delivery `MatrixModel::build` refuses changes nothing but the
+      notice.** The model, `self.snapshot` and the draft's own state are
+      decided on a copy and committed only after the build succeeds, so
+      the panel cannot go `Behind` against a generation it never
+      painted. One build per delivery still: with a base retained the
+      screen keeps the model it already has (`on_delivered` moves only
+      the draft's STATE, which `build` does not read), and the fresh
+      build is a validation of the delivered generation.
+    - **The delivery notice is cleared in `apply`** — on the delivery
+      that PAINTS, ahead of every notice `apply` itself writes — rather
+      than in `deliver`'s `Ok` arm, where a staged delivery wiped a
+      `:rebase` report on any unrelated publish.
+    - **Every keyboard verb that moves which TILE has focus re-arms
+      `pending_focus_restore`** when window focus is on a non-shell
+      handle (`ShellView::note_keyboard_focus_move`, called from
+      `dispatch`'s workspace branch and `open_module`'s focus arm) —
+      the keyboard sibling of the mouse rule every tile mouse-down
+      already follows. `i` then `mod+l` otherwise left the cell editor
+      focused and painted, so each following bare key was dispatched by
+      the matcher AND typed into the abandoned cell. The editor
+      persists until commit or cancel; `escape` on the tile once focus
+      returns there still cancels it through the module fragment.
+    Two recorded, without code: a `Draft`'s generation identity is its
+    source time ALONE, so a republish that keeps its source time
+    (`source_time = "document"` stamping a date's midnight, or a
+    corrected file republish, which ties its predecessor's) is invisible
+    to the draft and swaps the grid under index-keyed edits — harmless
+    while the row/column set is unchanged (CVI's ladder is fixed per
+    date), unreachable under `--demo` (`source_time = "receive"`), and a
+    `gen_id`-in-provenance follow-up for Part 4; and the `Behind` chip
+    says "different document received HH:MM", because an as-of step back
+    delivers an OLDER generation into that state — with `:asof undo`
+    redelivering the edits' own base, which returns the draft to
+    `Editing` untouched.
 
 ## 9. Egress
 

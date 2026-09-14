@@ -2783,10 +2783,14 @@ run_mutation "tile: a stale tag is dropped" \
   geode-blotter \
   a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
 
+# Re-anchored (Part 3's final fix wave, I-1): `follows_changed`'s body
+# moved into `differs_on_followed`, which `promote`'s gate now shares —
+# same site, same meaning, `acted` spelled `versions` because the caller
+# is no longer always `self.acted`.
 run_mutation "tile: a pinned tile ignores the slot" \
   crates/geode-blotter/src/tile.rs \
-  '            || (self.pin == Pin::None && acted.grouping != now.grouping)' \
-  '            || acted.grouping != now.grouping' \
+  '            || (self.pin == Pin::None && versions.grouping != now.grouping)' \
+  '            || versions.grouping != now.grouping' \
   geode-blotter \
   a_frame_slot_change_requeries_once_and_a_pinned_tile_ignores_it
 
@@ -3764,14 +3768,20 @@ run_mutation "flip: a non-following tile still arrives on its own" \
 # by the harness's own bug-reproduction run), console output in
 # task-8-report.md's "Fix round 1" section.
 
-# Re-anchored (F5, final fix wave): `promote`'s inline three-field
-# compare now goes through `FrameVersions::same_flip_identity` (also
-# used by `Frame::matches`), so the mutation targets that call instead.
-run_mutation "flip: promote only applies a staged snapshot for the versions it was staged under" \
+# Re-anchored twice: first (F5, the 2026-09-06 fix wave) onto
+# `FrameVersions::same_flip_identity`, and now (I-1, the Part 3 final
+# whole-branch review) onto `differs_on_followed` — the gate asks whether
+# anything this tile FOLLOWS has moved, not whether the barrier's flip
+# identity is unchanged. Same site, same meaning: a stage that no longer
+# answers the tile's latest question must not paint. The catching test
+# moved with it, to the one race the narrowed gate still defends (a
+# HIDDEN tile, where no requery supersedes the stage) — a pinned tile
+# under a grouping-only change now promotes, which is the finding.
+run_mutation "flip: promote only applies a staged snapshot that still answers what the tile follows" \
   crates/geode-blotter/src/tile.rs \
-  '        if versions.same_flip_identity(now) {' \
+  '        if !self.differs_on_followed(versions, now) {' \
   '        if true {' \
-  geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
+  geode-blotter a_stage_is_dropped_when_a_counter_the_tile_follows_has_moved
 
 run_mutation "flip: a fresh requery clears whatever was staged before it" \
   crates/geode-blotter/src/tile.rs \
@@ -10111,10 +10121,13 @@ run_mutation "mdtile: a stale tag is dropped" \
 # the panel paints the generation it happened to open on and never asks
 # again: the header keeps showing a source time that is minutes old with
 # nothing to say a newer document exists.
+# Re-anchored (this branch's final fix wave, I-1): the comparison moved
+# into `differs_on_followed`, which `promote`'s gate now shares — same
+# site, same meaning, `acted` spelled `versions`.
 run_mutation "mdtile: a publish bumps data and the panel requeries" \
   crates/geode-marketdata/src/tile.rs \
-  '        acted.as_of != now.as_of || acted.data != now.data' \
-  '        acted.as_of != now.as_of' \
+  '        versions.as_of != now.as_of || versions.data != now.data' \
+  '        versions.as_of != now.as_of' \
   geode-marketdata \
   a_publish_bumps_the_frame_and_the_tile_requeries
 
@@ -10475,6 +10488,179 @@ run_mutation "mddraft: revert while Behind drops the base snapshot" \
         self.rebuild_model();' \
   geode-marketdata \
   revert_while_behind_shows_the_newer_document_clean
+
+# ---- Final whole-branch review of Part 3 (2026-09-14): the fix wave ---
+#
+# Nine findings, four of them Important. Every entry below breaks the one
+# behaviour its fix installed and names the test that was written RED for
+# it. The two `promote` gates (panel and blotter) are the same mechanism
+# at two sites — the blotter's own entry is re-anchored above rather than
+# duplicated here.
+
+# I-1, the panel's half: a stage taken under an as-of barrier is the only
+# answer this panel will ever get for that as-of, because a barrier
+# replaced by a scope or grouping mutation comes with no requery for a
+# tile that follows neither. Mutated back to the blotter's flip-identity
+# rule, the stage is dropped and the PRE-as-of generation keeps painting
+# under the window-wide historical stripe with `acted` claiming the panel
+# is current.
+run_mutation "final: a panel stage survives a barrier replaced by a change it does not follow" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {' \
+  '        if versions.same_flip_identity(self.frame.read(cx).versions()) {' \
+  geode-marketdata \
+  a_stage_survives_a_barrier_replaced_by_a_change_the_panel_does_not_follow
+
+# The same gate's other direction: a stage whose own `as_of`/`data` moved
+# under it (reachable while hidden, where nothing requeries) must still be
+# dropped. Same anchor, opposite mutation — the two entries together are
+# what keep the gate from being either half of a tautology.
+run_mutation "final: a panel stage is dropped once a counter it follows has moved" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {' \
+  '        if true {' \
+  geode-marketdata \
+  a_stage_is_dropped_when_a_counter_the_panel_follows_has_moved
+
+# I-1, the blotter's half, in the direction the re-anchored entry above
+# does not cover: a pinned tile under a grouping-only barrier replacement
+# must PROMOTE what it staged. Mutated back to the flip identity, the
+# pre-mutation rows stay painted forever (nothing requeries a pinned tile
+# for a grouping change).
+run_mutation "final: a pinned blotter promotes the stage a replaced barrier left it" \
+  crates/geode-blotter/src/tile.rs \
+  '        if !self.differs_on_followed(versions, now) {' \
+  '        if versions.same_flip_identity(now) {' \
+  geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
+
+# I-2: a restored draft is resolved only against the first NON-EMPTY,
+# successfully built model. Mutated away, an empty first delivery (no
+# document for this key in this database, or a persisted as-of predating
+# its first publish) rebases every restored edit against an empty grid and
+# drops the lot — silently, which is the one path on this branch that lost
+# unsent work (§8.5).
+run_mutation "final: a restored draft waits for a model that can resolve it" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.unresolved_restore && !self.model.rows.is_empty() {' \
+  '        if self.unresolved_restore {' \
+  geode-marketdata \
+  a_restored_draft_survives_an_empty_first_delivery
+
+# I-2's second half: a restored edit the delivered document cannot place
+# is REPORTED, exactly as `:rebase` reports one. Mutated away it is pruned
+# in silence.
+run_mutation "final: a restored draft's dropped edits are named" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if !dropped.is_empty() && self.notice.is_none() {
+                    self.notice = Some(dropped_notice(&dropped).into());
+                }' \
+  '' \
+  geode-marketdata \
+  a_restored_edit_the_document_lacks_is_named_in_the_notice
+
+# I-3: a KEYBOARD focus move hands the keyboard back to the shell when a
+# tile occupant is still holding it — the mouse's rule (every tile
+# mouse-down re-arms `pending_focus_restore`) applied to the verbs that
+# move the focused tile. Mutated away, an abandoned cell editor keeps
+# window focus: the next bare key is dispatched by the matcher AND typed
+# into the abandoned cell, count prefix and all.
+run_mutation "final: a keyboard focus move hands the keyboard back to the shell" \
+  crates/geode-shell/src/shell/input.rs \
+  '            self.note_keyboard_focus_move(window, cx);' \
+  '' \
+  geode-shell \
+  a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell
+
+# I-4: the edits' own base generation coming back (an as-of step back and
+# `:asof undo` — an ordinary round trip) returns a `Behind` draft to
+# `Editing`. Mutated away the header keeps naming a document the panel is
+# not showing and `edit`/`:bump` stay refused with every edit valid.
+run_mutation "final: the base generation redelivered leaves Behind" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            DraftState::Behind { .. } if self.base.as_deref() == Some(as_of) => {
+                self.state = DraftState::Editing;
+                true
+            }' \
+  '' \
+  geode-marketdata \
+  the_base_generation_redelivered_brings_a_behind_draft_back_to_editing
+
+# M-1: the base is retained only when the OUTGOING snapshot really is the
+# generation the edits were made on. Mutated away, a restored draft that
+# landed `Behind` pins whatever was painted on the NEXT delivery as if it
+# were the base, and the panel freezes on a generation that is neither the
+# base nor the newest.
+run_mutation "final: only the edits' own base generation is retained" \
+  crates/geode-marketdata/src/tile.rs \
+  '                None => self
+                    .snapshot
+                    .clone()
+                    .filter(|s| draft.base.is_some() && source_time_of(s) == draft.base),' \
+  '                None => self.snapshot.clone(),' \
+  geode-marketdata \
+  a_restored_behind_draft_keeps_following_the_feed
+
+# M-2: a generation `MatrixModel::build` refuses is not recorded at all —
+# not as `self.snapshot`, and not as a delivery the draft heard about.
+# Mutated to commit an empty model instead, the draft goes `Behind`
+# against a generation it never painted and `:rebase` is left pointed at a
+# document that cannot be laid out as a grid.
+run_mutation "final: an unbuildable delivery changes nothing but the notice" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Err(e) => {
+                self.notice = Some(e.into());
+                return;
+            }' \
+  '            Err(e) => {
+                self.notice = Some(e.into());
+                MatrixModel::empty(self.spec, self.key.as_deref().unwrap_or(&[]))
+            }' \
+  geode-marketdata \
+  a_delivery_that_cannot_be_built_changes_nothing_but_the_notice
+
+# M-5, the ordering: the notice is cleared where the delivery PAINTS, and
+# ahead of every notice `apply` itself writes. Mutated to clear again
+# after the restore block, the dropped-edit report I-2 installed vanishes
+# on the very delivery that produced it.
+run_mutation "final: a notice set while applying a delivery survives it" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if !dropped.is_empty() && self.notice.is_none() {
+                    self.notice = Some(dropped_notice(&dropped).into());
+                }
+            }
+        }
+        self.sync_scroll();' \
+  '                if !dropped.is_empty() && self.notice.is_none() {
+                    self.notice = Some(dropped_notice(&dropped).into());
+                }
+            }
+        }
+        self.notice = None;
+        self.sync_scroll();' \
+  geode-marketdata \
+  a_notice_set_while_applying_a_delivery_survives_it
+
+# M-5, the other half of the move: the delivery notice IS cleared on the
+# delivery that paints (it used to be cleared in `deliver`'s `Ok` arm,
+# where a staged delivery wiped a `:rebase` report on any unrelated
+# publish). Mutated away, a select failure's message outlives the document
+# that replaced it.
+run_mutation "final: a painting delivery clears the previous delivery's notice" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.notice = None;
+        self.draft = draft;' \
+  '        self.draft = draft;' \
+  geode-marketdata \
+  a_painting_delivery_clears_the_previous_deliverys_notice
+
+# M-4: the `Behind` chip says "different", never "newer" — an as-of step
+# back delivers an OLDER generation and lands in the same state.
+run_mutation "final: the Behind chip does not call an older document newer" \
+  crates/geode-marketdata/src/core/draft.rs \
+  'format!("different document received {}", local_hhmm(newer))' \
+  'format!("newer document received {}", local_hhmm(newer))' \
+  geode-marketdata \
+  summary_spells_each_state_in_the_traders_local_clock
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

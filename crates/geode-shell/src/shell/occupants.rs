@@ -346,6 +346,42 @@ impl ShellView {
         self.scratch_active_tiles = active;
     }
 
+    /// A keyboard verb moved which TILE has focus — hand the keyboard
+    /// back to the shell if a tile occupant is still holding it (I-3,
+    /// final whole-branch review).
+    ///
+    /// The one door every focus-moving verb goes through: `dispatch`'s
+    /// workspace branch (directional focus, next/prev, the workspace
+    /// switch, a dock show/toggle/move, a close) and
+    /// [`ShellView::open_module`]'s "focus the existing tile" arm. It is
+    /// the keyboard sibling of the rule CLAUDE.md records for the mouse —
+    /// every tile mouse-down re-arms `pending_focus_restore` — and it
+    /// exists because a focus-tracking occupant that owns a focused
+    /// `Input` (a market-data cell editor, spec §8.6) otherwise keeps
+    /// WINDOW focus after the FOCUSED TILE has moved out from under it:
+    /// the next bare key is then dispatched by the matcher against the
+    /// newly focused tile AND typed into the abandoned cell, count prefix
+    /// and all.
+    ///
+    /// The flag rather than `focus_handle.focus` directly: this runs
+    /// inside a dispatch, so the restore is consumed at the top of the
+    /// very next render (`ensure_occupants`'s own backstop takes focus
+    /// immediately only because it runs *inside* that render, where the
+    /// flag would be a frame late). The condition is
+    /// `holds_shell_focus`'s exactly — a shell surface that legitimately
+    /// holds the caret (the scope bar's field, a dialog, the palette, a
+    /// command line) keeps it. The occupant's editor is left OPEN: it
+    /// belongs to the module until commit or cancel, and `escape` on the
+    /// tile once focus returns there still cancels it.
+    pub(super) fn note_keyboard_focus_move(&mut self, window: &Window, cx: &App) {
+        if window
+            .focused(cx)
+            .is_some_and(|focused| !self.holds_shell_focus(&focused, cx))
+        {
+            self.pending_focus_restore = true;
+        }
+    }
+
     /// Is `handle` one of the shell's own focusable surfaces — the root,
     /// or one of the four `Entity<InputState>`s a user can be typing
     /// into? Anything else that holds window focus belongs to a tile's

@@ -362,11 +362,22 @@ impl BlotterTile {
         let Some(acted) = self.acted else {
             return true;
         };
-        (!self.unscoped && acted.scope != now.scope)
-            || (self.pin == Pin::None && acted.grouping != now.grouping)
-            || acted.as_of != now.as_of
-            || acted.data != now.data
-            || acted.config != now.config
+        self.differs_on_followed(acted, now)
+    }
+
+    /// Whether `versions` and `now` disagree on any counter THIS tile
+    /// follows — `scope` unless it is unscoped, `grouping` unless it is
+    /// pinned, and always `as_of`/`data`/`config`. The one comparison
+    /// [`Self::follows_changed`] and [`Self::promote`]'s gate both go
+    /// through (I-1, final whole-branch review), so "what this tile
+    /// requeries for" and "what invalidates something it has already
+    /// staged" can never drift apart.
+    fn differs_on_followed(&self, versions: FrameVersions, now: FrameVersions) -> bool {
+        (!self.unscoped && versions.scope != now.scope)
+            || (self.pin == Pin::None && versions.grouping != now.grouping)
+            || versions.as_of != now.as_of
+            || versions.data != now.data
+            || versions.config != now.config
     }
 
     fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
@@ -410,23 +421,32 @@ impl BlotterTile {
     /// calling it on every `flip` bump costs nothing for a tile that
     /// never had to wait.
     ///
-    /// Fix round 1, Finding 1: a staged snapshot is only ever valid for
-    /// the `(scope, grouping, as_of)` triple it was staged under. A
-    /// second mutation within the same barrier window replaces it with
-    /// one over newer versions before this tile's own fresh requery for
-    /// those newer versions lands — when that happens, the `flip` bump
-    /// that eventually releases the newer barrier must not promote a
-    /// snapshot staged for the older one. Dropping it here keeps
-    /// whatever is already on screen (last-good); the tile's own
-    /// `requery` for the newer versions (already in flight by the time
-    /// this runs — `follows_changed` fires in the same `on_frame_changed`
-    /// pass) will paint the real answer when it lands.
+    /// Fix round 1, Finding 1: a staged snapshot is only ever valid while
+    /// it still answers this tile's latest question. A second mutation
+    /// within the same barrier window replaces the barrier before this
+    /// tile's own fresh requery lands — when that happens, the `flip`
+    /// bump that eventually releases the newer barrier must not promote a
+    /// snapshot staged for a question that has since moved. Dropping it
+    /// here keeps whatever is already on screen (last-good); the tile's
+    /// own `requery` (already in flight by the time this runs —
+    /// `follows_changed` fires in the same `on_frame_changed` pass) will
+    /// paint the real answer when it lands.
+    ///
+    /// I-1 (final whole-branch review): the gate asks whether anything
+    /// this tile FOLLOWS has moved, not whether the barrier's flip
+    /// identity is unchanged. An `unscoped` tile under a scope change and
+    /// a pinned tile under a grouping change never requery, so for them
+    /// the replaced barrier came with no fresh answer at all and the
+    /// identity check threw away the only one they would ever get —
+    /// leaving the pre-mutation rows painted with `acted` claiming the
+    /// tile was current. `requery` clears `staged`, so a staged snapshot is by construction the answer to
+    /// the latest question asked.
     fn promote(&mut self, cx: &mut Context<Self>) {
         let Some((snapshot, grouping, versions)) = self.staged.take() else {
             return;
         };
         let now = self.frame.read(cx).versions();
-        if versions.same_flip_identity(now) {
+        if !self.differs_on_followed(versions, now) {
             self.apply(snapshot, grouping, cx);
         }
     }
@@ -3339,12 +3359,17 @@ mod tests {
     /// only the others — see the fix-round report for both console
     /// outputs): Part 1 (both tiles unpinned, a second *scope* change)
     /// is caught by either half alone — `requery`'s clear runs before
-    /// the flip bumps, and `promote`'s version check would also reject
-    /// the scope mismatch if it didn't. Part 2 pins B to a fixed
-    /// grouping, so a *grouping-only* second mutation never makes B
-    /// requery at all (`requery`'s clear never runs) — only `promote`'s
-    /// version check stands between the stale V1 payload and the
-    /// screen. Part 3 is the reverse: a `data`-only bump (which never
+    /// the flip bumps, and `promote`'s gate would also reject the scope
+    /// mismatch if it didn't. Part 2 pins B to a fixed grouping, so a
+    /// *grouping-only* second mutation never makes B requery at all
+    /// (`requery`'s clear never runs) — and, since I-1 (final
+    /// whole-branch review) narrowed the gate from the barrier's flip
+    /// identity to the counters the tile itself FOLLOWS, the V1 payload
+    /// there is no longer stale at all: it is the only answer a pinned B
+    /// will ever get for that scope, and it now promotes. What the gate
+    /// still refuses is a stage whose own followed counters moved, which
+    /// `a_stage_is_dropped_when_a_counter_the_tile_follows_has_moved`
+    /// pins. Part 3 is the reverse: a `data`-only bump (which never
     /// opens or replaces a barrier, but `follows_changed` always
     /// compares `data`) forces B to requery while the *original* V1
     /// barrier — whose scope/grouping/as_of the data bump never
@@ -3498,8 +3523,12 @@ mod tests {
 
         assert_eq!(
             shown_texts(&h2.b, &vcx2),
-            baseline2,
-            "the stale V1 payload must never paint under the grouping-only flip"
+            vec!["".to_string(), "M1".into(), "M2".into()],
+            "I-1 (final whole-branch review): B is PINNED, so a \
+             grouping-only mutation is not something it follows — the V1 \
+             payload is still the answer to its latest question, and the \
+             only answer it will ever get for that scope. Dropping it left \
+             the pre-V1 rows painted with `acted` claiming B was current"
         );
 
         // Part 3: a data-only bump forces B to requery while V1 is
@@ -3573,6 +3602,60 @@ mod tests {
             shown_texts(&h3.b, &vcx3),
             vec!["".to_string(), "N1".into(), "N2".into()],
             "the real, fresher payload paints once it actually arrives"
+        );
+    }
+
+    /// I-1 (final whole-branch review), the other half of the same gate:
+    /// a stage whose own followed counters have MOVED must still be
+    /// dropped. Reachable while hidden — `set_visible(false)` leaves a
+    /// stage in place and a hidden tile never requeries, so nothing else
+    /// supersedes it; `promote`'s gate is the only thing between it and
+    /// the screen.
+    #[gpui::test]
+    fn a_stage_is_dropped_when_a_counter_the_tile_follows_has_moved(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let pa0 = next_query(&h.requests);
+        let pb0 = next_query(&h.requests);
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
+        let baseline = shown_texts(&h.b, &vcx);
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+
+        // V1: a scope change over both keys; B stages, A never answers.
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("V1".into()));
+            cx.notify();
+        });
+        let _pa1 = next_query(&h.requests);
+        let pb1 = next_query(&h.requests);
+        frame.update(&mut vcx, |f, _| {
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+        });
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
+        assert_eq!(shown_texts(&h.b, &vcx), baseline, "V1 is staged");
+
+        // B is hidden and the scope moves again: B follows `scope`, but a
+        // hidden tile does not requery, so nothing clears the stage.
+        h.b.update(&mut vcx, |t, cx| t.set_visible(false, cx));
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("V2".into()));
+            cx.notify();
+        });
+        let _pa2 = next_query(&h.requests);
+        assert!(
+            h.requests.try_recv().is_err(),
+            "a hidden tile asks for nothing"
+        );
+        frame.update(&mut vcx, |f, cx| {
+            assert!(f.sweep(Instant::now() + FLIP_DEADLINE + Duration::from_millis(1)));
+            cx.notify();
+        });
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            baseline,
+            "the stage answers a scope nobody is asking about any more"
         );
     }
 
