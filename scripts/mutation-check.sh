@@ -9133,7 +9133,7 @@ run_mutation "sources: a subscribed source stores the paths it just said it igno
 
 run_mutation "sections: a subscribed source is described as a directory one (path and readiness)" \
   crates/geode-diagnostics/src/sections.rs \
-  '    if spec.topics.is_empty() {' \
+  '    if spec.adapter == geode_core::source_config::CSV_DIR_ADAPTER {' \
   '    if true {' \
   geode-diagnostics a_subscribed_source_shows_its_adapter_and_topics_not_paths
 
@@ -9839,6 +9839,34 @@ run_mutation "objectdialog: a column stage offers no destructive action" \
   '    let row = editing_row(shell);' \
   geode-shell \
   a_column_stage_offers_no_destructive_action
+
+# ---- Part 2 residuals, fixed at Part 3's opening (Task 1) ----
+
+run_mutation "parked: sections discriminates a subscribed source by adapter, not by topics.is_empty()" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    if spec.adapter == geode_core::source_config::CSV_DIR_ADAPTER {' \
+  '    if spec.adapter != geode_core::source_config::CSV_DIR_ADAPTER {' \
+  geode-diagnostics a_subscribed_source_with_no_topics_still_shows_the_subscribed_shape
+
+run_mutation "parked: a topic pattern with a non-final '>' is accepted rather than refused" \
+  crates/geode-core/src/source_config.rs \
+  '        if *level == ">" && i != last {' \
+  '        if false {' \
+  geode-core a_topic_pattern_with_a_non_final_greater_than_is_refused
+
+run_mutation "parked: first_sighting's contains guard is dropped -- every repeat reports as new" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if self.seen.contains(path) {
+            return false;
+        }' \
+  '' \
+  geode-data first_sighting_dedupes_below_the_cap_then_warns_once_and_stops_growing
+
+run_mutation "parked: the expiry ladder never skips a month whose third Friday already passed" \
+  crates/geode-demo-data/src/documents.rs \
+  '        if third_friday(y0, m0) < anchor {' \
+  '        if false {' \
+  geode-demo-data expiries_skip_a_month_whose_third_friday_has_already_passed
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

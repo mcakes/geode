@@ -85,11 +85,27 @@ pub mod cvi {
             .expect("the third Friday of a month is always within it")
     }
 
-    /// `EXPIRY_MONTHS` monthly listed expiries, ascending, starting the
-    /// month `anchor` falls in — `the_grid_is_full_and_term_major`'s
-    /// "terms sorted" rests on this always producing an ascending list.
+    /// `EXPIRY_MONTHS` monthly listed expiries, ascending, starting at the
+    /// first month whose third Friday is ON OR AFTER `anchor` —
+    /// `the_grid_is_full_and_term_major`'s "terms sorted" rests on this
+    /// always producing an ascending list.
+    ///
+    /// The anchor's own calendar month is skipped when that month's
+    /// listed expiry has already passed (an anchor drawn the day after a
+    /// month's third Friday, say): a document whose nearest term already
+    /// expired is not a plausible live CVI grid, and starting from
+    /// `(anchor.year(), anchor.month())` unconditionally used to produce
+    /// exactly that.
     fn expiries(anchor: NaiveDate) -> Vec<NaiveDate> {
-        let (y0, m0) = (anchor.year(), anchor.month());
+        let (mut y0, mut m0) = (anchor.year(), anchor.month());
+        if third_friday(y0, m0) < anchor {
+            if m0 == 12 {
+                y0 += 1;
+                m0 = 1;
+            } else {
+                m0 += 1;
+            }
+        }
         (0..EXPIRY_MONTHS)
             .map(|i| {
                 let total = m0 as i32 - 1 + i as i32;
@@ -334,6 +350,24 @@ pub mod cvi {
             assert_eq!(
                 third_friday(2026, 9),
                 NaiveDate::from_ymd_opt(2026, 9, 18).unwrap()
+            );
+        }
+
+        /// Part 2 residual: `expiries` used to start at the anchor's OWN
+        /// month regardless of whether that month's third Friday had
+        /// already passed — an anchor drawn the day after September's own
+        /// listed expiry (2026-09-18) still opened the ladder with a term
+        /// already one day expired. The ladder must start at the first
+        /// month whose third Friday is ON OR AFTER the anchor.
+        #[test]
+        fn expiries_skip_a_month_whose_third_friday_has_already_passed() {
+            let anchor = NaiveDate::from_ymd_opt(2026, 9, 19).unwrap();
+            let first = expiries(anchor)[0];
+            assert_eq!(
+                first,
+                NaiveDate::from_ymd_opt(2026, 10, 16).unwrap(),
+                "September's own third Friday (the 18th) is already behind the \
+                 anchor, so the ladder must open on October's"
             );
         }
     }

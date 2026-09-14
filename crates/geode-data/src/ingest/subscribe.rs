@@ -178,7 +178,7 @@ impl SubscriptionWorker {
             ingest,
             report_load,
             stop: Arc::clone(&stop),
-            unknown: HashSet::new(),
+            unknown: UnknownPaths::new(spec.name.clone()),
             failed_topics: HashSet::new(),
         };
         let window = spec.coalesce;
@@ -252,6 +252,77 @@ impl Drop for SubscriptionWorker {
     }
 }
 
+/// The largest number of distinct "unknown element" paths one source's
+/// receiver will remember having warned about.
+///
+/// A parser reports an unrecognised element by its own path in the
+/// document, and nothing here controls what a feed calls its elements —
+/// a hostile or merely buggy feed that indexes element names by content
+/// (a stray field per message, say) must not be able to grow this set,
+/// and so the receiver's own memory, without bound for the life of the
+/// session (PHILOSOPHY §6). Past the cap the set simply stops growing;
+/// see [`UnknownPaths::first_sighting`] for what a source reports once
+/// that happens.
+const UNKNOWN_PATH_CAP: usize = 256;
+
+/// Dedupes "unknown element" warnings for one source's receiver thread —
+/// pulled out of [`Receiving`] as its own small piece of state so the
+/// cap-and-warn-once behaviour can be unit-tested directly, without
+/// constructing the dataset schema, ingest handle and report sinks the
+/// rest of the receiver needs.
+struct UnknownPaths {
+    source: String,
+    seen: HashSet<String>,
+    /// Whether the one "cap reached" warning has already fired. Separate
+    /// from the per-path warning `first_sighting`'s caller makes: this
+    /// one is about the SET, not about any particular path, and must
+    /// fire exactly once no matter how many further distinct paths
+    /// arrive.
+    cap_warned: bool,
+}
+
+impl UnknownPaths {
+    fn new(source: String) -> Self {
+        UnknownPaths {
+            source,
+            seen: HashSet::new(),
+            cap_warned: false,
+        }
+    }
+
+    /// True the first time `path` is seen, false on a repeat — the
+    /// dedupe the module doc promises: a feed sending one stray element
+    /// on every message logs one line, not one per message (spec §6.3).
+    ///
+    /// Below [`UNKNOWN_PATH_CAP`] this is a plain seen-before set. At the
+    /// cap the set stops growing (nothing new is allocated for it ever
+    /// again), a single `warn` says the cap was hit, and every later
+    /// distinct path reports `true` on every call — there is nowhere left
+    /// to remember having seen it, so the caller's own per-path warning
+    /// fires every time rather than once. Better a noisy log than
+    /// unbounded memory for a feed that will not stop sending new names.
+    fn first_sighting(&mut self, path: &str) -> bool {
+        if self.seen.contains(path) {
+            return false;
+        }
+        if self.seen.len() < UNKNOWN_PATH_CAP {
+            self.seen.insert(path.to_string());
+            return true;
+        }
+        if !self.cap_warned {
+            tracing::warn!(
+                target: "geode::ingest",
+                "source {}: unknown-element path cap ({UNKNOWN_PATH_CAP}) \
+                 reached; further distinct paths will warn every time \
+                 rather than once",
+                self.source,
+            );
+            self.cap_warned = true;
+        }
+        true
+    }
+}
+
 /// Everything the receiver thread owns. A struct rather than eight
 /// parameters threaded through three functions.
 struct Receiving {
@@ -262,11 +333,10 @@ struct Receiving {
     ingest: Arc<IngestHandle>,
     report_load: LoadReportSink,
     stop: Arc<AtomicBool>,
-    /// Element paths this source's parser has already complained about.
-    /// One set for the life of the thread, so a feed sending one stray
-    /// element on every message logs one line, not one per message
-    /// (spec §6.3).
-    unknown: HashSet<String>,
+    /// Element paths this source's parser has already complained about,
+    /// capped so an adversarial or buggy feed's own element names cannot
+    /// grow it without bound — see [`UnknownPaths`].
+    unknown: UnknownPaths,
     /// Topics this source has filed a load-lane failure under — a parse
     /// `Err` or a panicking parse, the two failures with no batch to key
     /// on. Cleared by the first message from that topic that makes it all
@@ -369,14 +439,13 @@ impl Receiving {
             }
         };
         for path in &parsed.unknown_paths {
-            if !self.unknown.contains(path) {
+            if self.unknown.first_sighting(path) {
                 tracing::warn!(
                     target: "geode::ingest",
                     "source {}: unknown element {path} in {} document; skipped",
                     self.source,
                     self.kind.name(),
                 );
-                self.unknown.insert(path.clone());
             }
         }
         let rows = parsed.rows;
@@ -620,6 +689,48 @@ mod tests {
             wrong.contains("spot_ref") && wrong.contains("f64"),
             "{wrong}"
         );
+    }
+
+    // ---- UnknownPaths::first_sighting (pure) ----------------------------
+
+    /// True once per distinct path, false on a repeat; past the cap the
+    /// set stops growing and every later distinct path reports `true`
+    /// forever (Part 2 residual: extracted so this needs no dataset,
+    /// ingest handle or report sink to test).
+    #[test]
+    fn first_sighting_dedupes_below_the_cap_then_warns_once_and_stops_growing() {
+        let mut u = UnknownPaths::new("test-source".to_string());
+        assert!(u.first_sighting("a/b"), "the first sighting of a path");
+        assert!(!u.first_sighting("a/b"), "a repeat is not a first sighting");
+
+        // Fill the set to the cap with distinct paths ("a/b" already
+        // counts as one).
+        for i in 1..UNKNOWN_PATH_CAP {
+            assert!(
+                u.first_sighting(&format!("p/{i}")),
+                "every distinct path up to the cap is a first sighting"
+            );
+        }
+        assert_eq!(u.seen.len(), UNKNOWN_PATH_CAP);
+
+        // Past the cap: still reports true (there's nowhere left to
+        // remember it), the set does not grow further, and asking about
+        // the very same overflow path again still reports true — it was
+        // never actually recorded.
+        assert!(
+            u.first_sighting("overflow/1"),
+            "past the cap every distinct path still reports as a first sighting"
+        );
+        assert_eq!(
+            u.seen.len(),
+            UNKNOWN_PATH_CAP,
+            "the set stops growing at the cap"
+        );
+        assert!(
+            u.first_sighting("overflow/1"),
+            "an overflow path is never actually recorded, so it reports true again too"
+        );
+        assert!(u.cap_warned, "the one-time cap warning fired");
     }
 
     // ---- the receiver thread, over a real ChannelAdapter ---------------
@@ -1003,12 +1114,18 @@ mod tests {
     /// unreachable on shutdown, and left every join waiting on the stop
     /// flag — serially, once per source, in `DataService::shutdown`.
     ///
-    /// Timed rather than asserted structurally because the two paths
-    /// differ only in when the thread wakes. The bound is half of
-    /// `MAX_WAIT` (125ms today) against a true cost of microseconds: the
-    /// publish immediately before it means the receiver has just entered a
-    /// fresh full-length `recv_timeout`, so the flag-only path costs very
-    /// nearly all of `MAX_WAIT`.
+    /// Asserted as liveness, not timing (Part 2 residual: a wall-clock
+    /// bound could not tell a fast `Disconnected` exit from a merely
+    /// lucky short `MAX_WAIT` tick, and read differently depending on how
+    /// loaded the machine running it was). `unsubscribe` is called here
+    /// directly, WITHOUT the stop flag `shutdown` would also set, so the
+    /// loop's `Disconnected` arm is the only remaining way the thread can
+    /// end at all — `wait_until` blocking until `is_finished()` is
+    /// therefore direct evidence the channel actually disconnected, and a
+    /// regression that keeps the channel connected (a leaked sender
+    /// clone, the exact shape of the fix-round-1 defect this guards)
+    /// leaves the thread live forever, so the bounded wait times out and
+    /// fails the test rather than merely running slow.
     #[test]
     fn shutting_down_an_idle_worker_does_not_wait_out_max_wait() {
         let mut h = plain_harness();
@@ -1019,14 +1136,16 @@ mod tests {
             FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
         );
         assert_eq!(published(&h.events), ("SPX.Z".to_string(), 6));
-        let start = Instant::now();
-        h.worker.shutdown();
-        let took = start.elapsed();
-        assert!(
-            took < MAX_WAIT / 2,
-            "shutdown took {took:?}: the channel did not disconnect, so the \
-             join waited on the stop flag instead (MAX_WAIT is {MAX_WAIT:?})"
-        );
+        h.worker.subscription.unsubscribe();
+        wait_until("the receiver thread to end on Disconnected alone", || {
+            h.worker.thread.as_ref().is_some_and(|t| t.is_finished())
+        });
+        h.worker
+            .thread
+            .take()
+            .expect("only `shutdown` ever takes this, and it was not called")
+            .join()
+            .unwrap();
     }
 
     #[test]

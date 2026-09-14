@@ -147,14 +147,17 @@ fn push_spec_detail(out: &mut Vec<Row>, state: &geode_shell::diagnostics::Source
     // glob alone runs past a tile's width. Seen on a display 2026-09-08 —
     // the wrapped tail of this row painted over the poll row beneath it.
     //
-    // Which two depends on what kind of source it is, and non-empty
-    // `topics` is that question (`SourceSummary::topics`: a subscribed
-    // source is refused at load without at least one, and a directory
-    // source never carries any). A subscribed source has no path to poll
-    // and no readiness rule, so printing either described a market-data
-    // feed as a directory source with an empty path and a sentinel
-    // convention it has never used.
-    if spec.topics.is_empty() {
+    // Which two depends on what kind of source it is, and `adapter` is
+    // that question — not `topics.is_empty()` (Part 2 residual, fixed at
+    // Part 3's opening): a subscribed source is refused at load without
+    // at least one topic, but a diagnostics reader must not lean on
+    // validation it cannot see from here, so an empty topic list on a
+    // subscribed source must still read as subscribed rather than
+    // silently falling back to the directory-source shape. A subscribed
+    // source has no path to poll and no readiness rule, so printing
+    // either described a market-data feed as a directory source with an
+    // empty path and a sentinel convention it has never used.
+    if spec.adapter == geode_core::source_config::CSV_DIR_ADAPTER {
         let paths = spec.paths.join(", ");
         out.push(row(format!("path: {paths}"), 1, Tone::Muted));
         out.push(row(
@@ -660,6 +663,38 @@ mod tests {
         assert!(
             !texts.iter().any(|t| t.starts_with("path: ")),
             "a subscribed source has no path to poll: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("readiness")),
+            "nor a readiness rule: {texts:?}"
+        );
+    }
+
+    /// Part 2 residual: "subscribed" must be decided by `adapter`, not by
+    /// `topics.is_empty()` — a subscribed source with a topic list that
+    /// happens to be empty (rejected at load in the ordinary case, but a
+    /// diagnostics tile must not assume every caller went through that
+    /// validation) is still a subscribed source and must not fall back to
+    /// painting a path/readiness row shape it has no data for.
+    #[test]
+    fn a_subscribed_source_with_no_topics_still_shows_the_subscribed_shape() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.describe_source(
+            "cvi",
+            SourceSummary {
+                paths: Vec::new(),
+                priority: "LatestOther".into(),
+                readiness: "Sentinel".into(),
+                adapter: "demo_bus".into(),
+                topics: Vec::new(),
+            },
+        );
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
+        assert!(texts.contains(&"adapter: demo_bus"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.starts_with("path: ")),
+            "a subscribed source has no path to poll even with no topics: {texts:?}"
         );
         assert!(
             !texts.iter().any(|t| t.contains("readiness")),

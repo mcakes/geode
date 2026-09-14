@@ -252,6 +252,37 @@ pub fn check_batch_pattern(pattern: &str) -> Result<(), String> {
 /// `sources.<name>[.<key>]` (§19.5): `key` is the deepest field the call
 /// site honestly knows — `None` only for "not a table", where there is no
 /// field to point into at all.
+/// Validates one `topics` entry against the Solace grammar the matcher in
+/// `geode_data::adapter::topic::topic_matches` runs at message time (that
+/// matcher stays in `geode-data` — it is the hot per-message path and has
+/// nowhere to put a diagnostic; this is the load-time check ahead of it,
+/// in `geode-core`, run once per source at config load). Three shapes are
+/// refused: an empty pattern, an empty level (two consecutive `/`s,
+/// including a leading or trailing one), and a `>` anywhere but the final
+/// level — each is all but certainly a typo, since the matcher treats a
+/// non-final `>` as the literal level `>`, which no real topic carries,
+/// so such a pattern would silently match nothing forever rather than
+/// fail loudly now. `*` anywhere, and `>` as the last level, are the two
+/// real wildcards and always accepted.
+fn validate_topic_pattern(pattern: &str) -> Result<(), String> {
+    if pattern.is_empty() {
+        return Err("empty topic pattern".to_string());
+    }
+    let levels: Vec<&str> = pattern.split('/').collect();
+    let last = levels.len() - 1;
+    for (i, level) in levels.iter().enumerate() {
+        if level.is_empty() {
+            return Err(format!("empty level in topic pattern '{pattern}'"));
+        }
+        if *level == ">" && i != last {
+            return Err(format!(
+                "'>' is only valid as the final level in topic pattern '{pattern}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn diag(
     severity: Severity,
     name: &str,
@@ -544,6 +575,10 @@ impl SourceSpec {
                         Some("topics"),
                         format!("adapter '{adapter}' needs at least one topic pattern"),
                     ));
+                    continue;
+                }
+                if let Some(reason) = topics.iter().find_map(|t| validate_topic_pattern(t).err()) {
+                    diags.push(diag(Severity::Error, name, Some("topics"), reason));
                     continue;
                 }
                 let coalesce =
@@ -1076,6 +1111,74 @@ paths = ["/tmp/*.csv"]
                 .iter()
                 .any(|d| d.path.as_deref() == Some("sources.cvi.document")
                     && d.severity == Severity::Error)
+        );
+    }
+
+    /// Part 2 residual: each `topics` entry is validated at load against
+    /// the Solace grammar `geode_data::adapter::topic::topic_matches`
+    /// runs (the matcher itself has nowhere to put a diagnostic and stays
+    /// in `geode-data`; this is the load-time validator, in `geode-core`,
+    /// checking the same three rules ahead of time). An empty pattern, an
+    /// empty level (two consecutive `/`s), or a `>` anywhere but the
+    /// final level is refused — the config author almost certainly meant
+    /// something else, and letting it through would silently match
+    /// nothing or the literal level `>` forever.
+    #[test]
+    fn a_topic_pattern_with_an_empty_string_is_refused() {
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\n\
+             document = \"cvi_params\"\ntopics = [\"\"]\n",
+        );
+        assert!(sources.is_empty());
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.cvi.topics"))
+            .expect("an error diagnostic on topics");
+        assert_eq!(d.severity, Severity::Error);
+    }
+
+    #[test]
+    fn a_topic_pattern_with_an_empty_level_is_refused() {
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\n\
+             document = \"cvi_params\"\ntopics = [\"a//b\"]\n",
+        );
+        assert!(sources.is_empty());
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.cvi.topics"))
+            .expect("an error diagnostic on topics");
+        assert_eq!(d.severity, Severity::Error);
+    }
+
+    #[test]
+    fn a_topic_pattern_with_a_non_final_greater_than_is_refused() {
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\n\
+             document = \"cvi_params\"\ntopics = [\"a/>/b\"]\n",
+        );
+        assert!(sources.is_empty());
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.cvi.topics"))
+            .expect("an error diagnostic on topics");
+        assert_eq!(d.severity, Severity::Error);
+    }
+
+    #[test]
+    fn topic_patterns_with_star_and_a_final_greater_than_are_accepted() {
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\n\
+             document = \"cvi_params\"\ntopics = [\"marketdata/*/SPX.Z\", \"marketdata/cvi/>\"]\n",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].topics,
+            vec![
+                "marketdata/*/SPX.Z".to_string(),
+                "marketdata/cvi/>".to_string()
+            ]
         );
     }
 
