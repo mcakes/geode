@@ -3,7 +3,8 @@
 //! Built ONCE per delivery or draft change, never in `render`: every cell
 //! is already formatted text in a `SharedString`, so a frame clones
 //! refcounts and formats nothing (PHILOSOPHY §6, spec §7.1's 8 ms pure-UI
-//! budget). A `uniform_list` then lays out only the visible rows.
+//! budget). gpui-component's table (`crate::delegate::MatrixDelegate`,
+//! user ruling 2026-09-14) then lays out only the visible rows.
 //!
 //! Two shapes, one model. `Columns::Axis` pivots: the grid is (row axis ×
 //! column axis) and the single value column fills it. `Columns::Values`

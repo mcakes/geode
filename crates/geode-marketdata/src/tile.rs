@@ -316,9 +316,12 @@ impl MarketDataTile {
         // blotter's does, `cell_selectable` because the panel's cursor is a
         // CELL and the component only reports which column was clicked in
         // that mode, `row_header(false)` so it adds no row-number column
-        // of its own (the row labels are this panel's first column), and
+        // of its own (the row labels are this panel's first column),
         // `col_selectable(false)`/`sortable(false)` because a document's
-        // axes are the desk's own order and nothing here sorts them.
+        // axes are the desk's own order and nothing here sorts them, and
+        // `col_resizable(false)` because a dragged width has nowhere to
+        // live and every `refresh` would undo it (see `LABEL_WIDTH` in
+        // `delegate.rs`, which says it once for both halves).
         let table = cx.new(|cx| {
             TableState::new(MatrixDelegate::new(spec), window, cx)
                 .row_selectable(true)
@@ -326,7 +329,7 @@ impl MarketDataTile {
                 .cell_selectable(true)
                 .row_header(false)
                 .loop_selection(false)
-                .col_resizable(true)
+                .col_resizable(false)
                 .col_movable(false)
                 .sortable(false)
         });
@@ -343,14 +346,31 @@ impl MarketDataTile {
         // very next frame. Whether an occupant may deliberately keep focus
         // through that restore is a shell-side decision, deferred; until it
         // is made, this panel does not offer an affordance it cannot honour,
-        // which is why `TableEvent::DoubleClickedCell` is not matched here
-        // (and no `subscribe_in`/`Window` is needed for what is left).
+        // which is why `TableEvent::DoubleClickedCell` is not matched here.
         //
         // `SelectRow`/`SelectColumn` are deliberately not matched either:
         // `sync_cursor` emits both, so matching them would re-enter this
         // handler on every cursor move.
-        cx.subscribe(&table, |this, _, event: &TableEvent, cx| {
+        //
+        // `subscribe_in` (and so a `Window`) for the cancel below alone.
+        cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
             if let TableEvent::SelectCell(row, col) = event {
+                // A click while the cell editor is open CANCELS it
+                // (controller ruling 2026-09-14, review Minor 5) — through
+                // `close_editor`, so blur then drop, and never a commit: a
+                // click is not `enter`, and silently writing a half-typed
+                // number because the trader clicked elsewhere is the one
+                // outcome nobody asked for. Cancelling is not optional
+                // either, because the same mouse-down has already re-armed
+                // the shell's focus restore: left open, the editor would sit
+                // painted on the cell the cursor just left, deaf to the
+                // keyboard, with `mode == insert` still claimed.
+                if this.editor.is_some() {
+                    this.close_editor(window, cx);
+                    // `cancel`'s own chrome step in `dispatch`: the header
+                    // is re-prepared once, off the render thread.
+                    this.changed(cx);
+                }
                 this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)
             }
         })
@@ -410,6 +430,13 @@ impl MarketDataTile {
             last_flip: 0,
         };
         this.rebuild_chrome();
+        // The delegate starts with the model this tile starts with (review
+        // Minor 3). Both are empty here, so nothing paints differently —
+        // but "the delegate's model IS the tile's model" is an invariant
+        // every other path maintains, and starting the two apart would
+        // leave the one window in which it does not hold, for a future
+        // constructor that seeds a model to fall through.
+        this.install_model(cx);
         this
     }
 
@@ -2319,6 +2346,49 @@ mod tests {
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.5000"));
         assert_eq!(h.mode(&vcx), "insert");
+    }
+
+    /// A click while the cell editor is open CANCELS it and then moves the
+    /// cursor (controller ruling 2026-09-14) — a cancel, never a commit:
+    /// the typed text is dropped and the draft stays empty, because a click
+    /// is not `enter`.
+    ///
+    /// Cancelling is what stops the editor being left painted on the cell
+    /// the cursor just left, deaf to the keyboard (the same mouse-down has
+    /// already re-armed the shell's focus restore) while `key_context` still
+    /// claims `insert`.
+    #[gpui::test]
+    fn a_click_while_editing_cancels_the_editor_then_moves(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        // Typed but uncommitted: a commit would write 9.9 into (0, 0).
+        h.set_editor(&mut vcx, "9.9");
+        assert_eq!(h.mode(&vcx), "insert");
+
+        let at = centre_of(&mut vcx, "marketdata-cell-1-3");
+        click_at(&mut vcx, at, 1);
+        assert_eq!(h.editor_value(&vcx), None, "the click cancelled the editor");
+        assert_eq!(h.mode(&vcx), "normal", "and insert mode went with it");
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, cx| t.table().read(cx).delegate().editor.is_none()),
+            "the delegate has nothing left to paint in the old cell"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            (1, 2),
+            "and the cursor moved to the clicked cell"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "a click is not `enter`: nothing was written"
+        );
+        assert_eq!(
+            h.cell(&vcx, 0, 0).0,
+            "0.1000",
+            "the cell the editor was on still reads the document's own value"
+        );
     }
 
     /// The delegate mirrors the tile's cursor and its open editor — which

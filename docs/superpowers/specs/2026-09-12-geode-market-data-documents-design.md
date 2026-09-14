@@ -1115,9 +1115,16 @@ are all untouched; what changed is what paints the grid.
    row-label column for `ix == 0` (the row axis's own name, left
    aligned, `ColumnFixed::Left`, not movable, not sortable) and one
    value column per model column (right aligned, `CELL_WIDTH`, not
-   movable, not sortable). Columns stay resizable — the component's
-   default — and widths are deliberately not persisted: a panel has no
-   presentation layer, unlike a view.
+   movable, not sortable). **Columns are not resizable either** (review
+   Minor 2), on both `Column::resizable` and
+   `TableState::col_resizable`: a panel has no presentation document to
+   write a width into (`view_presentation.toml` belongs to a view), so a
+   dragged width would live only in the delegate's `column()` answer —
+   which `TableState::refresh` re-prepares `col_groups` from, and every
+   model swap refreshes, so the drag would snap back on the next delivery
+   (about every 5 s on the demo bus) or the next committed edit. A handle
+   that undoes itself seconds later is worse than no handle; offer it
+   again when a width has somewhere to be written.
 2. **The tile's cursor stays the truth; the delegate mirrors it.**
    `MarketDataTile::sync_cursor` writes `cursor`/`editor` into the
    delegate and moves the table's own selection —
@@ -1150,8 +1157,16 @@ are all untouched; what changed is what paints the grid.
    is why). `TableEvent::DoubleClickedCell` is therefore not matched, and
    `SelectRow`/`SelectColumn` are not matched either — `sync_cursor`
    emits both, so matching them would re-enter the handler on every
-   cursor move. A plain `cx.subscribe` suffices, since nothing in the
-   handler needs a `Window`.
+   cursor move. **A click while the cell editor is open cancels it**
+   before the cursor moves (review Minor 5) — through `close_editor`, so
+   blur then drop, and never a commit: a click is not `enter`, and
+   writing a half-typed number because the trader clicked elsewhere is
+   the one outcome nobody asked for. Cancelling is not optional, since
+   the same mouse-down has already re-armed the shell's focus restore:
+   left open, the editor would sit painted on the cell the cursor just
+   left, deaf to the keyboard, with `mode == insert` still claimed and
+   `enter` still bound to commit it. That cancel is the only reason the
+   subscription is `cx.subscribe_in` and takes a `Window` at all.
 5. **`geode_marketdata::init` binds the `DataTable` context's keys to
    `NoAction`, exactly as `geode_blotter::init` does**, and `main.rs`
    calls it beside the blotter's. A second copy rather than a shared
@@ -1179,7 +1194,9 @@ are all untouched; what changed is what paints the grid.
    subscription (`DoubleClickedCell` -> `begin_edit`, which needs
    `cx.subscribe_in` for its `Window`), and
    `a_double_click_only_moves_the_cursor` is the test that would have to
-   change with it.
+   change with it. A click while an editor IS open cancels it (item 4),
+   which is the same ruling read from the other side: the mouse may end
+   an edit, never start one.
 7. **Display checks are pending on a real window**, as §8.7.21's are —
    and this change adds to that list rather than clearing any of it:
    the table body's own chrome next to a blotter's, the cursor cell's

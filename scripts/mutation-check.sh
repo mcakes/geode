@@ -10938,6 +10938,23 @@ run_mutation "mdtable: the delegate's cursor mirror follows the tile's cursor" \
   geode-marketdata \
   the_delegate_mirrors_the_cursor_and_the_editor
 
+# Review Minor 5 (controller ruling 2026-09-14): a click while the cell
+# editor is open CANCELS it before the cursor moves. Mutated away, the
+# editor is left painted on the cell the cursor just left — and deaf,
+# because the same mouse-down re-armed the shell's `pending_focus_restore`
+# — while `key_context` still reports `mode == insert`, so the shell keeps
+# routing bare keys at an input nobody can see the caret in and `enter`
+# commits whatever was half-typed into a cell the trader has moved away
+# from. The cancel is `close_editor`, so blur-then-drop and never a commit.
+run_mutation "mdtable: a click while editing cancels the editor" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if this.editor.is_some() {
+                    this.close_editor(window, cx);' \
+  '                if false {
+                    this.close_editor(window, cx);' \
+  geode-marketdata \
+  a_click_while_editing_cancels_the_editor_then_moves
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

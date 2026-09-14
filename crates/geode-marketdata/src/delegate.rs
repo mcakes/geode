@@ -29,31 +29,47 @@ use std::rc::Rc;
 /// The row-label column's width, and one value cell's. Fixed: a document's
 /// columns are a ladder the desk chose (spec §8.2 — "no horizontal
 /// virtualisation, since no sketched document has more than a few dozen
-/// columns"), and the component makes them resizable by drag from here
-/// (deliberately not persisted — a panel has no per-column presentation
-/// layer, unlike a view).
+/// columns").
+///
+/// **Columns are deliberately NOT resizable** (controller ruling
+/// 2026-09-14, review Minor 2), here and on `TableState::col_resizable`.
+/// A dragged width would have nowhere to live: a panel has no presentation
+/// document (`view_presentation.toml` belongs to a view), so the width
+/// would be this delegate's in-memory `column()` answer — and
+/// `TableState::refresh` re-prepares `col_groups` from exactly that. Since
+/// every model swap refreshes ([`crate::tile::MarketDataTile`]'s
+/// `install_model`), a drag would snap back on the next delivery (about
+/// every 5 s on the demo bus) or the next committed edit. A handle that
+/// undoes itself seconds later is worse than no handle; offer it again
+/// when a width has somewhere to be written.
 const LABEL_WIDTH: f32 = 128.0;
 const CELL_WIDTH: f32 = 84.0;
 
 /// The table column the row labels live in. Column 0, pinned left for the
 /// blotter's own reason (user ruling 2026-09-12 on the tree column): the
 /// row's identity must stay readable however far right the values scroll.
-pub const LABEL_COL: usize = 0;
+pub(crate) const LABEL_COL: usize = 0;
 
+/// Every field is `pub(crate)`, never `pub` (review Minor 4): a model swap
+/// is only correct when it is paired with a `TableState::refresh`, and
+/// `MarketDataTile::install_model` is the one place that pairs them. Crate
+/// visibility is what keeps that invariant compiler-kept — a caller
+/// outside this crate could otherwise write `model` on its own and paint
+/// the previous document's columns.
 pub struct MatrixDelegate {
     /// The prepared grid. An `Rc` swapped by the tile on every rebuild —
     /// never cloned per frame, and never mutated in place.
-    pub model: Rc<MatrixModel>,
+    pub(crate) model: Rc<MatrixModel>,
     /// The row axis's name (`term`), painted as column 0's header.
     row_axis: SharedString,
     /// The tile's cursor, mirrored. `(model row, model column)` — NOT a
     /// table column index.
-    pub cursor: (usize, usize),
+    pub(crate) cursor: (usize, usize),
     /// The open cell editor, mirrored from the tile: the cell it was
     /// opened on (again in model coordinates) and its `InputState`.
     /// Painted IN that cell, which is what makes it typeable at all
     /// (`MarketDataTile`'s `Editing::state`).
-    pub editor: Option<((usize, usize), Entity<InputState>)>,
+    pub(crate) editor: Option<((usize, usize), Entity<InputState>)>,
 }
 
 impl MatrixDelegate {
@@ -106,6 +122,9 @@ impl TableDelegate for MatrixDelegate {
                 width: px(LABEL_WIDTH),
                 fixed: Some(ColumnFixed::Left),
                 movable: false,
+                // See `LABEL_WIDTH`'s own note: a dragged width has
+                // nowhere to live and `refresh` would undo it.
+                resizable: false,
                 ..Column::default()
             };
         };
@@ -127,6 +146,7 @@ impl TableDelegate for MatrixDelegate {
             sort: None,
             width: px(CELL_WIDTH),
             movable: false,
+            resizable: false,
             ..Column::default()
         }
     }
