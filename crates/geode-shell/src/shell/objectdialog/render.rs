@@ -1216,7 +1216,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             {
                 set_notice(shell, READ_ONLY_NOTICE.to_string());
             } else {
-                step_selected_row(shell, forward, cx);
+                step_selected_row(shell, forward, true, cx);
             }
             cx.notify();
             return true;
@@ -1337,8 +1337,8 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // notice names `space`/`shift+space` whichever alias was
         // pressed: naming the alias would need the keystroke down here,
         // and the two canonical keys are the ones the footer teaches.
-        NormalCommand::Toggle => step_selected_row(shell, true, cx),
-        NormalCommand::ToggleBack => step_selected_row(shell, false, cx),
+        NormalCommand::Toggle => step_selected_row(shell, true, false, cx),
+        NormalCommand::ToggleBack => step_selected_row(shell, false, false, cx),
         NormalCommand::MoveItem(delta) if in_column_stage(shell) => {
             // Part 2c §5.2: there is no list in this stage to reorder, so
             // the ordinary "that is as far as this row goes" would answer
@@ -1708,19 +1708,6 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     false
 }
 
-/// A step the draft declined ([`Step::Refused`]), said with the verb that
-/// does what the trader was reaching for.
-///
-/// The refusal this exists for is unticking a grouping slot's last
-/// dimension (`Draft::step_selected`'s own doc has the model reason). The
-/// trader wants that slot to stop grouping by the chain they just cleared,
-/// and the config model has exactly one way to say it: get rid of the
-/// slot's user-layer copy, which is `r` when the desk has one underneath
-/// and `d` when the slot is the user's own. Naming the wrong verb would be
-/// worse than naming none, so the hint is read off the same
-/// [`editing_row`] the action bar builds `d` and `r` from — a row that
-/// offers neither (a desk-owned slot the user has not forked) gets the
-/// reason alone rather than an invented verb.
 /// Step the selected row and record it — the ONE path every stepping
 /// key takes: `space`/`shift+space` and their 2026-09-13 aliases
 /// `l`/`h`/`tab`/`shift+tab` in normal mode, and `tab`/`shift+tab` in
@@ -1729,12 +1716,21 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
 /// this crate keeps paying for (`Draft::toggle_selected_back`'s own doc
 /// records the same lesson one layer down).
 ///
-/// The `Step::Inert` notice names `space`/`shift+space` rather than the
-/// key actually pressed: those two are what the footer teaches, and a
-/// notice about `l` would be a sentence about a key the trader may never
-/// have seen advertised. The caller has already decided the row is
-/// writable.
-fn step_selected_row(shell: &mut ShellView, forward: bool, cx: &mut Context<ShellView>) {
+/// `filtering` exists for the `Step::Inert` notice alone, which has to
+/// name a key the trader can actually press *here*: `space` types in
+/// filter mode, so "nothing on this row changes with space" would be a
+/// sentence about a key that puts a character in the query. Each mode
+/// gets the pair its own footer teaches — the aliases (`l`, `h`) are
+/// deliberately never named, since a notice about a key the footer did
+/// not advertise explains nothing.
+///
+/// The caller has already decided the row is writable.
+fn step_selected_row(
+    shell: &mut ShellView,
+    forward: bool,
+    filtering: bool,
+    cx: &mut Context<ShellView>,
+) {
     let stepped = draft_mut(shell).map(|draft| {
         if forward {
             draft.toggle_selected()
@@ -1751,12 +1747,30 @@ fn step_selected_row(shell: &mut ShellView, forward: bool, cx: &mut Context<Shel
         }
         Some(Step::Refused(reason)) => refuse_step(shell, reason),
         _ => {
-            let key = if forward { "space" } else { "shift+space" };
+            let key = match (filtering, forward) {
+                (false, true) => "space",
+                (false, false) => "shift+space",
+                (true, true) => "tab",
+                (true, false) => "shift+tab",
+            };
             set_notice(shell, format!("nothing on this row changes with {key}"));
         }
     }
 }
 
+/// A step the draft declined ([`Step::Refused`]), said with the verb that
+/// does what the trader was reaching for.
+///
+/// The refusal this exists for is unticking a grouping slot's last
+/// dimension (`Draft::step_selected`'s own doc has the model reason). The
+/// trader wants that slot to stop grouping by the chain they just cleared,
+/// and the config model has exactly one way to say it: get rid of the
+/// slot's user-layer copy, which is `r` when the desk has one underneath
+/// and `d` when the slot is the user's own. Naming the wrong verb would be
+/// worse than naming none, so the hint is read off the same
+/// [`editing_row`] the action bar builds `d` and `r` from — a row that
+/// offers neither (a desk-owned slot the user has not forked) gets the
+/// reason alone rather than an invented verb.
 fn refuse_step(shell: &mut ShellView, reason: String) {
     let hint = match editing_row(shell) {
         // `overridden` implies the user layer has it too, so both verbs
@@ -3536,6 +3550,14 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             .child(chip)
             .into_any_element()
     };
+    // Likewise the reorder group, which became per-row in the same
+    // review: `shift+j`/`shift+k` only move a list ITEM.
+    let hint_reorder = |chip: AnyElement| {
+        div()
+            .debug_selector(|| "objectdialog-hint-reorder".to_string())
+            .child(chip)
+            .into_any_element()
+    };
     // User ruling 2026-09-13: the change group and `i` are computed from
     // the row under the CURSOR, not from the domain — see
     // [`RowVocabulary`]. Computed once, here, so the column stage and the
@@ -3727,21 +3749,45 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     } else {
         // The change group is row-sensitive (2026-09-13) and can be
         // empty — Scopes' two display-only summaries, Groupings' `slot`,
-        // a list's own header row — where `shift+j`/`shift+k` still
-        // follow, so `move ·` keeps its separator either way.
-        let mut motion = vec![chip("j"), chip("k"), sep("move ·")];
-        motion.extend(change_group(true, false));
-        motion.extend([chip("shift+j"), chip("shift+k")]);
-        // `x` is Views-only (§18.2 — see `mod.rs`'s `Draft::remove_selected`
-        // doc): a hint for a verb every other domain's `x` merely refuses
-        // would teach a trader on Groupings or Scopes a key that does
-        // nothing there.
-        if state.domain == Domain::Views {
-            motion.push(sep("reorder ·"));
-            motion.push(chip("x"));
-            motion.push(sep("remove"));
-        } else {
-            motion.push(sep("reorder"));
+        // a list's own header row. So is the reorder group after it:
+        // `shift+j`/`shift+k` move a LIST ITEM, and on any other row
+        // `Draft::move_item` answers "that is as far as this row goes",
+        // which is the same inert-key class the change group's own gate
+        // closed (review 2026-09-13). `x` keeps its extra Views-only
+        // condition on top (§18.2 — see `mod.rs`'s
+        // `Draft::remove_selected` doc): every other domain's `x` merely
+        // refuses, so a chip there would teach a trader on Groupings or
+        // Scopes a key that does nothing.
+        let reorders = vocabulary == RowVocabulary::Item;
+        // The change group takes its trailing separator only when the
+        // reorder group really follows it, and `move` takes its own only
+        // when anything follows at all — the whole point of building
+        // this row group by group rather than as one literal.
+        let change = change_group(reorders, false);
+        let mut motion = vec![
+            chip("j"),
+            chip("k"),
+            sep(if change.is_empty() && !reorders {
+                "move"
+            } else {
+                "move ·"
+            }),
+        ];
+        motion.extend(change);
+        if reorders {
+            motion.extend([
+                hint_reorder(chip("shift+j")),
+                chip("shift+k"),
+                if state.domain == Domain::Views {
+                    sep("reorder ·")
+                } else {
+                    sep("reorder")
+                },
+            ]);
+            if state.domain == Domain::Views {
+                motion.push(chip("x"));
+                motion.push(sep("remove"));
+            }
         }
         let mut action = Vec::new();
         // §18.8: Groupings' two extra verbs, advertised only where they

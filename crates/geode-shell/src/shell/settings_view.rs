@@ -920,16 +920,35 @@ fn build(
         key_chip(&ks, chip_fg, chip_bg)
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
+    // The stepping group's own selector — the settings twin of the
+    // object dialog's `objectdialog-hint-change`. It rides the `tab`
+    // chip specifically rather than the group's first, because `tab` is
+    // the one spelling whose presence differed between the two modes'
+    // groups (normal mode withheld it until 2026-09-13) and so the one a
+    // test needs to be able to find. In filter mode `tab` *is* the
+    // group's first chip, so the two readings agree there.
+    let hint_change = |chip: AnyElement| {
+        div()
+            .debug_selector(|| "settings-hint-change".to_string())
+            .child(chip)
+            .into_any_element()
+    };
 
     // The hint row states the CURRENT mode's vocabulary, not the union of
     // both (the keybinding dialog's rule): a footer listing keys that
     // are inert right now is exactly the lie the mode pill exists to
-    // prevent. `tab`/`shift+tab` step in both modes but are shown only
-    // in filter mode, where they are the only stepping keys; normal mode
-    // shows `space`/`shift+space` and, since the 2026-09-13 ruling,
-    // `l`/`h` — the vim pair a hand already reaches for beside `j`/`k`,
-    // and the two keys that are letters in filter mode and so cannot be
-    // named there.
+    // prevent. Normal mode names all four stepping spellings —
+    // `space`/`shift+space`, `l`/`h` and `tab`/`shift+tab` — since the
+    // 2026-09-13 ruling made them one vocabulary and the object dialog's
+    // own group names them together; `tab` used to be withheld here on
+    // the grounds that it was filter mode's only stepping key, which
+    // withheld a live key from the mode that has the most of them.
+    // Filter mode still shows `tab`/`shift+tab` alone, because there
+    // `space`, `l` and `h` are characters on their way to the `Input`.
+    //
+    // Both groups carry a `settings-hint-change` selector on their `tab`
+    // chip (see its closure above), so a test can read that normal mode
+    // really does teach `tab` now.
     let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = match state.mode {
         DialogMode::Normal => (
             vec![
@@ -946,9 +965,11 @@ fn build(
             vec![
                 chip("space"),
                 chip("l"),
+                hint_change(chip("tab")),
                 sep("next value ·"),
                 chip("shift+space"),
                 chip("h"),
+                chip("shift+tab"),
                 sep("previous value ·"),
                 chip("/"),
                 sep("filter ·"),
@@ -977,7 +998,7 @@ fn build(
                 sep("±10"),
             ],
             vec![
-                chip("tab"),
+                hint_change(chip("tab")),
                 sep("next value ·"),
                 chip("shift+tab"),
                 sep("previous value ·"),

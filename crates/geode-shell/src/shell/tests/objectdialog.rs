@@ -6106,7 +6106,24 @@ fn l_and_h_step_the_selected_row_in_the_column_stage(cx: &mut gpui::TestAppConte
 fn tab_steps_the_selected_row_in_both_modes(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
-    cx.simulate_keystrokes("j enter j j");
+    cx.simulate_keystrokes("j enter"); // npv's column stage, cursor on `label`
+    cx.run_until_parked();
+
+    // An inert row names the key the trader actually pressed (review
+    // 2026-09-13): `space` TYPES in filter mode, so "nothing on this row
+    // changes with space" would be a sentence about a key that puts a
+    // character in the query.
+    cx.simulate_keystrokes("/ tab");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("nothing on this row changes with tab"),
+        "label is a Text: tab steps nothing here, and says so in tab's own name"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("j j"); // width → scale
     cx.run_until_parked();
     let start = scale_index(&shell, &cx);
 
@@ -6171,8 +6188,27 @@ fn tab_steps_the_selected_row_in_both_modes(cx: &mut gpui::TestAppContext) {
 fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (_shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // The reorder group is row-sensitive for the same reason (review
+    // 2026-09-13): `shift+j`/`shift+k` move a list ITEM, and this fixture
+    // lands on one.
+    assert!(
+        cx.debug_bounds("objectdialog-hint-reorder").is_some(),
+        "a member row can be reordered"
+    );
+    cx.simulate_keystrokes("k k"); // the Columns header, then the Dataset row
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-reorder").is_none(),
+        "the dataset row has no item to move, so shift+j/shift+k must not be named"
+    );
+    cx.simulate_keystrokes("j j"); // back to the member row
+
     cx.simulate_keystrokes("j enter"); // npv's column stage, cursor on `label`
     cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-reorder").is_none(),
+        "and the column stage has no list at all"
+    );
     assert!(
         cx.debug_bounds("objectdialog-hint-i").is_some(),
         "label is an editable Text: i types a value"

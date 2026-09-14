@@ -792,6 +792,20 @@ fn l_and_h_step_the_selected_value_in_settings_normal_mode(cx: &mut gpui::TestAp
         crate::fontsize::FontSize::Medium,
         "h should step it back, Large -> Medium"
     );
+    // And the footer teaches `tab` in normal mode, where it has always
+    // stepped and was withheld until the same ruling (review
+    // 2026-09-13). The selector rides the `tab` chip, so its presence in
+    // normal mode IS the claim.
+    assert!(
+        cx.debug_bounds("settings-hint-change").is_some(),
+        "the normal-mode footer names tab beside space and l"
+    );
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-hint-change").is_some(),
+        "and filter mode still names it, where it is the only stepping key"
+    );
 }
 
 /// §17.1 rule 1 reaches this dialog too: the frozen filter row is the

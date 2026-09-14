@@ -130,13 +130,18 @@ stages compute both groups from `Draft::selected_vocabulary` — the
 change group on a `Choice`/`Bool`/`Number` row, `i` on a `Number` or an
 editable `Text`, both on a `Number`, neither on a read-only one; a list
 row gets the forward key alone with the word (`toggle`, `add`) that says
-which way it travels. The filter-mode footer names the same group
-shrunk to `tab`/`shift+tab`, since those are the only two spellings that
-step with the `Input` focused — the same rule read the other way round,
-about keys that type rather than keys that are dead. Groupings' `i` is
-the one thing that is not row-derived: there it opens the slot's whole
-chain rather than a row's value, so it is live everywhere and stated
-unconditionally.
+which way it travels. The **reorder group goes the same way**
+(`shift+j`/`shift+k`, and `x` where the domain offers it): those move a
+list *item* and answer "that is as far as this row goes" anywhere else,
+so they are named only on an item row. The filter-mode footer names the
+change group shrunk to `tab`/`shift+tab`, since those are the only two
+spellings that step with the `Input` focused — the same rule read the
+other way round, about keys that type rather than keys that are dead —
+and for the same reason a step that finds nothing to change names
+`tab`/`shift+tab` there and `space`/`shift+space` in normal mode, never
+the aliases, which no footer advertises. Groupings' `i` is the one thing
+that is not row-derived: there it opens the slot's whole chain rather
+than a row's value, so it is live everywhere and stated unconditionally.
 
 `shift+j`/`shift+k` replaces Phase 4c §3.3's pick-up sub-mode
 (`enter` to grab, arrows to move, `enter` to drop), which existed only
@@ -921,7 +926,11 @@ Window tests (`shell/tests/chrome_and_dialogs.rs`):
 `space_types_in_settings_filter_mode_rather_than_stepping`,
 `tab_still_steps_in_settings_normal_mode`,
 `l_and_h_step_the_selected_value_in_settings_normal_mode` (§4's
-2026-09-13 amendment, with its `route` test
+2026-09-13 amendment, which also put `tab`/`shift+tab` into the
+normal-mode footer — withheld there until then on the grounds that they
+were filter mode's only stepping keys, which withheld a live key from
+the mode with the most of them — marked by a `settings-hint-change`
+selector on the `tab` chip; with its `route` test
 `h_and_l_step_in_normal_mode_and_type_in_filter_mode` and the harness
 entry "settings: h reaches the step table through dialogmode" — that
 dialog grew no code of its own for the two keys, so the entry names the

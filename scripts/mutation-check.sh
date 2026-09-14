@@ -9909,10 +9909,47 @@ run_mutation "dialogmode: shift+tab steps a value backward" \
 # exactly what it did before the ruling.
 run_mutation "objectdialog: tab steps the selected row in filter mode" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                step_selected_row(shell, forward, cx);' \
+  '                step_selected_row(shell, forward, true, cx);' \
   '                let _ = forward;' \
   geode-shell \
   tab_steps_the_selected_row_in_both_modes
+
+# Review 2026-09-13: an inert step names a key the trader can press in
+# the mode they are in. `space` TYPES in filter mode, so the pre-review
+# notice ("nothing on this row changes with space") described a key that
+# would have put a character in the query. The mutation is the exact
+# pre-review state — one `filtering` flag, at the one call site that
+# passes it true.
+run_mutation "objectdialog: an inert step in filter mode names space rather than tab" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                step_selected_row(shell, forward, true, cx);' \
+  '                step_selected_row(shell, forward, false, cx);' \
+  geode-shell \
+  tab_steps_the_selected_row_in_both_modes
+
+# Review 2026-09-13, the other half of the row-sensitive footer: the
+# reorder group. `shift+j`/`shift+k` move a list ITEM and answer "that is
+# as far as this row goes" everywhere else, so painting them on a field
+# row is the same inert-key class the change group's gate closed.
+run_mutation "objectdialog: the edit footer paints the reorder group on a row with no item" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        let reorders = vocabulary == RowVocabulary::Item;' \
+  '        let reorders = true;' \
+  geode-shell \
+  the_edit_footer_names_only_what_the_selected_row_offers
+
+# Review 2026-09-13: `tab` steps in the settings dialog's NORMAL mode and
+# the footer used to withhold it there, on the grounds that it was filter
+# mode's only stepping key — withholding a live key from the mode with
+# the most of them. The `settings-hint-change` selector rides the `tab`
+# chip, so dropping the chip is what the window test sees.
+run_mutation "settings: the normal-mode footer names tab beside space and l" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '                chip("l"),
+                hint_change(chip("tab")),' \
+  '                chip("l"),' \
+  geode-shell \
+  l_and_h_step_the_selected_value_in_settings_normal_mode
 
 # The row-sensitive footer: paint the change group on EVERY row, the
 # fixed group the ruling replaced. A `Text` row that cannot step is where
