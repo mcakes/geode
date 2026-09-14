@@ -113,6 +113,10 @@ fn main() {
             // `geode_blotter::init`'s own doc comment.
             geode_blotter::init(cx);
             geode_diagnostics::init(cx);
+            // The market-data panel's body is a `DataTable` too (user
+            // ruling 2026-09-14), so it owes the same reclaim; binding the
+            // same keys to `NoAction` twice is harmless.
+            geode_marketdata::init(cx);
 
             // The demo bus's adapter (market-data-documents plan, Task
             // 10): registered only under `--demo`, since it is the

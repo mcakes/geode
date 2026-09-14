@@ -725,18 +725,24 @@ pub struct PanelSpec {
 
 A header row: key, each header attribute, the generation's source
 time, the staleness style the blotter uses, and the draft state
-(§8.4). Below it, column labels across the top, and the body: a gpui
-`uniform_list` over the row axis (roadmap ruling 6 as revised
-2026-09-13), each row painting its label and a fixed strip of cells
-from a `MatrixModel` built once per snapshot or draft change and
-cached, so a frame paints from prepared strings and never formats and
-only the visible rows are laid out. A `UniformListScrollHandle` keeps
-the cursor row in view on every cursor move. Row height is fixed (one
-line of the data face); there is no horizontal virtualisation, since
-no sketched document has more than a few dozen columns. §11 records
-the model build and the paint at 20×30 and at 10,000 rows × 5
-columns — the dividend-schedule shape that forced the revision — so
-the decision is measured.
+(§8.4). Below it, the body: **gpui-component's table
+(`DataTable`/`TableState`) over this crate's own `MatrixDelegate`
+(superseded 2026-09-14 — roadmap ruling 6's revised form, a gpui
+`uniform_list` with a column strip per row, is what Part 3 shipped and
+what the user's "visual unity" ruling replaced; §8.8 records the as-built
+seam).** The table's column 0 is the row-label column, carrying the row
+axis's own name and pinned left as the blotter pins its tree column;
+then one column per value column. Every cell comes out of a
+`MatrixModel` built once per snapshot or draft change and cached, so a
+frame paints from prepared strings and never formats, and the component
+lays out only the visible rows. The cursor row and column are kept in
+view by the table's own selection (`set_selected_row`/`set_selected_col`,
+which scroll non-strictly, so a cell already on screen never jumps).
+Row height is fixed (one line of the data face at `Size::XSmall`); there
+is no horizontal virtualisation to arrange, since no sketched document
+has more than a few dozen columns. §11 records the model build and the
+paint at 20×30 and at 10,000 rows × 5 columns — the dividend-schedule
+shape that forced the 2026-09-13 revision — so the decision is measured.
 
 ### 8.3 Keys
 
@@ -1092,6 +1098,86 @@ newer generation restores into `Behind` rather than misaligning), and
     redelivering the edits' own base, which returns the draft to
     `Editing` untouched.
 
+### 8.8 As built (the table body, 2026-09-14)
+
+The user's ruling — "visually I don't like how the CVI panel looks; we
+should use gpui-component's datatable here too for visual unity" —
+replaced §8.2's body. The chip header, the model, the draft, the keys,
+the yank, the find, the `:` vocabulary and the flip-barrier behaviour
+are all untouched; what changed is what paints the grid.
+
+1. **`geode_marketdata::delegate::MatrixDelegate` is the whole of it**,
+   and the crate still does not depend on `geode-blotter`: the shapes
+   were copied, not the code. It holds the prepared `Rc<MatrixModel>`,
+   a mirror of the tile's cursor and a mirror of the open cell editor,
+   and nothing else. `columns_count` is `1 + model.columns.len()`,
+   `rows_count` is `model.rows.len()`, and `column(ix)` answers the
+   row-label column for `ix == 0` (the row axis's own name, left
+   aligned, `ColumnFixed::Left`, not movable, not sortable) and one
+   value column per model column (right aligned, `CELL_WIDTH`, not
+   movable, not sortable). Columns stay resizable — the component's
+   default — and widths are deliberately not persisted: a panel has no
+   presentation layer, unlike a view.
+2. **The tile's cursor stays the truth; the delegate mirrors it.**
+   `MarketDataTile::sync_cursor` writes `cursor`/`editor` into the
+   delegate and moves the table's own selection —
+   `set_selected_col(MatrixDelegate::table_col(col))` then
+   `set_selected_row(row)` then `scroll_to_row(row)`. The column is
+   set BEFORE the row because each setter switches the component's
+   selection mode and the row highlight paints only in row mode, so
+   ending on the row is what makes the panel read like the blotter (a
+   highlighted row plus a bordered cursor cell). The `+ 1` is the
+   row-label column, which the cursor never enters: `h` at model
+   column 0 stays put, and `MatrixDelegate::model_col` answers `None`
+   for table column 0 rather than saturating to 0.
+3. **Every model swap goes through `MarketDataTile::install_model`,
+   which calls `TableState::refresh`.** The component caches each
+   `column()`'s answer in `col_groups` at prepare time and paints its
+   HEADER from that cache alone, so a delivery whose node ladder
+   changed would keep the previous document's headers (and lay its
+   cells out at the previous widths) without it — the same trap
+   CLAUDE.md records for the blotter's line-number gutter. Both doors
+   into a model change end there: `rebuild_model` (a draft change) and
+   `apply`'s own assignment (a delivery).
+4. **The mouse is the blotter's shape.** `cell_selectable(true)` with
+   `row_header(false)` is what makes the component report WHICH COLUMN
+   a click landed in (`TableEvent::SelectCell`), and it adds no row-number
+   column of its own; `col_selectable(false)` and `sortable(false)`
+   because a document's axes are the desk's own order. A single click
+   moves the cursor (a click on a row label moves the row and leaves
+   the column alone); a double-click on a value cell is
+   `marketdata::edit` on it, through the same `begin_edit` the keyboard
+   uses. The subscription is `cx.subscribe_in` (not `subscribe`)
+   because `begin_edit` needs a `Window`, and it deliberately does not
+   match `SelectRow`/`SelectColumn` — `sync_cursor` emits both, so
+   matching them would re-enter the handler on every cursor move.
+5. **`geode_marketdata::init` binds the `DataTable` context's keys to
+   `NoAction`, exactly as `geode_blotter::init` does**, and `main.rs`
+   calls it beside the blotter's. A second copy rather than a shared
+   function: this crate must not depend on `geode-blotter`, and binding
+   the same keys twice is harmless. Focus is otherwise unchanged — the
+   table is never focused, `close_editor` still blurs then drops, and
+   `key_context` still reports `insert` exactly while `editor` is
+   `Some`.
+6. **Known, and not fixed here: an editor opened by double-click is
+   not typeable in the real app.** Every tile mouse-down re-arms the
+   shell's `pending_focus_restore` (CLAUDE.md's focus rule), which the
+   next `ShellView::render` consumes by focusing the shell root — so
+   the `Input` that `begin_edit` just focused is blurred a frame later,
+   and the panel is left in the state `the_insert_branch_needs_the_tile_
+   to_hold_focus_not_just_insert_mode` (`geode-shell`) already pins as
+   legitimate: the editor is open, the matcher governs the keyboard,
+   and `escape` cancels. The keyboard path (`i`/`enter`) is unaffected,
+   since no mouse-down arms the restore. Making the mouse path typeable
+   needs a shell-side decision about an occupant that deliberately
+   takes focus, which is outside this bounded change.
+7. **Display checks are pending on a real window**, as §8.7.21's are —
+   and this change adds to that list rather than clearing any of it:
+   the table body's own chrome next to a blotter's, the cursor cell's
+   border, the edited and sent cell styles, the pinned row-label
+   column under horizontal scroll, and the editor `Input` inside a
+   table cell.
+
 ## 9. Egress
 
 ### 9.1 Config
@@ -1212,10 +1298,11 @@ binding; the reserved lists are gone (compile-time).
 CVI document at the sketch's size (order of 20 terms × 30 nodes) and at
 ten times that; archive growth per hour at the demo cadence; the
 panel's `MatrixModel` build and its paint at 20×30 and at 10,000 rows
-× 5 columns (a broad-index dividend schedule), which the uniform list
-must hold under the 8 ms pure-UI budget because only the visible rows
-are laid out; the scenario panel's T×S grid (slice 2) inherits the
-same list.
+× 5 columns (a broad-index dividend schedule), which the table must
+hold under the 8 ms pure-UI budget because only the visible rows are
+laid out (superseded 2026-09-14: "the uniform list" was the body when
+this was written); the scenario panel's T×S grid (slice 2) inherits the
+same table.
 
 ## 12. Sequencing
 

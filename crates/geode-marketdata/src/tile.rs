@@ -3,6 +3,17 @@
 //! [`MatrixModel`] a frame paints from, and owns the cursor, the yank, the
 //! `/` find and the `:` vocabulary over it.
 //!
+//! The BODY is gpui-component's table, driven by this crate's own
+//! [`MatrixDelegate`] (user ruling 2026-09-14 — visual unity with the
+//! blotter, superseding roadmap ruling 6's hand-painted uniform row list).
+//! The chip header above it is this tile's own, unchanged. Two rules the
+//! seam rests on: **the tile's cursor stays the truth** and the delegate
+//! only mirrors it ([`Self::sync_cursor`]), and **every model swap goes
+//! through [`Self::install_model`]**, which calls `TableState::refresh` —
+//! the component caches `column()`'s answers in `col_groups` and paints
+//! its header from that cache alone, so a swap without a refresh paints
+//! the previous document's columns.
+//!
 //! What this tile is NOT is a blotter. There is no view, no grouping and
 //! no scope: a document request is (dataset, key, as-of) and nothing else
 //! (Part 1 §7), so the only frame counters it follows are `as_of` and
@@ -40,13 +51,13 @@
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::{Draft, MatrixModel, PanelSpec, parse_cell};
+use crate::delegate::MatrixDelegate;
 use geode_core::document::split_key;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::FindEvent;
@@ -54,23 +65,15 @@ use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, Entity, Focusable as _, IntoElement, ScrollStrategy, SharedString,
-    UniformListScrollHandle, Window, div, px, uniform_list,
+    App, ClipboardItem, Context, Entity, Focusable as _, IntoElement, SharedString, Window, div, px,
 };
-use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::input::InputState;
+use gpui_component::table::{DataTable, TableEvent, TableState};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-/// The row-label gutter's width, and one cell's. Fixed: a document's
-/// columns are a ladder the desk chose (§8.2 — "no horizontal
-/// virtualisation, since no sketched document has more than a few dozen
-/// columns"), so every row is the same shape and `uniform_list` can lay
-/// out only what is on screen.
-const LABEL_WIDTH: f32 = 128.0;
-const CELL_WIDTH: f32 = 84.0;
 
 /// How many rows `ctrl+d`/`ctrl+u` step — `vimnav`'s own ±5, the same
 /// fixed offset every list in this codebase uses, multiplied by the count
@@ -208,12 +211,13 @@ pub struct MarketDataTile {
     /// been received, and is honestly painted against the newest one
     /// until `:rebase`/`:discard` (Task 8).
     base_snapshot: Option<Arc<Snapshot>>,
-    /// `Rc`, not a plain `MatrixModel`: `render` hands this to the
-    /// `uniform_list` closure on every paint — every shell repaint, not
-    /// just this tile's own rebuilds — and a `MatrixModel` clone there
-    /// would reallocate every row and bump every cell's `SharedString`
-    /// per frame (the diagnostics tile's own MAJ-4, same shape). Replaced
-    /// wholesale by `rebuild_model` and never mutated in place.
+    /// `Rc`, not a plain `MatrixModel`: the delegate paints from this on
+    /// every frame — every shell repaint, not just this tile's own
+    /// rebuilds — and a `MatrixModel` clone per paint would reallocate
+    /// every row and bump every cell's `SharedString` (the diagnostics
+    /// tile's own MAJ-4, same shape). Replaced wholesale by
+    /// `rebuild_model` and never mutated in place; `install_model` is
+    /// what hands the new `Rc` to the delegate.
     model: Rc<MatrixModel>,
     draft: Draft,
     /// A restored draft's edits are parked out of every grid's range
@@ -228,9 +232,13 @@ pub struct MarketDataTile {
     /// a document its labels did not come from.
     unresolved_restore: bool,
     /// (row, column) into the model's grid — the same index a
-    /// `Draft` edit is keyed by.
+    /// `Draft` edit is keyed by, and the truth the table's own selection
+    /// mirrors (never the other way round).
     cursor: (usize, usize),
-    scroll: UniformListScrollHandle,
+    /// The body: gpui-component's table over [`MatrixDelegate`]. Never
+    /// focused (see `geode_marketdata::init`, which binds its context's
+    /// keys to `NoAction` for the one frame a click gives it gpui focus).
+    table: Entity<TableState<MatrixDelegate>>,
     /// `Some` while the cell editor holds the keyboard, which is the
     /// whole of what `mode == insert` means to the shell (spec §8.6).
     /// Opened by `marketdata::edit`, closed by `commit`/`cancel` through
@@ -286,7 +294,7 @@ impl MarketDataTile {
         data: DataHandle,
         stale_after: Rc<StdCell<Duration>>,
         restored: Option<&toml::Table>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let key = restored
@@ -304,6 +312,55 @@ impl MarketDataTile {
             .map(Draft::from_toml)
             .unwrap_or_default();
 
+        // The body. `row_selectable` so the cursor's row reads as the
+        // blotter's does, `cell_selectable` because the panel's cursor is a
+        // CELL and the component only reports which column was clicked in
+        // that mode, `row_header(false)` so it adds no row-number column
+        // of its own (the row labels are this panel's first column), and
+        // `col_selectable(false)`/`sortable(false)` because a document's
+        // axes are the desk's own order and nothing here sorts them.
+        let table = cx.new(|cx| {
+            TableState::new(MatrixDelegate::new(spec), window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(true)
+                .row_header(false)
+                .loop_selection(false)
+                .col_resizable(true)
+                .col_movable(false)
+                .sortable(false)
+        });
+        // The mouse's half of spec §8.3, in the blotter's shape (a row
+        // double-click there is `space`): a single click on a cell moves
+        // the cursor to it, a double-click on a VALUE cell is
+        // `marketdata::edit` on it. `subscribe_in` rather than `subscribe`
+        // because `begin_edit` needs a `Window` — it creates and focuses an
+        // `InputState`. The `SelectRow`/`SelectColumn` events
+        // `sync_cursor` itself emits are deliberately not matched: they
+        // would re-enter this handler on every cursor move.
+        cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
+            match event {
+                TableEvent::SelectCell(row, col) => {
+                    this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)
+                }
+                TableEvent::DoubleClickedCell(row, col) => {
+                    // A double-click on a row label edits nothing: there is
+                    // no cell there, and the cursor has already moved on the
+                    // single click that preceded it.
+                    if let Some(model_col) = MatrixDelegate::model_col(*col) {
+                        this.cursor_to(*row, Some(model_col), cx);
+                        this.begin_edit(window, cx);
+                        // `edit` is one of `dispatch`'s chrome verbs (it can
+                        // set a notice), and the editor has to reach the
+                        // delegate to be painted at all.
+                        this.changed(cx);
+                        this.sync_cursor(cx);
+                    }
+                }
+                _ => {}
+            }
+        })
+        .detach();
         cx.observe(&frame, |this, frame, cx| {
             // A flip released (Phase 4 §3.10): promote whatever is staged,
             // and do it REGARDLESS of visibility — a panel hidden between
@@ -348,7 +405,7 @@ impl MarketDataTile {
             base_snapshot: None,
             draft,
             cursor: (0, 0),
-            scroll: UniformListScrollHandle::new(),
+            table,
             editor: None,
             find: None,
             notice: None,
@@ -547,7 +604,7 @@ impl MarketDataTile {
     /// generation, the model, the cursor and the scroll. Called by
     /// `deliver` for an un-barriered outcome and by [`Self::promote`] for
     /// a staged one, so the two paths cannot drift.
-    fn apply(&mut self, snapshot: Arc<Snapshot>, _cx: &mut Context<Self>) {
+    fn apply(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
         let as_of = source_time_of(&snapshot);
         // Everything below is decided on a COPY of the draft and built
         // before a single field is committed (M-2, final whole-branch
@@ -631,7 +688,7 @@ impl MarketDataTile {
             // the decision `:rebase` exists to ask for (§8.4).
             if !self.draft.is_behind() {
                 let (_, dropped) = self.draft.rebase(&self.model);
-                self.rebuild_model();
+                self.rebuild_model(cx);
                 // Reported, never pruned in silence — `:rebase` names
                 // every dropped pair on the same situation, and a reader
                 // of §8.7.17 would expect the same disclosure here.
@@ -643,7 +700,13 @@ impl MarketDataTile {
                 }
             }
         }
-        self.sync_scroll();
+        // This method assigns `self.model` itself (the retained-base branch
+        // deliberately keeps the model it already had), so the delivery's
+        // own hand-off to the table happens here — and, being
+        // `install_model`, it refreshes: a new generation can carry a
+        // different node ladder, and the table paints its header from the
+        // column groups `refresh` rebuilds.
+        self.install_model(cx);
     }
 
     /// Apply a staged snapshot, if any — from the `flip` bump in the frame
@@ -716,13 +779,14 @@ impl MarketDataTile {
 
     /// Rebuild the prepared grid. Called on a delivery and on a draft
     /// change — never from `render`.
-    fn rebuild_model(&mut self) {
+    fn rebuild_model(&mut self, cx: &mut Context<Self>) {
         let Some(snapshot) = self.painted_snapshot() else {
             self.model = Rc::new(MatrixModel::empty(
                 self.spec,
                 self.key.as_deref().unwrap_or(&[]),
             ));
             self.clamp_cursor();
+            self.install_model(cx);
             return;
         };
         match MatrixModel::build(&snapshot, self.spec, &self.draft) {
@@ -733,6 +797,27 @@ impl MarketDataTile {
             Err(e) => self.notice = Some(e.into()),
         }
         self.clamp_cursor();
+        self.install_model(cx);
+    }
+
+    /// Hand the current model to the delegate and refresh the table.
+    ///
+    /// **Every model swap ends here**, and the `refresh` is the reason: the
+    /// pinned gpui-component caches each `column()`'s answer in
+    /// `col_groups` at prepare time and paints its HEADER from that cache
+    /// alone, so a document whose node ladder changed would keep the
+    /// previous one's headers (and lay its cells out at the previous
+    /// widths) until something else happened to refresh. The same trap
+    /// CLAUDE.md records for the blotter's gutter.
+    ///
+    /// One `Rc::clone` — a refcount — never the model itself.
+    fn install_model(&mut self, cx: &mut Context<Self>) {
+        let model = Rc::clone(&self.model);
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().model = model;
+            t.refresh(cx);
+        });
+        self.sync_cursor(cx);
     }
 
     /// Keep the cursor inside the grid — a new generation can be shorter
@@ -746,9 +831,46 @@ impl MarketDataTile {
             .min(self.model.columns.len().saturating_sub(1));
     }
 
-    fn sync_scroll(&self) {
-        self.scroll
-            .scroll_to_item(self.cursor.0, ScrollStrategy::Nearest);
+    /// Mirror the cursor and the open editor into the delegate, and move
+    /// the table's own selection to match — which is also what keeps the
+    /// cursor row and column in view (`set_selected_row` and
+    /// `set_selected_col` each scroll, non-strictly, so a cell already on
+    /// screen never jumps).
+    ///
+    /// The column is shifted by one: the table's column 0 is the row-label
+    /// column, which the cursor never enters. The column is set BEFORE the
+    /// row deliberately — each setter switches the component's selection
+    /// mode, and the row highlight is painted only in row mode, so ending
+    /// on the row is what makes the panel read like the blotter (a
+    /// highlighted row plus a bordered cursor cell) rather than painting
+    /// nothing at all.
+    fn sync_cursor(&self, cx: &mut Context<Self>) {
+        let (row, col) = self.cursor;
+        let editor = self.editor.as_ref().map(|e| (e.cell, e.state.clone()));
+        self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            d.cursor = (row, col);
+            d.editor = editor;
+            t.set_selected_col(MatrixDelegate::table_col(col), cx);
+            t.set_selected_row(row, cx);
+            t.scroll_to_row(row, cx);
+        });
+    }
+
+    /// Move the cursor to a clicked cell — the mouse's form of §8.3's
+    /// motions, clamped into the grid. `col: None` is a click on the
+    /// row-label column: the row moves and the column stays, since the
+    /// cursor never enters that column.
+    fn cursor_to(&mut self, row: usize, col: Option<usize>, cx: &mut Context<Self>) {
+        if self.model.rows.is_empty() {
+            return;
+        }
+        self.cursor.0 = row.min(self.model.rows.len().saturating_sub(1));
+        if let Some(col) = col {
+            self.cursor.1 = col.min(self.model.columns.len().saturating_sub(1));
+        }
+        self.sync_cursor(cx);
+        cx.notify();
     }
 
     /// The one door every mutation ends at: re-prepare the header (which
@@ -932,7 +1054,7 @@ impl MarketDataTile {
             }
             _ => return false,
         };
-        self.sync_scroll();
+        self.sync_cursor(cx);
         if chrome {
             self.rebuild_chrome();
         }
@@ -1047,7 +1169,7 @@ impl MarketDataTile {
         self.notice = None;
         // The draft's values are what `MatrixModel::build` paints, so an
         // edit that does not rebuild is an edit nobody can see.
-        self.rebuild_model();
+        self.rebuild_model(cx);
         true
     }
 
@@ -1089,7 +1211,7 @@ impl MarketDataTile {
         }
         self.draft.revert();
         self.leave_behind();
-        self.rebuild_model();
+        self.rebuild_model(cx);
         self.changed(cx);
         Ok(())
     }
@@ -1157,7 +1279,7 @@ impl MarketDataTile {
             })
             .collect();
         self.draft.bump(cells.into_iter(), delta, &base);
-        self.rebuild_model();
+        self.rebuild_model(cx);
         self.changed(cx);
         Ok(())
     }
@@ -1192,7 +1314,7 @@ impl MarketDataTile {
         // showing" — `rebuild_model` only ever WRITES `notice` on a build
         // failure, never clears it on success.
         self.notice = None;
-        self.rebuild_model();
+        self.rebuild_model(cx);
         // A build failure against the newer document means paint that did
         // not happen, which matters more than a report about edits that
         // did land — it wins over the dropped-edit message when both would
@@ -1213,7 +1335,7 @@ impl MarketDataTile {
         }
         self.draft.discard();
         self.leave_behind();
-        self.rebuild_model();
+        self.rebuild_model(cx);
         // `rebuild_model` only ever WRITES `notice` on a build failure, so
         // one already wins by being left in place. On success, clear only
         // the BEHIND-refusal notice — the one thing this verb is itself
@@ -1317,7 +1439,7 @@ impl MarketDataTile {
                 }
             }
         }
-        self.sync_scroll();
+        self.sync_cursor(cx);
         // A plain notify, for MIN-5's reason at this site too: `/` moves
         // the cursor and nothing else, and it does so on every keystroke
         // of the query — re-preparing the header there would format the
@@ -1412,7 +1534,7 @@ impl MarketDataTile {
         // delivery is never the one already asked for.
         self.acted = None;
         self.cursor = (0, 0);
-        self.rebuild_model();
+        self.rebuild_model(cx);
         if self.visible {
             self.requery(cx);
         } else {
@@ -1557,13 +1679,12 @@ impl MarketDataTile {
         self.chips.iter().map(|c| c.text.to_string()).collect()
     }
 
-    /// The row `scroll_to_item` was last asked to show —
-    /// `logical_scroll_top_index` answers from the still-pending deferred
-    /// scroll when one is queued, which is exactly the state right after
-    /// a cursor move and before the next paint consumes it.
+    /// The table this panel's body is — what a test reads the painted
+    /// columns and the mirrored cursor off (`selected_row`/`selected_col`),
+    /// exactly as the blotter's own tests read theirs.
     #[cfg(test)]
-    pub(crate) fn scroll_target(&self) -> usize {
-        self.scroll.logical_scroll_top_index()
+    pub(crate) fn table(&self) -> &Entity<TableState<MatrixDelegate>> {
+        &self.table
     }
 }
 
@@ -1604,8 +1725,9 @@ impl gpui::Render for MarketDataTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         // Copied out of the theme before anything else borrows `cx`, and
-        // `Hsla` is `Copy`: the per-cell decision below is then a compare
-        // and a copy, never a lookup or an allocation.
+        // `Hsla` is `Copy`: the per-chip decision below is then a compare
+        // and a copy, never a lookup or an allocation. (The cells' own
+        // colours are the delegate's, read the same way in `render_td`.)
         let (foreground, muted_foreground, warning, warning_foreground, danger) = (
             theme.foreground,
             theme.muted_foreground,
@@ -1613,7 +1735,7 @@ impl gpui::Render for MarketDataTile {
             theme.warning_foreground,
             theme.danger,
         );
-        let (accent, muted, border) = (theme.accent, theme.muted, theme.border);
+        let border = theme.border;
 
         let stale = self.is_stale(chrono::Utc::now());
         let mut header = h_flex()
@@ -1642,107 +1764,25 @@ impl gpui::Render for MarketDataTile {
             header = header.child(div().text_color(warning).child("stale"));
         }
 
-        let label_w = px(LABEL_WIDTH);
-        let cell_w = px(CELL_WIDTH);
-        // The column strip: a fixed header row above the list, in the
-        // data face so its labels line up with the cells beneath them.
-        let mut strip = h_flex()
-            .w_full()
-            .h(px(20.))
-            .items_center()
-            .px_2()
-            .text_xs()
-            .font_family(fonts::MONO)
-            .text_color(muted_foreground)
-            .border_b_1()
-            .border_color(border)
-            .child(div().w(label_w).child(SharedString::from(self.spec.rows)));
-        for column in &self.model.columns {
-            strip = strip.child(
-                div()
-                    .w(cell_w)
-                    .text_right()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .child(column.clone()),
-            );
-        }
-
-        // One `Rc` clone, one `Option<Entity>` clone and two `usize`s into
-        // the closure — never the model itself (a `MatrixModel` clone
-        // here would reallocate every row on every paint).
-        let model = self.model.clone();
-        // The cell the editor is ON travels with it, rather than the paint
-        // reading the cursor: the two are the same under every binding
-        // (insert mode binds nothing that moves a cursor), but a palette
-        // dispatch can move one under an open editor, and a commit writes
-        // to the cell it OPENED on — so painting at the cursor would show
-        // the input over a cell it is not about to write.
-        let editor = self.editor.as_ref().map(|e| (e.cell, e.state.clone()));
-        let cursor = self.cursor;
-        let list = uniform_list(
-            "marketdata-rows",
-            self.model.rows.len(),
-            move |range, _window, _cx| {
-                range
-                    .map(|i| {
-                        let row = &model.rows[i];
-                        let mut el = h_flex().w_full().px_2().text_xs().child(
-                            div()
-                                .w(label_w)
-                                .font_family(fonts::MONO)
-                                .text_color(foreground)
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(row.label.clone()),
-                        );
-                        for (c, cell) in row.cells.iter().enumerate() {
-                            let at_cursor = (i, c) == cursor;
-                            let mut d = div()
-                                .w(cell_w)
-                                .font_family(fonts::MONO)
-                                .text_right()
-                                .whitespace_nowrap()
-                                .overflow_hidden();
-                            // `sent` is checked first: a sent cell is
-                            // also an edited one (the draft keeps its
-                            // edits until the echo clears them, §9.4),
-                            // and what it needs to say is that it is out
-                            // the door.
-                            d = if at_cursor {
-                                d.bg(accent).text_color(foreground)
-                            } else if cell.sent {
-                                d.bg(muted).text_color(muted_foreground)
-                            } else if cell.edited {
-                                d.bg(warning.opacity(0.25)).text_color(warning_foreground)
-                            } else {
-                                d.text_color(foreground)
-                            };
-                            // The editor is painted IN the cell it edits
-                            // (spec §8.3), and painted is what makes it
-                            // typeable at all (`Editing::state`); every
-                            // other cell paints its text.
-                            el = el.child(match &editor {
-                                Some((at, state)) if *at == (i, c) => d.child(Input::new(state)),
-                                _ => d.child(cell.text.clone()),
-                            });
-                        }
-                        el.into_any_element()
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .track_scroll(&self.scroll)
-        .flex_1()
-        .debug_selector(|| format!("marketdata-rows-{}", self.id.0));
+        // The body: one `DataTable` over this tile's own delegate, in the
+        // blotter's chrome (`Size::XSmall`, unbordered, unstriped) so the
+        // two read as one application — the whole point of the 2026-09-14
+        // ruling. The column strip is the table's own header now, and the
+        // rows, the cell styles and the cell editor are `MatrixDelegate`'s.
+        // `min_h_0` beside `flex_1`: without it the table's own scroll area
+        // cannot shrink below its content and the header scrolls away.
+        let body = div().flex_1().min_h_0().w_full().child(
+            DataTable::new(&self.table)
+                .with_size(Size::XSmall)
+                .bordered(false)
+                .stripe(false),
+        );
 
         v_flex()
             .size_full()
             .debug_selector(|| format!("tile-content-{}", self.id.0))
             .child(header)
-            .child(strip)
-            .child(list)
+            .child(body)
     }
 }
 
@@ -2069,6 +2109,279 @@ mod tests {
             let tag = self.document_request().expect("one request").tag;
             self.deliver(vcx, tag, Arc::new(cvi(BASE)));
         }
+        /// How many columns the table carries: the row-label column plus
+        /// one per value column.
+        fn columns(&self, vcx: &gpui::VisualTestContext) -> usize {
+            self.tile.read_with(vcx, |t, cx| {
+                gpui_component::table::TableDelegate::columns_count(
+                    t.table().read(cx).delegate(),
+                    cx,
+                )
+            })
+        }
+        /// Every column header in order, as the table itself answers.
+        fn headers(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+            self.tile
+                .read_with(vcx, |t, cx| t.table().read(cx).headers(cx))
+        }
+        /// The table's own (row, column) selection — the tile's cursor
+        /// mirrored, in TABLE coordinates (so the column is one to the
+        /// right of the model's). The blotter's tests read `selected_row`
+        /// the same way.
+        fn selection(&self, vcx: &gpui::VisualTestContext) -> (Option<usize>, Option<usize>) {
+            self.tile.read_with(vcx, |t, cx| {
+                let table = t.table().read(cx);
+                (table.selected_row(), table.selected_col())
+            })
+        }
+    }
+
+    fn draw(vcx: &mut gpui::VisualTestContext) {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// Paints the tile and hands back the centre of one painted element by
+    /// its debug selector — the mouse tests below click real bounds, never
+    /// a synthesised event, so a listener that is not actually wired to the
+    /// painted element fails them (the blotter's own `centre_of`).
+    fn centre_of(
+        vcx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> gpui::Point<gpui::Pixels> {
+        draw(vcx);
+        vcx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is painted"))
+            .center()
+    }
+
+    /// A left mouse-down/up pair at `at` carrying `click_count` — gpui's
+    /// own `simulate_click` hardwires a count of 1, and a double-click is
+    /// nothing but the second press of a pair with a count of 2.
+    fn click_at(
+        vcx: &mut gpui::VisualTestContext,
+        at: gpui::Point<gpui::Pixels>,
+        click_count: usize,
+    ) {
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+        });
+    }
+
+    /// The body is gpui-component's table (user ruling 2026-09-14): one
+    /// row-label column carrying the row axis's own name, then one column
+    /// per value column.
+    ///
+    /// The second delivery is the `refresh` probe. `columns_count` reads
+    /// the delegate live, so it moves either way — but the HEADER is
+    /// painted from `TableState`'s cached column groups
+    /// (`prepare_col_groups`, re-run only by `refresh`), so a dropped node
+    /// keeps a header cell unless the model swap refreshed the table.
+    #[gpui::test]
+    fn the_table_shows_one_label_column_plus_the_models_columns(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        assert_eq!(h.columns(&vcx), 1 + NODES.len());
+        assert_eq!(
+            h.headers(&vcx),
+            vec!["term", "-20", "-1", "3.5"],
+            "the row axis's own name, then the node labels in document order"
+        );
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-th-3").is_some(),
+            "the third node's header is painted"
+        );
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&TERMS, &NODES[..2], BASE)),
+        );
+        draw(&mut vcx);
+        assert_eq!(h.columns(&vcx), 3, "a node fewer");
+        assert!(
+            vcx.debug_bounds("marketdata-th-2").is_some(),
+            "two nodes are still painted"
+        );
+        assert!(
+            vcx.debug_bounds("marketdata-th-3").is_none(),
+            "the dropped node's header is gone — every model swap must `refresh` \
+             the table, which is where the painted header comes from"
+        );
+    }
+
+    /// A single click on a value cell moves the cursor there, exactly as
+    /// `j`/`l` would — and the table's own selection follows, since the
+    /// tile's cursor is the truth and the delegate mirrors it.
+    #[gpui::test]
+    fn a_cell_click_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 0));
+
+        // Row 1, the third node: table column 3.
+        let at = centre_of(&mut vcx, "marketdata-cell-1-3");
+        click_at(&mut vcx, at, 1);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            (1, 2),
+            "the click moved the cursor to that cell"
+        );
+        assert_eq!(
+            h.selection(&vcx),
+            (Some(1), Some(3)),
+            "and the table's own selection is the cursor plus the label column"
+        );
+        h.dispatch(&mut vcx, "yank", None);
+        assert_eq!(
+            clipboard(&mut vcx).as_deref(),
+            Some("0.6000"),
+            "the cursor really is on the clicked cell, not merely painted there"
+        );
+    }
+
+    /// The label column is the table's column 0 and the cursor never
+    /// enters it: `h` at the first value column stays put, and a click on
+    /// a row label moves the ROW while leaving the column alone.
+    #[gpui::test]
+    fn the_cursor_never_enters_the_label_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 2));
+        h.dispatch(&mut vcx, "first_col", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 0));
+        h.dispatch(&mut vcx, "left", None);
+        assert_eq!(
+            h.selection(&vcx),
+            (Some(0), Some(1)),
+            "`h` at the first value column stays on it — table column 1, never 0"
+        );
+
+        h.dispatch(&mut vcx, "right", Some(2));
+        let at = centre_of(&mut vcx, "marketdata-cell-1-0");
+        click_at(&mut vcx, at, 1);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            (1, 2),
+            "a click on a row label moves the row and leaves the column where it was"
+        );
+        assert_eq!(h.selection(&vcx), (Some(1), Some(3)));
+    }
+
+    /// A double-click on a value cell is `marketdata::edit` on it — the
+    /// blotter's own shape (a row double-click is `space`). The editor
+    /// opens on the clicked cell, seeded with what that cell reads.
+    #[gpui::test]
+    fn a_double_click_on_a_value_cell_opens_the_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+
+        let at = centre_of(&mut vcx, "marketdata-cell-1-2");
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (1, 1));
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("0.5000"),
+            "the editor opened on the double-clicked cell"
+        );
+        assert_eq!(h.mode(&vcx), "insert");
+
+        // A double-click on a row label opens nothing: there is no cell
+        // there to edit.
+        h.dispatch(&mut vcx, "cancel", None);
+        let at = centre_of(&mut vcx, "marketdata-cell-0-0");
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        assert_eq!(h.editor_value(&vcx), None, "no editor over a row label");
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    /// The delegate mirrors the tile's cursor and its open editor — which
+    /// is where `render_td` reads both from, so the cursor cell's border
+    /// and the in-cell editor are painted off this mirror and nothing
+    /// else. (The border itself is a style, invisible to `debug_bounds`:
+    /// this pins its one input, and the painted border is a display
+    /// check — spec §8.8.7.)
+    #[gpui::test]
+    fn the_delegate_mirrors_the_cursor_and_the_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let mirror = |vcx: &gpui::VisualTestContext| {
+            h.tile.read_with(vcx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                (d.cursor, d.editor.as_ref().map(|(at, _)| *at))
+            })
+        };
+        assert_eq!(mirror(&vcx), ((0, 0), None));
+
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "right", Some(2));
+        assert_eq!(
+            mirror(&vcx),
+            ((1, 2), None),
+            "every cursor move reaches the delegate — in MODEL coordinates"
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(
+            mirror(&vcx),
+            ((1, 2), Some((1, 2))),
+            "and so does the open editor's own cell"
+        );
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(mirror(&vcx), ((1, 2), None), "cancel clears the mirror too");
+    }
+
+    /// The editor is painted IN the cell it edits (spec §8.3), which is
+    /// also what makes it typeable at all: gpui installs a text-input
+    /// handler only for a focused `Input` that has been drawn.
+    #[gpui::test]
+    fn the_editor_is_painted_in_the_cursor_cell(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "right", Some(2));
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-editor-1-3").is_none(),
+            "no editor before `i`"
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-editor-1-3").is_some(),
+            "the editor paints in the cursor cell (row 1, table column 3)"
+        );
+        assert!(
+            vcx.debug_bounds("marketdata-editor-1-2").is_none(),
+            "and in no other cell"
+        );
+
+        h.dispatch(&mut vcx, "cancel", None);
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-editor-1-3").is_none(),
+            "cancel takes it off the tree again"
+        );
     }
 
     /// The `as_of` mutation + `open_flip` a scope-bar as-of change makes,
@@ -2631,15 +2944,16 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.dispatch(&mut vcx, "last_col", None);
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 2));
 
-        // Read the queued scroll inside the same update as the dispatch:
-        // a real draw consumes the deferred `scroll_to_item`, after which
-        // the handle answers the (unsized) test window's own offset.
-        let target = vcx.update(|window, cx| {
-            h.content
-                .dispatch(&ActionId("marketdata::bottom".into()), None, window, cx);
-            h.tile.read(cx).scroll_target()
-        });
-        assert_eq!(target, terms.len() - 1, "G scrolls the last row into view");
+        // The scroll is the table's now: `sync_cursor` sets the selected
+        // row (which scrolls it into view) and the selected column, so the
+        // selection is what a test reads — the blotter's own tests read
+        // `selected_row` exactly this way.
+        h.dispatch(&mut vcx, "bottom", None);
+        assert_eq!(
+            h.selection(&vcx),
+            (Some(terms.len() - 1), Some(MatrixDelegate::table_col(2))),
+            "G moves the table's selected row, which is what scrolls it into view"
+        );
     }
 
     #[gpui::test]

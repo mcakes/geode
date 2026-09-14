@@ -63,24 +63,40 @@ on every slice below.
    is built against a simulator that is a first-class adapter in the
    mould of `--demo`'s generated CSVs. The vendor client is a thin shim
    written later, blind, against a deliberately tiny trait.
-6. **Matrices are painted through a uniform row list — no shared table
-   component, no blotter embedding.** The CVI, repo, dividend,
-   correlation and index-composition panels are a header block plus a
-   matrix whose column set is small and fixed and whose row count is
-   not: a CVI set is a few dozen rows, a dividend schedule for a broad
-   index (Russell 2000) is tens of thousands. Every panel's body is a
-   gpui `uniform_list` over the row axis (fixed row height, only the
-   visible rows laid out, a scroll handle keeping the cursor row in
-   view) with the columns painted as a fixed strip per row; there is
-   no horizontal virtualisation because no sketched document has more
-   than a few dozen columns. An earlier proposal to lift the blotter's
-   table into a shared crate and build these panels on it was rejected
-   as overcomplicating: the data is not aggregatable, and the
-   component's delegate model would fight a draft-diff cell style. An
-   earlier form of this ruling (2026-09-12) said "painted directly, no
-   virtualisation" on the belief that every document was small; the
-   dividend-schedule cardinality (user, 2026-09-13) revised it before
-   the panel was built. The blotter stays exactly as it is.
+6. **Matrices are painted through gpui-component's table, driven by a
+   module-local delegate — no shared Geode table crate, no blotter
+   embedding.** The CVI, repo, dividend, correlation and
+   index-composition panels are a header block plus a matrix whose
+   column set is small and fixed and whose row count is not: a CVI set
+   is a few dozen rows, a dividend schedule for a broad index (Russell
+   2000) is tens of thousands. Every panel's body is a
+   `gpui_component::table::DataTable` over that panel crate's own
+   `TableDelegate` (`geode_marketdata::delegate::MatrixDelegate`),
+   which the component virtualises by row — so the panel gets the
+   blotter's chrome, header, resize handles and row virtualisation
+   without either crate knowing about the other. The delegate paints
+   the row-label column first (pinned left, as the blotter pins its
+   tree column) and one column per value column, and the draft-diff
+   cell style is the delegate's own `render_td`, per cell, with no
+   argument from the component. There is no horizontal virtualisation
+   to arrange, because no sketched document has more than a few dozen
+   columns. The two prohibitions stand: the blotter stays exactly as it
+   is, nothing is lifted out of it into a shared crate, and no panel
+   embeds a blotter — a panel's data is not aggregatable and shares
+   none of the blotter's tree, grouping or attribution vocabulary.
+   **This is the user's ruling of 2026-09-14 ("visually I don't like
+   how the CVI panel looks — we should use gpui-component's datatable
+   here too, for visual unity"), superseding the uniform-row-list form
+   the panel was built to on 2026-09-13.** Two earlier forms are
+   recorded for the record: 2026-09-12's "painted directly, no
+   virtualisation" (revised once the dividend-schedule cardinality was
+   named by the user on 2026-09-13), and 2026-09-13's gpui
+   `uniform_list` with a column strip per row, which shipped in Part 3
+   and is what the 2026-09-14 ruling replaced. The 2026-09-13
+   assumption that "the component's delegate model would fight a
+   draft-diff cell style" was measured and found wrong: `render_td` is
+   per cell, so the edited, sent and cursor styles are exactly as
+   direct there as they were in the hand-painted row.
 7. **Two dataset families, side by side.** Measure datasets keep the
    grain vocabulary untouched. A new *document* family declares an
    identity key, axes and document-level attributes, and is served by a

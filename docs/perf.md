@@ -1445,6 +1445,14 @@ implementation sandbox has no window; the display recipe below is the
 template, in the shape Phase 3's "the painted frame" section used for
 the blotter.
 
+The body is gpui-component's table since the user's ruling of
+2026-09-14 ("visual unity" with the blotter — spec §8.8), so the paint
+being measured is the same component the blotter's own painted-frame
+numbers were taken through: one `render_td` per visible cell over the
+prepared `MatrixModel`, only the visible rows laid out. Nothing above
+changes — `MatrixModel::build` is the same function, called from the
+same two places — and nothing below has been measured yet.
+
 | reading | where read | value |
 | --- | --- | --- |
-| frame time, uniform-list paint over a 10,000-row `Columns::Values` panel, p50/p95/max | perf overlay, counters reset before scrolling | *(template — not yet measured)* |
+| frame time, `DataTable` paint over a 10,000-row `Columns::Values` panel, p50/p95/max | perf overlay, counters reset before scrolling | *(template — not yet measured)* |

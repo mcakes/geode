@@ -10548,9 +10548,9 @@ run_mutation "mddraft: revert while Behind drops the base snapshot" \
   crates/geode-marketdata/src/tile.rs \
   '        self.draft.revert();
         self.leave_behind();
-        self.rebuild_model();' \
+        self.rebuild_model(cx);' \
   '        self.draft.revert();
-        self.rebuild_model();' \
+        self.rebuild_model(cx);' \
   geode-marketdata \
   revert_while_behind_shows_the_newer_document_clean
 
@@ -10687,21 +10687,23 @@ run_mutation "final: an unbuildable delivery changes nothing but the notice" \
 # ahead of every notice `apply` itself writes. Mutated to clear again
 # after the restore block, the dropped-edit report I-2 installed vanishes
 # on the very delivery that produced it.
+# Re-anchored 2026-09-14 (the table body): `apply`'s tail line is now
+# `install_model(cx)` rather than `sync_scroll()`, so the anchor stops at
+# the end of the restore block — same site, same mutation (a late clear
+# after the block), one line shorter.
 run_mutation "final: a notice set while applying a delivery survives it" \
   crates/geode-marketdata/src/tile.rs \
   '                if !dropped.is_empty() && self.notice.is_none() {
                     self.notice = Some(dropped_notice(&dropped).into());
                 }
             }
-        }
-        self.sync_scroll();' \
+        }' \
   '                if !dropped.is_empty() && self.notice.is_none() {
                     self.notice = Some(dropped_notice(&dropped).into());
                 }
             }
         }
-        self.notice = None;
-        self.sync_scroll();' \
+        self.notice = None;' \
   geode-marketdata \
   a_notice_set_while_applying_a_delivery_survives_it
 
@@ -10869,6 +10871,68 @@ run_mutation "objectdialog: the filter-mode footer names the pair that still ste
   '            let _ = &change_group;' \
   geode-shell \
   the_edit_footer_names_only_what_the_selected_row_offers
+
+# ---- The panel body as gpui-component's table (user ruling 2026-09-14) -
+#
+# The market-data panel's body is a `DataTable` over `MatrixDelegate`
+# (spec §8.8), so the four behaviours below are the seam between the
+# tile's own truth (the cursor, the model) and what the component paints.
+
+# Every model swap must `refresh` the table. The component caches each
+# `column()`'s answer in `col_groups` at prepare time and paints its
+# HEADER from that cache alone, so mutated away a delivery whose node
+# ladder changed keeps the PREVIOUS document's column headers — and lays
+# its cells out at the previous widths — with the new numbers underneath
+# them: one document's values read under another's node labels, which is
+# a wrong number at a wrong node rather than a cosmetic defect. The same
+# trap CLAUDE.md records for the blotter's line-number gutter.
+run_mutation "mdtable: a model swap refreshes the table" \
+  crates/geode-marketdata/src/tile.rs \
+  '            t.delegate_mut().model = model;
+            t.refresh(cx);' \
+  '            t.delegate_mut().model = model;' \
+  geode-marketdata \
+  the_table_shows_one_label_column_plus_the_models_columns
+
+# The table's column 0 is the ROW-LABEL column, so the cursor's model
+# column is mirrored one to the right. Mutated to mirror it raw, every
+# selection (and the `scroll_to_col` that rides on it) is off by one: the
+# highlighted column is the one left of the cursor, and the cursor's own
+# column can scroll out of view while the label column is scrolled to.
+run_mutation "mdtable: the cursor mirror skips the label column" \
+  crates/geode-marketdata/src/tile.rs \
+  '            t.set_selected_col(MatrixDelegate::table_col(col), cx);' \
+  '            t.set_selected_col(col, cx);' \
+  geode-marketdata \
+  the_cursor_never_enters_the_label_column
+
+# The same arithmetic in the other direction, on the click path: a
+# clicked TABLE column is translated back to a model column, and column 0
+# (a row label) moves the row alone. Mutated to take the table column as
+# a model column, a click on a row label drags the cursor to the first
+# value column — the cursor entering the one column it must never be in,
+# expressed as a silent column jump under the trader's hand.
+run_mutation "mdtable: a clicked column is translated back through the label column" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)' \
+  '                    this.cursor_to(*row, Some(*col), cx)' \
+  geode-marketdata \
+  the_cursor_never_enters_the_label_column
+
+# The delegate's cursor mirror is what `render_td` paints the cursor
+# cell's border from (and `sync_cursor` is the only writer). Mutated away,
+# the border never moves off (0, 0) however far the cursor travels: the
+# trader's cell reference and the painted cell disagree, which on a grid
+# of numbers is the cell they are about to type into. What this entry
+# proves is the MIRROR, not the painted border — a border is a style, and
+# `debug_bounds` reads geometry only, so the paint itself stays a display
+# check (spec §8.8.7).
+run_mutation "mdtable: the delegate's cursor mirror follows the tile's cursor" \
+  crates/geode-marketdata/src/tile.rs \
+  '            d.cursor = (row, col);' \
+  '            let _ = (row, col);' \
+  geode-marketdata \
+  the_delegate_mirrors_the_cursor_and_the_editor
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

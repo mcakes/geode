@@ -10,17 +10,52 @@
 //! a prepared cell hands a frame its text without allocating.
 //! [`commands`] is the second pure half: the `:` vocabulary.
 //!
-//! [`tile`] and [`content`] are the gpui half: the entity that requests
-//! its document through `DataHandle` and paints it, and the
-//! `TileContent`/`ModuleFactory` pair the shell hosts it through. Cell
-//! editing (insert mode, `:bump`, `:revert`) is Task 7 and the draft
-//! states (`Behind`, `:rebase`, `:discard`) are Task 8; the vocabulary and
-//! the plumbing for both are here, answering which task lands them.
+//! [`tile`], [`delegate`] and [`content`] are the gpui half: the entity
+//! that requests its document through `DataHandle`, the `TableDelegate`
+//! its body is painted through (gpui-component's table, user ruling
+//! 2026-09-14), and the `TileContent`/`ModuleFactory` pair the shell hosts
+//! it through. Cell editing (insert mode, `:bump`, `:revert`) and the
+//! draft states (`Behind`, `:rebase`, `:discard`) are both here; `:upload`
+//! is Part 4, and the vocabulary already answers so.
 
 pub mod commands;
 pub mod content;
 pub mod core;
+pub mod delegate;
 pub mod tile;
 
 pub use content::{ACTIONS, DEFAULT_KEYMAP, MarketDataFactory};
+pub use delegate::MatrixDelegate;
 pub use tile::MarketDataTile;
+
+/// Reclaim `DataTable`'s own key bindings, exactly as `geode_blotter::init`
+/// does and for the same reason (Phase 3 §3.3): this panel's body is a
+/// gpui-component table (user ruling 2026-09-14) which is never given
+/// focus, but a click inside it moves gpui focus there for one frame, and
+/// the component's own `escape`/arrows/`tab` actions must not act during
+/// it — they would fight the panel's `h j k l` and its cell editor.
+///
+/// Deliberately a second copy rather than a call into `geode-blotter`:
+/// this crate must not depend on that one, and binding the same keys to
+/// `NoAction` twice is harmless (the later `bind_keys` simply wins with
+/// the same answer).
+pub fn init(cx: &mut gpui::App) {
+    const CONTEXT: Option<&str> = Some("DataTable");
+    cx.bind_keys(
+        [
+            "escape",
+            "up",
+            "down",
+            "left",
+            "right",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+            "tab",
+            "shift-tab",
+        ]
+        .into_iter()
+        .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, CONTEXT)),
+    );
+}
