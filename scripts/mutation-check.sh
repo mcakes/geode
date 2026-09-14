@@ -10408,17 +10408,20 @@ run_mutation "mddraft: Behind paints the base, not the newer document" \
 # the edits stay at their OLD, now-stale grid indices — which
 # `rebuild_model` then paints straight into the newer document's actual
 # shape: a wrong value in a cell the edit was never about.
+# Re-anchored (fix round 1, MIN-4): the `.expect(..)` this originally
+# mutated became `.ok_or_else(..)?` (an invariant break now reads as a
+# `:`-line refusal, not a crash) — same site, same meaning, same test.
 run_mutation "mddraft: rebase resolves labels against the newer document" \
   crates/geode-marketdata/src/tile.rs \
   '        let snapshot = self
             .snapshot
             .clone()
-            .expect("`Behind` implies a newer generation was delivered");' \
+            .ok_or_else(|| NOT_BEHIND.to_string())?;' \
   '        let snapshot = self
             .base_snapshot
             .clone()
             .or_else(|| self.snapshot.clone())
-            .expect("`Behind` implies a newer generation was delivered");' \
+            .ok_or_else(|| NOT_BEHIND.to_string())?;' \
   geode-marketdata \
   rebase_reapplies_edits_by_label_and_reports_dropped_ones
 
@@ -10453,6 +10456,25 @@ run_mutation "mddraft: editing is refused while the draft is behind" \
         }' \
   geode-marketdata \
   edit_and_bump_are_refused_while_behind
+
+# Fix round 1 (review IMPORTANT): `:revert` while `Behind` is `Clean`
+# afterwards (`Draft::revert`'s own doing), and `Clean` means "on the live
+# document" — so `revert` must drop `base_snapshot` too, or the panel
+# keeps painting the base generation with no draft left to explain it, and
+# `:rebase`/`:discard` are both refused (there is no draft to move or
+# drop): the only way out left would be a `:key` retype or the next
+# delivery. Mutated away, `leave_behind()` is skipped and the stale
+# `base_snapshot` survives the revert. Anchored on the whole three-line
+# body: `self.leave_behind();` alone appears in `rebase`/`discard` too.
+run_mutation "mddraft: revert while Behind drops the base snapshot" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.draft.revert();
+        self.leave_behind();
+        self.rebuild_model();' \
+  '        self.draft.revert();
+        self.rebuild_model();' \
+  geode-marketdata \
+  revert_while_behind_shows_the_newer_document_clean
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

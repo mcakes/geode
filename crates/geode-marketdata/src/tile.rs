@@ -974,14 +974,36 @@ impl MarketDataTile {
     /// `:revert` (spec §8.4) — drop every edit. The document's own numbers
     /// are back on the same keystroke, so the only thing worth reporting is
     /// the nothing-to-do case.
+    ///
+    /// **Controller ruling 2026-09-14:** a draft emptied by `:revert` while
+    /// `Behind` is `Clean` afterwards — `Draft::revert`'s own doing — and
+    /// `Clean` means "on the live document". `leave_behind()` makes that
+    /// true of the PANEL too: without it, `base_snapshot` stayed set with
+    /// no draft left to explain it, the panel kept painting a generation
+    /// the header no longer said anything about, and `:rebase`/`:discard`
+    /// were both refused (there is no draft to move or drop) — the only
+    /// way out was a `:key` retype or waiting for the next delivery.
     fn revert(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         if self.draft.is_empty() {
             return Err("no edits to revert".to_string());
         }
         self.draft.revert();
+        self.leave_behind();
         self.rebuild_model();
         self.changed(cx);
         Ok(())
+    }
+
+    /// Drop whatever generation was retained under `Behind` so the next
+    /// [`Self::rebuild_model`] paints the newest delivered one instead.
+    ///
+    /// The one door both `:discard` and a `:revert` that empties a
+    /// `Behind` draft leave through — harmless to call when the draft was
+    /// never `Behind` (`base_snapshot` is already `None`), which is why
+    /// `revert` above calls it unconditionally rather than guarding on
+    /// `is_behind()` first.
+    fn leave_behind(&mut self) {
+        self.base_snapshot = None;
     }
 
     /// `:bump <delta> [row|col]` — add `delta` to every cell along the
@@ -1055,19 +1077,29 @@ impl MarketDataTile {
         if !self.draft.is_behind() {
             return Err(NOT_BEHIND.to_string());
         }
+        // Not `.expect(..)`: `Behind` implies a newer generation was
+        // delivered, but this is a render-thread module, and an invariant
+        // break here must read as a `:`-line refusal, never a crash.
         let snapshot = self
             .snapshot
             .clone()
-            .expect("`Behind` implies a newer generation was delivered");
+            .ok_or_else(|| NOT_BEHIND.to_string())?;
         let newer_model = MatrixModel::build(&snapshot, self.spec, &Draft::default())?;
         let (_, dropped) = self.draft.rebase(&newer_model);
-        self.base_snapshot = None;
-        self.notice = if dropped.is_empty() {
-            None
-        } else {
-            Some(dropped_notice(&dropped).into())
-        };
+        self.leave_behind();
+        // Cleared before the rebuild so the check below can tell "this
+        // rebuild set its own error" from "something else was already
+        // showing" — `rebuild_model` only ever WRITES `notice` on a build
+        // failure, never clears it on success.
+        self.notice = None;
         self.rebuild_model();
+        // A build failure against the newer document means paint that did
+        // not happen, which matters more than a report about edits that
+        // did land — it wins over the dropped-edit message when both would
+        // apply, by simply arriving second and this check yielding to it.
+        if self.notice.is_none() && !dropped.is_empty() {
+            self.notice = Some(dropped_notice(&dropped).into());
+        }
         self.changed(cx);
         Ok(())
     }
@@ -1080,9 +1112,16 @@ impl MarketDataTile {
             return Err(NOT_BEHIND.to_string());
         }
         self.draft.discard();
-        self.base_snapshot = None;
-        self.notice = None;
+        self.leave_behind();
         self.rebuild_model();
+        // `rebuild_model` only ever WRITES `notice` on a build failure, so
+        // one already wins by being left in place. On success, clear only
+        // the BEHIND-refusal notice — the one thing this verb is itself
+        // the escape from — and leave anything else (a delivery error,
+        // say) alone: it has nothing to do with discarding a draft.
+        if self.notice.as_deref() == Some(BEHIND_REFUSED) {
+            self.notice = None;
+        }
         self.changed(cx);
         Ok(())
     }
@@ -2953,6 +2992,63 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.command(&mut vcx, "revert"),
             Err("no edits to revert".to_string()),
             "a second revert has nothing to do and says so"
+        );
+    }
+
+    /// Controller ruling 2026-09-14: `:revert` while `Behind` reduces to
+    /// `:discard` — `Clean` means "on the live document" — so the newer
+    /// document paints, not the base the edits were made against with
+    /// nothing left to explain why.
+    #[gpui::test]
+    fn revert_while_behind_shows_the_newer_document_clean(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+
+        h.command(&mut vcx, "revert").expect("an edit to clear");
+
+        let (state, rows, cell) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+            )
+        });
+        assert_eq!(state, DraftState::Clean);
+        assert_eq!(
+            rows, 1,
+            "the newer document, not the base, is now on screen"
+        );
+        assert_eq!(cell.text.to_string(), "0.1000", "the document's own value");
+        assert!(!cell.edited);
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        assert!(
+            !chips
+                .iter()
+                .any(|c| c.contains("edit") || c.contains("newer")),
+            "nothing left to explain a generation that is no longer retained: {chips:?}"
+        );
+        // Both are now refused again — there is no draft to move or drop.
+        assert_eq!(
+            h.command(&mut vcx, "rebase"),
+            Err("nothing to rebase — the draft is on the live document".to_string())
+        );
+        assert_eq!(
+            h.command(&mut vcx, "discard"),
+            Err("nothing to rebase — the draft is on the live document".to_string())
         );
     }
 
