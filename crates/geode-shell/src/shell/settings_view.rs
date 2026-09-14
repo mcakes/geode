@@ -926,7 +926,10 @@ fn build(
     // are inert right now is exactly the lie the mode pill exists to
     // prevent. `tab`/`shift+tab` step in both modes but are shown only
     // in filter mode, where they are the only stepping keys; normal mode
-    // shows `space`, the shared vocabulary's step.
+    // shows `space`/`shift+space` and, since the 2026-09-13 ruling,
+    // `l`/`h` — the vim pair a hand already reaches for beside `j`/`k`,
+    // and the two keys that are letters in filter mode and so cannot be
+    // named there.
     let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = match state.mode {
         DialogMode::Normal => (
             vec![
@@ -942,8 +945,10 @@ fn build(
             ],
             vec![
                 chip("space"),
+                chip("l"),
                 sep("next value ·"),
                 chip("shift+space"),
+                chip("h"),
                 sep("previous value ·"),
                 chip("/"),
                 sep("filter ·"),
@@ -1368,6 +1373,24 @@ mod tests {
             Drop,
             "still claimed — see handle_key"
         );
+    }
+
+    /// User ruling 2026-09-13: `h`/`l` step too — in NORMAL mode only.
+    /// They arrive through [`dialogmode::normal_command`], which is the
+    /// whole reason this dialog needs no arm of its own for them; the
+    /// half that matters here is the half that must NOT happen, since
+    /// `h` and `l` are ordinary letters a trader types into the filter
+    /// (`shell` and `colour` both hold one) and a step there would
+    /// change a setting under them.
+    #[test]
+    fn h_and_l_step_in_normal_mode_and_type_in_filter_mode() {
+        use KeyAction::*;
+        let n = DialogMode::Normal;
+        assert_eq!(route(n, true, &bare("l")), Step(StepDirection::Right));
+        assert_eq!(route(n, true, &bare("h")), Step(StepDirection::Left));
+        let f = DialogMode::Filter;
+        assert_eq!(route(f, false, &bare("l")), PassThrough, "l types");
+        assert_eq!(route(f, false, &bare("h")), PassThrough, "h types");
     }
 
     /// The keys both modes share: `tab`/`shift+tab` step and the
