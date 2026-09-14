@@ -252,6 +252,24 @@ pub fn check_batch_pattern(pattern: &str) -> Result<(), String> {
 /// `sources.<name>[.<key>]` (§19.5): `key` is the deepest field the call
 /// site honestly knows — `None` only for "not a table", where there is no
 /// field to point into at all.
+fn diag(
+    severity: Severity,
+    name: &str,
+    key: Option<&str>,
+    m: impl std::fmt::Display,
+) -> Diagnostic {
+    Diagnostic {
+        severity,
+        layer: None,
+        file: None,
+        message: format!("source '{name}': {m}"),
+        path: Some(match key {
+            Some(k) => format!("sources.{name}.{k}"),
+            None => format!("sources.{name}"),
+        }),
+    }
+}
+
 /// Validates one `topics` entry against the Solace grammar the matcher in
 /// `geode_data::adapter::topic::topic_matches` runs at message time (that
 /// matcher stays in `geode-data` — it is the hot per-message path and has
@@ -281,24 +299,6 @@ fn validate_topic_pattern(pattern: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn diag(
-    severity: Severity,
-    name: &str,
-    key: Option<&str>,
-    m: impl std::fmt::Display,
-) -> Diagnostic {
-    Diagnostic {
-        severity,
-        layer: None,
-        file: None,
-        message: format!("source '{name}': {m}"),
-        path: Some(match key {
-            Some(k) => format!("sources.{name}.{k}"),
-            None => format!("sources.{name}"),
-        }),
-    }
 }
 
 /// Reads a duration-with-unit key, warning and falling back to `default`
