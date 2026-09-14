@@ -10912,10 +10912,14 @@ run_mutation "mdtable: the cursor mirror skips the label column" \
 # a model column, a click on a row label drags the cursor to the first
 # value column — the cursor entering the one column it must never be in,
 # expressed as a silent column jump under the trader's hand.
+# Re-anchored 2026-09-14 (controller ruling: a double-click only moves the
+# cursor, so the `DoubleClickedCell` arm is gone and the one remaining
+# `SelectCell` arm is an `if let` at one indent less) — same site, same
+# mutation, and now the only click path there is.
 run_mutation "mdtable: a clicked column is translated back through the label column" \
   crates/geode-marketdata/src/tile.rs \
-  '                    this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)' \
-  '                    this.cursor_to(*row, Some(*col), cx)' \
+  '                this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)' \
+  '                this.cursor_to(*row, Some(*col), cx)' \
   geode-marketdata \
   the_cursor_never_enters_the_label_column
 

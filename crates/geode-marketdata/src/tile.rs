@@ -330,34 +330,28 @@ impl MarketDataTile {
                 .col_movable(false)
                 .sortable(false)
         });
-        // The mouse's half of spec §8.3, in the blotter's shape (a row
-        // double-click there is `space`): a single click on a cell moves
-        // the cursor to it, a double-click on a VALUE cell is
-        // `marketdata::edit` on it. `subscribe_in` rather than `subscribe`
-        // because `begin_edit` needs a `Window` — it creates and focuses an
-        // `InputState`. The `SelectRow`/`SelectColumn` events
-        // `sync_cursor` itself emits are deliberately not matched: they
-        // would re-enter this handler on every cursor move.
-        cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
-            match event {
-                TableEvent::SelectCell(row, col) => {
-                    this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)
-                }
-                TableEvent::DoubleClickedCell(row, col) => {
-                    // A double-click on a row label edits nothing: there is
-                    // no cell there, and the cursor has already moved on the
-                    // single click that preceded it.
-                    if let Some(model_col) = MatrixDelegate::model_col(*col) {
-                        this.cursor_to(*row, Some(model_col), cx);
-                        this.begin_edit(window, cx);
-                        // `edit` is one of `dispatch`'s chrome verbs (it can
-                        // set a notice), and the editor has to reach the
-                        // delegate to be painted at all.
-                        this.changed(cx);
-                        this.sync_cursor(cx);
-                    }
-                }
-                _ => {}
+        // The mouse's whole part in this panel: a click selects a cell.
+        // The cursor moves to it, and that is all — a click on the
+        // row-label column moves the row and leaves the column alone, and a
+        // DOUBLE-click does exactly what the single click already did.
+        //
+        // **Editing is keyboard-only** (`i`/`enter`), by controller ruling
+        // 2026-09-14: every tile mouse-down re-arms the shell's
+        // `pending_focus_restore` (CLAUDE.md's focus rule), which the next
+        // `ShellView::render` consumes by focusing the shell root — so an
+        // editor opened from a mouse event would lose the keyboard on the
+        // very next frame. Whether an occupant may deliberately keep focus
+        // through that restore is a shell-side decision, deferred; until it
+        // is made, this panel does not offer an affordance it cannot honour,
+        // which is why `TableEvent::DoubleClickedCell` is not matched here
+        // (and no `subscribe_in`/`Window` is needed for what is left).
+        //
+        // `SelectRow`/`SelectColumn` are deliberately not matched either:
+        // `sync_cursor` emits both, so matching them would re-enter this
+        // handler on every cursor move.
+        cx.subscribe(&table, |this, _, event: &TableEvent, cx| {
+            if let TableEvent::SelectCell(row, col) = event {
+                this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)
             }
         })
         .detach();
@@ -2285,33 +2279,46 @@ mod tests {
         assert_eq!(h.selection(&vcx), (Some(1), Some(3)));
     }
 
-    /// A double-click on a value cell is `marketdata::edit` on it — the
-    /// blotter's own shape (a row double-click is `space`). The editor
-    /// opens on the clicked cell, seeded with what that cell reads.
+    /// A double-click does what the single click already did — move the
+    /// cursor — and opens NO editor (controller ruling 2026-09-14).
+    ///
+    /// Editing is keyboard-only because a mouse-opened editor could not
+    /// keep the keyboard: every tile mouse-down re-arms the shell's
+    /// `pending_focus_restore`, and the next render focuses the shell root.
+    /// Offering a double-click that opened an editor which then went deaf
+    /// would be a broken affordance, so the panel does not offer it; `i`
+    /// and `enter` are the edit keys, and this test is what stops a future
+    /// change from reintroducing the mapping quietly.
     #[gpui::test]
-    fn a_double_click_on_a_value_cell_opens_the_editor(cx: &mut gpui::TestAppContext) {
+    fn a_double_click_only_moves_the_cursor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
 
         let at = centre_of(&mut vcx, "marketdata-cell-1-2");
         click_at(&mut vcx, at, 1);
         click_at(&mut vcx, at, 2);
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (1, 1));
         assert_eq!(
-            h.editor_value(&vcx).as_deref(),
-            Some("0.5000"),
-            "the editor opened on the double-clicked cell"
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            (1, 1),
+            "the cursor moved to the clicked cell"
         );
-        assert_eq!(h.mode(&vcx), "insert");
-
-        // A double-click on a row label opens nothing: there is no cell
-        // there to edit.
-        h.dispatch(&mut vcx, "cancel", None);
-        let at = centre_of(&mut vcx, "marketdata-cell-0-0");
-        click_at(&mut vcx, at, 1);
-        click_at(&mut vcx, at, 2);
-        assert_eq!(h.editor_value(&vcx), None, "no editor over a row label");
+        assert_eq!(
+            h.editor_value(&vcx),
+            None,
+            "and no editor opened — editing is `i`/`enter` only"
+        );
         assert_eq!(h.mode(&vcx), "normal");
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, cx| t.table().read(cx).delegate().editor.is_none()),
+            "nothing to paint in the cell either"
+        );
+
+        // The keyboard still opens one on that same cell, so the cell the
+        // mouse chose is the cell `i` edits.
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.5000"));
+        assert_eq!(h.mode(&vcx), "insert");
     }
 
     /// The delegate mirrors the tile's cursor and its open editor — which

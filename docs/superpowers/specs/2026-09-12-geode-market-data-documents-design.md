@@ -1143,14 +1143,15 @@ are all untouched; what changed is what paints the grid.
    `row_header(false)` is what makes the component report WHICH COLUMN
    a click landed in (`TableEvent::SelectCell`), and it adds no row-number
    column of its own; `col_selectable(false)` and `sortable(false)`
-   because a document's axes are the desk's own order. A single click
-   moves the cursor (a click on a row label moves the row and leaves
-   the column alone); a double-click on a value cell is
-   `marketdata::edit` on it, through the same `begin_edit` the keyboard
-   uses. The subscription is `cx.subscribe_in` (not `subscribe`)
-   because `begin_edit` needs a `Window`, and it deliberately does not
-   match `SelectRow`/`SelectColumn` — `sync_cursor` emits both, so
-   matching them would re-enter the handler on every cursor move.
+   because a document's axes are the desk's own order. **A mouse click
+   selects a cell and does nothing else**: the cursor moves there, a
+   click on a row label moves the row and leaves the column alone, and a
+   double-click does exactly what the single click already did (item 6
+   is why). `TableEvent::DoubleClickedCell` is therefore not matched, and
+   `SelectRow`/`SelectColumn` are not matched either — `sync_cursor`
+   emits both, so matching them would re-enter the handler on every
+   cursor move. A plain `cx.subscribe` suffices, since nothing in the
+   handler needs a `Window`.
 5. **`geode_marketdata::init` binds the `DataTable` context's keys to
    `NoAction`, exactly as `geode_blotter::init` does**, and `main.rs`
    calls it beside the blotter's. A second copy rather than a shared
@@ -1159,18 +1160,26 @@ are all untouched; what changed is what paints the grid.
    table is never focused, `close_editor` still blurs then drops, and
    `key_context` still reports `insert` exactly while `editor` is
    `Some`.
-6. **Known, and not fixed here: an editor opened by double-click is
-   not typeable in the real app.** Every tile mouse-down re-arms the
-   shell's `pending_focus_restore` (CLAUDE.md's focus rule), which the
-   next `ShellView::render` consumes by focusing the shell root — so
-   the `Input` that `begin_edit` just focused is blurred a frame later,
-   and the panel is left in the state `the_insert_branch_needs_the_tile_
-   to_hold_focus_not_just_insert_mode` (`geode-shell`) already pins as
-   legitimate: the editor is open, the matcher governs the keyboard,
-   and `escape` cancels. The keyboard path (`i`/`enter`) is unaffected,
-   since no mouse-down arms the restore. Making the mouse path typeable
-   needs a shell-side decision about an occupant that deliberately
-   takes focus, which is outside this bounded change.
+6. **Editing is keyboard-only, by controller ruling 2026-09-14: the
+   mouse selects a cell, `i`/`enter` edit it.** A double-click was
+   briefly wired to `marketdata::edit` and was withdrawn before review,
+   because the editor it opened could not keep the keyboard: every tile
+   mouse-down re-arms the shell's `pending_focus_restore` (CLAUDE.md's
+   focus rule), which the next `ShellView::render` consumes by focusing
+   the shell root, so the `Input` `begin_edit` had just focused went
+   deaf on the following frame — the state `geode-shell`'s own
+   `the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode`
+   pins as legitimate (the editor stays open, the matcher governs the
+   keyboard, `escape` cancels). A panel does not offer an affordance it
+   cannot honour, and documenting one as broken is worse than not
+   shipping it. Whether a tile occupant may deliberately hold focus
+   through that restore is a shell-side focus decision, **deferred** —
+   not a panel limitation to work around from inside a module. Should it
+   be made, reinstating the mapping is one more arm in the `TableEvent`
+   subscription (`DoubleClickedCell` -> `begin_edit`, which needs
+   `cx.subscribe_in` for its `Window`), and
+   `a_double_click_only_moves_the_cursor` is the test that would have to
+   change with it.
 7. **Display checks are pending on a real window**, as §8.7.21's are —
    and this change adds to that list rather than clearing any of it:
    the table body's own chrome next to a blotter's, the cursor cell's
