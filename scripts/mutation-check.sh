@@ -4211,18 +4211,40 @@ run_mutation "objectdialog: a user doc created in memory carries no config_versi
   geode-shell \
   the_watchers_reload_of_our_own_write_changes_nothing
 
-# The one edit that still asks first. Forking is instant and irreversible
-# in the direction that matters — a user-layer copy of a desk view stops
-# receiving the desk's changes — and applying it without the confirm is
-# green against every test that only checks the value landed: it DID
-# land, in the user's own `views.toml`, weeks before anyone notices the
-# desk's new column never arrived.
-run_mutation "objectdialog: a definitional change forks without asking" \
+# A fork no longer asks (user ruling 2026-09-14) — it is applied on the
+# keystroke and ANNOUNCED, because a user-layer copy of a desk view stops
+# receiving the desk's changes and the trader has to be told that on the
+# keystroke rather than weeks later. Two halves, each with its own entry.
+# Silencing the notice is green against every test that only checks the
+# value landed (it DID land, in the user's own `views.toml`); only a test
+# reading the notice can see it.
+run_mutation "objectdialog: a fork says nothing" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if super::apply::would_fork(shell, domain) {' \
-  '    if false {' \
+  '    let fork =
+        super::apply::would_fork(shell, domain).then(|| super::apply::fork_notice(shell, domain));' \
+  '    let fork: Option<String> = None;' \
   geode-shell \
-  a_definitional_change_to_a_desk_view_confirms_before_forking
+  a_definitional_change_to_a_desk_view_forks_and_says_so
+
+# And the other half: reinstating a confirm in front of the fork — the
+# behaviour the ruling removed. Every test that flushes and reads the
+# file back would hang on an unanswered question rather than fail
+# cleanly, so the named test asserts the write is QUEUED on the keystroke
+# and no confirm is armed.
+run_mutation "objectdialog: a fork asks first" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    match super::apply::commit_edit(shell, cx) {
+        Some(refusal) => set_notice(shell, refusal),' \
+  '    if fork.is_some() {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Overwrite);
+        }
+        return;
+    }
+    match super::apply::commit_edit(shell, cx) {
+        Some(refusal) => set_notice(shell, refusal),' \
+  geode-shell \
+  a_definitional_change_to_a_desk_view_forks_and_says_so
 
 # Spec §7.1's no-carry-forward rule means `reload::decide` rejects any
 # config holding an error diagnostic, so an error-severity edit that
@@ -4234,7 +4256,7 @@ run_mutation "objectdialog: a definitional change forks without asking" \
 # refuse. Every other objectdialog test stays green (none of them ever
 # put an error diagnostic on a draft); only a test that does can see it.
 # `blocking_diagnostic` (apply.rs) is the one check both call sites into
-# `commit_edit` share (render.rs's `commit_or_confirm` peeks it early for
+# `commit_edit` share (render.rs's `commit_change` once peeked it early for
 # UX; `commit_edit` itself checks it again, unconditionally). Disabling
 # it here disables the gate everywhere at once — this is CI's regression
 # test for the whole rule, not just one caller of it.
@@ -4342,21 +4364,21 @@ run_mutation "config: check_object_name refuses config_version" \
 # the same indent, and the bare-line anchor stopped being unique the
 # moment that sibling method existed.
 #
-# Re-anchored again for §18.8 (2026-09-12): the mode is now a two-armed
-# `if` keyed on the domain, and the mutation keeps Groupings' `Filter`
-# arm — a slot still opens in its chain field, so every Groupings test
-# stays green — while letting every other domain inherit whatever mode
-# browse was in, which is exactly the old defect.
+# Re-anchored again on 2026-09-14, when the chain-field landing was
+# reversed by user ruling and the mode went back to one bare
+# `DialogMode::Normal` line: the anchor carries the closing `};` of
+# `enter_edit`'s own `Stage::Edit` literal above `self.query.clear()`,
+# which neither `enter_edit_with` (`self.draft = …` sits there) nor
+# `cancel_naming` (`self.stage = Stage::Browse;`) has, and the mutation
+# drops the assignment so the stage inherits whatever mode browse was in
+# — exactly the old defect.
 run_mutation "objectdialog: the edit stage inherits the browse filter's mode" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        self.mode = if opens_in_chain_field {
-            DialogMode::Filter
-        } else {
-            DialogMode::Normal
-        };' \
-  '        if opens_in_chain_field {
-            self.mode = DialogMode::Filter;
-        }' \
+  '        };
+        self.query.clear();
+        self.mode = DialogMode::Normal;' \
+  '        };
+        self.query.clear();' \
   geode-shell \
   an_object_opened_from_filter_mode_still_escapes_back_a_stage
 
@@ -6083,7 +6105,7 @@ run_mutation "pool: the refusal warning is latched once per worker" \
 # what `shift+space` maps to.
 run_mutation "dialogmode: shift+space maps to nothing (forward-only restored)" \
   crates/geode-shell/src/dialogmode.rs \
-  '            "space" => Some(NormalCommand::ToggleBack),' \
+  '            "space" | "tab" => Some(NormalCommand::ToggleBack),' \
   '' \
   geode-shell shift_space_steps_a_value_backward
 
@@ -6201,8 +6223,8 @@ run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" 
 # MIN-1: `commit_edit` resolves the user directory BEFORE it moves the
 # draft's baseline. Marking the draft saved on the way out of a shell with
 # nowhere to write makes an unqueued value the baseline, and a later
-# declined `Confirm::Fork` then reverts onto a value that was never
-# applied and never persisted. Needs `user_dir: None`, which only one
+# later commit then treats a value that was never applied and never
+# persisted as accounted for. Needs `user_dir: None`, which only one
 # fixture in the suite has.
 #
 # Re-anchored on the preceding "Before the baseline moves" comment (Task
@@ -6214,18 +6236,18 @@ run_mutation "objectdialog: a shell with nowhere to write still marks the draft 
   '    // **Before the baseline moves.** A shell with nowhere to write queues
     // nothing, so nothing has been accounted for and the draft must stay
     // dirty: a `mark_saved()` here would make the unqueued value the
-    // baseline, and a later declined `Confirm::Fork` would then
-    // `revert_to_baseline` onto a forked value that was never applied and
-    // never persisted — exactly what `cancel_confirm` exists to prevent.
+    // baseline, and the revert of a failed write (`revert_failed_write`)
+    // or a later successful commit would then treat a value that was
+    // never applied and never persisted as accounted for.
     let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };' \
   '    // **Before the baseline moves.** A shell with nowhere to write queues
     // nothing, so nothing has been accounted for and the draft must stay
     // dirty: a `mark_saved()` here would make the unqueued value the
-    // baseline, and a later declined `Confirm::Fork` would then
-    // `revert_to_baseline` onto a forked value that was never applied and
-    // never persisted — exactly what `cancel_confirm` exists to prevent.
+    // baseline, and the revert of a failed write (`revert_failed_write`)
+    // or a later successful commit would then treat a value that was
+    // never applied and never persisted as accounted for.
     let user_dir = match shell.user_dir.clone() {
         Some(dir) => dir,
         None => {
@@ -6248,10 +6270,10 @@ run_mutation "objectdialog: a shell with nowhere to write still marks the draft 
 # a scope that really differs.
 run_mutation "objectdialog: a confirmed o that changes nothing says nothing" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            revalidate(shell);
-            if !changed {' \
-  '            revalidate(shell);
-            if false {' \
+  '    revalidate(shell);
+    let queued = if !changed {' \
+  '    revalidate(shell);
+    let queued = if false {' \
   geode-shell o_on_a_scope_that_already_matches_the_frame_says_so
 
 # The review's one missing entry, smaller than MAJ-1: `commit_removal`
@@ -6308,47 +6330,50 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
 # from `draft.source` and never fed back into `to_table`), and its one
 # new verb: `o` overwrites the saved scope under the cursor with the
 # frame's current one. Two properties nothing else in this suite can
-# see: that `o` asks before acting (the same "confirm, not immediate"
-# shape `d`/`r`/the fork question all share, but this is the one test
-# that exercises *this* verb's own arm/confirm wiring), and that the
-# write lands in `scopes.toml` rather than in the frame it reads from.
+# see: that `o` on a USER-owned scope asks before acting (the same
+# "confirm, not immediate" shape `d`/`r` share — since the 2026-09-14
+# ruling a desk-owned scope writes at once instead, so the fixture is the
+# user-owned one), and that the write lands in `scopes.toml` rather than
+# in the frame it reads from.
 
-run_mutation "objectdialog: o overwrites immediately instead of asking first" \
+run_mutation "objectdialog: o overwrites a user-owned scope instead of asking first" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  "        NormalCommand::Verb('o') => arm_overwrite(shell)," \
-  "        NormalCommand::Verb('o') => {
-            arm_overwrite(shell);
-            let armed = shell
-                .object_dialog
-                .as_ref()
-                .and_then(|state| state.draft.as_ref())
-                .and_then(|draft| draft.confirm);
-            if let Some(confirm) = armed {
-                disarm_confirm(shell);
-                run_confirmed(shell, confirm, window, cx);
-            }
-        }" \
+  '    if !forks {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Overwrite);
+        }
+        return;
+    }' \
+  '    if false {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Overwrite);
+        }
+        return;
+    }' \
   geode-shell o_confirms_before_overwriting
 
 run_mutation "objectdialog: o writes the frame instead of the saved scope" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            let changed = draft_mut(shell).is_some_and(|draft| {
-                scopes::overwrite_with(draft, &scope);
-                draft.is_dirty()
-            });' \
-  '            let changed = true;
-            shell.frame.update(cx, |f, _| {
-                f.set_scope(scope.clone());
-            });' \
+  '    let changed = draft_mut(shell).is_some_and(|draft| {
+        scopes::overwrite_with(draft, &scope);
+        draft.is_dirty()
+    });' \
+  '    let changed = true;
+    shell.frame.update(cx, |f, _| {
+        f.set_scope(scope.clone());
+    });' \
   geode-shell o_overwrites_the_saved_scope_with_the_frames_current_one
 
 # ---- Phase 4c part 2a, Task 5 review round 1: fork disclosure + -------
 # ---- source-based dirtiness --------------------------------------------
 #
 # The Major: `o` used to fork a desk-owned scope into the user layer with
-# no disclosure at all — `arm_overwrite` decides `forks` from whether the
-# user layer already owns the object, independently of the prompt it
-# feeds, so this is the one line that decision collapses to.
+# no disclosure at all. `overwrite_scope` decides `forks` from whether
+# the user layer already owns the object, and since the 2026-09-14
+# ruling that decision is "write at once and announce the fork" versus
+# "ask, since the previous selection is lost" — so this is the one line
+# both the disclosure and the no-confirm land on: mutated, a desk-owned
+# scope asks instead of writing, and nothing is announced.
 #
 # The Minor: `is_dirty`/`writes_by_destination` used to compare only the
 # painted `Selects`/`Text filter` summaries, which are lossy on purpose
@@ -6357,11 +6382,11 @@ run_mutation "objectdialog: o writes the frame instead of the saved scope" \
 # comparison would call that pair "no change" and `o` would silently
 # refuse to write. Comparing `source` (the actual object) closes it.
 
-run_mutation "objectdialog: o discloses no fork for a desk-owned scope" \
+run_mutation "objectdialog: o asks before forking a desk-owned scope" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    let forks = editing_row(shell).is_some_and(|row| row.layer != Some(Layer::User));' \
   '    let forks = false;' \
-  geode-shell o_on_a_desk_owned_scope_discloses_the_fork_before_writing
+  geode-shell o_on_a_desk_owned_scope_forks_without_asking_and_says_so
 
 run_mutation "objectdialog: is_dirty ignores a source-only change" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -6979,39 +7004,26 @@ run_mutation "objectdialog: an edit-stage click takes the keyboard off the filte
 
 # `space` promotes a row to the END of the member block — a screenful
 # away on a list that scrolls — so the cursor has to be scrolled back
-# into view, exactly as `shift+j`'s own arm does. Anchored from the
-# `Toggle` arm's head because `ToggleBack`'s body below is character-for-
-# character identical.
-run_mutation "objectdialog: space moves the cursor off screen and leaves it there" \
+# into view, exactly as `shift+j`'s own arm does.
+#
+# This was TWO entries, one per direction, while `Toggle` and
+# `ToggleBack` each carried their own copy of this five-line sequence.
+# The 2026-09-13 step-key ruling merged them into `step_selected_row`
+# (`tab` in filter mode needed the same body a third time), so there is
+# one branch to break and one entry to break it — but still two tests
+# behind it, because the forward and backward spellings reach it
+# separately and only one of them is named here.
+run_mutation "objectdialog: a step moves the cursor off screen and leaves it there" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);
-                scroll_to_cursor(shell);' \
-  '        NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);' \
+  '        Some(Step::Changed) => {
+            maybe_refresh_available(shell);
+            revalidate(shell);
+            scroll_to_cursor(shell);' \
+  '        Some(Step::Changed) => {
+            maybe_refresh_available(shell);
+            revalidate(shell);' \
   geode-shell \
   space_scrolls_the_next_row_into_view
-
-# The same for `shift+space`: one `step_selected` underneath, two arms
-# above it, so a fix applied to one and not the other is exactly the
-# failure this pair of entries exists to notice.
-run_mutation "objectdialog: shift+space moves the cursor off screen and leaves it there" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);
-                scroll_to_cursor(shell);' \
-  '        NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
-            Some(Step::Changed) => {
-                maybe_refresh_available(shell);
-                revalidate(shell);' \
-  geode-shell \
-  shift_space_scrolls_the_next_row_into_view
 
 # And `x`, which moves the cursor the other way — to the end of the
 # available block, off the BOTTOM of the viewport.
@@ -7269,19 +7281,36 @@ run_mutation "objectdialog: the action bar stays up under the chain field" \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
-# The landing is keyed on the domain (§18.8, user ruling 2026-09-12).
-# Inverting it opens Views' and Scopes' edit stages in a chain field that
-# has no list to complete against, and lands Groupings in the chooser —
-# every Groupings test that `escape`s first still passes (an `escape` in
-# the chooser merely steps back to browse and the next keystrokes act
-# there, which most fixtures would notice, but only the one asserting
-# BOTH domains' landings names the rule).
-run_mutation "objectdialog: the chain-field landing ignores the domain" \
+# A slot opens in the chooser, never in its chain field (user ruling
+# 2026-09-14, reversing 2026-09-12's landing). The mutation reinstates the
+# old landing in full — chain entry begun and the mode at `Filter`, keyed
+# on Groupings — so a test that only checked the mode, or only checked
+# Views, would still be green: only one asserting Groupings' own landing
+# is the chooser names the rule.
+run_mutation "objectdialog: a Groupings slot opens in its chain field" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        let opens_in_chain_field = self.domain == Domain::Groupings;' \
-  '        let opens_in_chain_field = self.domain != Domain::Groupings;' \
+  '        self.draft = Some(draft);
+        self.stage = Stage::Edit {
+            object: object.to_string(),
+        };
+        self.query.clear();
+        self.mode = DialogMode::Normal;' \
+  '        let opens_in_chain_field = self.domain == Domain::Groupings;
+        if opens_in_chain_field {
+            draft.begin_chain_entry();
+        }
+        self.draft = Some(draft);
+        self.stage = Stage::Edit {
+            object: object.to_string(),
+        };
+        self.query.clear();
+        self.mode = if opens_in_chain_field {
+            DialogMode::Filter
+        } else {
+            DialogMode::Normal
+        };' \
   geode-shell \
-  a_groupings_slot_opens_in_the_chain_field_and_a_view_does_not
+  every_domain_opens_in_normal_mode_with_no_field_open
 
 # ---- Mouse parity (spec §17.1 rule 2): a browse row click opens --------
 
@@ -7378,7 +7407,7 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
 # Review finding on Task 5: a tick click must be claimed and dropped
 # while a confirm is armed, exactly as `handle_edit_key`'s bare-letter
 # case is — otherwise it can act on the object behind a pending
-# Delete/Revert/Fork. Mutated away, the guard never fires.
+# Delete/Revert/Overwrite. Mutated away, the guard never fires.
 run_mutation "objectdialog: a tick click is claimed and dropped while a confirm is armed" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if draft.confirm.is_some() {
@@ -8524,13 +8553,16 @@ run_mutation "objectdialog: the fork's own entry wins over its stale twin" \
 # footer advertises `i` only where a row can take it. Treating every Text
 # as editable would put the chip on Views, where `i` only refuses — the
 # Views window test asserts the chip is absent, the Sources one that it
-# is present, and the pure test pins the per-domain rule.
+# is present, and the pure test pins the per-domain rule. The
+# 2026-09-13 ruling narrowed the question from the object to the row
+# under the cursor (`Draft::selected_vocabulary` replacing
+# `offers_text_entry`), which is where the rule lives now.
 run_mutation "objectdialog: the footer offers i only for an editable text or a number" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            FieldKind::Text(_) => domain.text_editable(&field.key),' \
-  '            FieldKind::Text(_) => true,' \
+  '                FieldKind::Text(_) if domain.text_editable(&self.fields[i].key) => {' \
+  '                FieldKind::Text(_) if true => {' \
   geode-shell \
-  offers_text_entry_needs_a_number_or_an_editable_text_row
+  selected_vocabulary_answers_for_the_row_under_the_cursor
 
 # ---- market-data documents Part 2 Task 1: the document arm of
 # compile_distinct lowers the text and expression filters grain-free.
@@ -10661,6 +10693,149 @@ run_mutation "final: the Behind chip does not call an older document newer" \
   'format!("newer document received {}", local_hhmm(newer))' \
   geode-marketdata \
   summary_spells_each_state_in_the_traders_local_clock
+
+# User ruling 2026-09-13: `enter` is named wherever it opens something —
+# the Schema edit stage's column rows were the one door with no chip at
+# all, on a dialog the palette still called read-only.
+run_mutation "objectdialog: the Schema edit footer names enter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                action.push(hint_enter(chip("enter")));
+                action.push(sep("open column ·"));' \
+  '                action.push(sep("open column ·"));' \
+  geode-shell \
+  the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door
+
+# Same ruling, the browse list: `enter` opens the edit stage in both modes
+# and the normal-mode footer never said so.
+run_mutation "objectdialog: the browse footer names enter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                    action.push(hint_enter(chip("enter")));
+                    action.push(sep("open ·"));' \
+  '                    action.push(sep("open ·"));' \
+  geode-shell \
+  the_footers_name_enter_where_it_opens_something
+
+# Review 2026-09-13: the chip is gated on the SELECTED row opening a
+# column stage, not on the domain — gated by domain, Views' landing row
+# (`dataset`, where enter only gives a notice) would advertise it.
+run_mutation "objectdialog: enter is named only while the selected row opens a column" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let opens_column = column_stage_target(shell).is_some();' \
+  '    let opens_column = true;' \
+  geode-shell \
+  the_footers_name_enter_where_it_opens_something
+
+# ---- Dialog step keys and the row-sensitive footer (user ruling
+# 2026-09-13, "I'd like cycling to also be done with tab and h/l — I keep
+# reaching for them"). The four aliases are claimed in ONE table, so a
+# dropped alternative there goes dead in every modal dialog at once;
+# these entries name a different surface's test each, so a `caught` says
+# which surface is actually defending the shared arm.
+
+# The forward step's three spellings. `space` survives the mutation, so
+# every existing space test stays green and only the new pure test can
+# see it — which is the isolation this entry is for.
+run_mutation "dialogmode: l and tab step a value forward beside space" \
+  crates/geode-shell/src/dialogmode.rs \
+  '        "space" | "l" | "tab" => Some(NormalCommand::Toggle),' \
+  '        "space" => Some(NormalCommand::Toggle),' \
+  geode-shell \
+  tab_and_h_and_l_step_a_value_beside_space
+
+# `h` is the backward step, and the SETTINGS dialog is what this entry
+# defends: that surface grew no arm of its own for `h`/`l` — `route`'s
+# normal-mode branch already forwarded `Toggle`/`ToggleBack` — so the
+# only thing standing between a trader and a dead `h` there is this one
+# line in `dialogmode` plus the settings test named below.
+run_mutation "settings: h reaches the step table through dialogmode" \
+  crates/geode-shell/src/dialogmode.rs \
+  '        "h" => Some(NormalCommand::ToggleBack),' \
+  '        "h" => None,' \
+  geode-shell \
+  h_and_l_step_in_normal_mode_and_type_in_filter_mode
+
+# The backward step's shift arm, dropping only `tab` — `shift+space`
+# survives, so `shift_space_steps_a_value_backward` stays green and the
+# object dialog's own window test is the one that has to see it.
+run_mutation "dialogmode: shift+tab steps a value backward" \
+  crates/geode-shell/src/dialogmode.rs \
+  '            "space" | "tab" => Some(NormalCommand::ToggleBack),' \
+  '            "space" => Some(NormalCommand::ToggleBack),' \
+  geode-shell \
+  tab_steps_the_selected_row_in_both_modes
+
+# The object dialog's FILTER-mode `tab`, which is a branch of its own
+# rather than a `dialogmode` answer: the `Input` holds the keyboard
+# there, so the step has to be claimed before the handler hands the
+# keystroke to the field. Claiming it and doing nothing is the failure
+# mode this breaks to — the key stays inert and swallowed, which is
+# exactly what it did before the ruling.
+run_mutation "objectdialog: tab steps the selected row in filter mode" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                step_selected_row(shell, forward, true, cx);' \
+  '                let _ = forward;' \
+  geode-shell \
+  tab_steps_the_selected_row_in_both_modes
+
+# Review 2026-09-13: an inert step names a key the trader can press in
+# the mode they are in. `space` TYPES in filter mode, so the pre-review
+# notice ("nothing on this row changes with space") described a key that
+# would have put a character in the query. The mutation is the exact
+# pre-review state — one `filtering` flag, at the one call site that
+# passes it true.
+run_mutation "objectdialog: an inert step in filter mode names space rather than tab" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                step_selected_row(shell, forward, true, cx);' \
+  '                step_selected_row(shell, forward, false, cx);' \
+  geode-shell \
+  tab_steps_the_selected_row_in_both_modes
+
+# Review 2026-09-13, the other half of the row-sensitive footer: the
+# reorder group. `shift+j`/`shift+k` move a list ITEM and answer "that is
+# as far as this row goes" everywhere else, so painting them on a field
+# row is the same inert-key class the change group's gate closed.
+run_mutation "objectdialog: the edit footer paints the reorder group on a row with no item" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        let reorders = vocabulary == RowVocabulary::Item;' \
+  '        let reorders = true;' \
+  geode-shell \
+  the_edit_footer_names_only_what_the_selected_row_offers
+
+# Review 2026-09-13: `tab` steps in the settings dialog's NORMAL mode and
+# the footer used to withhold it there, on the grounds that it was filter
+# mode's only stepping key — withholding a live key from the mode with
+# the most of them. The `settings-hint-change` selector rides the `tab`
+# chip, so dropping the chip is what the window test sees.
+run_mutation "settings: the normal-mode footer names tab beside space and l" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '                chip("l"),
+                hint_change(chip("tab")),' \
+  '                chip("l"),' \
+  geode-shell \
+  l_and_h_step_the_selected_value_in_settings_normal_mode
+
+# The row-sensitive footer: paint the change group on EVERY row, the
+# fixed group the ruling replaced. A `Text` row that cannot step is where
+# it shows, and the column stage has one (`label`) two rows above a
+# `Choice` that can — which is why that test walks all three kinds rather
+# than asserting on one.
+run_mutation "objectdialog: the edit footer paints the change group on a row nothing changes" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            RowVocabulary::Inert | RowVocabulary::Types => return Vec::new(),' \
+  '            RowVocabulary::Inert | RowVocabulary::Types => "change",' \
+  geode-shell \
+  the_edit_footer_names_only_what_the_selected_row_offers
+
+# The filter-mode half of the same footer, which is a separate arm
+# because the group shrinks there to the one pair a focused `Input`
+# leaves free. Dropping it is the state this branch started from: `tab`
+# steps and nothing on screen says so.
+run_mutation "objectdialog: the filter-mode footer names the pair that still steps" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            action.extend(change_group(true, true));' \
+  '            let _ = &change_group;' \
+  geode-shell \
+  the_edit_footer_names_only_what_the_selected_row_offers
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

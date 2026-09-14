@@ -88,7 +88,8 @@ use crate::dialogmode::DialogMode;
 /// verb gate, and `render::edit_commit_notice` all read this same
 /// string, so a trader sees one consistent answer wherever they reach
 /// for a key the schema inspector cannot honour.
-pub const READ_ONLY_NOTICE: &str = "the schema is read-only";
+pub const READ_ONLY_NOTICE: &str =
+    "the datasets doc is read-only — open a column (enter) to set how it paints";
 
 /// Which config domain a dialog is browsing. One variant per adapter
 /// module under this directory.
@@ -1039,6 +1040,38 @@ pub enum EditRow {
     },
 }
 
+/// What the row under the cursor answers to — the footer's whole
+/// question (user ruling 2026-09-13, "when we're highlighting a row that
+/// is text based, show the `press i` helper text; when it's on something
+/// we cycle, show the space/shift+space etc").
+///
+/// Derived from the row rather than from the domain, which is the point:
+/// a footer that named `space` on a read-only `Text`, or `i` on a
+/// `Choice`, would teach a key that is inert on the row the trader is
+/// actually looking at — the defect class this interaction model exists
+/// to remove. Answered by [`Draft::selected_vocabulary`], which is the
+/// same match [`Draft::step_selected`] and [`super::render::
+/// open_text_field`] make, in the same order, so the footer cannot
+/// promise a key those two would refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowVocabulary {
+    /// Nothing on this row changes and nothing types: a display-only
+    /// `Text` (Groupings' `slot`, Scopes' two summaries, every Schema
+    /// row), an `OrderedList`'s own header row, a `MultiChoice`, or no
+    /// row at all under an over-narrow filter.
+    Inert,
+    /// A value the step keys cycle and `i` cannot open: `Choice`, `Bool`.
+    Steps,
+    /// Both: a `Number`, which steps by one and takes a typed value.
+    StepsAndTypes,
+    /// `i` alone: a `Text` row the domain marks editable.
+    Types,
+    /// One of the object's own list entries — `space` ticks it.
+    Item,
+    /// A catalogue row — `space` adds it to the object's list.
+    Available,
+}
+
 /// What a dragged list row carries (4c §18.9.1): the field's key, which
 /// block it came from, and the item's NAME — never an index. The keyboard
 /// stays live during a drag, so a keystroke can reorder or remove between
@@ -1070,30 +1103,18 @@ pub struct RowDrag {
 pub enum Confirm {
     Delete,
     Revert,
-    /// A definitional change to an object the user's layer does not own.
-    /// Applying it copies the object into the user layer — which
-    /// **freezes** it: the desk's later changes stop reaching this trader
-    /// (spec §4.1). The one edit in this dialog that asks before acting,
-    /// and the reason it asks is that the cost lands weeks later.
-    Fork,
-    /// `o` on a saved scope (`Domain::Scopes` only): overwrite its
-    /// contents with whatever the frame currently holds.
-    ///
-    /// `forks` is decided at arm time (`render::arm_overwrite`), from
-    /// whether the scope under the cursor is the user layer's own —
-    /// never from destructiveness alone. When it is not, the write does
-    /// two things at once: it replaces the scope's content, and it
-    /// forks it into the user layer, which **freezes** the desk's copy
-    /// out the same way `Fork` does (spec §4.1) — invisible until weeks
-    /// later if the prompt does not say so (spec §16). One confirm
-    /// either way, not two in sequence (§16 keeps every confirm to a
-    /// single row that never changes length): the payload is what lets
-    /// one prompt disclose whichever consequence is real for *this*
-    /// object, since "saved selection is lost" is true only when there
-    /// is no desk copy underneath to fall back to.
-    Overwrite {
-        forks: bool,
-    },
+    /// `o` on a saved scope the user layer already owns (`Domain::Scopes`
+    /// only): overwrite its contents with whatever the frame currently
+    /// holds. Armed only there, because only there is something lost —
+    /// with no desk copy underneath, the scope's previous selection is
+    /// gone for good. On a desk- or builtin-owned scope `o` writes at
+    /// once and says so instead (`render::overwrite_scope`): nothing is
+    /// lost, the desk's copy is still there and `r` restores it, and the
+    /// fork it makes is announced rather than asked about, exactly as a
+    /// field edit's is (user ruling 2026-09-14). There used to be a
+    /// `Fork` confirm for those field edits and a `forks` payload here
+    /// so one prompt could disclose the fork; both went with that ruling.
+    Overwrite,
 }
 
 impl Confirm {
@@ -1104,21 +1125,12 @@ impl Confirm {
         match self {
             Confirm::Delete => format!("Delete '{name}' from your config?"),
             Confirm::Revert => format!("Throw away your changes to '{name}'?"),
-            Confirm::Fork => {
-                format!("Copy '{name}' to your config?")
-            }
-            // User-owned: nothing underneath to fall back to, so the
-            // scope's previous contents really are gone.
-            Confirm::Overwrite { forks: false } => format!(
+            // User-owned (the only case that arms it): nothing underneath
+            // to fall back to, so the scope's previous contents really
+            // are gone.
+            Confirm::Overwrite => format!(
                 "Replace '{name}' with the frame's current scope? Its saved selection is lost."
             ),
-            // Not user-owned: nothing is lost — the desk's own copy is
-            // still there — but the write forks this one into the user
-            // layer, exactly like `Fork`'s own consequence, and `r`
-            // reverts it same as any other fork.
-            Confirm::Overwrite { forks: true } => {
-                format!("Replace '{name}' with the frame's current scope? 'r' reverts.")
-            }
         }
     }
 }
@@ -1175,9 +1187,7 @@ pub struct Draft {
     /// The fields as they were when the draft was built, or as the last
     /// applied edit left them. Which files an edit touches is this
     /// comparison and nothing else, so a keystroke that puts a value back
-    /// where it started changes nothing and writes nothing — and a
-    /// declined [`Confirm::Fork`] restores from here
-    /// ([`Draft::revert_to_baseline`]).
+    /// where it started changes nothing and writes nothing.
     baseline: Vec<Field>,
     /// `source` as it stood at the same moment `baseline` did. For every
     /// domain but Scopes this never diverges from `source` after
@@ -1428,25 +1438,47 @@ impl Draft {
     /// The row the cursor is on, if the cursor is in range — indexed
     /// through [`Draft::visible_rows`], so every verb acts on the row the
     /// trader is actually looking at, filtered or not (§18.3).
-    /// Can `i` open a value field on some row of this draft? A `Number`
-    /// row on any domain, or a `Text` row the domain marks editable
-    /// (`Domain::text_editable`). What the edit footer reads to decide
-    /// whether to advertise `i` at all: a chip for a verb that only
-    /// refuses would teach a trader a key that does nothing on this
-    /// object — the same rule that keeps `x` off every non-Views footer.
-    pub fn offers_text_entry(&self, domain: Domain) -> bool {
-        self.fields.iter().any(|field| match &field.kind {
-            FieldKind::Number { .. } => true,
-            FieldKind::Text(_) => domain.text_editable(&field.key),
-            _ => false,
-        })
-    }
-
     pub fn selected_row(&self) -> Option<EditRow> {
         let rows = self.rows();
         self.visible_rows()
             .get(self.selected)
             .and_then(|m| rows.get(m.row).copied())
+    }
+
+    /// What the row under the cursor answers to (user ruling
+    /// 2026-09-13) — see [`RowVocabulary`] for why the footer asks the
+    /// row rather than the domain.
+    ///
+    /// Groupings is the one domain whose footer must NOT take `i` from
+    /// this answer: there `i` reaches past the selected row to the
+    /// slot's whole chain (§18.8), so it is live on every row including
+    /// the display-only `slot`. That exception lives at the one call
+    /// site in `render`, not here, because it is a fact about the
+    /// domain's `i` and not about any row.
+    pub fn selected_vocabulary(&self, domain: Domain) -> RowVocabulary {
+        match self.selected_row() {
+            None => RowVocabulary::Inert,
+            Some(EditRow::Item { .. }) => RowVocabulary::Item,
+            Some(EditRow::Available { .. }) => RowVocabulary::Available,
+            Some(EditRow::Field(i)) => match &self.fields[i].kind {
+                // `step_selected`'s own guard, mirrored: a `Choice` with
+                // one option (a config with a single dataset) steps
+                // nowhere in either direction, so naming the step keys
+                // there would be the inert-key lie again. A `Number` at
+                // the end of its range is not the same case — the other
+                // direction still moves, and an out-of-range one refuses
+                // out loud rather than doing nothing.
+                FieldKind::Choice { options, .. } if options.len() < 2 => RowVocabulary::Inert,
+                FieldKind::Choice { .. } | FieldKind::Bool(_) => RowVocabulary::Steps,
+                FieldKind::Number { .. } => RowVocabulary::StepsAndTypes,
+                FieldKind::Text(_) if domain.text_editable(&self.fields[i].key) => {
+                    RowVocabulary::Types
+                }
+                FieldKind::Text(_)
+                | FieldKind::MultiChoice { .. }
+                | FieldKind::OrderedList { .. } => RowVocabulary::Inert,
+            },
+        }
     }
 
     /// Re-point the cursor at `row`'s own position in the FILTERED list,
@@ -1476,14 +1508,12 @@ impl Draft {
     /// the baseline rather than tracked with a flag, so putting a value
     /// back where it started changes nothing and writes nothing.
     ///
-    /// `true` in exactly three situations, and a reader relying on this
+    /// `true` in exactly two situations, and a reader relying on this
     /// invariant should count on no others:
     ///
     /// 1. *within* the keystroke that changed a field, before
     ///    [`apply::commit_edit`] records it and moves the baseline;
-    /// 2. while a [`Confirm::Fork`] is waiting on its answer — the change
-    ///    is on the draft and not yet recorded anywhere else;
-    /// 3. indefinitely, for a change `commit_edit` **refused**: an error
+    /// 2. indefinitely, for a change `commit_edit` **refused**: an error
     ///    diagnostic (`apply::blocking_diagnostic`) or a shell with no
     ///    writable user directory both return before `mark_saved()`, so
     ///    the value stays on the draft, painted and dirty, until a later
@@ -1497,14 +1527,6 @@ impl Draft {
     /// `source` out from under a painted summary.
     pub fn is_dirty(&self) -> bool {
         self.fields != self.baseline || self.source != self.baseline_source
-    }
-
-    /// Put every field, and `source`, back to the last applied state —
-    /// what a declined [`Confirm::Fork`] leaves behind, so the screen
-    /// never shows a value that is neither applied nor persisted.
-    pub fn revert_to_baseline(&mut self) {
-        self.fields = self.baseline.clone();
-        self.source = self.baseline_source.clone();
     }
 
     /// The column whose presentation is open, if [`Stage::Column`] is
@@ -3019,8 +3041,8 @@ impl ObjectDialogState {
     ///   the `LeaveFilter` rung — which the edit handler does not claim,
     ///   so the shell's modal branch closes the whole dialog instead of
     ///   stepping back to the list, without ever asking. `Normal` for
-    ///   every domain but Groupings; `Filter` there, because a slot opens
-    ///   IN its chain field (§18.8) and that field owns `escape`.
+    ///   every domain, Groupings included (user ruling 2026-09-14): a
+    ///   slot opens in its chooser, and `i` opens the chain field.
     ///
     /// Both are pure, and that is now the whole transition: the shared
     /// `Input` is emptied and blurred to match by `dialog::
@@ -3038,27 +3060,17 @@ impl ObjectDialogState {
     pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
         let mut draft = self.domain.draft(config, object);
         draft.query.clear();
-        // §18.8 (user ruling 2026-09-12): a Groupings slot opens IN its
-        // chain field — the typed line is the primary way to set a
-        // chain, and the chooser is one `escape` behind it. `Filter` is
-        // what hands the shared `Input` the keys through the sync, and
-        // `begin_chain_entry` is what seeds the text it writes there.
-        // Every other domain still opens in normal mode, for the reason
-        // the paragraph above gives.
-        let opens_in_chain_field = self.domain == Domain::Groupings;
-        if opens_in_chain_field {
-            draft.begin_chain_entry();
-        }
+        // Every domain opens in normal mode with no field open — a
+        // Groupings slot lands in the chooser and `i` opens its chain
+        // field (user ruling 2026-09-14, superseding §18.8's 2026-09-12
+        // chain-field landing). There is deliberately no domain arm here:
+        // the one door every entry goes through has one answer.
         self.draft = Some(draft);
         self.stage = Stage::Edit {
             object: object.to_string(),
         };
         self.query.clear();
-        self.mode = if opens_in_chain_field {
-            DialogMode::Filter
-        } else {
-            DialogMode::Normal
-        };
+        self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
     }
@@ -3815,13 +3827,13 @@ mod tests {
         assert!(state.notice.is_none());
     }
 
-    /// §18.8 (user ruling 2026-09-12): a Groupings slot opens IN the
-    /// chain field — `text_entry` set with `completions: true`, the text
-    /// seeded, the mode at `Filter` so the sync hands the field the keys
-    /// — where every other domain still opens in normal mode with no
-    /// field at all.
+    /// Every domain opens its edit stage in normal mode with no field
+    /// open — Groupings included (user ruling 2026-09-14, superseding
+    /// 2026-09-12's chain-field landing, §18.8): a slot opens in the
+    /// chooser, and `i` is the way into the chain field. The Views half
+    /// pins that the rule has no domain arm at all.
     #[test]
-    fn a_groupings_slot_opens_in_the_chain_field_and_a_view_does_not() {
+    fn every_domain_opens_in_normal_mode_with_no_field_open() {
         let config = config_from(&[
             (Layer::Desk, "groupings", "3 = [\"book\"]\n"),
             (
@@ -3833,9 +3845,10 @@ mod tests {
         let mut state = ObjectDialogState::new(Domain::Groupings);
         state.enter_edit(&config, "3");
         let draft = state.draft.as_ref().unwrap();
-        assert!(draft.chain_entry());
-        assert_eq!(state.mode, DialogMode::Filter);
-        assert_eq!(state.effective_query(), "book", "seeded with the chain");
+        assert!(!draft.chain_entry(), "the chooser, not the chain field");
+        assert!(draft.text_entry.is_none());
+        assert_eq!(state.mode, DialogMode::Normal);
+        assert_eq!(state.effective_query(), "");
 
         let mut state = ObjectDialogState::new(Domain::Views);
         state.enter_edit(&config, "tree");
@@ -4691,47 +4704,20 @@ mod tests {
     fn a_confirm_names_the_object_and_the_consequence() {
         assert!(Confirm::Delete.prompt("tree").contains("tree"));
         assert!(Confirm::Revert.prompt("tree").contains("tree"));
-        // The fork prompt names the object and the act; it deliberately
-        // does not spell out "it stops following the desk" (user ruling
-        // 2026-09-11: that clause read as a warning about the act rather
-        // than a description of it).
-        let fork = Confirm::Fork.prompt("tree");
-        assert!(fork.contains("tree"), "{fork}");
-        assert!(fork.starts_with("Copy"), "{fork}");
-        assert!(!fork.contains("desk"), "{fork}");
     }
 
-    /// `Confirm::Overwrite`'s two prompts must each be true of the case
-    /// they describe (Part 2a Task 5 review round 1, the Major): a
-    /// user-owned scope really does lose its previous contents, but a
-    /// desk/builtin-owned one does not — the desk's copy is still there,
-    /// `r`-revertible — so it must say so instead of claiming a loss.
-    /// Neither prompt spells out "it stops following the desk" any more
-    /// (user ruling 2026-09-11); the forked case discloses its
-    /// reversibility through `'r' reverts` alone.
+    /// `Confirm::Overwrite` is armed only on a user-owned scope (a
+    /// desk-owned one writes at once, user ruling 2026-09-14), so its one
+    /// prompt must be true of that case alone: the previous contents
+    /// really are lost, and there is no fork to claim.
     #[test]
     fn overwrite_prompts_tell_the_truth_about_what_it_costs() {
-        let owned = Confirm::Overwrite { forks: false }.prompt("mine");
+        let owned = Confirm::Overwrite.prompt("mine");
         assert!(owned.contains("mine"), "{owned}");
         assert!(owned.contains("lost"), "{owned}");
         assert!(
             !owned.contains("reverts"),
             "a user-owned scope's prompt must not claim a fork: {owned}"
-        );
-
-        let forked = Confirm::Overwrite { forks: true }.prompt("mine");
-        assert!(forked.contains("mine"), "{forked}");
-        assert!(
-            !forked.contains("desk"),
-            "the 'stops following the desk' clause was retired: {forked}"
-        );
-        assert!(
-            forked.contains("reverts"),
-            "a desk-owned scope's prompt must say r reverts: {forked}"
-        );
-        assert!(
-            !forked.contains("lost"),
-            "nothing is lost when the desk's own copy is still there: {forked}"
         );
     }
 
@@ -5689,47 +5675,128 @@ mod tests {
         );
     }
 
-    /// The edit footer advertises `i` only where a row can take it
-    /// (user request 2026-09-12: "i for edit text isn't discoverable"):
-    /// a `Number` on any domain, a `Text` only where the domain marks
-    /// the key editable — never on a domain whose `i` merely refuses.
+    /// The edit footer's row-sensitive question (user ruling 2026-09-13,
+    /// superseding the 2026-09-12 "i for edit text isn't discoverable"
+    /// answer, which asked whether the OBJECT had such a row anywhere
+    /// and so put the `i` chip on `Choice` rows `i` refuses): what the
+    /// row under the CURSOR answers to. Every arm, because the footer
+    /// paints a different pair of chip groups for each.
     #[test]
-    fn offers_text_entry_needs_a_number_or_an_editable_text_row() {
-        let text = |key: &str| Field {
+    fn selected_vocabulary_answers_for_the_row_under_the_cursor() {
+        let field = |key: &str, kind: FieldKind| Field {
             key: key.to_string(),
             label: key.to_string(),
-            kind: FieldKind::Text("2s".to_string()),
+            kind,
             dest: Destination::Doc,
             layer: None,
         };
-        let number = Field {
-            key: "polls".to_string(),
-            label: "polls".to_string(),
-            kind: FieldKind::Number {
-                value: 3,
-                min: 1,
-                max: 100,
-                step: 1,
-                wrap: false,
-            },
-            dest: Destination::Doc,
-            layer: None,
+        let choice = |options: &[&str]| FieldKind::Choice {
+            options: options.iter().map(|o| (*o).to_string()).collect(),
+            selected: 0,
         };
-        let sources = Draft::new_object("live", vec![text("poll_interval")], toml::Table::new());
-        assert!(sources.offers_text_entry(Domain::Sources));
-        assert!(
-            !sources.offers_text_entry(Domain::Views),
-            "the same key is read-only on Views"
+
+        // A `Text` row takes `i` where the domain marks the key editable
+        // and offers nothing at all where it does not — the same
+        // `Domain::text_editable` door `open_text_field` asks.
+        let text = Draft::new_object(
+            "live",
+            vec![field("poll_interval", FieldKind::Text("2s".to_string()))],
+            toml::Table::new(),
         );
-        let views = Draft::new_object("tree", vec![text("dataset")], toml::Table::new());
-        assert!(!views.offers_text_entry(Domain::Views));
-        let with_number = Draft::new_object("x", vec![number], toml::Table::new());
-        assert!(
-            with_number.offers_text_entry(Domain::Views),
-            "a Number types anywhere"
+        assert_eq!(
+            text.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Types
         );
+        assert_eq!(
+            text.selected_vocabulary(Domain::Views),
+            RowVocabulary::Inert,
+            "the same key is read-only on Views, where i only refuses"
+        );
+
+        // A `Number` is the one row that does both.
+        let number = Draft::new_object(
+            "live",
+            vec![field(
+                "polls",
+                FieldKind::Number {
+                    value: 3,
+                    min: 1,
+                    max: 100,
+                    step: 1,
+                    wrap: false,
+                },
+            )],
+            toml::Table::new(),
+        );
+        assert_eq!(
+            number.selected_vocabulary(Domain::Views),
+            RowVocabulary::StepsAndTypes,
+            "a Number steps and takes a typed value on any domain"
+        );
+
+        // `Choice` and `Bool` step and nothing more — except a `Choice`
+        // with one option, which steps nowhere in either direction.
+        let steps = Draft::new_object(
+            "live",
+            vec![
+                field("dataset", choice(&["risk", "vol"])),
+                field("thousands", FieldKind::Bool(true)),
+                field("only", choice(&["risk"])),
+            ],
+            toml::Table::new(),
+        );
+        assert_eq!(
+            steps.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Steps
+        );
+        let mut on_bool = steps.clone();
+        on_bool.selected = 1;
+        assert_eq!(
+            on_bool.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Steps
+        );
+        let mut on_lone = steps.clone();
+        on_lone.selected = 2;
+        assert_eq!(
+            on_lone.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Inert,
+            "a one-option Choice steps nowhere, so the footer must not say it does"
+        );
+
+        // The list rows: the header itself has no value, an item ticks
+        // and an available row adds.
+        let mut list = two_column_draft_with_one_available();
+        assert_eq!(
+            list.rows(),
+            vec![
+                EditRow::Field(0),
+                EditRow::Field(1),
+                EditRow::Item { field: 1, item: 0 },
+                EditRow::Item { field: 1, item: 1 },
+                EditRow::Available { field: 1, item: 0 },
+            ],
+            "sanity: the fixture's row order, which the indices below rely on"
+        );
+        list.selected = 1;
+        assert_eq!(
+            list.selected_vocabulary(Domain::Views),
+            RowVocabulary::Inert,
+            "an OrderedList's own header row has no value to change"
+        );
+        list.selected = 2;
+        assert_eq!(list.selected_vocabulary(Domain::Views), RowVocabulary::Item);
+        list.selected = 4;
+        assert_eq!(
+            list.selected_vocabulary(Domain::Views),
+            RowVocabulary::Available
+        );
+
+        // No row at all — an over-narrow filter — is inert, not a panic.
         let empty = Draft::new_object("x", Vec::new(), toml::Table::new());
-        assert!(!empty.offers_text_entry(Domain::Sources));
+        assert_eq!(
+            empty.selected_vocabulary(Domain::Sources),
+            RowVocabulary::Inert
+        );
     }
 
     /// Part 2c §5.2: the column stage is a PROJECTION over the same draft

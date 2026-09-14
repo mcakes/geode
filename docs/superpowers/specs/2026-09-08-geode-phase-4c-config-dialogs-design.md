@@ -240,27 +240,35 @@ itself — a click on the tick, a drag on the handle — not a bar button
 that would have to ask which row it meant, so the honest statement is
 the one above rather than three more buttons.
 
-`Copy to user layer` is a **confirm**, not a verb and no longer a
-label. It arms when the edit just made would fork the object — a
-`Doc`-destined field (§4.1) changed on an object whose winning layer is
-builtin or desk — and it is the one edit in these dialogs that asks
-before acting. Everything else applies on the keystroke.
+**A fork applies on the keystroke and is announced, never asked about
+(user ruling 2026-09-14, superseding the confirm below).** An edit to a
+`Doc`-destined field (§4.1) on an object whose winning layer is builtin
+or desk copies the object into the user layer exactly as any other edit
+applies — same batch, same debounce — and the dialog's notice says so:
+`copied 'tree' to your config — r restores the desk copy`
+(`apply::fork_notice`, the shadowed layer named from `shadow_of`). The
+ruling: "the prompt to copy to config is too distracting. It should
+tell the user what is happening but just do it and not ask for a
+confirmation." What the confirm existed to disclose — that a fork
+*freezes*, so the desk's next column never reaches this trader — is
+disclosed by the notice instead, on the keystroke, with the verb that
+undoes it. `Confirm::Fork` is gone, and with it the declined-fork
+`revert_to_baseline` and the two-call-site gate reasoning in
+`commit_or_confirm`, now `commit_change`. The same ruling reaches Scopes'
+`o`: on a desk-owned scope nothing is lost (the desk copy is still there
+and `r` restores it), so it writes at once with a notice naming both the
+replacement and the copy, and `Confirm::Overwrite` (now a unit variant)
+arms only on a user-owned scope, where the previous selection really is
+gone.
 
-It asks because a fork *freezes*: a user-layer copy of a desk view stops
-receiving the column the desk adds next week, and that cost lands weeks
-after the keystroke that caused it. Nothing else on this surface has
-that shape — order, inclusion and width fork nothing (§4.1) — so nothing
-else asks.
-
-Declining puts the field back where it was. That is not politeness: with
-every other edit applying instantly, a declined fork would otherwise be
-the one value on screen that is neither applied nor persisted, which is
-exactly the state this design exists to make unreachable.
-
-Earlier drafts of this paragraph made `Copy to user layer` a *label* on
-`s`, replacing `Save changes` when the save would fork. Both halves are
-gone with `s` itself; what survives is the warning, which was the part
-that mattered.
+*Superseded (2026-09-08 to 2026-09-13):* `Copy to user layer` was a
+**confirm**, not a verb and no longer a label. It armed when the edit
+just made would fork the object, and it was the one edit in these
+dialogs that asked before acting; declining put the field back where it
+was, so a declined fork was never the one value on screen that is
+neither applied nor persisted. Earlier drafts still made `Copy to user
+layer` a *label* on `s`, replacing `Save changes` when the save would
+fork; both halves went with `s` itself.
 
 The bar sits outside the scrolling list, so **the row list never changes
 length as you edit**.
@@ -466,9 +474,9 @@ from `view_presentation.toml` — old 4c's `:cols reset`, now reachable
 from the dialog.
 
 Every write goes to the user layer. Desk and builtin are never written:
-`config_write` refuses them rather than attempting and failing, and a
-builtin-layer object's edit stage offers `Copy to user layer` in place
-of the field rows' save.
+`config_write` refuses them rather than attempting and failing, and an
+edit to a builtin- or desk-layer object copies it into the user layer
+on the keystroke, announced in the notice (§5, as amended 2026-09-14).
 
 ## 6. The write door
 
@@ -798,7 +806,7 @@ Five palette actions, no default key bindings:
 | `config::sources` | Sources | Config |
 | `config::scopes` | Saved scopes | Config |
 | `config::groupings` | Grouping slots | Config |
-| `config::schema` | Schema (read-only) | Config |
+| `config::schema` | Edit schema (retitled from "Schema (read-only)" 2026-09-13 — §19.4) | Config |
 
 No defaults, because `keybindings::open` has none either — it is
 palette-only, and the user binds it if they want it (this repo's own
@@ -1268,6 +1276,19 @@ changes underneath them (§18.1). Renaming an existing object stays
 unbuilt everywhere (§8.2's ruling), and the `Text` editing vocabulary
 stays in Part 2b.
 
+**Amended 2026-09-13** (interaction-model spec §4's own amendment, which
+is the statement of record): `l`/`tab` and `h`/`shift+tab` step a value
+beside `space`/`shift+space` on every modal surface, this dialog's two
+stages included, and `tab`/`shift+tab` step in FILTER mode here as they
+always have in the settings dialog — except while a text field is open,
+where the chain field's `tab` still completes a segment. The edit and
+column footers' change group and `i` chip are now computed from the row
+under the cursor (`Draft::selected_vocabulary`) rather than from the
+domain, so a `Choice` row names the step keys and not `i`, an editable
+`Text` row names `i` and not the step keys, a `Number` names both and a
+read-only `Text` names neither; Groupings' `i` is the exception, since
+it opens the slot's whole chain (§18.8) rather than a row's value.
+
 ### 18.1 Visual refresh
 
 The chrome changes are made once, in `shell::dialog`, so the
@@ -1342,10 +1363,10 @@ Per domain:
   `Columns` (the view's members, tick = shown/hidden,
   `Destination::Presentation`) and `Available` (the chosen dataset's
   other columns plus derived dimensions, in schema order). `space` on
-  an available column **adds it to the view**: a `Doc` write, going
-  through `Confirm::Fork` when the view is not the user's. `x` on a
-  member **removes it from the view**, same destination and same
-  confirm. Hidden and removed are different states on purpose: hiding
+  an available column **adds it to the view**: a `Doc` write, forking
+  the view (announced, not asked — §5 as amended 2026-09-14) when it is
+  not the user's. `x` on a member **removes it from the view**, same
+  destination and same fork. Hidden and removed are different states on purpose: hiding
   never forks, and a desk column the trader hid still comes back when
   the desk changes it. Changing the dataset empties `Available` and
   repopulates it; members that the new dataset lacks stay listed, as
@@ -1945,9 +1966,9 @@ spelling so appending is a separator and a name away. The design:
 - **`enter` applies.** The typed names become the chain in typed order
   — ticked and first, every other item after, unticked — and the field
   closes; a `Step::Changed` then rides exactly the path a tick does
-  (`revalidate`, `commit_or_confirm`), so a desk-owned slot still asks
-  before forking and the write joins the same batch behind the same
-  debounce. `Step::Refused` keeps the field open with the text intact
+  (`revalidate`, `commit_change`), so a desk-owned slot forks and says
+  so (no confirm since 2026-09-14) and the write joins the same batch
+  behind the same debounce. `Step::Refused` keeps the field open with the text intact
   and says why — an empty chain (§3.3's "must keep at least one entry"
   refusal, since the config model has no empty chain), a name twice
   (`'book' is listed twice`), or a name no dataset carries. `Step::Inert`
@@ -1960,21 +1981,22 @@ spelling so appending is a separator and a name away. The design:
   applied before `i` is dropped with it — `i` overwrote `query` with the
   seed, and the filter had no meaning while the field was open.
 
-**The field is the landing, not a verb (user ruling 2026-09-12, "let's
-have the type-a-chain mode be the default, rather than filter mode").**
+**The chooser is the landing; the field is `i`'s (user ruling
+2026-09-14, "Edit grouping should open in normal mode, not chain mode",
+reversing the 2026-09-12 ruling that the typed line was the default).**
 Opening a Groupings slot — by `enter`, by a digit, or by a click — lands
-in the chain field: seeded, focused, completions below. The rule is one
-line in `ObjectDialogState::enter_edit`, keyed on the domain, so every
-door into the stage agrees (`enter_edit_with` is `n`'s door and Groupings
-has no `n`). `escape` then walks field → chooser → browse, one visible
-rung at a time — the chooser (tick, `shift+j`/`shift+k`) is one `escape`
-behind the field and `i` reopens the field from it, so nothing the
-chooser could do is lost. `enter` still applies and closes the field
-into the chooser, so the fork question and the applied chain are seen
-before leaving. The one consequence: while the field is open a digit is
-text, so jumping slot to slot from a freshly opened slot is `escape` then
-the digit. The pre-existing Groupings window tests gained exactly that
-`escape` after each `enter`/digit.
+in the chooser in normal mode with no field open, exactly as every other
+domain's edit stage does; `ObjectDialogState::enter_edit` has no domain
+arm at all. `i` opens the chain field from there: seeded, focused,
+completions below. `escape` walks field → chooser → browse, one visible
+rung at a time, and `enter` applies and closes the field into the
+chooser, so the fork notice and the applied chain are seen before
+leaving. A digit in the chooser jumps straight to another slot; only
+while the field is open is a digit text. The window tests that had
+gained an `escape` after each `enter`/digit under the earlier ruling
+lost it again, and `opening_a_slot_lands_in_the_chooser_and_i_opens_the_chain_field`
+plus `every_domain_opens_in_normal_mode_with_no_field_open` pin the
+landing (harness: "a Groupings slot opens in its chain field").
 
 **State shape.** `Draft::chain_entry: bool` beside `confirm`, not a
 `Stage` — the escape ladder and the browse cursor restore key on
@@ -2116,8 +2138,8 @@ a filter the target is a *visible* row the trader pointed at, so unlike
 
 After `Changed` the cursor follows the dropped item by identity
 (`Draft::follow`) and the viewport scrolls to it; then `revalidate` and
-`commit_or_confirm`, so a desk-owned view still asks before a `Doc`
-write forks it, and the write joins the same batch behind the same
+`commit_change`, so a desk-owned view is forked (and told so) by a `Doc`
+write, and the write joins the same batch behind the same
 debounce a keystroke's would. *Rejected:* reorder within the members
 list only, with add and remove left to the tick and `x`. One gesture
 that covers reorder, add and remove is what a trader with a mouse
@@ -2127,9 +2149,9 @@ costs two more arms.
 ### 18.9.4 Browse and the chain field
 
 - **Browse:** a click opens (§17 rule 2), through `enter_edit_stage`.
-  On Groupings that lands in the chain field per §18.8's ruling; on
-  Scopes it opens the two read-only rows with `o` on the action bar,
-  which already has a button.
+  On Groupings that lands in the chooser like every other door (§18.8,
+  as amended 2026-09-14); on Scopes it opens the two read-only rows with
+  `o` on the action bar, which already has a button.
 - **The chain field:** clicking a completion row is the mouse form of
   `tab` — `selected` moves to that row and `Draft::complete_chain` runs
   unchanged, so the trailing segment is replaced and the next opened
@@ -2437,8 +2459,8 @@ to complete" notice. `enter` commits:
    intact and the notice says why — the chain field's duplicate-name
    rule, applied to every text.
 2. `Ok(value)` writes the `Text`'s value and is a `Step::Changed` down
-   the tick's own path — `revalidate`, then `commit_or_confirm` — so a
-   desk-owned object still asks before forking, the write joins the
+   the tick's own path — `revalidate`, then `commit_change` — so a
+   desk-owned object forks and says so, the write joins the
    same batch behind the same debounce, and the reader's validation
    remains the safety net for anything `parse_text` let through.
 3. The same text typed back is `Step::Inert`: the field closes with
@@ -2520,8 +2542,8 @@ not a placeholder row here.
 `validate` runs `SourceSpec::from_doc` over the rendered draft, as
 Views runs its reader, plus the one cross-check the reader cannot make
 (the dataset exists in the schema). Sources opens in the chooser, not a
-field: there is no chain field here (§18.8's landing rule is Groupings'
-alone).
+field: there is no chain field here (and since 2026-09-14 Groupings
+opens in its chooser too, §18.8).
 
 **`n` creates an idle source (ruling 2026-09-12).** The reader today
 makes empty `paths` an error and skips the source, and `commit_create`
@@ -2549,7 +2571,7 @@ delivery path. A live restart, if ever wanted, is its own design.
 
 ### 19.4 The schema inspector
 
-`Domain::Schema`, palette `config::schema` ("Schema (read-only)",
+`Domain::Schema`, palette `config::schema` ("Edit schema" since 2026-09-13, was "Schema (read-only)",
 category Configuration), over `datasets`. §9 as written, with three mechanics
 settled:
 
@@ -2598,6 +2620,14 @@ settled:
   inspector shows the schema's own diagnostics on the rows they name
   (§19.5). `to_table` is unreachable behind `writable()` and returns the
   source unchanged.
+
+> **Amended (as built, 2026-09-13).** The inspector is no longer labelled
+> read-only: its column rows open the dataset-level column stage (see
+> `2026-09-13-geode-dataset-column-presentation-design.md` §4, §9.10),
+> `Domain::writable(stage)` is true there alone, the palette title is
+> `Schema`, and the refusal notice on its own rows names that door
+> (`open a column (enter) to set how it paints`). Every footer now names
+> `enter` where it opens something.
 
 ### 19.5 Per-field diagnostics: readers fill `Diagnostic.path`
 
@@ -2649,9 +2679,10 @@ still says no reader fills the field, is corrected.
   door is needed.
 - An entry is one more `(doc, object)` edit in the **same batch** as the
   fork it records, so it rides `run_writes` in the same flush: it cannot
-  land without the fork, nor before it. Three forks exist — a confirmed
-  `Confirm::Fork`, Scopes' `o` with `forks: true`, and none for `n`,
-  since a taken name is refused.
+  land without the fork, nor before it. Two forks exist — a `Doc` edit
+  through `commit_change` and Scopes' `o` on a desk-owned scope (both
+  unasked and announced since 2026-09-14) — and none for `n`, since a
+  taken name is refused.
 - `r` (revert) removes the entry along with the user copy, and `d`
   (delete) removes it too; both go through `commit_removal`, which gains
   the second key.

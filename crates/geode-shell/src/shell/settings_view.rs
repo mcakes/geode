@@ -920,13 +920,35 @@ fn build(
         key_chip(&ks, chip_fg, chip_bg)
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
+    // The stepping group's own selector — the settings twin of the
+    // object dialog's `objectdialog-hint-change`. It rides the `tab`
+    // chip specifically rather than the group's first, because `tab` is
+    // the one spelling whose presence differed between the two modes'
+    // groups (normal mode withheld it until 2026-09-13) and so the one a
+    // test needs to be able to find. In filter mode `tab` *is* the
+    // group's first chip, so the two readings agree there.
+    let hint_change = |chip: AnyElement| {
+        div()
+            .debug_selector(|| "settings-hint-change".to_string())
+            .child(chip)
+            .into_any_element()
+    };
 
     // The hint row states the CURRENT mode's vocabulary, not the union of
     // both (the keybinding dialog's rule): a footer listing keys that
     // are inert right now is exactly the lie the mode pill exists to
-    // prevent. `tab`/`shift+tab` step in both modes but are shown only
-    // in filter mode, where they are the only stepping keys; normal mode
-    // shows `space`, the shared vocabulary's step.
+    // prevent. Normal mode names all four stepping spellings —
+    // `space`/`shift+space`, `l`/`h` and `tab`/`shift+tab` — since the
+    // 2026-09-13 ruling made them one vocabulary and the object dialog's
+    // own group names them together; `tab` used to be withheld here on
+    // the grounds that it was filter mode's only stepping key, which
+    // withheld a live key from the mode that has the most of them.
+    // Filter mode still shows `tab`/`shift+tab` alone, because there
+    // `space`, `l` and `h` are characters on their way to the `Input`.
+    //
+    // Both groups carry a `settings-hint-change` selector on their `tab`
+    // chip (see its closure above), so a test can read that normal mode
+    // really does teach `tab` now.
     let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = match state.mode {
         DialogMode::Normal => (
             vec![
@@ -942,8 +964,12 @@ fn build(
             ],
             vec![
                 chip("space"),
+                chip("l"),
+                hint_change(chip("tab")),
                 sep("next value ·"),
                 chip("shift+space"),
+                chip("h"),
+                chip("shift+tab"),
                 sep("previous value ·"),
                 chip("/"),
                 sep("filter ·"),
@@ -972,7 +998,7 @@ fn build(
                 sep("±10"),
             ],
             vec![
-                chip("tab"),
+                hint_change(chip("tab")),
                 sep("next value ·"),
                 chip("shift+tab"),
                 sep("previous value ·"),
@@ -1368,6 +1394,24 @@ mod tests {
             Drop,
             "still claimed — see handle_key"
         );
+    }
+
+    /// User ruling 2026-09-13: `h`/`l` step too — in NORMAL mode only.
+    /// They arrive through [`dialogmode::normal_command`], which is the
+    /// whole reason this dialog needs no arm of its own for them; the
+    /// half that matters here is the half that must NOT happen, since
+    /// `h` and `l` are ordinary letters a trader types into the filter
+    /// (`shell` and `colour` both hold one) and a step there would
+    /// change a setting under them.
+    #[test]
+    fn h_and_l_step_in_normal_mode_and_type_in_filter_mode() {
+        use KeyAction::*;
+        let n = DialogMode::Normal;
+        assert_eq!(route(n, true, &bare("l")), Step(StepDirection::Right));
+        assert_eq!(route(n, true, &bare("h")), Step(StepDirection::Left));
+        let f = DialogMode::Filter;
+        assert_eq!(route(f, false, &bare("l")), PassThrough, "l types");
+        assert_eq!(route(f, false, &bare("h")), PassThrough, "h types");
     }
 
     /// The keys both modes share: `tab`/`shift+tab` step and the

@@ -772,6 +772,42 @@ fn tab_still_steps_in_settings_normal_mode(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// User ruling 2026-09-13: `l`/`h` step too, in normal mode, through the
+/// shared `dialogmode` table rather than an arm of this dialog's own —
+/// which is exactly why a window test is worth having here: the pure
+/// test proves `route` answers `Step`, this one proves the answer
+/// reaches a setting.
+#[gpui::test]
+fn l_and_h_step_the_selected_value_in_settings_normal_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("j l");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.font_size),
+        crate::fontsize::FontSize::Large,
+        "l should step Font size forward, Medium -> Large"
+    );
+    cx.simulate_keystrokes("h");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.font_size),
+        crate::fontsize::FontSize::Medium,
+        "h should step it back, Large -> Medium"
+    );
+    // And the footer teaches `tab` in normal mode, where it has always
+    // stepped and was withheld until the same ruling (review
+    // 2026-09-13). The selector rides the `tab` chip, so its presence in
+    // normal mode IS the claim.
+    assert!(
+        cx.debug_bounds("settings-hint-change").is_some(),
+        "the normal-mode footer names tab beside space and l"
+    );
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-hint-change").is_some(),
+        "and filter mode still names it, where it is the only stepping key"
+    );
+}
+
 /// §17.1 rule 1 reaches this dialog too: the frozen filter row is the
 /// mouse form of `/`.
 #[gpui::test]

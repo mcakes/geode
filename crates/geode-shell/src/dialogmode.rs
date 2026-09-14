@@ -127,7 +127,11 @@ pub fn normal_command(ks: &Keystroke) -> Option<NormalCommand> {
             "j" => Some(NormalCommand::MoveItem(1)),
             "k" => Some(NormalCommand::MoveItem(-1)),
             "g" => Some(NormalCommand::Nav(NavCommand::Bottom)),
-            "space" => Some(NormalCommand::ToggleBack),
+            // `shift+tab` joins `shift+space` (user ruling 2026-09-13):
+            // the settings dialog has stepped on `tab`/`shift+tab` since
+            // before it went modal, and a hand that learned them there
+            // must not find them dead in the config dialogs.
+            "space" | "tab" => Some(NormalCommand::ToggleBack),
             _ => None,
         };
     }
@@ -140,7 +144,15 @@ pub fn normal_command(ks: &Keystroke) -> Option<NormalCommand> {
         "g" => Some(NormalCommand::Nav(NavCommand::Top)),
         "/" => Some(NormalCommand::EnterFilter),
         "enter" => Some(NormalCommand::Commit),
-        "space" => Some(NormalCommand::Toggle),
+        // The forward step and its three aliases (user ruling
+        // 2026-09-13). `l`/`h` are the vim pair a hand already reaches
+        // for beside `j`/`k`, and `tab`/`shift+tab` are what the settings
+        // dialog has always stepped with; claiming them here rather than
+        // per surface is what makes them work in every modal dialog at
+        // once. Neither `h` nor `l` reaches `Verb` any more — no surface
+        // claimed either letter, which is what made this safe.
+        "space" | "l" | "tab" => Some(NormalCommand::Toggle),
+        "h" => Some(NormalCommand::ToggleBack),
         "i" => Some(NormalCommand::EditText),
         // `escape` is the ladder's, never a verb — returning it here
         // would swallow the one key every dialog needs.
@@ -227,6 +239,34 @@ mod tests {
             normal_command(&ks("j", SHIFT)),
             Some(NormalCommand::MoveItem(1))
         );
+    }
+
+    /// User ruling 2026-09-13 ("I keep reaching for them"): `l`/`tab`
+    /// join `space` as the forward step and `h`/`shift+tab` join
+    /// `shift+space` as the backward one, here rather than per dialog, so
+    /// every modal surface — the settings dialog included — gains them
+    /// from one table.
+    ///
+    /// A MODIFIED `h` or `l` is not a step and not a verb either: the
+    /// chords belong to whatever is underneath, and `shift+h` would be a
+    /// capital letter a surface might one day want.
+    #[test]
+    fn tab_and_h_and_l_step_a_value_beside_space() {
+        use NormalCommand::*;
+        assert_eq!(normal_command(&bare("l")), Some(Toggle));
+        assert_eq!(normal_command(&bare("tab")), Some(Toggle));
+        assert_eq!(normal_command(&bare("h")), Some(ToggleBack));
+        assert_eq!(normal_command(&ks("tab", SHIFT)), Some(ToggleBack));
+        // The keys they join are untouched.
+        assert_eq!(normal_command(&bare("space")), Some(Toggle));
+        assert_eq!(normal_command(&ks("space", SHIFT)), Some(ToggleBack));
+        // And neither is a `Verb` any more — a surface that had claimed
+        // `h` or `l` as its own letter would now be stepping instead,
+        // which is why nothing does.
+        for mods in [Modifiers::CTRL, Modifiers::ALT, Modifiers::CMD, SHIFT] {
+            assert_eq!(normal_command(&ks("h", mods)), None, "{mods:?}");
+            assert_eq!(normal_command(&ks("l", mods)), None, "{mods:?}");
+        }
     }
 
     /// Arrows and the ctrl-steps keep working in normal mode: the two

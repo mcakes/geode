@@ -108,6 +108,41 @@ teaches the other:
 | `escape` | the ladder of §5 |
 | letters | per-surface verbs — 4c's `s`/`d`/`r`/`n`, keybindings' `d`/`r` |
 
+**Amended (as built, 2026-09-13).** The step keys are five, not two:
+`space`, `l` and `tab` forward, `shift+space`, `h` and `shift+tab` back
+(user ruling: "I'd like cycling to also be done with tab and h/l — I
+keep reaching for them"). All six spellings are claimed in
+`dialogmode::normal_command`, the one table every modal surface reads,
+so the settings dialog gained `h`/`l` with no code of its own; `h` and
+`l` are no longer reachable as `NormalCommand::Verb`, which was safe
+because no surface had claimed either letter. In the object dialog's
+FILTER mode `tab`/`shift+tab` step too — the settings dialog's own "tab
+steps in both modes" rule — while `h` and `l` stay letters on their way
+to the focused `Input`. The one exception is an open text field, whose
+`tab` still completes a chain segment (4c §18.8) or stays inert.
+
+The same ruling made the footer **row-sensitive**, which §9's "a footer
+hint row listing the current mode's vocabulary" now has to mean per row
+as well as per mode: a footer that names `space` while the cursor is on
+a read-only `Text`, or `i` while it is on a `Choice`, is the inert-key
+lie in its most ordinary form. The object dialog's edit and column
+stages compute both groups from `Draft::selected_vocabulary` — the
+change group on a `Choice`/`Bool`/`Number` row, `i` on a `Number` or an
+editable `Text`, both on a `Number`, neither on a read-only one; a list
+row gets the forward key alone with the word (`toggle`, `add`) that says
+which way it travels. The **reorder group goes the same way**
+(`shift+j`/`shift+k`, and `x` where the domain offers it): those move a
+list *item* and answer "that is as far as this row goes" anywhere else,
+so they are named only on an item row. The filter-mode footer names the
+change group shrunk to `tab`/`shift+tab`, since those are the only two
+spellings that step with the `Input` focused — the same rule read the
+other way round, about keys that type rather than keys that are dead —
+and for the same reason a step that finds nothing to change names
+`tab`/`shift+tab` there and `space`/`shift+space` in normal mode, never
+the aliases, which no footer advertises. Groupings' `i` is the one thing
+that is not row-derived: there it opens the slot's whole chain rather
+than a row's value, so it is live everywhere and stated unconditionally.
+
 `shift+j`/`shift+k` replaces Phase 4c §3.3's pick-up sub-mode
 (`enter` to grab, arrows to move, `enter` to drop), which existed only
 because no key was free. The sub-mode is deleted, not reimplemented.
@@ -832,6 +867,7 @@ The shared table of §4, with the settings-specific verbs filled in:
 | `j` / `k` / `g` / `shift+g` | move | (text) |
 | arrows, `ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`, `pageup`/`pagedown` | move | move |
 | `space` / `shift+space` | step the value forward / back (§4's `Toggle`/`ToggleBack`, the keys 4c's `Choice` rows use) | (text) |
+| `l` / `h` | step forward / back (§4's 2026-09-13 amendment) | (text) |
 | `tab` / `shift+tab` | step forward / back | step forward / back |
 | `/` | enter filter mode | (text) |
 | `enter` | claimed and dropped | claimed and dropped |
@@ -889,6 +925,16 @@ Window tests (`shell/tests/chrome_and_dialogs.rs`):
 `space_and_shift_space_step_the_selected_value_in_normal_mode`,
 `space_types_in_settings_filter_mode_rather_than_stepping`,
 `tab_still_steps_in_settings_normal_mode`,
+`l_and_h_step_the_selected_value_in_settings_normal_mode` (§4's
+2026-09-13 amendment, which also put `tab`/`shift+tab` into the
+normal-mode footer — withheld there until then on the grounds that they
+were filter mode's only stepping keys, which withheld a live key from
+the mode with the most of them — marked by a `settings-hint-change`
+selector on the `tab` chip; with its `route` test
+`h_and_l_step_in_normal_mode_and_type_in_filter_mode` and the harness
+entry "settings: h reaches the step table through dialogmode" — that
+dialog grew no code of its own for the two keys, so the entry names the
+`dialogmode` arm and the settings test together),
 `clicking_the_settings_frozen_filter_row_enters_filter_mode` and
 `a_settings_row_click_keeps_focus_where_the_mode_says`; the pre-modal
 tests now press `/` first where they type. Pure tests on `route` cover

@@ -605,13 +605,14 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
 }
 
 /// **The mirror image of the test above.** Hiding a member is
-/// presentation and asks nothing; adding an AVAILABLE column changes what
-/// the view IS, so it goes through the same fork confirm any other
-/// definitional edit to a desk view does. `delta01` is on the dataset
-/// (`desk_view_docs`) but not on `tree`'s own columns, so it is the one
-/// row in the available block this fixture's `tree` has.
+/// presentation and says nothing; adding an AVAILABLE column changes what
+/// the view IS, so it forks the desk view into the user layer — applied
+/// at once and announced, like any other definitional edit (user ruling
+/// 2026-09-14). `delta01` is on the dataset (`desk_view_docs`) but not
+/// on `tree`'s own columns, so it is the one row in the available block
+/// this fixture's `tree` has.
 #[gpui::test]
-fn adding_an_available_column_to_a_desk_view_asks_before_forking(cx: &mut gpui::TestAppContext) {
+fn adding_an_available_column_to_a_desk_view_forks_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
 
@@ -624,15 +625,18 @@ fn adding_an_available_column_to_a_desk_view_asks_before_forking(cx: &mut gpui::
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("objectdialog-confirm").is_some(),
-        "membership forks a desk view"
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "membership forks a desk view without asking"
     );
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(
+        notice.contains("copied 'tree'") && notice.contains("r restores"),
+        "the fork is announced, not asked about: {notice}"
+    );
     flush_config_write(&mut cx);
 
     let written = std::fs::read_to_string(dir.path().join("views.toml"))
-        .expect("confirming forks the view into the user layer");
+        .expect("the fork lands in the user layer on the keystroke's own batch");
     assert!(written.contains("name = \"delta01\""), "{written}");
     let _ = shell;
 }
@@ -668,10 +672,7 @@ fn a_fork_records_an_override_entry_and_revert_removes_it(cx: &mut gpui::TestApp
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    cx.simulate_keystrokes("space"); // dataset: risk → vol
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
-    cx.simulate_keystrokes("enter"); // fork
+    cx.simulate_keystrokes("space"); // dataset: risk → vol, forking tree
     cx.run_until_parked();
     flush_config_write(&mut cx);
     let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
@@ -744,10 +745,7 @@ fn the_forks_own_entry_wins_over_its_stale_twin(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    cx.simulate_keystrokes("space"); // dataset: risk → vol
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
-    cx.simulate_keystrokes("enter"); // fork
+    cx.simulate_keystrokes("space"); // dataset: risk → vol, forking tree
     cx.run_until_parked();
     flush_config_write(&mut cx);
     let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
@@ -840,78 +838,6 @@ fn an_edit_the_reader_rejects_does_not_join_the_batch(cx: &mut gpui::TestAppCont
         std::fs::read_dir(dir.path()).unwrap().next().is_none(),
         "no file may appear: the write must not fire for an edit that \
          never joined the batch"
-    );
-}
-
-/// **The gate is inside `commit_edit` itself, not only in front of it.**
-///
-/// `commit_or_confirm`'s own early check
-/// (`apply::blocking_diagnostic`) is a UX nicety — it skips asking to
-/// fork an edit that can never be saved — but `run_confirmed`'s
-/// `Confirm::Fork` arm calls `apply::commit_edit` directly, bypassing
-/// that early check entirely. This test answers the fork question
-/// after the diagnostic turns to `Error`, which the real dialog cannot
-/// do today (armed, every other key is claimed and dropped, so nothing
-/// can call `revalidate` in between) — the point is to prove
-/// `commit_edit` itself refuses regardless of *how* the draft came to
-/// carry an error, rather than relying on that key-claiming behaviour
-/// as the reason this call site is safe.
-#[gpui::test]
-fn a_confirmed_fork_still_refuses_an_error_diagnostic(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    // A second dataset, so the `Dataset` choice has somewhere to step to
-    // and arms `Confirm::Fork` — same fixture as
-    // `a_definitional_change_to_a_desk_view_confirms_before_forking`.
-    let services = desk_view_services(&[(
-        "datasets",
-        "[other_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
-    )]);
-    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-
-    cx.simulate_keystrokes("space");
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("objectdialog-confirm").is_some(),
-        "forking a desk view has to ask first"
-    );
-
-    shell.update(&mut cx, |shell, _| {
-        shell
-            .object_dialog
-            .as_mut()
-            .unwrap()
-            .draft
-            .as_mut()
-            .unwrap()
-            .diagnostics = vec![geode_core::config::Diagnostic {
-            severity: geode_core::config::Severity::Error,
-            layer: None,
-            file: None,
-            message: "dataset 'other_snapshot' does not exist".to_string(),
-            path: None,
-        }];
-    });
-
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert!(
-        shell.read_with(&cx, |shell, _| shell.pending_config_write.is_none()),
-        "the second call site into commit_edit must refuse an error diagnostic exactly as the first one does"
-    );
-    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
-    assert!(
-        notice
-            .as_deref()
-            .is_some_and(|n| n.contains("other_snapshot")),
-        "got {notice:?}"
-    );
-
-    flush_config_write(&mut cx);
-    assert!(
-        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
-        "no file may appear: the fork must not have been applied or written"
     );
 }
 
@@ -1465,12 +1391,14 @@ fn edits_inside_the_debounce_window_coalesce_into_one_write(cx: &mut gpui::TestA
 
 /// A **definitional** change to an object the user's layer does not own
 /// forks it into the user layer, and a fork freezes: the desk's next
-/// column never reaches this trader (spec §4.1). It is the one edit that
-/// still asks before acting — and declining takes the value back off the
-/// screen, because a painted value that is neither applied nor persisted
-/// is precisely what instant editing must never produce.
+/// column never reaches this trader (spec §4.1). It applies on the
+/// keystroke like every other edit and is *announced* rather than asked
+/// about (user ruling 2026-09-14: the confirm was "too distracting —
+/// tell the user what is happening but just do it"): the notice names
+/// the copy, the layer it shadows and the `r` that restores it, and the
+/// write is queued before the keystroke returns.
 #[gpui::test]
-fn a_definitional_change_to_a_desk_view_confirms_before_forking(cx: &mut gpui::TestAppContext) {
+fn a_definitional_change_to_a_desk_view_forks_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     // A second dataset, so the `Dataset` choice has somewhere to step to.
     let services = desk_view_services(&[(
@@ -1485,28 +1413,29 @@ fn a_definitional_change_to_a_desk_view_confirms_before_forking(cx: &mut gpui::T
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("objectdialog-confirm").is_some(),
-        "forking a desk view has to ask first"
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "forking a desk view does not ask"
     );
     assert!(
-        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
-        "and nothing may be applied or written while it asks"
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_some()),
+        "the fork is queued on the keystroke"
     );
-
-    cx.simulate_keystrokes("n");
-    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(
+        notice.contains("copied 'tree' to your config")
+            && notice.contains("desk")
+            && notice.contains("r restores"),
+        "the notice names the copy, the shadowed layer and the way back: {notice}"
+    );
     assert_eq!(
         edit_draft(&shell, &cx, |d| d.choice("dataset").map(str::to_string)),
-        Some("risk_snapshot".to_string()),
-        "declining puts the field back — the screen may not keep a value \
-         that was neither applied nor persisted"
+        Some("other_snapshot".to_string()),
+        "and the value stays on screen — it is applied, not pending an answer"
     );
 
-    cx.simulate_keystrokes("space enter");
-    cx.run_until_parked();
     flush_config_write(&mut cx);
     let text = std::fs::read_to_string(dir.path().join("views.toml"))
-        .expect("confirming forks the view into the user layer");
+        .expect("the fork lands in the user layer");
     assert!(text.contains("other_snapshot"), "{text}");
 }
 
@@ -1979,9 +1908,7 @@ fn ticking_a_dimension_in_an_empty_slot_writes_it_without_asking(cx: &mut gpui::
     // `reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order`
     // needs to reach a configured slot's first item), then tick the
     // first dimension.
-    // `escape` first: a slot opens in the chain field (§18.8), and the
-    // chooser this test drives is one rung behind it.
-    cx.simulate_keystrokes("enter escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j space");
     cx.run_until_parked();
@@ -2023,7 +1950,7 @@ fn d_on_an_empty_slot_says_there_is_nothing_to_delete(cx: &mut gpui::TestAppCont
         dir.path(),
         "config::groupings",
     );
-    cx.simulate_keystrokes("enter escape d");
+    cx.simulate_keystrokes("enter d");
     cx.run_until_parked();
     assert!(cx.debug_bounds("objectdialog-confirm").is_none());
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
@@ -2055,9 +1982,7 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     // down to slot 3, then into its edit stage.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
-    // `escape` leaves the chain field a slot opens in (§18.8) for the
-    // chooser this test reorders in.
-    cx.simulate_keystrokes("enter escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
 
     // Past `Slot` and the `Dimensions` header row, onto `book` — the
@@ -2070,15 +1995,14 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     // Every Groupings field is `Destination::Doc` (spec §8.2 — there is
     // no presentation split the way Views has one), so reordering a
     // builtin-owned slot is a definitional change to an object the user
-    // layer does not own: it forks, and asks first, exactly like any
-    // other `Doc` edit to a desk/builtin object.
+    // layer does not own: it forks, applied at once and announced,
+    // exactly like any other `Doc` edit to a desk/builtin object.
     assert!(
-        cx.debug_bounds("objectdialog-confirm").is_some(),
-        "reordering a builtin slot has to ask before forking it into the \
-         user layer"
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "reordering a builtin slot forks it into the user layer without asking"
     );
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("copied '3'"), "{notice}");
 
     // Let the debounced batch merge, apply, and write.
     flush_config_write(&mut cx);
@@ -2135,15 +2059,11 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
     // down to slot 3 first.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
-    // `escape` leaves the chain field a slot opens in (§18.8) for the
-    // chooser this test reorders in.
-    cx.simulate_keystrokes("enter escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
     cx.simulate_keystrokes("shift-j");
-    cx.run_until_parked();
-    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     flush_config_write(&mut cx);
 
@@ -2194,8 +2114,7 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
     // `Dimensions` header, onto `book` — the chain's only ticked item.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
-    // `escape` leaves the chain field a slot opens in (§18.8).
-    cx.simulate_keystrokes("enter escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
@@ -2359,11 +2278,9 @@ fn o_overwrites_the_saved_scope_with_the_frames_current_one(cx: &mut gpui::TestA
     cx.simulate_keystrokes("o");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("objectdialog-confirm").is_some(),
-        "o must ask before overwriting"
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "mine is builtin-owned: nothing is lost, so o writes at once"
     );
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
     flush_config_write(&mut cx);
 
     assert_eq!(
@@ -2383,13 +2300,15 @@ fn o_overwrites_the_saved_scope_with_the_frames_current_one(cx: &mut gpui::TestA
     assert_eq!(frame_after, frame_scope);
 }
 
-/// `o` must confirm before acting, since it destroys the saved scope's
-/// previous contents: pressing it alone must not touch the doc, and
-/// declining (`n`) must leave `mine` exactly as it was.
+/// `o` on a scope the user layer owns must confirm before acting, since
+/// it destroys the saved scope's previous contents with no desk copy to
+/// fall back on: pressing it alone must not touch the doc, and declining
+/// (`n`) must leave `mine` exactly as it was. (On a desk-owned scope it
+/// writes at once — `o_on_a_desk_owned_scope_forks_without_asking_and_says_so`.)
 #[gpui::test]
 fn o_confirms_before_overwriting(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let services = services_with_a_saved_scope();
+    let services = services_with_a_user_owned_scope();
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
 
     let frame_scope = Scope {
@@ -2460,24 +2379,31 @@ fn services_with_a_user_owned_scope() -> ShellServices {
     services
 }
 
-/// Task 5 review round 1, the Major: `o` on a scope the user layer does
-/// not already own also forks it into the user layer (the same
-/// consequence any other definitional edit through this dialog has), and
-/// that has to be disclosed in the prompt *before* the second keystroke —
-/// not discovered weeks later when the desk's changes stop arriving
-/// (spec §16). `mine` here is builtin-owned only
-/// (`services_with_a_saved_scope` — no user-layer `scopes` doc at all),
-/// so `o` must arm `Confirm::Overwrite { forks: true }`, not `{ forks:
-/// false }`. `overwrite_prompts_tell_the_truth_about_what_it_costs`
-/// (`mod.rs`) pins that the `true` prompt's wording is honest once armed
-/// this way; this test pins that `arm_overwrite` actually arms it this
-/// way for a real desk-owned object, through the real dispatch path
-/// (`editing_row`, not a hand-built `ObjectRow`).
+/// `o` on a scope the user layer does not already own forks it into the
+/// user layer (the same consequence any other definitional edit through
+/// this dialog has) and, by the 2026-09-14 ruling, does so at once and
+/// says so — nothing is lost, the desk's copy is still there and `r`
+/// restores it, so there is nothing to ask. `mine` here is builtin-owned
+/// only (`services_with_a_saved_scope` — no user-layer `scopes` doc at
+/// all), through the real dispatch path (`editing_row`, not a hand-built
+/// `ObjectRow`). Task 5 review round 1's Major was that the fork went
+/// undisclosed; the notice is where it is disclosed now.
 #[gpui::test]
-fn o_on_a_desk_owned_scope_discloses_the_fork_before_writing(cx: &mut gpui::TestAppContext) {
+fn o_on_a_desk_owned_scope_forks_without_asking_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let services = services_with_a_saved_scope();
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+    shell.update(&mut cx, |s, cx| {
+        s.frame.update(cx, |f, _| {
+            f.set_scope(Scope {
+                dimensions: vec![DimensionSelection {
+                    column: "book".to_string(),
+                    values: vec!["BK009".to_string()],
+                }],
+                ..Scope::default()
+            });
+        });
+    });
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2486,15 +2412,27 @@ fn o_on_a_desk_owned_scope_discloses_the_fork_before_writing(cx: &mut gpui::Test
 
     assert_eq!(
         edit_draft(&shell, &cx, |draft| draft.confirm),
-        Some(objectdialog::Confirm::Overwrite { forks: true }),
-        "mine is builtin-owned, not user-owned, so o must disclose the fork"
+        None,
+        "mine is builtin-owned: nothing is lost, so o must not ask"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_some()),
+        "and the overwrite is queued on the keystroke"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(
+        notice.contains("replaced")
+            && notice.contains("copied 'mine'")
+            && notice.contains("builtin"),
+        "the notice says both what was replaced and what was copied: {notice}"
     );
 }
 
-/// The non-forking twin: `o` on a scope the user layer already owns must
-/// not claim it will fork anything.
+/// The other half: `o` on a scope the user layer already owns still
+/// asks, since its previous contents really are lost, and the prompt
+/// claims no fork.
 #[gpui::test]
-fn o_on_a_user_owned_scope_does_not_claim_a_fork(cx: &mut gpui::TestAppContext) {
+fn o_on_a_user_owned_scope_still_asks_first(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let services = services_with_a_user_owned_scope();
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
@@ -2506,7 +2444,7 @@ fn o_on_a_user_owned_scope_does_not_claim_a_fork(cx: &mut gpui::TestAppContext) 
 
     assert_eq!(
         edit_draft(&shell, &cx, |draft| draft.confirm),
-        Some(objectdialog::Confirm::Overwrite { forks: false }),
+        Some(objectdialog::Confirm::Overwrite),
         "mine is already user-owned, so o must not claim a fork"
     );
 }
@@ -2517,11 +2455,10 @@ fn o_on_a_user_owned_scope_does_not_claim_a_fork(cx: &mut gpui::TestAppContext) 
 /// and this is the ordering that proves it: with no writable user config
 /// directory nothing is queued, applied or written, so nothing has been
 /// accounted for and the draft has to stay dirty. A `mark_saved()` ahead
-/// of the check makes the unqueued value the baseline, and a later
-/// declined `Confirm::Fork` then `revert_to_baseline`s onto a value that
-/// was never applied and never persisted — the state `cancel_confirm`
-/// exists to prevent. Every other fixture in this file has a user
-/// directory, which is why this ordering regressed unseen.
+/// of the check makes the unqueued value the baseline, so a later commit
+/// treats a value that was never applied and never persisted as already
+/// accounted for. Every other fixture in this file has a user directory,
+/// which is why this ordering regressed unseen.
 #[gpui::test]
 fn an_edit_with_nowhere_to_write_leaves_the_draft_dirty(cx: &mut gpui::TestAppContext) {
     // `dialog_test_shell_with`, not `..._in_dir`: this one's `user_dir` is
@@ -2624,16 +2561,17 @@ fn o_on_a_scope_that_already_matches_the_frame_says_so(cx: &mut gpui::TestAppCon
     cx.run_until_parked();
     cx.simulate_keystrokes("o");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "builtin-owned, so o acts at once"
+    );
 
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
     assert!(
         notice
             .as_deref()
             .is_some_and(|n| n.contains("already matches the frame")),
-        "a confirmed o that writes nothing has to say why, got {notice:?}"
+        "an o that writes nothing has to say why, got {notice:?}"
     );
     assert!(
         shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
@@ -2991,9 +2929,7 @@ fn a_digit_in_the_edit_stage_jumps_to_that_slot(cx: &mut gpui::TestAppContext) {
             object: "1".to_string()
         }
     );
-    // Out of the chain field a slot opens in (§18.8): a digit typed
-    // there is text, so the jump is `escape` then the digit.
-    cx.simulate_keystrokes("escape 3");
+    cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -3006,9 +2942,7 @@ fn a_digit_in_the_edit_stage_jumps_to_that_slot(cx: &mut gpui::TestAppContext) {
         .unwrap()[0]
         .included));
 
-    // The landing is the chain field again; "already editing" is the
-    // chooser's answer, so `escape` first here too.
-    cx.simulate_keystrokes("escape 3");
+    cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -3039,13 +2973,11 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
     );
     // Slot 1 is empty: ticking `book` queues a user-layer write with no
     // fork to confirm.
-    // Each slot opens in its chain field (§18.8); `escape` reaches the
-    // chooser the tick and the second digit belong to.
-    cx.simulate_keystrokes("1 escape j j space");
+    cx.simulate_keystrokes("1 j j space");
     cx.run_until_parked();
     assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_some()));
 
-    cx.simulate_keystrokes("2 escape 1 escape");
+    cx.simulate_keystrokes("2 1");
     cx.run_until_parked();
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -3085,15 +3017,14 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
     );
 }
 
-/// §18.8 (user ruling 2026-09-12): opening a slot lands IN the chain
-/// field — seeded, focused, completions below — and `escape` walks
-/// field → chooser → browse, one visible rung at a time. The chooser
-/// (tick, reorder) is still there behind the first `escape`, and `i`
-/// reopens the field from it.
+/// Opening a slot lands in the chooser (user ruling 2026-09-14,
+/// superseding §18.8's 2026-09-12 chain-field landing): normal mode, no
+/// field open, the action bar up. `i` opens the chain field — seeded,
+/// focused, completions below — and `escape` walks field → chooser →
+/// browse, one visible rung at a time. The same holds by digit, by
+/// `enter` and by a click (`clicking_a_groupings_row_opens_the_chooser`).
 #[gpui::test]
-fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
-    cx: &mut gpui::TestAppContext,
-) {
+fn opening_a_slot_lands_in_the_chooser_and_i_opens_the_chain_field(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = dialog_test_shell_in_dir(
         cx,
@@ -3105,6 +3036,27 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert!(
+        !edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "the chooser, not the chain field"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
+    assert_eq!(dialog_input_text(&shell, &cx), "");
+    assert!(cx.debug_bounds("dialog-mode-pill-normal").is_some());
+    assert!(cx.debug_bounds("dialog-mode-pill-chain").is_none());
+    assert!(cx.debug_bounds("objectdialog-actions").is_some());
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+
+    // `i` opens the field, seeded with the chain and holding the keys;
+    // a digit typed there is text, not a jump.
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(
         edit_draft(&shell, &cx, |d| d.chain_entry()),
         "the field is open"
     );
@@ -3113,8 +3065,6 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     assert_eq!(dialog_input_text(&shell, &cx), "book");
     assert!(cx.debug_bounds("dialog-mode-pill-chain").is_some());
     assert!(cx.debug_bounds("objectdialog-actions").is_none());
-
-    // Typing goes into the field — a digit here is text, not a jump.
     cx.simulate_input(" 4");
     cx.run_until_parked();
     assert_eq!(dialog_input_text(&shell, &cx), "book 4");
@@ -3125,7 +3075,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
         }
     );
 
-    // First escape: the chooser, with the chain untouched.
+    // First escape: back to the chooser, with the chain untouched.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
@@ -3139,7 +3089,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     assert!(cx.debug_bounds("objectdialog-actions").is_some());
     assert!(!edit_draft(&shell, &cx, |d| d.is_dirty()));
 
-    // `i` reopens it; second escape from the chooser goes back a stage.
+    // `i` reopens it; two escapes from there go field → chooser → browse.
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
@@ -3153,8 +3103,9 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     // By `enter` from the list, the same landing.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
-    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
 }
 
 /// The text the shared dialog `Input` currently holds.
@@ -3179,8 +3130,7 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
         dir.path(),
         "config::groupings",
     );
-    // The field is open on arrival (§18.8); `i` is only the way BACK in.
-    cx.simulate_keystrokes("3");
+    cx.simulate_keystrokes("3 i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert!(
@@ -3251,20 +3201,19 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
     );
     // Slot 3 is the builtin layer's, so the applied chain is a
     // definitional change to an object the user does not own: the same
-    // fork question a tick or a `shift+j` on it would ask
+    // fork a tick or a `shift+j` on it makes
     // (`reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order`),
-    // answered the same way.
+    // applied and announced the same way.
     assert!(
-        cx.debug_bounds("objectdialog-confirm").is_some(),
-        "a desk slot asks before forking, from the chain field too"
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "a desk slot forks without asking, from the chain field too"
     );
-    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_none()));
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
     assert!(
         shell.read_with(&cx, |s, _| s.pending_config_write.is_some()),
-        "queued once the fork is confirmed, like a tick"
+        "queued on the keystroke, like a tick"
     );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("copied '3'"), "{notice}");
     flush_config_write(&mut cx);
     let written = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap();
     assert!(written.contains("\"book\", \"lhu\""), "{written}");
@@ -3282,8 +3231,7 @@ fn a_refused_chain_keeps_the_field_open_and_escape_cancels_it(cx: &mut gpui::Tes
         dir.path(),
         "config::groupings",
     );
-    // The field is open on arrival (§18.8); `i` is only the way BACK in.
-    cx.simulate_keystrokes("3");
+    cx.simulate_keystrokes("3 i");
     cx.simulate_input(" npv");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -4122,10 +4070,11 @@ fn clicking_a_browse_row_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
-/// On Groupings the door lands in the chain field (§18.8), because the
-/// door decides, not the click.
+/// On Groupings a click lands in the chooser like every other door
+/// (user ruling 2026-09-14): the door decides, not the click, and the
+/// door opens no field.
 #[gpui::test]
-fn clicking_a_groupings_row_lands_in_the_chain_field(cx: &mut gpui::TestAppContext) {
+fn clicking_a_groupings_row_opens_the_chooser(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = dialog_test_shell_in_dir(
         cx,
@@ -4142,9 +4091,16 @@ fn clicking_a_groupings_row_lands_in_the_chain_field(cx: &mut gpui::TestAppConte
         gpui::Modifiers::none(),
     );
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
-    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "book / lhu");
-    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        },
+        "the click opened slot 3"
+    );
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "");
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
 /// While the naming row is open a click only selects: a typed name must
@@ -4234,7 +4190,7 @@ fn clicking_a_tick_hides_the_column_and_parks_the_cursor_there(cx: &mut gpui::Te
 }
 
 /// On an available row the tick adds — `space`'s add — which is a `Doc`
-/// write, so on a desk view it asks before forking rather than writing.
+/// write, so on a desk view it forks the view and says so.
 #[gpui::test]
 fn clicking_an_available_rows_tick_adds_it(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4257,9 +4213,11 @@ fn clicking_an_available_rows_tick_adds_it(cx: &mut gpui::TestAppContext) {
     });
     assert_eq!(names, ["book", "npv", "delta01"]);
     assert!(
-        edit_draft(&shell, &cx, |d| d.confirm.is_some()),
-        "a desk view asks before forking"
+        edit_draft(&shell, &cx, |d| d.confirm.is_none()),
+        "a desk view forks without asking"
     );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("copied 'tree'"), "{notice}");
 }
 
 /// §17.1 rule 3 / §18.9.2 follow-up: a tick click is claimed and dropped
@@ -4485,7 +4443,7 @@ fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) 
         dir.path(),
         "config::groupings",
     );
-    cx.simulate_keystrokes("3");
+    cx.simulate_keystrokes("3 i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     // Open a fresh segment so `lhu` is offered.
@@ -5151,8 +5109,8 @@ fn services_with_sources() -> ShellServices {
 
 /// §19.3: rows read dataset first and sort by it; `i` on a text row
 /// opens the field seeded with the value; a bad duration is refused with
-/// the field open; a good one applies and, on a builtin source, asks
-/// before forking; the flush writes the spelling the reader reads.
+/// the field open; a good one applies and, on a builtin source, forks it
+/// without asking; the flush writes the spelling the reader reads.
 #[gpui::test]
 fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5212,11 +5170,9 @@ fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppC
     assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert!(
-        cx.debug_bounds("objectdialog-confirm").is_some(),
-        "a builtin source asks before forking"
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "a builtin source forks without asking"
     );
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
     flush_config_write(&mut cx);
     let written = std::fs::read_to_string(dir.path().join("sources.toml")).unwrap();
     assert!(written.contains("poll_interval = \"30s\""), "{written}");
@@ -5510,16 +5466,32 @@ fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppConte
     );
 }
 
-/// The edit footer names `i` where a row can take it (Sources has editable
-/// text and a number) and stays silent where `i` only refuses (Views).
+/// The edit footer names `i` on the row that can take it and on no
+/// other (user ruling 2026-09-13, narrowing the 2026-09-12 rule from the
+/// object to the row): Sources' `Paths` is an editable `Text`, but the
+/// `Dataset` row the stage opens on is a `Choice` that `i` refuses.
 #[gpui::test]
 fn the_edit_footer_offers_i_only_where_a_row_can_take_it(cx: &mut gpui::TestAppContext) {
     let (_shell, mut cx) = dialog_test_shell_with(cx, services_with_sources(), "config::sources");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_none(),
+        "Sources opens on Dataset, a Choice i cannot open"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_some(),
+        "which the step keys do change"
+    );
+    cx.simulate_keystrokes("j"); // Paths, an editable Text
+    cx.run_until_parked();
+    assert!(
         cx.debug_bounds("objectdialog-hint-i").is_some(),
-        "Sources' footer advertises i"
+        "Paths takes a typed value"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_none(),
+        "and nothing on it steps"
     );
 }
 
@@ -5909,8 +5881,8 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
 
 /// A builtin `colours` doc with one colour (`delta`, `hue = 240`) plus
 /// the keymap — the same shape `services_with_sources` uses, so a first
-/// edit to `delta` asks before forking exactly as a builtin source's
-/// first edit does.
+/// edit to `delta` forks it exactly as a builtin source's first edit
+/// does.
 fn services_with_colours() -> ShellServices {
     let mut services = test_services();
     let colours = LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap();
@@ -5953,13 +5925,294 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
         d.fields[0].kind,
         objectdialog::FieldKind::Number { value: 255, .. }
     )));
-    // A builtin colour's first edit asks the fork question, exactly as
-    // `sources_rows_are_dataset_first_and_i_types_a_duration` presses
-    // `enter` on it before the flush.
-    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    // A builtin colour's first edit forks it without asking, exactly as
+    // a builtin source's does.
+    assert!(cx.debug_bounds("objectdialog-confirm").is_none());
     flush_config_write(&mut cx);
     let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
     assert!(written.contains("[delta]\nhue = 255"), "{written}");
+}
+
+/// `enter` is named wherever it opens something and nowhere else (user
+/// ruling 2026-09-13): browse in both modes (it opens the edit stage),
+/// the Views edit stage (a member row opens its column stage), the
+/// Schema edit stage (a column row opens the dataset-level stage) — and
+/// not inside a column stage, where `enter` on a field only gives a
+/// notice.
+#[gpui::test]
+fn the_footers_name_enter_where_it_opens_something(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "browse, normal mode: enter opens the edit stage"
+    );
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "browse, filter mode: enter still opens the highlighted row"
+    );
+    cx.simulate_keystrokes("escape enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_none(),
+        "the Views edit stage lands on the dataset row, where enter only gives a notice"
+    );
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "on a member row enter opens its column stage"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        matches!(
+            dialog_state(&shell, &cx, |s| s.stage.clone()),
+            objectdialog::Stage::Column { .. }
+        ),
+        "the column stage opened"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_none(),
+        "inside a column stage enter only gives a notice, so it is not named"
+    );
+}
+
+#[gpui::test]
+fn the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-enter").is_some(),
+        "the Schema edit stage: enter opens a column row's stage"
+    );
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("open a column"), "{notice}");
+    assert!(notice.contains("enter"), "{notice}");
+}
+
+// ---- Step keys and the row-sensitive footer (user ruling 2026-09-13) ---
+
+/// The `scale` `Choice`'s selected index in an open column stage — the
+/// one number every stepping-key assertion below reads. Found by key
+/// rather than by position so a seventh column key inserted ahead of it
+/// does not silently move the assertion onto another row.
+fn scale_index(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> usize {
+    edit_draft(shell, cx, |draft| {
+        let field = draft
+            .fields
+            .iter()
+            .find(|f| f.key == "scale")
+            .expect("the column stage has a scale row");
+        match &field.kind {
+            objectdialog::FieldKind::Choice { selected, .. } => *selected,
+            other => panic!("scale should be a Choice, got {other:?}"),
+        }
+    })
+}
+
+/// User ruling 2026-09-13 ("I keep reaching for them"): `l`/`h` step the
+/// row under the cursor forward and back in normal mode, exactly as
+/// `space`/`shift+space` do — one path, `Draft::step_selected`, so the
+/// aliases cannot drift from the keys they alias.
+#[gpui::test]
+fn l_and_h_step_the_selected_row_in_the_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // `npv`'s column stage, then past `label` and `width` onto `scale`.
+    cx.simulate_keystrokes("j enter j j");
+    cx.run_until_parked();
+    let before = scale_index(&shell, &cx);
+
+    cx.simulate_keystrokes("l");
+    cx.run_until_parked();
+    let forward = scale_index(&shell, &cx);
+    assert_ne!(forward, before, "l steps the Choice forward");
+
+    cx.simulate_keystrokes("h");
+    cx.run_until_parked();
+    assert_eq!(
+        scale_index(&shell, &cx),
+        before,
+        "h steps it back to where it started"
+    );
+    assert!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).is_none(),
+        "neither key is announced as 'not a verb here'"
+    );
+}
+
+/// `tab`/`shift+tab` step in BOTH modes — the settings dialog's own rule,
+/// now this stage's. The filter keeps focus and the query is untouched:
+/// a step is a value change, not a filter keystroke. `h`/`l` stay
+/// letters in filter mode, which is what a trader typing `hidden` into
+/// the query depends on.
+#[gpui::test]
+fn tab_steps_the_selected_row_in_both_modes(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter"); // npv's column stage, cursor on `label`
+    cx.run_until_parked();
+
+    // An inert row names the key the trader actually pressed (review
+    // 2026-09-13): `space` TYPES in filter mode, so "nothing on this row
+    // changes with space" would be a sentence about a key that puts a
+    // character in the query.
+    cx.simulate_keystrokes("/ tab");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("nothing on this row changes with tab"),
+        "label is a Text: tab steps nothing here, and says so in tab's own name"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("j j"); // width → scale
+    cx.run_until_parked();
+    let start = scale_index(&shell, &cx);
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let forward = scale_index(&shell, &cx);
+    assert_ne!(forward, start, "tab steps forward in normal mode");
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert_eq!(scale_index(&shell, &cx), start, "shift+tab steps back");
+
+    // Into filter mode, where the shared `Input` holds the keyboard.
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(
+        scale_index(&shell, &cx),
+        forward,
+        "tab steps forward in filter mode too"
+    );
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert_eq!(scale_index(&shell, &cx), start, "and shift+tab back");
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Filter,
+        "stepping never leaves filter mode"
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "nor moves focus off the field the trader is typing into"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "",
+        "and puts no character into the query"
+    );
+
+    // The other two aliases are ordinary letters here.
+    cx.simulate_keystrokes("l h");
+    cx.run_until_parked();
+    assert_eq!(
+        scale_index(&shell, &cx),
+        start,
+        "h and l type in filter mode rather than stepping"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "lh",
+        "they reached the field as text"
+    );
+}
+
+/// The footer names the keys the row under the CURSOR answers to, not
+/// the ones its domain has somewhere (user ruling 2026-09-13). The
+/// column stage is where all three cases sit side by side: `label` is an
+/// editable `Text` (`i` only), `scale` a `Choice` (the step keys only),
+/// `precision` a `Number` (both).
+#[gpui::test]
+fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // The reorder group is row-sensitive for the same reason (review
+    // 2026-09-13): `shift+j`/`shift+k` move a list ITEM, and this fixture
+    // lands on one.
+    assert!(
+        cx.debug_bounds("objectdialog-hint-reorder").is_some(),
+        "a member row can be reordered"
+    );
+    cx.simulate_keystrokes("k k"); // the Columns header, then the Dataset row
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-reorder").is_none(),
+        "the dataset row has no item to move, so shift+j/shift+k must not be named"
+    );
+    cx.simulate_keystrokes("j j"); // back to the member row
+
+    cx.simulate_keystrokes("j enter"); // npv's column stage, cursor on `label`
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-reorder").is_none(),
+        "and the column stage has no list at all"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "label is an editable Text: i types a value"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_none(),
+        "and nothing on it steps, so the change keys must not be named"
+    );
+
+    cx.simulate_keystrokes("j j"); // width → scale
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_some(),
+        "scale is a Choice: the step keys change it"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_none(),
+        "and i has nothing to open on a Choice"
+    );
+
+    cx.simulate_keystrokes("j"); // precision
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_some(),
+        "a Number steps"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "and takes a typed value"
+    );
+
+    // Filter mode names the one stepping pair a focused `Input` leaves
+    // free, and drops `i` — which types an `i` there rather than opening
+    // anything.
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_some(),
+        "tab still steps the Number with the filter focused"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_none(),
+        "i is a character in filter mode, so the footer must not name it"
+    );
+    // And on a row nothing steps, the filter footer names no step key
+    // either: `escape` back to normal is the whole of it.
+    cx.simulate_keystrokes("escape k k k"); // precision → scale → width → label
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-hint-change").is_none(),
+        "label has nothing tab could step"
+    );
 }
