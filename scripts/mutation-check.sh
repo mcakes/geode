@@ -1728,15 +1728,15 @@ run_mutation "keybindings: escape only walks the ladder when unmodified" \
 
 run_mutation "keybindings: d never writes an unbind" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '            NormalCommand::Verb('"'"'d'"'"') => {' \
-  '            NormalCommand::Verb('"'"'\0'"'"') => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'r'"'"')) => {' \
   geode-shell \
   d_unbinds_the_selected_binding
 
 run_mutation "keybindings: r never writes a reset" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '            NormalCommand::Verb('"'"'r'"'"') => {' \
-  '            NormalCommand::Verb('"'"'\u{1}'"'"') => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"')) => {' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
 
