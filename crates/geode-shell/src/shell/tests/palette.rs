@@ -387,12 +387,12 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_theme(
 }
 
 /// The full-list scroll behavior this task adds: real `down` keystrokes
-/// (not a direct `PaletteState::move_selection` call — this is the
+/// (not a direct `PaletteState::set_selected` call — this is the
 /// actual key-event pipeline `handle_palette_key` drives) move the
 /// selection well past `palette::VISIBLE_ROWS` (12) into rows that,
 /// before this task, `render` would never have drawn (it truncated to
-/// the top 12 filtered rows) and `move_selection`'s old clamp would
-/// never have let the selection reach. Also checks, via gpui's
+/// the top 12 filtered rows) and the palette's old `VISIBLE_ROWS` clamp
+/// would never have let the selection reach. Also checks, via gpui's
 /// test-only `debug_selector`/
 /// `debug_bounds` (wired up in `palette::render`), that the selected
 /// row's *painted* bounds actually land inside the scrollable list

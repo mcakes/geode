@@ -11208,8 +11208,11 @@ run_mutation "settings: shift+click on the value chip steps back (spec §20.3)" 
 
 # Spec §20.3: the chip degrades to plain text — no handler — while a
 # confirm is armed, one of the four inert conditions the keys share.
-# Mutated away, a chip click under a pending Delete steps the value (and
-# writes it) while the question is still on screen.
+# Mutated away, the render gate paints a live chip under a pending
+# Delete; the click itself is still dropped by the handler's own guard,
+# so what the test observes is the gate alone — the chip's painted width
+# (a live chip measures wider than the armed plain text), never a
+# stepped value.
 run_mutation "objectdialog: the value chip is inert under an armed confirm (spec §20.3)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    let chips_live = writable && draft.confirm.is_none() && draft.text_entry.is_none();' \

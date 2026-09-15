@@ -1636,9 +1636,10 @@ fn build(
                 Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
                 Hint::new(HintRow::Edit, &["enter"], "rebind"),
                 // The two verbs normal mode exists to make room for
-                // (spec §8/§9): a chord has no clickable target and a
-                // bare letter has no visible one, so the footer is where
-                // `d` and `r` are discovered at all.
+                // (spec §8/§9). Since spec §20.1 they are buttons too
+                // (`action_block`), so the footer is where the KEYS are
+                // discovered — a bare letter has no visible target of
+                // its own — rather than the verbs' only door.
                 Hint::new(HintRow::Edit, &["d"], "unbind"),
                 Hint::new(HintRow::Edit, &["r"], "reset"),
                 Hint::new(HintRow::Go, &["/"], "filter"),

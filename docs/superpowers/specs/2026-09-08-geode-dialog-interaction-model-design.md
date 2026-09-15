@@ -1274,16 +1274,17 @@ passing `wrap = mode is Normal` (visual mode passes `false`). The
 market-data tile's `move_cursor` routes its row axis through `apply` and
 its column axis through `apply_clamped`, matching the ruling's "columns
 clamp" clause; its fragment's page keys are `page_down_full`/
-`page_up_full` at `FULL_PAGE = 10`, the blotter's own step. `PaletteState`
-is the one list that did **not** delete its `move_selection` — the
-method survives as a thin delegate to `vimnav::apply`, kept because
-fourteen pure tests already name it and `handle_palette_key` calls it by
-that name; only the arithmetic moved. This is a deviation from §20.5's
-"deletes it and routes … through `apply`" wording, which read as
-"deletes the method" — what was deleted is the method's own arithmetic,
-not the method. The picker's free `nav_delta` function and the as-of
-selector's own `move_selection` free function were both deleted outright,
-as written. The palette's `tab` reclaim landed as a `GeodePalette` key
+`page_up_full` at `FULL_PAGE = 10`, the blotter's own step. `PaletteState::
+move_selection` is deleted too (the final whole-branch review's I3): it
+had survived Task 3 as a thin delegate to `vimnav::apply` on the grounds
+that fourteen pure tests named it, but `handle_palette_key` had stopped
+calling it — every palette motion already went through
+`listfilter::nav_command` + `vimnav::apply` + `set_selected` — so by
+controller ruling the method went and the fourteen tests were ported
+onto `apply` through a test-local `step` helper spelling exactly what
+the fallback arm does, every assertion kept. The picker's free
+`nav_delta` function and the as-of selector's own `move_selection` free
+function were deleted outright as well, as written. The palette's `tab` reclaim landed as a `GeodePalette` key
 context on the palette's panel plus the same `tab`/`shift-tab` → `NoAction`
 bindings the modal and command-line contexts already carry — and the
 window test asserting `tab` stays on `palette_input` was genuinely red
@@ -1293,7 +1294,11 @@ see, not only the display-check item §20.5 called it.
 **§20.2, the picker.** `picker::back_to_columns` is the function
 `handle_values_key` calls on a bare `escape`; the Values stage's tick
 glyph carries the selector `picker-tick-{value}` and is the click target
-`§20.3`'s split moved the toggle onto.
+`§20.3`'s split moved the toggle onto. One consequence, by ruling rather
+than a bug: `frame::pick_<col>` (and a chip body click) opens straight
+into Values, so the first `escape` there lands on a Columns stage the
+trader never saw — the ladder is the same ladder whichever door opened
+the picker, and a second `escape` closes it.
 
 **§20.1, the confirm.** `dialog::ConfirmAnswer::from_key(&Keystroke) ->
 Option<ConfirmAnswer>` and `dialog::ConfirmHandler` are the shared
@@ -1333,8 +1338,9 @@ both call; the button reads its dataset seed at click time
 Sources rows once per frame while the bar is up. `actions()` offers `i`
 whenever the selected row's `RowVocabulary` is `Types` or
 `StepsAndTypes`, or the domain is Groupings (whose whole-chain `i` is
-live on every row); its early return for `d`/`r`/`o` narrowed to exclude
-a column stage specifically (`!in_column`), while `i`'s own condition
+live on every row). Its `d` and `r` pushes each carry a per-push
+`!in_column` guard — there is no early return for the destructive verbs
+as a group; each is decided on its own line — while `i`'s own condition
 carries no such guard, which is how a column stage now paints an `i`
 button where §18's original build painted none.
 

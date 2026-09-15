@@ -588,7 +588,9 @@ fn handle_values_key(
                 }
             });
         }
-        shell.close_modal(window, cx); // the existing close path used by escape
+        // `close_modal`: the same door the ladder's last rung takes
+        // (a bare `escape` in Values steps back to Columns first, §20.2).
+        shell.close_modal(window, cx);
         return true;
     }
     if let Some(cmd) = listfilter::nav_command(ks) {

@@ -1452,8 +1452,9 @@ impl Draft {
     /// Groupings is the one domain whose footer must NOT take `i` from
     /// this answer: there `i` reaches past the selected row to the
     /// slot's whole chain (§18.8), so it is live on every row including
-    /// the display-only `slot`. That exception lives at the one call
-    /// site in `render`, not here, because it is a fact about the
+    /// the display-only `slot`. That exception lives at the two call
+    /// sites in `render` — the edit footer and `actions()`, the `i`
+    /// button (spec §20.3) — not here, because it is a fact about the
     /// domain's `i` and not about any row.
     pub fn selected_vocabulary(&self, domain: Domain) -> RowVocabulary {
         self.vocabulary_of(self.selected_row(), domain)
