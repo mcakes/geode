@@ -998,9 +998,9 @@ impl MarketDataTile {
                 });
             }
         }
-        for (label, value) in &self.model.header {
+        for h in &self.model.header {
             self.chips.push(Chip {
-                text: format!("{label}: {value}").into(),
+                text: format!("{}: {}", h.label, h.text).into(),
                 tone: Tone::Plain,
             });
         }
@@ -2658,7 +2658,7 @@ mod tests {
             "the title and the key: {chips:?}"
         );
         assert!(
-            chips.iter().any(|c| c == "spot_ref: 5000"),
+            chips.iter().any(|c| c == "spot: 5000"),
             "each header attribute: {chips:?}"
         );
         let local = chrono::DateTime::parse_from_rfc3339(BASE)

@@ -20,6 +20,16 @@ use geode_core::snapshot::Snapshot;
 use gpui::SharedString;
 use std::collections::HashMap;
 
+/// One header attribute as painted: prepared text, and whether the draft
+/// has overridden it (Task 3 sets `edited`; here it is always false).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderCell {
+    pub column: SharedString,
+    pub label: SharedString,
+    pub text: SharedString,
+    pub edited: bool,
+}
+
 /// One prepared cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
@@ -52,8 +62,8 @@ pub struct MatrixModel {
     /// source time (`Catalog::live_source_time`, Part 1 §4.5). This is
     /// the identity a [`Draft`] compares, not a `gen_id`.
     pub source_time: Option<String>,
-    /// (label, value) per header attribute the spec names, in spec order.
-    pub header: Vec<(SharedString, SharedString)>,
+    /// Header attributes the spec names, in spec order.
+    pub header: Vec<HeaderCell>,
     pub columns: Vec<SharedString>,
     pub rows: Vec<RowModel>,
 }
@@ -180,16 +190,18 @@ fn key_of(snapshot: &Snapshot, spec: &PanelSpec, rows_idx: usize) -> Result<Vec<
 /// axis or a key cell, a missing attribute identifies nothing, so there is
 /// nothing for it to corrupt — it is display, and absent display is
 /// absence.
-fn header_of(snapshot: &Snapshot, spec: &PanelSpec) -> Vec<(SharedString, SharedString)> {
+fn header_of(snapshot: &Snapshot, spec: &PanelSpec) -> Vec<HeaderCell> {
     spec.header
         .iter()
-        .filter_map(|name| {
-            let idx = snapshot.column_index(name)?;
+        .filter_map(|attr| {
+            let idx = snapshot.column_index(attr.column)?;
             let value = label_at(snapshot, idx, 0)?;
-            Some((
-                SharedString::from(name.to_string()),
-                SharedString::from(value),
-            ))
+            Some(HeaderCell {
+                column: attr.column.into(),
+                label: attr.label.into(),
+                text: value.into(),
+                edited: false,
+            })
         })
         .collect()
 }
@@ -474,7 +486,7 @@ fn cell_of(
 mod tests {
     use super::*;
     use crate::core::draft::{Draft, DraftState};
-    use crate::core::spec::{CVI, Columns, PanelSpec};
+    use crate::core::spec::{CVI, Columns, HeaderAttr, PanelSpec};
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::schema::ColumnType;
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
@@ -602,18 +614,26 @@ mod tests {
         );
         assert_eq!(labels(&model, 1), vec!["0.4000", "0.5000", "0.6000"]);
 
+        let header: Vec<(String, String, String)> = model
+            .header
+            .iter()
+            .map(|h| {
+                (
+                    h.column.to_string(),
+                    h.label.to_string(),
+                    h.text.to_string(),
+                )
+            })
+            .collect();
         assert_eq!(
-            model
-                .header
-                .iter()
-                .map(|(l, v)| (l.to_string(), v.to_string()))
-                .collect::<Vec<_>>(),
+            header,
             vec![
-                ("anchor_date".to_string(), "2026-09-12".to_string()),
-                ("spot_ref".to_string(), "5000".to_string()),
+                ("anchor_date".into(), "anchor".into(), "2026-09-12".into()),
+                ("spot_ref".into(), "spot".into(), "5000".into()),
             ],
             "the header reads the document-level attributes off row 0"
         );
+        assert!(model.header.iter().all(|h| !h.edited));
     }
 
     #[test]
@@ -738,7 +758,11 @@ mod tests {
         document: "div_schedule",
         rows: "ex_date",
         columns: Columns::Values,
-        header: &["currency"],
+        header: &[HeaderAttr {
+            column: "currency",
+            label: "currency",
+            ty: ColumnType::Utf8,
+        }],
         value_type: ColumnType::F64,
         format: ColumnFormat::MEASURE,
     };
@@ -788,14 +812,22 @@ mod tests {
         assert_eq!(model.rows[1].label.to_string(), "2026-11-20");
         assert_eq!(labels(&model, 1), vec!["2.50", "2.00"]);
         assert_eq!(model.rows[1].cells[0].cell_ref, (1, 0));
+        let header: Vec<(String, String, String)> = model
+            .header
+            .iter()
+            .map(|h| {
+                (
+                    h.column.to_string(),
+                    h.label.to_string(),
+                    h.text.to_string(),
+                )
+            })
+            .collect();
         assert_eq!(
-            model
-                .header
-                .iter()
-                .map(|(l, v)| (l.to_string(), v.to_string()))
-                .collect::<Vec<_>>(),
-            vec![("currency".to_string(), "USD".to_string())]
+            header,
+            vec![("currency".into(), "currency".into(), "USD".into())]
         );
+        assert!(model.header.iter().all(|h| !h.edited));
     }
 
     #[test]

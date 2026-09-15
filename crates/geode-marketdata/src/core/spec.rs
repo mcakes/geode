@@ -9,6 +9,17 @@
 use geode_core::schema::ColumnType;
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 
+/// One document-level attribute the header paints (spec 2026-09-14 §4):
+/// the column it reads, the short label the dense row shows, and the
+/// declared type a typed edit is parsed as — on the SPEC for the same
+/// reason `value_type` is (a `Snapshot` carries no declared type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderAttr {
+    pub column: &'static str,
+    pub label: &'static str,
+    pub ty: ColumnType,
+}
+
 /// How the columns across the top are chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Columns {
@@ -36,7 +47,7 @@ pub struct PanelSpec {
     pub rows: &'static str,
     pub columns: Columns,
     /// Document-level attributes shown in the header, in this order.
-    pub header: &'static [&'static str],
+    pub header: &'static [HeaderAttr],
     pub format: ColumnFormat,
     /// The declared type of the value column(s) this panel's cells hold —
     /// what a typed cell edit is parsed as
@@ -65,7 +76,7 @@ impl PanelSpec {
     pub fn names(&self, column: &str) -> bool {
         self.rows == column
             || matches!(self.columns, Columns::Axis(a) if a == column)
-            || self.header.contains(&column)
+            || self.header.iter().any(|h| h.column == column)
     }
 }
 
@@ -85,7 +96,18 @@ pub const CVI: PanelSpec = PanelSpec {
     document: "cvi_params",
     rows: "term",
     columns: Columns::Axis("node"),
-    header: &["anchor_date", "spot_ref"],
+    header: &[
+        HeaderAttr {
+            column: "anchor_date",
+            label: "anchor",
+            ty: ColumnType::Date,
+        },
+        HeaderAttr {
+            column: "spot_ref",
+            label: "spot",
+            ty: ColumnType::F64,
+        },
+    ],
     value_type: ColumnType::F64,
     format: ColumnFormat {
         precision: 4,

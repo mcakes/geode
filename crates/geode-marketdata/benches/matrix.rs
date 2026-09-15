@@ -18,7 +18,7 @@ use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColu
 use geode_core::view::ColumnFormat;
 use geode_marketdata::core::draft::Draft;
 use geode_marketdata::core::matrix::MatrixModel;
-use geode_marketdata::core::spec::{CVI, Columns, PanelSpec};
+use geode_marketdata::core::spec::{CVI, Columns, HeaderAttr, PanelSpec};
 use std::hint::black_box;
 
 const BASE: &str = "2026-09-12T14:00:00Z";
@@ -99,7 +99,11 @@ const SCHEDULE: PanelSpec = PanelSpec {
     document: "div_schedule",
     rows: "ex_date",
     columns: Columns::Values,
-    header: &["currency"],
+    header: &[HeaderAttr {
+        column: "currency",
+        label: "currency",
+        ty: ColumnType::Utf8,
+    }],
     value_type: ColumnType::F64,
     format: ColumnFormat::MEASURE,
 };
