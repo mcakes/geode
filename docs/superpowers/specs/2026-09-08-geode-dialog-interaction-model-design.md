@@ -994,3 +994,263 @@ its group is (`settings-hint-change-tab` is how the settings test proves
 `tab` chip itself). Harness: "footer: a hint's row is its position, not
 its category" and "footer: an empty row is painted anyway". Display check
 pending on a real window, as §16.6's and §18.3's are.
+
+## 20. Amendment — one answer per verb, across every surface (2026-09-14)
+
+User request, 2026-09-14: "review the ui and ensure that verbs and
+actions are presented consistently to the user. The same key actions,
+focus changes and mouse clicks should behave similarly across the same.
+If sometimes esc loses focus and undoes the result and sometimes loses
+focus and confirms the results, that would be inconsistent ux."
+
+The audit that followed read every key and mouse handler on every
+surface — the scope bar's text field, the palette, the per-tile `/` and
+`:` lines, the dimension picker, the as-of selector, the settings,
+keybindings and object dialogs, and the blotter, market-data and
+diagnostics tiles — and found that `escape` already means one thing
+everywhere: **it discards what was being *typed* and never reverts what
+was *stepped or ticked*.** Every text field cancels on it (the scope bar
+reverts to its pre-focus text, a find line returns the cursor to its
+origin, the `:` line, the object dialog's `i` field, the chain field,
+the naming row, a rebind capture, the market-data cell editor); every
+modal walks §5's ladder; the filter-only surfaces close. That rule is
+now stated here so it is a rule and not a coincidence.
+
+Six things did diverge, and the six rulings below settle them. Each
+section states the rule first and the mechanism second.
+
+### 20.1 `d`/`r` confirm on every surface that has them
+
+**Ruling.** A destructive verb asks the same question on every surface.
+The keybindings dialog's `d` (unbind) and `r` (reset) adopt the object
+dialog's confirm: the verb arms a question, `y`/`enter` runs it,
+`n`/`escape` withdraws it, every other key is claimed and dropped while
+it stands, and both verbs are also offered as `danger` buttons under
+the list. This is the direction that adds safety rather than removing
+it: the keybinding `d` is the *less* recoverable of the two (a `"none"`
+shadow it writes over a builtin binding is one `r` cannot lift —
+`reset_selected`'s own doc), and it was the one that asked nothing.
+
+**Mechanism.** `Confirm`, the confirm row (question, two buttons) and
+the key router that answers it move out of `objectdialog/render.rs`
+into `shell/dialog.rs` as one shared implementation
+(`dialog::confirm_row`, `dialog::ConfirmAnswer::from_key`), which both
+dialogs consume; the object dialog's behaviour is unchanged by the move.
+`KeybindingsState` gains `confirm: Option<Confirm>`. The verbs keep
+their existing "nothing to do" notices — `d` on an unbound row, `r` on
+a row with no user override — and arm nothing in those cases; a confirm
+arms only where the write would actually happen. The footer swaps to
+the confirm's own go row while armed (`enter`/`y` go ahead, `escape`/`n`
+leave it alone), the same three hints the object dialog paints. Capture
+and confirm are mutually exclusive: `d`/`r` are not verbs while
+listening (already so — a captured keystroke is never a verb), and a
+row click, the frozen-row click and the action buttons are claimed and
+dropped while a confirm is armed, exactly as the object dialog's tick
+click and drop are (§18.9.2). The buttons ride the object dialog's
+`action_bar` shape: an outline button per live verb showing its key
+chip and label, `keybindings-action-d` / `keybindings-action-r`
+selectors, routed through a `press_verb` that arms and never writes.
+
+### 20.2 The picker walks the escape ladder
+
+**Ruling.** A surface with a previous stage steps back to it on `escape`
+before it closes. The dimension picker keeps its staged model — ticks
+apply on `enter`, because a scope change is a requery every tile on
+screen follows and one per tick would repaint the whole desk on every
+keystroke — but its Values stage now takes `EscapeStep::PreviousStage`:
+`escape` returns to the Columns stage with the ticks and the Values
+query dropped and the cursor on the column just left; a second `escape`
+closes, as `escape` on Columns always has. §5's `PreviousStage` rung was
+written with "the picker's own two-stage shape" in mind (the
+keybindings dialog's own comment says so) and the picker had never
+taken it.
+
+**Mechanism.** `handle_values_key` claims a bare `escape` (modifier-
+agnostic, the modal branch's own rule) and calls a new
+`picker::back_to_columns`, which rebuilds `Stage::Columns` with an empty
+query — `commit_column` already gives each stage a fresh query, so this
+is the same door walked backwards — and sets `selected` to the position
+of the column being left in the unfiltered column list. Nothing is
+applied on the way back: `PickerState::apply` is still reached only from
+`enter`. The Values footer's `escape` hint reads `back`, Columns' reads
+`close`.
+
+The Values row click also changes, as §20.3's rule applied here: a
+click on a row **selects** it, and the tick glyph (`✓`/`·`) is the click
+target that toggles — the split the object dialog's list rows already
+have (a row click moves the cursor; the tick is `space`'s mouse form).
+Until now the whole Values row toggled on one click, the one list in the
+shell where a click to look at a row changed it.
+
+### 20.3 The value chip is the mouse form of `space`
+
+**Ruling.** A row whose value steps — a `Choice`, a `Number`, a `Bool`,
+the settings dialog's five rows — paints that value as a chip, and the
+chip is the click target: a click steps forward, a shift+click steps
+back, the exact mouse form of `space`/`shift+space`. A click on the rest
+of the row selects it and nothing more, on every dialog. This replaces
+the settings dialog's two-step rule (§18.2: first click selects, a click
+on the selected row steps) — a mouse verb whose keyboard twin was an
+inert `enter` — and gives the object dialog's value rows a mouse route
+they never had (a trader could change a theme with the mouse but not a
+column's `scale`). §17.2's "no mouse verb has a meaning its keyboard
+twin lacks" now holds in both directions, because the object dialog's
+two remaining keyboard-only verbs gain buttons too: `i` (`Edit value`)
+on the edit stage's action bar whenever the selected row is one `i`
+opens, and `n` (`New <object>`) on the browse stage wherever
+`Domain::writable` holds and the domain has no fixed roster.
+
+**Mechanism.** `dialog::value_chip(text, selector, on_step)` is one
+element both dialogs paint: a `mono` chip in the muted fill the key
+chips use, `on_mouse_down` reading `event.modifiers.shift` to pick the
+direction, `stop_propagation` so the row's own select does not also
+run, ending in `sync_dialog_text` like every mouse handler that mutates
+a dialog (§17.1 rule 3). It routes through each surface's ONE step path
+— `settings_view::apply_setting` via `step`, and
+`objectdialog::render::step_selected_row` — so a chip click gives every
+refusal and every write the key gives (a read-only domain's notice, a
+`Step::Refused`, a fork's notice). The chip degrades to the plain value
+text — no handler, no chip fill — on a read-only domain, on a one-option
+`Choice` (`Step::Inert`), while a confirm is armed and while a text
+field is open, the same four conditions under which the keys are inert;
+`Draft::selected_vocabulary` already answers "does this row step", and
+the chip reads the same answer for the row it paints. Selectors:
+`settings-value-{row}`, `objectdialog-value-{field key}`.
+`settings_view::click_selects_or_steps` is deleted and `on_row_clicked`
+becomes select-only. The `i` and `n` buttons are two more entries in
+`objectdialog::render::actions` (`destructive: false`) reaching
+`press_verb`, which is the audited exception of §16.6 precisely because
+it only arms or opens — `i` opens the text field through
+`open_text_field` and so must end in `sync_dialog_text` (the field takes
+focus), which makes `press_verb` no longer an exception: it syncs on
+every path, and §16.6's note is amended to say so.
+
+### 20.4 Clicking away from a `/` line commits it
+
+**Ruling.** Clicking away from a text field whose contents have already
+applied keeps them — the scope bar's rule (blur ends the session and the
+typed text stands) — and a tile's `/` line is such a field: its matches
+have moved the cursor on every keystroke. A tile mouse-down while a `/`
+line is open therefore **commits** the find (`FindEvent::Committed` with
+the field's text: the cursor stays on the match, `n`/`N` repeat it, an
+fzf narrowing stays until `escape`) rather than cancelling it (the
+cursor jumped back to its origin, the narrowing vanished, and `n` had no
+target — a trader who found a row and clicked on it lost the find). A
+`:` line still cancels on a click away: nothing typed there has applied,
+and a stray click must not run a command. `escape` cancels both, as
+before. An empty `/` line commits as a cancel, `vimfind`'s own "an empty
+`enter` is a cancel" rule.
+
+**Mechanism.** `ShellView::cancel_command_line` (the `escape` door,
+unchanged) gains a sibling `leave_command_line` for the mouse: `Find`
+with non-empty text → `Committed(text)` then close; `Find` with empty
+text, and `Command` → `cancel_command_line`. The three tile mouse-down
+sites (`render.rs`'s tree and dock tile listeners, `drag.rs`'s
+`try_arm_tile_drag` path through them) and the render-time backstop
+(the focused-tile / focus check at the top of `render`) call
+`leave_command_line`; `dialog::open_shell_dialog` and
+`toggle_palette` keep calling `cancel_command_line`, since a chord that
+opens an overlay is not a click away.
+
+### 20.5 A single step wraps, anything larger clamps
+
+**Ruling.** On every list and every tile cursor, a bare ±1 step —
+`j`/`k`, `up`/`down`, `ctrl+p`/`ctrl+n` — wraps at both ends; every
+larger step (`ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`, `pageup`/`pagedown`)
+and every count-prefixed step (`5j`) clamps. And every list accepts the
+whole `listfilter::nav_command` set. Until now the palette, the picker
+and the as-of selector wrapped on ±1 while the three modal dialogs and
+every tile clamped; the picker took only four of the ten nav keys and
+the as-of selector only two; and the market-data tile lacked the four
+full-page keys the blotter has.
+
+**Mechanism.** The rule lives in one place, `vimnav::apply`: a
+`NavCommand::Move(d)` with `d.abs() == 1` wraps (the palette's own
+modular arithmetic, moved here), every other `Move` clamps, `Top`/
+`Bottom` are unchanged, and an empty list still answers `0`. Its doc
+comment's "**no wrap**" paragraph is replaced by this rule. Every list
+that had its own `move_selection` — `PaletteState`, `PickerState`, the
+as-of selector's free function — deletes it and routes
+`listfilter::nav_command` through `apply`, which is what gives the
+picker and the as-of selector the full key set for free. Two
+consequences worth stating: `Cursor::move_rows` multiplies the count
+into the delta *before* calling `apply`, so `1j` wraps exactly as `j`
+does and `2j` clamps, with no special case for a count of one; and
+**visual mode is the one exception** — a wrapping `j` at the bottom
+would put the cursor above the anchor and invert the selection, so
+`move_rows` clamps a ±1 step while `Mode::Visual`. Columns (`h`/`l`,
+`move_cols`, the panel's second axis) clamp: the ruling was about rows
+and a horizontal wrap is a separate question, left as it is. The
+market-data tile's `move_cursor` takes the same rule on its row axis and
+its fragment gains `ctrl+f`/`ctrl+b`/`pagedown`/`pageup` at the
+blotter's `page_down_full`/`page_up_full` step. The diagnostics tile is
+untouched (§20.6).
+
+**The palette's `tab`.** `dialog::init_reclaimed_keybindings` binds
+`tab`/`shift+tab` to `NoAction` inside `GeodeModal` and
+`GeodeCommandLine` but never inside the palette overlay, so
+gpui-component `Root`'s focus cycling could take the keys off
+`palette_input` while the palette stayed open. The palette's panel gains
+a `GeodePalette` key context and the same two reclaims. This is a
+display-check item — the sandbox cannot show whether `Root` actually
+cycled — fixed on the reading of the pinned rev rather than on a
+reproduction.
+
+### 20.6 What stays as it is
+
+- **The diagnostics tile** — no `escape`, no `space`/`z a`, no mouse
+  handling, a `/` that filters rather than finds — is left untouched by
+  ruling: it is to be reworked whole, and this amendment does not
+  pre-empt that. Recorded so the audit's finding is not lost.
+- **The backdrop click** closes a modal from any depth (a column stage,
+  an open text field, an armed confirm, a capture in progress), where
+  `escape` walks one rung. Deliberate: the backdrop is "close", not
+  "back", and it is the only mouse route out that does not need a
+  target.
+- **`escape` mid-drag**: a tile drag cancels, a divider drag finishes
+  and keeps its resizes. Deliberate and already recorded — a divider's
+  resizes applied live, so "stop tracking the mouse" is the honest
+  meaning; it is the one `escape` in the shell that keeps a result, and
+  it keeps it because nothing was pending.
+- **Overlay focus return** goes back to the scope bar's field when it
+  was focused at open, and to the shell root otherwise — a market-data
+  cell editor open at the time stays open, unfocused, with `escape`
+  still cancelling it through the matcher (pinned by
+  `the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode`).
+  Whether a tile occupant may hold focus through the shell's restore is
+  the deferred shell-side decision of market-data §8.8.6; this amendment
+  does not make it.
+- **`enter` on a row with nothing to open** posts a notice naming the
+  right verb in the object dialog and is silently dropped in settings.
+  Left: every settings row steps, so there is no verb to name that the
+  footer does not already show.
+
+### 20.7 Tests and harness
+
+Pure tests: `vimnav::apply` wraps on ±1 and clamps on ±5/±10 and on a
+counted ±1 (`move_rows` with `Some(2)`), and clamps ±1 in visual mode;
+`dialog::ConfirmAnswer::from_key` answers `y`/`enter`/`n`/`escape` and
+drops the rest; `leave_command_line`'s three arms.
+
+Window tests (`shell/tests/`): keybindings — `d` on a bound row arms and
+paints the confirm row, `y` writes the shadow, `n` leaves the file
+untouched, a row click while armed is dropped, `d` while listening is
+captured not armed; picker — `escape` in Values returns to Columns with
+the ticks gone and the cursor on the column, a Values row click selects
+without toggling and the tick click toggles; settings and object dialog
+— a chip click steps forward, a shift+click steps back, a click on the
+row text only selects, the chip is inert on a read-only domain and
+under an armed confirm, `i` and `n` buttons open what their keys open;
+command line — a tile click with `/foo` typed commits (cursor stays,
+`n` repeats), with an empty line cancels, with a `:` line cancels;
+palette/picker/as-of — `ctrl+d` moves five, `up` at row 0 lands on the
+last row, `ctrl+u` at row 0 stays; market-data — `pagedown` moves ten
+and `j` at the last row wraps to the first; blotter — `j` at the last
+row wraps, `2j` at the last row stays, visual `j` at the last row stays.
+
+Harness entries (each naming its test): `apply`'s wrap mutated back to
+a clamp; the picker's Values `escape` mutated back to fall-through; the
+picker's row click mutated back to toggling; `leave_command_line`'s
+`Find` arm mutated to cancel; the chip's shift check mutated away; the
+keybindings confirm gate mutated so `d` writes unarmed; the visual-mode
+clamp mutated away. `--anchors-only` before merge.
