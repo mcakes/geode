@@ -50,7 +50,8 @@
 //! against a grid `:rebase` is about to move away from underneath it.
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
-use crate::core::{Draft, MatrixModel, PanelSpec, parse_cell};
+use crate::core::draft::local_hhmm;
+use crate::core::{Draft, DraftBadge, MatrixModel, PanelSpec, parse_cell};
 use crate::delegate::MatrixDelegate;
 use geode_core::colour::readable_on;
 use geode_core::document::split_key;
@@ -1044,10 +1045,19 @@ impl MarketDataTile {
                 tone: Tone::Warn,
             });
         } else {
-            let summary = self.draft.summary();
-            if !summary.is_empty() {
+            // A temporary chip off the draft's badge — Task 4 replaces the
+            // whole header with the spec's dense-row design; this is only
+            // what keeps a trader told something is unsent in the
+            // meantime.
+            let chip = match self.draft.badge() {
+                DraftBadge::Clean => None,
+                DraftBadge::Dirty => Some("edited".to_string()),
+                DraftBadge::Behind { newer } => Some(format!("update {}", local_hhmm(&newer))),
+                DraftBadge::Sent => Some("sent".to_string()),
+            };
+            if let Some(text) = chip {
                 self.chips.push(Chip {
-                    text: summary.into(),
+                    text: text.into(),
                     tone: Tone::Warn,
                 });
             }
@@ -1616,9 +1626,10 @@ impl MarketDataTile {
             return Ok(());
         }
         if !self.draft.is_empty() {
-            let n = self.draft.len();
-            let plural = if n == 1 { "" } else { "s" };
-            return Err(format!("{n} edit{plural} pending — :revert first"));
+            return Err(format!(
+                "{} pending — :revert first",
+                self.draft.count_phrase()
+            ));
         }
         self.key = Some(key);
         self.snapshot = None;
@@ -3049,7 +3060,7 @@ edits = [["2026-11-20", "-1", 9.5]]
 
         assert_eq!(
             h.command(&mut vcx, "key NDX.Z"),
-            Err("1 edit pending — :revert first".to_string()),
+            Err("1 cell pending — :revert first".to_string()),
             "the count is spelled as the header spells it, and the verb is named"
         );
         let (key, edits) = h
@@ -3343,9 +3354,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             "a newer generation under a restored draft is Behind, got {state:?}"
         );
         assert!(
-            chips
-                .iter()
-                .any(|c| c.starts_with("different document received")),
+            chips.iter().any(|c| c.starts_with("update ")),
             "the header says so: {chips:?}"
         );
     }
@@ -3437,7 +3446,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.tile
                 .read_with(&vcx, |t, _| t.header_chips())
                 .iter()
-                .any(|c| c.contains("1 edit")),
+                .any(|c| c.contains("edited")),
             "the header counts it: {:?}",
             h.tile.read_with(&vcx, |t, _| t.header_chips())
         );
@@ -3848,9 +3857,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             .to_string();
         let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
         assert!(
-            chips
-                .iter()
-                .any(|c| c == &format!("different document received {local}")),
+            chips.iter().any(|c| c == &format!("update {local}")),
             "{chips:?}"
         );
     }
@@ -3904,9 +3911,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             .to_string();
         let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
         assert!(
-            chips
-                .iter()
-                .any(|c| c == &format!("different document received {local}")),
+            chips.iter().any(|c| c == &format!("update {local}")),
             "{chips:?}"
         );
     }

@@ -12,7 +12,7 @@
 //! answer the same `Cell`, so the tile's cursor, yank and edit paths know
 //! only about a grid.
 
-use crate::core::draft::Draft;
+use crate::core::draft::{Draft, attr_text};
 use crate::core::spec::{Columns, PanelSpec};
 use geode_core::attribution::Attribution;
 use geode_core::format::format_number;
@@ -21,7 +21,8 @@ use gpui::SharedString;
 use std::collections::HashMap;
 
 /// One header attribute as painted: prepared text, and whether the draft
-/// has overridden it (Task 3 sets `edited`; here it is always false).
+/// has overridden it — `true` exactly when [`header_of`] found a
+/// [`Draft`] entry for this column's own attribute edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderCell {
     pub column: SharedString,
@@ -110,7 +111,7 @@ impl MatrixModel {
             .column_index(spec.rows)
             .ok_or_else(|| format!("the document has no '{}' column", spec.rows))?;
         let key = key_of(snapshot, spec, rows_idx)?;
-        let header = header_of(snapshot, spec);
+        let header = header_of(snapshot, spec, draft);
         let (columns, rows) = match spec.columns {
             Columns::Axis(axis) => pivot(snapshot, spec, draft, rows_idx, axis)?,
             Columns::Values => flatten(snapshot, spec, draft, rows_idx)?,
@@ -185,22 +186,29 @@ fn key_of(snapshot: &Snapshot, spec: &PanelSpec, rows_idx: usize) -> Result<Vec<
 
 /// The header attributes the spec names, read off row 0 — a document-level
 /// attribute is constant within one document (spec §3.1), so any row would
-/// do. An attribute the document does not carry, or carries as NULL, is
-/// left out rather than shown blank: the panel says what it has. Unlike an
-/// axis or a key cell, a missing attribute identifies nothing, so there is
-/// nothing for it to corrupt — it is display, and absent display is
-/// absence.
-fn header_of(snapshot: &Snapshot, spec: &PanelSpec) -> Vec<HeaderCell> {
+/// do. An attribute the document does not carry is left out rather than
+/// shown blank: the panel says what it has. Unlike an axis or a key cell,
+/// a missing attribute identifies nothing, so there is nothing for it to
+/// corrupt — it is display, and absent display is absence.
+///
+/// The draft's own value paints over a NULL or a real one alike, marked
+/// `edited` — the same rule [`cell_of`] applies to a grid cell — so a
+/// document that carries the column but a NULL row 0 no longer forces
+/// `label_at` to succeed before an edit can be seen at all.
+fn header_of(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft) -> Vec<HeaderCell> {
     spec.header
         .iter()
         .filter_map(|attr| {
             let idx = snapshot.column_index(attr.column)?;
-            let value = label_at(snapshot, idx, 0)?;
+            let (text, edited) = match draft.attrs.get(attr.column) {
+                Some(value) => (attr_text(value), true),
+                None => (label_at(snapshot, idx, 0)?, false),
+            };
             Some(HeaderCell {
                 column: attr.column.into(),
                 label: attr.label.into(),
-                text: value.into(),
-                edited: false,
+                text: text.into(),
+                edited,
             })
         })
         .collect()
@@ -488,6 +496,7 @@ mod tests {
     use crate::core::draft::{Draft, DraftState};
     use crate::core::spec::{CVI, Columns, HeaderAttr, PanelSpec};
     use geode_core::attribution::{Attribution, ScopeSemantics};
+    use geode_core::document::Value;
     use geode_core::schema::ColumnType;
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
     use geode_core::view::ColumnFormat;
@@ -719,6 +728,26 @@ mod tests {
             "a neighbouring cell still paints the document"
         );
         assert!(!model.rows[0].cells[0].edited);
+    }
+
+    #[test]
+    fn an_edited_attribute_paints_the_drafts_value_marked_edited() {
+        let snapshot = full_grid();
+        let mut draft = Draft::default();
+        draft.set_attr("spot_ref", Value::F64(4520.0), "t0");
+        let model = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
+        let spot = model
+            .header
+            .iter()
+            .find(|h| h.column == "spot_ref")
+            .unwrap();
+        assert_eq!((spot.text.as_ref(), spot.edited), ("4520", true));
+        let anchor = model
+            .header
+            .iter()
+            .find(|h| h.column == "anchor_date")
+            .unwrap();
+        assert!(!anchor.edited);
     }
 
     #[test]

@@ -12,6 +12,7 @@
 //! the draft goes `Behind` rather than being clobbered (roadmap ruling 9).
 
 use crate::core::matrix::MatrixModel;
+use geode_core::document::Value;
 use geode_core::schema::ColumnType;
 use std::collections::{BTreeMap, HashMap};
 
@@ -36,7 +37,20 @@ pub enum DraftState {
     Sent,
 }
 
-/// Edits keyed by grid cell, with the labels that make them portable.
+/// What the header says about the draft at a glance (spec 2026-09-14 §4):
+/// a dot for `Dirty`, `update HH:MM` for `Behind`, `sent HH:MM` for `Sent`
+/// (Part 4), nothing for `Clean`. Counts live in `count_phrase`, for the
+/// places a number matters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftBadge {
+    Clean,
+    Dirty,
+    Behind { newer: String },
+    Sent,
+}
+
+/// Edits keyed by grid cell, with the labels that make them portable, plus
+/// document-level attribute edits keyed by column name.
 ///
 /// **The invariant this leans on:** a [`MatrixModel`]'s row labels are
 /// unique and so are its column labels. A label is how an edit is
@@ -48,12 +62,20 @@ pub enum DraftState {
 /// own: a second check here would be a defence the first one hides, and
 /// neither would then be isolated enough for the mutation harness to say
 /// which is load-bearing.
+///
+/// A header attribute needs no such indexing — its column NAME is its
+/// identity, the same name every generation of one document carries it
+/// under — so `attrs` is keyed directly, with no `labels`-style side map.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Draft {
     /// The source time of the generation every edit was made against,
     /// RFC 3339. `None` exactly when there are no edits.
     pub base: Option<String>,
     pub edits: BTreeMap<(usize, usize), f64>,
+    /// Document-level attribute edits, keyed by column name. Part of the
+    /// same draft as `edits` (one base, one state) because both are unsent
+    /// work against the same document generation.
+    pub attrs: BTreeMap<String, Value>,
     pub state: DraftState,
     /// (row label, column label) per edited cell. Private because it must
     /// never drift from `edits`: every door that writes one writes both.
@@ -74,12 +96,24 @@ pub struct Draft {
 const UNRESOLVED_COLUMN: usize = usize::MAX;
 
 impl Draft {
-    pub fn len(&self) -> usize {
+    /// Edited cells alone — what a grid position is keyed by.
+    pub fn cell_count(&self) -> usize {
         self.edits.len()
     }
 
+    /// Edited header attributes alone.
+    pub fn attr_count(&self) -> usize {
+        self.attrs.len()
+    }
+
+    /// Cells and attributes together — the one number that answers
+    /// "is there unsent work".
+    pub fn len(&self) -> usize {
+        self.edits.len() + self.attrs.len()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.edits.is_empty()
+        self.edits.is_empty() && self.attrs.is_empty()
     }
 
     pub fn is_sent(&self) -> bool {
@@ -95,7 +129,7 @@ impl Draft {
     /// edit in one draft is against one generation and a later keystroke
     /// must never quietly restamp the set.
     pub fn set(&mut self, cell: (usize, usize), labels: (String, String), value: f64, base: &str) {
-        if self.edits.is_empty() || self.base.is_none() {
+        if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
         }
         self.edits.insert(cell, value);
@@ -108,13 +142,25 @@ impl Draft {
         }
     }
 
-    /// Drop every edit, answering how many there were. The draft is
-    /// `Clean` afterwards and carries no base, since a base describes a
-    /// set of edits.
+    /// Record one attribute edit — the same base rule as `set`.
+    pub fn set_attr(&mut self, column: &str, value: Value, base: &str) {
+        if self.is_empty() || self.base.is_none() {
+            self.base = Some(base.to_string());
+        }
+        self.attrs.insert(column.to_string(), value);
+        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+            self.state = DraftState::Editing;
+        }
+    }
+
+    /// Drop every edit and attribute, answering how many there were in
+    /// total. The draft is `Clean` afterwards and carries no base, since a
+    /// base describes a set of edits.
     pub fn revert(&mut self) -> usize {
-        let n = self.edits.len();
+        let n = self.len();
         self.edits.clear();
         self.labels.clear();
+        self.attrs.clear();
         self.base = None;
         self.state = DraftState::Clean;
         n
@@ -247,13 +293,33 @@ impl Draft {
 
         self.edits = edits;
         self.labels = labels;
+
+        // A header attribute's identity is its column NAME — the same
+        // name every generation of one document carries it under — so
+        // there is no label to resolve, only a declared/not-declared
+        // check against the newer model's own header.
+        let declared: std::collections::HashSet<&str> = model_of_newer
+            .header
+            .iter()
+            .map(|h| h.column.as_ref())
+            .collect();
+        let mut attrs = BTreeMap::new();
+        for (column, value) in std::mem::take(&mut self.attrs) {
+            if declared.contains(column.as_str()) {
+                attrs.insert(column, value);
+            } else {
+                dropped.push((column, "attribute".to_string()));
+            }
+        }
+        self.attrs = attrs;
+
         self.base = model_of_newer.source_time.clone();
-        self.state = if self.edits.is_empty() {
+        self.state = if self.is_empty() {
             DraftState::Clean
         } else {
             DraftState::Editing
         };
-        (self.edits.len(), dropped)
+        (self.len(), dropped)
     }
 
     /// Drop the edits and the base outright — `:discard`, which is how a
@@ -262,36 +328,34 @@ impl Draft {
         self.revert();
     }
 
-    /// The header's one line about the draft. Times are the trader's local
-    /// clock throughout (Phase 4a's ruling), so an RFC 3339 base is
-    /// converted, and an unparseable one is shown verbatim rather than
-    /// hidden — a panel that cannot read its own base should say so.
-    pub fn summary(&self) -> String {
-        let count = self.edits.len();
+    /// The header's badge, at a glance (Task 4 paints it): [`DraftBadge`]
+    /// carries no count, since a badge is a shape and a count is a
+    /// sentence — [`Draft::count_phrase`] is where the count lives, for
+    /// the notices and confirms that need one.
+    pub fn badge(&self) -> DraftBadge {
         match &self.state {
-            DraftState::Clean => String::new(),
-            // "different", never "newer" (M-4, final whole-branch
-            // review): an as-of step back delivers an OLDER generation
-            // and lands here too, so the one word this line can honestly
-            // say about the delivered document is that it is not the one
-            // the edits were made on.
-            DraftState::Behind { newer } => {
-                format!("different document received {}", local_hhmm(newer))
-            }
-            DraftState::Editing => self.count_phrase(count, ""),
-            DraftState::Sent => self.count_phrase(count, " sent"),
+            DraftState::Clean => DraftBadge::Clean,
+            DraftState::Editing => DraftBadge::Dirty,
+            DraftState::Behind { newer } => DraftBadge::Behind {
+                newer: newer.clone(),
+            },
+            DraftState::Sent => DraftBadge::Sent,
         }
     }
 
-    fn count_phrase(&self, count: usize, verb: &str) -> String {
-        let plural = if count == 1 { "" } else { "s" };
-        match &self.base {
-            Some(base) => format!(
-                "{count} edit{plural}{verb} on {}'s document",
-                local_hhmm(base)
-            ),
-            None => format!("{count} edit{plural}{verb}"),
+    /// "3 cells, spot_ref" / "1 cell" / "anchor_date, spot_ref" — the
+    /// unsent work named for a notice or a confirm, cells first (a count,
+    /// since a cell has no name worth showing) and then every edited
+    /// attribute's own column name.
+    pub fn count_phrase(&self) -> String {
+        let mut parts = Vec::new();
+        match self.edits.len() {
+            0 => {}
+            1 => parts.push("1 cell".to_string()),
+            n => parts.push(format!("{n} cells")),
         }
+        parts.extend(self.attrs.keys().cloned());
+        parts.join(", ")
     }
 
     /// The session form (spec §8.5): the base and the edits as label
@@ -315,6 +379,21 @@ impl Draft {
             })
             .collect();
         table.insert("edits".into(), toml::Value::Array(edits));
+        if !self.attrs.is_empty() {
+            let mut attrs = toml::Table::new();
+            for (column, value) in &self.attrs {
+                attrs.insert(
+                    column.clone(),
+                    match value {
+                        Value::F64(f) => toml::Value::Float(*f),
+                        Value::I64(i) => toml::Value::Integer(*i),
+                        Value::Utf8(s) => toml::Value::String(s.clone()),
+                        Value::Date(d) => toml::Value::String(d.format("%Y-%m-%d").to_string()),
+                    },
+                );
+            }
+            table.insert("attrs".into(), toml::Value::Table(attrs));
+        }
         table
     }
 
@@ -323,6 +402,12 @@ impl Draft {
     /// model resolves it by label; a malformed entry is skipped rather
     /// than taking the whole draft with it (unsent work is worth more than
     /// tidiness).
+    ///
+    /// An attribute's `String` is read back as a [`Value::Date`] when it
+    /// parses `%Y-%m-%d` and a [`Value::Utf8`] otherwise: a date string is
+    /// unambiguous (`to_toml` writes no other string in that exact shape),
+    /// and a free-text attribute never happens to look like one — so the
+    /// direction of the guess costs nothing either way.
     pub fn from_toml(t: &toml::Table) -> Draft {
         let base = t.get("base").and_then(|v| v.as_str()).map(str::to_string);
         let mut edits = BTreeMap::new();
@@ -349,7 +434,26 @@ impl Draft {
             edits.insert(cell, value);
             labels.insert(cell, (row_label.to_string(), col_label.to_string()));
         }
-        let state = if edits.is_empty() {
+        let mut attrs = BTreeMap::new();
+        if let Some(toml::Value::Table(attr_table)) = t.get("attrs") {
+            for (column, value) in attr_table {
+                let value = match value {
+                    toml::Value::Float(f) => Value::F64(*f),
+                    toml::Value::Integer(i) => Value::I64(*i),
+                    toml::Value::String(s) => {
+                        match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                            Ok(d) => Value::Date(d),
+                            Err(_) => Value::Utf8(s.clone()),
+                        }
+                    }
+                    // A malformed attribute value is skipped, the same
+                    // rule a malformed cell edit above follows.
+                    _ => continue,
+                };
+                attrs.insert(column.clone(), value);
+            }
+        }
+        let state = if edits.is_empty() && attrs.is_empty() {
             DraftState::Clean
         } else {
             DraftState::Editing
@@ -357,6 +461,7 @@ impl Draft {
         Draft {
             base,
             edits,
+            attrs,
             state,
             labels,
         }
@@ -371,7 +476,10 @@ fn as_f64(value: &toml::Value) -> Option<f64> {
         .or_else(|| value.as_integer().map(|i| i as f64))
 }
 
-fn local_hhmm(rfc3339: &str) -> String {
+/// Local, like every other displayed time in this codebase (Phase 4a's
+/// ruling) — `pub(crate)` because Task 4's header paints `DraftBadge`'s
+/// `Behind`/`Sent` times through it directly.
+pub(crate) fn local_hhmm(rfc3339: &str) -> String {
     match chrono::DateTime::parse_from_rfc3339(rfc3339) {
         Ok(t) => t.with_timezone(&chrono::Local).format("%H:%M").to_string(),
         Err(_) => rfc3339.to_string(),
@@ -381,10 +489,12 @@ fn local_hhmm(rfc3339: &str) -> String {
 /// Parse a typed cell to the number a document holds.
 ///
 /// Only `f64` and `i64` columns are editable — a document's values are
-/// declared one of those two (spec §3.2) and an axis or attribute is
-/// read-only in slice 1 — so anything else is refused by type rather than
-/// coerced. Every message names the text it refused, because the inline
-/// notice appears beside a field the trader can no longer see the whole of.
+/// declared one of those two (spec §3.2) and an axis is read-only in
+/// slice 1 (a header attribute is editable too, but through
+/// [`parse_attr`], which parses its own broader vocabulary of types) — so
+/// anything else is refused by type rather than coerced. Every message
+/// names the text it refused, because the inline notice appears beside a
+/// field the trader can no longer see the whole of.
 pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
     let trimmed = text.trim();
     match ty {
@@ -407,15 +517,72 @@ pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
     }
 }
 
+/// Parse a typed header attribute to the value a document holds.
+///
+/// A wider vocabulary than [`parse_cell`]'s: a header attribute can be a
+/// date or free text as well as a number (spec 2026-09-14 §4), each
+/// parsed per its own declared [`ColumnType`] rather than coerced —
+/// `Bool`/`Timestamp` fall to the catch-all, since neither header
+/// attribute type this slice ships is either.
+pub fn parse_attr(text: &str, ty: ColumnType) -> Result<Value, String> {
+    let trimmed = text.trim();
+    match ty {
+        ColumnType::Date => chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+            .map(Value::Date)
+            .map_err(|_| format!("'{text}' is not a date (YYYY-MM-DD)")),
+        ColumnType::F64 => parse_cell(text, ColumnType::F64).map(Value::F64),
+        ColumnType::I64 => parse_cell(text, ColumnType::I64).map(|f| Value::I64(f as i64)),
+        ColumnType::Utf8 if trimmed.is_empty() => Err("a value is required".to_string()),
+        ColumnType::Utf8 => Ok(Value::Utf8(trimmed.to_string())),
+        other => Err(format!("a {other:?} attribute is not editable")),
+    }
+}
+
+/// The document's own spelling of an attribute (what `label_at` yields for
+/// the delivered value), so an edited value paints in the same shape.
+pub fn attr_text(value: &Value) -> String {
+    match value {
+        Value::F64(f) => format!("{f}"),
+        Value::I64(i) => i.to_string(),
+        Value::Utf8(s) => s.clone(),
+        Value::Date(d) => d.format("%Y-%m-%d").to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::matrix::{Cell, MatrixModel, RowModel};
+    use crate::core::matrix::{Cell, HeaderCell, MatrixModel, RowModel};
+    use chrono::NaiveDate;
+    use geode_core::document::Value;
     use geode_core::schema::ColumnType;
     use gpui::SharedString;
+    use proptest::prelude::*;
 
     const BASE: &str = "2026-09-12T14:02:00Z";
     const NEWER: &str = "2026-09-12T14:07:00Z";
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    /// A model whose header names the given `(column, label)` pairs and
+    /// nothing else — `rebase` only ever reads a model's `header`, `rows`
+    /// and `columns`.
+    fn model_with_header(attrs: &[(&str, &str)]) -> MatrixModel {
+        MatrixModel {
+            header: attrs
+                .iter()
+                .map(|(c, l)| HeaderCell {
+                    column: (*c).into(),
+                    label: (*l).into(),
+                    text: "".into(),
+                    edited: false,
+                })
+                .collect(),
+            ..MatrixModel::default()
+        }
+    }
 
     fn pair(row: &str, col: &str) -> (String, String) {
         (row.to_string(), col.to_string())
@@ -602,7 +769,7 @@ mod tests {
         assert!(draft.edits.is_empty());
         assert_eq!(draft.state, DraftState::Clean);
         assert_eq!(draft.base, None);
-        assert_eq!(draft.summary(), "");
+        assert_eq!(draft.badge(), DraftBadge::Clean);
     }
 
     #[test]
@@ -624,53 +791,38 @@ mod tests {
     }
 
     #[test]
-    fn summary_spells_each_state_in_the_traders_local_clock() {
-        let local = |rfc: &str| {
-            chrono::DateTime::parse_from_rfc3339(rfc)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%H:%M")
-                .to_string()
-        };
-
+    fn badge_and_count_phrase_track_the_drafts_state() {
         let mut draft = Draft::default();
-        assert_eq!(draft.summary(), "");
+        assert_eq!(draft.badge(), DraftBadge::Clean);
+        assert_eq!(draft.count_phrase(), "");
 
         draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
-        assert_eq!(
-            draft.summary(),
-            format!("1 edit on {}'s document", local(BASE))
-        );
+        assert_eq!(draft.badge(), DraftBadge::Dirty);
+        assert_eq!(draft.count_phrase(), "1 cell");
+
         draft.set((0, 1), pair("T1", "-1"), 1.0, BASE);
         draft.set((1, 1), pair("T2", "-1"), 1.0, BASE);
-        assert_eq!(
-            draft.summary(),
-            format!("3 edits on {}'s document", local(BASE))
-        );
+        assert_eq!(draft.count_phrase(), "3 cells");
 
         draft.state = DraftState::Sent;
-        assert_eq!(
-            draft.summary(),
-            format!("3 edits sent on {}'s document", local(BASE))
-        );
+        assert_eq!(draft.badge(), DraftBadge::Sent);
 
-        draft.on_delivered(NEWER);
         draft.state = DraftState::Behind {
             newer: NEWER.to_string(),
         };
         assert_eq!(
-            draft.summary(),
-            format!("different document received {}", local(NEWER)),
+            draft.badge(),
+            DraftBadge::Behind {
+                newer: NEWER.to_string()
+            },
             "M-4: an as-of step back delivers an OLDER document, so the \
-             chip cannot claim the delivered one is newer"
+             badge can only say the delivered one is DIFFERENT, never newer"
         );
     }
 
     #[test]
-    fn an_unparseable_base_is_shown_verbatim_rather_than_swallowed() {
-        let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, "not a time");
-        assert_eq!(draft.summary(), "1 edit on not a time's document");
+    fn local_hhmm_shows_an_unparseable_time_verbatim_rather_than_swallowing_it() {
+        assert_eq!(local_hhmm("not a time"), "not a time");
     }
 
     #[test]
@@ -758,5 +910,123 @@ mod tests {
         assert!(err.contains("1e400"), "{err}");
         let err = parse_cell("2026-10-16", ColumnType::Date).expect_err("dates are read-only");
         assert!(err.contains("2026-10-16"), "{err}");
+    }
+
+    #[test]
+    fn an_attribute_edit_is_part_of_the_same_draft() {
+        let mut draft = Draft::default();
+        assert_eq!(draft.badge(), DraftBadge::Clean);
+        draft.set_attr("spot_ref", Value::F64(4520.0), "2026-09-14T14:00:00Z");
+        assert_eq!(draft.len(), 1);
+        assert_eq!(draft.attr_count(), 1);
+        assert_eq!(draft.base.as_deref(), Some("2026-09-14T14:00:00Z"));
+        assert_eq!(draft.state, DraftState::Editing);
+        assert_eq!(draft.badge(), DraftBadge::Dirty);
+        // No cell touched at all — an `is_empty` keyed on `edits` alone
+        // would call this draft empty and let a trader navigate away with
+        // the attribute edit uncounted.
+        assert!(!draft.is_empty(), "an attribute alone is still unsent work");
+        assert_eq!(draft.revert(), 1);
+        assert!(draft.is_empty() && draft.base.is_none());
+    }
+
+    #[test]
+    fn an_attribute_edit_survives_rebase_when_the_newer_document_declares_it() {
+        let mut draft = Draft::default();
+        draft.set_attr("spot_ref", Value::F64(1.0), "t0");
+        draft.set_attr("gone", Value::I64(2), "t0");
+        let newer = model_with_header(&[("spot_ref", "spot")]);
+        let (kept, dropped) = draft.rebase(&newer);
+        assert_eq!(kept, 1);
+        assert_eq!(dropped, vec![("gone".to_string(), "attribute".to_string())]);
+        assert_eq!(draft.attrs.get("spot_ref"), Some(&Value::F64(1.0)));
+    }
+
+    #[test]
+    fn parse_attr_per_type() {
+        assert_eq!(
+            parse_attr("2026-09-14", ColumnType::Date),
+            Ok(Value::Date(d(2026, 9, 14)))
+        );
+        assert_eq!(
+            parse_attr("2026-13-45", ColumnType::Date),
+            Err("'2026-13-45' is not a date (YYYY-MM-DD)".into())
+        );
+        assert_eq!(
+            parse_attr(" 4520.5 ", ColumnType::F64),
+            Ok(Value::F64(4520.5))
+        );
+        assert_eq!(parse_attr("7", ColumnType::I64), Ok(Value::I64(7)));
+        assert_eq!(
+            parse_attr("7.5", ColumnType::I64),
+            Err("'7.5' is not a whole number".into())
+        );
+        assert_eq!(
+            parse_attr("  ", ColumnType::Utf8),
+            Err("a value is required".into())
+        );
+        assert_eq!(
+            parse_attr(" abc ", ColumnType::Utf8),
+            Ok(Value::Utf8("abc".into()))
+        );
+        assert!(parse_attr("x", ColumnType::Bool).is_err());
+    }
+
+    #[test]
+    fn attr_text_is_the_documents_own_spelling() {
+        assert_eq!(attr_text(&Value::Date(d(2026, 9, 14))), "2026-09-14");
+        assert_eq!(attr_text(&Value::F64(5000.0)), "5000");
+        assert_eq!(attr_text(&Value::F64(4520.25)), "4520.25");
+        assert_eq!(attr_text(&Value::I64(3)), "3");
+    }
+
+    #[test]
+    fn toml_round_trips_attribute_edits() {
+        let mut draft = Draft::default();
+        draft.set_attr("anchor_date", Value::Date(d(2026, 9, 14)), "t0");
+        draft.set_attr("spot_ref", Value::F64(4520.0), "t0");
+        let back = Draft::from_toml(&draft.to_toml());
+        assert_eq!(back.attrs, draft.attrs);
+        assert_eq!(back.base, draft.base);
+        assert_eq!(back.state, DraftState::Editing);
+    }
+
+    #[test]
+    fn count_phrase_names_cells_and_attributes() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), ("1M".into(), "-20".into()), 0.1, "t0");
+        draft.set((0, 1), ("1M".into(), "-10".into()), 0.1, "t0");
+        draft.set_attr("spot_ref", Value::F64(1.0), "t0");
+        assert_eq!(draft.count_phrase(), "2 cells, spot_ref");
+        let mut one = Draft::default();
+        one.set((0, 0), ("1M".into(), "-20".into()), 0.1, "t0");
+        assert_eq!(one.count_phrase(), "1 cell");
+    }
+
+    proptest! {
+        /// The session form round-trips an attribute map through TOML
+        /// exactly as it round-trips a cell edit: `to_toml`/`from_toml`
+        /// must answer the same `attrs` it was given, over arbitrary
+        /// column names and finite `F64` values plus one fixed `Date` and
+        /// one `Utf8`, so a restart never quietly drops or reshapes a
+        /// header edit sitting in `session.toml`.
+        #[test]
+        fn to_toml_and_from_toml_round_trip_an_arbitrary_attrs_map(
+            floats in prop::collection::btree_map(
+                "[a-z_]{1,8}",
+                any::<f64>().prop_filter("finite", |f| f.is_finite()).prop_map(Value::F64),
+                0..4,
+            )
+        ) {
+            let mut draft = Draft::default();
+            for (column, value) in &floats {
+                draft.set_attr(column, value.clone(), "t0");
+            }
+            draft.set_attr("anchor_date", Value::Date(d(2026, 9, 14)), "t0");
+            draft.set_attr("free_text", Value::Utf8("a note".into()), "t0");
+
+            let back = Draft::from_toml(&draft.to_toml());
+            prop_assert_eq!(back.attrs, draft.attrs);
+        }
     }
 }
