@@ -11088,6 +11088,27 @@ run_mutation "marketdata: the row axis wraps a bare step, the column axis never 
   geode-marketdata \
   a_bare_row_step_wraps_and_the_full_page_keys_move_ten
 
+run_mutation "picker: the values list moves through vimnav::apply, not a private ±1 (spec §20.5)" \
+  crates/geode-shell/src/shell/picker.rs \
+  '            p.selected = vimnav::apply(p.selected, len, cmd); // values' \
+  '            p.selected = vimnav::apply_clamped(p.selected, len, cmd); // values' \
+  geode-shell \
+  the_values_list_takes_the_full_nav_set
+
+run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '    if let Some(cmd) = listfilter::nav_command(ks) {' \
+  '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, vimnav::NavCommand::Move(1 | -1))) {' \
+  geode-shell \
+  the_as_of_list_takes_ctrl_n_and_clamps_a_page_step
+
+run_mutation "palette: tab is reclaimed inside the palette (spec §20.5)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodePalette")),' \
+  '        gpui::KeyBinding::new("f24", gpui::NoAction, Some("GeodePalette")),' \
+  geode-shell \
+  tab_in_the_palette_leaves_the_query_field_focused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -403,6 +403,40 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// Spec §20.5 on the picker: `ctrl+d` moves five and clamps, `up` at
+/// row 0 wraps — the same `nav_command` + `apply` pair every other list
+/// routes through, replacing the picker's own four-key `nav_delta`.
+#[gpui::test]
+fn the_values_list_takes_the_full_nav_set(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    let values: Vec<(String, u64)> = (0..8).map(|i| (format!("BK00{i}"), 1)).collect();
+    shell.update(&mut vcx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: PICKER_KEY,
+                tag: 1,
+                column: "book".into(),
+                values: Ok(values),
+            },
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    let selected = |vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| s.picker.as_ref().unwrap().selected)
+    };
+    vcx.simulate_keystrokes("ctrl-d");
+    assert_eq!(selected(&vcx), 5, "ctrl+d moves five");
+    vcx.simulate_keystrokes("ctrl-d");
+    assert_eq!(selected(&vcx), 7, "and clamps at the end");
+    vcx.simulate_keystrokes("down");
+    assert_eq!(selected(&vcx), 0, "a bare down at the end wraps");
+    vcx.simulate_keystrokes("up");
+    assert_eq!(selected(&vcx), 7, "and a bare up at the top wraps");
+}
+
 /// Phase 4b M5: `PickerState::tag` used to reset to the same starting
 /// value on every `open`, so a stale `DistinctOutcome` from a first open
 /// on `book` could pass the tag check of a second, unrelated open on the

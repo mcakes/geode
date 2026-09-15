@@ -586,28 +586,17 @@ impl PaletteState {
             .map(|(i, indices)| (&self.items[*i], indices.as_slice(), self.title_len[*i]))
     }
 
-    /// Move the selection by `delta` rows (arrow keys / ctrl+p / ctrl+n
-    /// pass ±1), wrapping at both ends — pressing up at index 0 selects the
-    /// LAST filtered item; pressing down at the last item wraps to 0. An
-    /// empty result list remains a no-op. `render` now draws every filtered
-    /// row inside a scrollable viewport (rather than truncating to a fixed
-    /// window), and the caller that drives real key events
-    /// (`ShellView::handle_palette_key`) is responsible for scrolling the
-    /// newly selected row into view after each call here — see
-    /// `gpui::ScrollHandle::scroll_to_item`, invoked from that same
-    /// selection-change path; scroll-follow handles any index, including
-    /// wrap-around jumps.
+    /// Move the selection by `delta` — `vimnav::apply`'s rule (spec
+    /// §20.5): a bare ±1 wraps, anything larger clamps. Kept as a method
+    /// because the pure tests below and `handle_palette_key` call it by
+    /// this name; the arithmetic itself lives in one place now.
     pub fn move_selection(&mut self, delta: i32) {
         let len = self.filtered.len();
-        if len == 0 {
-            self.selected = 0;
-            return;
-        }
-        // Wrapping modular arithmetic: safely handles negative deltas and
-        // out-of-bounds movement. Formula: ((current + delta) % len + len) % len
-        // The double-modulo ensures the result is always in [0, len).
-        let next = ((self.selected as i32 + delta) % len as i32 + len as i32) % len as i32;
-        self.selected = next as usize;
+        self.selected = crate::vimnav::apply(
+            self.selected,
+            len,
+            crate::vimnav::NavCommand::Move(delta as i64),
+        );
     }
 
     /// The currently selected row, if any (an empty filtered list, or a
@@ -999,6 +988,10 @@ pub fn render(
         .left(px(left))
         .top(px(top))
         .w(px(width))
+        // Spec §20.5: reclaims `tab`/`shift-tab` from gpui-component's
+        // `Root` (`dialog::init_reclaimed_keybindings`'s `"GeodePalette"`
+        // entries) so they cannot cycle focus off `query_input`.
+        .key_context("GeodePalette")
         .flex()
         .flex_col()
         .gap_2()

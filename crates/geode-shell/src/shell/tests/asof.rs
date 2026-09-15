@@ -137,3 +137,51 @@ fn selecting_a_preset_sets_that_instant_and_live_then_undo_returns(cx: &mut gpui
         AsOf::At(second_newest)
     );
 }
+
+/// Opens the shell, publishes `n` generations (oldest first, so
+/// `note_published`'s newest-first `VecDeque` ends up with the newest at
+/// preset index 0 — the same ordering `selecting_a_preset_sets_that_
+/// instant_and_live_then_undo_returns` above relies on) and opens the
+/// as-of dialog (`alt-t`), leaving the field empty so the dialog is
+/// browsing presets.
+fn open_as_of_with_presets(
+    cx: &mut gpui::TestAppContext,
+    n: usize,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let newest = chrono::Utc::now();
+    frame.update(&mut vcx, |f, _| {
+        for i in (0..n).rev() {
+            f.note_published(Publish {
+                dataset: "risk".into(),
+                batch: "EOD".into(),
+                books: 1,
+                at: newest - chrono::Duration::seconds(30 * i as i64),
+            });
+        }
+    });
+    vcx.simulate_keystrokes("alt-t");
+    (shell, vcx)
+}
+
+/// Spec §20.5: every list takes the whole nav set through one rule.
+/// `ctrl+n`/`ctrl+p` used to be dead here and `up` at row 0 wrapped;
+/// now `ctrl+n` moves, `up` at 0 still wraps (a bare ±1), and `ctrl+u`
+/// at 0 clamps.
+#[gpui::test]
+fn the_as_of_list_takes_ctrl_n_and_clamps_a_page_step(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_as_of_with_presets(cx, 3); // ≥3 presets
+    let selected = |cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |s, _| s.as_of_dialog.as_ref().unwrap().selected)
+    };
+    cx.simulate_keystrokes("ctrl-n");
+    assert_eq!(selected(&cx), 1, "ctrl+n is down");
+    cx.simulate_keystrokes("ctrl-p");
+    assert_eq!(selected(&cx), 0);
+    cx.simulate_keystrokes("up");
+    assert_eq!(selected(&cx), 2, "a bare step wraps");
+    cx.simulate_keystrokes("ctrl-u");
+    assert_eq!(selected(&cx), 0, "a page step clamps");
+}

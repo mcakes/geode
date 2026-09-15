@@ -99,8 +99,8 @@ use geode_core::scope::{DimensionSelection, Scope};
 
 use crate::fonts;
 use crate::keymap::{Keystroke, Modifiers};
-use crate::listfilter;
 use crate::palette;
+use crate::{listfilter, vimnav};
 
 use super::dialog;
 use super::{PICKER_KEY, Pickable, ShellEvent, ShellView};
@@ -253,19 +253,6 @@ impl PickerState {
             return None;
         };
         values.get(*idx).map(|(v, _)| v.clone())
-    }
-
-    /// Move the selection by `delta` (±1 for up/down/ctrl+p/ctrl+n),
-    /// wrapping at both ends — `PaletteState::move_selection`'s own rule,
-    /// not the dialogs' clamping one: this is a short, per-keystroke list
-    /// the user steps through quickly, same as the palette.
-    pub fn move_selection(&mut self, delta: i32, len: usize) {
-        if len == 0 {
-            self.selected = 0;
-            return;
-        }
-        let next = ((self.selected as i32 + delta) % len as i32 + len as i32) % len as i32;
-        self.selected = next as usize;
     }
 
     /// Replace `scope`'s selection for this stage's column with whatever
@@ -478,24 +465,6 @@ pub(super) fn sync_picker_scroll(shell: &ShellView) {
     }
 }
 
-/// `up`/`down`/`ctrl+p`/`ctrl+n` as a signed step, or `None` for anything
-/// else — shared by both stages' [`handle_key`] arms.
-fn nav_delta(ks: &Keystroke) -> Option<i32> {
-    if ks.mods == Modifiers::NONE && ks.key == "up" {
-        return Some(-1);
-    }
-    if ks.mods == Modifiers::NONE && ks.key == "down" {
-        return Some(1);
-    }
-    if ks.mods == Modifiers::CTRL && ks.key == "p" {
-        return Some(-1);
-    }
-    if ks.mods == Modifiers::CTRL && ks.key == "n" {
-        return Some(1);
-    }
-    None
-}
-
 fn handle_columns_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -507,7 +476,7 @@ fn handle_columns_key(
         commit_column(shell, position, window, cx);
         return true;
     }
-    if let Some(delta) = nav_delta(ks) {
+    if let Some(cmd) = listfilter::nav_command(ks) {
         let query = shell
             .picker
             .as_ref()
@@ -515,7 +484,7 @@ fn handle_columns_key(
             .unwrap_or_default();
         let len = PickerState::columns(&shell.pickable, &query).len();
         if let Some(p) = shell.picker.as_mut() {
-            p.move_selection(delta, len);
+            p.selected = vimnav::apply(p.selected, len, cmd);
         }
         cx.notify();
         return true;
@@ -563,10 +532,10 @@ fn handle_values_key(
         shell.close_modal(window, cx); // the existing close path used by escape
         return true;
     }
-    if let Some(delta) = nav_delta(ks) {
+    if let Some(cmd) = listfilter::nav_command(ks) {
         let len = shell.picker.as_ref().map(|p| p.shown().len()).unwrap_or(0);
         if let Some(p) = shell.picker.as_mut() {
-            p.move_selection(delta, len);
+            p.selected = vimnav::apply(p.selected, len, cmd); // values
         }
         sync_picker_scroll(shell);
         cx.notify();

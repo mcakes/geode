@@ -361,6 +361,11 @@ pub fn init_reclaimed_keybindings(cx: &mut App) {
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeCommandLine")),
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeModalOpen")),
         gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeModalOpen")),
+        // Spec §20.5: the palette overlay is not a `GeodeModal`, so it
+        // never had the reclaim — `Root` could cycle focus off the query
+        // field on `tab`.
+        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodePalette")),
+        gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodePalette")),
     ]);
 }
 

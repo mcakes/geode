@@ -227,17 +227,6 @@ impl ShellView {
     /// guard is a plain Rust-level branch that never falls through to
     /// `self.matcher.press` regardless of what happens in here.
     ///
-    /// The named up/down/ctrl+p/ctrl+n arms below keep wrapping
-    /// (`PaletteState::move_selection`, unchanged since before Task 5),
-    /// while the larger steps in the fallback arm clamp
-    /// (`crate::vimnav::apply`) — a page jump that teleported from the top
-    /// of a long result list to the bottom would read as a glitch, not a
-    /// feature. That split falls out of arm order alone: the ±1 keys
-    /// return from their own arms before the fallback arm is ever reached,
-    /// so nothing there has to inspect the resolved delta to pick a rule —
-    /// reaching the fallback arm at all already means the key was none of
-    /// those four.
-    ///
     /// Reads gpui's own `Keystroke` directly (`event.keystroke`, not the
     /// shell-native one `convert_keystroke` produces) because it needs the
     /// named keys (`"up"`, `"down"`, `"enter"`, `"escape"`) and raw
@@ -250,51 +239,17 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
-        let mods = ks.modifiers;
 
         match ks.key.as_str() {
             "escape" => self.close_palette(window, cx),
             "enter" => self.commit_selected(window, cx),
-            "up" => {
-                if let Some(palette) = self.palette.as_mut() {
-                    palette.move_selection(-1);
-                }
-                self.sync_palette_scroll();
-            }
-            "down" => {
-                if let Some(palette) = self.palette.as_mut() {
-                    palette.move_selection(1);
-                }
-                self.sync_palette_scroll();
-            }
-            "p" if mods.control => {
-                if let Some(palette) = self.palette.as_mut() {
-                    palette.move_selection(-1);
-                }
-                self.sync_palette_scroll();
-            }
-            "n" if mods.control => {
-                if let Some(palette) = self.palette.as_mut() {
-                    palette.move_selection(1);
-                }
-                self.sync_palette_scroll();
-            }
-            // Everything the named arms above did not take. Two outcomes:
-            // a larger navigation step (the vocabulary the two list
-            // dialogs use, adopted here so all three filtered surfaces
-            // read the same — spec §3, "The command palette"), or a
-            // genuine no-op.
-            //
-            // These clamp, while the ±1 arms above wrap: reaching this
-            // arm at all means the key was NOT up/down/ctrl+p/ctrl+n, so
-            // nothing here has to inspect the delta to pick a rule. A
-            // page jump that teleports from the top of a long result list
-            // to the bottom reads as a glitch, not as a feature.
-            //
-            // A bare typed character lands here too, and must stay a true
+            // Everything but escape/enter: the whole `listfilter::nav_command`
+            // set through `vimnav::apply` — a bare ±1 wraps, a page step
+            // clamps (spec §20.5), the same rule every list and tile has.
+            // A bare typed character lands here too and must stay a true
             // no-op — deliberately not `cx.stop_propagation()`, so the
-            // window's separate text-input phase still delivers it to the
-            // focused `palette_input` (see this method's doc comment).
+            // window's text-input phase still delivers it to the focused
+            // `palette_input` (see this method's doc comment).
             _ => {
                 if let Some(ks) = convert_keystroke(&event.keystroke)
                     && let Some(cmd) = listfilter::nav_command(&ks)
