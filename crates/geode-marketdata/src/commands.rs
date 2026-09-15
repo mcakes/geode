@@ -3,11 +3,12 @@
 //! and `geode_diagnostics::commands` keep, and the reason this half is
 //! tested without a window.
 //!
-//! The vocabulary is `key <value>`, `revert`, `bump <delta> [row|col]`,
-//! `rebase`, `discard`, `upload`. Part 3 builds `key` for real; the rest
-//! parse here and the tile answers which task lands them, so the
-//! grammar a trader types is the grammar Tasks 7 and 8 wire up rather
-//! than one invented twice.
+//! The vocabulary is `underlying <value>` (trader-facing; `key` is a silent
+//! alias), `revert`, `bump <delta> [row|col]`, `rebase`, `discard`,
+//! `upload`, `set`, `menu`. Part 3 builds them for real; the rest parse
+//! here and the tile answers which task lands them, so the grammar a trader
+//! types is the grammar Tasks 7 and 8 wire up rather than one invented
+//! twice.
 
 use geode_core::document::KEY_SEPARATOR;
 
@@ -47,11 +48,22 @@ pub enum Command {
     Upload,
 }
 
-/// Every verb, in the order completions offer them. `rebase`/`discard`
-/// are filtered by the caller's `behind` flag (spec §8.3: they are
-/// offered only while a newer generation sits under the draft) — listed
-/// here so one table is the vocabulary and the filter is one line.
-const VERBS: [&str; 6] = ["key", "revert", "bump", "rebase", "discard", "upload"];
+/// Every verb, in the order completions offer them. `key` is a silent
+/// alias of `underlying` (the trader-facing word, spec §3) and is not
+/// listed: it parses, it is not taught. `rebase`/`discard` are filtered by
+/// the caller's `behind` flag (spec §8.3: they are offered only while a
+/// newer generation sits under the draft) — listed here so one table is the
+/// vocabulary and the filter is one line.
+const VERBS: [&str; 8] = [
+    "underlying",
+    "revert",
+    "bump",
+    "rebase",
+    "discard",
+    "upload",
+    "set",
+    "menu",
+];
 
 fn behind_only(verb: &str) -> bool {
     verb == "rebase" || verb == "discard"
@@ -68,13 +80,13 @@ fn behind_only(verb: &str) -> bool {
 pub fn parse(line: &str) -> Result<Command, String> {
     let mut words = line.split_whitespace();
     match words.next() {
-        Some("key") => {
+        Some(verb @ ("underlying" | "key")) => {
             let value = words
                 .next()
-                .ok_or_else(|| "usage: key <value>".to_string())?;
+                .ok_or_else(|| format!("usage: {verb} <value>"))?;
             if words.next().is_some() {
                 return Err(format!(
-                    "a document key is one word; parts are separated by '{KEY_DISPLAY_SEPARATOR}'"
+                    "an underlying is one word; parts are separated by '{KEY_DISPLAY_SEPARATOR}'"
                 ));
             }
             let parts: Vec<String> = value
@@ -82,7 +94,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 .map(str::to_string)
                 .collect();
             if parts.iter().any(|p| p.is_empty()) {
-                return Err(format!("'{value}' has an empty key part"));
+                return Err(format!("'{value}' has an empty part"));
             }
             // A key part carrying the storage separator would join back
             // into a different key than the one typed — refused here
@@ -113,6 +125,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
         Some("rebase") => Ok(Command::Rebase),
         Some("discard") => Ok(Command::Discard),
         Some("upload") => Ok(Command::Upload),
+        Some("set") => Err("set is not built yet".to_string()),
+        Some("menu") => Err("menu is not built yet".to_string()),
         Some(other) => Err(format!("unknown command '{other}'")),
         None => Err("empty command".to_string()),
     }
@@ -156,7 +170,7 @@ pub fn completions(line: &str, cursor: usize, keys: &[String], behind: bool) -> 
             .filter(|v| behind || !behind_only(v))
             .map(|v| (*v).to_string())
             .collect(),
-        ["key"] => keys.to_vec(),
+        ["underlying"] | ["key"] => keys.to_vec(),
         // `bump`'s delta is a number nothing can complete; its axis is a
         // two-word vocabulary.
         ["bump", _] => vec!["row".to_string(), "col".to_string()],
@@ -223,16 +237,30 @@ mod tests {
         let keys = vec!["NDX.Z".to_string(), "SPX.Z".to_string()];
         assert_eq!(
             completions("", 0, &keys, false),
-            vec!["key", "revert", "bump", "upload"],
+            vec!["underlying", "revert", "bump", "upload", "set", "menu"],
             "rebase and discard are offered only while behind"
         );
         assert_eq!(
             completions("", 0, &keys, true),
-            vec!["key", "revert", "bump", "rebase", "discard", "upload"]
+            vec![
+                "underlying",
+                "revert",
+                "bump",
+                "rebase",
+                "discard",
+                "upload",
+                "set",
+                "menu"
+            ]
         );
         assert_eq!(completions("key ", 4, &keys, false), keys);
         assert_eq!(
-            completions("key SP", 6, &keys, false),
+            completions("underlying ", 11, &keys, false),
+            keys,
+            "both underlying and key (the alias) complete with catalog keys"
+        );
+        assert_eq!(
+            completions("underlying SP", 13, &keys, false),
             keys,
             "the whole vocabulary, unfiltered — the shell ranks it"
         );
@@ -253,5 +281,22 @@ mod tests {
         let keys = vec!["SPX.Z".to_string()];
         // `é` is two bytes: a cursor at 2 lands mid-char.
         assert!(!completions("kéy", 2, &keys, false).is_empty());
+    }
+
+    #[test]
+    fn underlying_parses_like_key_and_key_stays_an_alias() {
+        assert_eq!(
+            parse("underlying SPX.Z"),
+            Ok(Command::Key(vec!["SPX.Z".into()]))
+        );
+        assert_eq!(parse("key SPX.Z"), Ok(Command::Key(vec!["SPX.Z".into()])));
+        assert_eq!(parse("underlying"), Err("usage: underlying <value>".into()));
+    }
+
+    #[test]
+    fn completions_offer_underlying_and_never_the_key_alias() {
+        let verbs = completions("", 0, &[], false);
+        assert_eq!(verbs[0], "underlying");
+        assert!(!verbs.iter().any(|v| v == "key"), "{verbs:?}");
     }
 }

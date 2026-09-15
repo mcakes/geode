@@ -251,9 +251,11 @@ pub struct MarketDataTile {
     frame: Entity<Frame>,
     diagnostics: Entity<Diagnostics>,
     data: DataHandle,
-    /// The document key, in the dataset's declared `key` order. `None`
-    /// until `:key` names one — a fresh panel has no document to ask
-    /// about, and guessing one would paint a document the trader never
+    /// The document key, in the dataset's declared `key` order. The
+    /// trader-facing word is "underlying" (`:underlying <value>`); the data
+    /// tier's word is "key" (the field name and `DocumentParams.document_key`).
+    /// `None` until `:underlying` names one — a fresh panel has no document
+    /// to ask about, and guessing one would paint a document the trader never
     /// asked for.
     key: Option<Vec<String>>,
     tag: u64,
@@ -372,7 +374,7 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) -> Self {
         let key = restored
-            .and_then(|t| t.get("key"))
+            .and_then(|t| t.get("underlying").or_else(|| t.get("key")))
             .and_then(|v| v.as_array())
             .map(|a| {
                 a.iter()
@@ -990,7 +992,8 @@ impl MarketDataTile {
             }
             None => {
                 self.chips.push(Chip {
-                    text: format!("{} — no key — :key <value>", self.spec.title).into(),
+                    text: format!("{} — no underlying — :underlying <value>", self.spec.title)
+                        .into(),
                     tone: Tone::Warn,
                 });
             }
@@ -1572,9 +1575,9 @@ impl MarketDataTile {
 
     pub fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
         // `completions` takes `&App` and can queue nothing, so this is
-        // the door a `key` line's own catalog request rides — the next
-        // completion list is then the fresh one (spec §8.3's "completions
-        // from the catalog's keys").
+        // the door an `underlying` line's own catalog request rides — the
+        // next completion list is then the fresh one (spec §8.3's
+        // "completions from the catalog's keys").
         //
         // UNCONDITIONALLY, not `request_catalog_if_needed` (review fix
         // round 1, MIN-4, controller ruling): a held catalog listing this
@@ -1584,7 +1587,7 @@ impl MarketDataTile {
         // offered a completion list that could never grow. `set_visible`'s
         // own request stays gated: there, one catalog is as good as
         // another and the point is only to have one at all.
-        if line.split_whitespace().next() == Some("key") {
+        if matches!(line.split_whitespace().next(), Some("underlying" | "key")) {
             self.request_catalog(cx);
         }
         match commands::parse(line)? {
@@ -1709,7 +1712,7 @@ impl MarketDataTile {
         let mut t = toml::Table::new();
         if let Some(key) = &self.key {
             t.insert(
-                "key".into(),
+                "underlying".into(),
                 toml::Value::Array(key.iter().map(|s| toml::Value::String(s.clone())).collect()),
             );
         }
@@ -3054,11 +3057,13 @@ edits = [["2026-11-20", "-1", 9.5]]
             .read_with(&vcx, |t, _| (t.serialize(), t.draft().len()));
         assert_eq!(edits, 1, "the edit is still there");
         assert_eq!(
-            key.get("key").and_then(|v| v.as_array()).map(|a| a.len()),
+            key.get("underlying")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
             Some(1)
         );
         assert_eq!(
-            key["key"][0].as_str(),
+            key["underlying"][0].as_str(),
             Some("SPX.Z"),
             "and the panel is still on the document those edits belong to"
         );
@@ -3257,7 +3262,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     fn serialize_round_trips_key_and_draft(cx: &mut gpui::TestAppContext) {
         let restored: toml::Table = format!(
             r#"
-key = ["SPX.Z"]
+underlying = ["SPX.Z"]
 [draft]
 base = "{BASE}"
 edits = [["2026-11-20", "-1", 9.5]]
@@ -3269,8 +3274,23 @@ edits = [["2026-11-20", "-1", 9.5]]
         let written = h.tile.read_with(&vcx, |t, _| t.serialize());
         assert_eq!(
             written, restored,
-            "the key and the draft survive a restart, labels and all"
+            "the underlying and the draft survive a restart, labels and all"
         );
+    }
+
+    #[gpui::test]
+    fn a_session_written_with_key_still_restores(cx: &mut gpui::TestAppContext) {
+        let mut t = toml::Table::new();
+        t.insert(
+            "key".into(),
+            toml::Value::Array(vec![toml::Value::String("SPX.Z".into())]),
+        );
+        let (h, mut vcx) = open_with(cx, Some(t));
+        h.visible(&mut vcx, true);
+        let req = h
+            .document_request()
+            .expect("a restored underlying requests its document");
+        assert_eq!(req.document_key, vec!["SPX.Z".to_string()]);
     }
 
     #[gpui::test]
