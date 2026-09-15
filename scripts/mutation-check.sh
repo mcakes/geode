@@ -11081,6 +11081,13 @@ run_mutation "blotter cursor: visual mode clamps a bare step (spec §20.5)" \
   geode-blotter \
   visual_mode_clamps_a_bare_step
 
+run_mutation "marketdata: the row axis wraps a bare step, the column axis never does (spec §20.5)" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.cursor.0 = apply(self.cursor.0, nrows, NavCommand::Move(rows as i64));' \
+  '        self.cursor.0 = apply_clamped(self.cursor.0, nrows, NavCommand::Move(rows as i64));' \
+  geode-marketdata \
+  a_bare_row_step_wraps_and_the_full_page_keys_move_ten
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

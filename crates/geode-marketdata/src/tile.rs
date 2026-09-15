@@ -83,6 +83,10 @@ use std::time::{Duration, Instant};
 /// prefix rather than being viewport-relative.
 const HALF_PAGE: isize = 5;
 
+/// How many rows `ctrl+f`/`ctrl+b`/`pagedown`/`pageup` step — `vimnav`'s
+/// own ±10, the blotter's `page_down_full`.
+const FULL_PAGE: isize = 10;
+
 /// `/` over the row labels (spec §8.3). The vim jump model only: a
 /// document's rows ARE its axis, in the desk's own order, so narrowing
 /// them (`FindStyle::Fzf`) would hide rows a cell reference is counted
@@ -1088,8 +1092,8 @@ impl MarketDataTile {
         // chips — `changed` formats, and a held `j` would then format the
         // whole header per keystroke for a row number nothing shows.
         let chrome = match verb {
-            "down" | "up" | "left" | "right" | "page_down" | "page_up" | "top" | "bottom"
-            | "first_col" | "last_col" => {
+            "down" | "up" | "left" | "right" | "page_down" | "page_up" | "page_down_full"
+            | "page_up_full" | "top" | "bottom" | "first_col" | "last_col" => {
                 let (rows, cols) = match verb {
                     "down" => (n, 0),
                     "up" => (-n, 0),
@@ -1097,6 +1101,9 @@ impl MarketDataTile {
                     "right" => (0, n),
                     "page_down" => (HALF_PAGE * n, 0),
                     "page_up" => (-HALF_PAGE * n, 0),
+                    // `vimnav`'s ±10, the blotter's `page_down_full`.
+                    "page_down_full" => (FULL_PAGE * n, 0),
+                    "page_up_full" => (-FULL_PAGE * n, 0),
                     "top" => (isize::MIN / 2, 0),
                     "bottom" => (isize::MAX / 2, 0),
                     "first_col" => (0, isize::MIN / 2),
@@ -1444,22 +1451,20 @@ impl MarketDataTile {
         Ok(())
     }
 
-    /// Move by cells, clamped. The extremes are the same door with a
-    /// saturating delta — `isize::MAX / 2` cannot overflow when added to
-    /// any real index, and one clamp is one rule about where a cursor may
-    /// be.
+    /// Spec §20.5: the row axis wraps on a bare ±1 and clamps on anything
+    /// larger (`vimnav::apply`, the one rule every list and tile shares);
+    /// the column axis clamps whatever the delta (`apply_clamped`). The
+    /// `top`/`bottom`/`first_col`/`last_col` verbs pass half-`isize`
+    /// deltas, which the clamp arm absorbs.
     fn move_cursor(&mut self, rows: isize, cols: isize) {
+        use geode_shell::vimnav::{NavCommand, apply, apply_clamped};
         let (nrows, ncols) = (self.model.rows.len(), self.model.columns.len());
         if nrows == 0 || ncols == 0 {
             self.cursor = (0, 0);
             return;
         }
-        self.cursor.0 = (self.cursor.0 as isize)
-            .saturating_add(rows)
-            .clamp(0, nrows as isize - 1) as usize;
-        self.cursor.1 = (self.cursor.1 as isize)
-            .saturating_add(cols)
-            .clamp(0, ncols as isize - 1) as usize;
+        self.cursor.0 = apply(self.cursor.0, nrows, NavCommand::Move(rows as i64));
+        self.cursor.1 = apply_clamped(self.cursor.1, ncols, NavCommand::Move(cols as i64));
     }
 
     /// The blotter's own tab-separated spelling (§8.3): a cell is its
@@ -3163,6 +3168,60 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.selection(&vcx),
             (Some(terms.len() - 1), Some(MatrixDelegate::table_col(2))),
             "G moves the table's selected row, which is what scrolls it into view"
+        );
+    }
+
+    /// Spec §20.5 on the panel: a bare `j` wraps, a counted one clamps,
+    /// the full-page pair moves ten, and `h`/`l` never wrap.
+    #[gpui::test]
+    fn a_bare_row_step_wraps_and_the_full_page_keys_move_ten(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        let terms: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let terms: Vec<&str> = terms.iter().map(String::as_str).collect();
+        h.deliver(&mut vcx, tag, Arc::new(document_of(&terms, &NODES, BASE)));
+
+        h.dispatch(&mut vcx, "up", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()).0,
+            11,
+            "a bare k at the top wraps to the last row"
+        );
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()).0,
+            0,
+            "and j wraps back"
+        );
+        h.dispatch(&mut vcx, "down", Some(20));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()).0,
+            11,
+            "a counted step clamps"
+        );
+        h.dispatch(&mut vcx, "page_up_full", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()).0,
+            1,
+            "ctrl+b moves ten"
+        );
+        h.dispatch(&mut vcx, "page_down_full", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()).0, 11);
+        h.dispatch(&mut vcx, "page_down_full", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()).0,
+            11,
+            "and clamps at the end"
+        );
+        h.dispatch(&mut vcx, "last_col", None);
+        let last = h.tile.read_with(&vcx, |t, _| t.cursor()).1;
+        h.dispatch(&mut vcx, "right", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()).1,
+            last,
+            "columns clamp: l at the last column stays"
         );
     }
 
