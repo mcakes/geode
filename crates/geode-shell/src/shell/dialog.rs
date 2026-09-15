@@ -1261,6 +1261,47 @@ pub(crate) fn confirm_row(
         .into_any_element()
 }
 
+/// What a value chip's click runs: `forward` is `!shift`.
+pub type StepHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+/// A steppable row's value, painted as a chip that is the mouse form of
+/// `space`/`shift+space` (spec §20.3): click steps forward, shift+click
+/// steps back. `on_step: None` paints the plain value with no fill and
+/// no handler — the four cases where the keys are inert too (a read-only
+/// domain, a one-option `Choice`, an armed confirm, an open text field).
+/// `stop_propagation` so the row's own select does not also run; the
+/// handler itself ends in [`sync_dialog_text`] at the caller, since it
+/// mutates the dialog off the key path (§17.1 rule 3).
+pub(crate) fn value_chip(
+    text: String,
+    selector: String,
+    fg: Hsla,
+    bg: Hsla,
+    on_step: Option<StepHandler>,
+) -> AnyElement {
+    let base = div()
+        .font_family(crate::fonts::MONO)
+        .text_sm()
+        .flex_shrink_0()
+        .debug_selector(move || selector.clone());
+    match on_step {
+        None => base.text_color(fg).child(text).into_any_element(),
+        Some(on_step) => base
+            .px_1p5()
+            .py_0p5()
+            .rounded(px(4.))
+            .bg(bg)
+            .text_color(fg)
+            .cursor_pointer()
+            .child(text)
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                cx.stop_propagation();
+                on_step(!event.modifiers.shift, window, cx);
+            })
+            .into_any_element(),
+    }
+}
+
 #[cfg(test)]
 mod confirm_tests {
     use super::ConfirmAnswer;

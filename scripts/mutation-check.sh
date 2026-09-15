@@ -11189,6 +11189,13 @@ run_mutation "dialog: the confirm router treats a modified escape as no (spec §
   geode-shell \
   the_confirm_router_answers_four_keys_and_drops_the_rest
 
+run_mutation "settings: shift+click on the value chip steps back (spec §20.3)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                on_step(!event.modifiers.shift, window, cx);' \
+  '                on_step(true, window, cx);' \
+  geode-shell \
+  the_settings_value_chip_steps_and_a_row_click_only_selects
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
