@@ -11280,6 +11280,34 @@ run_mutation "objectdialog: the n button is withheld on a fixed roster (spec §2
   geode-shell \
   the_i_button_opens_the_chain_field_on_groupings_and_n_is_withheld
 
+# Spec §20.3 / ruling 6: no `n` button on a read-only domain (Schema) —
+# the same gate the footer's `n` hint keys on. Mutated away, the button
+# paints over a surface whose `n` only ever answers the read-only notice.
+run_mutation "objectdialog: the n button is withheld on a read-only domain (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        && state.domain.writable(&state.stage)
+        && state.domain.roster().is_none();' \
+  '        && true
+        && state.domain.roster().is_none();' \
+  geode-shell \
+  the_schema_domain_offers_no_n_button_and_the_chip_door_refuses
+
+# Spec §20.3: the chip's door refuses on a read-only domain in the
+# keys' own words. Mutated to always step, a Schema row answers
+# `step_selected_row`'s "nothing on this row changes with space" instead
+# of the read-only notice — the wrong reason for the right outcome. (No
+# entry mutates `chips_live`'s own `writable` term: every Schema row is
+# a display-only `Text`, so no Schema row can carry a chip whatever that
+# term says, and such an entry would survive by construction.)
+run_mutation "objectdialog: the chip door refuses a read-only domain (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if writable {
+        step_selected_row(shell, forward, filtering, cx);' \
+  '    if true {
+        step_selected_row(shell, forward, filtering, cx);' \
+  geode-shell \
+  the_schema_domain_offers_no_n_button_and_the_chip_door_refuses
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

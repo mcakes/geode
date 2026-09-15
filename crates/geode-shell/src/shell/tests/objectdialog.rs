@@ -4766,6 +4766,54 @@ fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::Tes
     assert!(cx.debug_bounds("objectdialog-field-columns.book").is_none());
 }
 
+/// Spec §20.3 on the read-only Schema domain: no `n` button on browse
+/// (ruling 6 — a button that only ever refuses teaches a verb with
+/// nothing behind it), and the chip's own door refuses with the read-only
+/// notice and changes nothing.
+///
+/// The chip half is a direct call, not a click: every Schema edit-stage
+/// row is a display-only `Text`, so `vocabulary_of` answers `Inert` and
+/// no Schema row ever paints a chip whatever `chips_live` says — the
+/// render gate is unobservable here by construction. What IS observable
+/// is `on_value_chip_clicked`'s own writable gate, which is the one a
+/// future steppable Schema row (or a test) would reach.
+#[gpui::test]
+fn the_schema_domain_offers_no_n_button_and_the_chip_door_refuses(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
+    assert!(
+        cx.debug_bounds("objectdialog-action-n").is_none(),
+        "read-only: no n button on browse"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-field-columns.book").is_some());
+    assert_eq!(edit_draft(&shell, &cx, |d| d.selected), 0);
+    let fields_before = edit_draft(&shell, &cx, |d| d.fields.clone());
+
+    // The chip's door on row 1, forward: the cursor moves (the click
+    // selects, as on every domain), the notice is the read-only one —
+    // never `step_selected_row`'s "nothing changes with space", which
+    // would mean the gate had let the step through — and no write is
+    // queued.
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::on_value_chip_clicked(shell, 1, true, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.selected), 1);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some(objectdialog::READ_ONLY_NOTICE)
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.fields.clone()),
+        fields_before,
+        "nothing stepped"
+    );
+    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_none()));
+}
+
 /// `config::schema` on `risk`, with a writable user directory so a
 /// column-stage write lands on disk: the browse list, then `enter` into
 /// the dataset's column rows.

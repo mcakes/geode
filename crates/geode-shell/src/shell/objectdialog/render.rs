@@ -4150,7 +4150,12 @@ fn on_edit_row_clicked(
 /// (the chip paints without a handler then, but a test can still call
 /// this door). The read-only gate is `step_selected_row`'s callers' —
 /// applied here too, since this is one.
-fn on_value_chip_clicked(
+///
+/// `pub(in crate::shell)` so the window tests can drive it directly: no
+/// Schema row ever paints a chip (every row there is a display-only
+/// `Text`, so `vocabulary_of` answers `Inert`), which leaves this door's
+/// own read-only refusal reachable only by a direct call.
+pub(in crate::shell) fn on_value_chip_clicked(
     shell: &mut ShellView,
     position: usize,
     forward: bool,
