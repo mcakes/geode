@@ -11067,6 +11067,14 @@ run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
   geode-marketdata \
   floored_tones_refresh_only_when_an_input_changes
 
+# ---- Panel header: vocabulary (spec 2026-09-14 §3) ----------------------
+run_mutation "mdheader: a session written with key still restores" \
+  crates/geode-marketdata/src/tile.rs \
+  '            .and_then(|t| t.get("underlying").or_else(|| t.get("key")))' \
+  '            .and_then(|t| t.get("underlying"))' \
+  geode-marketdata \
+  a_session_written_with_key_still_restores
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
