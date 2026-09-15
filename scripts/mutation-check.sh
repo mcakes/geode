@@ -1922,17 +1922,30 @@ run_mutation "keybindings: a single row click starts listening" \
   a_single_click_on_a_row_starts_listening
 
 # Spec §20.1: `d`/`r` ask first — a bound row's `d` must ARM the confirm
-# rather than write straight through.
+# rather than write straight through. Anchored on `arm_verb`, the one
+# arm-or-notice decision shared by `handle_key` and `press_verb`.
 run_mutation "keybindings: d arms a confirm instead of writing (spec §20.1)" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '                    state.confirm = Some(KeybindingConfirm::Unbind);
-                } else {
-                    state.notice = unbind_selected(row, &user_dir, cx);' \
-  '                    state.notice = unbind_selected(row, &user_dir, cx);
-                } else {
-                    state.notice = unbind_selected(row, &user_dir, cx);' \
+  '        '"'"'d'"'"' if can_unbind(row) => {
+            state.confirm = Some(KeybindingConfirm::Unbind);
+        }
+        '"'"'d'"'"' => state.notice = unbind_selected(row, user_dir, cx),' \
+  '        '"'"'d'"'"' => state.notice = unbind_selected(row, user_dir, cx),' \
   geode-shell \
   d_asks_before_writing_and_n_withdraws
+
+# Spec §20.1, the `r` half: a row whose binding IS the user's own must
+# ARM the confirm rather than remove it straight through. Same anchor
+# function, the other guarded arm.
+run_mutation "keybindings: r arms a confirm instead of writing (spec §20.1)" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        '"'"'r'"'"' if can_reset(row) => {
+            state.confirm = Some(KeybindingConfirm::Reset);
+        }
+        '"'"'r'"'"' => state.notice = reset_selected(row, user_dir, cx),' \
+  '        '"'"'r'"'"' => state.notice = reset_selected(row, user_dir, cx),' \
+  geode-shell \
+  r_asks_before_writing_and_n_withdraws
 
 # Spec §20.1: a mouse click must not retarget the selection (or start a
 # capture) while `d`/`r`'s question stands.

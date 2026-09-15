@@ -647,6 +647,51 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+/// Whether `d` on `row` would actually silence something — the row has
+/// *some* effective binding, from any layer. `false` is where `d` gives
+/// its "already unbound" notice unarmed rather than asking a question
+/// with nothing behind it.
+fn can_unbind(row: Option<&KeybindingRow>) -> bool {
+    row.is_some_and(|r| r.current.is_some())
+}
+
+/// Whether `r` on `row` would actually remove something — the row's
+/// effective binding is the USER's own. `false` (a builtin/desk binding,
+/// or none at all) is where `r` gives its "no user override" notice
+/// unarmed, since there is nothing of the user's to remove.
+fn can_reset(row: Option<&KeybindingRow>) -> bool {
+    row.is_some_and(|r| r.current.as_ref().is_some_and(|b| b.layer == Layer::User))
+}
+
+/// The ONE arm-or-notice decision for `d`/`r` (spec §20.1, controller
+/// ruling: this was spelled three times — [`handle_key`]'s two `Verb`
+/// arms and [`press_verb`] — and is now spelled once, called from both).
+/// Arms the matching [`KeybindingConfirm`] where [`can_unbind`]/
+/// [`can_reset`] holds; otherwise runs the existing unarmed writers
+/// ([`unbind_selected`]/[`reset_selected`]) into `state.notice`, exactly
+/// as before this dialog grew a confirm at all — so a keystroke or a
+/// button press on a row with nothing to change still says so rather
+/// than silently asking a question about doing nothing.
+fn arm_verb(
+    state: &mut KeybindingsState,
+    key: char,
+    row: Option<&KeybindingRow>,
+    user_dir: &Option<PathBuf>,
+    cx: &mut Context<ShellView>,
+) {
+    match key {
+        'd' if can_unbind(row) => {
+            state.confirm = Some(KeybindingConfirm::Unbind);
+        }
+        'd' => state.notice = unbind_selected(row, user_dir, cx),
+        'r' if can_reset(row) => {
+            state.confirm = Some(KeybindingConfirm::Reset);
+        }
+        'r' => state.notice = reset_selected(row, user_dir, cx),
+        _ => {}
+    }
+}
+
 /// The [`dialog::ModalKeyHandler`] for this dialog. Priority order:
 ///
 /// 1. while listening, every keystroke is offered to
@@ -845,27 +890,13 @@ fn handle_key(
             NormalCommand::Commit => {
                 begin_capture(state, visible.len());
             }
-            // The two write verbs (spec §8, §20.1): each ARMS a question
-            // where a write would happen, and gives its notice unarmed
-            // where none would — `d` on an unbound row, `r` on a row with
-            // no user override — so the answer `y` runs is always a real
-            // write. `unbind_selected`/`reset_selected` are the writers,
-            // reached from the armed block above.
-            NormalCommand::Verb('d') => {
+            // The two write verbs (spec §8, §20.1): [`arm_verb`] is the
+            // ONE arm-or-notice decision, shared with [`press_verb`] so
+            // the keyboard and the mouse can never disagree on which rows
+            // arm a question.
+            NormalCommand::Verb(key @ ('d' | 'r')) => {
                 let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-                if row.is_some_and(|r| r.current.is_some()) {
-                    state.confirm = Some(KeybindingConfirm::Unbind);
-                } else {
-                    state.notice = unbind_selected(row, &user_dir, cx);
-                }
-            }
-            NormalCommand::Verb('r') => {
-                let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-                if row.is_some_and(|r| r.current.as_ref().is_some_and(|b| b.layer == Layer::User)) {
-                    state.confirm = Some(KeybindingConfirm::Reset);
-                } else {
-                    state.notice = reset_selected(row, &user_dir, cx);
-                }
+                arm_verb(state, key, row, &user_dir, cx);
             }
             // `Toggle`, `EditText`, `MoveItem` and any other verb belong
             // to surfaces that have something to toggle, edit or reorder;
@@ -1324,8 +1355,14 @@ pub(crate) fn highlighted_text(text: &str, indices: &[usize], primary: Hsla) -> 
         .into_any_element()
 }
 
-/// A verb pressed with the mouse (spec §20.1) — one door with the key, so
-/// a button and its letter can never differ: arms, never writes.
+/// A verb pressed with the mouse (spec §20.1) — one door with the key
+/// via [`arm_verb`] (the shared arm-or-notice decision [`handle_key`]'s
+/// `Verb` arm also calls), so a button and its letter can never differ:
+/// arms, never writes. Keeps its own guards a keystroke does not need —
+/// clearing a standing notice, and refusing outright while a question is
+/// already armed or a capture is listening — because a button click, and
+/// so a second `press_verb` call before the first's write lands, can
+/// happen with no keystroke in between at all.
 fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Context<ShellView>) {
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
     let user_dir = shell.user_dir.clone();
@@ -1340,16 +1377,8 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
     }
     let visible = visible_rows(state, &rows);
     let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-    match key {
-        "d" if row.is_some_and(|r| r.current.is_some()) => {
-            state.confirm = Some(KeybindingConfirm::Unbind);
-        }
-        "d" => state.notice = unbind_selected(row, &user_dir, cx),
-        "r" if row.is_some_and(|r| r.current.as_ref().is_some_and(|b| b.layer == Layer::User)) => {
-            state.confirm = Some(KeybindingConfirm::Reset);
-        }
-        "r" => state.notice = reset_selected(row, &user_dir, cx),
-        _ => {}
+    if let Some(key) = key.chars().next() {
+        arm_verb(state, key, row, &user_dir, cx);
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
@@ -1401,10 +1430,10 @@ fn action_block(
     let chip_bg = theme.muted;
     let mut verbs: Vec<(&'static str, &'static str)> = Vec::new();
     if state.listening.is_none() {
-        if row.is_some_and(|r| r.current.is_some()) {
+        if can_unbind(row) {
             verbs.push(("d", "Unbind"));
         }
-        if row.is_some_and(|r| r.current.as_ref().is_some_and(|b| b.layer == Layer::User)) {
+        if can_reset(row) {
             verbs.push(("r", "Reset to lower layer"));
         }
     }

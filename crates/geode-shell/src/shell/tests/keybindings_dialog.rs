@@ -1900,6 +1900,64 @@ fn d_asks_before_writing_and_n_withdraws(cx: &mut gpui::TestAppContext) {
     assert!(!dir.path().join("keymap.toml").exists());
 }
 
+/// The `r` half of [`d_asks_before_writing_and_n_withdraws`]: a bare `r`
+/// on a row whose binding IS the user's own arms `Reset` and writes
+/// nothing until `y`; `n` withdraws it and the file is untouched either
+/// way. Opened on `services_with_a_user_binding_for_the_palette` (rather
+/// than a builtin row, which would only give the unarmed notice) so a
+/// write really would be observable if the arm regressed to a
+/// write-through.
+#[gpui::test]
+fn r_asks_before_writing_and_n_withdraws(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_TEXT).unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(
+        cx,
+        services_with_a_user_binding_for_the_palette(),
+        dir.path(),
+    );
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_the_palette_row(&mut vcx);
+
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().confirm
+            == Some(keybindings_view::KeybindingConfirm::Reset)),
+        "r arms the question"
+    );
+    assert!(
+        vcx.debug_bounds("keybindings-confirm").is_some(),
+        "and it paints"
+    );
+    assert!(
+        vcx.debug_bounds("keybindings-action-r").is_none(),
+        "the action bar is replaced by the question"
+    );
+    let unchanged = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("still there");
+    assert_eq!(
+        unchanged, USER_KEYMAP_TEXT,
+        "nothing is written while the question stands"
+    );
+
+    vcx.simulate_keystrokes("n");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .confirm
+            .is_none()),
+        "n withdraws it"
+    );
+    assert!(vcx.debug_bounds("keybindings-confirm").is_none());
+    let still_unchanged =
+        std::fs::read_to_string(dir.path().join("keymap.toml")).expect("still there");
+    assert_eq!(still_unchanged, USER_KEYMAP_TEXT, "n writes nothing either");
+}
+
 /// A row click while a question stands is claimed and dropped — the
 /// object dialog's tick-click rule (§18.9.2) on this surface — and so is
 /// the frozen filter row's.
