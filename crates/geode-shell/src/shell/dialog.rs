@@ -1165,3 +1165,143 @@ pub(crate) fn hint_rows(hints: &[Hint], chip_fg: Hsla, chip_bg: Hsla) -> AnyElem
     }
     lines.into_any_element()
 }
+
+/// The answer to a destructive question, on every surface that asks one
+/// (spec §20.1): the object dialog's `d`/`r`/`o` and the keybindings
+/// dialog's `d`/`r`. `None` means the key is neither answer — the caller
+/// claims and drops it, because a stray letter must not act on the
+/// object behind an unanswered question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAnswer {
+    Yes,
+    No,
+}
+
+impl ConfirmAnswer {
+    /// `y`/`enter` bare are yes; `n` bare and `escape` with any modifiers
+    /// are no (modifier-agnostic on `escape` for the same reason every
+    /// dialog's close is: `shift+escape` must not be a key that visibly
+    /// does nothing).
+    pub fn from_key(ks: &Keystroke) -> Option<ConfirmAnswer> {
+        let bare = ks.mods == Modifiers::NONE;
+        match ks.key.as_str() {
+            "y" | "enter" if bare => Some(ConfirmAnswer::Yes),
+            "n" if bare => Some(ConfirmAnswer::No),
+            "escape" => Some(ConfirmAnswer::No),
+            _ => None,
+        }
+    }
+}
+
+/// What a confirm button runs. `Rc` so the two closures can be cloned
+/// into gpui's `'static` click handlers.
+pub type ConfirmHandler = Rc<dyn Fn(&mut ShellView, &mut Window, &mut Context<ShellView>)>;
+
+/// The confirm block every dialog paints in place of its action bar
+/// while a destructive question stands (spec §20.1): the question in
+/// `theme.warning`, a `danger` button labelled with the verb, and a ghost
+/// `Cancel`. Both handlers are mouse-side answers and so end in
+/// [`sync_dialog_text`] here, once, rather than in each caller (spec
+/// §16.1: a click never passes through the key path). Selectors:
+/// `"{selector_prefix}-confirm"`, `-yes`, `-no`.
+pub(crate) fn confirm_row(
+    prompt: String,
+    yes_label: &'static str,
+    selector_prefix: &'static str,
+    entity: &Entity<ShellView>,
+    on_yes: ConfirmHandler,
+    on_no: ConfirmHandler,
+    cx: &mut App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let go_ahead = entity.clone();
+    let leave_it = entity.clone();
+    let block = format!("{selector_prefix}-confirm");
+    let yes_sel = format!("{selector_prefix}-confirm-yes");
+    let no_sel = format!("{selector_prefix}-confirm-no");
+    let yes_id = SharedString::from(yes_sel.clone());
+    let no_id = SharedString::from(no_sel.clone());
+    h_flex()
+        .w_full()
+        .gap_3()
+        .items_center()
+        .debug_selector(move || block.clone())
+        .child(div().text_sm().text_color(theme.warning).child(prompt))
+        .child(
+            div().debug_selector(move || yes_sel.clone()).child(
+                Button::new(yes_id)
+                    .small()
+                    .danger()
+                    .label(yes_label)
+                    .on_click(move |_event, window, cx| {
+                        let on_yes = on_yes.clone();
+                        go_ahead.update(cx, |shell, cx| {
+                            on_yes(shell, window, cx);
+                            sync_dialog_text(shell, window, cx);
+                        });
+                    }),
+            ),
+        )
+        .child(div().debug_selector(move || no_sel.clone()).child(
+            Button::new(no_id).small().ghost().label("Cancel").on_click(
+                move |_event, window, cx| {
+                    let on_no = on_no.clone();
+                    leave_it.update(cx, |shell, cx| {
+                        on_no(shell, window, cx);
+                        sync_dialog_text(shell, window, cx);
+                        cx.notify();
+                    });
+                },
+            ),
+        ))
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::ConfirmAnswer;
+    use crate::keymap::{Keystroke, Modifiers};
+
+    fn ks(key: &str, mods: Modifiers) -> Keystroke {
+        Keystroke {
+            mods,
+            key: key.to_string(),
+        }
+    }
+    const SHIFT: Modifiers = Modifiers {
+        ctrl: false,
+        alt: false,
+        shift: true,
+        cmd: false,
+    };
+
+    /// Spec §20.1: one router for every destructive question. `y`/`enter`
+    /// bare say yes, `n` bare and `escape` with ANY modifiers say no, and
+    /// everything else is `None` — claimed and dropped by the caller.
+    #[test]
+    fn the_confirm_router_answers_four_keys_and_drops_the_rest() {
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("y", Modifiers::NONE)),
+            Some(ConfirmAnswer::Yes)
+        );
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("enter", Modifiers::NONE)),
+            Some(ConfirmAnswer::Yes)
+        );
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("n", Modifiers::NONE)),
+            Some(ConfirmAnswer::No)
+        );
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("escape", Modifiers::NONE)),
+            Some(ConfirmAnswer::No)
+        );
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("escape", SHIFT)),
+            Some(ConfirmAnswer::No)
+        );
+        assert_eq!(ConfirmAnswer::from_key(&ks("y", SHIFT)), None, "Y is not y");
+        assert_eq!(ConfirmAnswer::from_key(&ks("enter", Modifiers::CTRL)), None);
+        assert_eq!(ConfirmAnswer::from_key(&ks("d", Modifiers::NONE)), None);
+    }
+}

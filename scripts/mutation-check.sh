@@ -6818,21 +6818,25 @@ run_mutation "objectdialog: n empties a leftover browse filter before naming" \
   geode-shell \
   n_opens_an_empty_name_field_even_after_a_browse_filter
 
-# §16.1: the confirm buttons are the only door into `run_confirmed` that
-# never passes through `ShellView::handle_key_down`, so the sync at the
-# end of the "yes" closure is the one that empties the shared field when
-# a confirmed delete walks back to browse. Reachable only with the
-# mouse: an armed confirm swallows every keystroke, `/` included, so the
-# keyboard cannot reach one from filter mode at all — but the action
-# bar's buttons are live in either mode. Anchored on the last comment
-# line too: the identical sync call appears four times in this file, and
-# the "no" closure's is indented identically.
+# §16.1 / §20.1: the confirm buttons are the only door into
+# `run_confirmed` that never passes through `ShellView::handle_key_down`,
+# so the sync at the end of the shared `dialog::confirm_row`'s "yes"
+# closure is the one that empties the shared field when a confirmed
+# delete walks back to browse. Reachable only with the mouse: an armed
+# confirm swallows every keystroke, `/` included, so the keyboard cannot
+# reach one from filter mode at all — but the action bar's buttons are
+# live in either mode. Task 5 moved this closure from the object
+# dialog's own `confirm_row` into the shared one in `dialog.rs`; the
+# anchor moved with it (the bare `sync_dialog_text(shell, window, cx);`
+# call appears twice more in this file — this function's own "no"
+# closure, and an unrelated one elsewhere — so the preceding
+# `on_yes(shell, window, cx);` line disambiguates it).
 run_mutation "objectdialog: a mouse-confirmed delete leaves its filter text in the field" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                                // was filtering with is emptied here or nowhere.
-                                dialog::sync_dialog_text(shell, window, cx);' \
-  '                                // was filtering with is emptied here or nowhere.
-                                let _ = window;' \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                            on_yes(shell, window, cx);
+                            sync_dialog_text(shell, window, cx);' \
+  '                            on_yes(shell, window, cx);
+                            let _ = window;' \
   geode-shell \
   confirming_with_the_mouse_while_filtering_empties_the_field
 
@@ -11127,6 +11131,13 @@ run_mutation "palette: tab is reclaimed inside the palette (spec §20.5)" \
   '        gpui::KeyBinding::new("f24", gpui::NoAction, Some("GeodePalette")),' \
   geode-shell \
   tab_in_the_palette_leaves_the_query_field_focused
+
+run_mutation "dialog: the confirm router treats a modified escape as no (spec §20.1)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            "escape" => Some(ConfirmAnswer::No),' \
+  '            "escape" if bare => Some(ConfirmAnswer::No),' \
+  geode-shell \
+  the_confirm_router_answers_four_keys_and_drops_the_rest
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

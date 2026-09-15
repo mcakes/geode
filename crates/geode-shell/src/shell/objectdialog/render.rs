@@ -1102,16 +1102,16 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         .and_then(|state| state.draft.as_ref())
         .and_then(|draft| draft.confirm);
     if let Some(confirm) = armed {
-        let bare = ks.mods == Modifiers::NONE;
-        if bare && matches!(ks.key.as_str(), "enter" | "y") {
-            disarm_confirm(shell);
-            run_confirmed(shell, confirm, cx);
-        } else if ks.key == "escape" || (bare && ks.key == "n") {
-            disarm_confirm(shell);
+        match dialog::ConfirmAnswer::from_key(ks) {
+            Some(dialog::ConfirmAnswer::Yes) => {
+                disarm_confirm(shell);
+                run_confirmed(shell, confirm, cx);
+            }
+            Some(dialog::ConfirmAnswer::No) => disarm_confirm(shell),
+            // Claimed and dropped: while a destructive question is on
+            // screen, a stray letter must not act on the object behind it.
+            None => {}
         }
-        // Anything else is claimed and dropped: while a destructive
-        // question is on screen, a stray letter must not act on the
-        // object behind it.
         cx.notify();
         return true;
     }
@@ -3827,90 +3827,42 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 }
 
 /// The confirm block, which **replaces** the action bar rather than
-/// joining it: one question, two answers, and nothing above it moves.
+/// joining it — `dialog::confirm_row` (spec §20.1) with this dialog's
+/// question, verb and handlers. The yes handler's `run_confirmed`
+/// delete/revert arm walks all the way back to browse through
+/// `leave_edit`, which is why the shared row syncs after it.
 fn confirm_row(
     confirm: Confirm,
     name: &str,
     entity: &Entity<ShellView>,
     cx: &mut App,
 ) -> AnyElement {
-    let theme = cx.theme();
-    let go_ahead = entity.clone();
-    let leave_it = entity.clone();
-    h_flex()
-        .w(px(WIDTH))
-        .gap_3()
-        .items_center()
-        .debug_selector(|| "objectdialog-confirm".to_string())
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme.warning)
-                .child(confirm.prompt(name)),
-        )
-        .child(
-            // Wrapped for the same reason each action-bar button is:
-            // `debug_bounds` resolves a `debug_selector`, not a button's
-            // element id, so a test that answers with the mouse
-            // (`confirming_with_the_mouse_while_filtering_empties_the_
-            // field`) has something to aim at.
-            div()
-                .debug_selector(|| "objectdialog-confirm-yes".to_string())
-                .child(
-                    Button::new("objectdialog-confirm-yes")
-                        .small()
-                        .danger()
-                        .label(match confirm {
-                            Confirm::Delete => "Delete",
-                            Confirm::Revert => "Revert",
-                            Confirm::Overwrite => "Overwrite",
-                        })
-                        .on_click(move |_event, window, cx| {
-                            go_ahead.update(cx, |shell, cx| {
-                                let armed = shell
-                                    .object_dialog
-                                    .as_ref()
-                                    .and_then(|state| state.draft.as_ref())
-                                    .and_then(|draft| draft.confirm);
-                                if let Some(confirm) = armed {
-                                    disarm_confirm(shell);
-                                    run_confirmed(shell, confirm, cx);
-                                }
-                                // A mouse answer never passes through the key
-                                // path, so it needs the same seam a row click
-                                // does (spec §16.1): `run_confirmed`'s
-                                // delete/revert arm walks all the way back to
-                                // browse through `leave_edit`, and the field it
-                                // was filtering with is emptied here or nowhere.
-                                dialog::sync_dialog_text(shell, window, cx);
-                            });
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .debug_selector(|| "objectdialog-confirm-no".to_string())
-                .child(
-                    Button::new("objectdialog-confirm-no")
-                        .small()
-                        .ghost()
-                        .label("Cancel")
-                        .on_click(move |_event, window, cx| {
-                            leave_it.update(cx, |shell, cx| {
-                                disarm_confirm(shell);
-                                // Nothing here moves the mode or the query, so
-                                // the sync is a no-op today — present for the
-                                // same reason its twin above is: this closure is
-                                // off the key path, and the seam belongs to the
-                                // door rather than to what happens to be behind
-                                // it right now.
-                                dialog::sync_dialog_text(shell, window, cx);
-                                cx.notify();
-                            });
-                        }),
-                ),
-        )
-        .into_any_element()
+    let yes_label = match confirm {
+        Confirm::Delete => "Delete",
+        Confirm::Revert => "Revert",
+        Confirm::Overwrite => "Overwrite",
+    };
+    let on_yes: dialog::ConfirmHandler = Rc::new(|shell, _window, cx| {
+        let armed = shell
+            .object_dialog
+            .as_ref()
+            .and_then(|state| state.draft.as_ref())
+            .and_then(|draft| draft.confirm);
+        if let Some(confirm) = armed {
+            disarm_confirm(shell);
+            run_confirmed(shell, confirm, cx);
+        }
+    });
+    let on_no: dialog::ConfirmHandler = Rc::new(|shell, _window, _cx| disarm_confirm(shell));
+    dialog::confirm_row(
+        confirm.prompt(name),
+        yes_label,
+        "objectdialog",
+        entity,
+        on_yes,
+        on_no,
+        cx,
+    )
 }
 
 /// §5.3: the chip naming the layer in force on a column-stage field,
