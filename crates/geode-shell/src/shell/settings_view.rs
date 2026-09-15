@@ -258,12 +258,14 @@ pub enum StepDirection {
 }
 
 /// The value index one step from `current` in a `len`-value list,
-/// WRAPPING at both ends — deliberately unlike `vimnav::apply`'s clamped
-/// list navigation: a settings value is a cycle (fzf → vim → fzf), not a
-/// list with ends, and wrap is what lets a run of `tab` presses (or
-/// repeated clicks on the same row) reach every value without ever
-/// hitting a dead end. `len == 0` yields 0 (unreachable for real rows —
-/// every setting has at least two values — but deterministic).
+/// WRAPPING at both ends unconditionally — unlike `vimnav::apply`, which
+/// wraps only a bare ±1 and clamps a larger or counted step (spec
+/// §20.5): a settings value is a cycle (fzf → vim → fzf), not a list
+/// with ends, and this always moves by exactly one, so wrap is what lets
+/// a run of `tab` presses (or repeated clicks on the same row) reach
+/// every value without ever hitting a dead end. `len == 0` yields 0
+/// (unreachable for real rows — every setting has at least two values —
+/// but deterministic).
 pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
     if len == 0 {
         return 0;

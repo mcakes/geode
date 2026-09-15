@@ -2968,7 +2968,9 @@ pub struct ObjectDialogState {
     pub stage: Stage,
     /// Index into the **filtered** list ([`visible_rows`]), not the full
     /// one — the palette's convention, shared by every list surface in
-    /// this crate and what `vimnav::apply` clamps against.
+    /// this crate and the `len` bound `vimnav::apply` moves within
+    /// (wrapping a bare ±1, clamping a larger or counted step — spec
+    /// §20.5).
     pub selected: usize,
     /// The filter query, mirrored here from `ShellView::dialog_input` by
     /// that field's `InputEvent::Change` subscription. The `Input` owns

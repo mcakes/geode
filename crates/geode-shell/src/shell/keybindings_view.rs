@@ -326,8 +326,9 @@ fn is_shadowed(bindings: &[Binding], index: usize, candidate: &Binding) -> bool 
 #[derive(Debug)]
 pub struct KeybindingsState {
     /// Index into the **filtered** row list ([`visible_rows`]), not into
-    /// the full one — the palette's convention, and what
-    /// `vimnav::apply` clamps against. Row identity for clicks and
+    /// the full one — the palette's convention, and the `len` bound
+    /// `vimnav::apply` moves within (wrapping a bare ±1, clamping a
+    /// larger or counted step — spec §20.5). Row identity for clicks and
     /// rebinds is resolved through `visible_rows(..)[selected].row`.
     pub selected: usize,
     /// `Some(pending)` while listening for a new binding — `pending` is
