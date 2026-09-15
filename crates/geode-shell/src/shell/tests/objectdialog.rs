@@ -6137,6 +6137,32 @@ fn an_edit_row_click_is_dropped_while_a_confirm_is_armed(cx: &mut gpui::TestAppC
     );
 }
 
+/// The `n` button carries §19.3's Sources seeding exactly as the key
+/// does — the dataset and the name field both from the row under the
+/// cursor — read at click time, not baked into the button at paint.
+#[gpui::test]
+fn the_n_button_seeds_a_new_source_from_the_cursor_row(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    cx.simulate_keystrokes("j"); // vol · vols
+    cx.run_until_parked();
+    let n = cx
+        .debug_bounds("objectdialog-action-n")
+        .expect("browse offers n");
+    cx.simulate_click(n.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(dialog_state(&shell, &cx, |s| matches!(
+        s.stage,
+        objectdialog::Stage::Naming
+    )));
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_dataset.clone()).as_deref(),
+        Some("vol")
+    );
+    assert_eq!(dialog_input_text(&shell, &cx), "vol");
+}
+
 /// Groupings is the one domain whose `i` reaches past the selected row
 /// to the slot's whole chain (§18.8), so its button is live on every row
 /// of a slot's chooser and opens the CHAIN field — the key's own door,

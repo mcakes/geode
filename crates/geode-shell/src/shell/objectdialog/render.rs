@@ -2907,7 +2907,7 @@ fn build(
     // Spec §20.3: `n` as a button, between the list and the footer —
     // the browse stage's own action bar, in the edit stage's place for
     // it (outside the list, so the rows never shift under it).
-    let action_block = browse_action_bar(shell, state, entity, cx);
+    let action_block = browse_action_bar(state, entity, cx);
 
     v_flex()
         .gap_2()
@@ -3903,7 +3903,6 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 /// path — `begin_naming` sets `DialogMode::Filter`, and the sync is what
 /// focuses the name field (§17.1 rule 3).
 fn browse_action_bar(
-    shell: &ShellView,
     state: &ObjectDialogState,
     entity: &Entity<ShellView>,
     cx: &mut App,
@@ -3917,14 +3916,6 @@ fn browse_action_bar(
     let theme = cx.theme();
     let ks = crate::keymap::parse_keystroke("n", Modifiers::NONE).expect("valid");
     let entity = entity.clone();
-    // §19.3's seeding, read at paint from the row under the cursor —
-    // the same two values `handle_browse_key` computes above its own
-    // `&mut` borrow, and for the same reason: `begin_new_object` takes
-    // `shell` whole.
-    let seed = seed_dataset_under_cursor(shell);
-    let seed_taken = seed
-        .as_deref()
-        .is_some_and(|d| Domain::Sources.name_taken(&shell.services.config, d));
     let label = format!("New {}", object_word(state.domain));
     h_flex()
         .w(px(WIDTH))
@@ -3945,13 +3936,23 @@ fn browse_action_bar(
                                 .child(label),
                         )
                         .on_click(move |_event, window, cx| {
-                            let seed = seed.clone();
                             entity.update(cx, |shell, cx| {
                                 if let Some(state) = shell.object_dialog.as_mut()
                                     && state.notice.take().is_some()
                                 {
                                     cx.notify();
                                 }
+                                // §19.3's seeding, read at CLICK time from
+                                // the row under the cursor — the same two
+                                // values `handle_browse_key` computes at
+                                // keystroke time, and here for the same
+                                // reason plus one: reading them at paint
+                                // would derive the Sources rows a second
+                                // time on every frame the bar is up.
+                                let seed = seed_dataset_under_cursor(shell);
+                                let seed_taken = seed.as_deref().is_some_and(|d| {
+                                    Domain::Sources.name_taken(&shell.services.config, d)
+                                });
                                 begin_new_object(shell, seed, seed_taken);
                                 dialog::sync_dialog_text(shell, window, cx);
                                 cx.notify();
