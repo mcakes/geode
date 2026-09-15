@@ -11120,6 +11120,19 @@ run_mutation "mddraft: an edited attribute paints the draft's value" \
   geode-marketdata \
   an_edited_attribute_paints_the_drafts_value_marked_edited
 
+# Review fix round 1: a malformed `attrs` entry (a `Boolean`, a
+# `Datetime` — neither `to_toml` ever writes) is skipped, the same rule
+# the cell-edit loop above it follows. Mutated to bail the whole function
+# instead of just that one entry, a single bad attribute — perhaps hand
+# edited into session.toml — throws away every other attribute AND every
+# cell edit AND the base, restart-wide, rather than just itself.
+run_mutation "mddraft: a malformed attribute entry is skipped, not the whole draft" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                    _ => continue,' \
+  '                    _ => return Draft::default(),' \
+  geode-marketdata \
+  a_malformed_attribute_entry_is_skipped_and_the_others_survive
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
