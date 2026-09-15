@@ -674,7 +674,9 @@ existing vocabulary defines, each multiplied by the engine's count
 prefix (§3.3): `5j` moves five, `12G` goes to row 12, `3ctrl+d` pages
 three times. The two step sizes are `vimnav`'s own fixed offsets, the
 same ones every dialog list moves by — a general navigation convention
-(user ruling 2026-09-11), not a per-surface choice.
+(user ruling 2026-09-11), not a per-surface choice. A bare `j`/`k` wraps
+at the ends; a counted step and the page keys clamp; visual mode clamps
+a bare step too (interaction-model spec §20.5).
 
 **Line numbers.** `[ui] line_numbers = "off" | "on" | "rel"` (default
 `off`; a settings row, the palette's `ui::line_numbers_cycle`, hot

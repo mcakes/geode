@@ -620,6 +620,10 @@ comparison allocates the whole field's text on every keystroke at the
 pinned gpui-component rev (`SharedString::new(self.text.to_string())`);
 a cheaper read may exist there, unexplored.
 
+**`press_verb` stopped being this section's audited exception on
+2026-09-14** — see §20.3/§20.8: its `i` arm now opens a focused field, so
+it syncs like every other transition.
+
 ## 17. Amendment — mouse parity (2026-09-12)
 
 Approved 2026-09-12 from a user request the same day: "Dialogs need to
@@ -893,6 +897,11 @@ nothing, so §17.1 rule 2 has nothing for a click to be the mouse form
 of. The click handler ends in `sync_dialog_text` as every row click
 does (rule 3), so a click in normal mode leaves the shell root holding
 the keys and a click in filter mode keeps the caret in the field.
+
+**Superseded 2026-09-14 (§20.3/§20.8):** the two-step rule and
+`click_selects_or_steps` are gone — a row click only selects, and the
+value chip is the click target that steps, on this dialog exactly as on
+the object dialog.
 
 ### 18.3 As built
 
@@ -1254,3 +1263,100 @@ picker's row click mutated back to toggling; `leave_command_line`'s
 `Find` arm mutated to cancel; the chip's shift check mutated away; the
 keybindings confirm gate mutated so `d` writes unarmed; the visual-mode
 clamp mutated away. `--anchors-only` before merge.
+
+### 20.8 As built (2026-09-14)
+
+**§20.5, motion.** `vimnav::apply(selected, len, cmd)` and its sibling
+`apply_clamped` are the two doors this whole amendment resolves through;
+`Cursor::move_rows(len, cmd, count, wrap)` multiplies the count into the
+delta before calling one or the other, with the blotter's own call site
+passing `wrap = mode is Normal` (visual mode passes `false`). The
+market-data tile's `move_cursor` routes its row axis through `apply` and
+its column axis through `apply_clamped`, matching the ruling's "columns
+clamp" clause; its fragment's page keys are `page_down_full`/
+`page_up_full` at `FULL_PAGE = 10`, the blotter's own step. `PaletteState`
+is the one list that did **not** delete its `move_selection` — the
+method survives as a thin delegate to `vimnav::apply`, kept because
+fourteen pure tests already name it and `handle_palette_key` calls it by
+that name; only the arithmetic moved. This is a deviation from §20.5's
+"deletes it and routes … through `apply`" wording, which read as
+"deletes the method" — what was deleted is the method's own arithmetic,
+not the method. The picker's free `nav_delta` function and the as-of
+selector's own `move_selection` free function were both deleted outright,
+as written. The palette's `tab` reclaim landed as a `GeodePalette` key
+context on the palette's panel plus the same `tab`/`shift-tab` → `NoAction`
+bindings the modal and command-line contexts already carry — and the
+window test asserting `tab` stays on `palette_input` was genuinely red
+before the reclaim landed, so this is a fixed defect the sandbox could
+see, not only the display-check item §20.5 called it.
+
+**§20.2, the picker.** `picker::back_to_columns` is the function
+`handle_values_key` calls on a bare `escape`; the Values stage's tick
+glyph carries the selector `picker-tick-{value}` and is the click target
+`§20.3`'s split moved the toggle onto.
+
+**§20.1, the confirm.** `dialog::ConfirmAnswer::from_key(&Keystroke) ->
+Option<ConfirmAnswer>` and `dialog::ConfirmHandler` are the shared
+router and closure type; `dialog::confirm_row(prompt, yes_label,
+selector_prefix, entity, on_yes, on_no, cx)` is the shared row, keyed
+off `selector_prefix` for its three selectors (`keybindings-confirm`,
+`-yes`, `-no` on this dialog; the object dialog's own prefix unchanged).
+One deviation from §20.1's wording, worth stating plainly: `Confirm`
+itself — the enum, its `Overwrite` variant and its `prompt()` method —
+stays where it was, in `objectdialog`, because it is that dialog's own
+vocabulary (`d`/`r`/`o`) and the keybindings dialog needed no `Overwrite`
+arm. What moved out to `shell/dialog.rs` is the row and the router alone,
+never the question type. The keybindings side of it is
+`KeybindingConfirm { Unbind, Reset }` on `KeybindingsState.confirm`, with
+`can_unbind`/`can_reset` deciding whether a press arms a confirm or falls
+through to the existing "nothing to do" notice, `arm_verb` holding that
+one arm-or-notice decision so both the key and the button read it once,
+and `press_verb`/`action_block` the button-side mirror of the same logic
+(`keybindings-action-d`/`keybindings-action-r` selectors).
+
+**§20.3, the chip.** `dialog::StepHandler` is the click closure type and
+`dialog::value_chip(text, selector, fg, bg, on_step)` the shared element,
+used by both the settings dialog (`on_value_chip_clicked`, replacing the
+deleted `click_selects_or_steps`) and the object dialog
+(`objectdialog::render::on_value_chip_clicked`). The object dialog's is
+`pub(in crate::shell)` rather than private — deliberately, so the Schema
+domain's read-only gate can be asserted on the door directly, since every
+row Schema's edit stage paints is a display-only `Text` and can never
+itself paint a chip to click. `Draft::vocabulary_of(row, domain)` is what
+both the chip and the footer read to decide whether a row steps.
+`press_verb`'s `i` arm and the `i` keystroke both call the same
+`open_field` door, which is why Groupings' whole-chain field is reachable
+from the button exactly as it is from the key. `begin_new_object` is the
+extracted body `browse_action_bar`'s `n` button and the `n` keystroke
+both call; the button reads its dataset seed at click time
+(`seed_dataset_under_cursor`), not at paint, so it never derives the
+Sources rows once per frame while the bar is up. `actions()` offers `i`
+whenever the selected row's `RowVocabulary` is `Types` or
+`StepsAndTypes`, or the domain is Groupings (whose whole-chain `i` is
+live on every row); its early return for `d`/`r`/`o` narrowed to exclude
+a column stage specifically (`!in_column`), while `i`'s own condition
+carries no such guard, which is how a column stage now paints an `i`
+button where §18's original build painted none.
+
+One thing worth stating precisely against §16.6: `press_verb` is no
+longer that section's audited exception. It syncs now, because its `i`
+arm opens a focused field (`open_field` → `sync_dialog_text` at the tail
+of `press_verb` itself, unconditionally on every arm) — the one
+condition §16.6 said would make it stop being the exception has now
+happened. Its read-only early return (the `READ_ONLY_NOTICE` path) still
+returns before that sync, which is harmless by the same reasoning the
+tick-click and row-drop handlers' own early returns are: nothing was
+mutated that a sync would need to reconcile.
+
+**§20.4, the command line.** `ShellView::leave_command_line` is the
+mouse-side sibling of `cancel_command_line`: a non-empty `Find` commits
+through `FindEvent::Committed` before closing, an empty `Find` and any
+`Command` fall through to `cancel_command_line` unchanged.
+
+**Display checks pending on a real window**, as every dialog change on
+this branch's lineage: the value chip's look on both the settings and
+object dialogs; the keybindings action bar and its confirm row; the
+picker's tick glyph as a click target distinct from the row; and the
+palette's `tab` reclaim's actual effect inside a real `Root` (the window
+test proves the binding is registered and wins over `Root`'s own cycling
+in the test harness, not that a real compositor's tab-cycle agrees).
