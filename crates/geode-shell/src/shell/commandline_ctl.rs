@@ -76,20 +76,23 @@ impl ShellView {
     /// when none is open.
     ///
     /// This is the one door every OTHER exclusive-focus surface uses to
-    /// take the command line's input away from under it — mirroring
-    /// `close_palette`'s own call sites: `handle_command_line_key`'s own
-    /// escape arm, `toggle_palette` (opening OR closing the palette while
-    /// the line is open), `dialog::open_shell_dialog_with_key` (a modal
-    /// opening over an open line), and both tile mouse-down handlers in
-    /// `render` (fix round 1, findings 1 and 2). Without this, the line
-    /// stayed `Some` and painted but stopped receiving any of its own
-    /// keys the moment a newer surface's branch in `handle_key_down`
-    /// started winning ahead of it, or repainted at whatever tile the
-    /// workspace's focus had silently moved to underneath it. `render`'s
-    /// own generic check (I1, final review — same doc comment location
-    /// as the `pending_focus_restore`/drag-cancel block above it) also
-    /// calls this, as the backstop for any surface that steals the line
-    /// away by some means other than a tile mouse-down.
+    /// take the command line's input away from under it unconditionally
+    /// — mirroring `close_palette`'s own call sites: `handle_command_
+    /// line_key`'s own escape arm, `toggle_palette` (opening OR closing
+    /// the palette while the line is open), and `dialog::open_shell_
+    /// dialog_with_key` (a modal opening over an open line). A chord
+    /// that opens an overlay is not a click away, so none of those three
+    /// routes through this door's mouse-facing sibling instead. Without
+    /// this, the line stayed `Some` and painted but stopped receiving
+    /// any of its own keys the moment a newer surface's branch in
+    /// `handle_key_down` started winning ahead of it. A mouse click away
+    /// from the line — both tile mouse-down handlers in `render`, and
+    /// `render`'s own generic backstop for every other focus-stealing
+    /// surface (I1, final review — same doc comment location as the
+    /// `pending_focus_restore`/drag-cancel block above it) — goes
+    /// through [`leave_command_line`](Self::leave_command_line) instead,
+    /// which commits a non-empty `Find` prompt's text before falling
+    /// back to this door for everything else (spec §20.4).
     pub(super) fn cancel_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(line) = self.command_line.as_ref() else {
             return;
@@ -100,6 +103,29 @@ impl ShellView {
             o.content.find(FindEvent::Cancelled, window, cx);
         }
         self.close_command_line(window, cx);
+    }
+
+    /// The mouse's way out of the command line (spec §20.4): a click
+    /// away from a `/` line whose text has already moved the cursor
+    /// COMMITS it — `FindEvent::Committed` with the field's text, so the
+    /// cursor stays on the match and `n`/`N` have a target — exactly as
+    /// the scope bar keeps its text on blur. An empty `/` line, and any
+    /// `:` line (nothing typed there has applied, and a stray click must
+    /// not run a command), cancel through [`cancel_command_line`].
+    /// `escape` is still `cancel_command_line` for both prompts.
+    pub(super) fn leave_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(line) = self.command_line.as_ref() else {
+            return;
+        };
+        let text = self.command_input.read(cx).value().to_string();
+        if line.prompt == Prompt::Find && !text.is_empty() {
+            if let Some(o) = self.occupants.get(&line.tile) {
+                o.content.find(FindEvent::Committed(text), window, cx);
+            }
+            self.close_command_line(window, cx);
+        } else {
+            self.cancel_command_line(window, cx);
+        }
     }
 
     /// Re-rank (`:`) or forward (`/`) every change to the command line's

@@ -2261,6 +2261,13 @@ run_mutation "commandline: escape on a find is a cancel" \
   geode-shell \
   slash_streams_find_events_and_escape_cancels
 
+run_mutation "commandline: a click away commits a non-empty find line (spec §20.4)" \
+  crates/geode-shell/src/shell/commandline_ctl.rs \
+  '        if line.prompt == Prompt::Find && !text.is_empty() {' \
+  '        if false {' \
+  geode-shell \
+  a_mouse_down_on_a_tile_commits_an_open_find_line
+
 # "commandline: a tile mouse-down cancels an open line (fix round 1)"
 # retired (I1, final review): removing this call is no longer an
 # independently observable behaviour. A tile mouse-down always changes
@@ -2277,7 +2284,9 @@ run_mutation "commandline: escape on a find is a cancel" \
 # already defend. Keeping this one would only ever show `SURVIVED`,
 # which would misstate the situation as an untested gap rather than the
 # deliberate, now-redundant fast path `render`'s own doc comment
-# describes.
+# describes. Both tile mouse-down handlers now call `leave_command_line`
+# (spec §20.4) instead of `cancel_command_line`, and the entry above
+# covers its commit branch directly.
 
 run_mutation "commandline: a second tab refreshes the accepted word range instead of corrupting it (C1, final review)" \
   crates/geode-shell/src/shell/commandline_ctl.rs \
