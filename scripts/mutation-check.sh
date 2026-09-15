@@ -10232,13 +10232,15 @@ run_mutation "mdtile: a shorter document clamps the cursor" \
 # screen and out of the session on a keystroke that reads like navigation
 # — and the draft's cells are grid indices into the OLD document, so the
 # panel would then paint one document's numbers on another's ladder.
-# Anchored on two lines for the reason the `serialize` entry above gives.
+# Re-anchored (Task 3, one draft): the guard's body dropped its own
+# `let n = self.draft.len();` line when the refusal moved onto
+# `Draft::count_phrase` (spec 2026-09-14 §4), same site, same meaning.
 run_mutation "mdtile: a key change with edits pending is refused" \
   crates/geode-marketdata/src/tile.rs \
   '        if !self.draft.is_empty() {
-            let n = self.draft.len();' \
+            return Err(format!(' \
   '        if false {
-            let n = self.draft.len();' \
+            return Err(format!(' \
   geode-marketdata \
   a_key_change_is_refused_while_the_draft_has_edits
 
@@ -10722,12 +10724,16 @@ run_mutation "final: a painting delivery clears the previous delivery's notice" 
 
 # M-4: the `Behind` chip says "different", never "newer" — an as-of step
 # back delivers an OLDER generation and lands in the same state.
+# Re-anchored (Task 3, one draft): the wording moved from `Draft::summary`
+# to the temporary chip `rebuild_chrome` builds off `Draft::badge` — same
+# rule, same site's new home; any wording drift here fails the header's
+# own pinned assertions.
 run_mutation "final: the Behind chip does not call an older document newer" \
-  crates/geode-marketdata/src/core/draft.rs \
-  'format!("different document received {}", local_hhmm(newer))' \
-  'format!("newer document received {}", local_hhmm(newer))' \
+  crates/geode-marketdata/src/tile.rs \
+  'DraftBadge::Behind { newer } => Some(format!("update {}", local_hhmm(&newer))),' \
+  'DraftBadge::Behind { newer } => Some(format!("newer document received {}", local_hhmm(&newer))),' \
   geode-marketdata \
-  summary_spells_each_state_in_the_traders_local_clock
+  a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base
 
 # User ruling 2026-09-13: `enter` is named wherever it opens something —
 # the Schema edit stage's column rows were the one door with no chip at
@@ -11074,6 +11080,45 @@ run_mutation "mdheader: a session written with key still restores" \
   '            .and_then(|t| t.get("underlying"))' \
   geode-marketdata \
   a_session_written_with_key_still_restores
+
+# ---- Panel header: one draft (spec 2026-09-14 §4) -----------------------
+
+# `is_empty` must answer for BOTH maps: mutated to `edits` alone, a draft
+# holding only an attribute edit (no cell touched at all) reads empty —
+# `set_key` would let a trader navigate away with unsent work uncounted,
+# and a restart would never think to serialise it.
+run_mutation "mddraft: an attribute edit counts in the draft" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty() && self.attrs.is_empty()
+    }' \
+  '    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty()
+    }' \
+  geode-marketdata \
+  an_attribute_edit_is_part_of_the_same_draft
+
+# `rebase` keeps an attribute only when the newer document's header still
+# declares its column. Mutated to never keep one, every attribute edit is
+# reported dropped even when the newer document carries it — unsent header
+# work lost on the very republish that changed nothing about it.
+run_mutation "mddraft: rebase keeps a declared attribute and names an undeclared one" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            if declared.contains(column.as_str()) {' \
+  '            if false {' \
+  geode-marketdata \
+  an_attribute_edit_survives_rebase_when_the_newer_document_declares_it
+
+# `header_of` paints the draft's own value over the document's, marked
+# edited. Mutated to always fall through to the document's row-0 value,
+# an attribute edit never appears in the header at all — the trader types
+# a new spot and the panel keeps showing the old one.
+run_mutation "mddraft: an edited attribute paints the draft's value" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '            let (text, edited) = match draft.attrs.get(attr.column) {' \
+  '            let (text, edited) = match None::<&geode_core::document::Value> {' \
+  geode-marketdata \
+  an_edited_attribute_paints_the_drafts_value_marked_edited
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
