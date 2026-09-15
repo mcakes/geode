@@ -1812,9 +1812,19 @@ run_mutation "keybindings: a click leaves the previous row's notice standing" \
   '    if state.notice.take().is_some() {
         cx.notify();
     }
+    // Spec §20.1: a click is claimed and dropped while a question stands —
+    // the object dialog'"'"'s tick-click rule (§18.9.2) on this surface.
+    if state.confirm.is_some() {
+        return;
+    }
     let visible = visible_rows(state, &rows);
     let Some(ix)' \
-  '    let visible = visible_rows(state, &rows);
+  '    // Spec §20.1: a click is claimed and dropped while a question stands —
+    // the object dialog'"'"'s tick-click rule (§18.9.2) on this surface.
+    if state.confirm.is_some() {
+        return;
+    }
+    let visible = visible_rows(state, &rows);
     let Some(ix)' \
   geode-shell \
   clicking_a_row_clears_a_standing_notice
@@ -1910,6 +1920,33 @@ run_mutation "keybindings: a single row click starts listening" \
     }' \
   geode-shell \
   a_single_click_on_a_row_starts_listening
+
+# Spec §20.1: `d`/`r` ask first — a bound row's `d` must ARM the confirm
+# rather than write straight through.
+run_mutation "keybindings: d arms a confirm instead of writing (spec §20.1)" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                    state.confirm = Some(KeybindingConfirm::Unbind);
+                } else {
+                    state.notice = unbind_selected(row, &user_dir, cx);' \
+  '                    state.notice = unbind_selected(row, &user_dir, cx);
+                } else {
+                    state.notice = unbind_selected(row, &user_dir, cx);' \
+  geode-shell \
+  d_asks_before_writing_and_n_withdraws
+
+# Spec §20.1: a mouse click must not retarget the selection (or start a
+# capture) while `d`/`r`'s question stands.
+run_mutation "keybindings: a row click is dropped while a confirm is armed (spec §20.1)" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    if state.confirm.is_some() {
+        return;
+    }
+    let visible = visible_rows(state, &rows);
+    let Some(ix) = filtered_position(&visible, &rows, clicked) else {' \
+  '    let visible = visible_rows(state, &rows);
+    let Some(ix) = filtered_position(&visible, &rows, clicked) else {' \
+  geode-shell \
+  a_row_click_while_a_confirm_is_armed_is_dropped
 
 # ---- grouping slots and the frame (Phase 3 §4)
 

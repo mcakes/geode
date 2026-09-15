@@ -617,6 +617,10 @@ pub struct FrozenFilter<'a> {
 /// the shell root under a pill reading `filter`.
 pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
     if let Some(state) = shell.keybindings.as_mut() {
+        // Spec §20.1: not over an open question.
+        if state.confirm.is_some() {
+            return;
+        }
         state.listening = None;
         state.mode = DialogMode::Filter;
     } else if let Some(state) = shell.object_dialog.as_mut() {
