@@ -4,7 +4,7 @@
 use crate::core::expansion::path_of;
 use crate::core::plan::ColumnPlan;
 use geode_core::snapshot::Snapshot;
-use geode_shell::vimnav::{NavCommand, apply};
+use geode_shell::vimnav::{NavCommand, apply, apply_clamped};
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,7 +23,13 @@ pub enum Mode {
 }
 
 impl Cursor {
-    pub fn move_rows(&mut self, len: usize, cmd: NavCommand, count: Option<u32>) {
+    /// Move the row by `cmd`, `count` times. `wrap` is whether a BARE
+    /// ±1 wraps at the ends (spec §20.5, `vimnav::apply`'s rule) — the
+    /// tile passes `true` in normal mode and `false` in visual mode,
+    /// where a wrap would carry the cursor past the anchor and invert
+    /// the selection. A counted step is multiplied in before the rule
+    /// is applied, so `2j` clamps and `1j` wraps exactly as `j` does.
+    pub fn move_rows(&mut self, len: usize, cmd: NavCommand, count: Option<u32>, wrap: bool) {
         let n = count.unwrap_or(1) as i64;
         let cmd = match (cmd, count) {
             (NavCommand::Move(d), _) => NavCommand::Move(d * n),
@@ -34,12 +40,19 @@ impl Cursor {
             }
             (other, _) => other,
         };
-        self.row = apply(self.row, len, cmd);
+        self.row = if wrap {
+            apply(self.row, len, cmd)
+        } else {
+            apply_clamped(self.row, len, cmd)
+        };
     }
 
+    /// Columns clamp whatever the count: the ruling behind `apply`'s
+    /// wrap was about rows, and a horizontal wrap is a separate question
+    /// left as it was.
     pub fn move_cols(&mut self, cols: usize, delta: i64, count: Option<u32>) {
         let n = count.unwrap_or(1) as i64;
-        self.col = apply(self.col, cols, NavCommand::Move(delta * n));
+        self.col = apply_clamped(self.col, cols, NavCommand::Move(delta * n));
     }
 
     pub fn to_row(&mut self, row: usize, len: usize) {
@@ -131,20 +144,45 @@ mod tests {
     use geode_shell::vimnav::NavCommand;
 
     #[test]
-    fn row_motion_is_counted_and_clamped() {
+    fn row_motion_is_counted_and_clamped_but_a_bare_step_wraps() {
         let mut c = Cursor { row: 0, col: 0 };
-        c.move_rows(10, NavCommand::Move(1), Some(5));
+        c.move_rows(10, NavCommand::Move(1), Some(5), true);
         assert_eq!(c.row, 5);
-        c.move_rows(10, NavCommand::Move(1), Some(50));
-        assert_eq!(c.row, 9, "clamped, no wrap");
-        c.move_rows(10, NavCommand::Top, None);
+        c.move_rows(10, NavCommand::Move(1), Some(50), true);
+        assert_eq!(c.row, 9, "a counted step clamps, no wrap");
+        c.move_rows(10, NavCommand::Move(1), None, true);
+        assert_eq!(
+            c.row, 0,
+            "a bare j at the bottom wraps to the top (spec §20.5)"
+        );
+        c.move_rows(10, NavCommand::Move(-1), None, true);
+        assert_eq!(c.row, 9, "and a bare k at the top wraps to the bottom");
+        c.move_rows(10, NavCommand::Move(1), Some(1), true);
+        assert_eq!(
+            c.row, 0,
+            "1j is j: the count is multiplied in, not special-cased"
+        );
+        c.move_rows(10, NavCommand::Top, None, true);
         assert_eq!(c.row, 0);
-        c.move_rows(10, NavCommand::Bottom, Some(3));
+        c.move_rows(10, NavCommand::Bottom, Some(3), true);
         assert_eq!(c.row, 2, "a counted G goes to that row (1-based)");
-        c.move_rows(10, NavCommand::Bottom, None);
+        c.move_rows(10, NavCommand::Bottom, None, true);
         assert_eq!(c.row, 9);
-        c.move_rows(0, NavCommand::Move(1), None);
+        c.move_rows(0, NavCommand::Move(1), None, true);
         assert_eq!(c.row, 0, "empty list");
+    }
+
+    #[test]
+    fn visual_mode_clamps_a_bare_step() {
+        // `wrap = false` is what the tile passes while `Mode::Visual`: a
+        // wrap would put the cursor above the anchor and invert the
+        // selection.
+        let mut c = Cursor { row: 9, col: 0 };
+        c.move_rows(10, NavCommand::Move(1), None, false);
+        assert_eq!(c.row, 9);
+        c.row = 0;
+        c.move_rows(10, NavCommand::Move(-1), None, false);
+        assert_eq!(c.row, 0);
     }
 
     #[test]
@@ -154,6 +192,8 @@ mod tests {
         assert_eq!(c.col, 3);
         c.move_cols(5, 1, Some(9));
         assert_eq!(c.col, 4);
+        c.move_cols(5, 1, None);
+        assert_eq!(c.col, 4, "l at the last column stays: columns never wrap");
         c.move_cols(5, -1, None);
         assert_eq!(c.col, 3);
         c.clamp(1, 2);

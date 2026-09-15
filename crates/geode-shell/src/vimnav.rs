@@ -15,7 +15,8 @@
 //! own semantics — several bindings are deliberately redefined:
 //!
 //! - `j` / `k` — move down/up by 1, multiplied by an optional multi-digit
-//!   count prefix typed first (`5j`, `12j`, `3k`). No wrap: see [`apply`].
+//!   count prefix typed first (`5j`, `12j`, `3k`). A bare ±1 wraps, a
+//!   counted one clamps: see [`apply`].
 //! - `ctrl+d` / `ctrl+u` — move by a fixed ±5. **Not** vim's half-page
 //!   scroll (which scrolls by half the viewport height, a quantity this
 //!   pure state machine has no notion of) — a fixed offset, this app's own
@@ -251,12 +252,31 @@ impl VimListNav {
 }
 
 /// Apply a resolved [`NavCommand`] to a `selected` index against a list of
-/// `len` items, clamped to `0..len` at both ends — **no wrap**. (Wrap is a
-/// palette-specific choice made elsewhere in this crate; dialog/blotter
-/// lists driven by this module clamp instead, so `Top`/repeated `Move`
-/// downward never cycles back around.) An empty list (`len == 0`) always
-/// yields `0`, regardless of the command.
+/// `len` items. **A bare ±1 wraps at both ends; every larger step clamps**
+/// (interaction-model spec §20.5, user ruling 2026-09-14): `j` at the
+/// last row lands on the first, `ctrl+d` at the last row stays, and a
+/// counted `2j` — which `Cursor::move_rows` multiplies into the delta
+/// before calling here — clamps like any other multi-row step, with no
+/// special case for a count of one. `Top`/`Bottom` are absolute. An
+/// empty list (`len == 0`) always yields `0`, regardless of the command.
+///
+/// Two axes deliberately do NOT take this rule and call
+/// [`apply_clamped`] instead: a column axis (`h`/`l` — the ruling was
+/// about rows) and a blotter in visual mode (a wrapping `j` at the bottom
+/// would put the cursor above the anchor and invert the selection).
 pub fn apply(selected: usize, len: usize, cmd: NavCommand) -> usize {
+    match cmd {
+        NavCommand::Move(delta) if delta.abs() == 1 && len > 0 => {
+            let len = len as i64;
+            ((selected as i64 + delta).rem_euclid(len)) as usize
+        }
+        _ => apply_clamped(selected, len, cmd),
+    }
+}
+
+/// [`apply`] without the single-step wrap: clamped to `0..len` at both
+/// ends whatever the delta. The column axis and visual mode use this.
+pub fn apply_clamped(selected: usize, len: usize, cmd: NavCommand) -> usize {
     if len == 0 {
         return 0;
     }
@@ -586,11 +606,33 @@ mod tests {
     }
 
     #[test]
-    fn apply_does_not_wrap() {
-        // No-wrap is the whole point of this being different from the
-        // palette's own (wrapping) navigation — repeated downward moves
-        // past the end stay pinned at the last index, never cycle to 0.
-        assert_eq!(apply(4, 5, NavCommand::Move(1)), 4);
-        assert_eq!(apply(0, 5, NavCommand::Move(-1)), 0);
+    fn apply_wraps_a_single_step_at_both_ends() {
+        // Spec §20.5: a bare ±1 wraps — the palette's rule, now
+        // everyone's.
+        assert_eq!(apply(4, 5, NavCommand::Move(1)), 0);
+        assert_eq!(apply(0, 5, NavCommand::Move(-1)), 4);
+        assert_eq!(
+            apply(0, 1, NavCommand::Move(1)),
+            0,
+            "one row wraps to itself"
+        );
+    }
+
+    #[test]
+    fn apply_clamps_every_larger_step() {
+        // ±5 / ±10 (and a counted ±1, which arrives here already
+        // multiplied — `Cursor::move_rows`) clamp, never wrap.
+        assert_eq!(apply(4, 5, NavCommand::Move(2)), 4);
+        assert_eq!(apply(0, 5, NavCommand::Move(-2)), 0);
+        assert_eq!(apply(3, 5, NavCommand::Move(10)), 4);
+        assert_eq!(apply(1, 5, NavCommand::Move(-10)), 0);
+    }
+
+    #[test]
+    fn apply_clamped_never_wraps() {
+        // The column axis and visual mode use this one.
+        assert_eq!(apply_clamped(4, 5, NavCommand::Move(1)), 4);
+        assert_eq!(apply_clamped(0, 5, NavCommand::Move(-1)), 0);
+        assert_eq!(apply_clamped(0, 0, NavCommand::Move(1)), 0);
     }
 }

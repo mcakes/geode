@@ -726,7 +726,9 @@ impl BlotterTile {
                 };
                 self.with_delegate(cx, |d| {
                     let len = d.shown.len();
-                    d.cursor.move_rows(len, cmd, count);
+                    // Spec §20.5: a bare j/k wraps in normal mode only.
+                    let wrap = matches!(d.mode, Mode::Normal);
+                    d.cursor.move_rows(len, cmd, count, wrap);
                 });
                 self.sync_cursor(cx);
             }

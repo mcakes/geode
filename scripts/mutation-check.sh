@@ -11067,6 +11067,20 @@ run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
   geode-marketdata \
   floored_tones_refresh_only_when_an_input_changes
 
+run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
+  crates/geode-shell/src/vimnav.rs \
+  '        NavCommand::Move(delta) if delta.abs() == 1 && len > 0 => {' \
+  '        NavCommand::Move(delta) if delta.abs() == 0 && len > 0 => {' \
+  geode-shell \
+  apply_wraps_a_single_step_at_both_ends
+
+run_mutation "blotter cursor: visual mode clamps a bare step (spec §20.5)" \
+  crates/geode-blotter/src/core/cursor.rs \
+  '        self.row = if wrap {' \
+  '        self.row = if true {' \
+  geode-blotter \
+  visual_mode_clamps_a_bare_step
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
