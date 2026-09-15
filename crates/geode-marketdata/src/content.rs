@@ -58,10 +58,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
 /// §8.6), so every key not bound here is a character the trader is typing
 /// into a cell — which is the point.
 ///
-/// `0` and `$` sit beside `home`/`end` as the column-extreme pair (the
-/// blotter's own 2026-09-12 ruling). `0` is safe as a motion because the
-/// matcher keeps vim's rule that a LEADING zero is not a count digit;
-/// `$` is shifted punctuation on a US layout, so it binds as the bare
+/// `^` and `$` sit beside `home`/`end` as the column-extreme pair (user
+/// ruling 2026-09-12: a general navigation grammar, the blotter its first
+/// surface and this panel its second — the same two keys, not `0`); both
+/// are shifted punctuation on a US layout, so they bind as the bare
 /// character with no `shift` modifier.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
@@ -73,7 +73,7 @@ context = "marketdata && mode == normal"
 "l" = "marketdata::right"
 "g g" = "marketdata::top"
 "shift+g" = "marketdata::bottom"
-"0" = "marketdata::first_col"
+"^" = "marketdata::first_col"
 "$" = "marketdata::last_col"
 "home" = "marketdata::first_col"
 "end" = "marketdata::last_col"
@@ -311,11 +311,12 @@ mod tests {
         assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
     }
 
-    /// `0` is the first-column motion, not a count digit (vim's own rule,
-    /// which the matcher keeps for a leading zero) — and `$` binds as the
-    /// bare character with `shift` cleared, exactly as the blotter's does.
+    /// `^`/`$` are the column extremes, exactly the blotter's pair (the
+    /// first build bound `0` here and miscited the ruling): both bind as
+    /// the bare character with `shift` cleared, with counts enabled on the
+    /// context so the test proves neither is read as a count digit.
     #[test]
-    fn zero_and_dollar_resolve_to_the_column_extremes() {
+    fn caret_and_dollar_resolve_to_the_column_extremes() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
         let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
         assert!(diags.is_empty(), "{diags:?}");
@@ -327,7 +328,7 @@ mod tests {
                 .counts(),
         ];
         for (spec, expected) in [
-            ("0", "marketdata::first_col"),
+            ("^", "marketdata::first_col"),
             ("$", "marketdata::last_col"),
         ] {
             let keystroke = parse_keystroke(spec, default_mod()).unwrap();

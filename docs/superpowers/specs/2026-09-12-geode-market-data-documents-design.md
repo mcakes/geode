@@ -747,7 +747,7 @@ shape that forced the 2026-09-13 revision — so the decision is measured.
 ### 8.3 Keys
 
 Context `marketdata` with `mode = normal | insert`, opted into counts.
-Normal mode: `h j k l` move the cursor by cell with counts, `0`/`$`
+Normal mode: `h j k l` move the cursor by cell with counts, `^`/`$`
 first and last column, `gg`/`G` first and last row, `y` yanks the
 cell, `yy` the row, `yc` the column, in the blotter's tab-separated
 spelling. `i` or `enter` opens a cell input in place (insert mode:

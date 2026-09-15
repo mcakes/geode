@@ -10990,6 +10990,19 @@ run_mutation "mdtable: a click while editing cancels the editor" \
   geode-marketdata \
   a_click_while_editing_cancels_the_editor_then_moves
 
+# ---- The panel's first-column key is `^`, the blotter's (2026-09-14) ----
+#
+# The first build bound `0` here while citing the blotter's `^`/`$`
+# ruling, so `$` reached the last column and `^` did nothing. Mutated back
+# to `0`, every other key on the fragment still resolves — only a press of
+# `^` against the built keymap sees it.
+run_mutation "mdkeys: ^ is the panel's first-column key, matching the blotter" \
+  crates/geode-marketdata/src/content.rs \
+  '"^" = "marketdata::first_col"' \
+  '"0" = "marketdata::first_col"' \
+  geode-marketdata \
+  caret_and_dollar_resolve_to_the_column_extremes
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
