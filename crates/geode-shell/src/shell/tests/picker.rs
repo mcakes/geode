@@ -8,6 +8,7 @@
 //! init_reclaimed_keybindings`) production uses.
 
 use super::*;
+use crate::shell::picker;
 use geode_core::query::DistinctOutcome;
 use geode_core::scope::{DimensionSelection, Scope};
 
@@ -377,10 +378,31 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
 
     vcx.simulate_keystrokes("escape");
 
+    assert!(
+        shell.read_with(&vcx, |s, _| matches!(
+            s.picker.as_ref().map(|p| &p.stage),
+            Some(picker::Stage::Columns)
+        )),
+        "spec §20.2: escape from Values steps back to Columns first"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().ticked.len()),
+        0,
+        "the ticks are dropped on the way back"
+    );
+    let book_ix = shell.read_with(&vcx, |s, _| {
+        s.pickable.iter().position(|p| p.column == "book").unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().selected),
+        book_ix,
+        "with the cursor on the column just left"
+    );
+    vcx.simulate_keystrokes("escape");
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
     assert!(
         shell.read_with(&vcx, |s, _| s.picker.is_none()),
-        "close_modal clears the picker like every other dialog"
+        "and a second escape closes, clearing the picker like every other dialog"
     );
     assert_eq!(
         frame.read_with(&vcx, |f, _| f.versions().scope),
@@ -401,6 +423,73 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
         vec!["BK000".to_string()],
         "the original scope is untouched"
     );
+}
+
+/// §20.3's split applied here: a click on a Values row SELECTS it; the
+/// tick glyph is the click target that toggles, as it is on the object
+/// dialog's list rows. Until now the whole row toggled on one click.
+#[gpui::test]
+fn a_values_row_click_selects_and_only_the_tick_toggles(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    shell.update(&mut vcx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: PICKER_KEY,
+                tag: 1,
+                column: "book".into(),
+                values: Ok(vec![("BK000".into(), 1), ("BK001".into(), 2)]),
+            },
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    let ticked = |vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| s.picker.as_ref().unwrap().ticked.len())
+    };
+    assert_eq!(ticked(&vcx), 0, "nothing pre-ticked: the scope is empty");
+
+    // The row's label text, well right of the tick.
+    let row = vcx.debug_bounds("picker-value-BK001").expect("row paints");
+    vcx.simulate_click(
+        gpui::point(row.origin.x + row.size.width / 2.0, row.center().y),
+        gpui::Modifiers::default(),
+    );
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().selected),
+        1,
+        "the row click moved the cursor"
+    );
+    assert_eq!(ticked(&vcx), 0, "and toggled nothing");
+
+    let tick = vcx
+        .debug_bounds("picker-tick-BK001")
+        .expect("the tick paints");
+    vcx.simulate_click(tick.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(ticked(&vcx), 1, "the tick click is `tab`");
+}
+
+/// The Values footer says `back`, the Columns footer says `close`.
+#[test]
+fn the_values_hint_says_escape_goes_back() {
+    use crate::shell::picker::{Hint, Stage, hints};
+    let values = hints(&Stage::Values {
+        column: "book".into(),
+    });
+    let after_escape = values
+        .windows(2)
+        .find(|w| w[0] == Hint::Key("escape"))
+        .map(|w| w[1]);
+    assert_eq!(after_escape, Some(Hint::Text("back")));
+    let columns = hints(&Stage::Columns);
+    let after_escape = columns
+        .windows(2)
+        .find(|w| w[0] == Hint::Key("escape"))
+        .map(|w| w[1]);
+    assert_eq!(after_escape, Some(Hint::Text("close")));
 }
 
 /// Spec §20.5 on the picker: `ctrl+d` moves five and clamps, `up` at
@@ -454,6 +543,9 @@ fn a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first(
     dispatch_action(&shell, "frame::pick_book", &mut vcx);
     let first_tag = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().tag);
 
+    // `frame::pick_book` opens straight into `Values` (spec §20.2's first
+    // `escape` steps back to `Columns`; the second closes).
+    vcx.simulate_keystrokes("escape");
     vcx.simulate_keystrokes("escape");
     assert!(
         shell.read_with(&vcx, |s, _| s.picker.is_none()),

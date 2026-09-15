@@ -11095,6 +11095,25 @@ run_mutation "picker: the values list moves through vimnav::apply, not a private
   geode-shell \
   the_values_list_takes_the_full_nav_set
 
+run_mutation "picker: escape from Values steps back to Columns instead of closing (spec §20.2)" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        back_to_columns(shell, window, cx);' \
+  '        let _ = (window, &cx); return false;' \
+  geode-shell \
+  escape_cancels_without_touching_the_scope
+
+run_mutation "picker: a values row click selects, only the tick toggles (spec §20.3)" \
+  crates/geode-shell/src/shell/picker.rs \
+  '                                        p.selected = i;
+                                    }
+                                    sync_picker_scroll(shell);' \
+  '                                        p.selected = i;
+                                        p.toggle_selected();
+                                    }
+                                    sync_picker_scroll(shell);' \
+  geode-shell \
+  a_values_row_click_selects_and_only_the_tick_toggles
+
 run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
   crates/geode-shell/src/shell/asof_view.rs \
   '    if let Some(cmd) = listfilter::nav_command(ks) {' \
