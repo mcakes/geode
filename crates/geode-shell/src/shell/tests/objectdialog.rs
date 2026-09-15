@@ -6183,6 +6183,34 @@ fn an_edit_row_click_is_dropped_while_a_confirm_is_armed(cx: &mut gpui::TestAppC
         cx.debug_bounds("objectdialog-confirm").is_some(),
         "and the question was not silently disarmed"
     );
+
+    // The frozen filter row (the mouse form of `/`, §17.1 rule 1) is
+    // dropped too: the question owns the mouse until it is answered.
+    let frozen = cx
+        .debug_bounds("dialog-filter-frozen")
+        .expect("the frozen row still paints while a confirm is armed");
+    cx.simulate_mouse_down(
+        gpui::point(
+            frozen.origin.x + gpui::px(20.0),
+            frozen.origin.y + gpui::px(4.0),
+        ),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Normal,
+        "the frozen-row click did not enter filter mode over an open question"
+    );
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "and the filter did not take focus"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "the question still stands"
+    );
 }
 
 /// The `n` button carries §19.3's Sources seeding exactly as the key

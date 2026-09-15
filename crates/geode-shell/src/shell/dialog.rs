@@ -614,7 +614,10 @@ pub struct FrozenFilter<'a> {
 /// progress is cancelled first: a click on a text field is never a
 /// keystroke to bind, and `listening` wins over the mode in
 /// `dialogmode::focus_target`, so leaving it set would keep the keys on
-/// the shell root under a pill reading `filter`.
+/// the shell root under a pill reading `filter`. On both modal dialogs
+/// that can arm a confirm (keybindings, object dialog) the click is
+/// dropped while one is armed (spec §20.1): a question owns the keys and
+/// the mouse alike until it is answered.
 pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
     if let Some(state) = shell.keybindings.as_mut() {
         // Spec §20.1: not over an open question.
@@ -624,6 +627,11 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
         state.listening = None;
         state.mode = DialogMode::Filter;
     } else if let Some(state) = shell.object_dialog.as_mut() {
+        // Spec §20.1: not over an open question. `build_edit` still paints
+        // the frozen row while a confirm is armed, so the guard lives here.
+        if state.draft.as_ref().is_some_and(|d| d.confirm.is_some()) {
+            return;
+        }
         state.mode = DialogMode::Filter;
     } else if let Some(state) = shell.settings.as_mut() {
         state.mode = DialogMode::Filter;
@@ -1205,9 +1213,13 @@ pub type ConfirmHandler = Rc<dyn Fn(&mut ShellView, &mut Window, &mut Context<Sh
 /// while a destructive question stands (spec §20.1): the question in
 /// `theme.warning`, a `danger` button labelled with the verb, and a ghost
 /// `Cancel`. Both handlers are mouse-side answers and so end in
-/// [`sync_dialog_text`] here, once, rather than in each caller (spec
-/// §16.1: a click never passes through the key path). Selectors:
-/// `"{selector_prefix}-confirm"`, `-yes`, `-no`.
+/// [`sync_dialog_text`] and a `cx.notify()` here, once, rather than in
+/// each caller (spec §16.1: a click never passes through the key path).
+/// The notify is unconditional on both buttons: a yes handler usually
+/// notifies on its own way through, but a no handler only clears the
+/// armed state, and the symmetry keeps a third consumer honest — neither
+/// button may leave the disarmed (or written) dialog painting its
+/// question. Selectors: `"{selector_prefix}-confirm"`, `-yes`, `-no`.
 pub(crate) fn confirm_row(
     prompt: String,
     yes_label: &'static str,
@@ -1242,6 +1254,7 @@ pub(crate) fn confirm_row(
                         go_ahead.update(cx, |shell, cx| {
                             on_yes(shell, window, cx);
                             sync_dialog_text(shell, window, cx);
+                            cx.notify();
                         });
                     }),
             ),

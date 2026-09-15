@@ -1389,7 +1389,6 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
 /// outline buttons showing their key chip, `keybindings-action-{key}`.
 /// Replaced by the confirm row while a question stands.
 fn action_block(
-    shell: &ShellView,
     state: &KeybindingsState,
     row: Option<&KeybindingRow>,
     entity: &Entity<ShellView>,
@@ -1462,7 +1461,6 @@ fn action_block(
             });
         bar = bar.child(div().debug_selector(move || selector.clone()).child(button));
     }
-    let _ = shell;
     bar.into_any_element()
 }
 
@@ -1737,7 +1735,7 @@ fn build(
         // was moved out of this dialog's content entirely.
         .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
         .child(list)
-        .child(action_block(shell, state, row, entity, cx))
+        .child(action_block(state, row, entity, cx))
         .child(footer)
         .into_any_element()
 }

@@ -11317,6 +11317,59 @@ run_mutation "objectdialog: the chip door refuses a read-only domain (spec §20.
   geode-shell \
   the_schema_domain_offers_no_n_button_and_the_chip_door_refuses
 
+# ---- Final whole-branch review fix wave (2026-09-15) ---------------------
+
+# Spec §20.1 on the frozen filter row, the mouse form of `/`: dropped
+# while a question stands, on both dialogs that can arm one. The two
+# guards read alike, so each anchor carries its `if let` line. Mutated
+# away on the keybinding dialog, the click enters filter mode and focuses
+# the `Input` over the open question.
+run_mutation "dialog: the keybindings frozen-row click is dropped while a confirm is armed (spec §20.1)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    if let Some(state) = shell.keybindings.as_mut() {
+        // Spec §20.1: not over an open question.
+        if state.confirm.is_some() {
+            return;
+        }' \
+  '    if let Some(state) = shell.keybindings.as_mut() {
+        // Spec §20.1: not over an open question.
+        if false {
+            return;
+        }' \
+  geode-shell \
+  a_row_click_while_a_confirm_is_armed_is_dropped
+
+# The object-dialog half (the final review's I1): `build_edit` still
+# paints the frozen row while a confirm is armed, so without this guard
+# the click enters filter mode under a pending `d`/`r`.
+run_mutation "dialog: the object-dialog frozen-row click is dropped while a confirm is armed (spec §20.1)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    } else if let Some(state) = shell.object_dialog.as_mut() {
+        // Spec §20.1: not over an open question. `build_edit` still paints
+        // the frozen row while a confirm is armed, so the guard lives here.
+        if state.draft.as_ref().is_some_and(|d| d.confirm.is_some()) {
+            return;
+        }' \
+  '    } else if let Some(state) = shell.object_dialog.as_mut() {
+        // Spec §20.1: not over an open question. `build_edit` still paints
+        // the frozen row while a confirm is armed, so the guard lives here.
+        if false {
+            return;
+        }' \
+  geode-shell \
+  an_edit_row_click_is_dropped_while_a_confirm_is_armed
+
+# Spec §20.5 at the blotter tile's own derivation (the final review's
+# I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
+# what decides it from the mode. Mutated to always wrap, a bare `j` in
+# visual mode leaps from the last row to row 0 and inverts the selection.
+run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
+  crates/geode-blotter/src/tile.rs \
+  '                    let wrap = matches!(d.mode, Mode::Normal);' \
+  '                    let wrap = true;' \
+  geode-blotter \
+  a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

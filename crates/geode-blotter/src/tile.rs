@@ -2134,6 +2134,46 @@ mod tests {
         assert!(!act(&mut cx, "workspace::focus_left", None), "not ours");
     }
 
+    /// Spec §20.5: a bare `j` past the last row wraps to row 0 in normal
+    /// mode only. In visual mode the same keystroke clamps, so a
+    /// selection being extended downward cannot leap back to the top
+    /// and silently invert itself — and the anchor is untouched either
+    /// way.
+    #[gpui::test]
+    fn a_bare_j_wraps_in_normal_mode_and_clamps_in_visual(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        let act = |cx: &mut gpui::VisualTestContext, id: &str| {
+            h.tile
+                .update(cx, |t, cx| t.dispatch(&ActionId(id.into()), None, cx))
+        };
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2]);
+
+        assert!(act(&mut cx, "blotter::bottom"));
+        assert_eq!(cursor_row(&h, &cx), 2);
+        assert!(act(&mut cx, "blotter::down"));
+        assert_eq!(cursor_row(&h, &cx), 0, "a bare j wraps in normal mode");
+
+        assert!(act(&mut cx, "blotter::bottom"));
+        assert!(act(&mut cx, "blotter::visual"));
+        assert!(act(&mut cx, "blotter::down"));
+        assert_eq!(
+            cursor_row(&h, &cx),
+            2,
+            "in visual mode the same keystroke clamps at the last row"
+        );
+        assert!(
+            matches!(
+                h.tile
+                    .read_with(&cx, |t, cx| t.table().read(cx).delegate().mode),
+                Mode::Visual { anchor: 2 }
+            ),
+            "and the selection anchor is intact"
+        );
+    }
+
     #[gpui::test]
     fn find_jumps_under_vim_and_narrows_under_fzf(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
