@@ -5986,14 +5986,30 @@ fn the_value_chip_steps_a_number_and_is_inert_under_a_confirm(cx: &mut gpui::Tes
     );
     cx.run_until_parked();
     assert_eq!(hue(&cx), 240, "a row click does not step");
+    let live_width = cx
+        .debug_bounds("objectdialog-value-hue")
+        .expect("the live chip paints")
+        .size
+        .width;
 
-    // Armed: the chip has no handler.
+    // Armed: the chip has no handler — and no fill. The two forms of
+    // `dialog::value_chip` differ in more than the listener: the live
+    // one is padded as a chip, the inert one is the bare value text, so
+    // the same text measures narrower once the question is armed. That
+    // is the one observation that sees the RENDER gate rather than the
+    // handler's own guard behind it (both drop the click, so a click
+    // alone cannot tell them apart).
     cx.simulate_keystrokes("d");
     cx.run_until_parked();
     assert!(cx.debug_bounds("objectdialog-confirm").is_some());
     let chip = cx
         .debug_bounds("objectdialog-value-hue")
         .expect("still painted, as text");
+    assert!(
+        chip.size.width < live_width,
+        "the armed value is plain text, not a chip: {:?} vs {live_width:?}",
+        chip.size.width
+    );
     cx.simulate_click(chip.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(hue(&cx), 240, "inert while the question stands");
