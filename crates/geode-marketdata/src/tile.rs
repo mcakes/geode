@@ -52,6 +52,7 @@
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::{Draft, MatrixModel, PanelSpec, parse_cell};
 use crate::delegate::MatrixDelegate;
+use geode_core::colour::readable_on;
 use geode_core::document::split_key;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::snapshot::Snapshot;
@@ -61,15 +62,17 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::FindEvent;
+use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, Entity, Focusable as _, IntoElement, SharedString, Window, div, px,
+    App, ClipboardItem, Context, Entity, Focusable as _, Hsla, IntoElement, SharedString, Window,
+    div, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -110,6 +113,74 @@ enum Tone {
 struct Chip {
     text: SharedString,
     tone: Tone,
+}
+
+/// The two header tones a theme colour cannot be trusted to paint as
+/// TEXT, floored to Part 2c's 3:1 readability ratio against the window
+/// background (`geode_core::colour::readable_on`, lightness moved toward
+/// the foreground, hue and chroma kept). The finding is 2c's own: a
+/// theme's `warning` and `danger` are fills and tints, and on nine bundled
+/// light themes `warning` reads under 2.3:1 as text — and
+/// `warning_foreground`, which the first build painted `Warn` chips in
+/// with no fill under them, is the BACKGROUND family (1.00:1 on twenty
+/// themes: an invisible `3 edits`).
+///
+/// Memoised, not derived per frame: `readable_on` is a 16-step bisection
+/// through OKLab, and PHILOSOPHY §6 forbids that per chip per frame.
+/// `key` is EVERY colour `derive` reads and nothing else — the blotter's
+/// theme-signature rule at the scale of four inputs — so a theme switch
+/// recomputes on its first frame and every other frame is one compare.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FlooredTones {
+    key: [Hsla; 4],
+    warn: Hsla,
+    error: Hsla,
+}
+
+impl FlooredTones {
+    fn derive(theme: &Theme) -> Self {
+        let (bg, fg) = (to_rgb(theme.background), to_rgb(theme.foreground));
+        let floor = |c: Hsla| to_hsla(readable_on(to_rgb(c), bg, fg));
+        Self {
+            key: [
+                theme.background,
+                theme.foreground,
+                theme.warning,
+                theme.danger,
+            ],
+            warn: floor(theme.warning),
+            error: floor(theme.danger),
+        }
+    }
+
+    /// Re-derive only when one of the four inputs moved.
+    fn refresh(&mut self, theme: &Theme) {
+        let key = [
+            theme.background,
+            theme.foreground,
+            theme.warning,
+            theme.danger,
+        ];
+        if self.key != key {
+            *self = Self::derive(theme);
+        }
+    }
+}
+
+/// One chip's text colour: the theme's own secondary/primary text for the
+/// quiet tones, the floored `warning` for `Warn` (and for `Time` once the
+/// document is stale), the floored `danger` for `Error`. Never
+/// `warning_foreground` — that is the token for text on a SOLID warning
+/// fill, and a chip has no fill.
+fn tone_colour(tone: Tone, stale: bool, theme: &Theme, floored: &FlooredTones) -> Hsla {
+    match tone {
+        Tone::Plain => theme.muted_foreground,
+        Tone::Key => theme.foreground,
+        Tone::Time if stale => floored.warn,
+        Tone::Time => theme.muted_foreground,
+        Tone::Warn => floored.warn,
+        Tone::Error => floored.error,
+    }
 }
 
 /// What `edit` and `:bump` answer with nothing on screen (controller
@@ -282,6 +353,9 @@ pub struct MarketDataTile {
     /// observer pass on a frame that has already flipped then calls
     /// `promote`, which is a no-op with nothing staged.
     last_flip: u64,
+    /// The header's floored tone colours, refreshed at the top of `render`
+    /// (see [`FlooredTones`]).
+    tones: FlooredTones,
 }
 
 impl MarketDataTile {
@@ -428,6 +502,7 @@ impl MarketDataTile {
             source_at: None,
             staged: None,
             last_flip: 0,
+            tones: FlooredTones::derive(cx.theme()),
         };
         this.rebuild_chrome();
         // The delegate starts with the model this tile starts with (review
@@ -1745,18 +1820,13 @@ fn dropped_notice(dropped: &[(String, String)]) -> String {
 impl gpui::Render for MarketDataTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        self.tones.refresh(theme);
         // Copied out of the theme before anything else borrows `cx`, and
         // `Hsla` is `Copy`: the per-chip decision below is then a compare
         // and a copy, never a lookup or an allocation. (The cells' own
         // colours are the delegate's, read the same way in `render_td`.)
-        let (foreground, muted_foreground, warning, warning_foreground, danger) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.warning,
-            theme.warning_foreground,
-            theme.danger,
-        );
-        let border = theme.border;
+        let (muted_foreground, border) = (theme.muted_foreground, theme.border);
+        let tones = self.tones;
 
         let stale = self.is_stale(chrono::Utc::now());
         let mut header = h_flex()
@@ -1771,18 +1841,11 @@ impl gpui::Render for MarketDataTile {
             .border_color(border)
             .debug_selector(|| format!("marketdata-header-{}", self.id.0));
         for chip in &self.chips {
-            let colour = match chip.tone {
-                Tone::Plain => muted_foreground,
-                Tone::Key => foreground,
-                Tone::Time if stale => warning,
-                Tone::Time => muted_foreground,
-                Tone::Warn => warning_foreground,
-                Tone::Error => danger,
-            };
+            let colour = tone_colour(chip.tone, stale, theme, &tones);
             header = header.child(div().text_color(colour).child(chip.text.clone()));
         }
         if stale {
-            header = header.child(div().text_color(warning).child("stale"));
+            header = header.child(div().text_color(tones.warn).child("stale"));
         }
 
         // The body: one `DataTable` over this tile's own delegate, in the
@@ -1828,6 +1891,76 @@ mod tests {
     use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent};
     use geode_shell::tiling::TileId;
     use gpui::{Entity, Window};
+
+    /// Every header tone this tile COLOURS ITSELF must be readable on the
+    /// window background of EVERY bundled theme at Part 2c's 3:1 floor.
+    /// Before `FlooredTones`, `Warn` painted `warning_foreground` (1.00:1
+    /// on twenty themes — an invisible `3 edits`) and `Time`-while-stale
+    /// and `Error` painted the raw `warning`/`danger`, under 3:1 on nine
+    /// and eight light themes respectively.
+    ///
+    /// `Plain` and quiet `Time` are the theme's own `muted_foreground` —
+    /// the secondary text every other surface (blotter header, status bar,
+    /// dialogs) paints unchanged — and nine bundled themes ship it under
+    /// 3:1 (Catppuccin Latte 2.20:1). Flooring it in one tile would make
+    /// the panel disagree with the rest of the window; that is a theme
+    /// authoring matter, not a pairing error, and deliberately not swept.
+    #[gpui::test]
+    fn every_header_tone_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
+        use crate::delegate::tests::ground;
+        use geode_core::colour::{READABLE_RATIO, contrast_ratio};
+        cx.update(gpui_component::init);
+        let (service, _) = geode_shell::theme::load_bundled();
+        let mut failures = Vec::new();
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                let floored = FlooredTones::derive(theme);
+                let bg = ground(theme);
+                for (tone, stale) in [
+                    (Tone::Key, false),
+                    (Tone::Time, true),
+                    (Tone::Warn, false),
+                    (Tone::Error, false),
+                ] {
+                    let colour = tone_colour(tone, stale, theme, &floored);
+                    let ratio = contrast_ratio(to_rgb(colour), bg);
+                    if ratio < READABLE_RATIO {
+                        failures.push(format!("{name}: {tone:?} stale={stale} at {ratio:.2}:1"));
+                    }
+                }
+            });
+        }
+        assert!(
+            failures.is_empty(),
+            "unreadable chips:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// The memo re-derives only when one of its four inputs moves: a
+    /// theme with the same background, foreground, warning and danger
+    /// leaves it untouched, a different warning replaces it.
+    #[gpui::test]
+    fn floored_tones_refresh_only_when_an_input_changes(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (service, _) = geode_shell::theme::load_bundled();
+        let light = service.resolve("Gruvbox Light").unwrap().clone();
+        let dark = service.resolve("Gruvbox Dark").unwrap().clone();
+        cx.update(|cx| {
+            Theme::global_mut(cx).apply_config(&light);
+            let mut tones = FlooredTones::derive(cx.theme());
+            let before = tones;
+            tones.refresh(cx.theme());
+            assert_eq!(tones, before, "same theme: no re-derivation");
+            Theme::global_mut(cx).apply_config(&dark);
+            tones.refresh(cx.theme());
+            assert_ne!(tones, before, "a theme switch re-derives");
+            assert_eq!(tones, FlooredTones::derive(cx.theme()));
+        });
+    }
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;

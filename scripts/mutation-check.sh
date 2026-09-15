@@ -11003,6 +11003,70 @@ run_mutation "mdkeys: ^ is the panel's first-column key, matching the blotter" \
   geode-marketdata \
   caret_and_dollar_resolve_to_the_column_extremes
 
+# ---- Dirty cells readable on every theme (user report 2026-09-14) -------
+#
+# The state lives in the fill; the text is the theme's own foreground.
+# Mutated back to the paired tokens (`warning_foreground` over a 25% tint,
+# `muted_foreground` over `muted`), the panel still paints and every
+# behavioural test passes — only the bundled-theme contrast sweep sees a
+# 1.00:1 edited cell on Nord.
+run_mutation "mdpaint: an edited or sent cell's text is the theme foreground" \
+  crates/geode-marketdata/src/delegate.rs \
+  '    CellPaint {
+        fill,
+        text: theme.foreground,
+    }' \
+  '    CellPaint {
+        fill,
+        text: if sent {
+            theme.muted_foreground
+        } else if edited {
+            theme.warning_foreground
+        } else {
+            theme.foreground
+        },
+    }' \
+  geode-marketdata \
+  dirty_and_sent_cells_are_readable_on_every_bundled_theme
+
+# The header's `Warn` chip (`3 edits`, `different document received`) is
+# the floored `warning`, never `warning_foreground`. Mutated back, the
+# chip's text is the background family on twenty themes and every
+# behavioural test — which reads the chip's TEXT, not its colour — passes.
+run_mutation "mdpaint: a Warn chip is the floored warning, not warning_foreground" \
+  crates/geode-marketdata/src/tile.rs \
+  '        Tone::Warn => floored.warn,' \
+  '        Tone::Warn => theme.warning_foreground,' \
+  geode-marketdata \
+  every_header_tone_is_readable_on_every_bundled_theme
+
+# The floor itself. Mutated to the identity, `Warn`/`Error`/stale `Time`
+# paint the raw `warning`/`danger`, which nine light themes ship under 3:1
+# as text (Everforest Light's warning at 1.77:1) — 2c's own finding,
+# reached again from a second surface.
+run_mutation "mdpaint: header tones are floored to 3:1 against the background" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let floor = |c: Hsla| to_hsla(readable_on(to_rgb(c), bg, fg));' \
+  '        let floor = |c: Hsla| {
+            let _ = (bg, fg);
+            c
+        };' \
+  geode-marketdata \
+  every_header_tone_is_readable_on_every_bundled_theme
+
+# The memo re-derives on an input change. Mutated to never refresh, a
+# theme switch keeps painting the previous theme's floored colours — a
+# light theme's darkened warning on a dark background, for the rest of the
+# session.
+run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.key != key {
+            *self = Self::derive(theme);
+        }' \
+  '        let _ = key;' \
+  geode-marketdata \
+  floored_tones_refresh_only_when_an_input_changes
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

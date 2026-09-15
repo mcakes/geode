@@ -20,10 +20,10 @@
 use crate::core::{MatrixModel, PanelSpec};
 use geode_shell::fonts;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, SharedString, TextAlign, Window, div, px};
-use gpui_component::ActiveTheme as _;
+use gpui::{App, Context, Entity, Hsla, SharedString, TextAlign, Window, div, px};
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
+use gpui_component::{ActiveTheme as _, Theme};
 use std::rc::Rc;
 
 /// The row-label column's width, and one value cell's. Fixed: a document's
@@ -238,17 +238,8 @@ impl TableDelegate for MatrixDelegate {
         let Some(cell) = cell else {
             return el;
         };
-        // `sent` is checked first: a sent cell is also an edited one (the
-        // draft keeps its edits until the echo clears them, spec §9.4),
-        // and what it needs to say is that it is out the door.
-        el = if cell.sent {
-            el.bg(theme.muted).text_color(theme.muted_foreground)
-        } else if cell.edited {
-            el.bg(theme.warning.opacity(0.25))
-                .text_color(theme.warning_foreground)
-        } else {
-            el.text_color(theme.foreground)
-        };
+        let CellPaint { fill, text } = cell_paint(theme, cell.sent, cell.edited);
+        el = el.when_some(fill, |el, fill| el.bg(fill)).text_color(text);
         match &self.editor {
             Some((at, state)) if *at == (row_ix, model_col) => el.child(
                 div()
@@ -261,10 +252,104 @@ impl TableDelegate for MatrixDelegate {
     }
 }
 
+/// How a value cell paints in one draft state: an optional fill and the
+/// text colour over it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CellPaint {
+    pub fill: Option<Hsla>,
+    pub text: Hsla,
+}
+
+/// The one answer to "what colour is a cell in this state", read by
+/// `render_td` and by the test that checks it against every bundled theme.
+///
+/// The STATE lives in the fill and the text is always the theme's own
+/// `foreground` (user report 2026-09-14: dirty cells were unreadable on
+/// most themes). The paired tokens look right but are not: `warning_foreground`
+/// is for text on a SOLID warning fill and falls back to `primary_foreground`
+/// — the background family — at the pinned rev, so over a 25% tint it was
+/// cream on cream (1.00:1 on Nord, 1.13:1 on Default Light); and
+/// `muted_foreground` is secondary text on the BACKGROUND, not on `muted`
+/// itself, where 15 bundled themes put it under 3:1. `foreground` is the
+/// one colour every theme author made readable on their own background,
+/// which a translucent tint or the muted band barely moves.
+///
+/// `sent` is checked first: a sent cell is also an edited one (the draft
+/// keeps its edits until the echo clears them, spec §9.4), and what it
+/// needs to say is that it is out the door.
+pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool) -> CellPaint {
+    let fill = if sent {
+        Some(theme.muted)
+    } else if edited {
+        Some(theme.warning.opacity(0.25))
+    } else {
+        None
+    };
+    CellPaint {
+        fill,
+        text: theme.foreground,
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::CVI;
+    use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio};
+    use geode_shell::shell::colours::to_rgb;
+
+    /// `top` at its own alpha composited over an opaque `under`, in sRGB —
+    /// what the GPU paints for a translucent fill over what is beneath it.
+    pub(crate) fn over(top: Hsla, under: Rgb) -> Rgb {
+        let (t, a) = (to_rgb(top), top.a);
+        Rgb {
+            r: t.r * a + under.r * (1.0 - a),
+            g: t.g * a + under.g * (1.0 - a),
+            b: t.b * a + under.b * (1.0 - a),
+        }
+    }
+
+    /// The ground a cell fill lands on: the table body at ITS own alpha
+    /// over the opaque window background — a theme may make the body
+    /// transparent (Modus Operandi's `table.background = #00000000`), and
+    /// reading it as opaque would test against black.
+    pub(crate) fn ground(theme: &Theme) -> Rgb {
+        over(theme.table, to_rgb(theme.background))
+    }
+
+    /// An edited or sent cell's text must be readable over its own fill on
+    /// EVERY bundled theme, at the same 3:1 floor Part 2c holds named
+    /// colours to. The first build painted an edited cell's text in
+    /// `warning_foreground` — the token for text on a SOLID warning fill,
+    /// which falls back to `primary_foreground` (the background family) at
+    /// the pinned rev — over a 25% tint of `warning`, so on Gruvbox Light
+    /// the text was the background colour on a barely-tinted background.
+    #[gpui::test]
+    fn dirty_and_sent_cells_are_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (service, _) = geode_shell::theme::load_bundled();
+        let mut failures = Vec::new();
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                for (state, sent, edited) in [("edited", false, true), ("sent", true, false)] {
+                    let paint = cell_paint(theme, sent, edited);
+                    let fill = paint.fill.expect("both marked states carry a fill");
+                    let ratio = contrast_ratio(to_rgb(paint.text), over(fill, ground(theme)));
+                    if ratio < READABLE_RATIO {
+                        failures.push(format!("{name}: {state} text at {ratio:.2}:1"));
+                    }
+                }
+            });
+        }
+        assert!(
+            failures.is_empty(),
+            "unreadable cells:\n{}",
+            failures.join("\n")
+        );
+    }
 
     /// The label column is index 0 and every value column sits one to its
     /// right — the one arithmetic every cursor mirror, click and editor
