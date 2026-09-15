@@ -991,6 +991,45 @@ mod tests {
         assert_eq!(back.state, DraftState::Editing);
     }
 
+    /// The `attrs` analog of
+    /// `an_empty_table_is_a_clean_draft_and_a_malformed_edit_is_skipped`:
+    /// a value `to_toml` never writes (a `Boolean`, a `Datetime`) is
+    /// skipped rather than taking the whole draft with it — unsent work
+    /// is worth more than tidiness, the same rule the cell-edit loop
+    /// follows.
+    #[test]
+    fn a_malformed_attribute_entry_is_skipped_and_the_others_survive() {
+        let mut attrs = toml::Table::new();
+        attrs.insert("spot_ref".into(), toml::Value::Float(4520.0));
+        attrs.insert(
+            "anchor_date".into(),
+            toml::Value::String("2026-09-14".into()),
+        );
+        attrs.insert("flag".into(), toml::Value::Boolean(true));
+        attrs.insert(
+            "stamp".into(),
+            toml::Value::Datetime("2026-09-14T00:00:00Z".parse().unwrap()),
+        );
+        let mut table = toml::Table::new();
+        table.insert("base".into(), toml::Value::String("t0".into()));
+        table.insert("attrs".into(), toml::Value::Table(attrs));
+
+        let draft = Draft::from_toml(&table);
+        assert_eq!(
+            draft.attrs.len(),
+            2,
+            "the boolean and the datetime are skipped, not the whole draft"
+        );
+        assert_eq!(draft.attrs.get("spot_ref"), Some(&Value::F64(4520.0)));
+        assert_eq!(
+            draft.attrs.get("anchor_date"),
+            Some(&Value::Date(d(2026, 9, 14)))
+        );
+        assert!(!draft.attrs.contains_key("flag"));
+        assert!(!draft.attrs.contains_key("stamp"));
+        assert_eq!(draft.state, DraftState::Editing, "unsent work survived");
+    }
+
     #[test]
     fn count_phrase_names_cells_and_attributes() {
         let mut draft = Draft::default();
