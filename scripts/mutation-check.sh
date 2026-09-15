@@ -9948,11 +9948,10 @@ run_mutation "objectdialog: the refreshed catalogue reads the pending config" \
 # dataset" over one.
 run_mutation "objectdialog: a column stage offers no destructive action" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if draft.column().is_some() {
-        return Vec::new();
-    }
+  '    let in_column = draft.column().is_some();
     let row = editing_row(shell);' \
-  '    let row = editing_row(shell);' \
+  '    let in_column = false;
+    let row = editing_row(shell);' \
   geode-shell \
   a_column_stage_offers_no_destructive_action
 
@@ -11195,6 +11194,91 @@ run_mutation "settings: shift+click on the value chip steps back (spec §20.3)" 
   '                on_step(true, window, cx);' \
   geode-shell \
   the_settings_value_chip_steps_and_a_row_click_only_selects
+
+# ---- Verb consistency Task 8: the object dialog's chip, i/n buttons ------
+
+# Spec §20.3: the chip degrades to plain text — no handler — while a
+# confirm is armed, one of the four inert conditions the keys share.
+# Mutated away, a chip click under a pending Delete steps the value (and
+# writes it) while the question is still on screen.
+run_mutation "objectdialog: the value chip is inert under an armed confirm (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let chips_live = writable && draft.confirm.is_none() && draft.text_entry.is_none();' \
+  '    let chips_live = writable && draft.text_entry.is_none();' \
+  geode-shell \
+  the_value_chip_steps_a_number_and_is_inert_under_a_confirm
+
+# Spec §20.6 fallout: an edit-row click is claimed and dropped while a
+# confirm is armed — the tick's and the drop's guard, on the third handler
+# that reaches the row list. Mutated away, the click moves the cursor
+# and a door row's click opens a column stage whose `enter_column`
+# silently clears the confirm.
+run_mutation "objectdialog: an edit-row click is dropped while a confirm is armed (spec §20.6)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .is_some_and(|d| d.confirm.is_some())
+    {
+        return;
+    }' \
+  '        .is_some_and(|d| d.confirm.is_some())
+    {
+        let _ = 0;
+    }' \
+  geode-shell \
+  an_edit_row_click_is_dropped_while_a_confirm_is_armed
+
+# Spec §20.3: the `i` button reaches the key's own door. Mutated to a
+# no-op arm, the button paints and does nothing.
+run_mutation "objectdialog: the i button opens the field its key opens (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        "i" => open_field(shell),' \
+  '        "i" => {}' \
+  geode-shell \
+  i_and_n_have_buttons_that_do_what_their_keys_do
+
+# Spec §20.3 retires §16.6's audited exception: `press_verb` must end in
+# the sync, because `i` opens a field the sync is what focuses. Mutated
+# away, the field opens with the pure state at `Filter` and the `Input`
+# never focused — every following keystroke goes nowhere.
+run_mutation "objectdialog: press_verb syncs the dialog text after a verb (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        "o" => overwrite_scope(shell, cx),
+        _ => {}
+    }
+    dialog::sync_dialog_text(shell, window, cx);' \
+  '        "o" => overwrite_scope(shell, cx),
+        _ => {}
+    }' \
+  geode-shell \
+  i_and_n_have_buttons_that_do_what_their_keys_do
+
+# Spec §20.3: `i` is a button only where the selected row is one it
+# opens. Mutated to always offer it, a `Choice` row paints a button that
+# can only answer with a notice.
+run_mutation "objectdialog: the i button is offered per row, not per domain (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    ) || state.domain == Domain::Groupings;' \
+  '    ) || true;' \
+  geode-shell \
+  i_and_n_have_buttons_that_do_what_their_keys_do
+
+# Spec §20.3: the browse `n` button takes the key's own door. Mutated
+# away, the button syncs and notifies but opens nothing.
+run_mutation "objectdialog: the n button opens the naming stage (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                            begin_new_object(shell, seed, seed_taken);' \
+  '                            let _ = (seed, seed_taken);' \
+  geode-shell \
+  i_and_n_have_buttons_that_do_what_their_keys_do
+
+# Spec §20.3: no `n` button on a fixed roster (Groupings), exactly as its
+# footer names no `n` — a button that only ever refuses teaches a verb
+# with nothing behind it. Mutated away, the button paints there.
+run_mutation "objectdialog: the n button is withheld on a fixed roster (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        && state.domain.roster().is_none();' \
+  '        && true;' \
+  geode-shell \
+  the_i_button_opens_the_chain_field_on_groupings_and_n_is_withheld
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

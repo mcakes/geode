@@ -1456,7 +1456,14 @@ impl Draft {
     /// site in `render`, not here, because it is a fact about the
     /// domain's `i` and not about any row.
     pub fn selected_vocabulary(&self, domain: Domain) -> RowVocabulary {
-        match self.selected_row() {
+        self.vocabulary_of(self.selected_row(), domain)
+    }
+
+    /// [`selected_vocabulary`](Self::selected_vocabulary) for any row —
+    /// what the value chip asks per painted row (spec §20.3), so the chip
+    /// and the footer can never disagree about whether a row steps.
+    pub fn vocabulary_of(&self, row: Option<EditRow>, domain: Domain) -> RowVocabulary {
+        match row {
             None => RowVocabulary::Inert,
             Some(EditRow::Item { .. }) => RowVocabulary::Item,
             Some(EditRow::Available { .. }) => RowVocabulary::Available,

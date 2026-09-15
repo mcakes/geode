@@ -5933,6 +5933,235 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
     assert!(written.contains("[delta]\nhue = 255"), "{written}");
 }
 
+// --- Spec §20.3 / §20.6: the value chip, the i/n buttons, the armed guard --
+
+/// Spec §20.3 on the object dialog: the hue chip steps on click and
+/// shift+click through `step_selected_row`'s own path (so it writes), a
+/// click on the row's label only selects, and the chip is plain text —
+/// no handler — while a confirm is armed.
+#[gpui::test]
+fn the_value_chip_steps_a_number_and_is_inert_under_a_confirm(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    cx.simulate_keystrokes("enter"); // delta
+    cx.run_until_parked();
+    let hue = |cx: &gpui::VisualTestContext| {
+        edit_draft(&shell, cx, |d| match d.fields[0].kind {
+            objectdialog::FieldKind::Number { value, .. } => value,
+            _ => panic!("hue is a Number"),
+        })
+    };
+    assert_eq!(hue(&cx), 240);
+
+    let chip = cx
+        .debug_bounds("objectdialog-value-hue")
+        .expect("the hue chip paints");
+    cx.simulate_click(chip.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(hue(&cx), 255, "click steps forward by the field's step");
+    cx.simulate_click(
+        chip.center(),
+        gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    cx.run_until_parked();
+    assert_eq!(hue(&cx), 240, "shift+click steps back");
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    assert!(
+        written.contains("[delta]\nhue = 240"),
+        "the chip went through the write path: {written}"
+    );
+
+    // Label click: select only.
+    let row = cx
+        .debug_bounds("objectdialog-field-hue")
+        .expect("row paints");
+    cx.simulate_click(
+        gpui::point(row.origin.x + gpui::px(20.0), row.center().y),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(hue(&cx), 240, "a row click does not step");
+
+    // Armed: the chip has no handler.
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    let chip = cx
+        .debug_bounds("objectdialog-value-hue")
+        .expect("still painted, as text");
+    cx.simulate_click(chip.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(hue(&cx), 240, "inert while the question stands");
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "and the question is still there — the click was dropped, not answered"
+    );
+}
+
+/// The two keyboard-only verbs gain buttons: `i` on the edit stage's bar
+/// when the selected row is one `i` opens, `n` on the browse stage.
+#[gpui::test]
+fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    let n = cx
+        .debug_bounds("objectdialog-action-n")
+        .expect("browse offers n as a button");
+    cx.simulate_click(n.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        dialog_state(&shell, &cx, |s| matches!(
+            s.stage,
+            objectdialog::Stage::Naming
+        )),
+        "the n button opens the naming row"
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "and the field took focus through the sync"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-action-n").is_none(),
+        "the button is withdrawn while naming"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("enter"); // delta — cursor on `hue`, a Number, which `i` opens
+    cx.run_until_parked();
+    let i = cx
+        .debug_bounds("objectdialog-action-i")
+        .expect("the edit bar offers i on a Number row");
+    cx.simulate_click(i.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the i button opens the value field"
+    );
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert!(
+        cx.debug_bounds("objectdialog-action-i").is_none(),
+        "no verbs while the field is open"
+    );
+    cx.simulate_keystrokes("escape j"); // tone, a Choice: steps but never types
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-action-i").is_none(),
+        "i is not offered on a row it cannot open"
+    );
+}
+
+/// §20.6's fallout: an edit-row click while a confirm is armed is claimed
+/// and dropped, like the tick click — it neither moves the cursor nor
+/// opens a column stage that would silently disarm the question.
+#[gpui::test]
+fn an_edit_row_click_is_dropped_while_a_confirm_is_armed(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // A user-owned view, so `d` arms rather than pointing at the desk.
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_only_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter j"); // mine, cursor on the `Columns` row
+    cx.run_until_parked();
+    let before = edit_draft(&shell, &cx, |d| d.selected);
+    assert_eq!(before, 1);
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+
+    // A plain field row: the cursor stays where it was.
+    let row = cx
+        .debug_bounds("objectdialog-field-dataset")
+        .expect("a row paints");
+    cx.simulate_click(
+        gpui::point(row.origin.x + gpui::px(20.0), row.center().y),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected),
+        before,
+        "the cursor did not move"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "the question still stands"
+    );
+
+    // A door row: no column stage opens, so nothing disarms the question
+    // behind the trader's back.
+    let door = cx
+        .debug_bounds("objectdialog-item-npv")
+        .expect("a member row paints");
+    cx.simulate_click(
+        gpui::point(door.origin.x + gpui::px(20.0), door.center().y),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "mine".to_string()
+        },
+        "the column stage did not open"
+    );
+    assert_eq!(edit_draft(&shell, &cx, |d| d.selected), before);
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "and the question was not silently disarmed"
+    );
+}
+
+/// Groupings is the one domain whose `i` reaches past the selected row
+/// to the slot's whole chain (§18.8), so its button is live on every row
+/// of a slot's chooser and opens the CHAIN field — the key's own door,
+/// not a per-row value field — and browse offers no `n` on a fixed
+/// roster, exactly as its footer names none.
+#[gpui::test]
+fn the_i_button_opens_the_chain_field_on_groupings_and_n_is_withheld(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-action-n").is_none(),
+        "the slots are fixed — no button for a verb that only ever refuses"
+    );
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
+    let i = cx
+        .debug_bounds("objectdialog-action-i")
+        .expect("the chooser offers i on its slot row");
+    cx.simulate_click(i.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "the button opened the chain field, as the key does"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "book",
+        "seeded with the chain"
+    );
+}
+
 /// `enter` is named wherever it opens something and nowhere else (user
 /// ruling 2026-09-13): browse in both modes (it opens the edit stage),
 /// the Views edit stage (a member row opens its column stage), the
