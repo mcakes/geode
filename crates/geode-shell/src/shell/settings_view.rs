@@ -247,8 +247,11 @@ pub fn derive_rows(
 }
 
 /// Which way a value step goes — `tab` (forward, `Right`) vs. `shift+tab`
-/// (back, `Left`), and a click on the already-selected row (forward,
-/// mirroring `tab`). The old dialog's `h`/`left`/`l`/`right` motions and
+/// (back, `Left`), and the value chip's click (forward, mirroring `tab`)
+/// vs. its shift+click (back, mirroring `shift+tab`) — spec §20.3's mouse
+/// form of the same two directions; a plain click on the row's own label
+/// only selects it, never a step (the old already-selected-row-cycles
+/// rule is gone). The old dialog's `h`/`left`/`l`/`right` motions and
 /// its `enter`/`space` cycle-forward keys are retired along with the vim
 /// vocabulary this dialog no longer speaks (see the module doc); `enter`
 /// is deliberately inert now rather than aliased onto `Right` — see
@@ -264,7 +267,7 @@ pub enum StepDirection {
 /// wraps only a bare ±1 and clamps a larger or counted step (spec
 /// §20.5): a settings value is a cycle (fzf → vim → fzf), not a list
 /// with ends, and this always moves by exactly one, so wrap is what lets
-/// a run of `tab` presses (or repeated clicks on the same row) reach
+/// a run of `tab` presses (or repeated clicks on the value chip) reach
 /// every value without ever hitting a dead end. `len == 0` yields 0
 /// (unreachable for real rows — every setting has at least two values —
 /// but deterministic).
