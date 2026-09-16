@@ -11336,23 +11336,37 @@ run_mutation "mdpicker: closing the picker blurs before dropping" \
         }' \
   geode-marketdata escape_closes_the_picker_and_gives_focus_up
 
-# Review fix round 1, CRITICAL's other half: `rerank` must preserve
-# which KEY was highlighted across a rebuild a CATALOG change forces
-# (the diagnostics observer, query unchanged so `refilter`'s own guard
-# never runs), never reset to the top row. Named test, not
-# `enter_loads_the_highlighted_row_not_the_top_match`: that test's own
-# query never changes either, so `commit_picker`'s `refilter` call
-# short-circuits before ever reaching `rerank` — this line is reachable
-# only through a forced re-rank, which the diagnostics-driven test is
-# the one to exercise (checked empirically: the enter-test alone does
-# not catch this mutation, though the crate's full suite does).
-run_mutation "mdpicker: a forced rerank keeps the highlighted key, not row 0" \
-  crates/geode-marketdata/src/popup.rs \
-  '        self.highlighted = was_highlighted
-            .and_then(|all_index| self.ranked.iter().position(|&r| r == all_index))
-            .unwrap_or(0);' \
-  '        self.highlighted = 0;' \
-  geode-marketdata diagnostics_catalog_updates_preserve_the_highlight
+# Review fix round 1, CRITICAL's harness half (the finding that the
+# round-1 entry above only covered `rerank`'s internals, never
+# `commit_picker`'s own path to `p.highlighted`): mutated to always pick
+# row 0, `u`/`down`/`down`/`enter` would request the TOP match again
+# regardless of where the trader had actually moved the highlight — the
+# original shipped bug, reproduced at the one call site a trader's
+# `enter` actually goes through.
+run_mutation "mdpicker: enter loads the highlighted row, not the top match" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let index = p.highlighted;' \
+  '        let index = 0;' \
+  geode-marketdata enter_loads_the_highlighted_row_not_the_top_match
+
+# Review fix round 2 (a NEW breakage the round-1 fix itself
+# introduced): the diagnostics observer must capture the highlighted
+# KEY (a string) BEFORE `p.all` is overwritten, never after — capturing
+# it once `all` already holds the reordered catalog reads the OLD
+# ranked position back out of the NEW `all` array, exactly reproducing
+# the positional-index bug the string identity was built to fix (a
+# catalog reorder shifts every later index, so the "preserved"
+# highlight silently lands on whatever key now sits at that number).
+# Mutated by swapping the capture below the reassignment.
+run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its old index" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let keep = p.highlighted_key().map(str::to_string);
+            p.labels = Self::labels_for(&all);
+            p.all = all;' \
+  '            p.labels = Self::labels_for(&all);
+            p.all = all;
+            let keep = p.highlighted_key().map(str::to_string);' \
+  geode-marketdata a_resorted_catalog_keeps_the_highlighted_key_not_its_old_index
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
