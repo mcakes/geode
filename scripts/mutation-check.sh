@@ -11268,6 +11268,35 @@ run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
             }' \
   geode-marketdata enter_on_a_greyed_row_notices_and_keeps_the_menu
 
+# Fix round 1, IMPORTANT-1: the `⋯` button's capture-phase handler must
+# NOT stop propagation, or the shell's whole bubble phase is suppressed
+# for that click — click-to-focus, drag arming and
+# pending_focus_restore never run, so a click on an unfocused tile's
+# `⋯` opens the menu without ever focusing that tile. Mutated to
+# reinsert the stop, the harness's own bubble-phase click counter
+# (`Host`) stops moving on both clicks.
+run_mutation "mdmenu: the ⋯ click does not stop propagation" \
+  crates/geode-marketdata/src/header.rs \
+  '                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
+  '                    cx.stop_propagation();
+                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))' \
+  geode-marketdata a_menu_button_click_still_reaches_the_tiles_own_listeners
+
+# Fix round 1, IMPORTANT-2: `/` is a shell-owned `tile`-context binding
+# that never reaches `dispatch`'s own "any other action closes the
+# popup first" guard, so `find` must close the popup itself, on every
+# variant, before doing anything else. Mutated to skip that close, a
+# find session started with the menu open would leave `mode == menu`
+# on the context stack through the first keystroke.
+run_mutation "mdmenu: a find keystroke closes the popup" \
+  crates/geode-marketdata/src/tile.rs \
+  '    pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
+        self.close_popup(cx);
+        match event {' \
+  '    pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
+        match event {' \
+  geode-marketdata a_find_keystroke_closes_the_popup
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
