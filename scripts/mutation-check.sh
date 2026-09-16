@@ -10724,14 +10724,14 @@ run_mutation "final: a painting delivery clears the previous delivery's notice" 
 
 # M-4: the `Behind` chip says "different", never "newer" — an as-of step
 # back delivers an OLDER generation and lands in the same state.
-# Re-anchored (Task 3, one draft): the wording moved from `Draft::summary`
-# to the temporary chip `rebuild_chrome` builds off `Draft::badge` — same
-# rule, same site's new home; any wording drift here fails the header's
-# own pinned assertions.
+# Re-anchored (Task 4, one draft): the wording moved from `rebuild_chrome`'s
+# temporary chip to `HeaderModel::prepare`'s own state run — same rule,
+# same site's new home; any wording drift here fails the header's own
+# pinned assertions.
 run_mutation "final: the Behind chip does not call an older document newer" \
-  crates/geode-marketdata/src/tile.rs \
-  'DraftBadge::Behind { newer } => Some(format!("update {}", local_hhmm(&newer))),' \
-  'DraftBadge::Behind { newer } => Some(format!("newer document received {}", local_hhmm(&newer))),' \
+  crates/geode-marketdata/src/header.rs \
+  'Some((format!("update {}", local_hhmm(&newer)).into(), Tone::Warn)),' \
+  'Some((format!("newer document received {}", local_hhmm(&newer)).into(), Tone::Warn)),' \
   geode-marketdata \
   a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base
 
@@ -11035,12 +11035,13 @@ run_mutation "mdpaint: an edited or sent cell's text is the theme foreground" \
   geode-marketdata \
   dirty_and_sent_cells_are_readable_on_every_bundled_theme
 
-# The header's `Warn` chip (`3 edits`, `different document received`) is
+# The header's `Warn` run (`update HH:MM`, `edits await a document`) is
 # the floored `warning`, never `warning_foreground`. Mutated back, the
-# chip's text is the background family on twenty themes and every
-# behavioural test — which reads the chip's TEXT, not its colour — passes.
+# run's text is the background family on twenty themes and every
+# behavioural test — which reads the run's TEXT, not its colour — passes.
+# Re-anchored (Task 4): `tone_colour` moved from `tile.rs` to `header.rs`.
 run_mutation "mdpaint: a Warn chip is the floored warning, not warning_foreground" \
-  crates/geode-marketdata/src/tile.rs \
+  crates/geode-marketdata/src/header.rs \
   '        Tone::Warn => floored.warn,' \
   '        Tone::Warn => theme.warning_foreground,' \
   geode-marketdata \
@@ -11132,6 +11133,20 @@ run_mutation "mddraft: a malformed attribute entry is skipped, not the whole dra
   '                    _ => return Draft::default(),' \
   geode-marketdata \
   a_malformed_attribute_entry_is_skipped_and_the_others_survive
+
+# ---- Panel header: the dense row (spec 2026-09-14 §4, Task 4) -----------
+
+run_mutation "mdheader: behind reads update HH:MM" \
+  crates/geode-marketdata/src/header.rs \
+  'format!("update {}", local_hhmm(&newer))' \
+  'format!("different document received {}", local_hhmm(&newer))' \
+  geode-marketdata dirty_is_a_dot_and_behind_reads_update_hhmm
+
+run_mutation "mdheader: a dirty draft paints the dot" \
+  crates/geode-marketdata/src/header.rs \
+  '            DraftBadge::Dirty => (true, None),' \
+  '            DraftBadge::Dirty => (false, None),' \
+  geode-marketdata dirty_is_a_dot_and_behind_reads_update_hhmm
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
