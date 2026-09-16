@@ -548,27 +548,25 @@ impl MarketDataTile {
     /// `insert` while the cell editor holds the keyboard OR the
     /// underlying picker is open (spec §7/§8.6 — a `Popup::Picker`'s
     /// field holds the keyboard exactly as the cell editor does, which is
-    /// the shell's insert branch's own one pair to key on: it tests the
-    /// literal string `"insert"` and nothing else, so the picker cannot
-    /// use a mode value of its own), `menu` exactly while the action list
-    /// is open (spec §6.1; `editor` wins over `popup` since the two are
-    /// exclusive by construction, see `toggle_menu`/`open_picker`), else
-    /// `normal`. `counts()` stays on in every mode deliberately: stopping
-    /// a typed `3` from becoming a count prefix is the shell's job there,
-    /// not this context's.
+    /// the shell's insert branch's own one pair to key on), `menu` exactly
+    /// while the action list is open (spec §6.1; `editor` wins over
+    /// `popup` since the two are exclusive by construction, see
+    /// `toggle_menu`/`open_picker`), else `normal`. `counts()` stays on in
+    /// every mode deliberately: stopping a typed `3` from becoming a
+    /// count prefix is the shell's job there, not this context's.
     ///
-    /// A `popup == picker` pair rides alongside `mode == insert` exactly
-    /// while a `Popup::Picker` is open — NOT while the cell editor alone
-    /// is (both report `mode == insert`, indistinguishably, to the
-    /// shell). It exists solely so the keymap fragment can scope
-    /// `ctrl+j`/`ctrl+k` to the picker alone: those two chords are ALSO
-    /// bindable at the workspace level (`ctrl+k` ships bound to
-    /// `palette::toggle`), and a fragment binding scoped to bare `mode ==
-    /// insert` would shadow that binding for the ordinary cell editor too
-    /// — a real regression to the documented "a shipped chord still fires
-    /// from inside a cell editor" rule, caught by pressing `ctrl+k`
-    /// against the real builtin keymap plus this fragment rather than the
-    /// fragment alone.
+    /// **No context distinguishes the picker from the plain cell editor
+    /// (controller ruling, superseding this crate's own earlier attempt
+    /// at one).** The picker's highlight moves on bare `up`/`down` alone,
+    /// deliberately not a chord: CLAUDE.md's standing rule for a module's
+    /// insert-mode field is that a shipped chord (`ctrl+k` is the
+    /// palette) still fires from inside it, because a chord resolves
+    /// against the WHOLE context stack and a module must never take a
+    /// shell chord away — narrowing that shadow to "only while the picker
+    /// is open" still takes the palette away exactly when a trader is
+    /// typing in the picker, which is no better than taking it from the
+    /// cell editor. Spec §7 named `ctrl+j`/`ctrl+k` in error; Task 8
+    /// records the amendment.
     pub fn key_context(&self) -> KeyContext {
         let mode = if self.editor.is_some() || matches!(self.popup, Some(Popup::Picker(_))) {
             "insert"
@@ -577,12 +575,7 @@ impl MarketDataTile {
         } else {
             "normal"
         };
-        let ctx = KeyContext::new("marketdata").pair("mode", mode);
-        if matches!(self.popup, Some(Popup::Picker(_))) {
-            ctx.pair("popup", "picker").counts()
-        } else {
-            ctx.counts()
-        }
+        KeyContext::new("marketdata").pair("mode", mode).counts()
     }
 
     // ---- the request -------------------------------------------------

@@ -61,7 +61,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
 /// compiled-in shell keymap and below every desk and user layer — so a
 /// trader's own override still wins.
 ///
-/// Three contexts, matching what [`MarketDataTile::key_context`] pushes.
+/// Two contexts, matching what [`MarketDataTile::key_context`] pushes.
 /// `normal` is the whole grammar. `insert` is deliberately narrow: while
 /// the cell editor OR the underlying picker holds the keyboard, the shell
 /// resolves BARE keys ONLY against the contexts that carry `mode ==
@@ -73,18 +73,19 @@ pub const ACTIONS: &[(&str, &str)] = &[
 /// highlight (spec §7) — a no-op with no popup open at all, so binding
 /// them here (rather than picker-only) costs nothing.
 ///
-/// `ctrl+j`/`ctrl+k` are a THIRD, narrower context —
-/// `mode == insert && popup == picker` — deliberately not the plain
-/// `insert` block above: unlike a bare key, a CHORD resolves against the
-/// WHOLE context stack (spec §8.6 again), and `ctrl+k` ships bound to
-/// `palette::toggle` at the workspace level. Scoping these two to
-/// `insert` alone would shadow that binding for the ordinary CELL EDITOR
-/// too — the one case CLAUDE.md's own invariant ("a shipped chord still
-/// fires from inside a cell editor") means to keep working — since the
-/// editor's own `mode == insert` reports true with no picker anywhere in
-/// sight. `popup == picker` (set by `key_context` only while a
-/// `Popup::Picker` is open) narrows the shadow to the picker alone,
-/// where swallowing that chord is the point.
+/// **`ctrl+j`/`ctrl+k` are deliberately NOT bound here (controller
+/// ruling, superseding this crate's own first attempt and spec §7's
+/// original wording).** A bare key resolves only against insert-carrying
+/// contexts, but a CHORD resolves against the WHOLE stack (spec §8.6
+/// again) — and `ctrl+k` ships bound to `palette::toggle` at the
+/// workspace level. CLAUDE.md's standing rule for a module's insert-mode
+/// field is that a shipped chord still fires from inside it: the whole
+/// point of resolving chords against the full stack is that a module
+/// must never take one away, and scoping the shadow to "only while the
+/// picker is open" still takes the palette away exactly when a trader is
+/// typing into the picker — no better than taking it from the cell
+/// editor. `up`/`down` (bare, already above) are the picker's whole
+/// highlight vocabulary; Task 8 records the amendment.
 ///
 /// `^` and `$` sit beside `home`/`end` as the column-extreme pair (user
 /// ruling 2026-09-12: a general navigation grammar, the blotter its first
@@ -125,12 +126,6 @@ context = "marketdata && mode == insert"
 "escape" = "marketdata::cancel"
 "down" = "marketdata::menu_down"
 "up" = "marketdata::menu_up"
-
-[[bindings]]
-context = "marketdata && mode == insert && popup == picker"
-[bindings.keys]
-"ctrl+j" = "marketdata::menu_down"
-"ctrl+k" = "marketdata::menu_up"
 
 [[bindings]]
 context = "marketdata && mode == menu"
@@ -424,12 +419,11 @@ mod tests {
     /// cell. Bare `down`/`up` (Task 7, spec §7) are here for the same
     /// reason: the underlying picker's field holds the keyboard exactly
     /// as the cell editor does, and its highlight has to move somehow.
-    /// `ctrl+j`/`ctrl+k` are NOT asserted against this bare `insert`
-    /// stack — they need `popup == picker` too (see
-    /// `ctrl_j_and_ctrl_k_move_the_picker_highlight_and_nothing_wider`),
-    /// because unlike a bare key a CHORD resolves against the whole
-    /// stack, and shadowing `ctrl+k` (`palette::toggle` at the workspace
-    /// level) for the plain cell editor would be a real regression.
+    /// No chord is bound here at all (controller ruling — see
+    /// `ctrl_k_still_opens_the_palette_from_the_open_picker`): a bare key
+    /// is confined to insert-carrying contexts, but a chord resolves
+    /// against the whole stack, and this module must never take one a
+    /// trader could reach from anywhere else.
     #[test]
     fn enter_and_escape_resolve_in_insert_mode() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
@@ -452,15 +446,17 @@ mod tests {
         }
     }
 
-    /// The regression this fragment must never reintroduce: pressed
-    /// against the REAL builtin keymap (not the fragment alone — a
-    /// fragment-only keymap has no `palette::toggle` binding to shadow in
-    /// the first place), `ctrl+k` still opens the palette while the cell
-    /// editor alone holds the keyboard (`mode == insert`, no picker), and
-    /// only resolves to the picker's own verb once `popup == picker`
-    /// joins the stack.
+    /// The real invariant (controller ruling): pressed against the REAL
+    /// builtin keymap (not the fragment alone — a fragment-only keymap
+    /// has no `palette::toggle` binding to shadow in the first place),
+    /// `ctrl+k` still opens the palette with the underlying picker OPEN
+    /// — not just with the plain cell editor — because this module binds
+    /// no chord in insert mode at all. A module must never take a shipped
+    /// chord away from a trader, and "only while the picker is open" is
+    /// still taking it away exactly when a trader is typing into the
+    /// picker.
     #[test]
-    fn ctrl_j_and_ctrl_k_move_the_picker_highlight_and_nothing_wider() {
+    fn ctrl_k_still_opens_the_palette_from_the_open_picker() {
         use geode_core::config::LayerDoc;
         let builtin = LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
             .expect("builtin keymap TOML is well-formed");
@@ -471,7 +467,10 @@ mod tests {
         let (keymap, diags) = build_keymap(&layered, default_mod(), &reg);
         assert!(diags.is_empty(), "{diags:?}");
 
-        let editor_only = [
+        // `key_context()` reports the identical stack for the picker and
+        // the plain cell editor (no `popup` pair — see `key_context`'s
+        // own doc comment), so one stack stands for both.
+        let picker_or_editor_open = [
             KeyContext::new("workspace"),
             KeyContext::new("tile"),
             KeyContext::new("marketdata")
@@ -479,33 +478,12 @@ mod tests {
                 .counts(),
         ];
         let keystroke = parse_keystroke("ctrl+k", default_mod()).unwrap();
-        match Matcher::default().press(&keymap, keystroke, &editor_only) {
-            MatchResult::Matched { action, .. } => {
-                assert_eq!(
-                    action.0, "palette::toggle",
-                    "the cell editor must not shadow it"
-                )
-            }
+        match Matcher::default().press(&keymap, keystroke, &picker_or_editor_open) {
+            MatchResult::Matched { action, .. } => assert_eq!(
+                action.0, "palette::toggle",
+                "the picker must not shadow a shell chord either"
+            ),
             other => panic!("ctrl+k: expected a match, got {other:?}"),
-        }
-
-        let picker_open = [
-            KeyContext::new("workspace"),
-            KeyContext::new("tile"),
-            KeyContext::new("marketdata")
-                .pair("mode", "insert")
-                .pair("popup", "picker")
-                .counts(),
-        ];
-        for (spec, expected) in [
-            ("ctrl+j", "marketdata::menu_down"),
-            ("ctrl+k", "marketdata::menu_up"),
-        ] {
-            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
-            match Matcher::default().press(&keymap, keystroke, &picker_open) {
-                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
-                other => panic!("{spec}: expected a match, got {other:?}"),
-            }
         }
     }
 
