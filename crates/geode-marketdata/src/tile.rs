@@ -486,11 +486,28 @@ impl MarketDataTile {
                 return;
             }
             let all = this.catalog_keys(cx);
-            if let Some(Popup::Picker(p)) = &mut this.popup {
-                p.all = all;
-                let query = p.input.read(cx).value().to_string();
-                p.refilter(&query);
+            let Some(Popup::Picker(p)) = &mut this.popup else {
+                return;
+            };
+            // Review fix round 1, IMPORTANT-2: this observer fires on
+            // EVERY notification this entity emits, not only a catalog
+            // change (a source's health ticks about twice a second with
+            // a diagnostics tile open) — comparing first is what keeps an
+            // unrelated notification from resetting the highlight (a
+            // bare `rerank` always moves it, by design, when the
+            // catalog's own membership is unchanged there is nothing to
+            // rerank against) and from re-cloning the catalog into
+            // `labels` for nothing.
+            if p.all == all {
+                return;
             }
+            p.labels = Self::labels_for(&all);
+            p.all = all;
+            // Forced, not through `refilter`: the query has not changed,
+            // but `all` has, and a re-rank must run regardless — the
+            // highlighted KEY, not its position, is what `rerank`
+            // preserves.
+            p.rerank();
             cx.notify();
         })
         .detach();
@@ -1561,10 +1578,27 @@ impl MarketDataTile {
     /// with an editor still open cancels the editor first (never commits
     /// it, exactly as a click elsewhere does), which is why this takes
     /// `window`.
+    ///
+    /// **The popup match is exhaustive on purpose** (review fix round 1,
+    /// IMPORTANT-1): a Picker open when this runs — reachable via
+    /// `ctrl+k` → palette → "Actions menu", which is not bound by mode at
+    /// all — must be closed through [`Self::close_popup_with_window`]
+    /// (blur, then drop) before the Menu overwrites `self.popup`, or the
+    /// picker's still-focused `InputState` would be dropped with no
+    /// blur, leaving `Window::focused` pointing at a dead input for the
+    /// rest of the session (`close_editor`'s own rule). Unlike the editor
+    /// case just below, this one does NOT return: opening the action
+    /// list is the whole point of the row that reached here, so closing
+    /// the picker falls through into building the menu rather than
+    /// merely toggling it off.
     pub(crate) fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.popup, Some(Popup::Menu(_))) {
-            self.close_popup(cx);
-            return;
+        match &self.popup {
+            Some(Popup::Menu(_)) => {
+                self.close_popup(cx);
+                return;
+            }
+            Some(Popup::Picker(_)) => self.close_popup_with_window(window, cx),
+            None => {}
         }
         if self.editor.is_some() {
             self.close_editor(window, cx);
@@ -1648,6 +1682,15 @@ impl MarketDataTile {
 
     // ---- the underlying picker -----------------------------------
 
+    /// The picker's own prepared row text (review fix round 1,
+    /// IMPORTANT-3): a `PickerState.labels` entry per `all` entry, built
+    /// once at open and again whenever the diagnostics observer replaces
+    /// `all` — never in `render_picker`, where `SharedString::from(&str)`
+    /// would be a real allocation per visible row per repaint.
+    fn labels_for(all: &[String]) -> Vec<SharedString> {
+        all.iter().map(|s| SharedString::from(s.as_str())).collect()
+    }
+
     /// `u` (normal mode) and the menu row (spec §7): open the underlying
     /// picker over the dataset's catalog keys, ranked by `listfilter` as
     /// the trader types. Refused, exactly as `:key`/`:underlying`, while
@@ -1674,6 +1717,7 @@ impl MarketDataTile {
         }
         self.request_catalog(cx);
         let all = self.catalog_keys(cx);
+        let labels = Self::labels_for(&all);
         let ranked = (0..all.len()).collect();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("underlying"));
         cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
@@ -1696,8 +1740,10 @@ impl MarketDataTile {
         self.popup = Some(Popup::Picker(PickerState {
             input,
             all,
+            labels,
             ranked,
             highlighted: 0,
+            query: String::new(),
         }));
         self.notice = None;
         self.changed(cx);
@@ -1710,8 +1756,13 @@ impl MarketDataTile {
     /// none at all (CLAUDE.md's own trap, exercised by a test harness that
     /// writes the field that way) — trusting whatever `ranked` happens to
     /// hold would let the choice depend on a rank that was never actually
-    /// run. An empty ranked list (no catalog, or nothing matches) is
-    /// inert (spec §7): nothing to load, and the picker stays open.
+    /// run. `refilter` is a no-op when the text has not actually changed
+    /// (`PickerState`'s own doc comment, review fix round 1, CRITICAL),
+    /// so this defensive call never resets the highlight the trader
+    /// already moved to — it only re-ranks, preserving the highlighted
+    /// KEY, when there is a real query to catch up on. An empty ranked
+    /// list (no catalog, or nothing matches) is inert (spec §7): nothing
+    /// to load, and the picker stays open.
     fn commit_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Popup::Picker(p)) = &mut self.popup else {
             return;
@@ -2362,6 +2413,19 @@ impl MarketDataTile {
     pub(crate) fn picker_state(&self) -> Option<Entity<InputState>> {
         match &self.popup {
             Some(Popup::Picker(p)) => Some(p.input.clone()),
+            _ => None,
+        }
+    }
+
+    /// The catalog key the picker's highlight is currently on, `None`
+    /// with no picker open or an empty ranked list — the identity a
+    /// re-rank (a keystroke, or a catalog change) must preserve, read by
+    /// KEY rather than by index so a test can tell a real preservation
+    /// from a coincidence.
+    #[cfg(test)]
+    pub(crate) fn picker_highlighted_key(&self) -> Option<String> {
+        match &self.popup {
+            Some(Popup::Picker(p)) => p.ranked.get(p.highlighted).map(|&i| p.all[i].clone()),
             _ => None,
         }
     }
@@ -5555,6 +5619,102 @@ edits = [["2099-01-01", "-1", 1.0]]
             h.diagnostics
                 .read_with(&vcx, |d, _| d.pending_catalog_request()),
             "opening the picker asks again, regardless of what is already held"
+        );
+    }
+
+    /// Review fix round 1, CRITICAL: `enter` must load whichever row is
+    /// HIGHLIGHTED, not always the top match. The old `refilter` reset
+    /// the highlight to 0 on every call, and `commit_picker` always
+    /// calls it once (defensively, to cover a test harness's
+    /// `set_value`, which fires no `Change` at all) — so `u`, `down`,
+    /// `down`, `enter` used to silently request the TOP key regardless
+    /// of where the trader had actually moved the highlight.
+    #[gpui::test]
+    fn enter_loads_the_highlighted_row_not_the_top_match(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["AAA.Z", "BBB.Z", "CCC.Z"]));
+            cx.notify();
+        });
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        h.dispatch(&mut vcx, "menu_down", None);
+        h.dispatch(&mut vcx, "menu_down", None);
+        h.dispatch(&mut vcx, "commit", None);
+        let req = h
+            .document_request()
+            .expect("the pick requests its document");
+        assert_eq!(
+            req.document_key,
+            vec!["CCC.Z".to_string()],
+            "the THIRD row, not the first"
+        );
+    }
+
+    /// Review fix round 1, IMPORTANT-1: `marketdata::menu` (reachable via
+    /// the palette's "Actions menu" row, not gated by mode at all) must
+    /// close an open PICKER first, blurring before dropping it, rather
+    /// than overwriting `self.popup` out from under a still-focused
+    /// `InputState` — and then still open the menu, since that row's
+    /// whole point was to open it.
+    #[gpui::test]
+    fn menu_closes_an_open_picker_with_a_blur_before_opening(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&vcx), "menu");
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "the picker's field must be blurred, not just dropped"
+        );
+    }
+
+    /// Review fix round 1, IMPORTANT-2: a diagnostics notification that
+    /// carries no real catalog change (a source's health tick, or the
+    /// SAME catalog reported again) must not reset the picker's
+    /// highlight, and a catalog that genuinely changes must re-rank
+    /// keeping the highlight on the same KEY rather than the same
+    /// position.
+    #[gpui::test]
+    fn diagnostics_catalog_updates_preserve_the_highlight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["AAA.Z", "BBB.Z", "CCC.Z"]));
+            cx.notify();
+        });
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        h.dispatch(&mut vcx, "menu_down", None);
+        h.dispatch(&mut vcx, "menu_down", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("CCC.Z".to_string())
+        );
+
+        // The identical catalog again: nothing to rerank, the highlight
+        // must not move.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["AAA.Z", "BBB.Z", "CCC.Z"]));
+            cx.notify();
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("CCC.Z".to_string()),
+            "an unrelated notification must not reset the highlight"
+        );
+
+        // A grown catalog: CCC.Z is still there, just not necessarily at
+        // the same RANKED position.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["AAA.Z", "BBB.Z", "CCC.Z", "DDD.Z"]));
+            cx.notify();
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("CCC.Z".to_string()),
+            "the highlight follows the KEY across a catalog change"
         );
     }
 }

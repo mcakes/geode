@@ -41,29 +41,68 @@ pub(crate) struct MenuState {
 /// and which ranked row is highlighted.
 ///
 /// `all: Vec<String>`, not `Vec<SharedString>`, because
-/// [`geode_shell::listfilter::rank`] takes `&[String]` — the one-time
-/// `String` → `SharedString` conversion a rendered row needs happens in
-/// [`render_picker`], on text `all` already decided (never reformatted),
-/// which is what keeps that render allocation-free for a realistic
-/// underlying name (short enough to live inline in a `SharedString`'s
-/// small-string form).
+/// [`geode_shell::listfilter::rank`] takes `&[String]`. `labels` is the
+/// separate, PREPARED `SharedString` for each `all` entry (review fix
+/// round 1, IMPORTANT-3) — `open_picker` and the diagnostics observer
+/// both fill it off the render thread, so [`render_picker`] only ever
+/// clones an `Arc` per row; `SharedString::from(&str)` is a real
+/// allocation (there is no inline small-string form at the pinned rev),
+/// so doing that conversion once per row PER FRAME, as the first build
+/// did, violated "nothing allocates in render" on every repaint while a
+/// picker was open.
+///
+/// `query` is the text `ranked` was last built against — kept so
+/// [`Self::refilter`] can tell "the trader typed something new" from
+/// "nothing changed, don't touch the highlight" (review fix round 1,
+/// CRITICAL): the first build re-ranked (and reset the highlight to 0)
+/// on every call, including the ONE `commit`/`enter` always makes to
+/// cover a test harness's `set_value` (which fires no `Change` event at
+/// all) — so `u`, `down`, `down`, `enter` always loaded the TOP match,
+/// silently discarding whichever row the trader had actually
+/// highlighted.
 pub(crate) struct PickerState {
     pub input: Entity<InputState>,
     pub all: Vec<String>,
+    pub labels: Vec<SharedString>,
     pub ranked: Vec<usize>,
     pub highlighted: usize,
+    pub query: String,
 }
 
 impl PickerState {
-    /// Re-rank against the field's text; the highlight resets to the
-    /// top, exactly as a fresh filter session starts anywhere else in
-    /// this codebase.
-    pub(crate) fn refilter(&mut self, query: &str) {
-        self.ranked = geode_shell::listfilter::rank(&self.all, query)
+    /// Re-rank against `new_query`, but ONLY if it actually differs from
+    /// the query `ranked` was last built against — a no-op otherwise, so
+    /// a defensive re-rank at commit time (the field's current text may
+    /// never have reached this struct through a real `Change` event)
+    /// costs nothing when nothing changed, and never resets the
+    /// highlight out from under a trader who typed nothing at all.
+    /// Delegates the real rebuild to [`Self::rerank`], which is also the
+    /// door for a re-rank the query itself does NOT gate (the diagnostics
+    /// observer's own catalog refresh, review fix round 1, IMPORTANT-2).
+    pub(crate) fn refilter(&mut self, new_query: &str) {
+        if new_query == self.query {
+            return;
+        }
+        self.query = new_query.to_string();
+        self.rerank();
+    }
+
+    /// Rebuild `ranked` against the CURRENT `query`, preserving which
+    /// KEY was highlighted (by its index into `all`, not its position in
+    /// `ranked`) across the rebuild — falling back to the top row only
+    /// when that key dropped out of the new ranking entirely. A re-rank
+    /// must never silently move the trader's selection, whether it is
+    /// triggered by a new query ([`Self::refilter`]) or by `all` itself
+    /// changing under an unchanged query (the diagnostics observer).
+    pub(crate) fn rerank(&mut self) {
+        let was_highlighted = self.ranked.get(self.highlighted).copied();
+        self.ranked = geode_shell::listfilter::rank(&self.all, &self.query)
             .into_iter()
             .map(|r| r.row)
             .collect();
-        self.highlighted = 0;
+        self.highlighted = was_highlighted
+            .and_then(|all_index| self.ranked.iter().position(|&r| r == all_index))
+            .unwrap_or(0);
     }
 
     /// Move the highlight `delta` steps over `ranked`, clamped at either
@@ -210,11 +249,10 @@ pub(crate) fn render_picker(
         );
     } else {
         for (row_i, &i) in p.ranked.iter().enumerate() {
-            // A direct, one-time conversion of text `all` already
-            // decided — never a `format!` — so this is the one row a
-            // realistic (short) underlying name paints with no
-            // allocation (see `PickerState`'s own doc comment).
-            let text = SharedString::from(p.all[i].as_str());
+            // `labels[i]` is prepared off-render (`PickerState`'s own
+            // doc comment, review fix round 1, IMPORTANT-3) — this is a
+            // refcount clone, never a conversion.
+            let text = p.labels[i].clone();
             list = list.child(
                 h_flex()
                     .px_3()
