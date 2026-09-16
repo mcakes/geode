@@ -11223,6 +11223,51 @@ run_mutation "mdattr: the strip clears the table selection" \
             }),' \
   geode-marketdata k_from_the_top_row_enters_the_strip_and_i_edits_the_attribute
 
+# `Upload` must read `rebase or discard first` for as long as the draft
+# is Behind (spec §6.2's table), never falling through to the plain
+# clean/dirty rule underneath it. Mutated so the `behind` gate can never
+# fire, Upload would read greyed for the wrong reason while Behind (or
+# worse, `Ok(())` once dirty is also satisfied) instead of naming the
+# actual blocker.
+run_mutation "mdmenu: upload is greyed while behind" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '} else if behind {' \
+  '} else if false {' \
+  geode-marketdata behind_shows_rebase_and_discard_and_greys_upload
+
+# "Any other dispatched action closes the popup first, then runs" (spec
+# §6.1) is the one rule that keeps the popup from needing the shell's
+# modal machinery. Mutated so the guard can never fire, an unrelated
+# keystroke (a plain cursor motion, say) would run behind an open popup
+# without ever closing it — the popup and the grid both alive at once.
+run_mutation "mdmenu: an unrelated action closes the popup first" \
+  crates/geode-marketdata/src/tile.rs \
+  ') && self.popup.is_some()' \
+  ') && self.popup.is_some() && false' \
+  geode-marketdata an_unrelated_action_closes_the_menu_first
+
+# A disabled row's `enter`/click reports its reason as the notice and
+# leaves the popup open (spec §6.2) — it must never also dispatch the
+# very verb the reason says is refused. Mutated to fall through to the
+# `Ok` arm's own close-and-dispatch, a greyed "Upload" row would close
+# the popup and dispatch `marketdata::upload` anyway.
+run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Err(reason) => {
+                self.notice = Some((*reason).into());
+                self.rebuild_chrome();
+                cx.notify();
+            }' \
+  '            Err(reason) => {
+                self.notice = Some((*reason).into());
+                self.rebuild_chrome();
+                cx.notify();
+                let id = id.clone();
+                self.close_popup(cx);
+                self.dispatch(&id, None, window, cx);
+            }' \
+  geode-marketdata enter_on_a_greyed_row_notices_and_keeps_the_menu
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
