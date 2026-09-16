@@ -22,6 +22,7 @@ pub mod commands;
 pub mod content;
 pub mod core;
 pub mod delegate;
+pub(crate) mod header;
 pub mod tile;
 
 pub use content::{ACTIONS, DEFAULT_KEYMAP, MarketDataFactory};

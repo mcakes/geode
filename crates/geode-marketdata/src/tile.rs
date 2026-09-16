@@ -50,9 +50,9 @@
 //! against a grid `:rebase` is about to move away from underneath it.
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
-use crate::core::draft::local_hhmm;
-use crate::core::{Draft, DraftBadge, MatrixModel, PanelSpec, parse_cell};
+use crate::core::{Draft, MatrixModel, PanelSpec, parse_cell};
 use crate::delegate::MatrixDelegate;
+use crate::header::{self, HeaderInputs, HeaderModel};
 use geode_core::colour::readable_on;
 use geode_core::document::split_key;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
@@ -69,11 +69,11 @@ use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, Entity, Focusable as _, Hsla, IntoElement, SharedString, Window,
-    div, px,
+    div,
 };
 use gpui_component::input::InputState;
 use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, v_flex};
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -96,26 +96,6 @@ pub struct FindState {
     committed: Option<String>,
 }
 
-/// What one prepared header chip is painted as. The tone is resolved to a
-/// theme colour at paint (never a stored colour, so a theme switch needs
-/// no rebuild), and `Time` is the one tone whose colour depends on the
-/// clock — the staleness reading, which is a comparison per frame and not
-/// a format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tone {
-    Plain,
-    Key,
-    Time,
-    Warn,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-struct Chip {
-    text: SharedString,
-    tone: Tone,
-}
-
 /// The two header tones a theme colour cannot be trusted to paint as
 /// TEXT, floored to Part 2c's 3:1 readability ratio against the window
 /// background (`geode_core::colour::readable_on`, lightness moved toward
@@ -132,14 +112,14 @@ struct Chip {
 /// theme-signature rule at the scale of four inputs — so a theme switch
 /// recomputes on its first frame and every other frame is one compare.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct FlooredTones {
+pub(crate) struct FlooredTones {
     key: [Hsla; 4],
-    warn: Hsla,
-    error: Hsla,
+    pub(crate) warn: Hsla,
+    pub(crate) error: Hsla,
 }
 
 impl FlooredTones {
-    fn derive(theme: &Theme) -> Self {
+    pub(crate) fn derive(theme: &Theme) -> Self {
         let (bg, fg) = (to_rgb(theme.background), to_rgb(theme.foreground));
         let floor = |c: Hsla| to_hsla(readable_on(to_rgb(c), bg, fg));
         Self {
@@ -165,22 +145,6 @@ impl FlooredTones {
         if self.key != key {
             *self = Self::derive(theme);
         }
-    }
-}
-
-/// One chip's text colour: the theme's own secondary/primary text for the
-/// quiet tones, the floored `warning` for `Warn` (and for `Time` once the
-/// document is stale), the floored `danger` for `Error`. Never
-/// `warning_foreground` — that is the token for text on a SOLID warning
-/// fill, and a chip has no fill.
-fn tone_colour(tone: Tone, stale: bool, theme: &Theme, floored: &FlooredTones) -> Hsla {
-    match tone {
-        Tone::Plain => theme.muted_foreground,
-        Tone::Key => theme.foreground,
-        Tone::Time if stale => floored.warn,
-        Tone::Time => theme.muted_foreground,
-        Tone::Warn => floored.warn,
-        Tone::Error => floored.error,
     }
 }
 
@@ -324,13 +288,13 @@ pub struct MarketDataTile {
     /// clones it, and a `String` clone is an allocation per frame.
     notice: Option<SharedString>,
     stale_after: Rc<StdCell<Duration>>,
-    /// The prepared header, rebuilt by [`Self::changed`] — the one door
-    /// every mutation on this tile ends at — so `render` clones
+    /// The prepared header, rebuilt by [`Self::rebuild_chrome`] — the one
+    /// door every mutation on this tile ends at — so `render` clones
     /// refcounts and formats nothing.
-    chips: Vec<Chip>,
-    /// The painted generation's source time, parsed once beside its chip
-    /// so the staleness rule is a comparison per frame rather than an
-    /// RFC-3339 parse.
+    header: HeaderModel,
+    /// The painted generation's source time, parsed once beside the
+    /// header's own time text so the staleness rule is a comparison per
+    /// frame rather than an RFC-3339 parse.
     source_at: Option<chrono::DateTime<chrono::Utc>>,
     /// An outcome that arrived while the flip barrier (Phase 4 §3.10)
     /// still wanted this panel's key — held here, NOT applied, until
@@ -501,7 +465,16 @@ impl MarketDataTile {
             find: None,
             notice: None,
             stale_after,
-            chips: Vec::new(),
+            header: HeaderModel {
+                title: "".into(),
+                underlying: None,
+                dirty: false,
+                attrs: Vec::new(),
+                state: None,
+                notice: None,
+                time: None,
+                stale: false,
+            },
             source_at: None,
             staged: None,
             last_flip: 0,
@@ -979,95 +952,25 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// Prepare the header's chips (spec §8.2): the title and key, each
-    /// header attribute, the generation's source time, the draft's own
-    /// line, and the notice.
+    /// Prepare the header (spec §4): the kind badge and underlying, the
+    /// dirty dot, each header attribute, the one short state run, the
+    /// notice, and the generation's source time.
     fn rebuild_chrome(&mut self) {
-        self.chips.clear();
-        match &self.key {
-            Some(key) => {
-                self.chips.push(Chip {
-                    text: format!("{} {}", self.spec.title, display_key(key)).into(),
-                    tone: Tone::Key,
-                });
-            }
-            None => {
-                self.chips.push(Chip {
-                    text: format!("{} — no underlying — :underlying <value>", self.spec.title)
-                        .into(),
-                    tone: Tone::Warn,
-                });
-            }
-        }
-        for h in &self.model.header {
-            self.chips.push(Chip {
-                text: format!("{}: {}", h.label, h.text).into(),
-                tone: Tone::Plain,
-            });
-        }
         self.source_at = self
             .model
             .source_time
             .as_deref()
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&chrono::Utc));
-        if let Some(at) = self.source_at {
-            // Local, like every other displayed time in this codebase
-            // (Phase 4a's ruling).
-            self.chips.push(Chip {
-                text: at
-                    .with_timezone(&chrono::Local)
-                    .format("%H:%M:%S")
-                    .to_string()
-                    .into(),
-                tone: Tone::Time,
-            });
-        }
-        if self.key.is_some() && self.model.rows.is_empty() {
-            self.chips.push(Chip {
-                text: format!(
-                    "no document received for {}",
-                    display_key(self.key.as_deref().unwrap_or(&[]))
-                )
-                .into(),
-                tone: Tone::Warn,
-            });
-        }
-        if self.unresolved_restore && !self.draft.is_empty() {
-            // Parked, not lost (I-2): the restored edits have no grid
-            // position until a non-empty model resolves them by label, and
-            // the draft's own summary would otherwise claim they are on a
-            // document the panel has not received.
-            let n = self.draft.len();
-            let plural = if n == 1 { "" } else { "s" };
-            self.chips.push(Chip {
-                text: format!("{n} restored edit{plural} awaiting a document").into(),
-                tone: Tone::Warn,
-            });
-        } else {
-            // A temporary chip off the draft's badge — Task 4 replaces the
-            // whole header with the spec's dense-row design; this is only
-            // what keeps a trader told something is unsent in the
-            // meantime.
-            let chip = match self.draft.badge() {
-                DraftBadge::Clean => None,
-                DraftBadge::Dirty => Some("edited".to_string()),
-                DraftBadge::Behind { newer } => Some(format!("update {}", local_hhmm(&newer))),
-                DraftBadge::Sent => Some("sent".to_string()),
-            };
-            if let Some(text) = chip {
-                self.chips.push(Chip {
-                    text: text.into(),
-                    tone: Tone::Warn,
-                });
-            }
-        }
-        if let Some(notice) = &self.notice {
-            self.chips.push(Chip {
-                text: notice.clone(),
-                tone: Tone::Error,
-            });
-        }
+        self.header = HeaderModel::prepare(HeaderInputs {
+            spec: self.spec,
+            key: self.key.as_deref(),
+            model: &self.model,
+            badge: self.draft.badge(),
+            unresolved_restore: self.unresolved_restore,
+            notice: self.notice.as_ref(),
+            source_at: self.source_at,
+        });
     }
 
     /// Whether the painted generation is old enough to warrant the
@@ -1783,10 +1686,20 @@ impl MarketDataTile {
 
     /// The header exactly as painted, in order — the prepared strings, so
     /// a test asserts on what a trader reads rather than on the fields
-    /// behind it.
+    /// behind it. Staleness is applied here, as `render` applies it,
+    /// since [`HeaderModel::prepare`] never reads the clock.
     #[cfg(test)]
-    pub(crate) fn header_chips(&self) -> Vec<String> {
-        self.chips.iter().map(|c| c.text.to_string()).collect()
+    pub(crate) fn header_texts(&self) -> Vec<String> {
+        let mut h = self.header.clone();
+        h.stale = self.is_stale(chrono::Utc::now());
+        h.texts()
+    }
+
+    /// Whether the draft has any edit — the dirty dot the header paints
+    /// beside the underlying, rather than a text run a test can grep for.
+    #[cfg(test)]
+    pub(crate) fn header_dirty(&self) -> bool {
+        self.header.dirty
     }
 
     /// The table this panel's body is — what a test reads the painted
@@ -1801,7 +1714,7 @@ impl MarketDataTile {
 /// A document key in the panel's own typeable spelling (`SPX.Z`,
 /// `SPX.Z/EOD`) — the storage separator is unprintable, so it is never
 /// what a trader sees or types.
-fn display_key(key: &[String]) -> String {
+pub(crate) fn display_key(key: &[String]) -> String {
     key.join(&KEY_DISPLAY_SEPARATOR.to_string())
 }
 
@@ -1835,32 +1748,22 @@ impl gpui::Render for MarketDataTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         self.tones.refresh(theme);
-        // Copied out of the theme before anything else borrows `cx`, and
-        // `Hsla` is `Copy`: the per-chip decision below is then a compare
-        // and a copy, never a lookup or an allocation. (The cells' own
-        // colours are the delegate's, read the same way in `render_td`.)
-        let (muted_foreground, border) = (theme.muted_foreground, theme.border);
         let tones = self.tones;
-
-        let stale = self.is_stale(chrono::Utc::now());
-        let mut header = h_flex()
-            .w_full()
-            .h(px(22.))
-            .items_center()
-            .gap_3()
-            .px_2()
-            .text_sm()
-            .text_color(muted_foreground)
-            .border_b_1()
-            .border_color(border)
-            .debug_selector(|| format!("marketdata-header-{}", self.id.0));
-        for chip in &self.chips {
-            let colour = tone_colour(chip.tone, stale, theme, &tones);
-            header = header.child(div().text_color(colour).child(chip.text.clone()));
-        }
-        if stale {
-            header = header.child(div().text_color(tones.warn).child("stale"));
-        }
+        // Staleness is a comparison per frame, never a format: `prepare`
+        // never reads the clock, so `render` is the one place this is
+        // set before the header is painted.
+        self.header.stale = self.is_stale(chrono::Utc::now());
+        let tile = cx.entity();
+        let header = header::render(
+            &self.header,
+            None,
+            None,
+            false,
+            theme,
+            &tones,
+            &tile,
+            self.id.0,
+        );
 
         // The body: one `DataTable` over this tile's own delegate, in the
         // blotter's chrome (`Size::XSmall`, unbordered, unstriped) so the
@@ -1922,6 +1825,7 @@ mod tests {
     #[gpui::test]
     fn every_header_tone_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         use crate::delegate::tests::ground;
+        use crate::header::{Tone, tone_colour};
         use geode_core::colour::{READABLE_RATIO, contrast_ratio};
         cx.update(gpui_component::init);
         let (service, _) = geode_shell::theme::load_bundled();
@@ -1944,6 +1848,16 @@ mod tests {
                     if ratio < READABLE_RATIO {
                         failures.push(format!("{name}: {tone:?} stale={stale} at {ratio:.2}:1"));
                     }
+                }
+                // The header's dirty dot paints `tones.warn` directly (it
+                // has no `Tone` of its own to route through `tone_colour`)
+                // — already covered by the `Tone::Warn` case above, but
+                // asserted here explicitly since the dot is a fill, not a
+                // text run, and a future change to `tone_colour` alone
+                // would not touch it.
+                let dot_ratio = contrast_ratio(to_rgb(floored.warn), bg);
+                if dot_ratio < READABLE_RATIO {
+                    failures.push(format!("{name}: dirty dot at {dot_ratio:.2}:1"));
                 }
             });
         }
@@ -2659,17 +2573,18 @@ mod tests {
             (
                 t.model().rows.len(),
                 t.model().columns.len(),
-                t.header_chips(),
+                t.header_texts(),
             )
         });
         assert_eq!(rows, 2, "two terms down the side");
         assert_eq!(columns, 3, "three nodes across the top");
+        assert!(chips.iter().any(|c| c == "CVI"), "the title: {chips:?}");
         assert!(
-            chips.iter().any(|c| c == "CVI SPX.Z"),
-            "the title and the key: {chips:?}"
+            chips.iter().any(|c| c == "SPX.Z"),
+            "the underlying: {chips:?}"
         );
         assert!(
-            chips.iter().any(|c| c == "spot: 5000"),
+            chips.iter().any(|c| c == "spot 5000"),
             "each header attribute: {chips:?}"
         );
         let local = chrono::DateTime::parse_from_rfc3339(BASE)
@@ -2678,7 +2593,11 @@ mod tests {
             .format("%H:%M:%S")
             .to_string();
         assert!(
-            chips.contains(&local),
+            // `starts_with`, not an exact match: `BASE` is a fixed past
+            // date, so whether it also reads " stale" depends on how far
+            // real wall-clock `now` has drifted past it — this test is
+            // about the time text itself, not the staleness marker.
+            chips.iter().any(|c| c.starts_with(&local)),
             "the source time on the trader's own clock ({local}): {chips:?}"
         );
     }
@@ -2738,7 +2657,7 @@ mod tests {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
 
-        let chips = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.header_chips());
+        let chips = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.header_texts());
         let before = chips(&vcx);
         h.dispatch(&mut vcx, "down", None);
         assert_eq!(
@@ -2846,10 +2765,8 @@ mod tests {
             "SPX.Z's document must not be painted under NDX.Z"
         );
         assert!(
-            h.tile.read_with(&vcx, |t, _| t
-                .header_chips()
-                .iter()
-                .any(|c| c == "CVI NDX.Z")),
+            h.tile
+                .read_with(&vcx, |t, _| t.header_texts().iter().any(|c| c == "NDX.Z")),
             "and the header is the new key's"
         );
     }
@@ -3348,7 +3265,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         let (state, chips) = h
             .tile
-            .read_with(&vcx, |t, _| (t.draft().state.clone(), t.header_chips()));
+            .read_with(&vcx, |t, _| (t.draft().state.clone(), t.header_texts()));
         assert!(
             matches!(state, DraftState::Behind { .. }),
             "a newer generation under a restored draft is Behind, got {state:?}"
@@ -3443,12 +3360,8 @@ edits = [["2026-11-20", "-1", 9.5]]
             "the parsed value, formatted by the panel's own format, marked as an edit"
         );
         assert!(
-            h.tile
-                .read_with(&vcx, |t, _| t.header_chips())
-                .iter()
-                .any(|c| c.contains("edited")),
-            "the header counts it: {:?}",
-            h.tile.read_with(&vcx, |t, _| t.header_chips())
+            h.tile.read_with(&vcx, |t, _| t.header_dirty()),
+            "the header's dirty dot marks it"
         );
         assert!(h.editor_value(&vcx).is_none(), "the editor is gone");
         assert_eq!(
@@ -3581,7 +3494,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
         assert!(
             h.tile
-                .read_with(&vcx, |t, _| t.header_chips())
+                .read_with(&vcx, |t, _| t.header_texts())
                 .iter()
                 .any(|c| c == "'wide' is not a number"),
             "the notice reaches the header on the keystroke that set it"
@@ -3645,12 +3558,8 @@ edits = [["2026-11-20", "-1", 9.5]]
             "the document's own numbers are back"
         );
         assert!(
-            !h.tile
-                .read_with(&vcx, |t, _| t.header_chips())
-                .iter()
-                .any(|c| c.contains("edit")),
-            "and the header says nothing about a draft: {:?}",
-            h.tile.read_with(&vcx, |t, _| t.header_chips())
+            !h.tile.read_with(&vcx, |t, _| t.header_dirty()),
+            "and the header says nothing about a draft"
         );
         assert_eq!(
             h.command(&mut vcx, "revert"),
@@ -3698,11 +3607,10 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         assert_eq!(cell.text.to_string(), "0.1000", "the document's own value");
         assert!(!cell.edited);
-        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
-            !chips
-                .iter()
-                .any(|c| c.contains("edit") || c.contains("newer")),
+            !h.tile.read_with(&vcx, |t, _| t.header_dirty())
+                && !chips.iter().any(|c| c.contains("update")),
             "nothing left to explain a generation that is no longer retained: {chips:?}"
         );
         // Both are now refused again — there is no draft to move or drop.
@@ -3855,7 +3763,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             .with_timezone(&chrono::Local)
             .format("%H:%M")
             .to_string();
-        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
             "{chips:?}"
@@ -3909,7 +3817,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             .with_timezone(&chrono::Local)
             .format("%H:%M")
             .to_string();
-        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
             "{chips:?}"
@@ -3971,7 +3879,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         assert!(cell.edited);
 
-        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c
                 == "dropped 2 edits whose rows or columns the new document lacks: \
@@ -4015,10 +3923,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(rows, 1, "the newer document, its one term");
         assert_eq!(cell.text.to_string(), "0.1000", "the document's own value");
         assert!(!cell.edited);
-        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
         assert!(
-            !chips.iter().any(|c| c.contains("edit")),
-            "no draft chip left: {chips:?}"
+            !h.tile.read_with(&vcx, |t, _| t.header_dirty()),
+            "no dirty dot left"
         );
     }
 
@@ -4246,15 +4153,13 @@ edits = [["2026-11-20", "-1", 9.5]]
 
         let (edits, chips) = h
             .tile
-            .read_with(&vcx, |t, _| (t.draft().len(), t.header_chips()));
+            .read_with(&vcx, |t, _| (t.draft().len(), t.header_texts()));
         assert_eq!(
             edits, 1,
             "an empty document resolves nothing — and drops nothing"
         );
         assert!(
-            chips
-                .iter()
-                .any(|c| c == "1 restored edit awaiting a document"),
+            chips.iter().any(|c| c == "edits await a document"),
             "and the header says the edits are parked: {chips:?}"
         );
 
@@ -4330,7 +4235,7 @@ edits = [["2026-11-20", "-1", 9.5], ["2099-01-01", "-1", 1.0]]
         let first = h.document_request().unwrap().tag;
         h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
 
-        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c.contains("2099-01-01")),
             "the dropped pair is named: {chips:?}"
@@ -4411,7 +4316,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             (
                 t.draft().state.clone(),
                 t.model().rows.len(),
-                t.header_chips(),
+                t.header_texts(),
             )
         });
         assert_eq!(
@@ -4472,7 +4377,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         h.visible(&mut vcx, true);
         let tag = h.document_request().unwrap().tag;
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
-        let chips = h.tile.read_with(&vcx, |t, _| t.header_chips());
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c.contains("2099-01-01")),
             "the dropped-edit report is on screen after the delivery that \
