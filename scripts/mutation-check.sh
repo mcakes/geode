@@ -10218,12 +10218,8 @@ run_mutation "mdtile: serialize writes the draft" \
 # cannot save it — nothing moved, so nothing re-clamps.
 run_mutation "mdtile: a shorter document clamps the cursor" \
   crates/geode-marketdata/src/tile.rs \
-  '        self.cursor.0 = self.cursor.0.min(self.model.rows.len().saturating_sub(1));
-        self.cursor.1 = self
-            .cursor
-            .1
-            .min(self.model.columns.len().saturating_sub(1));' \
-  '        let _ = &self.model;' \
+  '        self.cursor = cursor::clamp(self.cursor, self.grid());' \
+  '        let _ = self.grid();' \
   geode-marketdata \
   a_shorter_document_clamps_the_cursor
 
@@ -10366,7 +10362,7 @@ run_mutation "mdtile: a delivery under an open barrier is staged" \
 # asserts the number itself.
 run_mutation "mdedit: a commit parses the typed text before writing it" \
   crates/geode-marketdata/src/tile.rs \
-  '        let value = match parse_cell(&text, self.spec.value_type) {' \
+  '        let value = match parse_cell(text, self.spec.value_type) {' \
   '        let value = match Ok::<f64, String>(0.0) {' \
   geode-marketdata \
   edit_commit_paints_the_cell_as_edited_and_the_header_counts_it
@@ -10391,14 +10387,20 @@ run_mutation "mdedit: the editor gives up focus before it is dropped" \
 # panel stays in insert mode with the value already written: every
 # keystroke after that is text going into an input nobody meant to be
 # open, and `mode == insert` is exactly what tells the shell to stop
-# matching. Anchored on the two lines after `draft.set`, since
-# `close_editor(window, cx)` alone appears at four sites (the moved cell,
-# the two refusals and this one).
+# matching. Anchored on the `&base,\n);` two lines above (Task 5 gave the
+# attribute arm its own identical-looking `close_editor` +
+# `notice = None` pair, so the bare two lines alone are ambiguous —
+# `&base,` is `commit_cell_edit`'s own `draft.set` call ending, not
+# `commit_attr_edit`'s `draft.set_attr`).
 run_mutation "mdedit: a committed edit closes the editor" \
   crates/geode-marketdata/src/tile.rs \
-  '        self.close_editor(window, cx);
+  '            &base,
+        );
+        self.close_editor(window, cx);
         self.notice = None;' \
-  '        self.notice = None;' \
+  '            &base,
+        );
+        self.notice = None;' \
   geode-marketdata \
   key_context_reports_insert_while_the_editor_exists
 
@@ -10974,8 +10976,8 @@ run_mutation "mdtable: a clicked column is translated back through the label col
 # check (spec §8.8.7).
 run_mutation "mdtable: the delegate's cursor mirror follows the tile's cursor" \
   crates/geode-marketdata/src/tile.rs \
-  '            d.cursor = (row, col);' \
-  '            let _ = (row, col);' \
+  '                d.cursor = Some((row, col));' \
+  '                let _ = (row, col);' \
   geode-marketdata \
   the_delegate_mirrors_the_cursor_and_the_editor
 
@@ -11147,6 +11149,79 @@ run_mutation "mdheader: a dirty draft paints the dot" \
   '            DraftBadge::Dirty => (true, None),' \
   '            DraftBadge::Dirty => (false, None),' \
   geode-marketdata dirty_is_a_dot_and_behind_reads_update_hhmm
+
+# ---- Panel header: the strip's own cursor, editing, and :set (Task 5) ---
+
+# `k` on the top row enters the strip only when there IS an attribute to
+# land on. Mutated so the guard can never pass, `k` on row 0 always steps
+# within the grid (clamped in place, since row 0 cannot go higher) and the
+# strip is unreachable by keyboard at all.
+run_mutation "mdcursor: k on the top row enters the strip" \
+  crates/geode-marketdata/src/core/cursor.rs \
+  '        (Cursor::Cell { row: 0, col }, Motion::Rows(n)) if n < 0 && grid.attrs > 0 => {' \
+  '        (Cursor::Cell { row: 0, col }, Motion::Rows(n)) if n < 0 && grid.attrs > usize::MAX - 1 => {' \
+  geode-marketdata k_on_the_top_row_enters_the_strip_at_the_nearest_attribute
+
+# `j` (or any downward motion) out of the strip returns to the grid column
+# the cursor left FROM, remembered in `last_grid_col`. Mutated to land on
+# column 0 instead, a trader who entered the strip from column 3 lands
+# back on column 0 rather than where they started.
+run_mutation "mdcursor: j from the strip returns to the remembered column" \
+  crates/geode-marketdata/src/core/cursor.rs \
+  '        (Cursor::Attr(_), Motion::Rows(n)) if n > 0 => Cursor::Cell {
+            row: 0,
+            col: (*last_grid_col).min(max_col),
+        },' \
+  '        (Cursor::Attr(_), Motion::Rows(n)) if n > 0 => Cursor::Cell {
+            row: 0,
+            col: 0,
+        },' \
+  geode-marketdata j_returns_to_the_top_row_at_the_remembered_column
+
+# A refused `parse_attr` must leave the editor OPEN, in insert mode, with
+# the typed text intact — the cell rule (spec §5.2), so retyping a bad
+# date is one keystroke away. Mutated to close the editor on the way out,
+# the notice still shows but the trader has lost the keyboard and the
+# typed text along with it.
+run_mutation "mdattr: a refused attribute value stays in insert mode" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Err(e) => {
+                // Refused, staying in insert mode with the typed text
+                // (the cell rule, spec §5.2) — retyping is one keystroke
+                // away where dropping the editor would throw the whole
+                // line back at the trader.
+                self.notice = Some(e.into());
+                return true;
+            }' \
+  '            Err(e) => {
+                // Refused, staying in insert mode with the typed text
+                // (the cell rule, spec §5.2) — retyping is one keystroke
+                // away where dropping the editor would throw the whole
+                // line back at the trader.
+                self.close_editor(window, cx);
+                self.notice = Some(e.into());
+                return true;
+            }' \
+  geode-marketdata a_bad_date_stays_in_insert_mode_with_the_notice
+
+# The strip clears the table's own selection (`clear_selection`) so the
+# grid paints no highlighted row behind an attribute edit. Mutated to skip
+# the clear, the previous grid selection stays painted underneath the
+# strip's own cursor border — two cursors on screen at once.
+run_mutation "mdattr: the strip clears the table selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Cursor::Attr(_) => self.table.update(cx, |t, cx| {
+                let d = t.delegate_mut();
+                d.cursor = None;
+                d.editor = editor;
+                t.clear_selection(cx);
+            }),' \
+  '            Cursor::Attr(_) => self.table.update(cx, |t, cx| {
+                let d = t.delegate_mut();
+                d.cursor = None;
+                d.editor = editor;
+            }),' \
+  geode-marketdata k_from_the_top_row_enters_the_strip_and_i_edits_the_attribute
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
