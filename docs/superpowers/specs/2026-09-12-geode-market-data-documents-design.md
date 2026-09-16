@@ -744,6 +744,9 @@ has more than a few dozen columns. §11 records the model build and the
 paint at 20×30 and at 10,000 rows × 5 columns — the dividend-schedule
 shape that forced the 2026-09-13 revision — so the decision is measured.
 
+Superseded in part by `2026-09-14-geode-market-data-panel-header-design.md`
+(header, attributes, actions).
+
 ### 8.3 Keys
 
 Context `marketdata` with `mode = normal | insert`, opted into counts.
@@ -765,6 +768,9 @@ only while a newer generation sits under the draft.
 
 The factory registers `marketdata::*` actions and ships its default
 bindings as a keymap fragment (§8.6).
+
+Superseded in part by `2026-09-14-geode-market-data-panel-header-design.md`
+(header, attributes, actions).
 
 ### 8.4 The draft
 

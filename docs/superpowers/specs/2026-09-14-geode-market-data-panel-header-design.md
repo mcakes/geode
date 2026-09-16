@@ -353,3 +353,109 @@ the strip's tint and cursor border, the badge and dot at 22px.
 - A primary Upload button outside the menu (offered, declined).
 - A shell-level popup facility for other modules: the popup is this
   crate's own until a second module needs one.
+
+## 11. As built (2026-09-15)
+
+Built as designed, with the following decisions the design left open or
+got wrong, each verified against `crates/geode-marketdata` before being
+recorded here.
+
+1. **§5.1's own open note is resolved:** the pinned gpui-component's
+   clear door is `TableState::clear_selection`, called from
+   `MarketDataTile::sync_cursor`'s `Cursor::Attr` arm — the delegate's
+   `cursor` field is also set to `None` there, so the grid mirrors no
+   selection at all while the cursor is in the strip.
+2. **`:bump` in the strip is refused, not silently inert or grid-wide.**
+   `bump` touches cells only (§5.3 says so for the draft; the tile's
+   own `bump` refuses with `"bump needs a grid cell — the cursor is in
+   the header"` when the cursor is `Cursor::Attr` rather than treating
+   the strip as an empty row or column). `yc` in the strip is inert
+   with a notice for the same reason — a column yank names a grid
+   column that does not exist in the strip.
+3. **The popup closes only at the module's own doors, never the
+   shell's.** `find` closes it on every `FindEvent` and `command`
+   closes it for every `Command` but `Menu` (a `:` command typed while
+   the menu is open should not be swallowed as "just close it" — the
+   trader is mid-command). The one residual this leaves, recorded
+   rather than fixed: a `:` line painted over an open menu stays
+   painted until a command is actually typed, since `command` only
+   fires on `enter`. Cosmetic, left as is.
+4. **The `⋯` button does not stop propagation, and must not.** It is a
+   `capture_any_mouse_down` listener (Capture phase, ahead of the
+   popup's own `on_mouse_down_out`, which is also Capture and would
+   otherwise close a just-reopened menu one beat behind this button's
+   own toggle). `cx.stop_propagation()` was in the first cut and was
+   wrong: it suppressed the shell's entire Bubble phase for that click,
+   so clicking `⋯` on an unfocused tile opened the menu without ever
+   focusing that tile — `mode == menu` then drove whichever tile the
+   shell still had focused, not the one just clicked. Capture-before-
+   Bubble is the whole fix; nothing needs to be suppressed at all.
+5. **The picker has no chords — spec §7 is wrong and is corrected
+   here.** §7 says "`up`/`down` (and `ctrl+j`/`ctrl+k` chords) move the
+   highlight"; only bare `up`/`down` were built, and the two chords
+   were deliberately dropped (commit `cdfae5d`). A shipped chord (here,
+   `ctrl+k`, the palette) must still fire from inside any module's
+   insert-mode field exactly as it fires from inside a cell editor —
+   CLAUDE.md's own standing rule — because a chord resolves against the
+   *whole* context stack, and narrowing that shadow to "only while the
+   picker is open" still takes the palette away exactly when a trader
+   is typing into the picker. `ctrl_k_still_opens_the_palette_from_the_
+   open_picker` is the test that pins this. §3's grammar table
+   (`up`/`down` — chords never named there) already agreed with the
+   build; only §7's own sentence needed correcting.
+6. **Picker identity is the catalog key string, never a row index —
+   found and fixed across two review rounds, not designed in from the
+   start.** The first build re-ranked (and reset the highlight to row
+   0) on every `commit`, including the defensive re-rank `commit`
+   always makes to cover `InputState::set_value` firing no `Change`
+   event at all — so `u`, `down`, `down`, `enter` always loaded the TOP
+   match, silently discarding whichever row the trader had highlighted
+   (round 1, CRITICAL, fixed in `cf166b7`). The fix's own `rerank`
+   still captured the highlighted position as an index into `all` and
+   looked that number up again after the catalog re-sorted — since
+   `catalog_keys()` returns a freshly sorted list, a newly arrived key
+   that sorts earlier shifts every later index, silently re-highlighting
+   a *different* row with no signal anything had moved (round 2,
+   CRITICAL, fixed in `59111d3`). `PickerState::place(key: Option<&str>)`
+   is now the one door every re-rank goes through — `refilter` (a real
+   query change) and the diagnostics observer's own catalog refresh
+   both capture `highlighted_key()` before rebuilding and hand it back
+   in — falling back to row 0 only when the key is genuinely gone.
+   `commit_picker` re-ranks from the field's live text (`p.input.read
+   (cx).value()`) before reading `highlighted`, never trusting whatever
+   `ranked` last held, for the `set_value`-fires-no-`Change` reason
+   above.
+7. **`DraftBadge::Sent` carries no timestamp.** §4 designed `Sent { at }`
+   painting "sent HH:MM" in the info tone; Part 3 built the unit variant
+   `Sent` (no field) and `HeaderModel::prepare` paints a bare `"sent"`
+   in `Tone::Time` (the muted tone, not a distinct info tone — none was
+   added). This is deliberately provisional: nothing in Part 3 ever
+   constructs `Sent` (`:upload` still answers "upload is not built
+   yet"), so there is no `at` to carry yet and no reader depending on
+   one. Part 4 (egress) is expected to add the field and the real
+   paint when upload actually produces a sent state.
+8. **`marketdata::set_attr` was not registered as an action.** §8 lists
+   it among "actions added" as "the `:set` door, palette-only"; the
+   built `ACTIONS` table (`content.rs`) has no such entry and `:set`
+   remains reachable only by typing the command line — there is no
+   `ActionDef`, so it does not appear in the palette and cannot be
+   bound in a keymap. `:set`'s own behaviour (parse, refuse, report the
+   current value with no argument) is built exactly as §5.2 describes;
+   only the palette-visibility half of §8's sentence was not.
+9. **Insert-mode routing while the picker is open**, beyond `up`/
+   `down`: `commit` and `cancel` are excluded from `dispatch`'s
+   close-first gate (alongside the five menu verbs) precisely because
+   `key_context()` reports `mode == "insert"` while a `Picker`'s field
+   holds focus, which is what puts the shell's `enter`/`escape` in a
+   trader's hand as this crate's own `commit_picker`/`close_popup_with_
+   window` rather than having the generic "any other action closes the
+   popup" rule swallow them first.
+
+Every rule above has a harness entry and a named test in
+`crates/geode-marketdata/src/tile.rs`, `popup.rs`, `commands.rs` or
+`core/menu.rs`'s own test modules; `scripts/mutation-check.sh` carries
+one `run_mutation` entry per behaviour changed on this branch (Task 8
+brought the harness to 929 entries total). Display checks — the
+anchored popup escaping the tile clip, the strip's tint and cursor
+border, the badge and dot at 22px — remain pending on a real window, as
+recorded in §9.
