@@ -1782,7 +1782,16 @@ impl MarketDataTile {
             .collect()
     }
 
+    /// `/` (spec §6.1's own example of a shell-owned door the popup must
+    /// not survive): `/`/`:` are `tile`-context bindings the shell
+    /// resolves before ever reaching this module's own dispatch, so the
+    /// popup's own "any other dispatched action closes it first" rule
+    /// (`dispatch`'s own guard) never sees them. Closing here,
+    /// unconditionally and on every variant, is what keeps a find
+    /// session that starts with the menu open from painting `mode ==
+    /// menu` under the find field for even one keystroke.
     pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
+        self.close_popup(cx);
         match event {
             FindEvent::Changed(query) => {
                 let origin = match &self.find {
@@ -1877,7 +1886,20 @@ impl MarketDataTile {
         if matches!(line.split_whitespace().next(), Some("underlying" | "key")) {
             self.request_catalog(cx);
         }
-        match commands::parse(line)? {
+        let command = commands::parse(line)?;
+        // The other half of `find`'s own door (spec §6.1): `:` is a
+        // shell-owned `tile`-context binding too, so the popup's own
+        // "any other dispatched action closes it first" guard in
+        // `dispatch` never sees a `:` line either. Every parsed command
+        // but `Menu` itself (which TOGGLES the popup, and so must decide
+        // for itself rather than have this close it out from under that
+        // decision) closes it here, once parsing has succeeded — a
+        // failed parse leaves the popup exactly as `dispatch`'s own
+        // guard would, since nothing here ran at all.
+        if !matches!(command, Command::Menu) {
+            self.close_popup(cx);
+        }
+        match command {
             Command::Key(key) => self.set_key(key, cx),
             Command::Revert => self.revert(cx),
             Command::Bump { delta, axis } => self.bump(delta, axis, cx),
@@ -2445,8 +2467,19 @@ mod tests {
 
     /// The view under the window's `Root`: renders the tile, and nothing
     /// else — what a test reads comes out of [`Built`], not out of here.
+    ///
+    /// `clicks` stands in for the shell's own tile-level bubble-phase
+    /// mouse-down (`focus_main_tile`/`focus_dock_tile`, drag arming,
+    /// `pending_focus_restore` — CLAUDE.md's focus rule): this crate's
+    /// harness has one tile and no shell, so a real click-to-focus
+    /// listener does not exist to observe directly. A plain bubble-phase
+    /// `on_mouse_down` wrapping the tile stands in for it — if this
+    /// crate's own capture-phase handlers ever swallowed propagation, a
+    /// click on them would leave this counter unmoved exactly as it
+    /// would leave the shell's own listeners unmoved.
     struct Host {
         tile: Entity<MarketDataTile>,
+        clicks: Rc<StdCell<u32>>,
     }
     impl gpui::Render for Host {
         fn render(
@@ -2454,7 +2487,13 @@ mod tests {
             _w: &mut Window,
             _cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
-            gpui::div().size_full().child(self.tile.clone())
+            let clicks = self.clicks.clone();
+            gpui::div()
+                .size_full()
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, _cx| {
+                    clicks.set(clicks.get() + 1);
+                })
+                .child(self.tile.clone())
         }
     }
 
@@ -2465,6 +2504,7 @@ mod tests {
         tile: Entity<MarketDataTile>,
         frame: Entity<Frame>,
         diagnostics: Entity<Diagnostics>,
+        clicks: Rc<StdCell<u32>>,
     }
 
     struct Harness {
@@ -2482,6 +2522,9 @@ mod tests {
         /// there is no service behind a `for_tests` handle, so this only
         /// drops the sender.
         data: DataHandle,
+        /// [`Host`]'s own bubble-phase click counter — the shell's
+        /// tile-level mouse-down stand-in.
+        clicks: Rc<StdCell<u32>>,
     }
 
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
@@ -2512,13 +2555,15 @@ mod tests {
                         cx,
                     );
                     let tile = occupant.view.clone().downcast::<MarketDataTile>().unwrap();
+                    let clicks = Rc::new(StdCell::new(0));
                     *slot.borrow_mut() = Some(Built {
                         content: occupant.content,
                         tile: tile.clone(),
                         frame,
                         diagnostics,
+                        clicks: clicks.clone(),
                     });
-                    let host = cx.new(|_| Host { tile });
+                    let host = cx.new(|_| Host { tile, clicks });
                     // Wrapped in `Root`, exactly as `main.rs` wraps the
                     // shell — and load-bearing here rather than decorative:
                     // gpui-component registers the FOCUSED `InputState` on
@@ -2545,6 +2590,7 @@ mod tests {
                 diagnostics: built.diagnostics,
                 rx,
                 data,
+                clicks: built.clicks,
             },
             vcx,
         )
@@ -2618,6 +2664,11 @@ mod tests {
         /// The open editor's text, `None` when none is open.
         fn editor_value(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
             self.tile.read_with(vcx, |t, cx| t.editor_value(cx))
+        }
+        /// [`Host`]'s own bubble-phase click count — the shell's
+        /// tile-level mouse-down stand-in (see `Host`'s own doc comment).
+        fn host_clicks(&self) -> u32 {
+            self.clicks.get()
         }
         /// Seed the open editor — the one thing a test cannot do through a
         /// key press. Typing for real is exercised in
@@ -5129,5 +5180,61 @@ edits = [["2099-01-01", "-1", 1.0]]
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
             Some("not built yet".into())
         );
+    }
+
+    /// Fix round 1, IMPORTANT-1: the `⋯` button's capture-phase handler
+    /// must decide the click first WITHOUT stopping propagation, or the
+    /// shell's own tile-level bubble listeners (click-to-focus, drag
+    /// arming, `pending_focus_restore`) never run for that click — this
+    /// crate's harness has one tile and no shell, so [`Host`]'s own
+    /// bubble-phase counter stands in for them. Both clicks (open, then
+    /// close) must reach it.
+    #[gpui::test]
+    fn a_menu_button_click_still_reaches_the_tiles_own_listeners(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let button = centre_of(&mut vcx, &format!("marketdata-menu-button-{TILE}"));
+        click_at(&mut vcx, button, 1);
+        assert_eq!(h.mode(&vcx), "menu");
+        assert_eq!(
+            h.host_clicks(),
+            1,
+            "the first click still bubbles to the tile's own listeners"
+        );
+        click_at(&mut vcx, button, 1);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.host_clicks(),
+            2,
+            "the second click — the one that closes the menu — bubbles too"
+        );
+    }
+
+    /// Fix round 1, IMPORTANT-2: `/` is a shell-owned `tile`-context
+    /// binding that never reaches `dispatch`'s own "any other action
+    /// closes the popup" guard, so `find` must close it itself — on the
+    /// very first keystroke of a find session started with the menu
+    /// open.
+    #[gpui::test]
+    fn a_find_keystroke_closes_the_popup(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&vcx), "menu");
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("1M".into()), window, cx));
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    /// The other half of fix round 1, IMPORTANT-2: `:` is the same kind
+    /// of shell-owned door, so `command` closes the popup itself for
+    /// every parsed command but `Menu` (which toggles it).
+    #[gpui::test]
+    fn a_command_line_closes_the_popup(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&vcx), "menu");
+        h.command(&mut vcx, "bump 1").unwrap();
+        assert_eq!(h.mode(&vcx), "normal");
     }
 }

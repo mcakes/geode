@@ -301,25 +301,43 @@ pub(crate) fn render(
     }
 
     // 7. `⋯` — the mouse door onto the action list (spec §6.1), the
-    // click's own form of `.`. `cx.stop_propagation()` here means the
-    // shell's tile-level mouse-down (focus re-arm) does not run for this
-    // click — acceptable, since opening the action list changes nothing
-    // about focus (unlike the attribute strip's click above, which
-    // deliberately leaves propagation alone).
+    // click's own form of `.`.
     //
-    // **On the CAPTURE phase, not the bubble one.** The popup's own
+    // **On the CAPTURE phase, not the bubble one — and it does NOT stop
+    // propagation (fix round 1, IMPORTANT-1).** The popup's own
     // `on_mouse_down_out` (`popup.rs`) is a Capture-phase listener that
     // fires on ANY mouse-down whose position is outside the popup's own
     // bounds — the button included, since the button is not inside the
-    // popup — and Capture always runs to completion (or a `stop_
-    // propagation`) BEFORE Bubble even starts. A Bubble-phase handler
-    // here would always run one beat behind that: `down_out` would have
-    // already closed the popup by the time this button's own handler
-    // asked whether one was open, so a second click on the button (meant
-    // to close it) would instead see it already closed and reopen it.
-    // Capturing here, ahead of `down_out` in the same pass, lets this
-    // button decide the click before the popup's own "outside" rule
-    // gets a say.
+    // popup — and Capture always runs to completion BEFORE Bubble even
+    // starts. A Bubble-phase handler here would always run one beat
+    // behind that: `down_out` would have already closed the popup by the
+    // time this button's own handler asked whether one was open, so a
+    // second click on the button (meant to close it) would instead see
+    // it already closed and reopen it. Capturing here, ahead of
+    // `down_out` in the same pass, is what lets this button decide the
+    // click before the popup's own "outside" rule gets a say — that
+    // ordering alone is what the toggle needs, and it needs nothing more:
+    //
+    // - First click (no popup open, so no `down_out` listener is even
+    //   painted yet — the popup this click is about to open does not
+    //   exist in the frame the click was dispatched against): this
+    //   handler opens the menu; Bubble then runs untouched, exactly as
+    //   any other tile click does — click-to-focus, drag arming,
+    //   `pending_focus_restore` all still fire.
+    // - Second click (popup open, so `down_out` IS painted): this
+    //   handler closes the menu first, in Capture, ahead of `down_out`;
+    //   `down_out`'s own `close_popup` then runs on an already-`None`
+    //   popup and is a no-op; Bubble again runs untouched.
+    //
+    // `cx.stop_propagation()` was here in the first cut and was wrong: it
+    // suppressed the shell's ENTIRE bubble phase for this click, so a
+    // click on `⋯` on an unfocused tile opened the menu without ever
+    // focusing that tile — `mode == menu` reached a context stack no
+    // longer topped by this tile, and the menu's own `j`/`k`/`enter`/
+    // `escape` drove whichever tile the shell had focused instead. This
+    // button needs to go FIRST in Capture, never to be the LAST thing
+    // that runs — unlike the attribute strip's click above, which was
+    // never a propagation question at all (it always let Bubble run).
     row = row.child(
         div()
             .px_1p5()
@@ -336,7 +354,6 @@ pub(crate) fn render(
                     if event.button != gpui::MouseButton::Left {
                         return;
                     }
-                    cx.stop_propagation();
                     tile.update(cx, |t, cx| t.toggle_menu(window, cx))
                 }
             }),
