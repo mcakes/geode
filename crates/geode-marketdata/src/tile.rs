@@ -55,7 +55,7 @@ use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::{Draft, MatrixModel, PanelSpec, parse_attr, parse_cell};
 use crate::delegate::MatrixDelegate;
 use crate::header::{self, HeaderInputs, HeaderModel};
-use crate::popup::{MenuState, Popup, render_menu};
+use crate::popup::{MenuState, PickerState, Popup, render_menu, render_picker};
 use geode_core::colour::readable_on;
 use geode_core::document::split_key;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
@@ -74,7 +74,7 @@ use gpui::{
     App, ClipboardItem, Context, Entity, Focusable as _, Hsla, IntoElement, SharedString, Window,
     div, px,
 };
-use gpui_component::input::InputState;
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, v_flex};
 use std::cell::Cell as StdCell;
@@ -474,6 +474,26 @@ impl MarketDataTile {
             }
         })
         .detach();
+        cx.observe(&diagnostics, |this, _diagnostics, cx| {
+            // A fresh catalog only matters LIVE while the picker is open
+            // (spec §7): `completions()` already reads the catalog
+            // pull-style at call time, and a closed panel gets a fresh
+            // one the next time it opens (`open_picker`'s own
+            // re-request) — so most notifications from this entity
+            // (a source's health, say) cost this one `matches!` and
+            // nothing else.
+            if !matches!(this.popup, Some(Popup::Picker(_))) {
+                return;
+            }
+            let all = this.catalog_keys(cx);
+            if let Some(Popup::Picker(p)) = &mut this.popup {
+                p.all = all;
+                let query = p.input.read(cx).value().to_string();
+                p.refilter(&query);
+            }
+            cx.notify();
+        })
+        .detach();
 
         let mut this = MarketDataTile {
             id,
@@ -525,15 +545,17 @@ impl MarketDataTile {
     }
 
     /// Pushed onto the keymap context stack while this tile is focused.
-    /// `insert` exactly while the cell editor holds the keyboard — the
-    /// shell's insert branch (spec §8.6) keys on this one pair — `menu`
-    /// exactly while the action list is open (spec §6.1; `editor` wins
-    /// over `popup` since the two are exclusive by construction, see
-    /// `toggle_menu`), else `normal`. `counts()` stays on in every mode
-    /// deliberately: stopping a typed `3` from becoming a count prefix is
-    /// the shell's job there, not this context's.
+    /// `insert` while the cell editor holds the keyboard OR the
+    /// underlying picker is open (spec §7/§8.6 — a `Popup::Picker`'s
+    /// field holds the keyboard exactly as the cell editor does, which is
+    /// the shell's insert branch's own one pair to key on), `menu` exactly
+    /// while the action list is open (spec §6.1; `editor` wins over
+    /// `popup` since the two are exclusive by construction, see
+    /// `toggle_menu`/`open_picker`), else `normal`. `counts()` stays on in
+    /// every mode deliberately: stopping a typed `3` from becoming a
+    /// count prefix is the shell's job there, not this context's.
     pub fn key_context(&self) -> KeyContext {
-        let mode = if self.editor.is_some() {
+        let mode = if self.editor.is_some() || matches!(self.popup, Some(Popup::Picker(_))) {
             "insert"
         } else if matches!(self.popup, Some(Popup::Menu(_))) {
             "menu"
@@ -1080,13 +1102,23 @@ impl MarketDataTile {
         // runs" (spec §6.1) — the one rule that keeps the popup from
         // needing the shell's modal machinery. The five menu verbs are
         // the popup's own grammar and must not close it out from under
-        // themselves.
+        // themselves; `commit`/`cancel` join them (Task 7) because with
+        // a picker open they route to IT rather than closing it —
+        // `key_context` reports `insert` while one is open, which is
+        // exactly what puts `commit`/`cancel` in a trader's hand for it.
+        //
+        // `close_popup_with_window`, never plain `close_popup`: this is
+        // reachable with a `Popup::Picker` open (any OTHER action, an
+        // ordinary cursor motion say), and its field holds the keyboard —
+        // dropping it unblurred would leave `Window::focused` pointing at
+        // a dead input for the rest of the session (`close_editor`'s own
+        // rule).
         if !matches!(
             verb,
-            "menu" | "menu_down" | "menu_up" | "menu_pick" | "menu_close"
+            "menu" | "menu_down" | "menu_up" | "menu_pick" | "menu_close" | "commit" | "cancel"
         ) && self.popup.is_some()
         {
-            self.close_popup(cx);
+            self.close_popup_with_window(window, cx);
         }
         let n = count.unwrap_or(1).max(1) as isize;
         // Whether this action touched something the HEADER paints (review
@@ -1140,17 +1172,32 @@ impl MarketDataTile {
                 self.begin_edit(window, cx);
                 true
             }
-            "commit" => self.commit_edit(window, cx),
+            "commit" => {
+                if matches!(self.popup, Some(Popup::Picker(_))) {
+                    self.commit_picker(window, cx);
+                    false
+                } else {
+                    self.commit_edit(window, cx)
+                }
+            }
             "cancel" => {
-                // Only when there WAS an editor: `marketdata::cancel` is
-                // bound in insert mode alone, so a normal-mode arrival is
-                // the palette's, and it has nothing to say.
-                match self.editor.is_some() {
-                    true => {
-                        self.close_editor(window, cx);
-                        true
+                // A picker takes priority over the (otherwise absent)
+                // editor: the two are exclusive by construction, so this
+                // is really "whichever of the two is open, if either".
+                if matches!(self.popup, Some(Popup::Picker(_))) {
+                    self.close_popup_with_window(window, cx);
+                    false
+                } else {
+                    // Only when there WAS an editor: `marketdata::cancel`
+                    // is bound in insert mode alone, so a normal-mode
+                    // arrival is the palette's, and it has nothing to say.
+                    match self.editor.is_some() {
+                        true => {
+                            self.close_editor(window, cx);
+                            true
+                        }
+                        false => false,
                     }
-                    false => false,
                 }
             }
             "find_next" | "find_prev" => {
@@ -1180,13 +1227,22 @@ impl MarketDataTile {
                 if self.popup.is_none() {
                     return false;
                 }
-                self.close_popup(cx);
+                // `_with_window`: this is a bare action id, so nothing
+                // upstream promises it can only ever reach a `Menu` —
+                // routing through the blur-first door is what keeps a
+                // stray dispatch here from ever seeing `close_popup`'s
+                // own "must never be a Picker" assertion fire.
+                self.close_popup_with_window(window, cx);
                 false
             }
             "menu_down" | "menu_up" => {
-                if let Some(Popup::Menu(m)) = &mut self.popup {
-                    let delta = if verb == "menu_down" { n } else { -n };
-                    m.highlighted = menu::step(&m.rows, m.highlighted, delta);
+                let delta = if verb == "menu_down" { n } else { -n };
+                match &mut self.popup {
+                    Some(Popup::Menu(m)) => {
+                        m.highlighted = menu::step(&m.rows, m.highlighted, delta);
+                    }
+                    Some(Popup::Picker(p)) => p.step_highlighted(delta),
+                    None => {}
                 }
                 false
             }
@@ -1215,12 +1271,15 @@ impl MarketDataTile {
                 }
                 true
             }
-            // `upload` is Part 4; `load_underlying` is Task 7. Both parse
-            // and are registered today so the palette and a keymap
-            // already reach them (spec §6.2/§7) — dispatching either
-            // here answers honestly rather than pretending they do
-            // nothing.
-            "upload" | "load_underlying" => {
+            "load_underlying" => {
+                self.open_picker(window, cx);
+                false
+            }
+            // `upload` is Part 4 — parsed and registered today so the
+            // palette and a keymap already reach it (spec §6.2), so
+            // dispatching it answers honestly rather than pretending it
+            // does nothing.
+            "upload" => {
                 self.notice = Some("not built yet".into());
                 true
             }
@@ -1515,7 +1574,32 @@ impl MarketDataTile {
     /// Close whatever popup is open. Harmless when none is (`dispatch`'s
     /// own "any other action closes it first" rule calls this
     /// unconditionally).
+    ///
+    /// **Must never see a [`Popup::Picker`]** — its field holds the
+    /// keyboard, and dropping it here without blurring first would leave
+    /// `Window::focused` pointing at a dead input for the rest of the
+    /// session (`close_editor`'s own rule). [`Self::close_popup_with_window`]
+    /// is the door for every site that can actually reach one; `find` and
+    /// `command` keep calling this one directly because neither can ever
+    /// be reached while a Picker's field holds focus — `/`/`:` would type
+    /// into it instead of ever reaching the shell's own dispatch.
     pub(crate) fn close_popup(&mut self, cx: &mut Context<Self>) {
+        debug_assert!(
+            !matches!(self.popup, Some(Popup::Picker(_))),
+            "close_popup must not see a Picker — use close_popup_with_window, which blurs first"
+        );
+        self.popup = None;
+        cx.notify();
+    }
+
+    /// [`Self::close_popup`], with the keyboard given up first when the
+    /// popup is a [`Popup::Picker`] — `close_editor`'s own blur-then-drop
+    /// order (blur, THEN drop, both halves): every site that can actually
+    /// see a Picker open has a `Window` to give this.
+    pub(crate) fn close_popup_with_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.popup, Some(Popup::Picker(_))) {
+            window.blur(cx);
+        }
         self.popup = None;
         cx.notify();
     }
@@ -1546,6 +1630,116 @@ impl MarketDataTile {
                 self.close_popup(cx);
                 self.dispatch(&id, None, window, cx);
             }
+        }
+    }
+
+    // ---- the underlying picker -----------------------------------
+
+    /// `u` (normal mode) and the menu row (spec §7): open the underlying
+    /// picker over the dataset's catalog keys, ranked by `listfilter` as
+    /// the trader types. Refused, exactly as `:key`/`:underlying`, while
+    /// the draft has edits — `set_key`'s own wording, so a trader reads
+    /// the same sentence from either door. Re-requests the catalog on the
+    /// way in (the existing rule: `request_catalog()` + `cx.notify()` in
+    /// the same update) so the list is fresh even if this panel has never
+    /// asked before; a catalog that arrives later, while the picker is
+    /// still open, is folded in by the diagnostics observer in `new`.
+    pub(crate) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.draft.is_empty() {
+            self.notice =
+                Some(format!("{} pending — :revert first", self.draft.count_phrase()).into());
+            self.changed(cx);
+            return;
+        }
+        // Defensive: unreachable through the shipped keymap (`edit` is a
+        // normal-mode binding, and `load_underlying`'s own `dispatch`
+        // guard above already closes any OTHER open popup before this
+        // runs), but a direct action dispatch (the palette) is not bound
+        // by mode at all.
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        self.request_catalog(cx);
+        let all = self.catalog_keys(cx);
+        let ranked = (0..all.len()).collect();
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("underlying"));
+        cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
+            // `InputState::set_value` emits no `Change` at all (a test
+            // harness writes the field that way, never through real
+            // keystrokes), which is why `commit_picker` re-ranks from the
+            // field's own current text as well rather than trusting this
+            // subscription alone — this is the LIVE path, for a trader
+            // actually typing.
+            if let InputEvent::Change = event {
+                let query = input.read(cx).value().to_string();
+                if let Some(Popup::Picker(p)) = &mut this.popup {
+                    p.refilter(&query);
+                }
+                cx.notify();
+            }
+        })
+        .detach();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.popup = Some(Popup::Picker(PickerState {
+            input,
+            all,
+            ranked,
+            highlighted: 0,
+        }));
+        self.notice = None;
+        self.changed(cx);
+    }
+
+    /// `commit` (`enter`) with the picker open (spec §7): re-rank from the
+    /// field's CURRENT text before resolving the highlighted row. A real
+    /// keystroke already kept `ranked` current through the `Change`
+    /// subscription in `open_picker`, but `InputState::set_value` emits
+    /// none at all (CLAUDE.md's own trap, exercised by a test harness that
+    /// writes the field that way) — trusting whatever `ranked` happens to
+    /// hold would let the choice depend on a rank that was never actually
+    /// run. An empty ranked list (no catalog, or nothing matches) is
+    /// inert (spec §7): nothing to load, and the picker stays open.
+    fn commit_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Picker(p)) = &mut self.popup else {
+            return;
+        };
+        let query = p.input.read(cx).value().to_string();
+        p.refilter(&query);
+        if p.ranked.is_empty() {
+            return;
+        }
+        let index = p.highlighted;
+        self.picker_pick(index, window, cx);
+    }
+
+    /// A row click, or `enter` after [`Self::commit_picker`]'s own
+    /// re-rank (spec §7): load the key at `ranked[index]` through the
+    /// same door `:underlying`/`:key` use, closing the picker first —
+    /// exactly as [`Self::menu_pick`] closes the menu before dispatching
+    /// its own row, and for the same reason: `set_key` needs no keyboard,
+    /// and the picker's own field is done being useful the moment a row
+    /// is chosen.
+    pub(crate) fn picker_pick(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Popup::Picker(p)) = &self.popup else {
+            return;
+        };
+        let Some(&i) = p.ranked.get(index) else {
+            return;
+        };
+        let key = p.all[i].clone();
+        self.close_popup_with_window(window, cx);
+        let parts: Vec<String> = key
+            .split(KEY_DISPLAY_SEPARATOR)
+            .map(str::to_string)
+            .collect();
+        if let Err(e) = self.set_key(parts, cx) {
+            self.notice = Some(e.into());
+            self.changed(cx);
         }
     }
 
@@ -2149,6 +2343,16 @@ impl MarketDataTile {
             .map(|e| e.state.read(cx).value().to_string())
     }
 
+    /// The open picker's own field entity — a test seeds a value through
+    /// it, exactly as [`Self::editor_state`] does for the cell editor.
+    #[cfg(test)]
+    pub(crate) fn picker_state(&self) -> Option<Entity<InputState>> {
+        match &self.popup {
+            Some(Popup::Picker(p)) => Some(p.input.clone()),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
@@ -2256,6 +2460,9 @@ impl gpui::Render for MarketDataTile {
                     let popup_el = match p {
                         Popup::Menu(m) => {
                             render_menu(m, theme, &tile, self.id.0).into_any_element()
+                        }
+                        Popup::Picker(p) => {
+                            render_picker(p, theme, &tile, self.id.0).into_any_element()
                         }
                     };
                     el.child(div().absolute().right_0().top(px(22.)).child(popup_el))
@@ -2678,6 +2885,19 @@ mod tests {
                 .tile
                 .read_with(vcx, |t, _| t.editor_state())
                 .expect("an open editor");
+            vcx.update(|window, cx| {
+                state.update(cx, |s, cx| s.set_value(text, window, cx));
+            });
+        }
+        /// Seed the open picker's field — `set_editor`'s own trick, and
+        /// the same reason: `InputState::set_value` emits no `Change` at
+        /// all, which is exactly what `commit_picker`'s own defensive
+        /// re-rank exists to cover (see its doc comment).
+        fn set_picker_text(&self, vcx: &mut gpui::VisualTestContext, text: &str) {
+            let state = self
+                .tile
+                .read_with(vcx, |t, _| t.picker_state())
+                .expect("an open picker");
             vcx.update(|window, cx| {
                 state.update(cx, |s, cx| s.set_value(text, window, cx));
             });
@@ -5236,5 +5456,92 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.mode(&vcx), "menu");
         h.command(&mut vcx, "bump 1").unwrap();
         assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    // ---- the underlying picker (Task 7, spec §7) ----------------------
+
+    /// `u` opens the picker (`mode == insert`, its field holds the
+    /// keyboard); typing filters `ranked` over the catalog's own keys;
+    /// `enter` re-ranks from the CURRENT text (`set_picker_text` writes
+    /// through `set_value`, which emits no `Change` at all — the trap
+    /// `commit_picker`'s own re-rank exists to cover) and loads the top
+    /// match through the same door `:underlying` uses.
+    #[gpui::test]
+    fn u_opens_the_picker_typing_filters_and_enter_loads(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["SPX.Z", "NKY.Z", "SX5E.Z"]));
+            cx.notify();
+        });
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        h.set_picker_text(&mut vcx, "nky");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        let req = h
+            .document_request()
+            .expect("the pick requests its document");
+        assert_eq!(req.document_key, vec!["NKY.Z".to_string()]);
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.header_texts())
+                .contains(&"NKY.Z".to_string())
+        );
+    }
+
+    /// Exactly as `:key`/`:underlying` are refused while the draft has
+    /// edits (`set_key`'s own guard): picking a different document out
+    /// from under unsent edits would throw them away with nothing left to
+    /// revert them against. `open_picker` checks this BEFORE ever
+    /// creating the field, so the panel stays in `normal` mode.
+    #[gpui::test]
+    fn the_picker_is_refused_while_the_draft_has_edits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "set spot_ref 1").unwrap();
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().unwrap_or("").contains(":revert"))
+        );
+    }
+
+    /// `cancel` (`escape` in insert mode) must give the keyboard up
+    /// BEFORE dropping the field — `close_editor`'s own order, here for
+    /// `close_popup_with_window` — or `Window::focused` never reports
+    /// `None` and the shell's own dropped-focus net can never fire.
+    #[gpui::test]
+    fn escape_closes_the_picker_and_gives_focus_up(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "blurred before dropped"
+        );
+    }
+
+    /// Opening the picker re-requests the catalog unconditionally (spec
+    /// §7), the same MIN-4 rule `:key`'s own line follows: a held catalog
+    /// is not necessarily a fresh one, and a subscribed feed can publish
+    /// a new key at any time.
+    #[gpui::test]
+    fn opening_the_picker_asks_for_a_fresh_catalog(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        // Drain `set_visible`'s own request first.
+        h.diagnostics
+            .update(&mut vcx, |d, _| d.take_pending_catalog_request());
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert!(
+            h.diagnostics
+                .read_with(&vcx, |d, _| d.pending_catalog_request()),
+            "opening the picker asks again, regardless of what is already held"
+        );
     }
 }

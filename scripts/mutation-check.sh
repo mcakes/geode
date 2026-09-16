@@ -11297,6 +11297,45 @@ run_mutation "mdmenu: a find keystroke closes the popup" \
         match event {' \
   geode-marketdata a_find_keystroke_closes_the_popup
 
+# `open_picker`'s own dirty guard (spec §7): picking a different document
+# out from under unsent edits would throw them away with nothing to
+# revert them against once the draft's own generation is gone. Mutated so
+# the guard can never fire, `u`/`load_underlying` would open the picker
+# anyway, and a pick would run `set_key`'s OWN guard instead — reachable,
+# but only after the trader has already typed and committed a choice, one
+# step later than the door this test means to keep shut.
+run_mutation "mdpicker: the picker is refused while the draft has edits" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !self.draft.is_empty() {
+            self.notice =
+                Some(format!("{} pending — :revert first", self.draft.count_phrase()).into());
+            self.changed(cx);
+            return;
+        }' \
+  '        if !self.draft.is_empty() && false {
+            self.notice =
+                Some(format!("{} pending — :revert first", self.draft.count_phrase()).into());
+            self.changed(cx);
+            return;
+        }' \
+  geode-marketdata the_picker_is_refused_while_the_draft_has_edits
+
+# Blur, THEN drop (`close_editor`'s own order, here for the picker):
+# `Root` holds a focused `InputState` strongly and only ever unregisters
+# it from that input's own render, which a removed input never reaches —
+# so dropping the picker's field without giving the keyboard up first
+# would leave `Window::focused` on a dead input for the rest of the
+# session. Mutated to drop alone, the shell's own dropped-focus net
+# (`render`'s `focused(cx).is_none()`) never fires.
+run_mutation "mdpicker: closing the picker blurs before dropping" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if matches!(self.popup, Some(Popup::Picker(_))) {
+            window.blur(cx);
+        }' \
+  '        if matches!(self.popup, Some(Popup::Picker(_))) {
+        }' \
+  geode-marketdata escape_closes_the_picker_and_gives_focus_up
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

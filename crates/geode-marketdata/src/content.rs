@@ -62,11 +62,16 @@ pub const ACTIONS: &[(&str, &str)] = &[
 /// trader's own override still wins.
 ///
 /// Two contexts, matching what [`MarketDataTile::key_context`] pushes.
-/// `normal` is the whole grammar. `insert` is deliberately just the two
-/// ways out: while the cell editor holds the keyboard the shell resolves
-/// bare keys ONLY against the contexts that carry `mode == insert` (spec
-/// §8.6), so every key not bound here is a character the trader is typing
-/// into a cell — which is the point.
+/// `normal` is the whole grammar. `insert` is deliberately narrow: while
+/// the cell editor OR the underlying picker holds the keyboard, the shell
+/// resolves bare keys ONLY against the contexts that carry `mode ==
+/// insert` (spec §8.6), so every key not bound here is a character the
+/// trader is typing into a cell or the picker's field — which is the
+/// point. `enter`/`escape` commit/cancel whichever of the two is open
+/// (`MarketDataTile::dispatch`'s own routing); `down`/`up` and
+/// `ctrl+j`/`ctrl+k` reuse `menu_down`/`menu_up` (Task 6's own verbs) to
+/// move the picker's highlight (spec §7) — a no-op with no popup open at
+/// all.
 ///
 /// `^` and `$` sit beside `home`/`end` as the column-extreme pair (user
 /// ruling 2026-09-12: a general navigation grammar, the blotter its first
@@ -105,6 +110,10 @@ context = "marketdata && mode == insert"
 [bindings.keys]
 "enter" = "marketdata::commit"
 "escape" = "marketdata::cancel"
+"down" = "marketdata::menu_down"
+"up" = "marketdata::menu_up"
+"ctrl+j" = "marketdata::menu_down"
+"ctrl+k" = "marketdata::menu_up"
 
 [[bindings]]
 context = "marketdata && mode == menu"
@@ -395,7 +404,10 @@ mod tests {
     /// while the cell editor holds focus the shell resolves ONLY the
     /// contexts carrying `mode == insert` for a bare key — a fragment
     /// that bound them in normal mode alone would leave no way out of a
-    /// cell.
+    /// cell. `down`/`up`/`ctrl+j`/`ctrl+k` (Task 7, spec §7) are here for
+    /// the same reason: the underlying picker's field holds the keyboard
+    /// exactly as the cell editor does, and its highlight has to move
+    /// somehow.
     #[test]
     fn enter_and_escape_resolve_in_insert_mode() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
@@ -407,6 +419,10 @@ mod tests {
         for (spec, expected) in [
             ("enter", "marketdata::commit"),
             ("escape", "marketdata::cancel"),
+            ("down", "marketdata::menu_down"),
+            ("up", "marketdata::menu_up"),
+            ("ctrl+j", "marketdata::menu_down"),
+            ("ctrl+k", "marketdata::menu_up"),
         ] {
             let keystroke = parse_keystroke(spec, default_mod()).unwrap();
             match Matcher::default().press(&keymap, keystroke, &stack) {
