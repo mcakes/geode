@@ -794,6 +794,7 @@ mod tests {
         }],
         value_type: ColumnType::F64,
         format: ColumnFormat::MEASURE,
+        actions: &[],
     };
 
     fn schedule() -> Snapshot {
@@ -929,6 +930,7 @@ mod tests {
             header: &[],
             value_type: ColumnType::F64,
             format: ColumnFormat::MEASURE,
+            actions: &[],
         };
         let err = MatrixModel::build(&schedule(), &PIVOTED, &Draft::default())
             .expect_err("one value per cell");

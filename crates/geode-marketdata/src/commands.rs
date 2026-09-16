@@ -46,6 +46,9 @@ pub enum Command {
     Rebase,
     Discard,
     Upload,
+    /// Open the action list (spec §6.1), the typed door onto exactly what
+    /// `.`/`⋯` open.
+    Menu,
     /// A document-level attribute edit typed at the `:` line — the same
     /// vocabulary `i`/`enter` on `Cursor::Attr` writes through, but
     /// reachable without moving the cursor into the strip at all. `value`
@@ -146,7 +149,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 value,
             })
         }
-        Some("menu") => Err("menu is not built yet".to_string()),
+        Some("menu") => Ok(Command::Menu),
         Some(other) => Err(format!("unknown command '{other}'")),
         None => Err("empty command".to_string()),
     }

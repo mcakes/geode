@@ -51,9 +51,11 @@
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
+use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::{Draft, MatrixModel, PanelSpec, parse_attr, parse_cell};
 use crate::delegate::MatrixDelegate;
 use crate::header::{self, HeaderInputs, HeaderModel};
+use crate::popup::{MenuState, Popup, render_menu};
 use geode_core::colour::readable_on;
 use geode_core::document::split_key;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
@@ -70,7 +72,7 @@ use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, Entity, Focusable as _, Hsla, IntoElement, SharedString, Window,
-    div,
+    div, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::table::{DataTable, TableEvent, TableState};
@@ -348,6 +350,10 @@ pub struct MarketDataTile {
     /// The header's floored tone colours, refreshed at the top of `render`
     /// (see [`FlooredTones`]).
     tones: FlooredTones,
+    /// The tile-owned popup — `.`/`⋯` open `Menu` (spec §6.1); Task 7
+    /// adds `Picker`. `None` most of the time, so most frames pay nothing
+    /// for it beyond the tag check.
+    popup: Option<Popup>,
 }
 
 impl MarketDataTile {
@@ -505,6 +511,7 @@ impl MarketDataTile {
             staged: None,
             last_flip: 0,
             tones: FlooredTones::derive(cx.theme()),
+            popup: None,
         };
         this.rebuild_chrome();
         // The delegate starts with the model this tile starts with (review
@@ -519,13 +526,17 @@ impl MarketDataTile {
 
     /// Pushed onto the keymap context stack while this tile is focused.
     /// `insert` exactly while the cell editor holds the keyboard — the
-    /// shell's insert branch (spec §8.6) keys on this one pair, and
-    /// `counts()` stays on in both modes deliberately: stopping a typed
-    /// `3` from becoming a count prefix is the shell's job there, not
-    /// this context's.
+    /// shell's insert branch (spec §8.6) keys on this one pair — `menu`
+    /// exactly while the action list is open (spec §6.1; `editor` wins
+    /// over `popup` since the two are exclusive by construction, see
+    /// `toggle_menu`), else `normal`. `counts()` stays on in every mode
+    /// deliberately: stopping a typed `3` from becoming a count prefix is
+    /// the shell's job there, not this context's.
     pub fn key_context(&self) -> KeyContext {
         let mode = if self.editor.is_some() {
             "insert"
+        } else if matches!(self.popup, Some(Popup::Menu(_))) {
+            "menu"
         } else {
             "normal"
         };
@@ -1065,6 +1076,18 @@ impl MarketDataTile {
         let Some(verb) = action.0.strip_prefix("marketdata::") else {
             return false;
         };
+        // "Any other dispatched action closes the popup first, then
+        // runs" (spec §6.1) — the one rule that keeps the popup from
+        // needing the shell's modal machinery. The five menu verbs are
+        // the popup's own grammar and must not close it out from under
+        // themselves.
+        if !matches!(
+            verb,
+            "menu" | "menu_down" | "menu_up" | "menu_pick" | "menu_close"
+        ) && self.popup.is_some()
+        {
+            self.close_popup(cx);
+        }
         let n = count.unwrap_or(1).max(1) as isize;
         // Whether this action touched something the HEADER paints (review
         // fix round 1, MIN-5, extended by Task 5 to the strip): a motion
@@ -1144,6 +1167,75 @@ impl MarketDataTile {
                 // Only when there WAS one: `escape` on a clean header
                 // changes nothing the chips show.
                 self.notice.take().is_some()
+            }
+            "menu" => {
+                self.toggle_menu(window, cx);
+                false
+            }
+            "menu_close" => {
+                // Only when there WAS one open — the same "only when
+                // there was one" rule `escape` above keeps: reachable
+                // from the palette with nothing open, and that has
+                // nothing to report.
+                if self.popup.is_none() {
+                    return false;
+                }
+                self.close_popup(cx);
+                false
+            }
+            "menu_down" | "menu_up" => {
+                if let Some(Popup::Menu(m)) = &mut self.popup {
+                    let delta = if verb == "menu_down" { n } else { -n };
+                    m.highlighted = menu::step(&m.rows, m.highlighted, delta);
+                }
+                false
+            }
+            "menu_pick" => {
+                if let Some(Popup::Menu(m)) = &self.popup {
+                    let index = m.highlighted;
+                    self.menu_pick(index, window, cx);
+                }
+                false
+            }
+            "revert" => {
+                if let Err(e) = self.revert(cx) {
+                    self.notice = Some(e.into());
+                }
+                true
+            }
+            "rebase" => {
+                if let Err(e) = self.rebase(cx) {
+                    self.notice = Some(e.into());
+                }
+                true
+            }
+            "discard" => {
+                if let Err(e) = self.discard(cx) {
+                    self.notice = Some(e.into());
+                }
+                true
+            }
+            // `upload` is Part 4; `load_underlying` is Task 7. Both parse
+            // and are registered today so the palette and a keymap
+            // already reach them (spec §6.2/§7) — dispatching either
+            // here answers honestly rather than pretending they do
+            // nothing.
+            "upload" | "load_underlying" => {
+                self.notice = Some("not built yet".into());
+                true
+            }
+            _ if self
+                .spec
+                .actions
+                .iter()
+                .any(|a| a.id.strip_prefix("marketdata::") == Some(verb)) =>
+            {
+                // Every `KindAction` in this slice is `built: false`
+                // (spec §6.3): when a future one is built it becomes an
+                // egress REQUEST designed in its own slice, never
+                // computation this crate performs.
+                self.notice = Some("not built yet".into());
+                true
             }
             _ => return false,
         };
@@ -1388,6 +1480,73 @@ impl MarketDataTile {
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.blur(cx);
         self.editor = None;
+    }
+
+    // ---- the action list ---------------------------------------------
+
+    /// `.`/`⋯` (spec §6.1): open the action list, or close it if it is
+    /// already open. Insert mode and the popup are exclusive — opening it
+    /// with an editor still open cancels the editor first (never commits
+    /// it, exactly as a click elsewhere does), which is why this takes
+    /// `window`.
+    pub(crate) fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.popup, Some(Popup::Menu(_))) {
+            self.close_popup(cx);
+            return;
+        }
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        let rows = menu::rows(&MenuInputs {
+            badge: self.draft.badge(),
+            has_key: self.key.is_some(),
+            // Upload is Part 4; every build before it greys the row with
+            // `not built yet` (spec §6.2's table) rather than pretending
+            // the panel can send anything anywhere.
+            upload_built: false,
+            kind_title: self.spec.title,
+            kind_actions: self.spec.actions,
+        });
+        let highlighted = menu::first_enabled(&rows);
+        self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
+        cx.notify();
+    }
+
+    /// Close whatever popup is open. Harmless when none is (`dispatch`'s
+    /// own "any other action closes it first" rule calls this
+    /// unconditionally).
+    pub(crate) fn close_popup(&mut self, cx: &mut Context<Self>) {
+        self.popup = None;
+        cx.notify();
+    }
+
+    /// `enter` on the highlighted row, or a click on any row (spec
+    /// §6.2): a disabled row's reason becomes the notice and the popup
+    /// stays open; an enabled one closes the popup and re-enters
+    /// [`Self::dispatch`] on its own id, so a menu row and a keybinding
+    /// (or a `:` line) take exactly one path from here on.
+    pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Menu(m)) = &self.popup else {
+            return;
+        };
+        let Some(row) = m.rows.get(index) else {
+            return;
+        };
+        let MenuRow::Action { id, enabled, .. } = row else {
+            return;
+        };
+        match enabled {
+            Err(reason) => {
+                self.notice = Some((*reason).into());
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Ok(()) => {
+                let id = id.clone();
+                self.close_popup(cx);
+                self.dispatch(&id, None, window, cx);
+            }
+        }
     }
 
     /// `:revert` (spec §8.4) — drop every edit. The document's own numbers
@@ -1696,7 +1855,12 @@ impl MarketDataTile {
 
     // ---- the `:` line ------------------------------------------------
 
-    pub fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn command(
+        &mut self,
+        line: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         // `completions` takes `&App` and can queue nothing, so this is
         // the door an `underlying` line's own catalog request rides — the
         // next completion list is then the fresh one (spec §8.3's
@@ -1723,6 +1887,10 @@ impl MarketDataTile {
             // Part 4 wires up.
             Command::Upload => Err("upload is not built yet".into()),
             Command::Set { attr, value } => self.set_attr_command(&attr, value, cx),
+            Command::Menu => {
+                self.toggle_menu(window, cx);
+                Ok(())
+            }
         }
     }
 
@@ -2042,16 +2210,34 @@ impl gpui::Render for MarketDataTile {
             EditTarget::Attr { index, .. } => Some((*index, &e.state)),
             EditTarget::Cell { .. } => None,
         });
+        let menu_open = matches!(self.popup, Some(Popup::Menu(_)));
         let header = header::render(
             &self.header,
             cursor_attr,
             editor,
-            false,
+            menu_open,
             theme,
             &tones,
             &tile,
             self.id.0,
         );
+        // The popup is anchored off a zero-size, absolutely positioned
+        // sibling at the header's own right edge (spec §6.1) — `relative`
+        // on the wrapper is what makes that positioning read against the
+        // header rather than the window.
+        let header =
+            div()
+                .relative()
+                .w_full()
+                .child(header)
+                .when_some(self.popup.as_ref(), |el, p| {
+                    let popup_el = match p {
+                        Popup::Menu(m) => {
+                            render_menu(m, theme, &tile, self.id.0).into_any_element()
+                        }
+                    };
+                    el.child(div().absolute().right_0().top(px(22.)).child(popup_el))
+                });
 
         // The body: one `DataTable` over this tile's own delegate, in the
         // blotter's chrome (`Size::XSmall`, unbordered, unstriped) so the
@@ -4860,6 +5046,88 @@ edits = [["2099-01-01", "-1", 1.0]]
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
             Some("nothing to yank in a column here".to_string())
+        );
+    }
+
+    // ---- the action list (Task 6, spec §6) ----------------------------
+
+    #[gpui::test]
+    fn dot_opens_the_menu_and_escape_closes_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&vcx), "menu");
+        // `centre_of` panics if the selector is not painted — that is
+        // this test's own "the popup is painted" assertion.
+        centre_of(&mut vcx, &format!("marketdata-menu-{TILE}"));
+        h.dispatch(&mut vcx, "menu_close", None);
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    #[gpui::test]
+    fn enter_on_a_greyed_row_notices_and_keeps_the_menu(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "menu", None);
+        h.dispatch(&mut vcx, "menu_down", None); // Upload (greyed: not built yet)
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert_eq!(h.mode(&vcx), "menu");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("not built yet".into())
+        );
+    }
+
+    #[gpui::test]
+    fn an_unrelated_action_closes_the_menu_first(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "menu", None);
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+    }
+
+    #[gpui::test]
+    fn a_menu_row_click_dispatches_and_a_click_outside_closes(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "set spot_ref 1").unwrap();
+        h.dispatch(&mut vcx, "menu", None);
+        let revert = centre_of(&mut vcx, &format!("marketdata-menu-row-{TILE}-2")); // Revert edits on a dirty, not-behind draft
+        click_at(&mut vcx, revert, 1);
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+        assert_eq!(h.mode(&vcx), "normal");
+        h.dispatch(&mut vcx, "menu", None);
+        let cell = centre_of(&mut vcx, "marketdata-cell-1-1");
+        click_at(&mut vcx, cell, 1);
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    #[gpui::test]
+    fn the_menu_button_toggles_the_menu(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let button = centre_of(&mut vcx, &format!("marketdata-menu-button-{TILE}"));
+        click_at(&mut vcx, button, 1);
+        assert_eq!(h.mode(&vcx), "menu");
+        click_at(&mut vcx, button, 1);
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    #[gpui::test]
+    fn a_kind_action_answers_not_built_yet(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "cvi_reanchor", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("not built yet".into())
         );
     }
 }

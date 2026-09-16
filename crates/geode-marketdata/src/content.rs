@@ -44,6 +44,16 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::find_next", "Find next"),
     ("marketdata::find_prev", "Find previous"),
     ("marketdata::escape", "Escape"),
+    ("marketdata::menu", "Actions menu"),
+    ("marketdata::menu_down", "Menu: next"),
+    ("marketdata::menu_up", "Menu: previous"),
+    ("marketdata::menu_pick", "Menu: pick"),
+    ("marketdata::menu_close", "Menu: close"),
+    ("marketdata::load_underlying", "Load underlying…"),
+    ("marketdata::upload", "Upload"),
+    ("marketdata::revert", "Revert edits"),
+    ("marketdata::rebase", "Rebase"),
+    ("marketdata::discard", "Discard edits"),
 ];
 
 /// This module's default bindings (market-data spec §8.3/§8.6), handed to
@@ -87,12 +97,23 @@ context = "marketdata && mode == normal"
 "n" = "marketdata::find_next"
 "shift+n" = "marketdata::find_prev"
 "escape" = "marketdata::escape"
+"." = "marketdata::menu"
+"u" = "marketdata::load_underlying"
 
 [[bindings]]
 context = "marketdata && mode == insert"
 [bindings.keys]
 "enter" = "marketdata::commit"
 "escape" = "marketdata::cancel"
+
+[[bindings]]
+context = "marketdata && mode == menu"
+[bindings.keys]
+"j" = "marketdata::menu_down"
+"k" = "marketdata::menu_up"
+"enter" = "marketdata::menu_pick"
+"escape" = "marketdata::menu_close"
+"." = "marketdata::menu_close"
 "#;
 
 pub struct MarketDataContent {
@@ -117,8 +138,11 @@ impl TileContent for MarketDataContent {
         self.tile
             .update(cx, |t, cx| t.dispatch(action, count, window, cx))
     }
-    fn command(&self, line: &str, _window: &mut Window, cx: &mut App) -> Result<(), String> {
-        self.tile.update(cx, |t, cx| t.command(line, cx))
+    /// `window` is forwarded for the same reason `dispatch`'s is:
+    /// `:menu` opens the action list, which — like `marketdata::edit` —
+    /// may need to close the cell editor first.
+    fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String> {
+        self.tile.update(cx, |t, cx| t.command(line, window, cx))
     }
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
         self.tile.read(cx).completions(line, cursor, cx)
@@ -208,6 +232,17 @@ impl ModuleFactory for MarketDataFactory {
                 category: "Market data".to_string(),
             });
         }
+        // The kind's own verbs (spec §6.3): registered so the palette
+        // lists them and a keymap can bind them, exactly as `ACTIONS`
+        // above — a second document kind's own `KindAction`s land here
+        // too, since this loop is per-spec rather than per-crate.
+        for a in self.spec.actions {
+            let _ = registry.register(ActionDef {
+                id: ActionId(a.id.to_string()),
+                title: a.title.to_string(),
+                category: "Market data".to_string(),
+            });
+        }
     }
 
     fn create(
@@ -266,10 +301,23 @@ mod tests {
         registry
     }
 
+    /// [`ACTIONS`] ids the default keymap deliberately binds no bare key
+    /// to (spec §6.2): each is reachable through the action list's own
+    /// `enter`/click — an internal [`crate::tile::MarketDataTile::dispatch`]
+    /// call, never a keymap binding — and through the `:` line. Binding a
+    /// bare key to a verb the menu already carries would be a second door
+    /// onto something spec §6.1 keeps to exactly one.
+    const MENU_ONLY: &[&str] = &[
+        "marketdata::upload",
+        "marketdata::revert",
+        "marketdata::rebase",
+        "marketdata::discard",
+    ];
+
     /// The twin of `geode_blotter::content`'s own fragment test, and the
     /// same two directions: every id the fragment binds is registered
     /// here (a `build_keymap` diagnostic IS that failure), and every
-    /// registered action is reachable from some key.
+    /// registered action not in [`MENU_ONLY`] is reachable from some key.
     #[test]
     fn the_default_keymap_binds_exactly_the_actions_this_module_registers() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).expect("the fragment parses");
@@ -289,6 +337,9 @@ mod tests {
             .map(|b| b.action.0.as_str())
             .collect();
         for (id, _) in ACTIONS {
+            if MENU_ONLY.contains(id) {
+                continue;
+            }
             assert!(
                 bound.contains(id),
                 "{id} is registered but the default keymap binds nothing to it"
@@ -362,6 +413,61 @@ mod tests {
                 MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
                 other => panic!("{spec}: expected a match, got {other:?}"),
             }
+        }
+    }
+
+    /// `.` and `u` are the normal-mode doors onto the action list (spec
+    /// §6.1); once it is open, `mode == menu` is the whole of the menu's
+    /// own grammar — `j`/`k`/`enter`/`escape`, and `.` toggling it closed
+    /// again.
+    #[test]
+    fn dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode() {
+        let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
+        assert!(diags.is_empty(), "{diags:?}");
+        let normal = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("marketdata")
+                .pair("mode", "normal")
+                .counts(),
+        ];
+        let menu = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("marketdata").pair("mode", "menu").counts(),
+        ];
+        for (stack, spec, expected) in [
+            (&normal, ".", "marketdata::menu"),
+            (&normal, "u", "marketdata::load_underlying"),
+            (&menu, "j", "marketdata::menu_down"),
+            (&menu, "k", "marketdata::menu_up"),
+            (&menu, "enter", "marketdata::menu_pick"),
+            (&menu, "escape", "marketdata::menu_close"),
+            (&menu, ".", "marketdata::menu_close"),
+        ] {
+            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
+            match Matcher::default().press(&keymap, keystroke, stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
+                other => panic!("{spec}: expected a match, got {other:?}"),
+            }
+        }
+    }
+
+    /// [`PanelSpec::actions`] rides `register_actions` exactly as
+    /// [`ACTIONS`] does (spec §6.3): the palette and a keymap can only
+    /// reach a `KindAction` if the registry actually knows its id.
+    #[test]
+    fn the_kind_actions_are_registered() {
+        let mut registry = ActionRegistry::default();
+        let (data, _rx) = DataHandle::for_tests();
+        MarketDataFactory::new(data, &CVI, Duration::from_secs(60)).register_actions(&mut registry);
+        for a in CVI.actions {
+            assert!(
+                registry.get(&ActionId(a.id.to_string())).is_some(),
+                "{}",
+                a.id
+            );
         }
     }
 }

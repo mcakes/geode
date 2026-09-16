@@ -106,6 +106,7 @@ const SCHEDULE: PanelSpec = PanelSpec {
     }],
     value_type: ColumnType::F64,
     format: ColumnFormat::MEASURE,
+    actions: &[],
 };
 
 /// A dividend schedule: `rows` dated rows, five value columns each.

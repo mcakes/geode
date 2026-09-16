@@ -20,6 +20,18 @@ pub struct HeaderAttr {
     pub ty: ColumnType,
 }
 
+/// A verb this document kind owns (spec 2026-09-14 §6.3): listed in the
+/// panel's action menu under the kind's own section, registered as an
+/// action so the palette and a keymap reach it. `built: false` paints
+/// greyed "not built yet"; when built it is an egress REQUEST to the
+/// upstream system (charter: Geode computes nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindAction {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub built: bool,
+}
+
 /// How the columns across the top are chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Columns {
@@ -63,6 +75,10 @@ pub struct PanelSpec {
     /// schema: an `i64` column whose values all happen to fit a `f64`
     /// array would then silently accept `0.5`.
     pub value_type: ColumnType,
+    /// Verbs the kind itself owns (spec §6.3): listed in the panel's
+    /// action menu under this spec's own `title` section, registered
+    /// through `register_actions` so the palette and a keymap reach them.
+    pub actions: &'static [KindAction],
 }
 
 impl PanelSpec {
@@ -116,6 +132,18 @@ pub const CVI: PanelSpec = PanelSpec {
         colour: Colour::None,
         scale: Scale::None,
     },
+    actions: &[
+        KindAction {
+            id: "marketdata::cvi_reanchor",
+            title: "Reanchor",
+            built: false,
+        },
+        KindAction {
+            id: "marketdata::cvi_recalc_forward",
+            title: "Recalc forward",
+            built: false,
+        },
+    ],
 };
 
 #[cfg(test)]

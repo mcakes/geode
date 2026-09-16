@@ -161,10 +161,10 @@ impl HeaderModel {
 ///
 /// `cursor_attr`/`editor` (Task 5, spec §5.1/§5.2): which attribute, if
 /// any, the cursor is on, and the open editor's own `(index, InputState)`
-/// when it is an attribute being edited. `menu_open` is `false` until
-/// Task 6 wires the action list `⋯` opens; `tile` is this attribute
-/// strip's own mouse door (`cursor_to_attr`) and Task 6's, once it wires
-/// the `⋯` click.
+/// when it is an attribute being edited. `menu_open` (Task 6, spec §6.1)
+/// is whether the action list is open, painting `⋯`'s own pressed state;
+/// `tile` is this attribute strip's own mouse door (`cursor_to_attr`) and
+/// `⋯`'s (`toggle_menu`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     h: &HeaderModel,
@@ -300,8 +300,26 @@ pub(crate) fn render(
         );
     }
 
-    // 7. `⋯` — Task 6 wires the click; painted now so the row's shape is
-    // final.
+    // 7. `⋯` — the mouse door onto the action list (spec §6.1), the
+    // click's own form of `.`. `cx.stop_propagation()` here means the
+    // shell's tile-level mouse-down (focus re-arm) does not run for this
+    // click — acceptable, since opening the action list changes nothing
+    // about focus (unlike the attribute strip's click above, which
+    // deliberately leaves propagation alone).
+    //
+    // **On the CAPTURE phase, not the bubble one.** The popup's own
+    // `on_mouse_down_out` (`popup.rs`) is a Capture-phase listener that
+    // fires on ANY mouse-down whose position is outside the popup's own
+    // bounds — the button included, since the button is not inside the
+    // popup — and Capture always runs to completion (or a `stop_
+    // propagation`) BEFORE Bubble even starts. A Bubble-phase handler
+    // here would always run one beat behind that: `down_out` would have
+    // already closed the popup by the time this button's own handler
+    // asked whether one was open, so a second click on the button (meant
+    // to close it) would instead see it already closed and reopen it.
+    // Capturing here, ahead of `down_out` in the same pass, lets this
+    // button decide the click before the popup's own "outside" rule
+    // gets a say.
     row = row.child(
         div()
             .px_1p5()
@@ -311,7 +329,17 @@ pub(crate) fn render(
             .when(menu_open, |d| d.bg(theme.secondary))
             .text_color(muted)
             .child("⋯")
-            .debug_selector(move || format!("marketdata-menu-button-{tile_id}")),
+            .debug_selector(move || format!("marketdata-menu-button-{tile_id}"))
+            .capture_any_mouse_down({
+                let tile = tile.clone();
+                move |event, window, cx| {
+                    if event.button != gpui::MouseButton::Left {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))
+                }
+            }),
     );
     row
 }

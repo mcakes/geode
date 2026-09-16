@@ -23,6 +23,7 @@ pub mod content;
 pub mod core;
 pub mod delegate;
 pub(crate) mod header;
+mod popup;
 pub mod tile;
 
 pub use content::{ACTIONS, DEFAULT_KEYMAP, MarketDataFactory};
