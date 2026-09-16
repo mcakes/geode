@@ -70,37 +70,56 @@ pub(crate) struct PickerState {
 }
 
 impl PickerState {
+    /// The catalog key currently highlighted, `None` with an empty
+    /// `ranked` list — the identity every re-rank preserves.
+    pub(crate) fn highlighted_key(&self) -> Option<&str> {
+        self.ranked
+            .get(self.highlighted)
+            .map(|&i| self.all[i].as_str())
+    }
+
     /// Re-rank against `new_query`, but ONLY if it actually differs from
     /// the query `ranked` was last built against — a no-op otherwise, so
     /// a defensive re-rank at commit time (the field's current text may
     /// never have reached this struct through a real `Change` event)
     /// costs nothing when nothing changed, and never resets the
     /// highlight out from under a trader who typed nothing at all.
-    /// Delegates the real rebuild to [`Self::rerank`], which is also the
-    /// door for a re-rank the query itself does NOT gate (the diagnostics
-    /// observer's own catalog refresh, review fix round 1, IMPORTANT-2).
+    /// Captures the currently highlighted KEY before rebuilding and
+    /// hands it to [`Self::place`], the one door every re-rank path
+    /// (this one, and the diagnostics observer's own catalog refresh,
+    /// review fix round 1, IMPORTANT-2) goes through.
     pub(crate) fn refilter(&mut self, new_query: &str) {
         if new_query == self.query {
             return;
         }
+        let keep = self.highlighted_key().map(str::to_string);
         self.query = new_query.to_string();
-        self.rerank();
+        self.place(keep.as_deref());
     }
 
-    /// Rebuild `ranked` against the CURRENT `query`, preserving which
-    /// KEY was highlighted (by its index into `all`, not its position in
-    /// `ranked`) across the rebuild — falling back to the top row only
-    /// when that key dropped out of the new ranking entirely. A re-rank
-    /// must never silently move the trader's selection, whether it is
-    /// triggered by a new query ([`Self::refilter`]) or by `all` itself
-    /// changing under an unchanged query (the diagnostics observer).
-    pub(crate) fn rerank(&mut self) {
-        let was_highlighted = self.ranked.get(self.highlighted).copied();
+    /// Rebuild `ranked` against the CURRENT `all`/`query`, then put the
+    /// highlight on `key` — falling back to row 0 when `key` is `None`
+    /// or no longer present in `all` at all.
+    ///
+    /// **Identity is the KEY STRING, never a positional index** (review
+    /// fix round 2, the bug the first fix's own `rerank` reintroduced by
+    /// capturing `was_highlighted` as an ALL-index and looking that same
+    /// number up in the NEW `all`): `catalog_keys()` returns a freshly
+    /// SORTED list, so a new underlying that sorts before the highlighted
+    /// one shifts every later index — the old code would then silently
+    /// re-highlight a DIFFERENT row at that number, with no fallback
+    /// signal that anything had moved at all. A caller whose own `all`
+    /// is about to change (only the diagnostics observer today) MUST
+    /// capture [`Self::highlighted_key`] before overwriting `all`, since
+    /// this method reads the key back out of `all` as it stands when
+    /// called — never before.
+    pub(crate) fn place(&mut self, key: Option<&str>) {
         self.ranked = geode_shell::listfilter::rank(&self.all, &self.query)
             .into_iter()
             .map(|r| r.row)
             .collect();
-        self.highlighted = was_highlighted
+        self.highlighted = key
+            .and_then(|k| self.all.iter().position(|s| s == k))
             .and_then(|all_index| self.ranked.iter().position(|&r| r == all_index))
             .unwrap_or(0);
     }

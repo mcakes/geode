@@ -493,21 +493,25 @@ impl MarketDataTile {
             // EVERY notification this entity emits, not only a catalog
             // change (a source's health ticks about twice a second with
             // a diagnostics tile open) — comparing first is what keeps an
-            // unrelated notification from resetting the highlight (a
-            // bare `rerank` always moves it, by design, when the
-            // catalog's own membership is unchanged there is nothing to
-            // rerank against) and from re-cloning the catalog into
-            // `labels` for nothing.
+            // unrelated notification from resetting the highlight and
+            // from re-cloning the catalog into `labels` for nothing.
             if p.all == all {
                 return;
             }
+            // Review fix round 2: captured BEFORE `all` is overwritten,
+            // and by KEY STRING rather than by index — `catalog_keys()`
+            // returns a freshly SORTED list, so a new underlying that
+            // sorts ahead of the highlighted one shifts every later
+            // index, and re-placing by the OLD index once `all` has
+            // already changed would silently highlight a different row
+            // (`PickerState::place`'s own doc comment has the full
+            // story).
+            let keep = p.highlighted_key().map(str::to_string);
             p.labels = Self::labels_for(&all);
             p.all = all;
             // Forced, not through `refilter`: the query has not changed,
-            // but `all` has, and a re-rank must run regardless — the
-            // highlighted KEY, not its position, is what `rerank`
-            // preserves.
-            p.rerank();
+            // but `all` has, and a re-rank must run regardless.
+            p.place(keep.as_deref());
             cx.notify();
         })
         .detach();
@@ -5715,6 +5719,58 @@ edits = [["2099-01-01", "-1", 1.0]]
             h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
             Some("CCC.Z".to_string()),
             "the highlight follows the KEY across a catalog change"
+        );
+    }
+
+    /// Review fix round 2: the round-1 fix above still tracked the
+    /// wrong row when the catalog RE-SORTS around the highlighted key —
+    /// `catalog_keys()` returns a freshly sorted list, so a new key that
+    /// sorts BEFORE the highlighted one shifts every later index, and
+    /// the old "preserve by ALL-index" logic silently landed on whatever
+    /// key now sat at that number (never falling back to 0, so nothing
+    /// signalled the mistake). Identity must be the KEY STRING: `AAA.Z`
+    /// sorting ahead of the highlighted `CCC.Z` shifts it from index 1
+    /// to index 2, and the highlight must follow it there; a genuine
+    /// removal still falls back to row 0.
+    #[gpui::test]
+    fn a_resorted_catalog_keeps_the_highlighted_key_not_its_old_index(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["BBB.Z", "CCC.Z"]));
+            cx.notify();
+        });
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        h.dispatch(&mut vcx, "menu_down", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("CCC.Z".to_string()),
+            "highlighted CCC.Z at its original index 1"
+        );
+
+        // AAA.Z sorts AHEAD of both — CCC.Z shifts from index 1 to 2.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["AAA.Z", "BBB.Z", "CCC.Z"]));
+            cx.notify();
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("CCC.Z".to_string()),
+            "the highlight follows CCC.Z to its new index, not whatever \
+             now sits at the old one"
+        );
+
+        // CCC.Z is removed entirely — falls back to row 0 (BBB.Z).
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["BBB.Z"]));
+            cx.notify();
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("BBB.Z".to_string()),
+            "a genuine removal falls back to row 0"
         );
     }
 }
