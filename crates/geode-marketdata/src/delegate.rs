@@ -62,9 +62,12 @@ pub struct MatrixDelegate {
     pub(crate) model: Rc<MatrixModel>,
     /// The row axis's name (`term`), painted as column 0's header.
     row_axis: SharedString,
-    /// The tile's cursor, mirrored. `(model row, model column)` — NOT a
-    /// table column index.
-    pub(crate) cursor: (usize, usize),
+    /// The tile's cursor, mirrored. `Some((model row, model column))` —
+    /// NOT a table column index — while the cursor is on a grid cell;
+    /// `None` while it is in the header strip (`Cursor::Attr`), which
+    /// paints no cursor cell here at all (`MarketDataTile::sync_cursor`
+    /// clears the table's own selection for that case).
+    pub(crate) cursor: Option<(usize, usize)>,
     /// The open cell editor, mirrored from the tile: the cell it was
     /// opened on (again in model coordinates) and its `InputState`.
     /// Painted IN that cell, which is what makes it typeable at all
@@ -77,7 +80,7 @@ impl MatrixDelegate {
         MatrixDelegate {
             model: Rc::new(MatrixModel::default()),
             row_axis: SharedString::from(spec.rows),
-            cursor: (0, 0),
+            cursor: Some((0, 0)),
             editor: None,
         }
     }
@@ -211,7 +214,7 @@ impl TableDelegate for MatrixDelegate {
                 .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"))
                 .child(label);
         };
-        let at_cursor = (row_ix, model_col) == self.cursor;
+        let at_cursor = self.cursor == Some((row_ix, model_col));
         let cell = self
             .model
             .rows
@@ -372,6 +375,6 @@ pub(crate) mod tests {
         assert_eq!(d.row_axis.as_ref(), "term");
         assert!(d.model.rows.is_empty());
         assert!(d.editor.is_none());
-        assert_eq!(d.cursor, (0, 0));
+        assert_eq!(d.cursor, Some((0, 0)));
     }
 }

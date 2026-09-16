@@ -50,7 +50,8 @@
 //! against a grid `:rebase` is about to move away from underneath it.
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
-use crate::core::{Draft, MatrixModel, PanelSpec, parse_cell};
+use crate::core::cursor::{self, Cursor, Grid, Motion};
+use crate::core::{Draft, MatrixModel, PanelSpec, parse_attr, parse_cell};
 use crate::delegate::MatrixDelegate;
 use crate::header::{self, HeaderInputs, HeaderModel};
 use geode_core::colour::readable_on;
@@ -177,29 +178,47 @@ const NOT_BEHIND: &str = "nothing to rebase — the draft is on the live documen
 /// [`Draft::bump`] consumes.
 type BumpCell = ((usize, usize), (String, String), f64);
 
-/// The open cell editor (spec §8.6): the input the trader is typing into,
-/// and which cell it belongs to.
+/// The open cell or attribute editor (spec §8.6/§5.2): the input the
+/// trader is typing into, and what it was opened on.
 struct Editing {
-    /// Tile-owned, and PAINTED in the cell (see `render`): gpui installs a
-    /// text-input handler only for a focused `Input` that has been drawn,
-    /// so an editor kept off the element tree would take no characters at
-    /// all.
+    /// Tile-owned, and PAINTED in the cell or the strip (see `render`):
+    /// gpui installs a text-input handler only for a focused `Input` that
+    /// has been drawn, so an editor kept off the element tree would take
+    /// no characters at all.
     state: Entity<InputState>,
-    /// The cell this editor was opened on, captured rather than read back
-    /// off the cursor at commit time.
-    cell: (usize, usize),
-    /// That cell's labels when the editor opened.
-    ///
-    /// The grid can move underneath an open editor: a delivery lands while
-    /// a trader is typing, a shorter generation clamps the cursor
-    /// (`clamp_cursor`), and a commit that wrote to whatever the cursor now
-    /// points at would file a typed number against a different term.
-    /// `commit` compares these against the model's CURRENT pair for the
-    /// same cell and refuses when they differ — one comparison, at the one
-    /// moment the answer matters, rather than a cancel-on-delivery path
-    /// (which `promote` could not take: it runs from the frame observer,
-    /// where there is no `Window` to blur).
-    labels: (SharedString, SharedString),
+    target: EditTarget,
+}
+
+/// What an open [`Editing`] was opened on.
+#[derive(Clone)]
+enum EditTarget {
+    Cell {
+        /// The cell this editor was opened on, captured rather than read
+        /// back off the cursor at commit time.
+        cell: (usize, usize),
+        /// That cell's labels when the editor opened.
+        ///
+        /// The grid can move underneath an open editor: a delivery lands
+        /// while a trader is typing, a shorter generation clamps the
+        /// cursor (`clamp_cursor`), and a commit that wrote to whatever
+        /// the cursor now points at would file a typed number against a
+        /// different term. `commit` compares these against the model's
+        /// CURRENT pair for the same cell and refuses when they differ —
+        /// one comparison, at the one moment the answer matters, rather
+        /// than a cancel-on-delivery path (which `promote` could not
+        /// take: it runs from the frame observer, where there is no
+        /// `Window` to blur).
+        labels: (SharedString, SharedString),
+    },
+    Attr {
+        /// The attribute's index into `model.header` when the editor
+        /// opened — a paint-time position, not an identity.
+        index: usize,
+        /// The attribute's column name — its real identity, checked
+        /// against the model at commit time exactly as a cell's labels
+        /// are (a header attribute's own "did the grid move" rule).
+        column: SharedString,
+    },
 }
 
 /// Which of the three yanks (spec §8.3) is being taken.
@@ -269,10 +288,16 @@ pub struct MarketDataTile {
     /// outright (ruling 2026-09-14), so it can never be left set against
     /// a document its labels did not come from.
     unresolved_restore: bool,
-    /// (row, column) into the model's grid — the same index a
-    /// `Draft` edit is keyed by, and the truth the table's own selection
-    /// mirrors (never the other way round).
-    cursor: (usize, usize),
+    /// A grid cell — the same index a `Draft` edit is keyed by, and the
+    /// truth the table's own selection mirrors (never the other way
+    /// round) — or an attribute in the header strip (spec 2026-09-14
+    /// §5.1).
+    cursor: Cursor,
+    /// The grid column the cursor left from on entering the strip —
+    /// `cursor::step`'s own memory, kept here because the tile is what
+    /// owns the cursor across motions (`j` reads it back to return to the
+    /// same column; `0` before the strip has ever been entered).
+    last_grid_col: usize,
     /// The body: gpui-component's table over [`MatrixDelegate`]. Never
     /// focused (see `geode_marketdata::init`, which binds its context's
     /// keys to `NoAction` for the one frame a click gives it gpui focus).
@@ -459,7 +484,8 @@ impl MarketDataTile {
             snapshot: None,
             base_snapshot: None,
             draft,
-            cursor: (0, 0),
+            cursor: Cursor::Cell { row: 0, col: 0 },
+            last_grid_col: 0,
             table,
             editor: None,
             find: None,
@@ -892,15 +918,21 @@ impl MarketDataTile {
         self.sync_cursor(cx);
     }
 
-    /// Keep the cursor inside the grid — a new generation can be shorter
-    /// than the one it replaces, and a cursor left past its end would
-    /// yank, edit and paint nothing.
+    /// The grid and strip shape `cursor::step`/`clamp` reason about —
+    /// this panel's whole cursor vocabulary, in one small `Copy` value.
+    fn grid(&self) -> Grid {
+        Grid {
+            rows: self.model.rows.len(),
+            cols: self.model.columns.len(),
+            attrs: self.model.header.len(),
+        }
+    }
+
+    /// Keep the cursor inside the grid or the strip — a new generation can
+    /// be shorter than the one it replaces (or lose an attribute), and a
+    /// cursor left past its end would yank, edit and paint nothing.
     fn clamp_cursor(&mut self) {
-        self.cursor.0 = self.cursor.0.min(self.model.rows.len().saturating_sub(1));
-        self.cursor.1 = self
-            .cursor
-            .1
-            .min(self.model.columns.len().saturating_sub(1));
+        self.cursor = cursor::clamp(self.cursor, self.grid());
     }
 
     /// Mirror the cursor and the open editor into the delegate, and move
@@ -909,39 +941,75 @@ impl MarketDataTile {
     /// `set_selected_col` each scroll, non-strictly, so a cell already on
     /// screen never jumps).
     ///
-    /// The column is shifted by one: the table's column 0 is the row-label
-    /// column, which the cursor never enters. The column is set BEFORE the
-    /// row deliberately — each setter switches the component's selection
-    /// mode, and the row highlight is painted only in row mode, so ending
-    /// on the row is what makes the panel read like the blotter (a
-    /// highlighted row plus a bordered cursor cell) rather than painting
-    /// nothing at all.
+    /// While the cursor is in the strip (`Cursor::Attr`) the delegate
+    /// mirrors NO selection at all (`clear_selection`) — the pinned
+    /// component's own clear door, confirmed at implementation time — so
+    /// the grid paints no highlighted row behind an attribute edit.
+    ///
+    /// In the grid, the column is shifted by one: the table's column 0 is
+    /// the row-label column, which the cursor never enters. The column is
+    /// set BEFORE the row deliberately — each setter switches the
+    /// component's selection mode, and the row highlight is painted only
+    /// in row mode, so ending on the row is what makes the panel read
+    /// like the blotter (a highlighted row plus a bordered cursor cell)
+    /// rather than painting nothing at all.
     fn sync_cursor(&self, cx: &mut Context<Self>) {
-        let (row, col) = self.cursor;
-        let editor = self.editor.as_ref().map(|e| (e.cell, e.state.clone()));
-        self.table.update(cx, |t, cx| {
-            let d = t.delegate_mut();
-            d.cursor = (row, col);
-            d.editor = editor;
-            t.set_selected_col(MatrixDelegate::table_col(col), cx);
-            t.set_selected_row(row, cx);
-            t.scroll_to_row(row, cx);
+        let editor = self.editor.as_ref().and_then(|e| match &e.target {
+            EditTarget::Cell { cell, .. } => Some((*cell, e.state.clone())),
+            EditTarget::Attr { .. } => None,
         });
+        match self.cursor {
+            Cursor::Cell { row, col } => self.table.update(cx, |t, cx| {
+                let d = t.delegate_mut();
+                d.cursor = Some((row, col));
+                d.editor = editor;
+                t.set_selected_col(MatrixDelegate::table_col(col), cx);
+                t.set_selected_row(row, cx);
+                t.scroll_to_row(row, cx);
+            }),
+            Cursor::Attr(_) => self.table.update(cx, |t, cx| {
+                let d = t.delegate_mut();
+                d.cursor = None;
+                d.editor = editor;
+                t.clear_selection(cx);
+            }),
+        }
     }
 
     /// Move the cursor to a clicked cell — the mouse's form of §8.3's
     /// motions, clamped into the grid. `col: None` is a click on the
-    /// row-label column: the row moves and the column stays, since the
-    /// cursor never enters that column.
+    /// row-label column: the row moves and the column stays where it was
+    /// (`last_grid_col` when the click arrives from the strip, since
+    /// there is no grid column of the cursor's own yet).
     fn cursor_to(&mut self, row: usize, col: Option<usize>, cx: &mut Context<Self>) {
         if self.model.rows.is_empty() {
             return;
         }
-        self.cursor.0 = row.min(self.model.rows.len().saturating_sub(1));
-        if let Some(col) = col {
-            self.cursor.1 = col.min(self.model.columns.len().saturating_sub(1));
-        }
+        let row = row.min(self.model.rows.len().saturating_sub(1));
+        let current_col = match self.cursor {
+            Cursor::Cell { col, .. } => col,
+            Cursor::Attr(_) => self.last_grid_col,
+        };
+        let col = col
+            .unwrap_or(current_col)
+            .min(self.model.columns.len().saturating_sub(1));
+        self.cursor = Cursor::Cell { row, col };
         self.sync_cursor(cx);
+        cx.notify();
+    }
+
+    /// Move the cursor to an attribute in the header strip — the mouse's
+    /// form of `k` (spec §5.1: "a click on an attribute value moves the
+    /// cursor to `Attr(i)` and opens nothing"). `header::render` attaches
+    /// this to each attribute value's own mouse-down.
+    pub(crate) fn cursor_to_attr(&mut self, i: usize, cx: &mut Context<Self>) {
+        let attrs = self.model.header.len();
+        if attrs == 0 {
+            return;
+        }
+        self.cursor = Cursor::Attr(i.min(attrs - 1));
+        self.sync_cursor(cx);
+        self.rebuild_chrome();
         cx.notify();
     }
 
@@ -999,27 +1067,32 @@ impl MarketDataTile {
         };
         let n = count.unwrap_or(1).max(1) as isize;
         // Whether this action touched something the HEADER paints (review
-        // fix round 1, MIN-5). The cursor is not in the header, so a
-        // motion, a yank and an `n`/`N` step must not re-prepare the
-        // chips — `changed` formats, and a held `j` would then format the
-        // whole header per keystroke for a row number nothing shows.
+        // fix round 1, MIN-5, extended by Task 5 to the strip): a motion
+        // that STAYS in the grid, a yank and an `n`/`N` step must not
+        // re-prepare the chips — `changed` formats, and a held `j` would
+        // then format the whole header per keystroke for a row number
+        // nothing shows. A motion that crosses into or out of the strip
+        // is the one exception: the strip's own cursor border is header
+        // paint (spec §5.1).
         let chrome = match verb {
             "down" | "up" | "left" | "right" | "page_down" | "page_up" | "top" | "bottom"
             | "first_col" | "last_col" => {
-                let (rows, cols) = match verb {
-                    "down" => (n, 0),
-                    "up" => (-n, 0),
-                    "left" => (0, -n),
-                    "right" => (0, n),
-                    "page_down" => (HALF_PAGE * n, 0),
-                    "page_up" => (-HALF_PAGE * n, 0),
-                    "top" => (isize::MIN / 2, 0),
-                    "bottom" => (isize::MAX / 2, 0),
-                    "first_col" => (0, isize::MIN / 2),
-                    _ => (0, isize::MAX / 2),
+                let motion = match verb {
+                    "down" => Motion::Rows(n),
+                    "up" => Motion::Rows(-n),
+                    "left" => Motion::Cols(-n),
+                    "right" => Motion::Cols(n),
+                    "page_down" => Motion::Rows(HALF_PAGE * n),
+                    "page_up" => Motion::Rows(-HALF_PAGE * n),
+                    "top" => Motion::Top,
+                    "bottom" => Motion::Bottom,
+                    "first_col" => Motion::FirstCol,
+                    _ => Motion::LastCol,
                 };
-                self.move_cursor(rows, cols);
-                false
+                let was_attr = matches!(self.cursor, Cursor::Attr(_));
+                let grid = self.grid();
+                self.cursor = cursor::step(self.cursor, &mut self.last_grid_col, motion, grid);
+                was_attr != matches!(self.cursor, Cursor::Attr(_))
             }
             "yank" | "yank_row" | "yank_col" => {
                 let what = match verb {
@@ -1027,10 +1100,18 @@ impl MarketDataTile {
                     "yank_row" => Yank::Row,
                     _ => Yank::Col,
                 };
-                if let Some(text) = self.yank_text(what) {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                // `yc` in the strip has no column to yank (spec §5.1): a
+                // notice, not a silent no-op — the one yank that touches
+                // the header at all.
+                if what == Yank::Col && matches!(self.cursor, Cursor::Attr(_)) {
+                    self.notice = Some("nothing to yank in a column here".into());
+                    true
+                } else {
+                    if let Some(text) = self.yank_text(what) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                    false
                 }
-                false
             }
             "edit" => {
                 self.begin_edit(window, cx);
@@ -1094,10 +1175,22 @@ impl MarketDataTile {
         Ok(self.model.source_time.clone().unwrap_or_default())
     }
 
-    /// `marketdata::edit` (`i`/`enter`): open an input in the cursor cell,
-    /// seeded with what that cell already reads — the draft's own value
-    /// where one has been made, since that is what `MatrixModel::build`
-    /// painted there — and give it the keyboard.
+    /// The attribute strip's own [`Self::edit_base`]: an attribute needs
+    /// no row or column, only a header to belong to, which the model
+    /// carries exactly when it carries any rows at all (see
+    /// `MatrixModel::build`'s early return for an empty document).
+    fn attr_edit_base(&self) -> Result<String, String> {
+        if self.model.header.is_empty() {
+            return Err(NO_DOCUMENT.to_string());
+        }
+        Ok(self.model.source_time.clone().unwrap_or_default())
+    }
+
+    /// `marketdata::edit` (`i`/`enter`): open an input in the cursor cell
+    /// or, on `Cursor::Attr`, in the strip — seeded with what is already
+    /// painted there (the draft's own value where one has been made,
+    /// since that is what `MatrixModel::build`/`header_of` painted) — and
+    /// give it the keyboard.
     ///
     /// Every painted cell is editable, in both pivots: `Columns::Axis`
     /// fills the grid from the document's one value column, and
@@ -1116,46 +1209,81 @@ impl MarketDataTile {
             self.notice = Some(BEHIND_REFUSED.into());
             return;
         }
-        if let Err(e) = self.edit_base() {
-            self.notice = Some(e.into());
-            return;
-        }
-        let cell = self.cursor;
-        let text = self.model.rows[cell.0].cells[cell.1].text.clone();
+        let (text, target) = match self.cursor {
+            Cursor::Cell { row, col } => {
+                if let Err(e) = self.edit_base() {
+                    self.notice = Some(e.into());
+                    return;
+                }
+                let cell = (row, col);
+                let text = self.model.rows[row].cells[col].text.clone();
+                let labels = self.model.label_of(cell);
+                (text, EditTarget::Cell { cell, labels })
+            }
+            Cursor::Attr(i) => {
+                if let Err(e) = self.attr_edit_base() {
+                    self.notice = Some(e.into());
+                    return;
+                }
+                let Some(attr) = self.model.header.get(i) else {
+                    self.notice = Some(NO_DOCUMENT.into());
+                    return;
+                };
+                (
+                    attr.text.clone(),
+                    EditTarget::Attr {
+                        index: i,
+                        column: attr.column.clone(),
+                    },
+                )
+            }
+        };
         let state = cx.new(|cx| InputState::new(window, cx));
         state.update(cx, |s, cx| s.set_value(text, window, cx));
         state.read(cx).focus_handle(cx).focus(window, cx);
-        self.editor = Some(Editing {
-            state,
-            cell,
-            labels: self.model.label_of(cell),
-        });
+        self.editor = Some(Editing { state, target });
         self.notice = None;
     }
 
     /// `marketdata::commit` (`enter` in insert mode). Answers whether the
     /// header needs re-preparing.
-    ///
-    /// The text is PARSED before anything is written, through the column's
-    /// declared type ([`PanelSpec::value_type`]) — a `'wide'` refused
-    /// inline, with the editor left open and focused, because retyping a
-    /// value is one keystroke away where dropping the editor would throw
-    /// the whole line back at the trader.
     fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(editing) = self.editor.as_ref() else {
             return false;
         };
         let text = editing.state.read(cx).value().to_string();
-        let cell = editing.cell;
-        let labels = editing.labels.clone();
+        let target = editing.target.clone();
+        match target {
+            EditTarget::Cell { cell, labels } => {
+                self.commit_cell_edit(cell, labels, &text, window, cx)
+            }
+            EditTarget::Attr { index, column } => {
+                self.commit_attr_edit(index, column, &text, window, cx)
+            }
+        }
+    }
 
+    /// `commit_edit`'s cell arm: the text is PARSED before anything is
+    /// written, through the column's declared type
+    /// ([`PanelSpec::value_type`]) — a `'wide'` refused inline, with the
+    /// editor left open and focused, because retyping a value is one
+    /// keystroke away where dropping the editor would throw the whole
+    /// line back at the trader.
+    fn commit_cell_edit(
+        &mut self,
+        cell: (usize, usize),
+        labels: (SharedString, SharedString),
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.model.label_of(cell) != labels {
-            // The grid moved under the editor (see `Editing::labels`).
+            // The grid moved under the editor (see `EditTarget::Cell`).
             self.close_editor(window, cx);
             self.notice = Some(CELL_MOVED.into());
             return true;
         }
-        let value = match parse_cell(&text, self.spec.value_type) {
+        let value = match parse_cell(text, self.spec.value_type) {
             Ok(value) => value,
             Err(e) => {
                 // Stay in insert mode, with the text as typed.
@@ -1181,6 +1309,63 @@ impl MarketDataTile {
         self.notice = None;
         // The draft's values are what `MatrixModel::build` paints, so an
         // edit that does not rebuild is an edit nobody can see.
+        self.rebuild_model(cx);
+        true
+    }
+
+    /// `commit_edit`'s attribute arm (spec §5.2): the same parse-first
+    /// discipline as [`Self::commit_cell_edit`], through
+    /// [`crate::core::draft::parse_attr`] and the attribute's own declared
+    /// type rather than the panel's cell type.
+    fn commit_attr_edit(
+        &mut self,
+        index: usize,
+        column: SharedString,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.model.header.get(index).map(|h| &h.column) != Some(&column) {
+            // The header moved under the editor — unreachable today (a
+            // panel's header is fixed by its spec), refused rather than
+            // guessed at, the same rule `commit_cell_edit` applies to a
+            // moved cell.
+            self.close_editor(window, cx);
+            self.notice = Some(CELL_MOVED.into());
+            return true;
+        }
+        let Some(attr) = self
+            .spec
+            .header
+            .iter()
+            .find(|a| a.column == column.as_ref())
+        else {
+            self.close_editor(window, cx);
+            self.notice = Some(CELL_MOVED.into());
+            return true;
+        };
+        let value = match parse_attr(text, attr.ty) {
+            Ok(value) => value,
+            Err(e) => {
+                // Refused, staying in insert mode with the typed text
+                // (the cell rule, spec §5.2) — retyping is one keystroke
+                // away where dropping the editor would throw the whole
+                // line back at the trader.
+                self.notice = Some(e.into());
+                return true;
+            }
+        };
+        let base = match self.attr_edit_base() {
+            Ok(base) => base,
+            Err(e) => {
+                self.close_editor(window, cx);
+                self.notice = Some(e.into());
+                return true;
+            }
+        };
+        self.draft.set_attr(attr.column, value, &base);
+        self.close_editor(window, cx);
+        self.notice = None;
         self.rebuild_model(cx);
         true
     }
@@ -1255,7 +1440,11 @@ impl MarketDataTile {
             return Err(BEHIND_REFUSED.to_string());
         }
         let base = self.edit_base()?;
-        let (row, col) = self.cursor;
+        let Cursor::Cell { row, col } = self.cursor else {
+            // `:bump` walks a grid row or column (spec §8.3); the strip
+            // has neither, and there is no cell here to name.
+            return Err("bump needs a grid cell — the cursor is in the header".to_string());
+        };
         let values: Vec<((usize, usize), f64)> = match axis {
             BumpAxis::Row => self.model.rows[row]
                 .cells
@@ -1360,50 +1549,70 @@ impl MarketDataTile {
         Ok(())
     }
 
-    /// Move by cells, clamped. The extremes are the same door with a
-    /// saturating delta — `isize::MAX / 2` cannot overflow when added to
-    /// any real index, and one clamp is one rule about where a cursor may
-    /// be.
-    fn move_cursor(&mut self, rows: isize, cols: isize) {
-        let (nrows, ncols) = (self.model.rows.len(), self.model.columns.len());
-        if nrows == 0 || ncols == 0 {
-            self.cursor = (0, 0);
-            return;
+    /// The cursor's row when it is on a grid cell, `0` when it is in the
+    /// strip — `find` and `repeat_find` never touch the strip (spec
+    /// §5.1: "`/` matches row and column labels as today and never the
+    /// strip"), so a search that somehow starts from `Attr` has nowhere
+    /// better to begin than the top.
+    fn cursor_row(&self) -> usize {
+        match self.cursor {
+            Cursor::Cell { row, .. } => row,
+            Cursor::Attr(_) => 0,
         }
-        self.cursor.0 = (self.cursor.0 as isize)
-            .saturating_add(rows)
-            .clamp(0, nrows as isize - 1) as usize;
-        self.cursor.1 = (self.cursor.1 as isize)
-            .saturating_add(cols)
-            .clamp(0, ncols as isize - 1) as usize;
+    }
+
+    /// Move the cursor to a grid row, keeping its column — the column the
+    /// cursor already had, or `last_grid_col` if it was in the strip.
+    fn set_cursor_row(&mut self, row: usize) {
+        let col = match self.cursor {
+            Cursor::Cell { col, .. } => col,
+            Cursor::Attr(_) => self.last_grid_col,
+        };
+        self.cursor = Cursor::Cell { row, col };
     }
 
     /// The blotter's own tab-separated spelling (§8.3): a cell is its
     /// text, a row is its label then its cells, a column is its cells one
     /// per line. Always the PREPARED text, so what is yanked is exactly
     /// what is on screen — a NULL yanks as nothing, never as `0.0000`.
+    ///
+    /// In the strip (spec §5.1), `y` yanks the attribute's own value and
+    /// `yy` its label and value the same way; `yc` has no column to yank
+    /// and answers `None` (the dispatcher turns that case into a notice
+    /// before it ever reaches here).
     fn yank_text(&self, what: Yank) -> Option<String> {
-        let (r, c) = self.cursor;
-        let row = self.model.rows.get(r)?;
-        Some(match what {
-            Yank::Cell => row.cells.get(c)?.text.to_string(),
-            Yank::Row => {
-                let mut out = row.label.to_string();
-                for cell in &row.cells {
-                    out.push('\t');
-                    out.push_str(&cell.text);
-                }
-                out
+        match self.cursor {
+            Cursor::Cell { row: r, col: c } => {
+                let row = self.model.rows.get(r)?;
+                Some(match what {
+                    Yank::Cell => row.cells.get(c)?.text.to_string(),
+                    Yank::Row => {
+                        let mut out = row.label.to_string();
+                        for cell in &row.cells {
+                            out.push('\t');
+                            out.push_str(&cell.text);
+                        }
+                        out
+                    }
+                    Yank::Col => self
+                        .model
+                        .rows
+                        .iter()
+                        .filter_map(|row| row.cells.get(c))
+                        .map(|cell| cell.text.as_ref())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                })
             }
-            Yank::Col => self
-                .model
-                .rows
-                .iter()
-                .filter_map(|row| row.cells.get(c))
-                .map(|cell| cell.text.as_ref())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        })
+            Cursor::Attr(i) => {
+                let attr = self.model.header.get(i)?;
+                match what {
+                    Yank::Cell => Some(attr.text.to_string()),
+                    Yank::Row => Some(format!("{}\t{}", attr.label, attr.text)),
+                    Yank::Col => None,
+                }
+            }
+        }
     }
 
     fn row_labels(&self) -> Vec<String> {
@@ -1420,11 +1629,12 @@ impl MarketDataTile {
                 let origin = match &self.find {
                     Some(find) => find.origin,
                     None => {
+                        let origin = self.cursor_row();
                         self.find = Some(FindState {
-                            origin: self.cursor.0,
+                            origin,
                             committed: None,
                         });
-                        self.cursor.0
+                        origin
                     }
                 };
                 let labels = self.row_labels();
@@ -1433,7 +1643,7 @@ impl MarketDataTile {
                 // lengthening query walk forward and a shortened one walk
                 // back (vim's incsearch).
                 if let Some(row) = find_match(&labels, origin, FindDirection::Forward, &query) {
-                    self.cursor.0 = row;
+                    self.set_cursor_row(row);
                     self.clamp_cursor();
                 }
             }
@@ -1446,7 +1656,7 @@ impl MarketDataTile {
             }
             FindEvent::Cancelled => {
                 if let Some(find) = self.find.take() {
-                    self.cursor.0 = find.origin;
+                    self.set_cursor_row(find.origin);
                     self.clamp_cursor();
                 }
             }
@@ -1469,7 +1679,7 @@ impl MarketDataTile {
         if labels.is_empty() {
             return;
         }
-        let mut at = self.cursor.0;
+        let mut at = self.cursor_row();
         for _ in 0..count.unwrap_or(1).max(1) {
             let start = match dir {
                 FindDirection::Forward => (at + 1) % labels.len(),
@@ -1480,7 +1690,7 @@ impl MarketDataTile {
                 None => return,
             }
         }
-        self.cursor.0 = at;
+        self.set_cursor_row(at);
         self.clamp_cursor();
     }
 
@@ -1512,6 +1722,63 @@ impl MarketDataTile {
             // Parsed, not executed: the grammar a trader types is the one
             // Part 4 wires up.
             Command::Upload => Err("upload is not built yet".into()),
+            Command::Set { attr, value } => self.set_attr_command(&attr, value, cx),
+        }
+    }
+
+    /// `:set <attr> [value]` (spec §5.2): the typed door onto the same
+    /// attribute vocabulary `i`/`enter` on `Cursor::Attr` writes through —
+    /// same parse, same refusals, attribute names as completions
+    /// ([`Self::completions`]).
+    ///
+    /// `value: None` answers with the current value AS A NOTICE
+    /// (`Err`, the command line's own inline-error slot — the same
+    /// contract every other module's `command` keeps for a one-line
+    /// answer that changed nothing), never `Ok`, since nothing was
+    /// written.
+    fn set_attr_command(
+        &mut self,
+        attr: &str,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let unknown = || {
+            let names = self
+                .spec
+                .header
+                .iter()
+                .map(|a| a.column)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("no attribute '{attr}' ({names})")
+        };
+        match value {
+            None => {
+                let cell = self
+                    .model
+                    .header
+                    .iter()
+                    .find(|h| h.column.as_ref() == attr)
+                    .ok_or_else(unknown)?;
+                Err(format!("{attr} = {}", cell.text))
+            }
+            Some(value) => {
+                if self.draft.is_behind() {
+                    return Err(BEHIND_REFUSED.to_string());
+                }
+                let header_attr = self
+                    .spec
+                    .header
+                    .iter()
+                    .find(|a| a.column == attr)
+                    .ok_or_else(unknown)?;
+                let parsed = parse_attr(&value, header_attr.ty)?;
+                let base = self.attr_edit_base()?;
+                self.draft.set_attr(header_attr.column, parsed, &base);
+                self.rebuild_model(cx);
+                self.changed(cx);
+                Ok(())
+            }
         }
     }
 
@@ -1546,7 +1813,8 @@ impl MarketDataTile {
         // A different document is a different question: the next
         // delivery is never the one already asked for.
         self.acted = None;
-        self.cursor = (0, 0);
+        self.cursor = Cursor::Cell { row: 0, col: 0 };
+        self.last_grid_col = 0;
         self.rebuild_model(cx);
         if self.visible {
             self.requery(cx);
@@ -1557,7 +1825,19 @@ impl MarketDataTile {
     }
 
     pub fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
-        commands::completions(line, cursor, &self.catalog_keys(cx), self.draft.is_behind())
+        let attrs: Vec<String> = self
+            .spec
+            .header
+            .iter()
+            .map(|a| a.column.to_string())
+            .collect();
+        commands::completions(
+            line,
+            cursor,
+            &self.catalog_keys(cx),
+            self.draft.is_behind(),
+            &attrs,
+        )
     }
 
     /// This panel's dataset's document keys, as the catalog holds them:
@@ -1652,7 +1932,7 @@ impl MarketDataTile {
     }
 
     #[cfg(test)]
-    pub(crate) fn cursor(&self) -> (usize, usize) {
+    pub(crate) fn cursor(&self) -> Cursor {
         self.cursor
     }
 
@@ -1754,10 +2034,18 @@ impl gpui::Render for MarketDataTile {
         // set before the header is painted.
         self.header.stale = self.is_stale(chrono::Utc::now());
         let tile = cx.entity();
+        let cursor_attr = match self.cursor {
+            Cursor::Attr(i) => Some(i),
+            Cursor::Cell { .. } => None,
+        };
+        let editor = self.editor.as_ref().and_then(|e| match &e.target {
+            EditTarget::Attr { index, .. } => Some((*index, &e.state)),
+            EditTarget::Cell { .. } => None,
+        });
         let header = header::render(
             &self.header,
-            None,
-            None,
+            cursor_attr,
+            editor,
             false,
             theme,
             &tones,
@@ -2228,11 +2516,12 @@ mod tests {
     /// its debug selector — the mouse tests below click real bounds, never
     /// a synthesised event, so a listener that is not actually wired to the
     /// painted element fails them (the blotter's own `centre_of`).
-    fn centre_of(
-        vcx: &mut gpui::VisualTestContext,
-        selector: &'static str,
-    ) -> gpui::Point<gpui::Pixels> {
+    fn centre_of(vcx: &mut gpui::VisualTestContext, selector: &str) -> gpui::Point<gpui::Pixels> {
         draw(vcx);
+        // `debug_bounds` wants `&'static str`; a formatted selector (a
+        // click test naming one tile's attribute index, say) is not one,
+        // so it is leaked here — a test-only cost, once per call.
+        let selector: &'static str = Box::leak(selector.to_string().into_boxed_str());
         vcx.debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} is painted"))
             .center()
@@ -2315,14 +2604,17 @@ mod tests {
     fn a_cell_click_moves_the_cursor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 0));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 0 }
+        );
 
         // Row 1, the third node: table column 3.
         let at = centre_of(&mut vcx, "marketdata-cell-1-3");
         click_at(&mut vcx, at, 1);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            (1, 2),
+            Cursor::Cell { row: 1, col: 2 },
             "the click moved the cursor to that cell"
         );
         assert_eq!(
@@ -2346,9 +2638,15 @@ mod tests {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
         h.dispatch(&mut vcx, "right", Some(2));
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 2));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 2 }
+        );
         h.dispatch(&mut vcx, "first_col", None);
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 0));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 0 }
+        );
         h.dispatch(&mut vcx, "left", None);
         assert_eq!(
             h.selection(&vcx),
@@ -2361,7 +2659,7 @@ mod tests {
         click_at(&mut vcx, at, 1);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            (1, 2),
+            Cursor::Cell { row: 1, col: 2 },
             "a click on a row label moves the row and leaves the column where it was"
         );
         assert_eq!(h.selection(&vcx), (Some(1), Some(3)));
@@ -2387,7 +2685,7 @@ mod tests {
         click_at(&mut vcx, at, 2);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            (1, 1),
+            Cursor::Cell { row: 1, col: 1 },
             "the cursor moved to the clicked cell"
         );
         assert_eq!(
@@ -2438,7 +2736,7 @@ mod tests {
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            (1, 2),
+            Cursor::Cell { row: 1, col: 2 },
             "and the cursor moved to the clicked cell"
         );
         assert!(
@@ -2468,24 +2766,28 @@ mod tests {
                 (d.cursor, d.editor.as_ref().map(|(at, _)| *at))
             })
         };
-        assert_eq!(mirror(&vcx), ((0, 0), None));
+        assert_eq!(mirror(&vcx), (Some((0, 0)), None));
 
         h.dispatch(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "right", Some(2));
         assert_eq!(
             mirror(&vcx),
-            ((1, 2), None),
+            (Some((1, 2)), None),
             "every cursor move reaches the delegate — in MODEL coordinates"
         );
 
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(
             mirror(&vcx),
-            ((1, 2), Some((1, 2))),
+            (Some((1, 2)), Some((1, 2))),
             "and so does the open editor's own cell"
         );
         h.dispatch(&mut vcx, "cancel", None);
-        assert_eq!(mirror(&vcx), ((1, 2), None), "cancel clears the mirror too");
+        assert_eq!(
+            mirror(&vcx),
+            (Some((1, 2)), None),
+            "cancel clears the mirror too"
+        );
     }
 
     /// The editor is painted IN the cell it edits (spec §8.3), which is
@@ -3041,7 +3343,10 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         h.dispatch(&mut vcx, "bottom", None);
         h.dispatch(&mut vcx, "last_col", None);
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (4, 2));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 4, col: 2 }
+        );
 
         // Two terms and two nodes now: both axes shrank under the cursor.
         h.deliver(
@@ -3051,7 +3356,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            (1, 1),
+            Cursor::Cell { row: 1, col: 1 },
             "the cursor is clamped into the new grid"
         );
         h.dispatch(&mut vcx, "yank", None);
@@ -3072,20 +3377,32 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.deliver(&mut vcx, tag, Arc::new(document_of(&terms, &NODES, BASE)));
 
         h.dispatch(&mut vcx, "down", Some(3));
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (3, 0));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 3, col: 0 }
+        );
         h.dispatch(&mut vcx, "right", Some(2));
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (3, 2));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 3, col: 2 }
+        );
         h.dispatch(&mut vcx, "down", Some(9));
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            (4, 2),
+            Cursor::Cell { row: 4, col: 2 },
             "a count past the end clamps"
         );
         h.dispatch(&mut vcx, "top", None);
         h.dispatch(&mut vcx, "first_col", None);
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 0));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 0 }
+        );
         h.dispatch(&mut vcx, "last_col", None);
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (0, 2));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 2 }
+        );
 
         // The scroll is the table's now: `sync_cursor` sets the selected
         // row (which scrolls it into view) and the selected column, so the
@@ -3128,7 +3445,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, cx| t.completions("", 0, cx)),
-            commands::completions("", 0, &[], false),
+            commands::completions("", 0, &[], false, &[]),
             "the verb position is the pure core's vocabulary"
         );
 
@@ -3317,14 +3634,14 @@ edits = [["2026-11-20", "-1", 9.5]]
                 .find(FindEvent::Changed("11-20".into()), window, cx)
         });
         assert_eq!(
-            h.tile.read_with(&vcx, |t, _| t.cursor()).0,
-            1,
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 },
             "the cursor jumps to the matching term"
         );
         vcx.update(|window, cx| h.content.find(FindEvent::Cancelled, window, cx));
         assert_eq!(
-            h.tile.read_with(&vcx, |t, _| t.cursor()).0,
-            0,
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 0 },
             "escape restores the origin"
         );
     }
@@ -3695,7 +4012,10 @@ edits = [["2026-11-20", "-1", 9.5]]
             Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
         );
         h.dispatch(&mut vcx, "bottom", None);
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), (4, 0));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 4, col: 0 }
+        );
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
 
@@ -4382,6 +4702,164 @@ edits = [["2099-01-01", "-1", 1.0]]
             chips.iter().any(|c| c.contains("2099-01-01")),
             "the dropped-edit report is on screen after the delivery that \
              produced it: {chips:?}"
+        );
+    }
+
+    // ---- Task 5: the strip's own cursor, editing, and `:set` ---------
+
+    /// `k` from the top row enters the strip at the nearest attribute —
+    /// the grid paints no selection behind it — and `i`/`enter` edits the
+    /// attribute exactly as a cell would: parsed, written to the draft,
+    /// and painted with the dirty marker. `j` back out returns to the
+    /// grid at column 1, the column the cursor left from.
+    #[gpui::test]
+    fn k_from_the_top_row_enters_the_strip_and_i_edits_the_attribute(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "up", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(1));
+        assert_eq!(
+            h.selection(&vcx),
+            (None, None),
+            "the grid paints no highlighted row behind the strip"
+        );
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("5000"));
+        h.set_editor(&mut vcx, "4520");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        let (attrs, dirty) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.model().header.clone(), t.header_dirty()));
+        assert_eq!((attrs[1].text.as_ref(), attrs[1].edited), ("4520", true));
+        assert!(dirty);
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.header_texts())
+                .contains(&"spot 4520".to_string())
+        );
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 1 }
+        );
+    }
+
+    /// A refused parse stays in insert mode with the typed text intact —
+    /// the cell rule, spec §5.2 — and writes nothing to the draft.
+    #[gpui::test]
+    fn a_bad_date_stays_in_insert_mode_with_the_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "up", None); // Attr(0) = anchor_date
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "2026-13-45");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("'2026-13-45' is not a date (YYYY-MM-DD)".into())
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    }
+
+    /// `:set` writes the same draft `i`/`enter` would, without moving the
+    /// cursor into the strip at all; an unknown attribute names the real
+    /// vocabulary; `:revert` clears the attribute edit and the dirty dot
+    /// along with any cell edits.
+    #[gpui::test]
+    fn set_writes_an_attribute_and_revert_clears_it_and_the_dot(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        assert!(h.tile.read_with(&vcx, |t, _| t.header_dirty()));
+        assert!(
+            h.command(&mut vcx, "set nope 1")
+                .unwrap_err()
+                .starts_with("no attribute 'nope'")
+        );
+        h.command(&mut vcx, "revert").unwrap();
+        assert!(!h.tile.read_with(&vcx, |t, _| t.header_dirty()));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.model().header[1].text.to_string()),
+            "5000"
+        );
+    }
+
+    /// `:set <attr>` with no value answers the current value as a notice
+    /// (spec §5.2) — an `Err`, since nothing was written.
+    #[gpui::test]
+    fn set_with_no_value_answers_the_current_value_as_a_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        assert_eq!(
+            h.command(&mut vcx, "set spot_ref"),
+            Err("spot_ref = 5000".to_string())
+        );
+    }
+
+    /// A click on an attribute value moves the cursor to `Attr(i)` and
+    /// opens nothing (spec §5.1) — the same rule a grid cell's click
+    /// keeps, and the same reason: editing is keyboard-only.
+    #[gpui::test]
+    fn a_click_on_an_attribute_moves_the_cursor_and_opens_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let at = centre_of(&mut vcx, &format!("marketdata-attr-{TILE}-1"));
+        click_at(&mut vcx, at, 1);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(1));
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.editor_value(&vcx), None, "the click opened no editor");
+    }
+
+    /// An attribute edit is unsent work exactly as a cell edit is: a
+    /// newer generation under it goes `Behind`, and `:rebase` carries the
+    /// attribute edit forward (by column name — spec §5.3) and marks the
+    /// header attribute as edited on the newer document.
+    #[gpui::test]
+    fn an_attribute_edit_goes_behind_and_rebase_keeps_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.header_texts())
+                .iter()
+                .any(|t| t.starts_with("update "))
+        );
+        h.command(&mut vcx, "rebase").unwrap();
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().attrs.len()), 1);
+        assert!(h.tile.read_with(&vcx, |t, _| t.model().header[1].edited));
+    }
+
+    /// `y`/`yy` in the strip yank the attribute's own value, and its
+    /// label plus value tab-separated — the same shape a grid row's `yy`
+    /// yanks. `yc` has no column to yank and answers with a notice
+    /// instead of silently doing nothing.
+    #[gpui::test]
+    fn yank_in_the_strip_reads_the_attribute_and_yc_is_inert(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "up", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(0));
+        h.dispatch(&mut vcx, "yank", None);
+        assert_eq!(clipboard(&mut vcx).as_deref(), Some("2026-09-12"));
+        h.dispatch(&mut vcx, "yank_row", None);
+        assert_eq!(clipboard(&mut vcx).as_deref(), Some("anchor\t2026-09-12"));
+        h.dispatch(&mut vcx, "yank_col", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("nothing to yank in a column here".to_string())
         );
     }
 }

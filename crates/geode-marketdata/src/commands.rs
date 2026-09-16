@@ -46,6 +46,14 @@ pub enum Command {
     Rebase,
     Discard,
     Upload,
+    /// A document-level attribute edit typed at the `:` line — the same
+    /// vocabulary `i`/`enter` on `Cursor::Attr` writes through, but
+    /// reachable without moving the cursor into the strip at all. `value`
+    /// is `None` for "show me the current value" (spec §5.2).
+    Set {
+        attr: String,
+        value: Option<String>,
+    },
 }
 
 /// Every verb, in the order completions offer them. `key` is a silent
@@ -125,7 +133,19 @@ pub fn parse(line: &str) -> Result<Command, String> {
         Some("rebase") => Ok(Command::Rebase),
         Some("discard") => Ok(Command::Discard),
         Some("upload") => Ok(Command::Upload),
-        Some("set") => Err("set is not built yet".to_string()),
+        Some("set") => {
+            let attr = words
+                .next()
+                .ok_or_else(|| "usage: set <attribute> [value]".to_string())?;
+            let value = words.next().map(str::to_string);
+            if words.next().is_some() {
+                return Err("a value is one word".to_string());
+            }
+            Ok(Command::Set {
+                attr: attr.to_string(),
+                value,
+            })
+        }
         Some("menu") => Err("menu is not built yet".to_string()),
         Some(other) => Err(format!("unknown command '{other}'")),
         None => Err("empty command".to_string()),
@@ -144,8 +164,15 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// the `/`-separated display spelling, and `behind` gates `rebase`/
 /// `discard` (spec §8.3). `behind` is a fourth parameter the brief's
 /// sketch left out: the rule it implements is the brief's own, and this
-/// core has no `Draft` to read it off.
-pub fn completions(line: &str, cursor: usize, keys: &[String], behind: bool) -> Vec<String> {
+/// core has no `Draft` to read it off. `attrs` is the panel's own header
+/// attribute column names, in spec order, for `set`'s first word.
+pub fn completions(
+    line: &str,
+    cursor: usize,
+    keys: &[String],
+    behind: bool,
+    attrs: &[String],
+) -> Vec<String> {
     // The caller's cursor should land on a char boundary; this pure core
     // must not panic on the slice below if it ever does not — the same
     // guard `geode_blotter::core::commands::completions` keeps, itself
@@ -171,6 +198,7 @@ pub fn completions(line: &str, cursor: usize, keys: &[String], behind: bool) -> 
             .map(|v| (*v).to_string())
             .collect(),
         ["underlying"] | ["key"] => keys.to_vec(),
+        ["set"] => attrs.to_vec(),
         // `bump`'s delta is a number nothing can complete; its axis is a
         // two-word vocabulary.
         ["bump", _] => vec!["row".to_string(), "col".to_string()],
@@ -236,12 +264,12 @@ mod tests {
     fn completions_offer_the_verbs_then_the_catalog_keys() {
         let keys = vec!["NDX.Z".to_string(), "SPX.Z".to_string()];
         assert_eq!(
-            completions("", 0, &keys, false),
+            completions("", 0, &keys, false, &[]),
             vec!["underlying", "revert", "bump", "upload", "set", "menu"],
             "rebase and discard are offered only while behind"
         );
         assert_eq!(
-            completions("", 0, &keys, true),
+            completions("", 0, &keys, true, &[]),
             vec![
                 "underlying",
                 "revert",
@@ -253,25 +281,28 @@ mod tests {
                 "menu"
             ]
         );
-        assert_eq!(completions("key ", 4, &keys, false), keys);
+        assert_eq!(completions("key ", 4, &keys, false, &[]), keys);
         assert_eq!(
-            completions("underlying ", 11, &keys, false),
+            completions("underlying ", 11, &keys, false, &[]),
             keys,
             "both underlying and key (the alias) complete with catalog keys"
         );
         assert_eq!(
-            completions("underlying SP", 13, &keys, false),
+            completions("underlying SP", 13, &keys, false, &[]),
             keys,
             "the whole vocabulary, unfiltered — the shell ranks it"
         );
-        assert_eq!(completions("bump 1 ", 7, &keys, false), vec!["row", "col"]);
         assert_eq!(
-            completions("bump ", 5, &keys, false),
+            completions("bump 1 ", 7, &keys, false, &[]),
+            vec!["row", "col"]
+        );
+        assert_eq!(
+            completions("bump ", 5, &keys, false, &[]),
             Vec::<String>::new(),
             "nothing completes a number"
         );
         assert_eq!(
-            completions("revert ", 7, &keys, false),
+            completions("revert ", 7, &keys, false, &[]),
             Vec::<String>::new()
         );
     }
@@ -280,7 +311,7 @@ mod tests {
     fn a_cursor_off_a_char_boundary_does_not_panic() {
         let keys = vec!["SPX.Z".to_string()];
         // `é` is two bytes: a cursor at 2 lands mid-char.
-        assert!(!completions("kéy", 2, &keys, false).is_empty());
+        assert!(!completions("kéy", 2, &keys, false, &[]).is_empty());
     }
 
     #[test]
@@ -295,8 +326,43 @@ mod tests {
 
     #[test]
     fn completions_offer_underlying_and_never_the_key_alias() {
-        let verbs = completions("", 0, &[], false);
+        let verbs = completions("", 0, &[], false, &[]);
         assert_eq!(verbs[0], "underlying");
         assert!(!verbs.iter().any(|v| v == "key"), "{verbs:?}");
+    }
+
+    #[test]
+    fn set_parses_an_attribute_with_or_without_a_value() {
+        assert_eq!(
+            parse("set spot_ref 4520"),
+            Ok(Command::Set {
+                attr: "spot_ref".into(),
+                value: Some("4520".into())
+            })
+        );
+        assert_eq!(
+            parse("set spot_ref"),
+            Ok(Command::Set {
+                attr: "spot_ref".into(),
+                value: None
+            })
+        );
+        assert_eq!(parse("set"), Err("usage: set <attribute> [value]".into()));
+        assert_eq!(
+            parse("set anchor_date 2026 09 14"),
+            Err("a value is one word".into())
+        );
+    }
+
+    #[test]
+    fn set_completes_attribute_names() {
+        let c = completions(
+            "set ",
+            4,
+            &[],
+            false,
+            &["anchor_date".into(), "spot_ref".into()],
+        );
+        assert_eq!(c, vec!["anchor_date", "spot_ref"]);
     }
 }

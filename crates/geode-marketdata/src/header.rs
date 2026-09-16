@@ -159,10 +159,12 @@ impl HeaderModel {
 /// Paint the header row (spec §4): kind badge, bold underlying, dirty
 /// dot, inline attribute strip, spacer, state, notice, time, `⋯`.
 ///
-/// `cursor_attr`/`editor` are `None` until Task 5 wires the strip's own
-/// cursor and cell editor; `menu_open` is `false` until Task 6 wires the
-/// action list `⋯` opens. `tile` is accepted, unused, for the mouse
-/// handlers those tasks add.
+/// `cursor_attr`/`editor` (Task 5, spec §5.1/§5.2): which attribute, if
+/// any, the cursor is on, and the open editor's own `(index, InputState)`
+/// when it is an attribute being edited. `menu_open` is `false` until
+/// Task 6 wires the action list `⋯` opens; `tile` is this attribute
+/// strip's own mouse door (`cursor_to_attr`) and Task 6's, once it wires
+/// the `⋯` click.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     h: &HeaderModel,
@@ -238,7 +240,17 @@ pub(crate) fn render(
             } else {
                 gpui::transparent_black()
             })
-            .debug_selector(move || format!("marketdata-attr-{tile_id}-{i}"));
+            .debug_selector(move || format!("marketdata-attr-{tile_id}-{i}"))
+            // The mouse's form of `k` (spec §5.1): a click on an
+            // attribute value moves the cursor to `Attr(i)` and opens
+            // nothing. Deliberately no `cx.stop_propagation()` — the
+            // shell's own tile-level mouse-down (focus re-arm) must still
+            // run, the same rule every other tile mouse-down in this
+            // codebase keeps (CLAUDE.md's focus rule).
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let tile = tile.clone();
+                move |_, _, cx| tile.update(cx, |t, cx| t.cursor_to_attr(i, cx))
+            });
         value = match editor {
             Some((e, state)) if e == i => {
                 value.child(div().min_w(px(80.)).child(Input::new(state)))
@@ -301,7 +313,6 @@ pub(crate) fn render(
             .child("⋯")
             .debug_selector(move || format!("marketdata-menu-button-{tile_id}")),
     );
-    let _ = tile;
     row
 }
 

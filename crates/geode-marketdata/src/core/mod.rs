@@ -8,10 +8,12 @@
 //! keyed by grid cell and resolved across generations by row and column
 //! *label*, because an index means nothing once a new document arrives.
 
+pub mod cursor;
 pub mod draft;
 pub mod matrix;
 pub mod spec;
 
+pub use cursor::Cursor;
 pub use draft::{Draft, DraftBadge, DraftState, attr_text, parse_attr, parse_cell};
 pub use matrix::{Cell, MatrixModel, RowModel};
 pub use spec::{CVI, Columns, PanelSpec};
