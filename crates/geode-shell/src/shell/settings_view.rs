@@ -37,8 +37,10 @@
 //! index of the currently-active one — and editing is *stepping*:
 //! `space`/`shift+space` in normal mode and `tab`/`shift+tab` in either
 //! mode step the selected row's value forward/back (wrapping at both
-//! ends, [`step`]), and a click on the already-selected row cycles
-//! forward too. A
+//! ends, [`step`]); the mouse form is the value chip (spec §20.3,
+//! [`dialog::value_chip`]) — click steps forward, shift+click steps
+//! back — and a click on the row's own label only selects it, never a
+//! step (the old second-click-steps rule is gone). A
 //! step applies IMMEDIATELY through the same apply-then-persist seams the
 //! old dialog's controls used
 //! ([`set_theme`]/[`set_font_size`]/[`set_find_style`]'s
@@ -245,8 +247,11 @@ pub fn derive_rows(
 }
 
 /// Which way a value step goes — `tab` (forward, `Right`) vs. `shift+tab`
-/// (back, `Left`), and a click on the already-selected row (forward,
-/// mirroring `tab`). The old dialog's `h`/`left`/`l`/`right` motions and
+/// (back, `Left`), and the value chip's click (forward, mirroring `tab`)
+/// vs. its shift+click (back, mirroring `shift+tab`) — spec §20.3's mouse
+/// form of the same two directions; a plain click on the row's own label
+/// only selects it, never a step (the old already-selected-row-cycles
+/// rule is gone). The old dialog's `h`/`left`/`l`/`right` motions and
 /// its `enter`/`space` cycle-forward keys are retired along with the vim
 /// vocabulary this dialog no longer speaks (see the module doc); `enter`
 /// is deliberately inert now rather than aliased onto `Right` — see
@@ -258,12 +263,14 @@ pub enum StepDirection {
 }
 
 /// The value index one step from `current` in a `len`-value list,
-/// WRAPPING at both ends — deliberately unlike `vimnav::apply`'s clamped
-/// list navigation: a settings value is a cycle (fzf → vim → fzf), not a
-/// list with ends, and wrap is what lets a run of `tab` presses (or
-/// repeated clicks on the same row) reach every value without ever
-/// hitting a dead end. `len == 0` yields 0 (unreachable for real rows —
-/// every setting has at least two values — but deterministic).
+/// WRAPPING at both ends unconditionally — unlike `vimnav::apply`, which
+/// wraps only a bare ±1 and clamps a larger or counted step (spec
+/// §20.5): a settings value is a cycle (fzf → vim → fzf), not a list
+/// with ends, and this always moves by exactly one, so wrap is what lets
+/// a run of `tab` presses (or repeated clicks on the value chip) reach
+/// every value without ever hitting a dead end. `len == 0` yields 0
+/// (unreachable for real rows — every setting has at least two values —
+/// but deterministic).
 pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
     if len == 0 {
         return 0;
@@ -359,23 +366,6 @@ pub fn filtered_position(
     visible
         .iter()
         .position(|m| rows.get(m.row).is_some_and(|r| r.id == clicked))
-}
-
-/// What a click on filtered position `clicked_ix` does to already-open
-/// dialog state: clicking any other row only selects it, a first click
-/// that does not yet act — this is the two-step rule the keybinding
-/// dialog's `click_listens` gave up (there, any click both selects AND
-/// starts listening in one step); clicking the already-selected row
-/// means "cycle this row's value forward" — returns `true` so the gpui
-/// caller ([`on_row_clicked`]) applies the step, keeping this function
-/// pure.
-pub fn click_selects_or_steps(state: &mut SettingsState, clicked_ix: usize) -> bool {
-    if state.selected == clicked_ix {
-        true
-    } else {
-        state.selected = clicked_ix;
-        false
-    }
 }
 
 /// What one keystroke does to this dialog — decided by [`route`] from
@@ -480,8 +470,8 @@ pub fn route(mode: DialogMode, query_is_empty: bool, ks: &Keystroke) -> KeyActio
 // ---------------------------------------------------------------------
 
 /// Apply value `value_ix` of the setting `id` names to the live shell —
-/// the one place [`handle_key`]'s stepping and [`on_row_clicked`]'s
-/// cycle-forward both land. Dispatches to the `*_on` core of the matching
+/// the one place [`handle_key`]'s stepping and [`on_value_chip_clicked`]'s
+/// step both land. Dispatches to the `*_on` core of the matching
 /// setter helper, so a keyboard step is byte-for-byte the same apply +
 /// persist path a direct [`set_theme`]/[`set_font_size`]/... call takes.
 /// An out-of-range `value_ix` (unreachable — [`step`] wraps within the
@@ -765,21 +755,10 @@ fn handle_key(
     true
 }
 
-/// Selection/step logic for a real mouse click on the row for `clicked`
-/// (`SettingId`, resolved back to a position in the *filtered* list
-/// against freshly derived rows — same identity-not-position keying as
-/// keybindings' `on_row_clicked`). The gpui-facing wrapper around the
-/// pure [`click_selects_or_steps`]: a `true` (already-selected row)
-/// cycles that row's value forward. Ends in [`dialog::sync_dialog_text`],
-/// the row-click seam of that function's seam classes (spec §16.1/§17.1
-/// rule 3): a click never passes through the key path, so this is its
-/// transition's only tail. On this dialog the sync is rule-3 uniformity
-/// rather than a load-bearing move — [`click_selects_or_steps`] changes
-/// neither mode nor query, and a mouse-down on a plain row moves gpui
-/// focus nowhere, so there is nothing for the sync to correct today. It
-/// is here so that a future click that DOES change the mode (a
-/// mouse-parity verb, say) cannot forget the gpui half, and so a reader
-/// auditing the seam classes finds every row click ending the same way.
+/// A real mouse click on the row for `clicked`: select it, nothing more
+/// (spec §20.3 — the second-click step is gone; the value chip is the
+/// mouse form of `space`). Ends in [`dialog::sync_dialog_text`], the
+/// row-click seam (spec §16.1/§17.1 rule 3).
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: SettingId,
@@ -794,11 +773,39 @@ fn on_row_clicked(
     let Some(ix) = filtered_position(&visible, &rows, clicked) else {
         return;
     };
-    let cycle = click_selects_or_steps(state, ix);
-    let selected = state.selected;
-    shell.settings_scroll.scroll_to_item(selected);
-    if cycle && let Some(row) = visible.get(ix).and_then(|m| rows.get(m.row)) {
-        let new_ix = step(row.values.len(), row.current, StepDirection::Right);
+    state.selected = ix;
+    shell.settings_scroll.scroll_to_item(ix);
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// The value chip's click (spec §20.3): select the row and step it
+/// through the ONE step path a key takes, [`apply_setting`] via
+/// [`step`]. `forward` is `!shift`.
+fn on_value_chip_clicked(
+    shell: &mut ShellView,
+    clicked: SettingId,
+    forward: bool,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let rows = rows_for(shell);
+    let Some(state) = shell.settings.as_mut() else {
+        return;
+    };
+    let visible = visible_rows(state, &rows);
+    let Some(ix) = filtered_position(&visible, &rows, clicked) else {
+        return;
+    };
+    state.selected = ix;
+    shell.settings_scroll.scroll_to_item(ix);
+    if let Some(row) = visible.get(ix).and_then(|m| rows.get(m.row)) {
+        let dir = if forward {
+            StepDirection::Right
+        } else {
+            StepDirection::Left
+        };
+        let new_ix = step(row.values.len(), row.current, dir);
         apply_setting(shell, row.id, new_ix, cx);
     }
     dialog::sync_dialog_text(shell, window, cx);
@@ -878,11 +885,23 @@ fn build(
 
         // The current value, in the data face — a value readout, not
         // prose, same register as the binding chips across the hall.
-        let value_el = div()
-            .font_family(crate::fonts::MONO)
-            .text_sm()
-            .flex_shrink_0()
-            .child(row.values[row.current].clone());
+        // Painted as a `dialog::value_chip` (spec §20.3): click steps
+        // forward, shift+click steps back, the mouse form of
+        // `space`/`shift+space` — a plain row click only selects.
+        let entity_for_chip = entity.clone();
+        let chip_id = row.id;
+        let on_step: dialog::StepHandler = Rc::new(move |forward, window, cx| {
+            entity_for_chip.update(cx, |shell, cx| {
+                on_value_chip_clicked(shell, chip_id, forward, window, cx);
+            });
+        });
+        let value_el = dialog::value_chip(
+            row.values[row.current].clone(),
+            format!("settings-value-{row_ix}"),
+            chip_fg,
+            chip_bg,
+            Some(on_step),
+        );
 
         let entity_for_row = entity.clone();
         let id = row.id;
@@ -1239,26 +1258,6 @@ mod tests {
             .find(|r| !visible.iter().any(|m| rows[m.row].id == r.id))
             .expect("the query must hide at least one row");
         assert_eq!(filtered_position(&visible, &rows, hidden.id), None);
-    }
-
-    // -- click_selects_or_steps ------------------------------------------
-
-    #[test]
-    fn a_click_on_a_different_row_selects_it_without_stepping() {
-        let mut state = SettingsState::new();
-        assert!(!click_selects_or_steps(&mut state, 2));
-        assert_eq!(state.selected, 2);
-    }
-
-    #[test]
-    fn a_click_on_the_selected_row_asks_for_a_forward_cycle() {
-        let mut state = SettingsState::new();
-        state.selected = 1;
-        assert!(click_selects_or_steps(&mut state, 1));
-        assert_eq!(
-            state.selected, 1,
-            "a cycle click leaves the selection where it was"
-        );
     }
 
     // -- the mode and the key table (crate::dialogmode, spec §18) --------

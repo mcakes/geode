@@ -62,6 +62,29 @@
 //! `ShellView::pickable` means no `datasets` doc is loaded, which no
 //! amount of backspacing in the filter will fix.
 //!
+//! ## §20.2: `escape` walks the ladder
+//!
+//! The picker is filter-only — there is no `DialogMode` here, no normal
+//! mode to fall out of — so its ladder is the shortest one in the shell:
+//! `Values` → `Columns` → close. `escape` on `Values` used to close the
+//! whole modal in one keystroke, indistinguishable from `Columns`'
+//! `escape`; it now steps back to `Columns` first
+//! ([`back_to_columns`]), dropping the Values stage's query and ticks and
+//! landing the cursor back on the column just left, the same "undo the
+//! stage transition" shape [`commit_column`] walks forward. A second
+//! `escape` from `Columns` is unclaimed here and falls through to
+//! `handle_key_down`'s own modal branch, which closes exactly as before.
+//!
+//! ## §20.3: a Values row click selects, its tick toggles
+//!
+//! [`build_values`]'s row used to toggle the tick on any click anywhere
+//! in the row. It now splits the way the object dialog's list rows do:
+//! clicking the row moves the cursor there (the mouse form of arrowing to
+//! it), and only clicking the tick glyph itself toggles it (the mouse
+//! form of `tab`) — the tick carries its own `debug_selector` and
+//! `on_mouse_down`, `cx.stop_propagation`ed so the row's own handler
+//! underneath it never also fires.
+//!
 //! ## Architecture
 //!
 //! [`PickerState`] — `stage`, `selected`, `query`, `values`, `ticked`,
@@ -99,8 +122,8 @@ use geode_core::scope::{DimensionSelection, Scope};
 
 use crate::fonts;
 use crate::keymap::{Keystroke, Modifiers};
-use crate::listfilter;
 use crate::palette;
+use crate::{listfilter, vimnav};
 
 use super::dialog;
 use super::{PICKER_KEY, Pickable, ShellEvent, ShellView};
@@ -253,19 +276,6 @@ impl PickerState {
             return None;
         };
         values.get(*idx).map(|(v, _)| v.clone())
-    }
-
-    /// Move the selection by `delta` (±1 for up/down/ctrl+p/ctrl+n),
-    /// wrapping at both ends — `PaletteState::move_selection`'s own rule,
-    /// not the dialogs' clamping one: this is a short, per-keystroke list
-    /// the user steps through quickly, same as the palette.
-    pub fn move_selection(&mut self, delta: i32, len: usize) {
-        if len == 0 {
-            self.selected = 0;
-            return;
-        }
-        let next = ((self.selected as i32 + delta) % len as i32 + len as i32) % len as i32;
-        self.selected = next as usize;
     }
 
     /// Replace `scope`'s selection for this stage's column with whatever
@@ -451,6 +461,35 @@ fn commit_column(
     cx.notify();
 }
 
+/// `escape` on the Values stage (spec §20.2, `EscapeStep::PreviousStage`):
+/// back to `Columns` with the ticks and the Values query dropped and the
+/// cursor on the column just left — `commit_column` walked backwards. A
+/// no-op when the stage is already `Columns`, whose own `escape` falls
+/// through to the shell's modal branch and closes. Nothing is applied on
+/// the way back: `PickerState::apply` is still reached only from `enter`.
+fn back_to_columns(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let Some(Stage::Values { column }) = shell.picker.as_ref().map(|p| p.stage.clone()) else {
+        return;
+    };
+    let position = shell
+        .pickable
+        .iter()
+        .position(|p| p.column == column)
+        .unwrap_or(0);
+    if let Some(p) = shell.picker.as_mut() {
+        p.stage = Stage::Columns;
+        p.selected = position;
+        p.query.clear();
+        p.values = None;
+        p.ticked.clear();
+        p.ticks_touched = false;
+    }
+    shell.dialog_input.update(cx, |input, cx| {
+        input.set_value("", window, cx);
+    });
+    cx.notify();
+}
+
 /// Scroll the picker's `Values`-stage `uniform_list` so the currently
 /// selected row stays visible (fix round 1, Finding 1) —
 /// `UniformListScrollHandle::scroll_to_item` with `ScrollStrategy::
@@ -459,8 +498,9 @@ fn commit_column(
 /// apply — see the module doc). Called from every path that can change
 /// `self.picker`'s `selected` field while `Stage::Values` is showing:
 /// [`handle_values_key`]'s up/down/ctrl+p/ctrl+n arm, a value row's mouse
-/// click (`build_values`'s `on_mouse_down`, which sets `selected` before
-/// toggling), [`commit_column`] (which resets `selected` to 0 on the
+/// click (`build_values`'s row `on_mouse_down`, which sets `selected`
+/// alone — §20.3, a row click selects, only the tick's own `on_mouse_down`
+/// toggles), [`commit_column`] (which resets `selected` to 0 on the
 /// fresh `Values` stage it just switched to), and the shared dialog
 /// filter's `InputEvent::Change` subscription (`ShellView::new`, `shell/
 /// mod.rs`), which resets `selected` to 0 on every query edit exactly
@@ -478,24 +518,6 @@ pub(super) fn sync_picker_scroll(shell: &ShellView) {
     }
 }
 
-/// `up`/`down`/`ctrl+p`/`ctrl+n` as a signed step, or `None` for anything
-/// else — shared by both stages' [`handle_key`] arms.
-fn nav_delta(ks: &Keystroke) -> Option<i32> {
-    if ks.mods == Modifiers::NONE && ks.key == "up" {
-        return Some(-1);
-    }
-    if ks.mods == Modifiers::NONE && ks.key == "down" {
-        return Some(1);
-    }
-    if ks.mods == Modifiers::CTRL && ks.key == "p" {
-        return Some(-1);
-    }
-    if ks.mods == Modifiers::CTRL && ks.key == "n" {
-        return Some(1);
-    }
-    None
-}
-
 fn handle_columns_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -507,7 +529,7 @@ fn handle_columns_key(
         commit_column(shell, position, window, cx);
         return true;
     }
-    if let Some(delta) = nav_delta(ks) {
+    if let Some(cmd) = listfilter::nav_command(ks) {
         let query = shell
             .picker
             .as_ref()
@@ -515,7 +537,7 @@ fn handle_columns_key(
             .unwrap_or_default();
         let len = PickerState::columns(&shell.pickable, &query).len();
         if let Some(p) = shell.picker.as_mut() {
-            p.move_selection(delta, len);
+            p.selected = vimnav::apply(p.selected, len, cmd);
         }
         cx.notify();
         return true;
@@ -529,6 +551,12 @@ fn handle_values_key(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
+    // Modifier-agnostic, like the shell's own modal close: a
+    // `shift+escape` must not be a key this stage claims and drops.
+    if ks.key == "escape" {
+        back_to_columns(shell, window, cx);
+        return true;
+    }
     if ks.mods == Modifiers::NONE && ks.key == "tab" {
         if let Some(p) = shell.picker.as_mut() {
             p.toggle_selected();
@@ -560,13 +588,15 @@ fn handle_values_key(
                 }
             });
         }
-        shell.close_modal(window, cx); // the existing close path used by escape
+        // `close_modal`: the same door the ladder's last rung takes
+        // (a bare `escape` in Values steps back to Columns first, §20.2).
+        shell.close_modal(window, cx);
         return true;
     }
-    if let Some(delta) = nav_delta(ks) {
+    if let Some(cmd) = listfilter::nav_command(ks) {
         let len = shell.picker.as_ref().map(|p| p.shown().len()).unwrap_or(0);
         if let Some(p) = shell.picker.as_mut() {
-            p.move_selection(delta, len);
+            p.selected = vimnav::apply(p.selected, len, cmd); // values
         }
         sync_picker_scroll(shell);
         cx.notify();
@@ -577,11 +607,15 @@ fn handle_values_key(
 
 /// The [`dialog::ModalKeyHandler`] for this modal — dispatches to
 /// [`handle_columns_key`]/[`handle_values_key`] by the open picker's
-/// current stage. `escape` is claimed by neither arm (both fall through
-/// their final `false`), so it reaches `handle_key_down`'s own modal
-/// branch, which closes the modal exactly as it does for every other
-/// dialog — and `ShellView::close_modal` clears `self.picker`, so an
-/// escaped picker leaves nothing behind.
+/// current stage. `escape` walks the ladder (spec §20.2, §5): on `Values`
+/// it is claimed by [`handle_values_key`], which steps back to `Columns`
+/// through [`back_to_columns`] rather than closing; on `Columns` it is
+/// claimed by neither arm (both fall through their final `false`), so it
+/// reaches `handle_key_down`'s own modal branch, which closes the modal
+/// exactly as it does for every other dialog — and `ShellView::
+/// close_modal` clears `self.picker`, so a closed picker leaves nothing
+/// behind. The picker is filter-only (no `DialogMode`), so its whole
+/// ladder is just `Values` → `Columns` → close.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -639,7 +673,7 @@ pub fn hints(stage: &Stage) -> &'static [Hint] {
             Hint::Key("enter"),
             Hint::Text("apply ·"),
             Hint::Key("escape"),
-            Hint::Text("close"),
+            Hint::Text("back"),
         ],
     }
 }
@@ -807,11 +841,30 @@ fn build_values(
                         if is_selected {
                             row = row.bg(selection).text_color(primary);
                         }
+                        let value_for_tick = value.clone();
+                        let tick_entity = entity.clone();
                         let tick = if is_ticked {
                             div().text_color(primary).child("✓")
                         } else {
                             div().text_color(muted).child("·")
-                        };
+                        }
+                        .debug_selector(move || format!("picker-tick-{value_for_tick}"))
+                        // §20.3's rule on this list: the tick is `tab`'s
+                        // mouse form; the row is the cursor's.
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            move |_event, _window, cx| {
+                                cx.stop_propagation();
+                                tick_entity.update(cx, |shell, cx| {
+                                    if let Some(p) = shell.picker.as_mut() {
+                                        p.selected = i;
+                                        p.toggle_selected();
+                                    }
+                                    sync_picker_scroll(shell);
+                                    cx.notify();
+                                });
+                            },
+                        );
                         let label = h_flex()
                             .gap_2()
                             .items_center()
@@ -829,8 +882,8 @@ fn build_values(
                             .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
                                 entity.update(cx, |shell, cx| {
                                     if let Some(p) = shell.picker.as_mut() {
+                                        // row: select only
                                         p.selected = i;
-                                        p.toggle_selected();
                                     }
                                     sync_picker_scroll(shell);
                                     cx.notify();

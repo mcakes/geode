@@ -456,7 +456,7 @@ Every rule above has a harness entry and a named test in
 `core/menu.rs`'s own test modules; `scripts/mutation-check.sh` carries
 one `run_mutation` entry per behaviour changed on this branch (Task 8
 brought the harness to 928 entries; the final review's wave below, to
-942 — counted as `grep -c '^run_mutation "'`, the bare `^run_mutation`
+942 on the branch, 968 after merging main's verb-consistency entries — counted as `grep -c '^run_mutation "'`, the bare `^run_mutation`
 count including the function definition). Display checks — the
 anchored popup escaping the tile clip, the strip's tint and cursor
 border, the badge and dot at 22px — remain pending on a real window, as
@@ -557,3 +557,22 @@ paint, rebase with a NULL attribute, attribute number formatting via
 `spec.format`, `from_toml` date coercion by `HeaderAttr.ty`, the
 geode-app type cross-check, a `registry()` test helper, the
 dropped-attribute notice wording, and `:upload`'s wording.
+
+### 11.x Merge with main (2026-09-17)
+
+Main's verb-consistency merge (spec §20.5) landed while this branch was
+in review: every list and tile now WRAPS the row axis on a bare `j`/`k`
+(`vimnav::apply`) and clamps larger deltas and the column axis; the panel
+also gained `page_down_full`/`page_up_full` (`FULL_PAGE` = 10). The two
+rules are composed rather than chosen between: `core::cursor::step`'s
+grid-row arm goes through `vimnav::apply`, so `j` on the last row wraps
+to row 0 and `k` on row 0 wraps to the last row **only when the panel has
+no attribute strip**; with attributes, `k` on row 0 — bare or counted —
+enters the strip (§5.1), and `k` in the strip stays. The strip therefore
+sits above the wrap cycle rather than inside it: repeated `j` cycles the
+grid forever, repeated `k` stops at the strip. Pinned by
+`a_bare_step_wraps_the_grid_and_the_strip_stays_outside_the_cycle` (pure)
+and main's `a_bare_row_step_wraps_and_the_full_page_keys_move_ten`
+(window; its top-row `k` step now asserts the strip). Main's harness entry
+for the wrap was re-anchored from `move_cursor` (deleted here) to that
+grid-row arm. Harness count after the merge: 968.

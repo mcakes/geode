@@ -527,9 +527,10 @@ pub struct ShellView {
     /// *fresh* one must still be handed to `track_scroll` every frame the
     /// list renders, so this is that stable handle). Rebuilt alongside
     /// `palette` in `toggle_palette` on every open, and driven from the
-    /// same selection-change path as `palette` itself (`move_selection`,
-    /// `push_char`, `backspace` in `handle_palette_key`) via `sync_palette_
-    /// scroll`, so the selected row always scrolls into view.
+    /// same selection-change path as `palette` itself (`set_selected`
+    /// after `vimnav::apply`, `push_char`, `backspace` in
+    /// `handle_palette_key`) via `sync_palette_scroll`, so the selected
+    /// row always scrolls into view.
     palette_scroll: ScrollHandle,
     /// The palette's query field (palette-input-polish task): a real
     /// gpui-component `Entity<InputState>`, replacing the hand-rolled

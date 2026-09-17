@@ -387,12 +387,12 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_theme(
 }
 
 /// The full-list scroll behavior this task adds: real `down` keystrokes
-/// (not a direct `PaletteState::move_selection` call — this is the
+/// (not a direct `PaletteState::set_selected` call — this is the
 /// actual key-event pipeline `handle_palette_key` drives) move the
 /// selection well past `palette::VISIBLE_ROWS` (12) into rows that,
 /// before this task, `render` would never have drawn (it truncated to
-/// the top 12 filtered rows) and `move_selection`'s old clamp would
-/// never have let the selection reach. Also checks, via gpui's
+/// the top 12 filtered rows) and the palette's old `VISIBLE_ROWS` clamp
+/// would never have let the selection reach. Also checks, via gpui's
 /// test-only `debug_selector`/
 /// `debug_bounds` (wired up in `palette::render`), that the selected
 /// row's *painted* bounds actually land inside the scrollable list
@@ -1481,4 +1481,37 @@ fn a_palette_dispatch_reaches_the_session_flush(cx: &mut gpui::TestAppContext) {
 
     let again = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
     assert!(again.is_none(), "one dispatch flushes once");
+}
+
+/// Spec §20.5: `tab` inside the palette is reclaimed so gpui-component's
+/// `Root` cannot cycle focus off the query field while the palette is
+/// open — `dialog::init_reclaimed_keybindings` binds it to `NoAction` in
+/// the `GeodePalette` context, the modal's own treatment.
+#[gpui::test]
+fn tab_in_the_palette_leaves_the_query_field_focused(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("ctrl-k");
+    cx.run_until_parked();
+    let focused = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            shell
+                .read(cx)
+                .palette_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        })
+    };
+    assert!(focused(&mut cx), "the palette opens with its field focused");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert!(
+        focused(&mut cx),
+        "tab must not move focus off the palette's field"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.palette.is_some()),
+        "and the palette is still open"
+    );
 }

@@ -77,14 +77,19 @@ pub fn rank(texts: &[String], query: &str) -> Vec<Ranked> {
 
 /// Map one keystroke onto a list-navigation command, or `None` if no
 /// list surface claims it (see the module doc for what they *can*
-/// claim). The caller feeds the result to [`crate::vimnav::apply`], which
-/// clamps against the current — filtered — row count.
+/// claim). The caller feeds the result to [`crate::vimnav::apply`],
+/// which wraps a bare ±1 and clamps every larger or counted step (spec
+/// §20.5) against the current — filtered — row count.
 ///
-/// The palette consults this only as a *fallback*, after its own
-/// `up`/`down`/`ctrl+p`/`ctrl+n` arms have already returned: those keep
-/// wrapping (`PaletteState::move_selection`), while everything reaching
-/// here clamps. That ordering is why nothing has to inspect the returned
-/// delta to decide which rule applies (spec §3, "The command palette").
+/// Every palette motion goes through this and `vimnav::apply` — the
+/// palette has no motion arms of its own any more (`PaletteState::
+/// move_selection` was deleted in spec §20's final fix wave), so a bare
+/// ±1 (`up`/`down`/`ctrl+p`/`ctrl+n`) wraps and every larger step
+/// (`ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`/page up/down) clamps, by
+/// `apply`'s one rule. The dialogs — keybindings, settings, the object
+/// dialog — and the picker and as-of selector route the same way, so
+/// nothing here has to inspect the returned delta to decide which rule
+/// applies (spec §3, "The command palette"; §20.5).
 pub fn nav_command(ks: &Keystroke) -> Option<NavCommand> {
     let delta = match (ks.mods, ks.key.as_str()) {
         (Modifiers::NONE, "up") | (Modifiers::CTRL, "p") => -1,

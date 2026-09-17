@@ -361,6 +361,11 @@ pub fn init_reclaimed_keybindings(cx: &mut App) {
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeCommandLine")),
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeModalOpen")),
         gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeModalOpen")),
+        // Spec §20.5: the palette overlay is not a `GeodeModal`, so it
+        // never had the reclaim — `Root` could cycle focus off the query
+        // field on `tab`.
+        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodePalette")),
+        gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodePalette")),
     ]);
 }
 
@@ -609,12 +614,24 @@ pub struct FrozenFilter<'a> {
 /// progress is cancelled first: a click on a text field is never a
 /// keystroke to bind, and `listening` wins over the mode in
 /// `dialogmode::focus_target`, so leaving it set would keep the keys on
-/// the shell root under a pill reading `filter`.
+/// the shell root under a pill reading `filter`. On both modal dialogs
+/// that can arm a confirm (keybindings, object dialog) the click is
+/// dropped while one is armed (spec §20.1): a question owns the keys and
+/// the mouse alike until it is answered.
 pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
     if let Some(state) = shell.keybindings.as_mut() {
+        // Spec §20.1: not over an open question.
+        if state.confirm.is_some() {
+            return;
+        }
         state.listening = None;
         state.mode = DialogMode::Filter;
     } else if let Some(state) = shell.object_dialog.as_mut() {
+        // Spec §20.1: not over an open question. `build_edit` still paints
+        // the frozen row while a confirm is armed, so the guard lives here.
+        if state.draft.as_ref().is_some_and(|d| d.confirm.is_some()) {
+            return;
+        }
         state.mode = DialogMode::Filter;
     } else if let Some(state) = shell.settings.as_mut() {
         state.mode = DialogMode::Filter;
@@ -1159,4 +1176,190 @@ pub(crate) fn hint_rows(hints: &[Hint], chip_fg: Hsla, chip_bg: Hsla) -> AnyElem
         lines = lines.child(line);
     }
     lines.into_any_element()
+}
+
+/// The answer to a destructive question, on every surface that asks one
+/// (spec §20.1): the object dialog's `d`/`r`/`o` and the keybindings
+/// dialog's `d`/`r`. `None` means the key is neither answer — the caller
+/// claims and drops it, because a stray letter must not act on the
+/// object behind an unanswered question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAnswer {
+    Yes,
+    No,
+}
+
+impl ConfirmAnswer {
+    /// `y`/`enter` bare are yes; `n` bare and `escape` with any modifiers
+    /// are no (modifier-agnostic on `escape` for the same reason every
+    /// dialog's close is: `shift+escape` must not be a key that visibly
+    /// does nothing).
+    pub fn from_key(ks: &Keystroke) -> Option<ConfirmAnswer> {
+        let bare = ks.mods == Modifiers::NONE;
+        match ks.key.as_str() {
+            "y" | "enter" if bare => Some(ConfirmAnswer::Yes),
+            "n" if bare => Some(ConfirmAnswer::No),
+            "escape" => Some(ConfirmAnswer::No),
+            _ => None,
+        }
+    }
+}
+
+/// What a confirm button runs. `Rc` so the two closures can be cloned
+/// into gpui's `'static` click handlers.
+pub type ConfirmHandler = Rc<dyn Fn(&mut ShellView, &mut Window, &mut Context<ShellView>)>;
+
+/// The confirm block every dialog paints in place of its action bar
+/// while a destructive question stands (spec §20.1): the question in
+/// `theme.warning`, a `danger` button labelled with the verb, and a ghost
+/// `Cancel`. Both handlers are mouse-side answers and so end in
+/// [`sync_dialog_text`] and a `cx.notify()` here, once, rather than in
+/// each caller (spec §16.1: a click never passes through the key path).
+/// The notify is unconditional on both buttons: a yes handler usually
+/// notifies on its own way through, but a no handler only clears the
+/// armed state, and the symmetry keeps a third consumer honest — neither
+/// button may leave the disarmed (or written) dialog painting its
+/// question. Selectors: `"{selector_prefix}-confirm"`, `-yes`, `-no`.
+pub(crate) fn confirm_row(
+    prompt: String,
+    yes_label: &'static str,
+    selector_prefix: &'static str,
+    entity: &Entity<ShellView>,
+    on_yes: ConfirmHandler,
+    on_no: ConfirmHandler,
+    cx: &mut App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let go_ahead = entity.clone();
+    let leave_it = entity.clone();
+    let block = format!("{selector_prefix}-confirm");
+    let yes_sel = format!("{selector_prefix}-confirm-yes");
+    let no_sel = format!("{selector_prefix}-confirm-no");
+    let yes_id = SharedString::from(yes_sel.clone());
+    let no_id = SharedString::from(no_sel.clone());
+    h_flex()
+        .w_full()
+        .gap_3()
+        .items_center()
+        .debug_selector(move || block.clone())
+        .child(div().text_sm().text_color(theme.warning).child(prompt))
+        .child(
+            div().debug_selector(move || yes_sel.clone()).child(
+                Button::new(yes_id)
+                    .small()
+                    .danger()
+                    .label(yes_label)
+                    .on_click(move |_event, window, cx| {
+                        let on_yes = on_yes.clone();
+                        go_ahead.update(cx, |shell, cx| {
+                            on_yes(shell, window, cx);
+                            sync_dialog_text(shell, window, cx);
+                            cx.notify();
+                        });
+                    }),
+            ),
+        )
+        .child(div().debug_selector(move || no_sel.clone()).child(
+            Button::new(no_id).small().ghost().label("Cancel").on_click(
+                move |_event, window, cx| {
+                    let on_no = on_no.clone();
+                    leave_it.update(cx, |shell, cx| {
+                        on_no(shell, window, cx);
+                        sync_dialog_text(shell, window, cx);
+                        cx.notify();
+                    });
+                },
+            ),
+        ))
+        .into_any_element()
+}
+
+/// What a value chip's click runs: `forward` is `!shift`.
+pub type StepHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+/// A steppable row's value, painted as a chip that is the mouse form of
+/// `space`/`shift+space` (spec §20.3): click steps forward, shift+click
+/// steps back. `on_step: None` paints the plain value with no fill and
+/// no handler — the four cases where the keys are inert too (a read-only
+/// domain, a one-option `Choice`, an armed confirm, an open text field).
+/// `stop_propagation` so the row's own select does not also run; the
+/// handler itself ends in [`sync_dialog_text`] at the caller, since it
+/// mutates the dialog off the key path (§17.1 rule 3).
+pub(crate) fn value_chip(
+    text: String,
+    selector: String,
+    fg: Hsla,
+    bg: Hsla,
+    on_step: Option<StepHandler>,
+) -> AnyElement {
+    let base = div()
+        .font_family(crate::fonts::MONO)
+        .text_sm()
+        .flex_shrink_0()
+        .debug_selector(move || selector.clone());
+    match on_step {
+        None => base.text_color(fg).child(text).into_any_element(),
+        Some(on_step) => base
+            .px_1p5()
+            .py_0p5()
+            .rounded(px(4.))
+            .bg(bg)
+            .text_color(fg)
+            .cursor_pointer()
+            .child(text)
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                cx.stop_propagation();
+                on_step(!event.modifiers.shift, window, cx);
+            })
+            .into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::ConfirmAnswer;
+    use crate::keymap::{Keystroke, Modifiers};
+
+    fn ks(key: &str, mods: Modifiers) -> Keystroke {
+        Keystroke {
+            mods,
+            key: key.to_string(),
+        }
+    }
+    const SHIFT: Modifiers = Modifiers {
+        ctrl: false,
+        alt: false,
+        shift: true,
+        cmd: false,
+    };
+
+    /// Spec §20.1: one router for every destructive question. `y`/`enter`
+    /// bare say yes, `n` bare and `escape` with ANY modifiers say no, and
+    /// everything else is `None` — claimed and dropped by the caller.
+    #[test]
+    fn the_confirm_router_answers_four_keys_and_drops_the_rest() {
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("y", Modifiers::NONE)),
+            Some(ConfirmAnswer::Yes)
+        );
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("enter", Modifiers::NONE)),
+            Some(ConfirmAnswer::Yes)
+        );
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("n", Modifiers::NONE)),
+            Some(ConfirmAnswer::No)
+        );
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("escape", Modifiers::NONE)),
+            Some(ConfirmAnswer::No)
+        );
+        assert_eq!(
+            ConfirmAnswer::from_key(&ks("escape", SHIFT)),
+            Some(ConfirmAnswer::No)
+        );
+        assert_eq!(ConfirmAnswer::from_key(&ks("y", SHIFT)), None, "Y is not y");
+        assert_eq!(ConfirmAnswer::from_key(&ks("enter", Modifiers::CTRL)), None);
+        assert_eq!(ConfirmAnswer::from_key(&ks("d", Modifiers::NONE)), None);
+    }
 }

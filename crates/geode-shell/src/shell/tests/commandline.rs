@@ -417,6 +417,97 @@ fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::Test
     );
 }
 
+/// Spec §20.4: a tile mouse-down while a `/` line holds text COMMITS
+/// the find (the cursor stays on the match, `n`/`N` have a target), an
+/// empty `/` line cancels, and a `:` line still cancels.
+#[gpui::test]
+fn a_mouse_down_on_a_tile_commits_an_open_find_line(cx: &mut gpui::TestAppContext) {
+    use crate::module::{FindEvent, recording::Recorded};
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("ctrl-v");
+    let shell = shell_of(&window, &mut cx);
+    let opened_on = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("sp");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let (_target_id, click_point) = cx.update(|window, cx| {
+        let viewport = window.viewport_size();
+        let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let content_height =
+            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+        let rects = shell
+            .read(cx)
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .layout(Rect {
+                x: 0.0,
+                y: 0.0,
+                w: tile_width,
+                h: content_height,
+            });
+        let (id, r) = rects
+            .into_iter()
+            .find(|(id, _)| Some(*id) != Some(opened_on))
+            .expect("a second, non-focused tile exists");
+        let point = gpui::point(
+            px(sidebar::WIDTH + r.x + r.w / 2.0),
+            px(toolbar_height + r.y + r.h / 2.0),
+        );
+        (id, point)
+    });
+
+    cx.simulate_mouse_down(click_point, MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(click_point, MouseButton::Left, gpui::Modifiers::none());
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    assert!(cx.debug_bounds("command-line").is_none(), "the line closed");
+    assert!(
+        log.borrow().contains(&Recorded::Find(
+            opened_on,
+            FindEvent::Committed("sp".into())
+        )),
+        "the click committed the find: {:?}",
+        log.borrow()
+    );
+    assert!(
+        !log.borrow()
+            .contains(&Recorded::Find(opened_on, FindEvent::Cancelled)),
+        "and did not cancel it"
+    );
+
+    // An empty `/` line is a cancel (vimfind's own rule).
+    cx.simulate_keystrokes("/");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let now_on = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    cx.simulate_mouse_down(click_point, MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(click_point, MouseButton::Left, gpui::Modifiers::none());
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        log.borrow()
+            .contains(&Recorded::Find(now_on, FindEvent::Cancelled)),
+        "an empty find line cancels on click-away: {:?}",
+        log.borrow()
+    );
+}
+
 /// I1, final review: the sidebar's workspace-switch mouse-down
 /// (`sidebar::sidebar`) dispatches `workspace::switch_N` directly —
 /// there is no sidebar-click precedent to imitate instead, so this

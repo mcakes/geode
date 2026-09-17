@@ -87,6 +87,10 @@ use std::time::{Duration, Instant};
 /// prefix rather than being viewport-relative.
 const HALF_PAGE: isize = 5;
 
+/// How many rows `ctrl+f`/`ctrl+b`/`pagedown`/`pageup` step — `vimnav`'s
+/// own ±10, the blotter's `page_down_full`.
+const FULL_PAGE: isize = 10;
+
 /// `/` over the row labels (spec §8.3). The vim jump model only: a
 /// document's rows ARE its axis, in the desk's own order, so narrowing
 /// them (`FindStyle::Fzf`) would hide rows a cell reference is counted
@@ -1168,8 +1172,8 @@ impl MarketDataTile {
         // is the one exception: the strip's own cursor border is header
         // paint (spec §5.1).
         let chrome = match verb {
-            "down" | "up" | "left" | "right" | "page_down" | "page_up" | "top" | "bottom"
-            | "first_col" | "last_col" => {
+            "down" | "up" | "left" | "right" | "page_down" | "page_up" | "page_down_full"
+            | "page_up_full" | "top" | "bottom" | "first_col" | "last_col" => {
                 let motion = match verb {
                     "down" => Motion::Rows(n),
                     "up" => Motion::Rows(-n),
@@ -1177,6 +1181,9 @@ impl MarketDataTile {
                     "right" => Motion::Cols(n),
                     "page_down" => Motion::Rows(HALF_PAGE * n),
                     "page_up" => Motion::Rows(-HALF_PAGE * n),
+                    // `vimnav`'s ±10, the blotter's `page_down_full`.
+                    "page_down_full" => Motion::Rows(FULL_PAGE * n),
+                    "page_up_full" => Motion::Rows(-FULL_PAGE * n),
                     "top" => Motion::Top,
                     "bottom" => Motion::Bottom,
                     "first_col" => Motion::FirstCol,
@@ -4033,6 +4040,56 @@ edits = [["2026-11-20", "-1", 9.5]]
             (Some(terms.len() - 1), Some(MatrixDelegate::table_col(2))),
             "G moves the table's selected row, which is what scrolls it into view"
         );
+    }
+
+    /// Spec §20.5 on the panel: a bare `j` wraps, a counted one clamps,
+    /// the full-page pair moves ten, and `h`/`l` never wrap.
+    #[gpui::test]
+    fn a_bare_row_step_wraps_and_the_full_page_keys_move_ten(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        let terms: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let terms: Vec<&str> = terms.iter().map(String::as_str).collect();
+        h.deliver(&mut vcx, tag, Arc::new(document_of(&terms, &NODES, BASE)));
+
+        // The strip sits ABOVE the wrap cycle (panel-header spec §11's
+        // merge ruling): with attributes to enter, `k` on row 0 goes to
+        // the strip rather than wrapping, so the wrap is shown through
+        // `j` at the bottom; the no-attribute `k` wrap is a pure
+        // `core::cursor` test.
+        let row = |vcx: &gpui::VisualTestContext| match h.tile.read_with(vcx, |t, _| t.cursor()) {
+            Cursor::Cell { row, .. } => row,
+            Cursor::Attr(_) => panic!("expected a grid cursor"),
+        };
+        let col = |vcx: &gpui::VisualTestContext| match h.tile.read_with(vcx, |t, _| t.cursor()) {
+            Cursor::Cell { col, .. } => col,
+            Cursor::Attr(_) => panic!("expected a grid cursor"),
+        };
+        h.dispatch(&mut vcx, "bottom", None);
+        assert_eq!(row(&vcx), 11);
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(row(&vcx), 0, "a bare j at the bottom wraps to row 0");
+        h.dispatch(&mut vcx, "up", None);
+        assert!(
+            matches!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(0)),
+            "a bare k at the top enters the strip, never wraps, while attributes exist"
+        );
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(row(&vcx), 0, "and j returns to the top row");
+        h.dispatch(&mut vcx, "down", Some(20));
+        assert_eq!(row(&vcx), 11, "a counted step clamps");
+        h.dispatch(&mut vcx, "page_up_full", None);
+        assert_eq!(row(&vcx), 1, "ctrl+b moves ten");
+        h.dispatch(&mut vcx, "page_down_full", None);
+        assert_eq!(row(&vcx), 11);
+        h.dispatch(&mut vcx, "page_down_full", None);
+        assert_eq!(row(&vcx), 11, "and clamps at the end");
+        h.dispatch(&mut vcx, "last_col", None);
+        let last = col(&vcx);
+        h.dispatch(&mut vcx, "right", None);
+        assert_eq!(col(&vcx), last, "columns clamp: l at the last column stays");
     }
 
     #[gpui::test]

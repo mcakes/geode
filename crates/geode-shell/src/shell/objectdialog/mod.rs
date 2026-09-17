@@ -1452,11 +1452,19 @@ impl Draft {
     /// Groupings is the one domain whose footer must NOT take `i` from
     /// this answer: there `i` reaches past the selected row to the
     /// slot's whole chain (§18.8), so it is live on every row including
-    /// the display-only `slot`. That exception lives at the one call
-    /// site in `render`, not here, because it is a fact about the
+    /// the display-only `slot`. That exception lives at the two call
+    /// sites in `render` — the edit footer and `actions()`, the `i`
+    /// button (spec §20.3) — not here, because it is a fact about the
     /// domain's `i` and not about any row.
     pub fn selected_vocabulary(&self, domain: Domain) -> RowVocabulary {
-        match self.selected_row() {
+        self.vocabulary_of(self.selected_row(), domain)
+    }
+
+    /// [`selected_vocabulary`](Self::selected_vocabulary) for any row —
+    /// what the value chip asks per painted row (spec §20.3), so the chip
+    /// and the footer can never disagree about whether a row steps.
+    pub fn vocabulary_of(&self, row: Option<EditRow>, domain: Domain) -> RowVocabulary {
+        match row {
             None => RowVocabulary::Inert,
             Some(EditRow::Item { .. }) => RowVocabulary::Item,
             Some(EditRow::Available { .. }) => RowVocabulary::Available,
@@ -2968,7 +2976,9 @@ pub struct ObjectDialogState {
     pub stage: Stage,
     /// Index into the **filtered** list ([`visible_rows`]), not the full
     /// one — the palette's convention, shared by every list surface in
-    /// this crate and what `vimnav::apply` clamps against.
+    /// this crate and the `len` bound `vimnav::apply` moves within
+    /// (wrapping a bare ±1, clamping a larger or counted step — spec
+    /// §20.5).
     pub selected: usize,
     /// The filter query, mirrored here from `ShellView::dialog_input` by
     /// that field's `InputEvent::Change` subscription. The `Input` owns

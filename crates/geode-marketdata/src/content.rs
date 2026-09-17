@@ -35,6 +35,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::last_col", "Last column"),
     ("marketdata::page_down", "Half page down"),
     ("marketdata::page_up", "Half page up"),
+    ("marketdata::page_down_full", "Full page down"),
+    ("marketdata::page_up_full", "Full page up"),
     ("marketdata::yank", "Yank cell"),
     ("marketdata::yank_row", "Yank row"),
     ("marketdata::yank_col", "Yank column"),
@@ -108,6 +110,10 @@ context = "marketdata && mode == normal"
 "end" = "marketdata::last_col"
 "ctrl+d" = "marketdata::page_down"
 "ctrl+u" = "marketdata::page_up"
+"ctrl+f" = "marketdata::page_down_full"
+"ctrl+b" = "marketdata::page_up_full"
+"pagedown" = "marketdata::page_down_full"
+"pageup" = "marketdata::page_up_full"
 "y" = "marketdata::yank"
 "y y" = "marketdata::yank_row"
 "y c" = "marketdata::yank_col"

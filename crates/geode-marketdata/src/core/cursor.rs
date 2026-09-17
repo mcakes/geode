@@ -44,6 +44,7 @@ pub fn clamp(cursor: Cursor, grid: Grid) -> Cursor {
 /// One motion. `last_grid_col` is the column the cursor left the grid
 /// from — written on entering the strip, read on leaving it.
 pub fn step(cursor: Cursor, last_grid_col: &mut usize, motion: Motion, grid: Grid) -> Cursor {
+    use geode_shell::vimnav::{self, NavCommand};
     if grid.rows == 0 || grid.cols == 0 {
         return Cursor::Cell { row: 0, col: 0 };
     }
@@ -54,8 +55,14 @@ pub fn step(cursor: Cursor, last_grid_col: &mut usize, motion: Motion, grid: Gri
             *last_grid_col = col;
             Cursor::Attr(col.min(grid.attrs - 1))
         }
+        // The grid's row axis follows the rule every list and tile shares
+        // (verb-consistency spec §20.5, `vimnav::apply`): a bare `j`/`k`
+        // WRAPS, anything larger clamps. The strip sits above that cycle
+        // rather than inside it — `k` on row 0 enters it (the arm above)
+        // when there are attributes to enter, and only wraps to the last
+        // row when there are none.
         (Cursor::Cell { row, col }, Motion::Rows(n)) => Cursor::Cell {
-            row: add(row, n, max_row),
+            row: vimnav::apply(row, grid.rows, NavCommand::Move(n as i64)),
             col,
         },
         (Cursor::Cell { row, col }, Motion::Cols(n)) => Cursor::Cell {
@@ -123,11 +130,37 @@ mod tests {
         );
     }
 
+    /// Without a strip to enter, the grid is the whole cycle: a bare `k`
+    /// on row 0 wraps to the last row (verb-consistency spec §20.5), and
+    /// a bare `j` on the last row wraps to row 0 whether or not there is
+    /// a strip — the strip sits above the cycle, not inside it.
     #[test]
-    fn k_with_no_attributes_stays_put() {
+    fn a_bare_step_wraps_the_grid_and_the_strip_stays_outside_the_cycle() {
         let mut last = 0;
         let g = Grid { attrs: 0, ..G };
-        assert_eq!(step(cell(0, 2), &mut last, Motion::Rows(-1), g), cell(0, 2));
+        assert_eq!(step(cell(0, 2), &mut last, Motion::Rows(-1), g), cell(4, 2));
+        assert_eq!(step(cell(4, 2), &mut last, Motion::Rows(1), g), cell(0, 2));
+        assert_eq!(
+            step(cell(4, 2), &mut last, Motion::Rows(1), G),
+            cell(0, 2),
+            "j wraps even with a strip"
+        );
+        assert_eq!(
+            step(cell(0, 2), &mut last, Motion::Rows(-1), G),
+            Cursor::Attr(1),
+            "k enters the strip instead"
+        );
+        assert_eq!(
+            step(cell(0, 2), &mut last, Motion::Rows(-3), g),
+            cell(0, 2),
+            "a counted step clamps, never wraps"
+        );
+        assert_eq!(
+            step(cell(0, 2), &mut last, Motion::Rows(-3), G),
+            Cursor::Attr(1),
+            "a counted k on row 0 enters the strip like a bare one"
+        );
+        assert_eq!(step(cell(3, 2), &mut last, Motion::Rows(5), G), cell(4, 2));
     }
 
     #[test]

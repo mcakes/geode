@@ -1728,15 +1728,15 @@ run_mutation "keybindings: escape only walks the ladder when unmodified" \
 
 run_mutation "keybindings: d never writes an unbind" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '            NormalCommand::Verb('"'"'d'"'"') => {' \
-  '            NormalCommand::Verb('"'"'\0'"'"') => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'r'"'"')) => {' \
   geode-shell \
   d_unbinds_the_selected_binding
 
 run_mutation "keybindings: r never writes a reset" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '            NormalCommand::Verb('"'"'r'"'"') => {' \
-  '            NormalCommand::Verb('"'"'\u{1}'"'"') => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"')) => {' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
 
@@ -1812,9 +1812,19 @@ run_mutation "keybindings: a click leaves the previous row's notice standing" \
   '    if state.notice.take().is_some() {
         cx.notify();
     }
+    // Spec §20.1: a click is claimed and dropped while a question stands —
+    // the object dialog'"'"'s tick-click rule (§18.9.2) on this surface.
+    if state.confirm.is_some() {
+        return;
+    }
     let visible = visible_rows(state, &rows);
     let Some(ix)' \
-  '    let visible = visible_rows(state, &rows);
+  '    // Spec §20.1: a click is claimed and dropped while a question stands —
+    // the object dialog'"'"'s tick-click rule (§18.9.2) on this surface.
+    if state.confirm.is_some() {
+        return;
+    }
+    let visible = visible_rows(state, &rows);
     let Some(ix)' \
   geode-shell \
   clicking_a_row_clears_a_standing_notice
@@ -1910,6 +1920,46 @@ run_mutation "keybindings: a single row click starts listening" \
     }' \
   geode-shell \
   a_single_click_on_a_row_starts_listening
+
+# Spec §20.1: `d`/`r` ask first — a bound row's `d` must ARM the confirm
+# rather than write straight through. Anchored on `arm_verb`, the one
+# arm-or-notice decision shared by `handle_key` and `press_verb`.
+run_mutation "keybindings: d arms a confirm instead of writing (spec §20.1)" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        '"'"'d'"'"' if can_unbind(row) => {
+            state.confirm = Some(KeybindingConfirm::Unbind);
+        }
+        '"'"'d'"'"' => state.notice = unbind_selected(row, user_dir, cx),' \
+  '        '"'"'d'"'"' => state.notice = unbind_selected(row, user_dir, cx),' \
+  geode-shell \
+  d_asks_before_writing_and_n_withdraws
+
+# Spec §20.1, the `r` half: a row whose binding IS the user's own must
+# ARM the confirm rather than remove it straight through. Same anchor
+# function, the other guarded arm.
+run_mutation "keybindings: r arms a confirm instead of writing (spec §20.1)" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        '"'"'r'"'"' if can_reset(row) => {
+            state.confirm = Some(KeybindingConfirm::Reset);
+        }
+        '"'"'r'"'"' => state.notice = reset_selected(row, user_dir, cx),' \
+  '        '"'"'r'"'"' => state.notice = reset_selected(row, user_dir, cx),' \
+  geode-shell \
+  r_asks_before_writing_and_n_withdraws
+
+# Spec §20.1: a mouse click must not retarget the selection (or start a
+# capture) while `d`/`r`'s question stands.
+run_mutation "keybindings: a row click is dropped while a confirm is armed (spec §20.1)" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    if state.confirm.is_some() {
+        return;
+    }
+    let visible = visible_rows(state, &rows);
+    let Some(ix) = filtered_position(&visible, &rows, clicked) else {' \
+  '    let visible = visible_rows(state, &rows);
+    let Some(ix) = filtered_position(&visible, &rows, clicked) else {' \
+  geode-shell \
+  a_row_click_while_a_confirm_is_armed_is_dropped
 
 # ---- grouping slots and the frame (Phase 3 §4)
 
@@ -2211,6 +2261,13 @@ run_mutation "commandline: escape on a find is a cancel" \
   geode-shell \
   slash_streams_find_events_and_escape_cancels
 
+run_mutation "commandline: a click away commits a non-empty find line (spec §20.4)" \
+  crates/geode-shell/src/shell/commandline_ctl.rs \
+  '        if line.prompt == Prompt::Find && !text.is_empty() {' \
+  '        if false {' \
+  geode-shell \
+  a_mouse_down_on_a_tile_commits_an_open_find_line
+
 # "commandline: a tile mouse-down cancels an open line (fix round 1)"
 # retired (I1, final review): removing this call is no longer an
 # independently observable behaviour. A tile mouse-down always changes
@@ -2227,7 +2284,9 @@ run_mutation "commandline: escape on a find is a cancel" \
 # already defend. Keeping this one would only ever show `SURVIVED`,
 # which would misstate the situation as an untested gap rather than the
 # deliberate, now-redundant fast path `render`'s own doc comment
-# describes.
+# describes. Both tile mouse-down handlers now call `leave_command_line`
+# (spec §20.4) instead of `cancel_command_line`, and the entry above
+# covers its commit branch directly.
 
 run_mutation "commandline: a second tab refreshes the accepted word range instead of corrupting it (C1, final review)" \
   crates/geode-shell/src/shell/commandline_ctl.rs \
@@ -6818,21 +6877,25 @@ run_mutation "objectdialog: n empties a leftover browse filter before naming" \
   geode-shell \
   n_opens_an_empty_name_field_even_after_a_browse_filter
 
-# §16.1: the confirm buttons are the only door into `run_confirmed` that
-# never passes through `ShellView::handle_key_down`, so the sync at the
-# end of the "yes" closure is the one that empties the shared field when
-# a confirmed delete walks back to browse. Reachable only with the
-# mouse: an armed confirm swallows every keystroke, `/` included, so the
-# keyboard cannot reach one from filter mode at all — but the action
-# bar's buttons are live in either mode. Anchored on the last comment
-# line too: the identical sync call appears four times in this file, and
-# the "no" closure's is indented identically.
+# §16.1 / §20.1: the confirm buttons are the only door into
+# `run_confirmed` that never passes through `ShellView::handle_key_down`,
+# so the sync at the end of the shared `dialog::confirm_row`'s "yes"
+# closure is the one that empties the shared field when a confirmed
+# delete walks back to browse. Reachable only with the mouse: an armed
+# confirm swallows every keystroke, `/` included, so the keyboard cannot
+# reach one from filter mode at all — but the action bar's buttons are
+# live in either mode. Task 5 moved this closure from the object
+# dialog's own `confirm_row` into the shared one in `dialog.rs`; the
+# anchor moved with it (the bare `sync_dialog_text(shell, window, cx);`
+# call appears twice more in this file — this function's own "no"
+# closure, and an unrelated one elsewhere — so the preceding
+# `on_yes(shell, window, cx);` line disambiguates it).
 run_mutation "objectdialog: a mouse-confirmed delete leaves its filter text in the field" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                                // was filtering with is emptied here or nowhere.
-                                dialog::sync_dialog_text(shell, window, cx);' \
-  '                                // was filtering with is emptied here or nowhere.
-                                let _ = window;' \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                            on_yes(shell, window, cx);
+                            sync_dialog_text(shell, window, cx);' \
+  '                            on_yes(shell, window, cx);
+                            let _ = window;' \
   geode-shell \
   confirming_with_the_mouse_while_filtering_empties_the_field
 
@@ -9894,11 +9957,10 @@ run_mutation "objectdialog: the refreshed catalogue reads the pending config" \
 # dataset" over one.
 run_mutation "objectdialog: a column stage offers no destructive action" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if draft.column().is_some() {
-        return Vec::new();
-    }
+  '    let in_column = draft.column().is_some();
     let row = editing_row(shell);' \
-  '    let row = editing_row(shell);' \
+  '    let in_column = false;
+    let row = editing_row(shell);' \
   geode-shell \
   a_column_stage_offers_no_destructive_action
 
@@ -11569,6 +11631,250 @@ run_mutation "mdmenu: the arrow keys move the menu highlight" \
   '"k" = "marketdata::menu_up"
 "enter" = "marketdata::menu_pick"' \
   geode-marketdata dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode
+
+run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
+  crates/geode-shell/src/vimnav.rs \
+  '        NavCommand::Move(delta) if delta.abs() == 1 && len > 0 => {' \
+  '        NavCommand::Move(delta) if delta.abs() == 0 && len > 0 => {' \
+  geode-shell \
+  apply_wraps_a_single_step_at_both_ends
+
+run_mutation "blotter cursor: visual mode clamps a bare step (spec §20.5)" \
+  crates/geode-blotter/src/core/cursor.rs \
+  '        self.row = if wrap {' \
+  '        self.row = if true {' \
+  geode-blotter \
+  visual_mode_clamps_a_bare_step
+
+run_mutation "marketdata: the row axis wraps a bare step, the column axis never does (spec §20.5)" \
+  crates/geode-marketdata/src/core/cursor.rs \
+  '            row: vimnav::apply(row, grid.rows, NavCommand::Move(n as i64)),' \
+  '            row: vimnav::apply_clamped(row, grid.rows, NavCommand::Move(n as i64)),' \
+  geode-marketdata \
+  a_bare_row_step_wraps_and_the_full_page_keys_move_ten
+
+run_mutation "picker: the values list moves through vimnav::apply, not a private ±1 (spec §20.5)" \
+  crates/geode-shell/src/shell/picker.rs \
+  '            p.selected = vimnav::apply(p.selected, len, cmd); // values' \
+  '            p.selected = vimnav::apply_clamped(p.selected, len, cmd); // values' \
+  geode-shell \
+  the_values_list_takes_the_full_nav_set
+
+run_mutation "picker: escape from Values steps back to Columns instead of closing (spec §20.2)" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        back_to_columns(shell, window, cx);' \
+  '        let _ = (window, &cx); return false;' \
+  geode-shell \
+  escape_cancels_without_touching_the_scope
+
+run_mutation "picker: a values row click selects, only the tick toggles (spec §20.3)" \
+  crates/geode-shell/src/shell/picker.rs \
+  '                                        p.selected = i;
+                                    }
+                                    sync_picker_scroll(shell);' \
+  '                                        p.selected = i;
+                                        p.toggle_selected();
+                                    }
+                                    sync_picker_scroll(shell);' \
+  geode-shell \
+  a_values_row_click_selects_and_only_the_tick_toggles
+
+run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '    if let Some(cmd) = listfilter::nav_command(ks) {' \
+  '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, vimnav::NavCommand::Move(1 | -1))) {' \
+  geode-shell \
+  the_as_of_list_takes_ctrl_n_and_clamps_a_page_step
+
+run_mutation "palette: tab is reclaimed inside the palette (spec §20.5)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodePalette")),' \
+  '        gpui::KeyBinding::new("f24", gpui::NoAction, Some("GeodePalette")),' \
+  geode-shell \
+  tab_in_the_palette_leaves_the_query_field_focused
+
+run_mutation "dialog: the confirm router treats a modified escape as no (spec §20.1)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            "escape" => Some(ConfirmAnswer::No),' \
+  '            "escape" if bare => Some(ConfirmAnswer::No),' \
+  geode-shell \
+  the_confirm_router_answers_four_keys_and_drops_the_rest
+
+run_mutation "settings: shift+click on the value chip steps back (spec §20.3)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                on_step(!event.modifiers.shift, window, cx);' \
+  '                on_step(true, window, cx);' \
+  geode-shell \
+  the_settings_value_chip_steps_and_a_row_click_only_selects
+
+# ---- Verb consistency Task 8: the object dialog's chip, i/n buttons ------
+
+# Spec §20.3: the chip degrades to plain text — no handler — while a
+# confirm is armed, one of the four inert conditions the keys share.
+# Mutated away, the render gate paints a live chip under a pending
+# Delete; the click itself is still dropped by the handler's own guard,
+# so what the test observes is the gate alone — the chip's painted width
+# (a live chip measures wider than the armed plain text), never a
+# stepped value.
+run_mutation "objectdialog: the value chip is inert under an armed confirm (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let chips_live = writable && draft.confirm.is_none() && draft.text_entry.is_none();' \
+  '    let chips_live = writable && draft.text_entry.is_none();' \
+  geode-shell \
+  the_value_chip_steps_a_number_and_is_inert_under_a_confirm
+
+# Spec §20.6 fallout: an edit-row click is claimed and dropped while a
+# confirm is armed — the tick's and the drop's guard, on the third handler
+# that reaches the row list. Mutated away, the click moves the cursor
+# and a door row's click opens a column stage whose `enter_column`
+# silently clears the confirm.
+run_mutation "objectdialog: an edit-row click is dropped while a confirm is armed (spec §20.6)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .is_some_and(|d| d.confirm.is_some())
+    {
+        return;
+    }' \
+  '        .is_some_and(|d| d.confirm.is_some())
+    {
+        let _ = 0;
+    }' \
+  geode-shell \
+  an_edit_row_click_is_dropped_while_a_confirm_is_armed
+
+# Spec §20.3: the `i` button reaches the key's own door. Mutated to a
+# no-op arm, the button paints and does nothing.
+run_mutation "objectdialog: the i button opens the field its key opens (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        "i" => open_field(shell),' \
+  '        "i" => {}' \
+  geode-shell \
+  i_and_n_have_buttons_that_do_what_their_keys_do
+
+# Spec §20.3 retires §16.6's audited exception: `press_verb` must end in
+# the sync, because `i` opens a field the sync is what focuses. Mutated
+# away, the field opens with the pure state at `Filter` and the `Input`
+# never focused — every following keystroke goes nowhere.
+run_mutation "objectdialog: press_verb syncs the dialog text after a verb (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        "o" => overwrite_scope(shell, cx),
+        _ => {}
+    }
+    dialog::sync_dialog_text(shell, window, cx);' \
+  '        "o" => overwrite_scope(shell, cx),
+        _ => {}
+    }' \
+  geode-shell \
+  i_and_n_have_buttons_that_do_what_their_keys_do
+
+# Spec §20.3: `i` is a button only where the selected row is one it
+# opens. Mutated to always offer it, a `Choice` row paints a button that
+# can only answer with a notice.
+run_mutation "objectdialog: the i button is offered per row, not per domain (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    ) || state.domain == Domain::Groupings;' \
+  '    ) || true;' \
+  geode-shell \
+  i_and_n_have_buttons_that_do_what_their_keys_do
+
+# Spec §20.3: the browse `n` button takes the key's own door. Mutated
+# away, the button syncs and notifies but opens nothing.
+run_mutation "objectdialog: the n button opens the naming stage (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                            begin_new_object(shell, seed, seed_taken);' \
+  '                            let _ = (seed, seed_taken);' \
+  geode-shell \
+  i_and_n_have_buttons_that_do_what_their_keys_do
+
+# Spec §20.3: no `n` button on a fixed roster (Groupings), exactly as its
+# footer names no `n` — a button that only ever refuses teaches a verb
+# with nothing behind it. Mutated away, the button paints there.
+run_mutation "objectdialog: the n button is withheld on a fixed roster (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        && state.domain.roster().is_none();' \
+  '        && true;' \
+  geode-shell \
+  the_i_button_opens_the_chain_field_on_groupings_and_n_is_withheld
+
+# Spec §20.3 / ruling 6: no `n` button on a read-only domain (Schema) —
+# the same gate the footer's `n` hint keys on. Mutated away, the button
+# paints over a surface whose `n` only ever answers the read-only notice.
+run_mutation "objectdialog: the n button is withheld on a read-only domain (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        && state.domain.writable(&state.stage)
+        && state.domain.roster().is_none();' \
+  '        && true
+        && state.domain.roster().is_none();' \
+  geode-shell \
+  the_schema_domain_offers_no_n_button_and_the_chip_door_refuses
+
+# Spec §20.3: the chip's door refuses on a read-only domain in the
+# keys' own words. Mutated to always step, a Schema row answers
+# `step_selected_row`'s "nothing on this row changes with space" instead
+# of the read-only notice — the wrong reason for the right outcome. (No
+# entry mutates `chips_live`'s own `writable` term: every Schema row is
+# a display-only `Text`, so no Schema row can carry a chip whatever that
+# term says, and such an entry would survive by construction.)
+run_mutation "objectdialog: the chip door refuses a read-only domain (spec §20.3)" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if writable {
+        step_selected_row(shell, forward, filtering, cx);' \
+  '    if true {
+        step_selected_row(shell, forward, filtering, cx);' \
+  geode-shell \
+  the_schema_domain_offers_no_n_button_and_the_chip_door_refuses
+
+# ---- Final whole-branch review fix wave (2026-09-15) ---------------------
+
+# Spec §20.1 on the frozen filter row, the mouse form of `/`: dropped
+# while a question stands, on both dialogs that can arm one. The two
+# guards read alike, so each anchor carries its `if let` line. Mutated
+# away on the keybinding dialog, the click enters filter mode and focuses
+# the `Input` over the open question.
+run_mutation "dialog: the keybindings frozen-row click is dropped while a confirm is armed (spec §20.1)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    if let Some(state) = shell.keybindings.as_mut() {
+        // Spec §20.1: not over an open question.
+        if state.confirm.is_some() {
+            return;
+        }' \
+  '    if let Some(state) = shell.keybindings.as_mut() {
+        // Spec §20.1: not over an open question.
+        if false {
+            return;
+        }' \
+  geode-shell \
+  a_row_click_while_a_confirm_is_armed_is_dropped
+
+# The object-dialog half (the final review's I1): `build_edit` still
+# paints the frozen row while a confirm is armed, so without this guard
+# the click enters filter mode under a pending `d`/`r`.
+run_mutation "dialog: the object-dialog frozen-row click is dropped while a confirm is armed (spec §20.1)" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    } else if let Some(state) = shell.object_dialog.as_mut() {
+        // Spec §20.1: not over an open question. `build_edit` still paints
+        // the frozen row while a confirm is armed, so the guard lives here.
+        if state.draft.as_ref().is_some_and(|d| d.confirm.is_some()) {
+            return;
+        }' \
+  '    } else if let Some(state) = shell.object_dialog.as_mut() {
+        // Spec §20.1: not over an open question. `build_edit` still paints
+        // the frozen row while a confirm is armed, so the guard lives here.
+        if false {
+            return;
+        }' \
+  geode-shell \
+  an_edit_row_click_is_dropped_while_a_confirm_is_armed
+
+# Spec §20.5 at the blotter tile's own derivation (the final review's
+# I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
+# what decides it from the mode. Mutated to always wrap, a bare `j` in
+# visual mode leaps from the last row to row 0 and inverts the selection.
+run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
+  crates/geode-blotter/src/tile.rs \
+  '                    let wrap = matches!(d.mode, Mode::Normal);' \
+  '                    let wrap = true;' \
+  geode-blotter \
+  a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

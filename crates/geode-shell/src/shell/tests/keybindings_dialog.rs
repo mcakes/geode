@@ -1046,7 +1046,7 @@ fn d_unbinds_the_selected_binding(cx: &mut gpui::TestAppContext) {
         "sanity: with no user keymap this binding is builtin"
     );
 
-    vcx.simulate_keystrokes("d");
+    vcx.simulate_keystrokes("d y");
     vcx.run_until_parked();
 
     let text = std::fs::read_to_string(dir.path().join("keymap.toml"))
@@ -1080,7 +1080,7 @@ fn d_on_a_user_layer_binding_removes_it_rather_than_shadowing_it(cx: &mut gpui::
     assert_eq!(key, "ctrl+alt+y", "the user's binding is the effective one");
     assert_eq!(layer, Layer::User);
 
-    vcx.simulate_keystrokes("d");
+    vcx.simulate_keystrokes("d y");
     vcx.run_until_parked();
 
     let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("d must write");
@@ -1109,7 +1109,7 @@ fn r_resets_a_user_override_by_removing_it(cx: &mut gpui::TestAppContext) {
     open_keybindings(&shell, &mut vcx);
 
     select_the_palette_row(&mut vcx);
-    vcx.simulate_keystrokes("r");
+    vcx.simulate_keystrokes("r y");
     vcx.run_until_parked();
 
     let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
@@ -1337,7 +1337,7 @@ fn d_acknowledges_the_write_immediately_and_names_the_way_back(cx: &mut gpui::Te
     let (_, bound) = selected_row(&shell, &vcx);
     let (key, _) = bound.expect("bound");
 
-    vcx.simulate_keystrokes("d");
+    vcx.simulate_keystrokes("d y");
     // Deliberately NOT `run_until_parked` first: the acknowledgement must
     // be on screen the instant the key is pressed, not after the
     // background write, and certainly not after the reload watcher.
@@ -1384,7 +1384,7 @@ fn d_on_a_contexted_binding_does_not_promise_the_retype_recovery(cx: &mut gpui::
     );
     let (key, _) = bound.expect("sanity: that row is bound");
 
-    vcx.simulate_keystrokes("d");
+    vcx.simulate_keystrokes("d y");
     let notice = shell
         .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
         .expect("d must acknowledge the write it just spawned");
@@ -1420,7 +1420,7 @@ fn d_does_not_claim_a_write_it_has_not_confirmed(cx: &mut gpui::TestAppContext) 
     open_keybindings(&shell, &mut vcx);
 
     select_the_palette_row(&mut vcx);
-    vcx.simulate_keystrokes("d");
+    vcx.simulate_keystrokes("d y");
     let notice = shell
         .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
         .expect("d must acknowledge");
@@ -1450,7 +1450,7 @@ fn r_acknowledges_the_write_it_spawned(cx: &mut gpui::TestAppContext) {
     open_keybindings(&shell, &mut vcx);
 
     select_the_palette_row(&mut vcx);
-    vcx.simulate_keystrokes("r");
+    vcx.simulate_keystrokes("r y");
     let notice = shell
         .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
         .expect("r must acknowledge the write it just spawned");
@@ -1766,7 +1766,7 @@ fn d_over_a_modules_fragment_binding_writes_a_user_layer_shadow(cx: &mut gpui::T
         "a fragment binding reports Builtin, which is what selects `d`'s shadow branch"
     );
 
-    vcx.simulate_keystrokes("d");
+    vcx.simulate_keystrokes("d y");
     vcx.run_until_parked();
 
     let text = std::fs::read_to_string(dir.path().join("keymap.toml"))
@@ -1820,7 +1820,7 @@ fn r_removes_a_user_override_and_the_modules_fragment_shows_through(cx: &mut gpu
         "fixture check: the user's override is the effective binding, over the fragment"
     );
 
-    vcx.simulate_keystrokes("r");
+    vcx.simulate_keystrokes("r y");
     vcx.run_until_parked();
 
     let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
@@ -1839,5 +1839,223 @@ fn r_removes_a_user_override_and_the_modules_fragment_shows_through(cx: &mut gpu
     assert!(
         !notice.contains("no user override"),
         "a reset that had something to reset reports no complaint: {notice}"
+    );
+}
+
+/// Spec §20.1: `d` arms a question and writes nothing until `y`; `n`
+/// withdraws it; the confirm row paints and the action bar is gone.
+#[gpui::test]
+fn d_asks_before_writing_and_n_withdraws(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_the_palette_row(&mut vcx);
+
+    vcx.simulate_keystrokes("d");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .confirm
+            .is_some()),
+        "d arms the question"
+    );
+    assert!(
+        vcx.debug_bounds("keybindings-confirm").is_some(),
+        "and it paints"
+    );
+    assert!(
+        vcx.debug_bounds("keybindings-action-d").is_none(),
+        "the action bar is replaced by the question"
+    );
+    assert!(
+        !dir.path().join("keymap.toml").exists(),
+        "nothing is written while the question stands"
+    );
+
+    // A stray verb is claimed and dropped while armed.
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().confirm
+            == Some(keybindings_view::KeybindingConfirm::Unbind)),
+        "r under an armed d neither re-arms nor acts"
+    );
+
+    vcx.simulate_keystrokes("n");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .confirm
+            .is_none()),
+        "n withdraws it"
+    );
+    assert!(vcx.debug_bounds("keybindings-confirm").is_none());
+    assert!(!dir.path().join("keymap.toml").exists());
+}
+
+/// The `r` half of [`d_asks_before_writing_and_n_withdraws`]: a bare `r`
+/// on a row whose binding IS the user's own arms `Reset` and writes
+/// nothing until `y`; `n` withdraws it and the file is untouched either
+/// way. Opened on `services_with_a_user_binding_for_the_palette` (rather
+/// than a builtin row, which would only give the unarmed notice) so a
+/// write really would be observable if the arm regressed to a
+/// write-through.
+#[gpui::test]
+fn r_asks_before_writing_and_n_withdraws(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_TEXT).unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(
+        cx,
+        services_with_a_user_binding_for_the_palette(),
+        dir.path(),
+    );
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_the_palette_row(&mut vcx);
+
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().confirm
+            == Some(keybindings_view::KeybindingConfirm::Reset)),
+        "r arms the question"
+    );
+    assert!(
+        vcx.debug_bounds("keybindings-confirm").is_some(),
+        "and it paints"
+    );
+    assert!(
+        vcx.debug_bounds("keybindings-action-r").is_none(),
+        "the action bar is replaced by the question"
+    );
+    let unchanged = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("still there");
+    assert_eq!(
+        unchanged, USER_KEYMAP_TEXT,
+        "nothing is written while the question stands"
+    );
+
+    vcx.simulate_keystrokes("n");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .confirm
+            .is_none()),
+        "n withdraws it"
+    );
+    assert!(vcx.debug_bounds("keybindings-confirm").is_none());
+    let still_unchanged =
+        std::fs::read_to_string(dir.path().join("keymap.toml")).expect("still there");
+    assert_eq!(still_unchanged, USER_KEYMAP_TEXT, "n writes nothing either");
+}
+
+/// A row click while a question stands is claimed and dropped — the
+/// object dialog's tick-click rule (§18.9.2) on this surface — and so is
+/// the frozen filter row's.
+#[gpui::test]
+fn a_row_click_while_a_confirm_is_armed_is_dropped(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_the_palette_row(&mut vcx);
+    vcx.simulate_keystrokes("d");
+    vcx.run_until_parked();
+
+    // `keybindings-row-{n}` is keyed by the row's index in the FULL,
+    // unfiltered row list (see `build`'s render loop), not by its
+    // position under the "palette" filter — so the row to click is the
+    // one actually visible under that filter (the selected row itself,
+    // per this test's own doc comment), not literally row 0.
+    let row_ix = shell.read_with(&vcx, |s, _| {
+        let rows = keybindings_view::derive_rows(&s.services.registry, &s.services.keymap);
+        let state = s.keybindings.as_ref().unwrap();
+        let visible = keybindings_view::visible_rows(state, &rows);
+        visible[state.selected].row
+    });
+    let row_selector: &'static str =
+        Box::leak(format!("keybindings-row-{row_ix}").into_boxed_str());
+    let row = vcx.debug_bounds(row_selector).expect("a row paints");
+    vcx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(20.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| {
+            let state = s.keybindings.as_ref().unwrap();
+            state.confirm.is_some() && state.listening.is_none()
+        }),
+        "the click neither retargeted nor started a capture"
+    );
+
+    let frozen = vcx
+        .debug_bounds("dialog-filter-frozen")
+        .expect("frozen row paints");
+    vcx.simulate_mouse_down(
+        gpui::point(
+            frozen.origin.x + gpui::px(20.0),
+            frozen.origin.y + gpui::px(4.0),
+        ),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| {
+            let state = s.keybindings.as_ref().unwrap();
+            state.confirm.is_some() && state.mode == DialogMode::Normal
+        }),
+        "the frozen-row click did not enter filter mode over an open question"
+    );
+}
+
+/// The two verbs are buttons too, and the button arms exactly as the
+/// key does; the yes button writes.
+#[gpui::test]
+fn the_unbind_button_arms_and_the_yes_button_writes(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_the_palette_row(&mut vcx);
+    let (_, bound) = selected_row(&shell, &vcx);
+    let (key, _) = bound.expect("bound");
+
+    let button = vcx
+        .debug_bounds("keybindings-action-d")
+        .expect("the unbind button paints");
+    vcx.simulate_click(button.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("keybindings-confirm").is_some(),
+        "the button arms"
+    );
+
+    let yes = vcx
+        .debug_bounds("keybindings-confirm-yes")
+        .expect("yes paints");
+    vcx.simulate_click(yes.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("written");
+    assert!(text.contains(&format!("\"{key}\" = \"none\"")), "{text}");
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .confirm
+            .is_none()),
+        "and the question is gone"
     );
 }

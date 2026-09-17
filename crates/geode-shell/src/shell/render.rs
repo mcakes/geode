@@ -210,7 +210,7 @@ impl Render for ShellView {
         // line is open" holds only while BOTH (a) the active workspace's
         // own focused tile is still that tile, and (b) `command_input`
         // still holds keyboard focus. Both tile mouse-down handlers
-        // (`render`, below) already call `cancel_command_line` before
+        // (`render`, below) already call `leave_command_line` before
         // acting, and that remains the fast, explicit path for the two
         // surfaces that need it — this is the generic backstop for
         // everything else that can change (a) or (b) without going
@@ -222,10 +222,15 @@ impl Render for ShellView {
         // all. One check here, at the top of render (same "reliably
         // funnels through with fresh state" precedent as `pending_focus_
         // restore` above), covers both without a third and fourth
-        // `cancel_command_line` call site — and is a no-op on the tile-
+        // `leave_command_line` call site — and is a no-op on the tile-
         // mouse-down paths, since they already set `command_line` to
         // `None` before this runs, so there is no double cancel (no
-        // second `FindEvent::Cancelled`).
+        // second `FindEvent::Cancelled`/`Committed`). This leaves
+        // (commits a find, cancels a command — `leave_command_line`,
+        // spec §20.4) rather than unconditionally cancelling: the
+        // sidebar switch and the filter-input click are both a click
+        // away from the tile, exactly like the tile mouse-down handlers
+        // below, not `escape` — a `/` line with text still commits here.
         if self.command_line.as_ref().is_some_and(|line| {
             self.services.workspaces.active().focused_tile() != Some(line.tile)
                 || !self
@@ -234,7 +239,7 @@ impl Render for ShellView {
                     .focus_handle(cx)
                     .is_focused(window)
         }) {
-            self.cancel_command_line(window, cx);
+            self.leave_command_line(window, cx);
         }
 
         // Apply the UI font size (see the `fontsize` module doc): the rem
@@ -597,15 +602,19 @@ impl Render for ShellView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                                // Any tile mouse-down cancels an open
+                                // Any tile mouse-down leaves an open
                                 // command line first, unconditionally
-                                // (fix round 1, finding 2 —
-                                // `cancel_command_line`'s own doc
+                                // (fix round 1, finding 2, and spec
+                                // §20.4 — `leave_command_line`'s own doc
                                 // comment): this is the fast, explicit
                                 // path for the one focus-stealing surface
-                                // that is itself a tile click. The
-                                // render-time check (I1, final review —
-                                // see the comment just above
+                                // that is itself a tile click. It leaves
+                                // (commits a find, cancels a command —
+                                // `leave_command_line`) rather than
+                                // unconditionally cancelling, so clicking
+                                // away from a `/` line with text commits
+                                // it. The render-time check (I1, final
+                                // review — see the comment just above
                                 // `ensure_occupants`'s drag-cancel
                                 // neighbours) is the generic backstop
                                 // that also covers surfaces that are NOT
@@ -618,7 +627,7 @@ impl Render for ShellView {
                                 // whenever it's open" an invariant — see
                                 // the comment where the strip is painted,
                                 // below.
-                                view.cancel_command_line(window, cx);
+                                view.leave_command_line(window, cx);
                                 if view.try_arm_tile_drag(id, event, cx) {
                                     return;
                                 }
@@ -666,10 +675,12 @@ impl Render for ShellView {
                     surface = surface.child(tile_cell(id, tr, is_focused, view, cx).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                            // Same command-line cancel as the tree-tile
-                            // listener above, and for the identical
-                            // reason (fix round 1, finding 2).
-                            view.cancel_command_line(window, cx);
+                            // Same command-line leave as the tree-tile
+                            // listener above (commits a find, cancels a
+                            // command — `leave_command_line`), and for
+                            // the identical reason (fix round 1, finding
+                            // 2, and spec §20.4).
+                            view.leave_command_line(window, cx);
                             if view.try_arm_tile_drag(id, event, cx) {
                                 return;
                             }

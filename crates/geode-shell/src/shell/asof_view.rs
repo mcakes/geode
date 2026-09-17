@@ -38,6 +38,7 @@ use geode_core::query::{AsOf, parse_as_of};
 
 use crate::frame::Frame;
 use crate::keymap::{Keystroke, Modifiers};
+use crate::{listfilter, vimnav};
 
 use super::ShellView;
 use super::dialog;
@@ -166,19 +167,6 @@ pub fn on_query_changed(state: &mut AsOfState, text: &str, now: DateTime<Utc>) {
     }
 }
 
-/// Move `selected` by `delta` (±1 for up/down), wrapping at both ends —
-/// `PickerState::move_selection`'s own rule (`shell::picker`), applied
-/// here to a bare `usize` rather than a whole struct: this dialog has
-/// nothing else to bundle the movement with.
-fn move_selection(selected: &mut usize, delta: i32, len: usize) {
-    if len == 0 {
-        *selected = 0;
-        return;
-    }
-    let next = ((*selected as i32 + delta) % len as i32 + len as i32) % len as i32;
-    *selected = next as usize;
-}
-
 // ---------------------------------------------------------------------
 // gpui shell.
 // ---------------------------------------------------------------------
@@ -242,9 +230,10 @@ fn commit_live(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Shel
 /// (the modal stays open, same "enter does nothing" contract the field's
 /// own inline error already promises).
 ///
-/// `up`/`down` move `selected` over the current preset list; `escape`
-/// claims nothing (falls through to `handle_key_down`'s own
-/// modal-closes-on-escape branch), exactly like every other dialog here.
+/// Every `listfilter::nav_command` key moves `selected` through
+/// `vimnav::apply` (spec §20.5); `escape` claims nothing (falls through to
+/// `handle_key_down`'s own modal-closes-on-escape branch), exactly like
+/// every other dialog here.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -283,15 +272,14 @@ fn handle_key(
         }
         return true;
     }
-    if ks.mods == Modifiers::NONE && (ks.key == "up" || ks.key == "down") {
-        let delta = if ks.key == "up" { -1 } else { 1 };
+    if let Some(cmd) = listfilter::nav_command(ks) {
         let len = shell
             .as_of_dialog
             .as_ref()
             .map(|state| cached_presets(state, shell.frame.read(cx)).len())
             .unwrap_or(0);
         if let Some(state) = shell.as_of_dialog.as_mut() {
-            move_selection(&mut state.selected, delta, len);
+            state.selected = vimnav::apply(state.selected, len, cmd);
         }
         cx.notify();
         return true;
@@ -568,17 +556,5 @@ mod tests {
         on_query_changed(&mut state, "not a time", now);
         assert!(state.error.is_some());
         assert!(state.resolved.is_none(), "error and resolved are exclusive");
-    }
-
-    #[test]
-    fn move_selection_wraps_at_both_ends() {
-        let mut selected = 0;
-        move_selection(&mut selected, -1, 3);
-        assert_eq!(selected, 2, "moving up from 0 wraps to the last index");
-        move_selection(&mut selected, 1, 3);
-        assert_eq!(selected, 0);
-        let mut none = 0;
-        move_selection(&mut none, 1, 0);
-        assert_eq!(none, 0, "an empty list never moves");
     }
 }

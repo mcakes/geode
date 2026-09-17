@@ -541,9 +541,10 @@ impl PaletteState {
 
     /// Set the selection to an absolute row index — a mouse click on a
     /// result row (`render`'s per-row `on_mouse_down`), which names exactly
-    /// which row was hit rather than a `±1` step the way keyboard nav does
-    /// (`move_selection`). Defensively clamped the same way that method is:
-    /// an empty filtered list leaves `selected` at 0 untouched, and an
+    /// which row was hit, and the keyboard path too, which lands the row
+    /// `vimnav::apply` answered (`handle_palette_key`; spec §20.5: a bare
+    /// ±1 wraps, anything larger clamps). Defensively clamped: an empty
+    /// filtered list leaves `selected` at 0 untouched, and an
     /// index past the end of the current filtered list (stale by the time a
     /// click is actually processed — e.g. the query changed between the
     /// frame that painted the row and the click landing) clamps to the last
@@ -584,30 +585,6 @@ impl PaletteState {
         self.filtered
             .iter()
             .map(|(i, indices)| (&self.items[*i], indices.as_slice(), self.title_len[*i]))
-    }
-
-    /// Move the selection by `delta` rows (arrow keys / ctrl+p / ctrl+n
-    /// pass ±1), wrapping at both ends — pressing up at index 0 selects the
-    /// LAST filtered item; pressing down at the last item wraps to 0. An
-    /// empty result list remains a no-op. `render` now draws every filtered
-    /// row inside a scrollable viewport (rather than truncating to a fixed
-    /// window), and the caller that drives real key events
-    /// (`ShellView::handle_palette_key`) is responsible for scrolling the
-    /// newly selected row into view after each call here — see
-    /// `gpui::ScrollHandle::scroll_to_item`, invoked from that same
-    /// selection-change path; scroll-follow handles any index, including
-    /// wrap-around jumps.
-    pub fn move_selection(&mut self, delta: i32) {
-        let len = self.filtered.len();
-        if len == 0 {
-            self.selected = 0;
-            return;
-        }
-        // Wrapping modular arithmetic: safely handles negative deltas and
-        // out-of-bounds movement. Formula: ((current + delta) % len + len) % len
-        // The double-modulo ensures the result is always in [0, len).
-        let next = ((self.selected as i32 + delta) % len as i32 + len as i32) % len as i32;
-        self.selected = next as usize;
     }
 
     /// The currently selected row, if any (an empty filtered list, or a
@@ -740,8 +717,8 @@ use crate::fonts;
 /// Target overlay width in pixels (brief: "~560px wide").
 const WIDTH: f32 = 560.0;
 
-/// Sizing hint only (no longer a selection clamp — see `PaletteState::
-/// move_selection`'s doc comment): the number of rows the results viewport
+/// Sizing hint only (no longer a selection clamp — every motion goes
+/// through `vimnav::apply`, spec §20.5): the number of rows the results viewport
 /// is tall enough to show before it needs to scroll. Item count today is
 /// 84 (`register_builtin_actions`' 40 actions + `theme::load_bundled`'s 44
 /// bundled theme entries — counted directly, not estimated, by
@@ -851,8 +828,8 @@ pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::H
 /// on top of exactly this primitive; at 66 items neither is needed here,
 /// so this uses the primitive directly rather than pulling in `List`'s
 /// virtualized-row bookkeeping for a list this small). `ShellView`'s
-/// selection-change path (`move_selection` calls, the selection reset in
-/// `set_query`, and row clicks via `set_selected`) calls `scroll_handle.
+/// selection-change path (`set_selected` after `vimnav::apply`, the
+/// selection reset in `set_query`, and row clicks via `set_selected`) calls `scroll_handle.
 /// scroll_to_item(new_selected)` — a real per-frame layout measurement, not
 /// a pixel-math guess — so the newly selected row always ends up visible;
 /// this function only wires the handle into the container, it never calls
@@ -999,6 +976,10 @@ pub fn render(
         .left(px(left))
         .top(px(top))
         .w(px(width))
+        // Spec §20.5: reclaims `tab`/`shift-tab` from gpui-component's
+        // `Root` (`dialog::init_reclaimed_keybindings`'s `"GeodePalette"`
+        // entries) so they cannot cycle focus off `query_input`.
+        .key_context("GeodePalette")
         .flex()
         .flex_col()
         .gap_2()
@@ -1053,6 +1034,19 @@ mod tests {
             category.to_string(),
             binding.map(str::to_string),
         )
+    }
+
+    /// A keyboard step exactly as `handle_palette_key`'s fallback arm
+    /// spells it (spec §20.5): `vimnav::apply` decides the row — a bare
+    /// ±1 wraps, anything larger clamps — and `set_selected` lands it.
+    /// `PaletteState` has no motion method of its own any more.
+    fn step(state: &mut PaletteState, delta: i64) {
+        let next = crate::vimnav::apply(
+            state.selected(),
+            state.filtered().len(),
+            crate::vimnav::NavCommand::Move(delta),
+        );
+        state.set_selected(next);
     }
 
     // -- fuzzy_match ----------------------------------------------------
@@ -1316,7 +1310,7 @@ mod tests {
             action("a", "Apple", "Test", None),
             action("b", "Banana", "Test", None),
         ]);
-        state.move_selection(1);
+        step(&mut state, 1);
         assert_eq!(state.selected(), 1);
 
         state.set_query("banana");
@@ -1341,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn move_selection_wraps_at_both_ends() {
+    fn a_bare_step_wraps_at_both_ends() {
         let mut state = PaletteState::new(vec![
             action("a", "A", "Test", None),
             action("b", "B", "Test", None),
@@ -1349,16 +1343,16 @@ mod tests {
         ]);
         assert_eq!(state.selected(), 0);
         // Up at index 0 wraps to the last item
-        state.move_selection(-1);
+        step(&mut state, -1);
         assert_eq!(state.selected(), 2, "up at 0 should wrap to last index");
 
         // Down at the last item wraps to 0
-        state.move_selection(1);
+        step(&mut state, 1);
         assert_eq!(state.selected(), 0, "down at last should wrap to 0");
     }
 
     #[test]
-    fn move_selection_wraps_up_from_start_with_large_list() {
+    fn a_bare_step_wraps_up_from_start_with_large_list() {
         // 70+ item list to test wrapping with a large dataset
         const ITEM_COUNT: usize = 75;
         let items: Vec<PaletteItem> = (0..ITEM_COUNT)
@@ -1367,7 +1361,7 @@ mod tests {
         let mut state = PaletteState::new(items);
         assert_eq!(state.selected(), 0);
         // Up at index 0 wraps to last
-        state.move_selection(-1);
+        step(&mut state, -1);
         assert_eq!(
             state.selected(),
             ITEM_COUNT - 1,
@@ -1376,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn move_selection_wraps_down_from_end_with_large_list() {
+    fn a_bare_step_wraps_down_from_end_with_large_list() {
         // 70+ item list to test wrapping with a large dataset
         const ITEM_COUNT: usize = 75;
         let items: Vec<PaletteItem> = (0..ITEM_COUNT)
@@ -1385,11 +1379,11 @@ mod tests {
         let mut state = PaletteState::new(items);
         // Move to last item (index ITEM_COUNT - 1 = 74)
         for _ in 0..(ITEM_COUNT - 1) {
-            state.move_selection(1);
+            step(&mut state, 1);
         }
         assert_eq!(state.selected(), ITEM_COUNT - 1);
         // Down at last wraps to 0
-        state.move_selection(1);
+        step(&mut state, 1);
         assert_eq!(
             state.selected(),
             0,
@@ -1398,25 +1392,25 @@ mod tests {
     }
 
     #[test]
-    fn move_selection_single_item_wraps_to_itself() {
+    fn a_bare_step_on_a_single_item_wraps_to_itself() {
         let items = vec![action("a", "Only Item", "Test", None)];
         let mut state = PaletteState::new(items);
         assert_eq!(state.selected(), 0);
         // Up wraps to itself
-        state.move_selection(-1);
+        step(&mut state, -1);
         assert_eq!(state.selected(), 0, "single item up should stay at 0");
         // Down wraps to itself
-        state.move_selection(1);
+        step(&mut state, 1);
         assert_eq!(state.selected(), 0, "single item down should stay at 0");
     }
 
     #[test]
-    fn move_selection_on_an_empty_result_set_does_not_panic() {
+    fn a_bare_step_on_an_empty_result_set_does_not_panic() {
         let mut state = PaletteState::new(vec![action("a", "Focus left", "Workspace", None)]);
         state.set_query("nomatch");
         assert!(state.filtered().is_empty());
-        state.move_selection(1);
-        state.move_selection(-1);
+        step(&mut state, 1);
+        step(&mut state, -1);
         assert_eq!(state.selected(), 0);
     }
 
@@ -1429,12 +1423,12 @@ mod tests {
             action("a", "Apple", "Test", None),
             action("b", "Banana", "Test", None),
         ]);
-        state.move_selection(1);
+        step(&mut state, 1);
         assert_eq!(state.selected(), 1);
         state.set_query("a");
         assert_eq!(state.selected(), 0);
 
-        state.move_selection(1);
+        step(&mut state, 1);
         assert_eq!(state.selected(), 1);
         state.set_query("");
         assert_eq!(state.selected(), 0);
@@ -1474,7 +1468,7 @@ mod tests {
             action("a", "Focus left", "Workspace", None),
             action("b", "Focus right", "Workspace", None),
         ]);
-        state.move_selection(1);
+        step(&mut state, 1);
         assert_eq!(
             state.selected_item(),
             Some(action("b", "Focus right", "Workspace", None))
@@ -1526,7 +1520,7 @@ mod tests {
         let _ = state.filtered();
         let _ = state.filtered();
         let _ = state.selected_item();
-        state.move_selection(1);
+        step(&mut state, 1);
         state.set_selected(0);
         assert_eq!(
             state.match_call_count(),

@@ -161,10 +161,11 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, StyledText,
-    Window, div, px,
+    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, SharedString,
+    StyledText, Window, div, px,
 };
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use geode_core::config::Layer;
 
@@ -318,6 +319,33 @@ fn is_shadowed(bindings: &[Binding], index: usize, candidate: &Binding) -> bool 
     })
 }
 
+/// The destructive question `d`/`r` arm (spec §20.1): the same
+/// ask-then-act shape the object dialog's `Confirm` has, on this dialog's
+/// two verbs. `Unbind` writes the `"none"` shadow (or removes the user's
+/// own entry); `Reset` removes the user override. Armed only where the
+/// write would actually happen — `d` on an unbound row and `r` on a row
+/// with no user override keep giving their notices unarmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeybindingConfirm {
+    Unbind,
+    Reset,
+}
+
+impl KeybindingConfirm {
+    pub fn prompt(self, title: &str, key: &str) -> String {
+        match self {
+            KeybindingConfirm::Unbind => format!("Silence {key} for '{title}'?"),
+            KeybindingConfirm::Reset => format!("Remove your {key} override on '{title}'?"),
+        }
+    }
+    pub fn yes_label(self) -> &'static str {
+        match self {
+            KeybindingConfirm::Unbind => "Unbind",
+            KeybindingConfirm::Reset => "Reset",
+        }
+    }
+}
+
 /// Persistent state for one open keybinding dialog session — the
 /// analogue of `palette::PaletteState`. Holds no `gpui` types (see the
 /// module doc's "Architecture" section for why the scroll handle lives
@@ -326,8 +354,9 @@ fn is_shadowed(bindings: &[Binding], index: usize, candidate: &Binding) -> bool 
 #[derive(Debug)]
 pub struct KeybindingsState {
     /// Index into the **filtered** row list ([`visible_rows`]), not into
-    /// the full one — the palette's convention, and what
-    /// `vimnav::apply` clamps against. Row identity for clicks and
+    /// the full one — the palette's convention, and the `len` bound
+    /// `vimnav::apply` moves within (wrapping a bare ±1, clamping a
+    /// larger or counted step — spec §20.5). Row identity for clicks and
     /// rebinds is resolved through `visible_rows(..)[selected].row`.
     pub selected: usize,
     /// `Some(pending)` while listening for a new binding — `pending` is
@@ -374,6 +403,10 @@ pub struct KeybindingsState {
     /// knowledge no later re-derivation of the rows could recover —
     /// precisely because nothing was written.
     pub notice: Option<String>,
+    /// `Some` while `d`/`r`'s question stands (spec §20.1). Every other
+    /// key is claimed and dropped until it is answered; a row click, the
+    /// frozen-row click and the action buttons are dropped too.
+    pub confirm: Option<KeybindingConfirm>,
 }
 
 /// Hand-written rather than derived so the opening mode is one explicit,
@@ -389,6 +422,7 @@ impl Default for KeybindingsState {
             query: String::new(),
             mode: DialogMode::Normal,
             notice: None,
+            confirm: None,
         }
     }
 }
@@ -613,6 +647,51 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+/// Whether `d` on `row` would actually silence something — the row has
+/// *some* effective binding, from any layer. `false` is where `d` gives
+/// its "already unbound" notice unarmed rather than asking a question
+/// with nothing behind it.
+fn can_unbind(row: Option<&KeybindingRow>) -> bool {
+    row.is_some_and(|r| r.current.is_some())
+}
+
+/// Whether `r` on `row` would actually remove something — the row's
+/// effective binding is the USER's own. `false` (a builtin/desk binding,
+/// or none at all) is where `r` gives its "no user override" notice
+/// unarmed, since there is nothing of the user's to remove.
+fn can_reset(row: Option<&KeybindingRow>) -> bool {
+    row.is_some_and(|r| r.current.as_ref().is_some_and(|b| b.layer == Layer::User))
+}
+
+/// The ONE arm-or-notice decision for `d`/`r` (spec §20.1, controller
+/// ruling: this was spelled three times — [`handle_key`]'s two `Verb`
+/// arms and [`press_verb`] — and is now spelled once, called from both).
+/// Arms the matching [`KeybindingConfirm`] where [`can_unbind`]/
+/// [`can_reset`] holds; otherwise runs the existing unarmed writers
+/// ([`unbind_selected`]/[`reset_selected`]) into `state.notice`, exactly
+/// as before this dialog grew a confirm at all — so a keystroke or a
+/// button press on a row with nothing to change still says so rather
+/// than silently asking a question about doing nothing.
+fn arm_verb(
+    state: &mut KeybindingsState,
+    key: char,
+    row: Option<&KeybindingRow>,
+    user_dir: &Option<PathBuf>,
+    cx: &mut Context<ShellView>,
+) {
+    match key {
+        'd' if can_unbind(row) => {
+            state.confirm = Some(KeybindingConfirm::Unbind);
+        }
+        'd' => state.notice = unbind_selected(row, user_dir, cx),
+        'r' if can_reset(row) => {
+            state.confirm = Some(KeybindingConfirm::Reset);
+        }
+        'r' => state.notice = reset_selected(row, user_dir, cx),
+        _ => {}
+    }
+}
+
 /// The [`dialog::ModalKeyHandler`] for this dialog. Priority order:
 ///
 /// 1. while listening, every keystroke is offered to
@@ -729,6 +808,24 @@ fn handle_key(
         return true;
     }
 
+    if let Some(confirm) = state.confirm {
+        match dialog::ConfirmAnswer::from_key(ks) {
+            Some(dialog::ConfirmAnswer::Yes) => {
+                state.confirm = None;
+                let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
+                state.notice = match confirm {
+                    KeybindingConfirm::Unbind => unbind_selected(row, &user_dir, cx),
+                    KeybindingConfirm::Reset => reset_selected(row, &user_dir, cx),
+                };
+            }
+            Some(dialog::ConfirmAnswer::No) => state.confirm = None,
+            // Claimed and dropped while the question stands.
+            None => {}
+        }
+        cx.notify();
+        return true;
+    }
+
     if state.mode == DialogMode::Normal {
         // Modifiers are ignored on `escape` here and in filter mode
         // below: `handle_key_down`'s own close never looked at them
@@ -793,18 +890,13 @@ fn handle_key(
             NormalCommand::Commit => {
                 begin_capture(state, visible.len());
             }
-            // The two write verbs (spec §8): `d` silences the selected
-            // row's effective binding, `r` removes the user's override
-            // so the layer beneath shows through. Both hand back the
-            // notice to show when they declined to write — see
-            // [`unbind_selected`]/[`reset_selected`].
-            NormalCommand::Verb('d') => {
+            // The two write verbs (spec §8, §20.1): [`arm_verb`] is the
+            // ONE arm-or-notice decision, shared with [`press_verb`] so
+            // the keyboard and the mouse can never disagree on which rows
+            // arm a question.
+            NormalCommand::Verb(key @ ('d' | 'r')) => {
                 let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-                state.notice = unbind_selected(row, &user_dir, cx);
-            }
-            NormalCommand::Verb('r') => {
-                let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-                state.notice = reset_selected(row, &user_dir, cx);
+                arm_verb(state, key, row, &user_dir, cx);
             }
             // `Toggle`, `EditText`, `MoveItem` and any other verb belong
             // to surfaces that have something to toggle, edit or reorder;
@@ -926,6 +1018,11 @@ fn on_row_clicked(
     // `handle_key` at all.
     if state.notice.take().is_some() {
         cx.notify();
+    }
+    // Spec §20.1: a click is claimed and dropped while a question stands —
+    // the object dialog's tick-click rule (§18.9.2) on this surface.
+    if state.confirm.is_some() {
+        return;
     }
     let visible = visible_rows(state, &rows);
     let Some(ix) = filtered_position(&visible, &rows, clicked) else {
@@ -1258,6 +1355,115 @@ pub(crate) fn highlighted_text(text: &str, indices: &[usize], primary: Hsla) -> 
         .into_any_element()
 }
 
+/// A verb pressed with the mouse (spec §20.1) — one door with the key
+/// via [`arm_verb`] (the shared arm-or-notice decision [`handle_key`]'s
+/// `Verb` arm also calls), so a button and its letter can never differ:
+/// arms, never writes. Keeps its own guards a keystroke does not need —
+/// clearing a standing notice, and refusing outright while a question is
+/// already armed or a capture is listening — because a button click, and
+/// so a second `press_verb` call before the first's write lands, can
+/// happen with no keystroke in between at all.
+fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Context<ShellView>) {
+    let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
+    let user_dir = shell.user_dir.clone();
+    let Some(state) = shell.keybindings.as_mut() else {
+        return;
+    };
+    if state.notice.take().is_some() {
+        cx.notify();
+    }
+    if state.confirm.is_some() || state.listening.is_some() {
+        return;
+    }
+    let visible = visible_rows(state, &rows);
+    let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
+    if let Some(key) = key.chars().next() {
+        arm_verb(state, key, row, &user_dir, cx);
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// The action bar under the list: `d` where the row has a binding to
+/// silence, `r` where it has a user override to remove — `danger`
+/// outline buttons showing their key chip, `keybindings-action-{key}`.
+/// Replaced by the confirm row while a question stands.
+fn action_block(
+    state: &KeybindingsState,
+    row: Option<&KeybindingRow>,
+    entity: &Entity<ShellView>,
+    cx: &mut App,
+) -> AnyElement {
+    if let Some(confirm) = state.confirm {
+        let (title, key) = row
+            .and_then(|r| {
+                r.current
+                    .as_ref()
+                    .map(|b| (r.title.to_string(), palette::render_binding(&b.keystrokes)))
+            })
+            .unwrap_or_default();
+        let on_yes: dialog::ConfirmHandler = Rc::new(|shell, window, cx| {
+            let ks = Keystroke {
+                mods: Modifiers::NONE,
+                key: "y".to_string(),
+            };
+            handle_key(shell, &ks, window, cx);
+        });
+        let on_no: dialog::ConfirmHandler = Rc::new(|shell, _window, _cx| {
+            if let Some(state) = shell.keybindings.as_mut() {
+                state.confirm = None;
+            }
+        });
+        return dialog::confirm_row(
+            confirm.prompt(&title, &key),
+            confirm.yes_label(),
+            "keybindings",
+            entity,
+            on_yes,
+            on_no,
+            cx,
+        );
+    }
+    let theme = cx.theme();
+    let chip_fg = theme.muted_foreground;
+    let chip_bg = theme.muted;
+    let mut verbs: Vec<(&'static str, &'static str)> = Vec::new();
+    if state.listening.is_none() {
+        if can_unbind(row) {
+            verbs.push(("d", "Unbind"));
+        }
+        if can_reset(row) {
+            verbs.push(("r", "Reset to lower layer"));
+        }
+    }
+    let mut bar = h_flex()
+        .w(px(WIDTH))
+        .gap_2()
+        .items_center()
+        .debug_selector(|| "keybindings-actions".to_string());
+    for (key, label) in verbs {
+        let ks = crate::keymap::parse_keystroke(key, Modifiers::NONE).expect("valid");
+        let entity_for_action = entity.clone();
+        let selector = format!("keybindings-action-{key}");
+        let button = Button::new(SharedString::from(format!("keybindings-{key}")))
+            .small()
+            .outline()
+            .danger()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(key_chip(&ks, chip_fg, chip_bg))
+                    .child(label),
+            )
+            .on_click(move |_event, window, cx| {
+                entity_for_action.update(cx, |shell, cx| press_verb(shell, key, window, cx));
+            });
+        bar = bar.child(div().debug_selector(move || selector.clone()).child(button));
+    }
+    bar.into_any_element()
+}
+
 /// The [`dialog::ShellModal::build`] closure body: a scrollable row list
 /// (title + category on the left, the current binding as [`key_chip`]s —
 /// or "unbound" — on the right, live capture chips while listening) plus a
@@ -1410,7 +1616,13 @@ fn build(
     // now is exactly the lie the mode pill exists to prevent. Which row
     // a hint paints on is `crate::footer`'s call (move / edit / go, spec
     // §19), not this dialog's.
-    let hints: Vec<Hint> = if state.listening.is_some() {
+    let hints: Vec<Hint> = if state.confirm.is_some() {
+        vec![
+            Hint::prose(HintRow::Go, "this needs an answer first"),
+            Hint::new(HintRow::Go, &["enter"], "go ahead"),
+            Hint::new(HintRow::Go, &["escape"], "leave it alone"),
+        ]
+    } else if state.listening.is_some() {
         vec![
             Hint::prose(HintRow::Go, "listening — type keys"),
             Hint::new(HintRow::Go, &["enter"], "save"),
@@ -1424,9 +1636,10 @@ fn build(
                 Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
                 Hint::new(HintRow::Edit, &["enter"], "rebind"),
                 // The two verbs normal mode exists to make room for
-                // (spec §8/§9): a chord has no clickable target and a
-                // bare letter has no visible one, so the footer is where
-                // `d` and `r` are discovered at all.
+                // (spec §8/§9). Since spec §20.1 they are buttons too
+                // (`action_block`), so the footer is where the KEYS are
+                // discovered — a bare letter has no visible target of
+                // its own — rather than the verbs' only door.
                 Hint::new(HintRow::Edit, &["d"], "unbind"),
                 Hint::new(HintRow::Edit, &["r"], "reset"),
                 Hint::new(HintRow::Go, &["/"], "filter"),
@@ -1513,6 +1726,8 @@ fn build(
         },
     );
 
+    let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
+
     v_flex()
         .gap_2()
         // §18.1: the mode badge lives in the modal's own title row now
@@ -1521,6 +1736,7 @@ fn build(
         // was moved out of this dialog's content entirely.
         .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
         .child(list)
+        .child(action_block(state, row, entity, cx))
         .child(footer)
         .into_any_element()
 }

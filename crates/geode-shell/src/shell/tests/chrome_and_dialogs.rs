@@ -902,6 +902,70 @@ fn a_settings_row_click_keeps_focus_where_the_mode_says(cx: &mut gpui::TestAppCo
     );
 }
 
+/// Spec §20.3: the value chip is the mouse form of `space`/`shift+space`
+/// — click steps forward, shift+click steps back — and a click on the
+/// row's label only selects. The old second-click-steps rule is gone.
+#[gpui::test]
+fn the_settings_value_chip_steps_and_a_row_click_only_selects(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let font = |cx: &gpui::VisualTestContext| shell.read_with(cx, |s, _| s.font_size);
+    assert_eq!(font(&cx), crate::fontsize::FontSize::Medium);
+
+    // Row 1 is Font size. Its chip:
+    let chip = cx
+        .debug_bounds("settings-value-1")
+        .expect("the value chip paints");
+    cx.simulate_click(chip.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        font(&cx),
+        crate::fontsize::FontSize::Large,
+        "click steps forward"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        1,
+        "and selects the row"
+    );
+    // The row this chip steps is Font size itself, so the first click's
+    // own effect (a bigger rem size) reflows the whole modal — the
+    // chip's bounds must be re-read, exactly as `click_row` above does
+    // for every click, rather than reusing the pre-click bounds.
+    let chip = cx
+        .debug_bounds("settings-value-1")
+        .expect("the value chip still paints after the reflow");
+    cx.simulate_click(
+        chip.center(),
+        gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        font(&cx),
+        crate::fontsize::FontSize::Medium,
+        "shift+click steps back"
+    );
+
+    // A click on the row's label, twice: select only, never a step.
+    let row = cx.debug_bounds("settings-row-1").expect("row paints");
+    let label = gpui::point(row.origin.x + gpui::px(20.0), row.center().y);
+    cx.simulate_click(label, gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_click(label, gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        font(&cx),
+        crate::fontsize::FontSize::Medium,
+        "a second row click no longer steps"
+    );
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "the chip click ended in the sync: normal mode keeps the field blurred"
+    );
+}
+
 /// Typing filters; the old `h`/`l` stepping keys are now just text,
 /// and must not step anything on their way into the query.
 #[gpui::test]
