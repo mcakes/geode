@@ -263,6 +263,13 @@ pub(crate) fn render_menu(
                     // the `⋯` button (`header.rs`), which must NOT stop
                     // propagation: no field is focused after it, so the
                     // shell's click-to-focus is exactly what should run.
+                    // Do not be fooled by the grid case: the pinned
+                    // `TableState::set_selected_row` (run by `sync_cursor`
+                    // at the end of every `dispatch`) stops propagation
+                    // of its own, so with the cursor in the grid this
+                    // stop looks redundant — with the cursor in the
+                    // strip (`clear_selection`, which stops nothing) it
+                    // is the only one there is.
                     .on_mouse_down(MouseButton::Left, {
                         let tile = tile.clone();
                         move |_, window, cx| {

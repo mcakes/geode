@@ -5901,10 +5901,22 @@ edits = [["2099-01-01", "-1", 1.0]]
     /// keyboard back. [`Host`]'s counter stands in for that bubble (its
     /// own doc comment): it must NOT move on this click, and the field
     /// must hold the keyboard afterwards.
+    ///
+    /// The cursor is put in the STRIP first, deliberately: with it in the
+    /// grid, the pinned `TableState::set_selected_row` (which `sync_cursor`
+    /// runs at the end of every `dispatch`) calls `cx.stop_propagation()`
+    /// of its own and would hide the row handler's — in the strip,
+    /// `sync_cursor` calls `clear_selection`, which stops nothing, so the
+    /// row's own stop is the only thing between the click and the bubble.
     #[gpui::test]
     fn the_menu_rows_stop_propagation_keeps_the_pickers_focus(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "up", None);
+        assert!(matches!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Attr(_)
+        ));
         h.dispatch(&mut vcx, "menu", None);
         let row = centre_of(&mut vcx, &format!("marketdata-menu-row-{TILE}-0")); // Load underlying…
         click_at(&mut vcx, row, 1);
