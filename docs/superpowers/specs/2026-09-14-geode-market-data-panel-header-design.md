@@ -455,7 +455,92 @@ Every rule above has a harness entry and a named test in
 `crates/geode-marketdata/src/tile.rs`, `popup.rs`, `commands.rs` or
 `core/menu.rs`'s own test modules; `scripts/mutation-check.sh` carries
 one `run_mutation` entry per behaviour changed on this branch (Task 8
-brought the harness to 929 entries total). Display checks — the
+brought the harness to 928 entries; the final review's wave below, to
+941 — counted as `grep -c '^run_mutation \\'`, the bare `^run_mutation`
+count including the function definition). Display checks — the
 anchored popup escaping the tile clip, the strip's tint and cursor
 border, the badge and dot at 22px — remain pending on a real window, as
 recorded in §9.
+
+### Final review (2026-09-17)
+
+Two reviewers over the whole branch found no Criticals; every item
+below is fixed, each with a named test and a harness entry.
+
+- **`close_popup(cx)` is deleted**, `debug_assert!` and all:
+  `close_popup_with_window` is the one door, and every close blurs
+  through the `Window` its site already had. The sites believed unable
+  to see a Picker could — `u` then `ctrl+k` then the palette's Find
+  reaches `find`; `u` then `mod+l` (the shell moves focus to its root,
+  the picker stays `Some`) then `/` or `:` reaches `find` or `command`;
+  the menu's `on_mouse_down_out` closure had a window all along.
+  `TileContent::find` now forwards its window. Harness: `mdmenu: a find
+  keystroke closes the popup` (re-anchored), `mdmenu: a command line
+  closes the popup` (new).
+- **`set_key` cancels an open cell editor** before swapping the
+  document — a key change is navigation, never a commit, and an editor
+  left open passed its label-identity check on a same-ladder underlying
+  and filed the typed number into the NEW document's draft.
+  `a_key_change_cancels_an_open_editor`; `mdattr: a key change cancels
+  an open editor`.
+- **An attribute value's click cancels an open editor** as a grid cell's
+  click does — it was the one mouse door that left one open and deaf
+  behind the shell's focus re-arm.
+  `an_attribute_click_cancels_the_editor_then_moves`; `mdattr: an
+  attribute click cancels an open editor`.
+- **The menu row's `stop_propagation` is load-bearing** for the row →
+  picker path ("Load underlying…" focuses the picker's field inside the
+  row's own handler; a bubble past it would re-arm
+  `pending_focus_restore` and take the keyboard back next render) — the
+  opposite of `⋯`'s, which must NOT stop because no field is focused
+  after it. Found while testing it: the pinned
+  `TableState::set_selected_row` (run by `sync_cursor` at the end of
+  every `dispatch`) stops propagation of its own, so the row's stop is
+  hidden while the cursor is in the grid and is the only one with the
+  cursor in the strip (`clear_selection`) — the test starts there.
+  `the_menu_rows_stop_propagation_keeps_the_pickers_focus`; `mdmenu:
+  the menu row's stop_propagation keeps the picker's focus`.
+- **`is_stale` is reachable**: `header_texts_at(now)` is the test door;
+  not stale at `BASE + 1s` nor at exactly `stale_after`, stale one
+  second past it. `the_time_chip_says_stale_past_stale_after`;
+  `mdheader: the time chip says stale past stale_after`.
+- **`PickerRows`** is the picker's pure half (`PickerState { input,
+  rows }`), with its own test module: an unchanged query keeps the
+  highlight, a changed one re-places by key, a filtered-out key falls to
+  row 0, an empty catalog has no highlighted key, `step` clamps both
+  ways. **The picker paints at most `PICKER_ROWS` (12)** ranked keys —
+  a cap, not a scroll container, since the query narrows the rest — and
+  `place`/`step_highlighted` clamp the highlight to the painted range.
+  `mdpicker: place falls back to row 0 when the key is gone`, `the
+  picker paints at most PICKER_ROWS rows`, `step stops at the last
+  painted row`.
+- **`parse_attr` parses an `I64` directly**, exact above 2^53 (the
+  `parse_cell` → `f64` → `as i64` path silently rounded), same error
+  text. `mdattr: an I64 attribute parses exactly above 2^53`.
+- **`:set <attr> <value...>`** joins its tail with single spaces (a
+  `Utf8` attribute may carry them); the usage error for no attribute
+  stands. `mdattr: a multi-word set value is joined with spaces`.
+- **`down`/`up` move the menu highlight** beside `j`/`k` (the picker
+  already had them). `mdmenu: the arrow keys move the menu highlight`.
+- Triage: `:set <attr>` with no document answers `no document to edit`
+  (`mdattr: set with no document says no document`); `FindState.origin`
+  is the whole `Cursor`, so a find cancelled from the strip returns to
+  the strip (`mdattr: a find cancelled from the strip returns to the
+  strip`); window tests for `toggle_menu` over an open editor and a
+  click outside the picker (the latter clicks an attribute value, not a
+  grid cell — the pinned `DataTable` `track_focus`es its own handle, so
+  a cell click takes focus on the same mouse-down and `focused ==
+  None` would say nothing about the blur).
+- Minors: `NO_DEFAULT_KEY` (was `MENU_ONLY`) is checked as an exact set
+  in both directions, kind actions included; the dead
+  `MenuInputs.has_key` is gone; the time chip's colour goes through
+  `tone_colour(Tone::Time, stale, ..)`; `commands.rs`'s docs say every
+  verb is built (`upload` alone answers not-built until Part 4);
+  `mdheader: a dirty draft paints the dot` is renamed `sets the dot
+  flag`. The harness stands at 941 entries.
+
+**Deferred to Part 4:** `Sent` dirty-semantics unification, sent-attribute
+paint, rebase with a NULL attribute, attribute number formatting via
+`spec.format`, `from_toml` date coercion by `HeaderAttr.ty`, the
+geode-app type cross-check, a `registry()` test helper, the
+dropped-attribute notice wording, and `:upload`'s wording.
