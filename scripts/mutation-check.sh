@@ -10377,7 +10377,11 @@ run_mutation "mdedit: a commit parses the typed text before writing it" \
 # anchor because `self.editor = None;` alone appears elsewhere.
 run_mutation "mdedit: the editor gives up focus before it is dropped" \
   crates/geode-marketdata/src/tile.rs \
-  '        window.blur(cx);
+  '        if let Some(e) = &self.editor
+            && e.state.read(cx).focus_handle(cx).is_focused(window)
+        {
+            window.blur(cx);
+        }
         self.editor = None;' \
   '        self.editor = None;' \
   geode-marketdata \
@@ -11345,12 +11349,34 @@ run_mutation "mdpicker: the picker is refused while the draft has edits" \
 # (`render`'s `focused(cx).is_none()`) never fires.
 run_mutation "mdpicker: closing the picker blurs before dropping" \
   crates/geode-marketdata/src/tile.rs \
-  '        if matches!(self.popup, Some(Popup::Picker(_))) {
+  '        if let Some(Popup::Picker(p)) = &self.popup
+            && p.input.read(cx).focus_handle(cx).is_focused(window)
+        {
+            window.blur(cx);
+        }' \
+  '        if let Some(Popup::Picker(p)) = &self.popup
+            && p.input.read(cx).focus_handle(cx).is_focused(window)
+        {
+        }' \
+  geode-marketdata escape_closes_the_picker_and_gives_focus_up
+
+# Re-review of the final wave: the blur is conditional on the picker's
+# OWN field holding focus. Mutated to blur unconditionally, a picker
+# orphaned by `ctrl+k` → palette "Find" (the shell's command line holds
+# the keyboard, the picker is still `Some`) has the first find keystroke
+# blur the FIND FIELD — the shell's focus backstop then cancels the
+# command line, and the trader's find dies after one character.
+run_mutation "mdmenu: closing an orphaned picker never blurs a foreign field" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(Popup::Picker(p)) = &self.popup
+            && p.input.read(cx).focus_handle(cx).is_focused(window)
+        {
             window.blur(cx);
         }' \
   '        if matches!(self.popup, Some(Popup::Picker(_))) {
+            window.blur(cx);
         }' \
-  geode-marketdata escape_closes_the_picker_and_gives_focus_up
+  geode-marketdata a_find_keystroke_with_an_orphaned_picker_keeps_the_foreign_focus
 
 # Review fix round 1, CRITICAL's harness half (the finding that the
 # round-1 entry above only covered `rerank`'s internals, never

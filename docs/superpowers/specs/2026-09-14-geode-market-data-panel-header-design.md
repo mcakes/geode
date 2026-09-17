@@ -456,7 +456,7 @@ Every rule above has a harness entry and a named test in
 `core/menu.rs`'s own test modules; `scripts/mutation-check.sh` carries
 one `run_mutation` entry per behaviour changed on this branch (Task 8
 brought the harness to 928 entries; the final review's wave below, to
-941 — counted as `grep -c '^run_mutation \\'`, the bare `^run_mutation`
+942 — counted as `grep -c '^run_mutation "'`, the bare `^run_mutation`
 count including the function definition). Display checks — the
 anchored popup escaping the tile clip, the strip's tint and cursor
 border, the badge and dot at 22px — remain pending on a real window, as
@@ -538,6 +538,19 @@ below is fixed, each with a named test and a harness entry.
   verb is built (`upload` alone answers not-built until Part 4);
   `mdheader: a dirty draft paints the dot` is renamed `sets the dot
   flag`. The harness stands at 941 entries.
+- **Re-review (same day):** the one-door close blurred whenever the popup
+  was a Picker, whether or not its field held focus. A picker orphaned
+  with the keyboard elsewhere — `u`, `ctrl+k` (the palette), the
+  palette's "Find" (the shell's command line, picker still `Some`) — had
+  the first find keystroke blur the FIND FIELD, and the shell's focus
+  backstop cancelled the command line: the find died after one
+  character; the same shape on a `:` line returning `Err`.
+  `close_popup_with_window` now blurs only when the picker's own field
+  `is_focused`, and `close_editor` carries the same guard (an editor
+  orphaned by `mod+l` and closed from a `:` line must not blur the
+  command line). `a_find_keystroke_with_an_orphaned_picker_keeps_the_
+  foreign_focus`; `mdmenu: closing an orphaned picker never blurs a
+  foreign field`. Harness at 942.
 
 **Deferred to Part 4:** `Sent` dirty-semantics unification, sent-attribute
 paint, rebase with a NULL attribute, attribute number formatting via

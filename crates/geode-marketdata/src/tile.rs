@@ -1571,9 +1571,16 @@ impl MarketDataTile {
     /// could never fire — leaving every chord dead for the rest of the
     /// session. Blurring is a module GIVING UP focus, never taking the
     /// shell's: no module touches the shell's own handle (CLAUDE.md's focus
-    /// rule), and the shell decides where focus lands next.
+    /// rule), and the shell decides where focus lands next. The blur is
+    /// conditional on the editor's own field holding focus, for
+    /// `close_popup_with_window`'s reason: an editor orphaned by `mod+l`
+    /// and closed from a `:` line must not blur the command line.
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.blur(cx);
+        if let Some(e) = &self.editor
+            && e.state.read(cx).focus_handle(cx).is_focused(window)
+        {
+            window.blur(cx);
+        }
         self.editor = None;
     }
 
@@ -1639,8 +1646,20 @@ impl MarketDataTile {
     /// (the shell moves focus to its root and the picker stays `Some`)
     /// then `/` or `:` — and every one of them already had a `Window` in
     /// hand, so the door without one is gone rather than guarded.
+    ///
+    /// The blur is conditional on the picker's OWN field holding focus
+    /// (re-review of that wave): a picker can be orphaned with the
+    /// keyboard elsewhere — `u`, `ctrl+k` (the palette takes focus), the
+    /// palette's "Find" (the shell's command line takes it, the picker
+    /// still `Some`) — and the first find keystroke reaches here. An
+    /// unconditional blur then blurred the FIND FIELD, and the shell's
+    /// focus backstop cancelled the command line on the next render: the
+    /// trader's find died after one character. Blurring is a module
+    /// giving up focus it holds, never focus something else holds.
     pub(crate) fn close_popup_with_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.popup, Some(Popup::Picker(_))) {
+        if let Some(Popup::Picker(p)) = &self.popup
+            && p.input.read(cx).focus_handle(cx).is_focused(window)
+        {
             window.blur(cx);
         }
         self.popup = None;
@@ -6056,6 +6075,42 @@ edits = [["2099-01-01", "-1", 1.0]]
             h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
             Some(keys[PICKER_ROWS - 1].clone()),
             "the highlight stops on the last painted row"
+        );
+    }
+
+    /// Re-review of the fix wave: a picker orphaned with the keyboard
+    /// elsewhere (`u`, `ctrl+k`, the palette's "Find" — the shell's
+    /// command line holds focus, the picker is still `Some`) is closed by
+    /// the first find keystroke WITHOUT blurring whoever holds the
+    /// keyboard. The second `InputState` stands in for the shell's
+    /// `command_input`; an unconditional blur would have cancelled the
+    /// trader's find after one character.
+    #[gpui::test]
+    fn a_find_keystroke_with_an_orphaned_picker_keeps_the_foreign_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        let foreign = vcx.update(|window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            input.read(cx).focus_handle(cx).focus(window, cx);
+            input
+        });
+        assert!(
+            vcx.update(|window, cx| foreign.read(cx).focus_handle(cx).is_focused(window)),
+            "the stand-in command line holds the keyboard"
+        );
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("1M".into()), window, cx));
+        assert_eq!(h.mode(&vcx), "normal", "the orphaned picker is closed");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.picker_state().is_none()),
+            "and dropped"
+        );
+        assert!(
+            vcx.update(|window, cx| foreign.read(cx).focus_handle(cx).is_focused(window)),
+            "the foreign field still holds the keyboard — nothing blurred it"
         );
     }
 }
