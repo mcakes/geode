@@ -8,12 +8,11 @@ use crate::core::spec::KindAction;
 use geode_shell::actions::ActionId;
 use gpui::SharedString;
 
-/// Everything [`rows`] needs. `has_key` is unused by this task's own
-/// rules (every row here reads the draft's badge alone) — it is Task 7's
-/// own input, kept on this struct now so the door does not move under it.
+/// Everything [`rows`] needs: every row's enablement reads the draft's
+/// badge alone (a `has_key` input once sat here for the picker row and
+/// was never read — removed by the final review).
 pub struct MenuInputs<'a> {
     pub badge: DraftBadge,
-    pub has_key: bool,
     pub upload_built: bool,
     pub kind_title: &'a str,
     pub kind_actions: &'a [KindAction],
@@ -162,7 +161,6 @@ mod tests {
     fn inputs(badge: DraftBadge) -> MenuInputs<'static> {
         MenuInputs {
             badge,
-            has_key: true,
             upload_built: false,
             kind_title: "CVI",
             kind_actions: CVI.actions,

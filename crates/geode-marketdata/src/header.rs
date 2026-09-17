@@ -243,13 +243,15 @@ pub(crate) fn render(
             .debug_selector(move || format!("marketdata-attr-{tile_id}-{i}"))
             // The mouse's form of `k` (spec §5.1): a click on an
             // attribute value moves the cursor to `Attr(i)` and opens
-            // nothing. Deliberately no `cx.stop_propagation()` — the
-            // shell's own tile-level mouse-down (focus re-arm) must still
-            // run, the same rule every other tile mouse-down in this
-            // codebase keeps (CLAUDE.md's focus rule).
+            // nothing — and cancels an open cell editor first, exactly
+            // as a grid cell click does (the `window` is for that alone).
+            // Deliberately no `cx.stop_propagation()` — the shell's own
+            // tile-level mouse-down (focus re-arm) must still run, the
+            // same rule every other tile mouse-down in this codebase
+            // keeps (CLAUDE.md's focus rule).
             .on_mouse_down(gpui::MouseButton::Left, {
                 let tile = tile.clone();
-                move |_, _, cx| tile.update(cx, |t, cx| t.cursor_to_attr(i, cx))
+                move |_, window, cx| tile.update(cx, |t, cx| t.cursor_to_attr(i, window, cx))
             });
         value = match editor {
             Some((e, state)) if e == i => {
@@ -288,13 +290,14 @@ pub(crate) fn render(
         );
     }
 
-    // 6. Time, with the stale marker.
+    // 6. Time, with the stale marker — `tone_colour` decides the colour,
+    // as it does for every other run here, so the stale rule is spelled
+    // once.
     if let Some(t) = &h.time {
-        let colour = if h.stale { tones.warn } else { muted };
         row = row.child(
             h_flex()
                 .gap_1()
-                .text_color(colour)
+                .text_color(tone_colour(Tone::Time, h.stale, theme, tones))
                 .child(t.clone())
                 .when(h.stale, |d| d.child("stale")),
         );

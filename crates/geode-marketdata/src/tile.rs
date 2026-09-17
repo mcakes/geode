@@ -55,7 +55,7 @@ use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::{Draft, MatrixModel, PanelSpec, parse_attr, parse_cell};
 use crate::delegate::MatrixDelegate;
 use crate::header::{self, HeaderInputs, HeaderModel};
-use crate::popup::{MenuState, PickerState, Popup, render_menu, render_picker};
+use crate::popup::{MenuState, PickerRows, PickerState, Popup, render_menu, render_picker};
 use geode_core::colour::readable_on;
 use geode_core::document::split_key;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
@@ -93,8 +93,11 @@ const HALF_PAGE: isize = 5;
 /// against — the panel moves its cursor instead, which is what
 /// `find_match` is for.
 pub struct FindState {
-    /// Where the cursor was when `/` opened; `escape` returns here.
-    origin: usize,
+    /// Where the cursor was when `/` opened; `escape` returns here. The
+    /// whole `Cursor`, not a row (final review, T4): a find started from
+    /// the attribute strip must cancel back INTO the strip, and a row
+    /// alone would land it on grid row 0.
+    origin: Cursor,
     /// The last committed query, for `n`/`N`.
     committed: Option<String>,
 }
@@ -495,23 +498,14 @@ impl MarketDataTile {
             // a diagnostics tile open) — comparing first is what keeps an
             // unrelated notification from resetting the highlight and
             // from re-cloning the catalog into `labels` for nothing.
-            if p.all == all {
+            if p.rows.all == all {
                 return;
             }
-            // Review fix round 2: captured BEFORE `all` is overwritten,
-            // and by KEY STRING rather than by index — `catalog_keys()`
-            // returns a freshly SORTED list, so a new underlying that
-            // sorts ahead of the highlighted one shifts every later
-            // index, and re-placing by the OLD index once `all` has
-            // already changed would silently highlight a different row
-            // (`PickerState::place`'s own doc comment has the full
+            // Review fix round 2: `replace_all` captures the highlighted
+            // KEY STRING before `all` is overwritten and re-places by it
+            // (`PickerRows::replace_all`'s own doc comment has the full
             // story).
-            let keep = p.highlighted_key().map(str::to_string);
-            p.labels = Self::labels_for(&all);
-            p.all = all;
-            // Forced, not through `refilter`: the query has not changed,
-            // but `all` has, and a re-rank must run regardless.
-            p.place(keep.as_deref());
+            p.rows.replace_all(all);
             cx.notify();
         })
         .detach();
@@ -1069,10 +1063,20 @@ impl MarketDataTile {
     /// form of `k` (spec §5.1: "a click on an attribute value moves the
     /// cursor to `Attr(i)` and opens nothing"). `header::render` attaches
     /// this to each attribute value's own mouse-down.
-    pub(crate) fn cursor_to_attr(&mut self, i: usize, cx: &mut Context<Self>) {
+    ///
+    /// An open cell editor is CANCELLED first (final review, B4) — the
+    /// `SelectCell` handler's own rule, and for the same reason: this
+    /// mouse-down has already re-armed the shell's focus restore, so an
+    /// editor left open would be painted on a cell the cursor just left,
+    /// deaf, with `mode == insert` still claimed. Never a commit: a click
+    /// is not `enter`. That is the only reason this takes a `Window`.
+    pub(crate) fn cursor_to_attr(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let attrs = self.model.header.len();
         if attrs == 0 {
             return;
+        }
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
         }
         self.cursor = Cursor::Attr(i.min(attrs - 1));
         self.sync_cursor(cx);
@@ -1261,11 +1265,9 @@ impl MarketDataTile {
                 if self.popup.is_none() {
                     return false;
                 }
-                // `_with_window`: this is a bare action id, so nothing
-                // upstream promises it can only ever reach a `Menu` —
-                // routing through the blur-first door is what keeps a
-                // stray dispatch here from ever seeing `close_popup`'s
-                // own "must never be a Picker" assertion fire.
+                // A bare action id, so nothing upstream promises it can
+                // only ever reach a `Menu` — the one door blurs first if
+                // it finds a Picker.
                 self.close_popup_with_window(window, cx);
                 false
             }
@@ -1275,7 +1277,7 @@ impl MarketDataTile {
                     Some(Popup::Menu(m)) => {
                         m.highlighted = menu::step(&m.rows, m.highlighted, delta);
                     }
-                    Some(Popup::Picker(p)) => p.step_highlighted(delta),
+                    Some(Popup::Picker(p)) => p.rows.step_highlighted(delta),
                     None => {}
                 }
                 false
@@ -1598,7 +1600,7 @@ impl MarketDataTile {
     pub(crate) fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.popup {
             Some(Popup::Menu(_)) => {
-                self.close_popup(cx);
+                self.close_popup_with_window(window, cx);
                 return;
             }
             Some(Popup::Picker(_)) => self.close_popup_with_window(window, cx),
@@ -1609,7 +1611,6 @@ impl MarketDataTile {
         }
         let rows = menu::rows(&MenuInputs {
             badge: self.draft.badge(),
-            has_key: self.key.is_some(),
             // Upload is Part 4; every build before it greys the row with
             // `not built yet` (spec §6.2's table) rather than pretending
             // the panel can send anything anywhere.
@@ -1622,31 +1623,22 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// Close whatever popup is open. Harmless when none is (`dispatch`'s
-    /// own "any other action closes it first" rule calls this
-    /// unconditionally).
+    /// Close whatever popup is open — THE one door (final review, B1).
+    /// Harmless when none is (`dispatch`'s own "any other action closes
+    /// it first" rule calls this unconditionally).
     ///
-    /// **Must never see a [`Popup::Picker`]** — its field holds the
-    /// keyboard, and dropping it here without blurring first would leave
-    /// `Window::focused` pointing at a dead input for the rest of the
-    /// session (`close_editor`'s own rule). [`Self::close_popup_with_window`]
-    /// is the door for every site that can actually reach one; `find` and
-    /// `command` keep calling this one directly because neither can ever
-    /// be reached while a Picker's field holds focus — `/`/`:` would type
-    /// into it instead of ever reaching the shell's own dispatch.
-    pub(crate) fn close_popup(&mut self, cx: &mut Context<Self>) {
-        debug_assert!(
-            !matches!(self.popup, Some(Popup::Picker(_))),
-            "close_popup must not see a Picker — use close_popup_with_window, which blurs first"
-        );
-        self.popup = None;
-        cx.notify();
-    }
-
-    /// [`Self::close_popup`], with the keyboard given up first when the
-    /// popup is a [`Popup::Picker`] — `close_editor`'s own blur-then-drop
-    /// order (blur, THEN drop, both halves): every site that can actually
-    /// see a Picker open has a `Window` to give this.
+    /// The keyboard is given up first when the popup is a
+    /// [`Popup::Picker`] — `close_editor`'s own blur-then-drop order
+    /// (blur, THEN drop, both halves): its field holds the keyboard, and
+    /// dropping it without blurring would leave `Window::focused`
+    /// pointing at a dead input for the rest of the session. There used
+    /// to be a second, `Window`-less `close_popup(cx)` for the sites
+    /// believed unreachable with a Picker open (`find`, `command`, the
+    /// menu's `on_mouse_down_out`); every one of them WAS reachable —
+    /// `u` then `ctrl+k` then the palette's "Find", or `u` then `mod+l`
+    /// (the shell moves focus to its root and the picker stays `Some`)
+    /// then `/` or `:` — and every one of them already had a `Window` in
+    /// hand, so the door without one is gone rather than guarded.
     pub(crate) fn close_popup_with_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.popup, Some(Popup::Picker(_))) {
             window.blur(cx);
@@ -1678,22 +1670,13 @@ impl MarketDataTile {
             }
             Ok(()) => {
                 let id = id.clone();
-                self.close_popup(cx);
+                self.close_popup_with_window(window, cx);
                 self.dispatch(&id, None, window, cx);
             }
         }
     }
 
     // ---- the underlying picker -----------------------------------
-
-    /// The picker's own prepared row text (review fix round 1,
-    /// IMPORTANT-3): a `PickerState.labels` entry per `all` entry, built
-    /// once at open and again whenever the diagnostics observer replaces
-    /// `all` — never in `render_picker`, where `SharedString::from(&str)`
-    /// would be a real allocation per visible row per repaint.
-    fn labels_for(all: &[String]) -> Vec<SharedString> {
-        all.iter().map(|s| SharedString::from(s.as_str())).collect()
-    }
 
     /// `u` (normal mode) and the menu row (spec §7): open the underlying
     /// picker over the dataset's catalog keys, ranked by `listfilter` as
@@ -1720,9 +1703,7 @@ impl MarketDataTile {
             self.close_editor(window, cx);
         }
         self.request_catalog(cx);
-        let all = self.catalog_keys(cx);
-        let labels = Self::labels_for(&all);
-        let ranked = (0..all.len()).collect();
+        let rows = PickerRows::new(self.catalog_keys(cx));
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("underlying"));
         cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
             // `InputState::set_value` emits no `Change` at all (a test
@@ -1734,21 +1715,14 @@ impl MarketDataTile {
             if let InputEvent::Change = event {
                 let query = input.read(cx).value().to_string();
                 if let Some(Popup::Picker(p)) = &mut this.popup {
-                    p.refilter(&query);
+                    p.rows.refilter(&query);
                 }
                 cx.notify();
             }
         })
         .detach();
         input.read(cx).focus_handle(cx).focus(window, cx);
-        self.popup = Some(Popup::Picker(PickerState {
-            input,
-            all,
-            labels,
-            ranked,
-            highlighted: 0,
-            query: String::new(),
-        }));
+        self.popup = Some(Popup::Picker(PickerState { input, rows }));
         self.notice = None;
         self.changed(cx);
     }
@@ -1761,7 +1735,7 @@ impl MarketDataTile {
     /// writes the field that way) — trusting whatever `ranked` happens to
     /// hold would let the choice depend on a rank that was never actually
     /// run. `refilter` is a no-op when the text has not actually changed
-    /// (`PickerState`'s own doc comment, review fix round 1, CRITICAL),
+    /// (`PickerRows`'s own doc comment, review fix round 1, CRITICAL),
     /// so this defensive call never resets the highlight the trader
     /// already moved to — it only re-ranks, preserving the highlighted
     /// KEY, when there is a real query to catch up on. An empty ranked
@@ -1772,11 +1746,11 @@ impl MarketDataTile {
             return;
         };
         let query = p.input.read(cx).value().to_string();
-        p.refilter(&query);
-        if p.ranked.is_empty() {
+        p.rows.refilter(&query);
+        if p.rows.ranked.is_empty() {
             return;
         }
-        let index = p.highlighted;
+        let index = p.rows.highlighted;
         self.picker_pick(index, window, cx);
     }
 
@@ -1796,16 +1770,16 @@ impl MarketDataTile {
         let Some(Popup::Picker(p)) = &self.popup else {
             return;
         };
-        let Some(&i) = p.ranked.get(index) else {
+        let Some(&i) = p.rows.ranked.get(index) else {
             return;
         };
-        let key = p.all[i].clone();
+        let key = p.rows.all[i].clone();
         self.close_popup_with_window(window, cx);
         let parts: Vec<String> = key
             .split(KEY_DISPLAY_SEPARATOR)
             .map(str::to_string)
             .collect();
-        if let Err(e) = self.set_key(parts, cx) {
+        if let Err(e) = self.set_key(parts, window, cx) {
             self.notice = Some(e.into());
             self.changed(cx);
         }
@@ -2051,21 +2025,29 @@ impl MarketDataTile {
     /// (`dispatch`'s own guard) never sees them. Closing here,
     /// unconditionally and on every variant, is what keeps a find
     /// session that starts with the menu open from painting `mode ==
-    /// menu` under the find field for even one keystroke.
-    pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
-        self.close_popup(cx);
+    /// menu` under the find field for even one keystroke. The `window`
+    /// is for that close alone: a Picker can be open here too (`u`,
+    /// `ctrl+k`, the palette's "Find"), and closing one blurs first.
+    pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_popup_with_window(window, cx);
         match event {
             FindEvent::Changed(query) => {
                 let origin = match &self.find {
                     Some(find) => find.origin,
                     None => {
-                        let origin = self.cursor_row();
+                        let origin = self.cursor;
                         self.find = Some(FindState {
                             origin,
                             committed: None,
                         });
                         origin
                     }
+                };
+                // A search from the strip begins at the top (`cursor_row`'s
+                // own rule for `Attr`).
+                let origin = match origin {
+                    Cursor::Cell { row, .. } => row,
+                    Cursor::Attr(_) => 0,
                 };
                 let labels = self.row_labels();
                 // Every keystroke searches from the ORIGIN, not from
@@ -2086,7 +2068,7 @@ impl MarketDataTile {
             }
             FindEvent::Cancelled => {
                 if let Some(find) = self.find.take() {
-                    self.set_cursor_row(find.origin);
+                    self.cursor = find.origin;
                     self.clamp_cursor();
                 }
             }
@@ -2159,10 +2141,10 @@ impl MarketDataTile {
         // failed parse leaves the popup exactly as `dispatch`'s own
         // guard would, since nothing here ran at all.
         if !matches!(command, Command::Menu) {
-            self.close_popup(cx);
+            self.close_popup_with_window(window, cx);
         }
         match command {
-            Command::Key(key) => self.set_key(key, cx),
+            Command::Key(key) => self.set_key(key, window, cx),
             Command::Revert => self.revert(cx),
             Command::Bump { delta, axis } => self.bump(delta, axis, cx),
             Command::Rebase => self.rebase(cx),
@@ -2206,6 +2188,12 @@ impl MarketDataTile {
         };
         match value {
             None => {
+                // With no document there is no value to report for ANY
+                // attribute — say so, rather than "no attribute 'spot_ref'"
+                // about a name the spec does declare (final review, T1).
+                if self.model.header.is_empty() {
+                    return Err(NO_DOCUMENT.to_string());
+                }
                 let cell = self
                     .model
                     .header
@@ -2243,7 +2231,20 @@ impl MarketDataTile {
     /// silently would throw unsent work away on a keystroke that reads
     /// like navigation. The notice names the count in the header's own
     /// spelling and the verb that clears it.
-    fn set_key(&mut self, key: Vec<String>, cx: &mut Context<Self>) -> Result<(), String> {
+    ///
+    /// An open cell editor is CANCELLED, never committed, before the
+    /// document is swapped (final review, B2) — a key change is
+    /// navigation, and an editor left open across it would pass its own
+    /// label-identity check on a same-ladder underlying and file the typed
+    /// number into the NEW document's draft. Reachable: `i`, then `mod+l`
+    /// (focus to the shell root, editor still open), then `:underlying`.
+    /// That close is the only reason this takes a `Window`.
+    fn set_key(
+        &mut self,
+        key: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if self.key.as_deref() == Some(key.as_slice()) {
             return Ok(());
         }
@@ -2252,6 +2253,9 @@ impl MarketDataTile {
                 "{} pending — :revert first",
                 self.draft.count_phrase()
             ));
+        }
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
         }
         self.key = Some(key);
         self.snapshot = None;
@@ -2429,7 +2433,7 @@ impl MarketDataTile {
     #[cfg(test)]
     pub(crate) fn picker_highlighted_key(&self) -> Option<String> {
         match &self.popup {
-            Some(Popup::Picker(p)) => p.ranked.get(p.highlighted).map(|&i| p.all[i].clone()),
+            Some(Popup::Picker(p)) => p.rows.highlighted_key().map(str::to_string),
             _ => None,
         }
     }
@@ -2445,8 +2449,17 @@ impl MarketDataTile {
     /// since [`HeaderModel::prepare`] never reads the clock.
     #[cfg(test)]
     pub(crate) fn header_texts(&self) -> Vec<String> {
+        self.header_texts_at(chrono::Utc::now())
+    }
+
+    /// [`Self::header_texts`] at an injected clock — the only way a test
+    /// reaches [`Self::is_stale`]'s comparison (final review, B3): the
+    /// wall-clock door above cannot say whether a fixed past `BASE` reads
+    /// stale without knowing how far `now` has drifted past it.
+    #[cfg(test)]
+    pub(crate) fn header_texts_at(&self, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
         let mut h = self.header.clone();
-        h.stale = self.is_stale(chrono::Utc::now());
+        h.stale = self.is_stale(now);
         h.texts()
     }
 
@@ -3432,13 +3445,62 @@ mod tests {
             .with_timezone(&chrono::Local)
             .format("%H:%M:%S")
             .to_string();
+        // Exact, at an injected clock one second past `BASE`: not stale,
+        // so the chip is the time alone (the staleness marker has its own
+        // test below).
+        let chips = h
+            .tile
+            .read_with(&vcx, |t, _| t.header_texts_at(base_plus(1)));
         assert!(
-            // `starts_with`, not an exact match: `BASE` is a fixed past
-            // date, so whether it also reads " stale" depends on how far
-            // real wall-clock `now` has drifted past it — this test is
-            // about the time text itself, not the staleness marker.
-            chips.iter().any(|c| c.starts_with(&local)),
+            chips.iter().any(|c| c == &local),
             "the source time on the trader's own clock ({local}): {chips:?}"
+        );
+    }
+
+    /// `BASE` plus `secs` seconds — the injected clock `header_texts_at`
+    /// reads staleness against.
+    fn base_plus(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(BASE)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            + chrono::Duration::seconds(secs)
+    }
+
+    /// The time chip reads ` stale` once `now` is past the painted
+    /// generation's source time by more than `stale_after` (the harness's
+    /// factory is built with fifteen minutes) and not a second before —
+    /// `is_stale`'s comparison, reachable only through the injected clock
+    /// (final review, B3).
+    #[gpui::test]
+    fn the_time_chip_says_stale_past_stale_after(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let local = chrono::DateTime::parse_from_rfc3339(BASE)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string();
+        let stale_after = 15 * 60;
+        let fresh = h
+            .tile
+            .read_with(&vcx, |t, _| t.header_texts_at(base_plus(1)));
+        assert!(
+            fresh.iter().any(|c| c == &local),
+            "not stale at +1s: {fresh:?}"
+        );
+        let at_limit = h
+            .tile
+            .read_with(&vcx, |t, _| t.header_texts_at(base_plus(stale_after)));
+        assert!(
+            at_limit.iter().any(|c| c == &local),
+            "exactly stale_after is not yet stale: {at_limit:?}"
+        );
+        let stale = h
+            .tile
+            .read_with(&vcx, |t, _| t.header_texts_at(base_plus(stale_after + 1)));
+        assert!(
+            stale.iter().any(|c| c == &format!("{local} stale")),
+            "stale one second past stale_after: {stale:?}"
         );
     }
 
@@ -5771,6 +5833,217 @@ edits = [["2099-01-01", "-1", 1.0]]
             h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
             Some("BBB.Z".to_string()),
             "a genuine removal falls back to row 0"
+        );
+    }
+
+    // ---- Final review (2026-09-17) ----------------------------------
+
+    /// B2: a key change is navigation, and an open cell editor is
+    /// CANCELLED across it — never committed into the new document's
+    /// draft, and never left open and deaf under a swapped grid.
+    /// Reachable for real via `i`, `mod+l` (focus to the shell root, the
+    /// editor still open), then `:underlying`.
+    #[gpui::test]
+    fn a_key_change_cancels_an_open_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        assert_eq!(h.mode(&vcx), "insert");
+        h.command(&mut vcx, "underlying NDX.Z").unwrap();
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.editor_value(&vcx), None, "the editor is gone");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "cancelled, never committed: {:?}",
+            h.tile.read_with(&vcx, |t, _| t.draft().count_phrase())
+        );
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "blurred before dropped"
+        );
+        assert_eq!(
+            h.document_request().map(|r| r.document_key),
+            Some(vec!["NDX.Z".to_string()]),
+            "and the new document was asked for"
+        );
+    }
+
+    /// B4: a click on an attribute value while a cell editor is open
+    /// cancels the editor first — `a_click_while_editing_cancels_the_
+    /// editor_then_moves`, for the strip. Without it this was the one
+    /// mouse door that left an editor open and deaf (the mouse-down has
+    /// re-armed the shell's focus restore).
+    #[gpui::test]
+    fn an_attribute_click_cancels_the_editor_then_moves(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        assert_eq!(h.mode(&vcx), "insert");
+        let at = centre_of(&mut vcx, &format!("marketdata-attr-{TILE}-1"));
+        click_at(&mut vcx, at, 1);
+        assert_eq!(h.editor_value(&vcx), None, "the click cancelled the editor");
+        assert_eq!(h.mode(&vcx), "normal", "and insert mode went with it");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(1));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "a click is not `enter`: nothing was written"
+        );
+        assert_eq!(h.cell(&vcx, 0, 0).0, "0.1000");
+    }
+
+    /// B5: the menu row's `stop_propagation` is load-bearing for the
+    /// menu-row → picker path. "Load underlying…" opens the picker and
+    /// focuses its field inside the row's own handler; were the click to
+    /// bubble on, the shell's tile-level mouse-down would re-arm
+    /// `pending_focus_restore` and the next render would take the
+    /// keyboard back. [`Host`]'s counter stands in for that bubble (its
+    /// own doc comment): it must NOT move on this click, and the field
+    /// must hold the keyboard afterwards.
+    #[gpui::test]
+    fn the_menu_rows_stop_propagation_keeps_the_pickers_focus(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "menu", None);
+        let row = centre_of(&mut vcx, &format!("marketdata-menu-row-{TILE}-0")); // Load underlying…
+        click_at(&mut vcx, row, 1);
+        assert_eq!(h.mode(&vcx), "insert", "the picker opened");
+        let input = h
+            .tile
+            .read_with(&vcx, |t, _| t.picker_state())
+            .expect("the picker's field exists");
+        assert!(
+            vcx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window)),
+            "the picker's field holds the keyboard"
+        );
+        assert_eq!(
+            h.host_clicks(),
+            0,
+            "the row click never bubbled to the tile's own listeners — the shell's \
+             focus re-arm must not run behind a field that was just focused"
+        );
+    }
+
+    /// T1: `:set <attr>` with no value and no document says there is no
+    /// document, not that a declared attribute does not exist.
+    #[gpui::test]
+    fn set_with_no_value_and_no_document_says_no_document(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert_eq!(
+            h.command(&mut vcx, "set spot_ref"),
+            Err(NO_DOCUMENT.to_string())
+        );
+    }
+
+    /// T2: opening the action list with a cell editor open cancels the
+    /// editor first (blur, then drop) — never commits it — and the menu
+    /// then owns the keyboard with no field focused.
+    #[gpui::test]
+    fn toggle_menu_with_an_editor_open_cancels_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&vcx), "menu");
+        assert_eq!(h.editor_value(&vcx), None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "blurred before dropped"
+        );
+    }
+
+    /// T3: a click outside the open picker closes it through the
+    /// blur-first door — the mouse's `escape`. The click lands on an
+    /// attribute value rather than a grid cell: the pinned `DataTable`
+    /// `track_focus`es its own handle, so a cell click would take focus on
+    /// the same mouse-down (in the shell, `pending_focus_restore` returns
+    /// it to the root a frame later — not this crate's to assert), and
+    /// `focused.is_none()` would then say nothing about the blur. The
+    /// strip focuses nothing, so `None` afterwards IS the blur.
+    #[gpui::test]
+    fn a_click_outside_the_picker_closes_it_and_gives_focus_up(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        let input = h
+            .tile
+            .read_with(&vcx, |t, _| t.picker_state())
+            .expect("the picker's field exists");
+        let at = centre_of(&mut vcx, &format!("marketdata-attr-{TILE}-1"));
+        click_at(&mut vcx, at, 1);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(
+            vcx.update(|window, cx| !input.read(cx).focus_handle(cx).is_focused(window)),
+            "the picker's field gave the keyboard up"
+        );
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "blurred before dropped"
+        );
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(1));
+    }
+
+    /// T4: a find started from the attribute strip cancels back INTO the
+    /// strip — the origin is the whole `Cursor`, not a grid row.
+    #[gpui::test]
+    fn a_find_cancelled_from_the_strip_returns_to_the_strip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "up", None);
+        let origin = h.tile.read_with(&vcx, |t, _| t.cursor());
+        assert!(matches!(origin, Cursor::Attr(_)), "{origin:?}");
+        vcx.update(|window, cx| {
+            h.content
+                .find(FindEvent::Changed("11-20".into()), window, cx)
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 },
+            "the search runs from the top of the grid"
+        );
+        vcx.update(|window, cx| h.content.find(FindEvent::Cancelled, window, cx));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            origin,
+            "escape returns to the strip, not to grid row 0"
+        );
+    }
+
+    /// A3: the picker paints at most `PICKER_ROWS` of its ranked keys
+    /// (the query narrows the rest), and the highlight cannot step past
+    /// the last painted row.
+    #[gpui::test]
+    fn the_picker_paints_at_most_twelve_rows(cx: &mut gpui::TestAppContext) {
+        use crate::popup::PICKER_ROWS;
+        let (h, mut vcx) = open(cx);
+        let keys: Vec<String> = (0..20).map(|i| format!("K{i:02}.Z")).collect();
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&refs));
+            cx.notify();
+        });
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        draw(&mut vcx);
+        let last: &'static str =
+            Box::leak(format!("marketdata-picker-row-{TILE}-{}", PICKER_ROWS - 1).into_boxed_str());
+        let past: &'static str =
+            Box::leak(format!("marketdata-picker-row-{TILE}-{PICKER_ROWS}").into_boxed_str());
+        assert!(
+            vcx.debug_bounds(last).is_some(),
+            "row {} is painted",
+            PICKER_ROWS - 1
+        );
+        assert!(vcx.debug_bounds(past).is_none(), "row {PICKER_ROWS} is not");
+        h.dispatch(&mut vcx, "menu_down", Some(100));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some(keys[PICKER_ROWS - 1].clone()),
+            "the highlight stops on the last painted row"
         );
     }
 }

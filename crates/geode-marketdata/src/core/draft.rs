@@ -531,7 +531,14 @@ pub fn parse_attr(text: &str, ty: ColumnType) -> Result<Value, String> {
             .map(Value::Date)
             .map_err(|_| format!("'{text}' is not a date (YYYY-MM-DD)")),
         ColumnType::F64 => parse_cell(text, ColumnType::F64).map(Value::F64),
-        ColumnType::I64 => parse_cell(text, ColumnType::I64).map(|f| Value::I64(f as i64)),
+        // Parsed as `i64` DIRECTLY, never through `parse_cell`'s `f64`
+        // (final review, A4): a round trip through a double loses every
+        // integer above 2^53, silently. Same error text as `parse_cell`'s
+        // own whole-number refusal, so `:set` and a cell read alike.
+        ColumnType::I64 => trimmed
+            .parse::<i64>()
+            .map(Value::I64)
+            .map_err(|_| format!("'{text}' is not a whole number")),
         ColumnType::Utf8 if trimmed.is_empty() => Err("a value is required".to_string()),
         ColumnType::Utf8 => Ok(Value::Utf8(trimmed.to_string())),
         other => Err(format!("a {other:?} attribute is not editable")),
@@ -960,6 +967,15 @@ mod tests {
         assert_eq!(
             parse_attr("7.5", ColumnType::I64),
             Err("'7.5' is not a whole number".into())
+        );
+        // Above 2^53: exact, because the parse never passes through f64.
+        assert_eq!(
+            parse_attr("9007199254740993", ColumnType::I64),
+            Ok(Value::I64(9_007_199_254_740_993))
+        );
+        assert_eq!(
+            attr_text(&parse_attr("9007199254740993", ColumnType::I64).unwrap()),
+            "9007199254740993"
         );
         assert_eq!(
             parse_attr("  ", ColumnType::Utf8),

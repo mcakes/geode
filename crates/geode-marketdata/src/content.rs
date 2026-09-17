@@ -132,6 +132,8 @@ context = "marketdata && mode == menu"
 [bindings.keys]
 "j" = "marketdata::menu_down"
 "k" = "marketdata::menu_up"
+"down" = "marketdata::menu_down"
+"up" = "marketdata::menu_up"
 "enter" = "marketdata::menu_pick"
 "escape" = "marketdata::menu_close"
 "." = "marketdata::menu_close"
@@ -168,8 +170,10 @@ impl TileContent for MarketDataContent {
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
         self.tile.read(cx).completions(line, cursor, cx)
     }
-    fn find(&self, event: FindEvent, _window: &mut Window, cx: &mut App) {
-        self.tile.update(cx, |t, cx| t.find(event, cx))
+    /// `window` is forwarded because `find` closes whatever popup is
+    /// open first — a Picker included, whose close blurs its field.
+    fn find(&self, event: FindEvent, window: &mut Window, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.find(event, window, cx))
     }
     fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
         match delivery {
@@ -322,50 +326,72 @@ mod tests {
         registry
     }
 
-    /// [`ACTIONS`] ids the default keymap deliberately binds no bare key
-    /// to (spec §6.2): each is reachable through the action list's own
-    /// `enter`/click — an internal [`crate::tile::MarketDataTile::dispatch`]
-    /// call, never a keymap binding — and through the `:` line. Binding a
-    /// bare key to a verb the menu already carries would be a second door
-    /// onto something spec §6.1 keeps to exactly one.
-    const MENU_ONLY: &[&str] = &[
+    /// Registered ids the default keymap deliberately binds NO key to
+    /// (spec §6.2): each is reachable from the palette (it is registered)
+    /// and from the `:` line, and the four draft verbs also through the
+    /// action list's own `enter`/click — an internal
+    /// [`crate::tile::MarketDataTile::dispatch`] call, never a keymap
+    /// binding. Binding a bare key to a verb the menu already carries
+    /// would be a second door onto something spec §6.1 keeps to exactly
+    /// one. [`PanelSpec::actions`] (CVI's `cvi_reanchor`/
+    /// `cvi_recalc_forward`) are unbound BY DESIGN: a per-kind verb lists
+    /// in the menu's own section and the palette, and answers "not built
+    /// yet" until egress gives it something to send.
+    const NO_DEFAULT_KEY: &[&str] = &[
         "marketdata::upload",
         "marketdata::revert",
         "marketdata::rebase",
         "marketdata::discard",
+        "marketdata::cvi_reanchor",
+        "marketdata::cvi_recalc_forward",
     ];
 
-    /// The twin of `geode_blotter::content`'s own fragment test, and the
-    /// same two directions: every id the fragment binds is registered
-    /// here (a `build_keymap` diagnostic IS that failure), and every
-    /// registered action not in [`MENU_ONLY`] is reachable from some key.
+    /// The twin of `geode_blotter::content`'s own fragment test, made
+    /// EXACT by the final review (A2): every id the fragment binds is
+    /// registered here (a `build_keymap` diagnostic IS that failure),
+    /// [`NO_DEFAULT_KEY`] is a subset of what is registered (a stale
+    /// entry fails), and the set of registered ids the keymap leaves
+    /// unbound EQUALS [`NO_DEFAULT_KEY`] in both directions — a new
+    /// action with no key and no entry here fails, and so does an entry
+    /// for an action that has since gained a key.
     #[test]
     fn the_default_keymap_binds_exactly_the_actions_this_module_registers() {
+        use std::collections::BTreeSet;
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).expect("the fragment parses");
         let (doc, diags) = check_fragment(doc, &["marketdata"]);
         assert!(
             diags.is_empty(),
             "every fragment binding must name this module's own context: {diags:?}"
         );
-        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
+        let mut reg = registry();
+        let (data, _rx) = DataHandle::for_tests();
+        MarketDataFactory::new(data, &CVI, Duration::from_secs(60)).register_actions(&mut reg);
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &reg);
         assert!(
             diags.is_empty(),
             "the fragment must bind only registered actions: {diags:?}"
         );
-        let bound: std::collections::BTreeSet<&str> = keymap
+        let registered: BTreeSet<&str> = ACTIONS
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(CVI.actions.iter().map(|a| a.id))
+            .collect();
+        let bound: BTreeSet<&str> = keymap
             .bindings()
             .iter()
             .map(|b| b.action.0.as_str())
             .collect();
-        for (id, _) in ACTIONS {
-            if MENU_ONLY.contains(id) {
-                continue;
-            }
-            assert!(
-                bound.contains(id),
-                "{id} is registered but the default keymap binds nothing to it"
-            );
-        }
+        let no_default_key: BTreeSet<&str> = NO_DEFAULT_KEY.iter().copied().collect();
+        assert!(
+            no_default_key.is_subset(&registered),
+            "every NO_DEFAULT_KEY id must be registered: {:?}",
+            no_default_key.difference(&registered).collect::<Vec<_>>()
+        );
+        let unbound: BTreeSet<&str> = registered.difference(&bound).copied().collect();
+        assert_eq!(
+            unbound, no_default_key,
+            "the registered ids with no default key must be exactly NO_DEFAULT_KEY"
+        );
     }
 
     /// The kind is `cvi` and the context is `marketdata` — two different
@@ -489,8 +515,9 @@ mod tests {
 
     /// `.` and `u` are the normal-mode doors onto the action list (spec
     /// §6.1); once it is open, `mode == menu` is the whole of the menu's
-    /// own grammar — `j`/`k`/`enter`/`escape`, and `.` toggling it closed
-    /// again.
+    /// own grammar — `j`/`k` and the arrow keys (final review, A7: the
+    /// picker already took `down`/`up`, and the menu is the same list
+    /// shape), `enter`/`escape`, and `.` toggling it closed again.
     #[test]
     fn dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
@@ -513,6 +540,8 @@ mod tests {
             (&normal, "u", "marketdata::load_underlying"),
             (&menu, "j", "marketdata::menu_down"),
             (&menu, "k", "marketdata::menu_up"),
+            (&menu, "down", "marketdata::menu_down"),
+            (&menu, "up", "marketdata::menu_up"),
             (&menu, "enter", "marketdata::menu_pick"),
             (&menu, "escape", "marketdata::menu_close"),
             (&menu, ".", "marketdata::menu_close"),

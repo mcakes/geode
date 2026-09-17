@@ -5,10 +5,11 @@
 //!
 //! The vocabulary is `underlying <value>` (trader-facing; `key` is a silent
 //! alias), `revert`, `bump <delta> [row|col]`, `rebase`, `discard`,
-//! `upload`, `set`, `menu`. Part 3 builds them for real; the rest parse
-//! here and the tile answers which task lands them, so the grammar a trader
-//! types is the grammar Tasks 7 and 8 wire up rather than one invented
-//! twice.
+//! `upload`, `set <attr> [value...]`, `menu`. Every verb is built and
+//! executed by the tile (`MarketDataTile::command`) — `upload` alone
+//! parses here and answers "upload is not built yet" until Part 4
+//! (egress) lands it, so the grammar a trader types today is the grammar
+//! that will send.
 
 use geode_core::document::KEY_SEPARATOR;
 
@@ -84,10 +85,10 @@ fn behind_only(verb: &str) -> bool {
 /// inline on the command line — the same contract every other module's
 /// `command` keeps.
 ///
-/// Parsing is deliberately complete even for the verbs Part 3 does not
-/// execute: the tile answers "lands in Task 7/8" for those, so a typo is
-/// still reported as a typo ("unknown command 'rebse'") rather than
-/// being indistinguishable from a verb that is merely not built yet.
+/// Parsing is deliberately complete even for `upload`, the one verb the
+/// tile does not yet execute (Part 4): a typo is still reported as a typo
+/// ("unknown command 'rebse'") rather than being indistinguishable from
+/// a verb that is merely not built yet.
 pub fn parse(line: &str) -> Result<Command, String> {
     let mut words = line.split_whitespace();
     match words.next() {
@@ -140,10 +141,12 @@ pub fn parse(line: &str) -> Result<Command, String> {
             let attr = words
                 .next()
                 .ok_or_else(|| "usage: set <attribute> [value]".to_string())?;
-            let value = words.next().map(str::to_string);
-            if words.next().is_some() {
-                return Err("a value is one word".to_string());
-            }
+            // The tail is the whole value, words joined by single spaces
+            // (final review, A5): a `Utf8` attribute may carry spaces, and
+            // a numeric or date one refuses the joined text at parse time
+            // with its own message rather than here.
+            let tail: Vec<&str> = words.collect();
+            let value = (!tail.is_empty()).then(|| tail.join(" "));
             Ok(Command::Set {
                 attr: attr.to_string(),
                 value,
@@ -351,9 +354,14 @@ mod tests {
             })
         );
         assert_eq!(parse("set"), Err("usage: set <attribute> [value]".into()));
+        // A multi-word value is joined with single spaces, whatever the
+        // trader's own spacing was.
         assert_eq!(
-            parse("set anchor_date 2026 09 14"),
-            Err("a value is one word".into())
+            parse("set note  front   month"),
+            Ok(Command::Set {
+                attr: "note".into(),
+                value: Some("front month".into())
+            })
         );
     }
 
