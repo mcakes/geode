@@ -11144,7 +11144,7 @@ run_mutation "mdheader: behind reads update HH:MM" \
   'format!("different document received {}", local_hhmm(&newer))' \
   geode-marketdata dirty_is_a_dot_and_behind_reads_update_hhmm
 
-run_mutation "mdheader: a dirty draft paints the dot" \
+run_mutation "mdheader: a dirty draft sets the dot flag" \
   crates/geode-marketdata/src/header.rs \
   '            DraftBadge::Dirty => (true, None),' \
   '            DraftBadge::Dirty => (false, None),' \
@@ -11263,7 +11263,7 @@ run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
                 self.rebuild_chrome();
                 cx.notify();
                 let id = id.clone();
-                self.close_popup(cx);
+                self.close_popup_with_window(window, cx);
                 self.dispatch(&id, None, window, cx);
             }' \
   geode-marketdata enter_on_a_greyed_row_notices_and_keeps_the_menu
@@ -11290,12 +11290,28 @@ run_mutation "mdmenu: the ⋯ click does not stop propagation" \
 # on the context stack through the first keystroke.
 run_mutation "mdmenu: a find keystroke closes the popup" \
   crates/geode-marketdata/src/tile.rs \
-  '    pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
-        self.close_popup(cx);
+  '    pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_popup_with_window(window, cx);
         match event {' \
-  '    pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
+  '    pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = &window;
         match event {' \
   geode-marketdata a_find_keystroke_closes_the_popup
+
+# The other half of that door: `:` is the same kind of shell-owned
+# `tile`-context binding, so `command` closes the popup itself for every
+# parsed command but `Menu`. Mutated to skip the close, `:bump 1` typed
+# with the menu open would leave `mode == menu` on the context stack
+# with the menu still painted over a grid that just changed.
+run_mutation "mdmenu: a command line closes the popup" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !matches!(command, Command::Menu) {
+            self.close_popup_with_window(window, cx);
+        }' \
+  '        if !matches!(command, Command::Menu) && false {
+            self.close_popup_with_window(window, cx);
+        }' \
+  geode-marketdata a_command_line_closes_the_popup
 
 # `open_picker`'s own dirty guard (spec §7): picking a different document
 # out from under unsent edits would throw them away with nothing to
@@ -11345,7 +11361,7 @@ run_mutation "mdpicker: closing the picker blurs before dropping" \
 # `enter` actually goes through.
 run_mutation "mdpicker: enter loads the highlighted row, not the top match" \
   crates/geode-marketdata/src/tile.rs \
-  '        let index = p.highlighted;' \
+  '        let index = p.rows.highlighted;' \
   '        let index = 0;' \
   geode-marketdata enter_loads_the_highlighted_row_not_the_top_match
 
@@ -11357,16 +11373,176 @@ run_mutation "mdpicker: enter loads the highlighted row, not the top match" \
 # the positional-index bug the string identity was built to fix (a
 # catalog reorder shifts every later index, so the "preserved"
 # highlight silently lands on whatever key now sits at that number).
-# Mutated by swapping the capture below the reassignment.
+# Mutated by swapping the capture below the reassignment (the logic
+# lives in `PickerRows::replace_all` since the final review split the
+# picker's pure half out; the window test still reaches it through the
+# diagnostics observer).
 run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its old index" \
-  crates/geode-marketdata/src/tile.rs \
-  '            let keep = p.highlighted_key().map(str::to_string);
-            p.labels = Self::labels_for(&all);
-            p.all = all;' \
-  '            p.labels = Self::labels_for(&all);
-            p.all = all;
-            let keep = p.highlighted_key().map(str::to_string);' \
+  crates/geode-marketdata/src/popup.rs \
+  '        let keep = self.highlighted_key().map(str::to_string);
+        self.labels = Self::labels_for(&all);
+        self.all = all;' \
+  '        self.labels = Self::labels_for(&all);
+        self.all = all;
+        let keep = self.highlighted_key().map(str::to_string);' \
   geode-marketdata a_resorted_catalog_keeps_the_highlighted_key_not_its_old_index
+
+# ---- Panel header: final review fix wave (2026-09-17) -------------------
+
+# B2: a key change is navigation. Mutated to leave an open cell editor
+# alone, `i`, `mod+l`, `:underlying NDX.Z` swaps the document under a
+# still-open editor whose eventual `enter` passes the label-identity
+# check on a same-ladder underlying and files the typed number into the
+# NEW document's draft — and until then the editor sits open and deaf
+# with `mode == insert` still claimed.
+run_mutation "mdattr: a key change cancels an open editor" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        self.key = Some(key);' \
+  '        self.key = Some(key);' \
+  geode-marketdata a_key_change_cancels_an_open_editor
+
+# B4: the attribute value's click was the one mouse door that left a
+# cell editor open. Mutated back to that, the editor stays painted on
+# the cell the cursor just left, deaf, after the mouse-down has already
+# re-armed the shell's focus restore.
+run_mutation "mdattr: an attribute click cancels an open editor" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        self.cursor = Cursor::Attr(i.min(attrs - 1));' \
+  '        self.cursor = Cursor::Attr(i.min(attrs - 1));' \
+  geode-marketdata an_attribute_click_cancels_the_editor_then_moves
+
+# B5: the menu row's `stop_propagation` is load-bearing for the row →
+# picker path (contrast `⋯`, whose stop was REMOVED for the opposite
+# reason). Mutated out, the click bubbles to the tile's own listeners —
+# the harness's `Host` counter, the shell's `pending_focus_restore` for
+# real — and the next render takes the keyboard back from the picker's
+# just-focused field.
+run_mutation "mdmenu: the menu row's stop_propagation keeps the picker's focus" \
+  crates/geode-marketdata/src/popup.rs \
+  '                        move |_, window, cx| {
+                            cx.stop_propagation();
+                            tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
+                        }' \
+  '                        move |_, window, cx| {
+                            tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
+                        }' \
+  geode-marketdata the_menu_rows_stop_propagation_keeps_the_pickers_focus
+
+# B3: `is_stale` is clock-injected and, until the final review, no test
+# could reach its comparison (`header_texts()` fed `Utc::now()`).
+# Mutated to flip the comparison, a generation one second old reads
+# stale and one past `stale_after` reads fresh.
+run_mutation "mdheader: the time chip says stale past stale_after" \
+  crates/geode-marketdata/src/tile.rs \
+  '            now.signed_duration_since(at).to_std().unwrap_or_default() > self.stale_after.get()' \
+  '            now.signed_duration_since(at).to_std().unwrap_or_default() < self.stale_after.get()' \
+  geode-marketdata the_time_chip_says_stale_past_stale_after
+
+# T1: `:set spot_ref` with no document answers `no document to edit`,
+# not "no attribute 'spot_ref'" about a name the spec declares. Mutated
+# so the gate can never pass, the lookup's own refusal wins again.
+run_mutation "mdattr: set with no document says no document" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if self.model.header.is_empty() {
+                    return Err(NO_DOCUMENT.to_string());
+                }
+                let cell = self' \
+  '                if self.model.header.is_empty() && false {
+                    return Err(NO_DOCUMENT.to_string());
+                }
+                let cell = self' \
+  geode-marketdata set_with_no_value_and_no_document_says_no_document
+
+# T4: the find origin is the whole `Cursor`. Mutated to restore a grid
+# row instead, `k` into the strip, `/`, `escape` lands on grid row 0
+# rather than back on the attribute the trader left.
+run_mutation "mdattr: a find cancelled from the strip returns to the strip" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if let Some(find) = self.find.take() {
+                    self.cursor = find.origin;
+                    self.clamp_cursor();
+                }' \
+  '                if let Some(find) = self.find.take() {
+                    self.set_cursor_row(match find.origin {
+                        Cursor::Cell { row, .. } => row,
+                        Cursor::Attr(_) => 0,
+                    });
+                    self.clamp_cursor();
+                }' \
+  geode-marketdata a_find_cancelled_from_the_strip_returns_to_the_strip
+
+# A1: a kept key the query filtered OUT (or one ranked past the painted
+# rows) has no row to land on and falls to row 0. Mutated to keep the
+# stale index, `highlighted` points past `ranked` and `enter` loads
+# nothing — the picker looks open and inert.
+run_mutation "mdpicker: place falls back to row 0 when the key is gone" \
+  crates/geode-marketdata/src/popup.rs \
+  '            .filter(|&row| row < PICKER_ROWS)
+            .unwrap_or(0);' \
+  '            .filter(|&row| row < PICKER_ROWS)
+            .unwrap_or(self.highlighted);' \
+  geode-marketdata a_key_the_query_filtered_out_falls_to_row_0
+
+# A3: the picker paints at most PICKER_ROWS ranked keys; the query
+# narrows the rest. Mutated to paint them all, a 300-key catalog paints
+# 300 rows off the bottom of the window.
+run_mutation "mdpicker: the picker paints at most PICKER_ROWS rows" \
+  crates/geode-marketdata/src/popup.rs \
+  '        for (row_i, &i) in rows.ranked.iter().take(PICKER_ROWS).enumerate() {' \
+  '        for (row_i, &i) in rows.ranked.iter().enumerate() {' \
+  geode-marketdata the_picker_paints_at_most_twelve_rows
+
+# A3's other half: the highlight is clamped to the PAINTED rows, so
+# `enter` can never load a row the trader cannot see. Mutated to clamp
+# to the whole ranked list, `down` walks the highlight off the bottom of
+# the painted list into rows that exist only in `ranked`.
+run_mutation "mdpicker: step stops at the last painted row" \
+  crates/geode-marketdata/src/popup.rs \
+  '        let painted = self.painted_len();
+        if painted == 0 {' \
+  '        let painted = self.ranked.len();
+        if painted == 0 {' \
+  geode-marketdata the_highlight_never_leaves_the_painted_rows
+
+# A4: an I64 attribute parses as `i64` directly. Mutated back to the
+# `parse_cell` → f64 → `as i64` path, 9007199254740993 (2^53 + 1)
+# silently becomes 9007199254740992.
+run_mutation "mdattr: an I64 attribute parses exactly above 2^53" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        ColumnType::I64 => trimmed
+            .parse::<i64>()
+            .map(Value::I64)' \
+  '        ColumnType::I64 => parse_cell(text, ColumnType::I64)
+            .map(|f| Value::I64(f as i64))' \
+  geode-marketdata parse_attr_per_type
+
+# A5: `:set <attr> <value...>` joins the tail with single spaces (a
+# Utf8 attribute may carry them). Mutated to join with nothing, `:set
+# note front month` writes `frontmonth`.
+run_mutation "mdattr: a multi-word set value is joined with spaces" \
+  crates/geode-marketdata/src/commands.rs \
+  '            let value = (!tail.is_empty()).then(|| tail.join(" "));' \
+  '            let value = (!tail.is_empty()).then(|| tail.join(""));' \
+  geode-marketdata set_parses_an_attribute_with_or_without_a_value
+
+# A7: the arrow keys move the menu highlight as `j`/`k` do (the picker
+# already had them). Mutated out of the fragment, `down` inside the open
+# action list resolves to nothing at all.
+run_mutation "mdmenu: the arrow keys move the menu highlight" \
+  crates/geode-marketdata/src/content.rs \
+  '"k" = "marketdata::menu_up"
+"down" = "marketdata::menu_down"
+"up" = "marketdata::menu_up"
+"enter" = "marketdata::menu_pick"' \
+  '"k" = "marketdata::menu_up"
+"enter" = "marketdata::menu_pick"' \
+  geode-marketdata dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
