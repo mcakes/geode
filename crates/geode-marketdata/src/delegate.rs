@@ -93,6 +93,14 @@ impl MatrixDelegate {
     }
 
     /// The table column a model column is painted in.
+    /// Whether table column `col_ix` is the LAST slice-value column — the
+    /// one whose right edge closes the slice block ahead of the ladder.
+    /// Never true for a model with no slice columns.
+    pub fn closes_slice_block(&self, col_ix: usize) -> bool {
+        self.model.slice_columns > 0
+            && Self::model_col(col_ix) == Some(self.model.slice_columns - 1)
+    }
+
     pub fn table_col(model_col: usize) -> usize {
         model_col + LABEL_COL + 1
     }
@@ -165,12 +173,16 @@ impl TableDelegate for MatrixDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let column = self.column(col_ix, cx);
+        let theme = cx.theme();
         div()
             .size_full()
             .flex()
             .items_center()
             .when(matches!(column.align, TextAlign::Right), |el| {
                 el.justify_end()
+            })
+            .when(self.closes_slice_block(col_ix), |el| {
+                el.border_r_1().border_color(theme.border)
             })
             .font_family(fonts::MONO)
             .debug_selector(|| format!("marketdata-th-{col_ix}"))
@@ -232,6 +244,13 @@ impl TableDelegate for MatrixDelegate {
             // the blotter's own I4 door; a gpui no-op in release, where
             // the closure is dropped unevaluated.
             .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"))
+            // The slice values read as their own block: a right border on
+            // the last of them, so the ladder starts visibly after the
+            // term's forward/atm/skew. Applied before the cursor border,
+            // which then wins on the cursor cell.
+            .when(self.closes_slice_block(col_ix), |el| {
+                el.border_r_1().border_color(theme.border)
+            })
             // The cursor cell reads as the blotter's does: a border in the
             // table's own active-border colour, never a fill, so an edited
             // or sent cell's own background still shows through it.

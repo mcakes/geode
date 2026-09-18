@@ -17,6 +17,7 @@ use crate::core::spec::{Columns, PanelSpec};
 use geode_core::attribution::Attribution;
 use geode_core::format::format_number;
 use geode_core::snapshot::Snapshot;
+use geode_core::view::ColumnFormat;
 use gpui::SharedString;
 use std::collections::HashMap;
 
@@ -65,7 +66,13 @@ pub struct MatrixModel {
     pub source_time: Option<String>,
     /// Header attributes the spec names, in spec order.
     pub header: Vec<HeaderCell>,
+    /// The slice-value labels first (`slice_columns` of them), then the
+    /// ladder.
     pub columns: Vec<SharedString>,
+    /// How many of `columns` (and of every row's leading `cells`) are the
+    /// spec's per-slice values rather than the pivot's own ladder — what
+    /// lets a row bump skip them and the delegate rule them off.
+    pub slice_columns: usize,
     pub rows: Vec<RowModel>,
 }
 
@@ -112,15 +119,19 @@ impl MatrixModel {
             .ok_or_else(|| format!("the document has no '{}' column", spec.rows))?;
         let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec, draft);
-        let (columns, rows) = match spec.columns {
+        let (columns, slice_columns, rows) = match spec.columns {
             Columns::Axis(axis) => pivot(snapshot, spec, draft, rows_idx, axis)?,
-            Columns::Values => flatten(snapshot, spec, draft, rows_idx)?,
+            Columns::Values => {
+                let (columns, rows) = flatten(snapshot, spec, draft, rows_idx)?;
+                (columns, 0, rows)
+            }
         };
         Ok(MatrixModel {
             key,
             source_time,
             header,
             columns,
+            slice_columns,
             rows,
         })
     }
@@ -228,9 +239,20 @@ fn is_value(snapshot: &Snapshot, idx: usize) -> bool {
     })
 }
 
-fn value_columns(snapshot: &Snapshot) -> Vec<usize> {
+/// The document's CELL values: every value column the spec does not name
+/// as a per-slice value. A slice value (CVI's `forward`) arrives
+/// `DeterminedNonAdditive` exactly as `param` does — it is a value the
+/// dataset declares — so without this filter a pivot would refuse the
+/// document as one with four value columns, and a flat panel would lay a
+/// per-slice value out as a cell column.
+fn value_columns(snapshot: &Snapshot, spec: &PanelSpec) -> Vec<usize> {
     (0..snapshot.columns())
-        .filter(|i| is_value(snapshot, *i))
+        .filter(|i| {
+            is_value(snapshot, *i)
+                && snapshot
+                    .meta_at(*i)
+                    .is_none_or(|m| spec.slice_value(&m.name).is_none())
+        })
         .collect()
 }
 
@@ -279,6 +301,10 @@ struct Grid {
     rows: Vec<String>,
     columns: Vec<String>,
     at: HashMap<String, HashMap<String, usize>>,
+    /// Each snapshot row's index into `rows` — the slice it belongs to,
+    /// so a second pass over the document (the slice values) allocates
+    /// no label.
+    row_of: Vec<usize>,
 }
 
 /// One pass over the document: the two label orders and the pair → row
@@ -296,18 +322,24 @@ fn index_grid(
         rows: Vec::new(),
         columns: Vec::new(),
         at: HashMap::new(),
+        row_of: Vec::with_capacity(snapshot.rows()),
     };
     // Membership sets beside the order vectors: `Vec::contains` per
     // document row is quadratic in the label count, and a schedule-shaped
     // document has thousands.
-    let mut seen_rows: HashMap<String, ()> = HashMap::new();
+    let mut seen_rows: HashMap<String, usize> = HashMap::new();
     let mut seen_cols: HashMap<String, ()> = HashMap::new();
     for row in 0..snapshot.rows() {
         let row_label = required_label(snapshot, rows_idx, row, spec.rows)?;
         let col_label = required_label(snapshot, col_idx, row, axis)?;
-        if seen_rows.insert(row_label.clone(), ()).is_none() {
-            grid.rows.push(row_label.clone());
-        }
+        let ri = match seen_rows.entry(row_label.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                grid.rows.push(row_label.clone());
+                *e.insert(grid.rows.len() - 1)
+            }
+        };
+        grid.row_of.push(ri);
         if seen_cols.insert(col_label.clone(), ()).is_none() {
             grid.columns.push(col_label.clone());
         }
@@ -327,8 +359,17 @@ fn index_grid(
     Ok(grid)
 }
 
-/// The pivot. Row labels down the side in document order, column labels
-/// across the top in document order, the one value column in the cells.
+/// The pivot. The spec's slice values first, then the column labels
+/// across the top in document order; row labels down the side in
+/// document order, the one value column in the ladder's cells.
+///
+/// A slice value is read off its slice's first row and the rest of the
+/// slice must agree: the long form repeats it per node row, so two
+/// different forwards under one term is the document contradicting
+/// itself, refused like a hole rather than averaged or first-wins — a
+/// grid that painted either would look complete and be wrong. A slice
+/// value the document does not carry is left out, as a header attribute
+/// is: it identifies nothing, so absent display is absence.
 ///
 /// The order is the document's own, first appearance first, and is NOT
 /// sorted: a term ladder and a node ladder arrive in the order the desk
@@ -344,7 +385,7 @@ fn pivot(
     draft: &Draft,
     rows_idx: usize,
     axis: &str,
-) -> Result<(Vec<SharedString>, Vec<RowModel>), String> {
+) -> Result<(Vec<SharedString>, usize, Vec<RowModel>), String> {
     let col_idx = snapshot
         .column_index(axis)
         .ok_or_else(|| format!("the document has no '{axis}' column"))?;
@@ -354,7 +395,7 @@ fn pivot(
     // rest would paint a grid that looks complete and is missing a
     // column's worth of numbers — a panel over such a dataset wants
     // `Columns::Values`, or a spec that names which value it pivots.
-    let values = value_columns(snapshot);
+    let values = value_columns(snapshot, spec);
     let value_idx = match values.as_slice() {
         [] => {
             return Err(format!(
@@ -381,14 +422,55 @@ fn pivot(
 
     let grid = index_grid(snapshot, spec, rows_idx, col_idx, axis)?;
 
+    // The slice values the document carries, in spec order: the snapshot
+    // column and, per slice, the first row that carries it — after the
+    // whole slice has been checked to agree.
+    let slices: Vec<(&crate::core::spec::SliceValue, usize)> = spec
+        .slice_values
+        .iter()
+        .filter_map(|sv| snapshot.column_index(sv.column).map(|idx| (sv, idx)))
+        .collect();
+    let mut first_row: Vec<Option<usize>> = vec![None; grid.rows.len()];
+    for (srow, &ri) in grid.row_of.iter().enumerate() {
+        match first_row[ri] {
+            None => first_row[ri] = Some(srow),
+            Some(first) => {
+                for (sv, idx) in &slices {
+                    if snapshot.f64_at(*idx, first) != snapshot.f64_at(*idx, srow) {
+                        return Err(format!(
+                            "the document's {}='{}' rows disagree on '{}' ({} on row {first}, {} on row {srow}): a slice value is constant across its slice",
+                            spec.rows,
+                            grid.rows[ri],
+                            sv.column,
+                            label_at(snapshot, *idx, first).unwrap_or_default(),
+                            label_at(snapshot, *idx, srow).unwrap_or_default(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let slice_columns = slices.len();
+
     let mut rows = Vec::with_capacity(grid.rows.len());
     for (ri, row_label) in grid.rows.iter().enumerate() {
-        let mut cells = Vec::with_capacity(grid.columns.len());
+        let mut cells = Vec::with_capacity(slice_columns + grid.columns.len());
+        // Every row label came out of `index_grid`'s pass over the
+        // snapshot rows, so each has a first row.
+        let first = first_row[ri].unwrap_or_default();
+        for (ci, (sv, idx)) in slices.iter().enumerate() {
+            cells.push(cell_of(snapshot, *idx, first, (ri, ci), &sv.format, draft));
+        }
         for (ci, col_label) in grid.columns.iter().enumerate() {
             match grid.at.get(row_label).and_then(|m| m.get(col_label)) {
-                Some(&srow) => {
-                    cells.push(cell_of(snapshot, value_idx, srow, (ri, ci), spec, draft))
-                }
+                Some(&srow) => cells.push(cell_of(
+                    snapshot,
+                    value_idx,
+                    srow,
+                    (ri, slice_columns + ci),
+                    &spec.format,
+                    draft,
+                )),
                 None => {
                     return Err(format!(
                         "the document has no cell for {}='{row_label}' {axis}='{col_label}'",
@@ -403,7 +485,12 @@ fn pivot(
         });
     }
     Ok((
-        grid.columns.into_iter().map(SharedString::from).collect(),
+        slices
+            .iter()
+            .map(|(sv, _)| SharedString::from(sv.label))
+            .chain(grid.columns.into_iter().map(SharedString::from))
+            .collect(),
+        slice_columns,
         rows,
     ))
 }
@@ -415,7 +502,7 @@ fn flatten(
     draft: &Draft,
     rows_idx: usize,
 ) -> Result<(Vec<SharedString>, Vec<RowModel>), String> {
-    let value_idxs = value_columns(snapshot);
+    let value_idxs = value_columns(snapshot, spec);
     if value_idxs.is_empty() {
         return Err(format!(
             "the document '{}' has no value column",
@@ -449,7 +536,7 @@ fn flatten(
             cells: value_idxs
                 .iter()
                 .enumerate()
-                .map(|(ci, &idx)| cell_of(snapshot, idx, row, (row, ci), spec, draft))
+                .map(|(ci, &idx)| cell_of(snapshot, idx, row, (row, ci), &spec.format, draft))
                 .collect(),
         });
     }
@@ -457,18 +544,19 @@ fn flatten(
 }
 
 /// One cell: the draft's value where there is an edit, the document's
-/// otherwise.
+/// otherwise, formatted with `format` — the panel's own for a ladder
+/// cell, the slice value's own for one of those.
 fn cell_of(
     snapshot: &Snapshot,
     value_idx: usize,
     srow: usize,
     cell_ref: (usize, usize),
-    spec: &PanelSpec,
+    format: &ColumnFormat,
     draft: &Draft,
 ) -> Cell {
     if let Some(&edited) = draft.edits.get(&cell_ref) {
         return Cell {
-            text: SharedString::from(format_number(edited, &spec.format).text),
+            text: SharedString::from(format_number(edited, format).text),
             value: Some(edited),
             edited: true,
             sent: draft.is_sent(),
@@ -481,7 +569,7 @@ fn cell_of(
     let value = snapshot.f64_at(value_idx, srow);
     Cell {
         text: value
-            .map(|v| SharedString::from(format_number(v, &spec.format).text))
+            .map(|v| SharedString::from(format_number(v, format).text))
             .unwrap_or_default(),
         value,
         edited: false,
@@ -536,8 +624,36 @@ mod tests {
     /// `term` is a dictionary column of date text rather than a real
     /// `Date32`: `TestColumn` has no date arm, and what the panel reads
     /// off an axis is its label either way.
+    ///
+    /// The per-slice values (`forward`/`atm`/`skew`) ride on every node
+    /// row of their term, from [`slice_values_for`] — the long form the
+    /// kind stores them in.
     fn document(cells: &[(String, f64, Option<f64>)]) -> Snapshot {
+        document_with(cells, |_, term| slice_values_for(term))
+    }
+
+    /// The slice values a term carries in these fixtures: the first two
+    /// terms have their own, anything else a third set.
+    fn slice_values_for(term: &str) -> (Option<f64>, Option<f64>, Option<f64>) {
+        match term {
+            "2026-10-16" => (Some(4512.3), Some(0.182), Some(-1.1)),
+            "2026-11-20" => (Some(4530.75), Some(0.19), Some(-0.95)),
+            _ => (Some(4600.0), Some(0.2), Some(-1.0)),
+        }
+    }
+
+    /// [`document`] with the slice values chosen per (row, term) — how a
+    /// test builds a slice whose rows disagree.
+    fn document_with(
+        cells: &[(String, f64, Option<f64>)],
+        slice: impl Fn(usize, &str) -> (Option<f64>, Option<f64>, Option<f64>),
+    ) -> Snapshot {
         let n = cells.len();
+        let slices: Vec<_> = cells
+            .iter()
+            .enumerate()
+            .map(|(row, c)| slice(row, &c.0))
+            .collect();
         Snapshot::for_tests_with_provenance(
             vec![
                 (
@@ -557,6 +673,18 @@ mod tests {
                     TestColumn::F64(cells.iter().map(|c| c.2).collect()),
                 ),
                 (
+                    meta("forward", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(slices.iter().map(|s| s.0).collect()),
+                ),
+                (
+                    meta("atm", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(slices.iter().map(|s| s.1).collect()),
+                ),
+                (
+                    meta("skew", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(slices.iter().map(|s| s.2).collect()),
+                ),
+                (
                     meta("anchor_date", Attribution::Additive),
                     TestColumn::Dict(vec![Some("2026-09-12".into()); n]),
                 ),
@@ -571,7 +699,9 @@ mod tests {
     }
 
     /// The six-row CVI document: two terms × three nodes, `param` running
-    /// 0.1 … 0.6 in axis order.
+    /// 0.1 … 0.6 in axis order, each term's slice values from
+    /// [`slice_values_for`]. Its grid is three slice columns then three
+    /// nodes, so a node cell sits at column `3 + n`.
     fn full_grid() -> Snapshot {
         let mut cells = Vec::new();
         for (t, term) in TERMS.iter().enumerate() {
@@ -603,11 +733,24 @@ mod tests {
         assert_eq!(model.key, vec!["SPX.Z".to_string()]);
         assert_eq!(model.source_time.as_deref(), Some(BASE));
         assert_eq!(model.rows.len(), 2);
-        assert_eq!(columns_of(&model), vec!["-20", "-1", "3.5"]);
+        // The slice values are the FIRST grid columns, ahead of the
+        // ladder, each with its own format: a forward at two places, a
+        // vol and a skew at four.
+        assert_eq!(
+            columns_of(&model),
+            vec!["fwd", "atm", "skew", "-20", "-1", "3.5"]
+        );
+        assert_eq!(model.slice_columns, 3);
         assert_eq!(model.rows[0].label.to_string(), "2026-10-16");
         assert_eq!(model.rows[1].label.to_string(), "2026-11-20");
+        assert_eq!(
+            labels(&model, 0),
+            vec!["4512.30", "0.1820", "-1.1000", "0.1000", "0.2000", "0.3000"]
+        );
+        assert_eq!(model.rows[0].cells[0].value, Some(4512.3));
+        assert_eq!(model.rows[0].cells[0].cell_ref, (0, 0));
 
-        let cell = &model.rows[0].cells[1];
+        let cell = &model.rows[0].cells[4];
         assert_eq!(
             cell.text.to_string(),
             "0.2000",
@@ -618,10 +761,13 @@ mod tests {
         assert!(!cell.sent);
         assert_eq!(
             cell.cell_ref,
-            (0, 1),
+            (0, 4),
             "a cell carries the grid index the draft is keyed by"
         );
-        assert_eq!(labels(&model, 1), vec!["0.4000", "0.5000", "0.6000"]);
+        assert_eq!(
+            labels(&model, 1),
+            vec!["4530.75", "0.1900", "-0.9500", "0.4000", "0.5000", "0.6000"]
+        );
 
         let header: Vec<(String, String, String)> = model
             .header
@@ -667,9 +813,105 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["2026-11-20", "2026-10-16"]
         );
-        assert_eq!(columns_of(&model), vec!["3.5", "-20"]);
-        assert_eq!(labels(&model, 0), vec!["0.1000", "0.2000"]);
-        assert_eq!(labels(&model, 1), vec!["0.3000", "0.4000"]);
+        assert_eq!(columns_of(&model), vec!["fwd", "atm", "skew", "3.5", "-20"]);
+        assert_eq!(
+            labels(&model, 0),
+            vec!["4530.75", "0.1900", "-0.9500", "0.1000", "0.2000"]
+        );
+        assert_eq!(
+            labels(&model, 1),
+            vec!["4512.30", "0.1820", "-1.1000", "0.3000", "0.4000"]
+        );
+    }
+
+    /// A slice value the long form repeats per node row must agree across
+    /// the slice; two forwards under one term is the document
+    /// contradicting itself, and the pivot refuses it like a hole rather
+    /// than averaging or keeping the first — either would paint a grid
+    /// that looks complete and is wrong.
+    #[test]
+    fn a_within_slice_disagreement_is_refused_naming_the_term_and_column() {
+        let mut cells = Vec::new();
+        for term in TERMS {
+            for node in NODES {
+                cells.push((term.to_string(), node, Some(0.1)));
+            }
+        }
+        // Row 4 is the second term's middle node: its forward disagrees.
+        let snap = document_with(&cells, |row, term| {
+            let (fwd, atm, skew) = slice_values_for(term);
+            if row == 4 {
+                (fwd.map(|f| f + 1.0), atm, skew)
+            } else {
+                (fwd, atm, skew)
+            }
+        });
+        let err = MatrixModel::build(&snap, &CVI, &Draft::default())
+            .expect_err("a slice whose rows disagree is refused, never averaged");
+        assert!(err.contains("2026-11-20"), "{err}");
+        assert!(err.contains("forward"), "{err}");
+        assert!(
+            !err.contains("2026-10-16"),
+            "the agreeing term is not blamed: {err}"
+        );
+    }
+
+    /// A slice value the document does not carry is left out, as a
+    /// header attribute is: the grid is then the ladder alone, with
+    /// `slice_columns` saying so.
+    #[test]
+    fn a_document_without_the_slice_columns_builds_the_ladder_alone() {
+        let n = 6;
+        let mut cells = Vec::new();
+        for term in TERMS {
+            for node in NODES {
+                cells.push((term.to_string(), node, Some(0.1)));
+            }
+        }
+        let snap = Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("SPX.Z".into()); n]),
+                ),
+                (
+                    meta("term", Attribution::Additive),
+                    TestColumn::Dict(cells.iter().map(|c| Some(c.0.clone())).collect()),
+                ),
+                (
+                    meta("node", Attribution::Additive),
+                    TestColumn::F64(cells.iter().map(|c| Some(c.1)).collect()),
+                ),
+                (
+                    meta("param", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(cells.iter().map(|c| c.2).collect()),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        );
+        let model = MatrixModel::build(&snap, &CVI, &Draft::default()).expect("the ladder alone");
+        assert_eq!(model.slice_columns, 0);
+        assert_eq!(columns_of(&model), vec!["-20", "-1", "3.5"]);
+    }
+
+    /// An edit to a slice cell is keyed like any other — `(row, col)` in
+    /// the grid, resolved by `(term, label)` across generations — so a
+    /// draft on `fwd` paints over the slice value with the slice's own
+    /// format and rebases by `(term, "fwd")`.
+    #[test]
+    fn an_edited_slice_cell_paints_the_draft_in_the_slice_values_own_format() {
+        let mut draft = Draft::default();
+        draft.set((1, 0), ("2026-11-20".into(), "fwd".into()), 4600.0, BASE);
+        let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
+        let cell = &model.rows[1].cells[0];
+        assert_eq!(cell.text.to_string(), "4600.00");
+        assert!(cell.edited);
+        assert_eq!(model.label_of((1, 0)), ("2026-11-20".into(), "fwd".into()));
+        assert!(
+            !model.rows[0].cells[0].edited,
+            "the other term's forward is untouched"
+        );
     }
 
     #[test]
@@ -710,24 +952,24 @@ mod tests {
         let snap = full_grid();
         let mut draft = Draft::default();
         draft.set(
-            (0, 1),
+            (0, 4),
             ("2026-10-16".into(), "-1".into()),
             0.9,
             "2026-09-12T14:00:00Z",
         );
         let model = MatrixModel::build(&snap, &CVI, &draft).expect("a complete grid");
 
-        let cell = &model.rows[0].cells[1];
+        let cell = &model.rows[0].cells[4];
         assert_eq!(cell.text.to_string(), "0.9000");
         assert_eq!(cell.value, Some(0.9));
         assert!(cell.edited);
         assert!(!cell.sent, "an edit is sent only once an upload said so");
         assert_eq!(
-            model.rows[0].cells[0].text.to_string(),
+            model.rows[0].cells[3].text.to_string(),
             "0.1000",
             "a neighbouring cell still paints the document"
         );
-        assert!(!model.rows[0].cells[0].edited);
+        assert!(!model.rows[0].cells[3].edited);
     }
 
     #[test]
@@ -753,12 +995,12 @@ mod tests {
     #[test]
     fn a_sent_draft_marks_its_own_cells_sent() {
         let mut draft = Draft::default();
-        draft.set((1, 0), ("2026-11-20".into(), "-20".into()), 0.5, BASE);
+        draft.set((1, 3), ("2026-11-20".into(), "-20".into()), 0.5, BASE);
         draft.state = DraftState::Sent;
         let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
-        assert!(model.rows[1].cells[0].sent);
-        assert!(model.rows[1].cells[0].edited);
-        assert!(!model.rows[1].cells[1].sent);
+        assert!(model.rows[1].cells[3].sent);
+        assert!(model.rows[1].cells[3].edited);
+        assert!(!model.rows[1].cells[4].sent);
     }
 
     #[test]
@@ -771,9 +1013,9 @@ mod tests {
         }
         let model =
             MatrixModel::build(&document(&cells), &CVI, &Draft::default()).expect("a full grid");
-        assert_eq!(model.rows[0].cells[0].text.to_string(), "");
+        assert_eq!(model.rows[0].cells[3].text.to_string(), "");
         assert_eq!(
-            model.rows[0].cells[0].value, None,
+            model.rows[0].cells[3].value, None,
             "NULL and 0.0 are different answers (§6.3)"
         );
     }
@@ -792,6 +1034,7 @@ mod tests {
             label: "currency",
             ty: ColumnType::Utf8,
         }],
+        slice_values: &[],
         value_type: ColumnType::F64,
         format: ColumnFormat::MEASURE,
         actions: &[],
@@ -891,9 +1134,11 @@ mod tests {
     #[test]
     fn label_of_answers_the_row_and_column_labels_and_never_panics() {
         let model = MatrixModel::build(&full_grid(), &CVI, &Draft::default()).expect("a full grid");
-        let (row, col) = model.label_of((1, 2));
+        let (row, col) = model.label_of((1, 5));
         assert_eq!(row.to_string(), "2026-11-20");
         assert_eq!(col.to_string(), "3.5");
+        let (_, col) = model.label_of((1, 1));
+        assert_eq!(col.to_string(), "atm");
         let (row, col) = model.label_of((9, 9));
         assert_eq!(row.to_string(), "");
         assert_eq!(col.to_string(), "");
@@ -928,6 +1173,7 @@ mod tests {
             rows: "ex_date",
             columns: Columns::Axis("currency"),
             header: &[],
+            slice_values: &[],
             value_type: ColumnType::F64,
             format: ColumnFormat::MEASURE,
             actions: &[],
@@ -1071,11 +1317,14 @@ mod tests {
                 model.rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(),
                 want_rows.clone()
             );
-            prop_assert_eq!(columns_of(&model), want_columns.clone());
+            // The three slice columns lead; the ladder follows them.
+            let s = model.slice_columns;
+            prop_assert_eq!(s, 3);
+            prop_assert_eq!(columns_of(&model)[s..].to_vec(), want_columns.clone());
             for (i, row) in model.rows.iter().enumerate() {
-                prop_assert_eq!(row.cells.len(), n);
-                for (j, cell) in row.cells.iter().enumerate() {
-                    let want = want_value[&(want_rows[i].clone(), want_columns[j].clone())];
+                prop_assert_eq!(row.cells.len(), s + n);
+                for (j, cell) in row.cells.iter().enumerate().skip(s) {
+                    let want = want_value[&(want_rows[i].clone(), want_columns[j - s].clone())];
                     prop_assert_eq!(cell.value, Some(want));
                     prop_assert_eq!(cell.cell_ref, (i, j));
                 }

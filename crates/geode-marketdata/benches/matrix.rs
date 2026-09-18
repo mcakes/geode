@@ -49,6 +49,11 @@ fn cvi(terms: usize, nodes: usize) -> Snapshot {
     let mut term_col = Vec::with_capacity(rows);
     let mut node_col = Vec::with_capacity(rows);
     let mut param = Vec::with_capacity(rows);
+    // The per-slice values (2026-09-17), repeated on every node row of
+    // their term — the long form the kind stores them in.
+    let mut forward = Vec::with_capacity(rows);
+    let mut atm = Vec::with_capacity(rows);
+    let mut skew = Vec::with_capacity(rows);
     for t in 0..terms {
         // Distinct terms past twelve months too: the pivot keys on the
         // label, so a repeated term would be a duplicate-pair refusal
@@ -58,6 +63,9 @@ fn cvi(terms: usize, nodes: usize) -> Snapshot {
             term_col.push(Some(term.clone()));
             node_col.push(Some(n as f64 / 4.0 - 20.0));
             param.push(Some((t * nodes + n) as f64 / 8.0));
+            forward.push(Some(4500.0 + 10.0 * t as f64));
+            atm.push(Some(0.18 + 0.001 * t as f64));
+            skew.push(Some(-1.0 - 0.01 * t as f64));
         }
     }
     Snapshot::for_tests_with_provenance(
@@ -77,6 +85,18 @@ fn cvi(terms: usize, nodes: usize) -> Snapshot {
             (
                 meta("param", Attribution::DeterminedNonAdditive),
                 TestColumn::F64(param),
+            ),
+            (
+                meta("forward", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(forward),
+            ),
+            (
+                meta("atm", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(atm),
+            ),
+            (
+                meta("skew", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(skew),
             ),
             (
                 meta("anchor_date", Attribution::Additive),
@@ -104,6 +124,7 @@ const SCHEDULE: PanelSpec = PanelSpec {
         label: "currency",
         ty: ColumnType::Utf8,
     }],
+    slice_values: &[],
     value_type: ColumnType::F64,
     format: ColumnFormat::MEASURE,
     actions: &[],

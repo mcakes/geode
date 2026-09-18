@@ -1895,10 +1895,16 @@ impl MarketDataTile {
             return Err("bump needs a grid cell — the cursor is in the header".to_string());
         };
         let values: Vec<((usize, usize), f64)> = match axis {
+            // A row bump walks the LADDER: the leading `slice_columns`
+            // cells are the term's own forward/atm/skew, and bumping a
+            // term's vols must not move its forward with them. A column
+            // bump on a slice column still bumps that column down every
+            // term, which is what a bump on `fwd` means.
             BumpAxis::Row => self.model.rows[row]
                 .cells
                 .iter()
                 .enumerate()
+                .skip(self.model.slice_columns)
                 .filter_map(|(ci, cell)| cell.value.map(|v| ((row, ci), v)))
                 .collect(),
             BumpAxis::Col => self
@@ -2780,16 +2786,31 @@ mod tests {
         }
     }
 
+    /// The slice-value columns every fixture document carries, ahead of
+    /// the ladder in the grid: a node cell at ladder index `n` sits at
+    /// grid column `SLICE + n`, and a fresh cursor at `(0, 0)` is on the
+    /// first term's `fwd` (`4500.00`, two places), not its first node.
+    const SLICE: usize = 3;
+
     /// A CVI document in the shape `query::document::compile_document`
-    /// delivers one — `document_columns()` order, the value column
+    /// delivers one — `document_columns()` order, the value columns
     /// `DeterminedNonAdditive`, no grouping — `terms` × `nodes` rows with
-    /// `param` running 0.1, 0.2, … in axis order.
+    /// `param` running 0.1, 0.2, … in axis order, and per term the
+    /// slice values `forward` = 4500 + 10 × term index, `atm` = 0.18 +
+    /// 0.01 × term index, `skew` = −1.0 − 0.1 × term index, repeated on
+    /// every node row of the term.
     fn document_of(terms: &[&str], nodes: &[f64], as_of: &str) -> Snapshot {
         let mut cells: Vec<(String, f64, f64)> = Vec::new();
-        for term in terms {
+        let mut slices: Vec<(f64, f64, f64)> = Vec::new();
+        for (t, term) in terms.iter().enumerate() {
             for node in nodes {
                 let i = cells.len() + 1;
                 cells.push(((*term).to_string(), *node, i as f64 / 10.0));
+                slices.push((
+                    4500.0 + 10.0 * t as f64,
+                    0.18 + 0.01 * t as f64,
+                    -1.0 - 0.1 * t as f64,
+                ));
             }
         }
         let n = cells.len();
@@ -2810,6 +2831,18 @@ mod tests {
                 (
                     meta("param", Attribution::DeterminedNonAdditive),
                     TestColumn::F64(cells.iter().map(|c| Some(c.2)).collect()),
+                ),
+                (
+                    meta("forward", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(slices.iter().map(|s| Some(s.0)).collect()),
+                ),
+                (
+                    meta("atm", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(slices.iter().map(|s| Some(s.1)).collect()),
+                ),
+                (
+                    meta("skew", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(slices.iter().map(|s| Some(s.2)).collect()),
                 ),
                 (
                     meta("anchor_date", Attribution::Additive),
@@ -3215,15 +3248,15 @@ mod tests {
         let tag = h.document_request().unwrap().tag;
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
 
-        assert_eq!(h.columns(&vcx), 1 + NODES.len());
+        assert_eq!(h.columns(&vcx), 1 + SLICE + NODES.len());
         assert_eq!(
             h.headers(&vcx),
-            vec!["term", "-20", "-1", "3.5"],
-            "the row axis's own name, then the node labels in document order"
+            vec!["term", "fwd", "atm", "skew", "-20", "-1", "3.5"],
+            "the row axis's own name, the slice values, then the node labels in document order"
         );
         draw(&mut vcx);
         assert!(
-            vcx.debug_bounds("marketdata-th-3").is_some(),
+            vcx.debug_bounds("marketdata-th-6").is_some(),
             "the third node's header is painted"
         );
 
@@ -3233,13 +3266,13 @@ mod tests {
             Arc::new(document_of(&TERMS, &NODES[..2], BASE)),
         );
         draw(&mut vcx);
-        assert_eq!(h.columns(&vcx), 3, "a node fewer");
+        assert_eq!(h.columns(&vcx), 1 + SLICE + 2, "a node fewer");
         assert!(
-            vcx.debug_bounds("marketdata-th-2").is_some(),
+            vcx.debug_bounds("marketdata-th-5").is_some(),
             "two nodes are still painted"
         );
         assert!(
-            vcx.debug_bounds("marketdata-th-3").is_none(),
+            vcx.debug_bounds("marketdata-th-6").is_none(),
             "the dropped node's header is gone — every model swap must `refresh` \
              the table, which is where the painted header comes from"
         );
@@ -3257,17 +3290,18 @@ mod tests {
             Cursor::Cell { row: 0, col: 0 }
         );
 
-        // Row 1, the third node: table column 3.
-        let at = centre_of(&mut vcx, "marketdata-cell-1-3");
+        // Row 1, the third node: grid column 5 (after the three slice
+        // values), table column 6.
+        let at = centre_of(&mut vcx, "marketdata-cell-1-6");
         click_at(&mut vcx, at, 1);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            Cursor::Cell { row: 1, col: 2 },
+            Cursor::Cell { row: 1, col: 5 },
             "the click moved the cursor to that cell"
         );
         assert_eq!(
             h.selection(&vcx),
-            (Some(1), Some(3)),
+            (Some(1), Some(6)),
             "and the table's own selection is the cursor plus the label column"
         );
         h.dispatch(&mut vcx, "yank", None);
@@ -3328,12 +3362,12 @@ mod tests {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
 
-        let at = centre_of(&mut vcx, "marketdata-cell-1-2");
+        let at = centre_of(&mut vcx, "marketdata-cell-1-5");
         click_at(&mut vcx, at, 1);
         click_at(&mut vcx, at, 2);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            Cursor::Cell { row: 1, col: 1 },
+            Cursor::Cell { row: 1, col: 4 },
             "the cursor moved to the clicked cell"
         );
         assert_eq!(
@@ -3373,7 +3407,7 @@ mod tests {
         h.set_editor(&mut vcx, "9.9");
         assert_eq!(h.mode(&vcx), "insert");
 
-        let at = centre_of(&mut vcx, "marketdata-cell-1-3");
+        let at = centre_of(&mut vcx, "marketdata-cell-1-6");
         click_at(&mut vcx, at, 1);
         assert_eq!(h.editor_value(&vcx), None, "the click cancelled the editor");
         assert_eq!(h.mode(&vcx), "normal", "and insert mode went with it");
@@ -3384,7 +3418,7 @@ mod tests {
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            Cursor::Cell { row: 1, col: 2 },
+            Cursor::Cell { row: 1, col: 5 },
             "and the cursor moved to the clicked cell"
         );
         assert!(
@@ -3393,7 +3427,7 @@ mod tests {
         );
         assert_eq!(
             h.cell(&vcx, 0, 0).0,
-            "0.1000",
+            "4500.00",
             "the cell the editor was on still reads the document's own value"
         );
     }
@@ -3527,7 +3561,11 @@ mod tests {
             )
         });
         assert_eq!(rows, 2, "two terms down the side");
-        assert_eq!(columns, 3, "three nodes across the top");
+        assert_eq!(
+            columns,
+            SLICE + 3,
+            "three slice values then three nodes across the top"
+        );
         assert!(chips.iter().any(|c| c == "CVI"), "the title: {chips:?}");
         assert!(
             chips.iter().any(|c| c == "SPX.Z"),
@@ -4042,7 +4080,10 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.dispatch(&mut vcx, "last_col", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            Cursor::Cell { row: 4, col: 2 }
+            Cursor::Cell {
+                row: 4,
+                col: SLICE + 2
+            }
         );
 
         // Two terms and two nodes now: both axes shrank under the cursor.
@@ -4053,7 +4094,10 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            Cursor::Cell { row: 1, col: 1 },
+            Cursor::Cell {
+                row: 1,
+                col: SLICE + 1
+            },
             "the cursor is clamped into the new grid"
         );
         h.dispatch(&mut vcx, "yank", None);
@@ -4098,7 +4142,11 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.dispatch(&mut vcx, "last_col", None);
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.cursor()),
-            Cursor::Cell { row: 0, col: 2 }
+            Cursor::Cell {
+                row: 0,
+                col: SLICE + 2
+            },
+            "the last column is the last NODE, past the slice values"
         );
 
         // The scroll is the table's now: `sync_cursor` sets the selected
@@ -4108,7 +4156,10 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.dispatch(&mut vcx, "bottom", None);
         assert_eq!(
             h.selection(&vcx),
-            (Some(terms.len() - 1), Some(MatrixDelegate::table_col(2))),
+            (
+                Some(terms.len() - 1),
+                Some(MatrixDelegate::table_col(SLICE + 2))
+            ),
             "G moves the table's selected row, which is what scrolls it into view"
         );
     }
@@ -4306,7 +4357,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         // range; without the tile's rebase it would paint nowhere.
         let cell = h
             .tile
-            .read_with(&vcx, |t, _| t.model().rows[1].cells[1].clone());
+            .read_with(&vcx, |t, _| t.model().rows[1].cells[SLICE + 1].clone());
         assert_eq!(cell.text.to_string(), "9.5000");
         assert!(cell.edited, "the restored edit paints as an edit");
     }
@@ -4349,18 +4400,25 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
 
         h.dispatch(&mut vcx, "yank", None);
-        assert_eq!(clipboard(&mut vcx).as_deref(), Some("0.1000"));
+        assert_eq!(clipboard(&mut vcx).as_deref(), Some("4500.00"));
         h.dispatch(&mut vcx, "yank_row", None);
         assert_eq!(
             clipboard(&mut vcx).as_deref(),
-            Some("2026-10-16\t0.1000\t0.2000\t0.3000"),
-            "the row is label then cells, tab separated"
+            Some("2026-10-16\t4500.00\t0.1800\t-1.0000\t0.1000\t0.2000\t0.3000"),
+            "the row is label then cells — the slice values included — tab separated"
         );
         h.dispatch(&mut vcx, "yank_col", None);
         assert_eq!(
             clipboard(&mut vcx).as_deref(),
-            Some("0.1000\n0.4000"),
+            Some("4500.00\n4510.00"),
             "the column is newline separated"
+        );
+        h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+        h.dispatch(&mut vcx, "yank_col", None);
+        assert_eq!(
+            clipboard(&mut vcx).as_deref(),
+            Some("0.1000\n0.4000"),
+            "a node column, past the slice values"
         );
     }
 
@@ -4411,17 +4469,17 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h.mode(&vcx), "insert", "the shell is told to stop matching");
         assert_eq!(
             h.editor_value(&vcx).as_deref(),
-            Some("0.1000"),
+            Some("4500.00"),
             "seeded with the cell's own text, so a small correction is a small edit"
         );
 
-        h.set_editor(&mut vcx, "0.5");
+        h.set_editor(&mut vcx, "4505.5");
         h.dispatch(&mut vcx, "commit", None);
 
         assert_eq!(
             h.cell(&vcx, 0, 0),
-            ("0.5000".to_string(), true),
-            "the parsed value, formatted by the panel's own format, marked as an edit"
+            ("4505.50".to_string(), true),
+            "the parsed value, formatted by the slice value's own format, marked as an edit"
         );
         assert!(
             h.tile.read_with(&vcx, |t, _| t.header_dirty()),
@@ -4515,7 +4573,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             "every typed character must land in the cell's own input"
         );
         h.dispatch(&mut vcx, "commit", None);
-        assert_eq!(h.cell(&vcx, 0, 0), ("0.5000".to_string(), true));
+        assert_eq!(h.cell(&vcx, 0, 0), ("0.50".to_string(), true));
     }
 
     #[gpui::test]
@@ -4530,7 +4588,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h.mode(&vcx), "normal");
         assert_eq!(
             h.cell(&vcx, 0, 0),
-            ("0.1000".to_string(), false),
+            ("4500.00".to_string(), false),
             "and the typed value went nowhere"
         );
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
@@ -4578,33 +4636,66 @@ edits = [["2026-11-20", "-1", 9.5]]
             .expect("a bump with a document");
         assert_eq!(
             h.row_texts(&vcx, 0),
-            vec!["0.3500", "0.4500", "0.5500"],
-            "the cursor's whole row moved"
+            vec!["4500.00", "0.1800", "-1.0000", "0.3500", "0.4500", "0.5500"],
+            "the cursor's whole ladder row moved; its slice values did not"
         );
         assert_eq!(
             h.row_texts(&vcx, 1),
-            vec!["0.4000", "0.5000", "0.6000"],
+            vec!["4510.00", "0.1900", "-1.1000", "0.4000", "0.5000", "0.6000"],
             "and nothing else did"
         );
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 3);
 
         h.command(&mut vcx, "revert").unwrap();
+        h.dispatch(&mut vcx, "right", Some(SLICE as u32));
         h.command(&mut vcx, "bump 1 col").unwrap();
         assert_eq!(
-            h.col_texts(&vcx, 0),
+            h.col_texts(&vcx, SLICE),
             vec!["1.1000", "1.4000"],
             "`col` walks the cursor's column instead"
         );
         assert_eq!(
             h.row_texts(&vcx, 0),
-            vec!["1.1000", "0.2000", "0.3000"],
+            vec!["4500.00", "0.1800", "-1.0000", "1.1000", "0.2000", "0.3000"],
             "and only that column"
         );
 
         // It composes with an edit already made rather than reading through
         // to the document underneath it.
         h.command(&mut vcx, "bump 1 col").unwrap();
-        assert_eq!(h.col_texts(&vcx, 0), vec!["2.1000", "2.4000"]);
+        assert_eq!(h.col_texts(&vcx, SLICE), vec!["2.1000", "2.4000"]);
+    }
+
+    /// The slice values (2026-09-17): a ROW bump walks the term's ladder
+    /// and leaves its `fwd`/`atm`/`skew` alone — bumping a term's vols
+    /// must not move its forward — while a COLUMN bump with the cursor on
+    /// `fwd` bumps every term's forward, which is what that column means.
+    #[gpui::test]
+    fn a_row_bump_skips_the_slice_cells_and_a_column_bump_on_fwd_moves_every_term(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+
+        // The cursor is on `fwd`; the row bump still walks the ladder.
+        h.command(&mut vcx, "bump 0.1").unwrap();
+        assert_eq!(
+            h.row_texts(&vcx, 0),
+            vec!["4500.00", "0.1800", "-1.0000", "0.2000", "0.3000", "0.4000"],
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().len()),
+            NODES.len(),
+            "one edit per node, none per slice value"
+        );
+
+        h.command(&mut vcx, "bump 1 col").unwrap();
+        assert_eq!(h.col_texts(&vcx, 0), vec!["4501.00", "4511.00"]);
+        assert_eq!(
+            h.col_texts(&vcx, 1),
+            vec!["0.1800", "0.1900"],
+            "the neighbouring slice column is untouched"
+        );
     }
 
     #[gpui::test]
@@ -4618,7 +4709,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
         assert_eq!(
             h.row_texts(&vcx, 0),
-            vec!["0.1000", "0.2000", "0.3000"],
+            vec!["4500.00", "0.1800", "-1.0000", "0.1000", "0.2000", "0.3000"],
             "the document's own numbers are back"
         );
         assert!(
@@ -4669,7 +4760,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             rows, 1,
             "the newer document, not the base, is now on screen"
         );
-        assert_eq!(cell.text.to_string(), "0.1000", "the document's own value");
+        assert_eq!(cell.text.to_string(), "4500.00", "the document's own value");
         assert!(!cell.edited);
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
@@ -4819,11 +4910,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             "got {state:?}"
         );
         assert_eq!(rows, 2, "still the base generation's two terms");
-        assert_eq!(
-            cell.text.to_string(),
-            "0.5000",
-            "the edit is still on screen"
-        );
+        assert_eq!(cell.text.to_string(), "0.50", "the edit is still on screen");
         assert!(cell.edited);
         let local = chrono::DateTime::parse_from_rfc3339(NEWER)
             .unwrap()
@@ -4878,7 +4965,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             "moves to the LATEST as_of, got {state:?}"
         );
         assert_eq!(rows, 2, "still the ORIGINAL base generation's two terms");
-        assert_eq!(cell.text.to_string(), "0.5000", "the edit is untouched");
+        assert_eq!(cell.text.to_string(), "0.50", "the edit is untouched");
         let local = chrono::DateTime::parse_from_rfc3339(NEWEST)
             .unwrap()
             .with_timezone(&chrono::Local)
@@ -4941,8 +5028,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(rows, 1, "now painting the newer document");
         assert_eq!(
             cell.text.to_string(),
-            "0.7000",
-            "the kept edit, at its new index"
+            "0.70",
+            "the kept edit, at its new index — a `fwd` cell, resolved by (term, \"fwd\")"
         );
         assert!(cell.edited);
 
@@ -4950,7 +5037,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             chips.iter().any(|c| c
                 == "dropped 2 edits whose rows or columns the new document lacks: \
-2026-10-16/-20, 2026-10-16/-1"),
+2026-10-16/fwd, 2026-10-16/atm"),
             "{chips:?}"
         );
     }
@@ -4988,7 +5075,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         });
         assert_eq!(state, DraftState::Clean);
         assert_eq!(rows, 1, "the newer document, its one term");
-        assert_eq!(cell.text.to_string(), "0.1000", "the document's own value");
+        assert_eq!(cell.text.to_string(), "4500.00", "the document's own value");
         assert!(!cell.edited);
         assert!(
             !h.tile.read_with(&vcx, |t, _| t.header_dirty()),
@@ -5234,7 +5321,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
         let cell = h
             .tile
-            .read_with(&vcx, |t, _| t.model().rows[1].cells[1].clone());
+            .read_with(&vcx, |t, _| t.model().rows[1].cells[SLICE + 1].clone());
         assert_eq!(cell.text.to_string(), "9.5000");
         assert!(cell.edited, "the restored edit is placed by label at last");
     }
@@ -5276,7 +5363,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
         let cell = h
             .tile
-            .read_with(&vcx, |t, _| t.model().rows[1].cells[1].clone());
+            .read_with(&vcx, |t, _| t.model().rows[1].cells[SLICE + 1].clone());
         assert_eq!(cell.text.to_string(), "9.5000");
         assert!(cell.edited);
     }
@@ -6111,7 +6198,7 @@ edits = [["2099-01-01", "-1", 1.0]]
             h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
             "a click is not `enter`: nothing was written"
         );
-        assert_eq!(h.cell(&vcx, 0, 0).0, "0.1000");
+        assert_eq!(h.cell(&vcx, 0, 0).0, "4500.00");
     }
 
     /// B5: the menu row's `stop_propagation` is load-bearing for the

@@ -32,6 +32,20 @@ pub struct KindAction {
     pub built: bool,
 }
 
+/// One value a document says once per ROW-AXIS slice rather than once
+/// per cell (2026-09-17): CVI's `forward`/`atm`/`skew` per term. Stored
+/// in the long form repeated on every node row of its slice, painted as
+/// the first grid columns ahead of the pivot's own ladder, each with its
+/// own format — a forward is a price, an ATM vol a decimal — and skipped
+/// by a row bump, which walks the ladder alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceValue {
+    pub column: &'static str,
+    /// The short column header.
+    pub label: &'static str,
+    pub format: ColumnFormat,
+}
+
 /// How the columns across the top are chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Columns {
@@ -60,6 +74,9 @@ pub struct PanelSpec {
     pub columns: Columns,
     /// Document-level attributes shown in the header, in this order.
     pub header: &'static [HeaderAttr],
+    /// Per-slice values painted ahead of the ladder, in this order
+    /// (`Columns::Axis` only; a flat panel has no slice).
+    pub slice_values: &'static [SliceValue],
     pub format: ColumnFormat,
     /// The declared type of the value column(s) this panel's cells hold —
     /// what a typed cell edit is parsed as
@@ -93,8 +110,26 @@ impl PanelSpec {
         self.rows == column
             || matches!(self.columns, Columns::Axis(a) if a == column)
             || self.header.iter().any(|h| h.column == column)
+            || self.slice_value(column).is_some()
+    }
+
+    /// The slice value this spec paints from `column`, if any — how the
+    /// pivot tells a spec-named per-slice value from a second value
+    /// column it must refuse (both arrive `DeterminedNonAdditive`).
+    pub fn slice_value(&self, column: &str) -> Option<&SliceValue> {
+        self.slice_values.iter().find(|s| s.column == column)
     }
 }
+
+/// CVI's cell format: four places, no grouping, no scale, no sign colour
+/// (see [`CVI`]). The slice values copy it and change only `precision`.
+const CVI_FORMAT: ColumnFormat = ColumnFormat {
+    precision: 4,
+    thousands: false,
+    negative: Negative::Minus,
+    colour: Colour::None,
+    scale: Scale::None,
+};
 
 /// The CVI surface (spec §6.3/§8.1): one document per underlying, terms
 /// down the side, nodes across the top, one `param` per cell.
@@ -124,14 +159,28 @@ pub const CVI: PanelSpec = PanelSpec {
             ty: ColumnType::F64,
         },
     ],
+    slice_values: &[
+        SliceValue {
+            column: "forward",
+            label: "fwd",
+            format: ColumnFormat {
+                precision: 2,
+                ..CVI_FORMAT
+            },
+        },
+        SliceValue {
+            column: "atm",
+            label: "atm",
+            format: CVI_FORMAT,
+        },
+        SliceValue {
+            column: "skew",
+            label: "skew",
+            format: CVI_FORMAT,
+        },
+    ],
     value_type: ColumnType::F64,
-    format: ColumnFormat {
-        precision: 4,
-        thousands: false,
-        negative: Negative::Minus,
-        colour: Colour::None,
-        scale: Scale::None,
-    },
+    format: CVI_FORMAT,
     actions: &[
         KindAction {
             id: "marketdata::cvi_reanchor",
@@ -161,5 +210,23 @@ mod tests {
             "the key is what `names` exists to leave uncounted"
         );
         assert!(!CVI.names("param"));
+    }
+
+    /// The slice values are named too — that is how the pivot leaves
+    /// them out of its "one value column" count — each with its own
+    /// format: a forward is a price at two places, a vol at four.
+    #[test]
+    fn the_cvi_spec_names_its_slice_values_with_their_own_formats() {
+        for column in ["forward", "atm", "skew"] {
+            assert!(CVI.names(column), "{column}");
+        }
+        assert_eq!(CVI.slice_value("forward").unwrap().format.precision, 2);
+        assert_eq!(CVI.slice_value("atm").unwrap().format.precision, 4);
+        assert_eq!(CVI.slice_value("skew").unwrap().format.precision, 4);
+        assert_eq!(
+            CVI.slice_values.iter().map(|s| s.label).collect::<Vec<_>>(),
+            ["fwd", "atm", "skew"]
+        );
+        assert!(CVI.slice_value("param").is_none());
     }
 }

@@ -602,6 +602,7 @@ mod tests {
             key: vec!["SPX.Z".to_string()],
             source_time: Some(source_time.to_string()),
             header: Vec::new(),
+            slice_columns: 0,
             columns: cols
                 .iter()
                 .map(|c| SharedString::from(c.to_string()))
