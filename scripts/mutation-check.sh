@@ -1961,6 +1961,36 @@ run_mutation "keybindings: a row click is dropped while a confirm is armed (spec
   geode-shell \
   a_row_click_while_a_confirm_is_armed_is_dropped
 
+# Tooltips (2026-09-18): the chord a tooltip shows must be the EFFECTIVE
+# binding — a user-layer "none" shadow plus a rebind — not the first
+# binding for the action id. Only the shared effective_binding walk sees
+# the shadow; a naive last-for-action search reports the builtin.
+run_mutation "tips: chord_for ignores a none shadow" \
+  crates/geode-shell/src/tips.rs \
+  '    effective_binding(bindings, &id).map(|b| b.keystrokes.clone())' \
+  '    bindings.iter().rev().find(|b| b.action == id).map(|b| b.keystrokes.clone())' \
+  geode-shell \
+  chord_for_follows_a_user_layer_rebind
+
+# A reload must republish the global, or every tooltip shows the
+# startup keymap for the rest of the session.
+run_mutation "tips: a keymap reload republishes Chords" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.services.keymap.bindings().to_vec(),' \
+  '                Vec::new(),' \
+  geode-shell \
+  a_keymap_reload_refreshes_the_chords_global
+
+# The scope chip's tooltip lists EVERY value; the elided summary is what
+# the chip itself shows. Reusing the summary as the tooltip would pass
+# every bounds test and tell the trader nothing new.
+run_mutation "scopebar: a chip's full text lists every value" \
+  crates/geode-shell/src/scopebar.rs \
+  '            full: format!("{} ∈ {}", d.column, d.values.join(", ")).into(),' \
+  '            full: format!("{} ∈ {{{}}}", d.column, d.values.len()).into(),' \
+  geode-shell \
+  a_chip_carries_the_full_selection_beside_its_elided_summary
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \

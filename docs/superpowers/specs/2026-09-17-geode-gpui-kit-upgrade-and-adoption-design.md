@@ -337,6 +337,35 @@ an idle window pays nothing.
 carries the expected title and chord text; a rebinding test showing the
 chip follows the user layer.
 
+**As built (2026-09-18):** `geode_shell::tips` — `TipModel::resolve`
+(pure), `tip(selector, title, action, detail)` for all-literal sites and
+`tip_with(SharedString, SharedString, action, detail)` for owned strings
+(both return the `.tooltip(..)` closure; the chord is resolved on hover
+from the `Chords` global through `try_global`, so a fixture without one
+paints a chord-less tooltip), and `render_tip` (title, one `key_chip` per
+keystroke, muted detail; selectors `tip-<site>`, `-title`,
+`-chord-<ctrl+k>`). Three departures from the paragraph above, each a
+ruling: the chip is Geode's `key_chip`, not gpui-component's `Kbd` (`Kbd`
+hardwires uppercase key names; every chip in the app is lowercase in the
+data face); the module-visible keymap read is a second gpui global,
+`tips::Chords`, republished by `hot_reload` after every keymap rebuild —
+the market-data `⋯` button has no other path to the live keymap; and
+**attaching a tooltip allocates nothing per render** — the model owns
+every string a tooltip needs as a `SharedString` (`Chip.full`,
+`tip_selector`, `close_selector`, `close_title`; `ScopeBarModel.expr_full`,
+`text_tip`; the blotter's `filter_tip`, recomputed at every `tile_scope`
+assignment; the market-data tile's two selectors and the prepared state
+text), and a literal is always `SharedString::new_static` — `From<&str>`
+inlines ≤ 23 bytes and heap-allocates above, and a site must not depend
+on a title's length. Sites: sidebar discs + profile icon; scope-chip
+bodies (the full selection) and close glyphs, text/expr (whole
+expression)/impossible chips, the AS OF badge; the status bar's
+diagnostics summary and as-of segment; the blotter's `filtered` (the
+tile's filter) and `unscoped` pills; the market-data `⋯` (chord `.`) and
+`Behind` state run. Tested by hover in `VisualTestContext` (mouse move →
+600 ms → `run_until_parked` → `tip-<site>` bounds). Display check pending:
+placement and theme colours on a real window.
+
 ### 5.2 As-of date picker
 
 **Keyboard path (grammar):** `parse_as_of` (`geode-core::query`) accepts
