@@ -178,10 +178,12 @@ before this branch started (the 2026-09-17 mouse-editing reversal, `main`
 ea429bb→eddb4ea: a double-click now opens the editor); the table above now
 names the successor, and the pinned-rev behaviour that row guards
 (`TableState::set_selected_row` stopping propagation of its own) is still
-covered by `the_menu_rows_stop_propagation_keeps_the_pickers_focus`. Of the
-63 comment sites that cited the pinned checkout, 59 were re-pointed after
-their claim was confirmed at the new versions and 7 were reported as
-changed, restated under a controller ruling rather than left:
+covered by `the_menu_rows_stop_propagation_keeps_the_pickers_focus`. The
+plan enumerated 63 comment sites citing the pinned checkout; the sweeps
+found 9 more the regexes had missed (72 in all). Every one was re-read at
+the new versions: 7 no longer held as written and were restated under a
+controller ruling rather than left, and the rest were confirmed, with
+those citing a path or line number re-pointed:
 
 - `crates/geode-shell/src/shell/dialog.rs:225` — gpui-base's
   `on_action_search` now propagates `ctrl-f` when the input is not
