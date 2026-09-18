@@ -38,10 +38,19 @@ pub struct KindAction {
 /// the first grid columns ahead of the pivot's own ladder, each with its
 /// own format — a forward is a price, an ATM vol a decimal — and skipped
 /// by a row bump, which walks the ladder alone.
+///
+/// A slice value is `f64` only: its cell is edited through the spec's
+/// `value_type` exactly as a ladder cell is, and the pivot's
+/// within-slice disagreement check reads it through `Snapshot::f64_at`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceValue {
     pub column: &'static str,
-    /// The short column header.
+    /// The short column header. **Must not collide with any label the
+    /// column axis can produce** (or another slice value's): `Draft`
+    /// resolves an edit by `(row label, column label)` and indexes
+    /// `MatrixModel.columns` by label, so the pivot refuses a document
+    /// whose axis produces this label rather than paint two columns one
+    /// name.
     pub label: &'static str,
     pub format: ColumnFormat,
 }

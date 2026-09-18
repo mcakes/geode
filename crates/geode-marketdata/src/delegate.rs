@@ -92,7 +92,6 @@ impl MatrixDelegate {
         table_col.checked_sub(LABEL_COL + 1)
     }
 
-    /// The table column a model column is painted in.
     /// Whether table column `col_ix` is the LAST slice-value column — the
     /// one whose right edge closes the slice block ahead of the ladder.
     /// Never true for a model with no slice columns.
@@ -101,6 +100,7 @@ impl MatrixDelegate {
             && Self::model_col(col_ix) == Some(self.model.slice_columns - 1)
     }
 
+    /// The table column a model column is painted in.
     pub fn table_col(model_col: usize) -> usize {
         model_col + LABEL_COL + 1
     }

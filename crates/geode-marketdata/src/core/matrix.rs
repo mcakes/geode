@@ -82,8 +82,10 @@ impl MatrixModel {
     ///
     /// `Err` is a document that cannot be laid out as a grid at all: a
     /// missing axis column, no value column (or more than one under
-    /// `Columns::Axis`), a blank axis or key cell, a repeated row label,
-    /// or — for a pivot — a hole or a repeated (row, column) pair. A hole
+    /// `Columns::Axis`, excluding the spec's slice values), a blank axis
+    /// or key cell, a repeated row label, or — for a pivot — a hole, a
+    /// repeated (row, column) pair, a slice whose rows disagree on a
+    /// slice value, or a slice label the column axis also produces. A hole
     /// is deliberately an error rather than a blank cell: the axes say the
     /// document claims a value there, so a blank would be this model
     /// inventing the §6.3 claim "this number does not belong to this row"
@@ -430,6 +432,18 @@ fn pivot(
         .iter()
         .filter_map(|sv| snapshot.column_index(sv.column).map(|idx| (sv, idx)))
         .collect();
+    // A slice label is a column label: `Draft` resolves edits by label and
+    // indexes `columns` by it, so a node that reads `fwd` would make two
+    // columns one name.
+    for (sv, _) in &slices {
+        if grid.columns.iter().any(|c| c == sv.label) {
+            return Err(format!(
+                "the slice value '{}' is labelled '{}', which is also a {axis} label; \
+                 a column label must name one column",
+                sv.column, sv.label
+            ));
+        }
+    }
     let mut first_row: Vec<Option<usize>> = vec![None; grid.rows.len()];
     for (srow, &ri) in grid.row_of.iter().enumerate() {
         match first_row[ri] {
@@ -582,7 +596,7 @@ fn cell_of(
 mod tests {
     use super::*;
     use crate::core::draft::{Draft, DraftState};
-    use crate::core::spec::{CVI, Columns, HeaderAttr, PanelSpec};
+    use crate::core::spec::{CVI, Columns, HeaderAttr, PanelSpec, SliceValue};
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::document::Value;
     use geode_core::schema::ColumnType;
@@ -893,6 +907,87 @@ mod tests {
         let model = MatrixModel::build(&snap, &CVI, &Draft::default()).expect("the ladder alone");
         assert_eq!(model.slice_columns, 0);
         assert_eq!(columns_of(&model), vec!["-20", "-1", "3.5"]);
+    }
+
+    /// The pivot compares slice values as `Option<f64>` through `f64_at`:
+    /// a NULL beside a value in one slice is a disagreement (refused,
+    /// naming the term and the column), while a slice that is NULL
+    /// throughout agrees with itself and paints a blank cell — the same
+    /// "NULL is not 0.0" rule a ladder cell has.
+    #[test]
+    fn a_null_beside_a_value_in_a_slice_is_a_disagreement_and_an_all_null_slice_is_blank() {
+        let mut cells = Vec::new();
+        for term in TERMS {
+            for node in NODES {
+                cells.push((term.to_string(), node, Some(0.1)));
+            }
+        }
+        // Row 4 (the second term's middle node) has no atm where the rest
+        // of the slice does.
+        let mixed = document_with(&cells, |row, term| {
+            let (fwd, atm, skew) = slice_values_for(term);
+            if row == 4 {
+                (fwd, None, skew)
+            } else {
+                (fwd, atm, skew)
+            }
+        });
+        let err = MatrixModel::build(&mixed, &CVI, &Draft::default())
+            .expect_err("a NULL beside a value is a disagreement");
+        assert!(err.contains("2026-11-20"), "{err}");
+        assert!(err.contains("atm"), "{err}");
+
+        // The whole second term has no skew: consistent, so it builds and
+        // that slice cell is blank, never 0.0000.
+        let all_null = document_with(&cells, |_, term| {
+            let (fwd, atm, skew) = slice_values_for(term);
+            if term == "2026-11-20" {
+                (fwd, atm, None)
+            } else {
+                (fwd, atm, skew)
+            }
+        });
+        let model = MatrixModel::build(&all_null, &CVI, &Draft::default())
+            .expect("an all-NULL slice agrees with itself");
+        assert_eq!(model.rows[1].cells[2].text.to_string(), "");
+        assert_eq!(model.rows[1].cells[2].value, None);
+        assert_eq!(model.rows[0].cells[2].text.to_string(), "-1.1000");
+    }
+
+    /// A slice label is a column label, and `Draft` indexes columns by
+    /// label: a spec whose slice label the column axis also produces is
+    /// refused rather than painted as two columns with one name.
+    #[test]
+    fn a_slice_label_colliding_with_an_axis_label_is_refused() {
+        // CVI's three slice values, the first relabelled as a node.
+        const COLLIDING: PanelSpec = PanelSpec {
+            slice_values: &[
+                SliceValue {
+                    column: "forward",
+                    label: "-20",
+                    format: ColumnFormat::MEASURE,
+                },
+                SliceValue {
+                    column: "atm",
+                    label: "atm",
+                    format: ColumnFormat::MEASURE,
+                },
+                SliceValue {
+                    column: "skew",
+                    label: "skew",
+                    format: ColumnFormat::MEASURE,
+                },
+            ],
+            ..CVI
+        };
+        let err = MatrixModel::build(&full_grid(), &COLLIDING, &Draft::default())
+            .expect_err("a node labelled -20 and a slice value labelled -20");
+        assert!(err.contains("'-20'"), "{err}");
+        assert!(err.contains("forward"), "{err}");
+        assert!(
+            MatrixModel::build(&full_grid(), &CVI, &Draft::default()).is_ok(),
+            "the shipped spec's labels do not collide with its ladder"
+        );
     }
 
     /// An edit to a slice cell is keyed like any other — `(row, col)` in

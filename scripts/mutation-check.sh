@@ -11959,6 +11959,26 @@ run_mutation "matrix: a within-slice disagreement is refused, never averaged" \
   '                    if false {' \
   geode-marketdata a_within_slice_disagreement_is_refused_naming_the_term_and_column
 
+# The disagreement compare is over `Option<f64>`: a NULL beside a value in
+# one slice is a disagreement. A Some-only compare (`zip`) lets a slice
+# with one NULL row through, painting the first row's value as if the
+# whole slice carried it.
+run_mutation "matrix: a NULL beside a value in a slice is a disagreement" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '                    if snapshot.f64_at(*idx, first) != snapshot.f64_at(*idx, srow) {' \
+  '                    if snapshot.f64_at(*idx, first).zip(snapshot.f64_at(*idx, srow)).is_some_and(|(a, b)| a != b) {' \
+  geode-marketdata \
+  a_null_beside_a_value_in_a_slice_is_a_disagreement_and_an_all_null_slice_is_blank
+
+# A slice label is a column label and `Draft` indexes columns by label:
+# a spec whose slice label the axis also produces is refused, never
+# painted as two columns with one name.
+run_mutation "matrix: a slice label colliding with an axis label is refused" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        if grid.columns.iter().any(|c| c == sv.label) {' \
+  '        if false && grid.columns.iter().any(|c| c == sv.label) {' \
+  geode-marketdata a_slice_label_colliding_with_an_axis_label_is_refused
+
 # A row bump walks the ladder and skips the term's own forward/atm/skew.
 run_mutation "mdbump: a row bump skips the slice cells" \
   crates/geode-marketdata/src/tile.rs \
