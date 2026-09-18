@@ -2,22 +2,22 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move Geode from the git-pinned gpui-component 0e2fb7a + unpinned zed gpui to the crates.io releases gpui-component 0.6.1 / gpui-kit-assets 0.6.1 / gpui-pre 0.3.5, rewrite the dependency invariant that no longer holds, swap the vendored skills to gpui-kit's, and re-point every code comment that cites the old pinned checkout.
+**Goal:** Move Geode from the git-pinned gpui-component 0e2fb7a + unpinned zed gpui to the crates.io releases gpui-component 0.6.2 / gpui-kit-assets 0.6.2 / gpui-pre 0.3.5, rewrite the dependency invariant that no longer holds, swap the vendored skills to gpui-kit's, and re-point every code comment that cites the old pinned checkout.
 
-**Architecture:** The dependency swap is four files (root `Cargo.toml`, `geode-app/Cargo.toml`, `main.rs`, `Cargo.lock`) and was proven on `probe/gpui-kit` at 0.6.0/0.3.4 with zero source errors; this plan redoes it on a fresh branch from today's `main` rather than rebasing the nine-day-old probe. Everything after that is verification and documentation: the suite, the invariant text, the skills, and 63 comment sites across 28 files that name "the pinned checkout" — each of which is re-read against the 0.6.1 / 0.3.5 source before its citation is rewritten, so a re-pointed citation never vouches for a file nobody checked.
+**Architecture:** The dependency swap is four files (root `Cargo.toml`, `geode-app/Cargo.toml`, `main.rs`, `Cargo.lock`) and was proven on `probe/gpui-kit` at 0.6.0/0.3.4 with zero source errors; this plan redoes it on a fresh branch from today's `main` rather than rebasing the nine-day-old probe. Everything after that is verification and documentation: the suite, the invariant text, the skills, and 63 comment sites across 28 files that name "the pinned checkout" — each of which is re-read against the 0.6.2 / 0.3.5 source before its citation is rewritten, so a re-pointed citation never vouches for a file nobody checked.
 
-**Tech Stack:** Rust 1.96 (upstream floor 1.90), cargo registry crates `gpui-pre` 0.3.5 (zed snapshot `d89e9c2`), `gpui-pre-platform` 0.3.5, `gpui-component` 0.6.1, `gpui-kit-assets` 0.6.1, `gpui-base` 0.6.1 (transitive); the `skills` CLI (`npx skills`, 1.7.0).
+**Tech Stack:** Rust 1.96 (upstream floor 1.90), cargo registry crates `gpui-pre` 0.3.5 (zed snapshot `d89e9c2`), `gpui-pre-platform` 0.3.5, `gpui-component` 0.6.2, `gpui-kit-assets` 0.6.2, `gpui-base` 0.6.2, `gpui-component-macros` 0.6.2 (the last two pinned directly because gpui-component names them with a caret); the `skills` CLI (`npx skills`, 1.7.0).
 
 **Spec:** `docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md` — §2 (versions and the pin rule) and §3 (Phase 1). §4 and §5 are later phases and are NOT in this plan.
 
 ## Global Constraints
 
-- Versions are exact, copied from spec §2: `gpui = { package = "gpui-pre", version = "=0.3.5" }`, `gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = ["font-kit", "runtime_shaders"] }`, `gpui-component = "=0.6.1"`, `gpui-kit-assets = "=0.6.1"`. No caret anywhere in these four. Geode never depends on the `gpui-kit` umbrella crate (spec §3.1: the alias `gpui = { package = "gpui-pre" }` keeps `#[gpui::test]` and every macro path unchanged).
+- Versions are exact, copied from spec §2: `gpui = { package = "gpui-pre", version = "=0.3.5" }`, `gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = ["font-kit", "runtime_shaders"] }`, `gpui-component = "=0.6.2"`, `gpui-kit-assets = "=0.6.2"`, `gpui-base = "=0.6.2"`, `gpui-component-macros = "=0.6.2"`. No caret anywhere in these six. Geode never depends on the `gpui-kit` umbrella crate (spec §3.1: the alias `gpui = { package = "gpui-pre" }` keeps `#[gpui::test]` and every macro path unchanged).
 - The four CI checks plus the `test-support` check must stay green on macOS (CLAUDE.md "Commands"): `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `cargo bench --workspace --no-run`; `cargo check -p geode-shell --features test-support --all-targets`. Windows must keep building; this checkout has **no git remote**, so Windows CI is a hand-off item (Task 9), not a step.
 - `zsh scripts/mutation-check.sh --anchors-only` must exit 0 before merge (CLAUDE.md). No harness entry is added by this plan: it changes no Geode behaviour.
 - Spec §3.4: a change in any listed pinned-rev behaviour is a **finding to report, not a test to relax**. No test is edited, weakened or `#[ignore]`d anywhere in this plan. If a test fails after the swap, stop the task and report the failure verbatim.
-- Spec §3.3 (user ruling 2026-09-17): every comment citing the pinned checkout is re-pointed to the registry path with the version in it, and the claim it rests on is re-read at 0.6.1 / 0.3.5 first. A claim that no longer holds is reported (file:line, what changed), and the comment is left untouched for the orchestrator to rule on. A re-pointed citation must not vouch for a file that changed.
-- Citation spelling (one rule, every site): `crates/ui/src/<path>` → `gpui-component-0.6.1/src/<path>`; `crates/gpui/src/<path>` → `gpui-pre-0.3.5/src/<path>`; a `:NNN` or `:NNN-MMM` line suffix is dropped and the named item (`fn`, `impl`, `static`, `struct`) is cited instead, because line numbers rot on every bump; "pinned checkout" / "vendored checkout" → "pinned release"; "pinned rev" / "pinned gpui-component rev" / "pinned gpui rev" stay as written (CLAUDE.md's glossary, Task 4, defines the term as the `=`-pinned registry versions). The registry source lives at `~/.cargo/registry/src/*/gpui-component-0.6.1/src/`, `~/.cargo/registry/src/*/gpui-base-0.6.1/src/`, `~/.cargo/registry/src/*/gpui-pre-0.3.5/src/` after Task 1's first build; until then, the same tarballs are unpacked in the scratchpad (`/private/tmp/claude-501/-Users-mch-Repos-geode/36fedef0-6140-467e-8537-2c71041dac2b/scratchpad/`).
+- Spec §3.3 (user ruling 2026-09-17): every comment citing the pinned checkout is re-pointed to the registry path with the version in it, and the claim it rests on is re-read at 0.6.2 / 0.3.5 first. A claim that no longer holds is reported (file:line, what changed), and the comment is left untouched for the orchestrator to rule on. A re-pointed citation must not vouch for a file that changed.
+- Citation spelling (one rule, every site): `crates/ui/src/<path>` → `gpui-component-0.6.2/src/<path>`; `crates/gpui/src/<path>` → `gpui-pre-0.3.5/src/<path>`; a `:NNN` or `:NNN-MMM` line suffix is dropped and the named item (`fn`, `impl`, `static`, `struct`) is cited instead, because line numbers rot on every bump; "pinned checkout" / "vendored checkout" → "pinned release"; "pinned rev" / "pinned gpui-component rev" / "pinned gpui rev" stay as written (CLAUDE.md's glossary, Task 4, defines the term as the `=`-pinned registry versions). The registry source lives at `~/.cargo/registry/src/*/gpui-component-0.6.2/src/`, `~/.cargo/registry/src/*/gpui-base-0.6.2/src/`, `~/.cargo/registry/src/*/gpui-pre-0.3.5/src/` after Task 1's first build; until then, the same tarballs are unpacked in the scratchpad (`/private/tmp/claude-501/-Users-mch-Repos-geode/36fedef0-6140-467e-8537-2c71041dac2b/scratchpad/`).
 - Commits are small and per task; every commit message ends with `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. Never commit `TODO.md` or `docs/modules.md` (the user's untracked notes on `main`).
 - Work happens on a worktree branch off `main` (`superpowers:using-git-worktrees` at execution time), named `worktree-gpui-kit`. Do not branch from or rebase onto `probe/gpui-kit`.
 
@@ -27,7 +27,7 @@
 
 | File | Responsibility in this plan |
 |---|---|
-| `Cargo.toml` (root) | the four `[workspace.dependencies]` entries and the comment that states the pin rule |
+| `Cargo.toml` (root) | the six `[workspace.dependencies]` entries and the comment that states the pin rule |
 | `Cargo.lock` | regenerated by cargo on the first build after Task 1; committed |
 | `crates/geode-app/Cargo.toml` | the assets crate's new name |
 | `crates/geode-app/src/main.rs` | the one `Assets` path; one comment site (Task 7) |
@@ -43,7 +43,7 @@ No new files. No test files change.
 ### Task 1: Dependency swap and first build
 
 **Files:**
-- Modify: `Cargo.toml:35-52` (the gpui comment block and four entries)
+- Modify: `Cargo.toml:35-52` (the gpui comment block; four entries become six)
 - Modify: `crates/geode-app/Cargo.toml:23`
 - Modify: `crates/geode-app/src/main.rs:92`
 - Regenerated: `Cargo.lock`
@@ -90,9 +90,17 @@ Replace lines 35–52 (from `# gpui-component's own Cargo.toml depends on` throu
 gpui = { package = "gpui-pre", version = "=0.3.5" }
 # runtime_shaders: compile Metal shaders at runtime; builds without full Xcode. No-op on non-macOS.
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = ["font-kit", "runtime_shaders"] }
-gpui-component = "=0.6.1"
+gpui-component = "=0.6.2"
 # Renamed upstream from `gpui-component-assets` with the gpui-kit rebrand.
-gpui-kit-assets = "=0.6.1"
+gpui-kit-assets = "=0.6.2"
+# gpui-component names these two siblings with a CARET (`gpui-base =
+# "0.6.2"`), so without a direct `=` pin on our side a `cargo update` can
+# float them to a newer release than the gpui-component they were built
+# with — which is exactly what happened on 2026-09-18 (a 0.6.1 component
+# over a 0.6.2 base failed to compile inside gpui-component itself). They
+# are depended on by `geode-app` for that reason alone.
+gpui-base = "=0.6.2"
+gpui-component-macros = "=0.6.2"
 ```
 
 - [ ] **Step 4: Rename the assets dependency in `geode-app`**
@@ -100,7 +108,14 @@ gpui-kit-assets = "=0.6.1"
 In `crates/geode-app/Cargo.toml`, change line 23 from
 `gpui-component-assets.workspace = true`
 to
-`gpui-kit-assets.workspace = true`
+```toml
+gpui-kit-assets.workspace = true
+# Sibling pins — see the root Cargo.toml's dependency comment: gpui-component
+# names these with a caret, and a direct `=` here is what keeps the family
+# in step under `cargo update`. Not imported by this crate.
+gpui-base.workspace = true
+gpui-component-macros.workspace = true
+```
 
 - [ ] **Step 5: Rename the assets path in `main.rs`**
 
@@ -117,7 +132,7 @@ Expected: `Finished` with no errors. If cargo reports it cannot resolve `=0.3.5`
 - [ ] **Step 7: Prove there is one copy of gpui and it is the pinned one**
 
 Run: `cargo tree --workspace -d 2>/dev/null | grep -iE "^gpui" ; echo "dupes above (expect none)"; cargo tree -p geode-app -e normal 2>/dev/null | grep -oE "gpui[a-z-]* v[0-9.]+" | sort -u`
-Expected: nothing above the `dupes` line; below it exactly `gpui-base v0.6.1`, `gpui-component v0.6.1`, `gpui-component-macros v0.6.1`, `gpui-kit-assets v0.6.1`, `gpui-pre v0.3.5`, `gpui-pre-macros v0.3.5`, `gpui-pre-platform v0.3.5` (and any `gpui-pre-*` platform sub-crates at 0.3.5). No `0.3.4`, no git URL.
+Expected: nothing above the `dupes` line; below it exactly `gpui-base v0.6.2`, `gpui-component v0.6.2`, `gpui-component-macros v0.6.2`, `gpui-kit-assets v0.6.2`, `gpui-pre v0.3.5`, `gpui-pre-macros v0.3.5`, `gpui-pre-platform v0.3.5` (and any `gpui-pre-*` platform sub-crates at 0.3.5). No `0.3.4`, no `0.6.1`, no git URL.
 
 - [ ] **Step 8: Check the two feature-gated builds**
 
@@ -128,7 +143,7 @@ Expected: both `Finished`. (`profiling` maps to `gpui/profiler`, which gpui-pre 
 
 ```bash
 git add Cargo.toml Cargo.lock crates/geode-app/Cargo.toml crates/geode-app/src/main.rs
-git commit -m "deps: gpui-component 0.6.1 / gpui-pre 0.3.5 from crates.io, =-pinned
+git commit -m "deps: gpui-component 0.6.2 / gpui-pre 0.3.5 from crates.io, =-pinned
 
 Replaces the git-pinned gpui-component 0e2fb7a and the unpinned zed gpui
 with the registry releases. gpui-kit depends on gpui-pre with a caret,
@@ -224,7 +239,7 @@ Replace the whole `## gpui skills` section (lines 140–142) with:
 ```markdown
 ## gpui skills
 
-The `gpui-kit` and `gpui-kit-design-guides` skills (available via the Skill tool) are vendored into this repo from longbridge/gpui-kit and tracked in `skills-lock.json` (they replaced the retired `gpui` and `gpui-component` skills on 2026-09-17, with the upgrade to the crates.io releases). Use them when touching any gpui rendering, entity, async, focus, or component code. **One translation to keep in mind:** the skills are written for the `gpui-kit` umbrella crate and spell paths as `gpui_kit::component::X` / `gpui_kit::base::X`; Geode does not depend on the umbrella (see the dependency comment in the root `Cargo.toml`), so those are `gpui_component::X` and, for the unstyled layer, a re-export or `gpui_base::X` here — the item names and signatures are the same, only the prefix differs.
+The `gpui-kit` and `gpui-kit-design-guides` skills (available via the Skill tool) are vendored into this repo from longbridge/gpui-kit and tracked in `skills-lock.json` (they replaced the retired `gpui` and `gpui-component` skills on 2026-09-18, with the upgrade to the crates.io releases). Use them when touching any gpui rendering, entity, async, focus, or component code. **One translation to keep in mind:** the skills are written for the `gpui-kit` umbrella crate and spell paths as `gpui_kit::component::X` / `gpui_kit::base::X`; Geode does not depend on the umbrella (see the dependency comment in the root `Cargo.toml`), so those are `gpui_component::X` and, for the unstyled layer, a re-export or `gpui_base::X` here — the item names and signatures are the same, only the prefix differs.
 ```
 
 - [ ] **Step 5: Commit**
@@ -256,7 +271,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 Replace the bullet that begins `- **gpui / gpui_platform git deps must stay unpinned**` (the whole bullet, one line) with:
 
 ```markdown
-- **Every gpui-kit and gpui-pre crate is `=`-pinned in the root `Cargo.toml`** — `gpui-component`, `gpui-kit-assets`, `gpui-pre` (aliased `gpui`) and `gpui-pre-platform` (aliased `gpui_platform`), all from crates.io since 2026-09-17 (0.6.1 / 0.3.5; spec `docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md` §2). gpui-kit depends on `gpui-pre` with a caret, so an unpinned entry would let `cargo update` move gpui under us. Bump both families together, deliberately, on a branch; read the gpui-pre crate's description on crates.io for the zed rev it snapshots. There is no git dependency on zed or gpui-kit any more, so the old two-copies hazard the previous form of this rule guarded against cannot recur. The full explanation is in the comment in the root `Cargo.toml`. **Glossary:** wherever this file or a code comment says "the pinned rev", "the pinned release" or "the pinned gpui-component", it means these exact versions; the source a maintainer reads is the registry copy at `~/.cargo/registry/src/*/gpui-component-0.6.1/src/` (styled components), `gpui-base-0.6.1/src/` (unstyled behaviour) and `gpui-pre-0.3.5/src/` (gpui itself), never a git checkout.
+- **Every gpui-kit and gpui-pre crate is `=`-pinned in the root `Cargo.toml`** — `gpui-component`, `gpui-kit-assets`, `gpui-base`, `gpui-component-macros`, `gpui-pre` (aliased `gpui`) and `gpui-pre-platform` (aliased `gpui_platform`), all from crates.io since 2026-09-18 (0.6.2 / 0.3.5; spec `docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md` §2). gpui-kit depends on `gpui-pre` with a caret and gpui-component names its own siblings `gpui-base`/`gpui-component-macros` with a caret too, so an unpinned entry would let `cargo update` move gpui — or split the gpui-kit family — under us (it did, on the first build of this upgrade). Bump both families together, deliberately, on a branch; read the gpui-pre crate's description on crates.io for the zed rev it snapshots. There is no git dependency on zed or gpui-kit any more, so the old two-copies hazard the previous form of this rule guarded against cannot recur. The full explanation is in the comment in the root `Cargo.toml`. **Glossary:** wherever this file or a code comment says "the pinned rev", "the pinned release" or "the pinned gpui-component", it means these exact versions; the source a maintainer reads is the registry copy at `~/.cargo/registry/src/*/gpui-component-0.6.2/src/` (styled components), `gpui-base-0.6.2/src/` (unstyled behaviour) and `gpui-pre-0.3.5/src/` (gpui itself), never a git checkout.
 ```
 
 - [ ] **Step 2: Check nothing else in CLAUDE.md still describes the git form**
@@ -277,13 +292,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 5: Re-point citations — geode-shell module headers (path citations)
 
-These ten files cite `crates/ui/src/<file>` paths, some with line numbers, as the basis of a recorded decision. For each site: open the cited file at 0.6.1, confirm the claim in the comment still holds, then rewrite the citation per the global spelling rule. Where the claim no longer holds, leave the comment as it is and report the site.
+These ten files cite `crates/ui/src/<file>` paths, some with line numbers, as the basis of a recorded decision. For each site: open the cited file at 0.6.2, confirm the claim in the comment still holds, then rewrite the citation per the global spelling rule. Where the claim no longer holds, leave the comment as it is and report the site.
 
 **Files:**
 - Modify (comments only): `crates/geode-shell/src/shell/dialog.rs` (sites at lines 8, 11, 201, 227, 240, 248, 470, 558–559, 651, 654, 952, 1049), `crates/geode-shell/src/palette.rs` (749, 788, 818, 826, 951, 958), `crates/geode-shell/src/fonts.rs` (9, 28, 33, 38), `crates/geode-shell/src/theme.rs` (10–11, 50, 73), `crates/geode-shell/src/shell/sidebar.rs` (7, 22–23), `crates/geode-shell/src/shell/toolbar.rs` (3–4), `crates/geode-shell/src/shell/status.rs` (16), `crates/geode-shell/src/tiling/docks.rs` (16), `crates/geode-shell/src/listfilter.rs` (20), `crates/geode-shell/src/fontsize.rs` (12)
 
 **Interfaces:**
-- Consumes: the registry source under `~/.cargo/registry/src/*/gpui-component-0.6.1/src/` and `gpui-pre-0.3.5/src/` (present after Task 1's build).
+- Consumes: the registry source under `~/.cargo/registry/src/*/gpui-component-0.6.2/src/` and `gpui-pre-0.3.5/src/` (present after Task 1's build).
 - Produces: nothing code-level; a report listing every site as `confirmed` or `changed: <what>`.
 
 - [ ] **Step 1: List the sites and confirm the count**
@@ -293,7 +308,7 @@ Expected: 36.
 
 - [ ] **Step 2: Verify and rewrite each claim**
 
-The claims, with where to confirm each at 0.6.1 (`C` = `gpui-component-0.6.1/src`, `P` = `gpui-pre-0.3.5/src`):
+The claims, with where to confirm each at 0.6.2 (`C` = `gpui-component-0.6.2/src`, `P` = `gpui-pre-0.3.5/src`):
 
 | Site | Claim | Confirm by |
 |---|---|---|
@@ -330,7 +345,7 @@ Rewrite each confirmed site per the spelling rule. Two worked examples, so the s
 after:
 ```
 //!   `Root::render`
-//!   (`gpui-component-0.6.1/src/root.rs`, the root `div`'s `.font_family(cx.theme()
+//!   (`gpui-component-0.6.2/src/root.rs`, the root `div`'s `.font_family(cx.theme()
 ```
 (the line number is dropped; the item — the root `div` — is named.)
 
@@ -342,7 +357,7 @@ after:
 after:
 ```
 /// .text_color(muted_foreground))` + `appearance(false)` pair (pinned
-/// release, `gpui-component-0.6.1/src/command/state.rs`, `Command`'s
+/// release, `gpui-component-0.6.2/src/command/state.rs`, `Command`'s
 /// searchable-header render) — so the icon is
 ```
 
@@ -360,7 +375,7 @@ Expected: fmt clean; doc tests `ok`.
 
 ```bash
 git add crates/geode-shell
-git commit -m "docs(shell): re-point pinned-checkout citations to the 0.6.1 / 0.3.5 registry sources
+git commit -m "docs(shell): re-point pinned-checkout citations to the 0.6.2 / 0.3.5 registry sources
 
 Every claim re-read at the new versions before its citation moved;
 line numbers replaced by item names.
@@ -372,7 +387,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 6: Re-point citations — geode-shell behavioural claims
 
-These sites say "at the pinned rev" about a gpui or gpui-component behaviour rather than citing a path. The phrase stays (Task 4's glossary defines it); the job is to re-verify each claim at 0.3.5 / 0.6.1 and rewrite only the sites that also name a checkout or a `crates/…` path.
+These sites say "at the pinned rev" about a gpui or gpui-component behaviour rather than citing a path. The phrase stays (Task 4's glossary defines it); the job is to re-verify each claim at 0.3.5 / 0.6.2 and rewrite only the sites that also name a checkout or a `crates/…` path.
 
 **Files:**
 - Modify (comments only, where a path or "checkout" appears): `crates/geode-shell/Cargo.toml` (15), `crates/geode-shell/src/module.rs` (514), `crates/geode-shell/src/shell/render.rs` (105), `crates/geode-shell/src/shell/occupants.rs` (318), `crates/geode-shell/src/shell/palette_ctl.rs` (24), `crates/geode-shell/src/shell/hot_reload.rs` (167), `crates/geode-shell/src/shell/mod.rs` (550, 567, 1130), `crates/geode-shell/src/shell/profiling_hook.rs` (5), `crates/geode-shell/src/shell/input.rs` (712), `crates/geode-shell/src/shell/commandline_ctl.rs` (258), `crates/geode-shell/src/shell/tests/drag.rs` (17, 1503), `crates/geode-shell/src/shell/tests/mod.rs` (547), `crates/geode-shell/src/shell/tests/palette.rs` (634)
@@ -410,7 +425,7 @@ Expected: no grep output (bar deliberately reported sites); fmt clean.
 
 ```bash
 git add crates/geode-shell
-git commit -m "docs(shell): pinned-rev behavioural claims re-verified at gpui-pre 0.3.5 / gpui-component 0.6.1
+git commit -m "docs(shell): pinned-rev behavioural claims re-verified at gpui-pre 0.3.5 / gpui-component 0.6.2
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -436,7 +451,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 | `marketdata/tile.rs:969` | `TableState` caches each `column()` in `col_groups`; `refresh` re-prepares | `grep -n "col_groups\|pub fn refresh" C/table/state.rs \| head` |
 | `marketdata/tile.rs:1569`, `:4505` | `blur` then drop is required; `Root` holds the focused input strongly and unregisters only from that input's render | `grep -n "focused_input" C/root.rs C/input/input.rs C/input/state.rs` — the strong `Entity<InputState>` on `Root` and the unregister site inside `Input`'s render |
 | `app/main.rs:233` | `App::on_app_quit` exists | `grep -n "fn on_app_quit" P/app.rs` |
-| `app/main.rs:303` | the `window_title` example at the pinned checkout is the reference for `TitleBar` content | the crates.io tarball ships no `examples/`; rewrite to cite `TitleBar`'s own doc comment (`gpui-component-0.6.1/src/title_bar.rs`) and keep the example's name as "upstream's `examples/window_title`" |
+| `app/main.rs:303` | the `window_title` example at the pinned checkout is the reference for `TitleBar` content | the crates.io tarball ships no `examples/`; rewrite to cite `TitleBar`'s own doc comment (`gpui-component-0.6.2/src/title_bar.rs`) and keep the example's name as "upstream's `examples/window_title`" |
 
 - [ ] **Step 2: Rewrite per the spelling rule; confirm; commit**
 
@@ -472,7 +487,7 @@ After the table in §3.4, add:
 
 ```markdown
 **As verified (Task 8 of the plan, <date>):** every behaviour in the table
-held at gpui-component 0.6.1 / gpui-pre 0.3.5 and every named test passed
+held at gpui-component 0.6.2 / gpui-pre 0.3.5 and every named test passed
 unchanged. Of the 63 comment sites that cited the pinned checkout, <n>
 were re-pointed after their claim was confirmed at the new versions and
 <m> were reported as changed: <list each as `file:line — what changed`, or
@@ -490,7 +505,7 @@ Expected: fmt clean; clippy `Finished`; `failed=0`; bench `Finished`; check `Fin
 
 ```bash
 git add docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md
-git commit -m "docs: gpui-kit spec §3.4 — as verified at 0.6.1 / 0.3.5
+git commit -m "docs: gpui-kit spec §3.4 — as verified at 0.6.2 / 0.3.5
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -518,7 +533,7 @@ Expected: `Deleted branch probe/gpui-kit`.
 
 - [ ] **Step 4: Update the orchestrator's memories**
 
-`gpui-component-inventory-check.md`: the inventory to list is now `~/.cargo/registry/src/*/gpui-component-0.6.1/src/` (and `gpui-base-0.6.1/src/`), not a git checkout. `gpui-kit-migration.md`: status → merged, date, commit; the "git-only" remark about headless testing corrected (`gpui_base::test_support` is released; only the `gpui_kit::test` facade is git-only). `working-rhythm.md`: the reviewer's hand-traces are against the registry sources, not `~/.cargo/git/checkouts/`.
+`gpui-component-inventory-check.md`: the inventory to list is now `~/.cargo/registry/src/*/gpui-component-0.6.2/src/` (and `gpui-base-0.6.2/src/`), not a git checkout. `gpui-kit-migration.md`: status → merged, date, commit; the "git-only" remark about headless testing corrected (`gpui_base::test_support` is released; only the `gpui_kit::test` facade is git-only). `working-rhythm.md`: the reviewer's hand-traces are against the registry sources, not `~/.cargo/git/checkouts/`.
 
 - [ ] **Step 5: Hand the display checks to the user**
 
