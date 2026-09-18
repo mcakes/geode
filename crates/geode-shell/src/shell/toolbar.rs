@@ -1,9 +1,10 @@
 //! The top toolbar row (Task 4). User direction: the toolbar IS the native
 //! title bar — no separate strip underneath eating extra vertical real
-//! estate. Built on gpui-component's [`TitleBar`] (pinned checkout:
-//! `crates/ui/src/title_bar.rs`), which already draws the platform window
-//! controls (macOS traffic lights overlay it via `traffic_light_position`;
-//! Windows/Linux get real caption buttons) and owns window-drag/double-
+//! estate. Built on gpui-component's [`TitleBar`] (pinned release:
+//! `gpui-component-0.6.2/src/title_bar.rs`), which already draws the
+//! platform window controls (macOS traffic lights overlay it via
+//! `traffic_light_position`; Windows/Linux get real caption buttons) and
+//! owns window-drag/double-
 //! click — `TitleBar::title_bar_options()` feeds `main.rs`'s
 //! `WindowOptions`, and the `window_title` example
 //! (`examples/window_title/src/main.rs`) is the reference for putting

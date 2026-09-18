@@ -785,11 +785,12 @@ pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::H
 /// binding right-aligned in `cx.theme().muted_foreground`.
 ///
 /// **`Input` styling** (inventoried against `Input`'s own builder methods at
-/// the pinned checkout, `crates/ui/src/input/input.rs`): `.appearance(false)`
-/// strips `Input`'s own background/border/rounding (`self.appearance`
-/// gates all three there), which would otherwise paint a second, competing
-/// box inside this panel's own chrome; it does *not* touch `Input`'s
-/// internal horizontal/vertical padding (`input_px`/`input_py`, applied
+/// the pinned release, `gpui-component-0.6.2/src/input/input.rs`):
+/// `.appearance(false)` strips `Input`'s own background/border/rounding
+/// (`self.appearance` gates all three there), which would otherwise paint
+/// a second, competing box inside this panel's own chrome; it does *not*
+/// touch `Input`'s internal horizontal/vertical padding
+/// (`input_px`/`input_py`, applied
 /// unconditionally for a single-line input regardless of `appearance`), so
 /// `input_row` below needs no padding of its own beyond the bottom border
 /// that visually separates it from `list` — the same convention the
@@ -823,8 +824,8 @@ pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::H
 /// open); `.id(..).overflow_y_scroll().track_scroll(scroll_handle)` on the
 /// list container turns it into a real scrollable viewport with mouse-wheel
 /// support built in (gpui-component's own `Scrollable`/list machinery — see
-/// `crates/ui/src/scroll/`, `crates/ui/src/list/list.rs` in the pinned
-/// gpui-component checkout — layers a custom scrollbar and virtualization
+/// `gpui-component-0.6.2/src/scroll/`, `gpui-component-0.6.2/src/list/
+/// list.rs` — layers a custom scrollbar and virtualization
 /// on top of exactly this primitive; at 66 items neither is needed here,
 /// so this uses the primitive directly rather than pulling in `List`'s
 /// virtualized-row bookkeeping for a list this small). `ShellView`'s
@@ -948,15 +949,17 @@ pub fn render(
     // helper text: an empty query shows the icon and a caret, never hint
     // text. This is gpui-component's own idiom for this exact surface —
     // its command palette builds the identical `prefix` +
-    // `appearance(false)` pair (pinned checkout, `crates/ui/src/command/
-    // state.rs:838-846`), which is why the icon keeps its default size —
-    // and the same one `shell::dialog::filter_row` wears, so all three
-    // filtering surfaces read alike.
+    // `appearance(false)` pair (pinned release,
+    // `gpui-component-0.6.2/src/command/state.rs`, `Command`'s
+    // searchable-header render), which is why the icon keeps its default
+    // size — and the same one `shell::dialog::filter_row` wears, so all
+    // three filtering surfaces read alike.
     //
     // `.appearance(false)` strips `Input`'s own border/background (see
     // this function's doc comment) but not its prefix, which that flag
-    // never guards (`crates/ui/src/input/input.rs:578-584`); the bottom
-    // border below is `input_row`'s own, standing in for the chrome
+    // never guards (`gpui-component-0.6.2/src/input/input.rs`, `Input`'s
+    // render); the bottom border below is `input_row`'s own, standing in
+    // for the chrome
     // `appearance(true)` would otherwise have drawn, just scoped to
     // separating the query row from `list` rather than boxing the input
     // itself.

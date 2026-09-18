@@ -7,9 +7,10 @@
 //! ## Checkout findings (gpui-component rev `0e2fb7a`, pinned in the
 //! workspace root `Cargo.toml`)
 //!
-//! Two theme sources exist in the pinned checkout:
-//! - `crates/ui/src/theme/default-theme.json` — the crate's own baseline
-//!   pair, `"Default Light"` / `"Default Dark"`, both `is_default: true`.
+//! Two theme sources exist in the pinned release:
+//! - `gpui-component-0.6.2/src/theme/default-theme.json` — the crate's
+//!   own baseline pair, `"Default Light"` / `"Default Dark"`, both
+//!   `is_default: true`.
 //!   `gpui_component::init` loads these into a `ThemeRegistry` global and
 //!   immediately applies `"Default Light"` (`theme::mod.rs::init`).
 //! - a repo-root `themes/*.json` directory of 21 further theme families
@@ -47,8 +48,9 @@
 //! because that is what Nord itself does; it is chrome, not data.
 //!
 //! Parsing uses the crate's own config type, `gpui_component::ThemeSet` /
-//! `ThemeConfig` (`crates/ui/src/theme/schema.rs`) — a theme JSON file is a
-//! `ThemeSet` (a family: `name`, `author`, `url`, and a `themes: Vec<
+//! `ThemeConfig` (`gpui-component-0.6.2/src/theme/schema.rs`) — a theme
+//! JSON file is a `ThemeSet` (a family: `name`, `author`, `url`, and a
+//! `themes: Vec<
 //! ThemeConfig>` list, one `ThemeConfig` per variant the family ships). A
 //! `ThemeConfig`'s own `.name` is already fully qualified, e.g. `"Gruvbox
 //! Dark"`; the `ThemeSet`'s `.name` is the bare family, e.g. `"Gruvbox"`.

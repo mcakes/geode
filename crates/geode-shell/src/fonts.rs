@@ -6,16 +6,16 @@
 //!
 //! # Inventory (recorded before wiring, per plan constraint)
 //!
-//! Checked against the pinned checkouts named in `crates/geode-app/
-//! Cargo.toml` — zed rev `e3adf43` (`~/.cargo/git/checkouts/
+//! Checked against the pinned releases named in the root `Cargo.toml` —
+//! zed rev `e3adf43` (`~/.cargo/git/checkouts/
 //! zed-a70e2ad075855582/e3adf43/`) and gpui-component rev `0e2fb7a`
 //! (`~/.cargo/git/checkouts/gpui-component-95ce574d8a0da8b8/0e2fb7a/`):
 //!
 //! - **Embedded-font API.** `App::text_system(&self) -> &Arc<TextSystem>`
-//!   (`crates/gpui/src/app.rs:2006`); `TextSystem::add_fonts(&self, fonts:
-//!   Vec<Cow<'static, [u8]>>) -> Result<()>` (`crates/gpui/src/
-//!   text_system.rs:102`, delegating to `PlatformTextSystem::add_fonts`,
-//!   `crates/gpui/src/platform.rs:1078`) is the exact registration call.
+//!   (`gpui-pre-0.3.5/src/app.rs`); `TextSystem::add_fonts(&self, fonts:
+//!   Vec<Cow<'static, [u8]>>) -> Result<()>` (`gpui-pre-0.3.5/src/
+//!   text_system.rs`, delegating to `PlatformTextSystem::add_fonts`,
+//!   `gpui-pre-0.3.5/src/platform.rs`) is the exact registration call.
 //!   Zed's own bootstrap (`crates/zed/src/main.rs::load_embedded_fonts`,
 //!   around line 1822) lists an asset dir for `.ttf` paths, loads each
 //!   file's bytes, and makes one `add_fonts(Vec<Cow<..>>)` call — the same
@@ -25,19 +25,20 @@
 //!   bytes fine and this repo's `AssetSource` is `gpui_component_assets::
 //!   Assets` (vendored upstream, not ours to extend with an app-specific
 //!   `fonts/` folder).
-//! - **Theme font-family seam.** `gpui_component::Theme` (`crates/ui/src/
-//!   theme/mod.rs`) carries `font_family: SharedString` (default
-//!   `.SystemUIFont`, the macOS system UI font — `mod.rs` `impl From<&
-//!   ThemeColor> for Theme`) and `mono_font_family: SharedString` (default
-//!   `Menlo`/`Consolas`/`DejaVu Sans Mono` by platform). `Root::render`
-//!   (`crates/ui/src/root.rs:588`) applies `.font_family(cx.theme()
-//!   .font_family.clone())` to the app-wide root `div` that wraps
-//!   `ShellView`, so it cascades to every element that doesn't set its own
-//!   `font_family` — exactly the seam [`register`] uses to make Inter the
-//!   default face app-wide.
-//! - **Theme JSON does not fight this.** `ThemeConfig` (`crates/ui/src/
-//!   theme/schema.rs`) carries the *optional* mirror fields `font_family:
-//!   Option<SharedString>` / `mono_font_family: Option<SharedString>`
+//! - **Theme font-family seam.** `gpui_component::Theme`
+//!   (`gpui-component-0.6.2/src/theme/mod.rs`) carries `font_family:
+//!   SharedString` (default `.SystemUIFont`, the macOS system UI font —
+//!   `mod.rs` `impl From<&ThemeColor> for Theme`) and `mono_font_family:
+//!   SharedString` (default `Menlo`/`Consolas`/`DejaVu Sans Mono` by
+//!   platform). `Root::render` (`gpui-component-0.6.2/src/root.rs`, the
+//!   root `div`'s `.font_family(cx.theme().font_family.clone())`) applies
+//!   to the app-wide root `div` that wraps `ShellView`, so it cascades to
+//!   every element that doesn't set its own `font_family` — exactly the
+//!   seam [`register`] uses to make Inter the default face app-wide.
+//! - **Theme JSON does not fight this.** `ThemeConfig`
+//!   (`gpui-component-0.6.2/src/theme/schema.rs`) carries the *optional*
+//!   mirror fields `font_family: Option<SharedString>` /
+//!   `mono_font_family: Option<SharedString>`
 //!   (schema.rs:51,57); `apply_to` only overwrites `Theme::font_family` /
 //!   `mono_font_family` when the config's field is `Some`
 //!   (schema.rs:1084-1089). None of this repo's 44 bundled `assets/
@@ -115,13 +116,13 @@ mod tests {
 
     /// **Honest limitation** (brief: "asserting the families resolve in the
     /// text system if the API allows; else document"): it doesn't, under
-    /// `#[gpui::test]`. `TestAppContext::new` (`crates/gpui/src/app/
-    /// test_context.rs:131`) builds its platform via `TestPlatform::new`,
-    /// which wires up `Arc::new(NoopTextSystem)` (`crates/gpui/src/
+    /// `#[gpui::test]`. `TestAppContext::new` (`gpui-pre-0.3.5/src/app/
+    /// test_context.rs`) builds its platform via `TestPlatform::new`,
+    /// which wires up `Arc::new(NoopTextSystem)` (`gpui-pre-0.3.5/src/
     /// platform/test/platform.rs`) rather than a real `cosmic_text`-backed
     /// system — `NoopTextSystem::add_fonts` is a literal no-op returning
     /// `Ok(())` regardless of the bytes given it, and its
-    /// `all_font_names()` returns an empty `Vec` (`crates/gpui/src/
+    /// `all_font_names()` returns an empty `Vec` (`gpui-pre-0.3.5/src/
     /// platform.rs`, `impl PlatformTextSystem for NoopTextSystem`).
     /// `TextSystem::all_font_names()` then only ever reports its own
     /// hardcoded fallback stack (`.ZedMono`, `.ZedSans`, `Helvetica`, …)
