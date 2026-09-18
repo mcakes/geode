@@ -626,12 +626,12 @@ fn left_and_right_arrows_move_the_input_caret_and_do_not_leak_to_the_shell(
 /// `BUILTIN_KEYMAP`), so the meaningful proof is that the input
 /// actually reacts to it and the query/palette are otherwise
 /// untouched. Platform quirk, asserted directly rather than assumed
-/// (gpui-component's own hardcoded bindings, `crates/base/src/input/
+/// (gpui-component's own hardcoded bindings, `gpui-base-0.6.2/src/input/
 /// base/state.rs`, not this crate's configurable mod-alias): on macOS
 /// `ctrl+a` is bound to `MoveHome` (Emacs-style — `cmd+a` is
 /// `SelectAll` there instead), everywhere else `ctrl+a` *is*
 /// `SelectAll`. Both handlers fully consume the keystroke (neither
-/// calls `cx.propagate()` — checked against the pinned checkout), so
+/// calls `cx.propagate()` — checked against the pinned release), so
 /// "does not leak" holds on every platform CI builds this on (spec: “CI
 /// runs on both macOS and Windows”); only the resulting caret/selection
 /// differs.

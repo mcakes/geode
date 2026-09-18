@@ -2,7 +2,8 @@
 //! only with geode-shell's `profiling` feature — which is nothing but
 //! gpui's own `profiler` feature re-exported (`profiling = ["gpui/profiler"]`).
 //!
-//! **Findings at the pinned gpui rev (zed e3adf43), recorded decision:**
+//! **Findings at the pinned gpui rev (gpui-pre 0.3.5, zed@d89e9c2; first
+//! recorded at zed e3adf43), recorded decision:**
 //! gpui already ships real profiler infrastructure behind its `profiler`
 //! cargo feature — hdrhistogram-backed per-window frame-duration and
 //! input-latency histograms (`Window::frame_duration_snapshot` /

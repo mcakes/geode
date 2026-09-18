@@ -21,7 +21,7 @@ impl ShellView {
     /// unlike the old free-text version) purely for the focus handoff:
     /// [`close_palette`](Self::close_palette) on the close arm, and, on the
     /// open arm, resetting `self.palette_input`'s value to `""`
-    /// (`InputState::set_value` — checked against the pinned checkout: it
+    /// (`InputState::set_value` — checked against the pinned release: it
     /// does *not* emit `InputEvent::Change`, so this alone never touches
     /// `self.palette`'s query, which is already starting fresh from
     /// `PaletteState::new` a few lines below) and focusing it, so typing
