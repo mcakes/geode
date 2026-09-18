@@ -35,6 +35,18 @@ pub mod cvi {
     const MAX_WALK_STEP: f64 = 0.02;
     const MIN_WALK_STEP: f64 = 0.0005;
 
+    /// The per-slice values (2026-09-17): `forward` is the spot carried
+    /// out to the term at a per-key rate drawn once from this range (a
+    /// fraction per month, so 0.2–0.5%/month), `atm` is a decimal vol
+    /// held inside `ATM_RANGE` and walked per publish, `skew` a
+    /// negative slope held inside `SKEW_RANGE` and walked the same way.
+    const CARRY_PER_MONTH: std::ops::RangeInclusive<f64> = 0.002..=0.005;
+    const ATM_RANGE: std::ops::RangeInclusive<f64> = 0.15..=0.30;
+    const SKEW_RANGE: std::ops::RangeInclusive<f64> = -2.0..=0.0;
+    const ATM_WALK_STEP: f64 = 0.004;
+    const SKEW_WALK_STEP: f64 = 0.02;
+    const DAYS_PER_MONTH: f64 = 30.4375;
+
     /// A per-underlying starting level: three named benchmarks (SPX,
     /// NDX, RUT), and a stable hash for anything else so an unfamiliar
     /// vocabulary still gets a plausible, deterministic spot rather than
@@ -69,6 +81,30 @@ pub mod cvi {
     /// drawn (`same_seed_same_documents`).
     fn baseline_param(node: f64, term_idx: usize) -> f64 {
         -0.01 * node + 0.02 * (term_idx as f64 + 1.0).ln()
+    }
+
+    /// One seeded walk step of at most `step`, then held inside `range`:
+    /// a clamp rather than a reflection, because a demo value at the
+    /// edge of its range for a publish or two is what a real feed does.
+    fn walk_within(
+        rng: &mut StdRng,
+        value: f64,
+        step: f64,
+        range: &std::ops::RangeInclusive<f64>,
+    ) -> f64 {
+        let magnitude = rng.random_range(step * 0.1..step);
+        let sign: f64 = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+        (value + magnitude * sign).clamp(*range.start(), *range.end())
+    }
+
+    /// The per-key, per-term slice values between publishes. `carry` is
+    /// fixed from the key's first call (so `forward` follows `spot_ref`
+    /// and never drifts on its own); `atm` and `skew` are one walk state
+    /// per term, term-major beside `CviGenerator::walk`.
+    struct SliceWalk {
+        carry: f64,
+        atm: Vec<f64>,
+        skew: Vec<f64>,
     }
 
     /// The third Friday of `year`/`month` — CVI's listed-expiry
@@ -134,6 +170,8 @@ pub mod cvi {
         /// One walk state per key, term-major (spec §6.3's row order),
         /// length `expiries.len() * NODES.len()`.
         walk: HashMap<String, Vec<f64>>,
+        /// The per-slice values' own walk, one entry per term.
+        slices: HashMap<String, SliceWalk>,
         rngs: HashMap<String, StdRng>,
     }
 
@@ -148,6 +186,7 @@ pub mod cvi {
                 anchor,
                 spot: HashMap::new(),
                 walk: HashMap::new(),
+                slices: HashMap::new(),
                 rngs: HashMap::new(),
             }
         }
@@ -173,8 +212,26 @@ pub mod cvi {
                 let baseline: Vec<f64> = (0..n_terms)
                     .flat_map(|t| NODES.iter().map(move |n| baseline_param(*n, t)))
                     .collect();
+                // The slice values' starting points: one carry rate per
+                // key, an ATM level with a gentle upward term structure,
+                // a skew that flattens with the term — each drawn after
+                // the spot and the smile, so the existing draws keep
+                // their order.
+                let carry = rng.random_range(CARRY_PER_MONTH);
+                let atm0: f64 = rng.random_range(0.16..=0.24);
+                let skew0: f64 = rng.random_range(-1.6..=-0.8);
+                let atm = (0..n_terms)
+                    .map(|t| (atm0 + 0.004 * t as f64).clamp(*ATM_RANGE.start(), *ATM_RANGE.end()))
+                    .collect();
+                let skew = (0..n_terms)
+                    .map(|t| {
+                        (skew0 + 0.05 * t as f64).clamp(*SKEW_RANGE.start(), *SKEW_RANGE.end())
+                    })
+                    .collect();
                 self.spot.insert(key.to_string(), spot);
                 self.walk.insert(key.to_string(), baseline);
+                self.slices
+                    .insert(key.to_string(), SliceWalk { carry, atm, skew });
                 self.rngs.insert(key.to_string(), rng);
             } else {
                 let rng = self
@@ -194,6 +251,16 @@ pub mod cvi {
                     let sign: f64 = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
                     *p += magnitude * sign;
                 }
+                let slices = self
+                    .slices
+                    .get_mut(key)
+                    .expect("a slice walk is seeded alongside every key's walk state");
+                for a in slices.atm.iter_mut() {
+                    *a = walk_within(rng, *a, ATM_WALK_STEP, &ATM_RANGE);
+                }
+                for k in slices.skew.iter_mut() {
+                    *k = walk_within(rng, *k, SKEW_WALK_STEP, &SKEW_RANGE);
+                }
             }
 
             let spot_ref = self.spot[key];
@@ -207,10 +274,22 @@ pub mod cvi {
             let total = n_terms * NODES.len();
             let mut terms = Vec::with_capacity(total);
             let mut nodes = Vec::with_capacity(total);
-            for term in &self.expiries {
+            // The slice values in the long form: repeated on every node
+            // row of their term, which is the shape `CviKind::write`
+            // requires (a slice whose rows disagree is refused).
+            let mut forward = Vec::with_capacity(total);
+            let mut atm = Vec::with_capacity(total);
+            let mut skew = Vec::with_capacity(total);
+            let slices = &self.slices[key];
+            for (t, term) in self.expiries.iter().enumerate() {
+                let months = (*term - self.anchor).num_days() as f64 / DAYS_PER_MONTH;
+                let fwd = spot_ref * (1.0 + slices.carry * months);
                 for node in NODES {
                     terms.push(*term);
                     nodes.push(node);
+                    forward.push(fwd);
+                    atm.push(slices.atm[t]);
+                    skew.push(slices.skew[t]);
                 }
             }
 
@@ -224,7 +303,12 @@ pub mod cvi {
                     ("term".to_string(), Column::Date(terms)),
                     ("node".to_string(), Column::F64(nodes)),
                 ],
-                values: vec![("param".to_string(), Column::F64(params))],
+                values: vec![
+                    ("param".to_string(), Column::F64(params)),
+                    ("forward".to_string(), Column::F64(forward)),
+                    ("atm".to_string(), Column::F64(atm)),
+                    ("skew".to_string(), Column::F64(skew)),
+                ],
             }
         }
     }
@@ -272,6 +356,9 @@ pub mod cvi {
                     col("term", ColumnType::Date, ColumnRole::Axis, false),
                     col("node", ColumnType::F64, ColumnRole::Axis, false),
                     col("param", ColumnType::F64, ColumnRole::Value, false),
+                    col("forward", ColumnType::F64, ColumnRole::Value, false),
+                    col("atm", ColumnType::F64, ColumnRole::Value, false),
+                    col("skew", ColumnType::F64, ColumnRole::Value, false),
                     col(
                         "anchor_date",
                         ColumnType::Date,
@@ -312,6 +399,71 @@ pub mod cvi {
                 "anchor_date/spot_ref are fixed once a key's first document is drawn"
             );
             assert_ne!(first.values, second.values, "param must drift");
+            let atm = |doc: &DocumentRows| doc.values[2].clone();
+            assert_eq!(atm(&first).0, "atm");
+            assert_ne!(atm(&first).1, atm(&second).1, "atm drifts per publish");
+            let forward = |doc: &DocumentRows| doc.values[1].clone();
+            assert_eq!(forward(&first).0, "forward");
+            assert_eq!(
+                forward(&first).1,
+                forward(&second).1,
+                "forward follows the fixed spot and carry, and does not walk"
+            );
+        }
+
+        /// The per-slice values (2026-09-17): each is constant across a
+        /// term's twelve nodes — the shape `CviKind::write` refuses
+        /// otherwise — `forward` carries the spot out with the term,
+        /// `atm` is a decimal vol and `skew` a negative slope, both
+        /// held in their ranges across many publishes.
+        #[test]
+        fn slice_values_are_constant_within_a_term_and_in_range() {
+            let mut g = CviGenerator::new(3, underlyings(), anchor());
+            for publish in 0..40 {
+                let doc = g.next_document("SPX");
+                let names: Vec<&str> = doc.values.iter().map(|(n, _)| n.as_str()).collect();
+                assert_eq!(names, ["param", "forward", "atm", "skew"]);
+                let col = |i: usize| match &doc.values[i].1 {
+                    Column::F64(v) => v.clone(),
+                    other => panic!("value {i} is f64, got {other:?}"),
+                };
+                let (forward, atm, skew) = (col(1), col(2), col(3));
+                let spot = match doc.attributes[1].1 {
+                    Value::F64(s) => s,
+                    _ => panic!("spot_ref is f64"),
+                };
+                let mut previous_forward = spot;
+                for t in 0..8 {
+                    let rows = t * NODES.len()..(t + 1) * NODES.len();
+                    for (name, column) in [("forward", &forward), ("atm", &atm), ("skew", &skew)] {
+                        let first = column[rows.start];
+                        assert!(
+                            column[rows.clone()].iter().all(|v| *v == first),
+                            "publish {publish}, term {t}: {name} must be constant across the slice"
+                        );
+                    }
+                    assert!(
+                        forward[rows.start] > previous_forward,
+                        "publish {publish}, term {t}: forward grows with the term"
+                    );
+                    assert!(
+                        forward[rows.start] < spot * 1.05,
+                        "a small carry, not a different level: {} against spot {spot}",
+                        forward[rows.start]
+                    );
+                    previous_forward = forward[rows.start];
+                    assert!(
+                        ATM_RANGE.contains(&atm[rows.start]),
+                        "atm {}",
+                        atm[rows.start]
+                    );
+                    assert!(
+                        SKEW_RANGE.contains(&skew[rows.start]),
+                        "skew {}",
+                        skew[rows.start]
+                    );
+                }
+            }
         }
 
         #[test]

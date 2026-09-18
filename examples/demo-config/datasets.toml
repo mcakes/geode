@@ -367,6 +367,15 @@ role = "axis"
 [cvi_params.columns.param]
 type = "f64"
 role = "value"
+[cvi_params.columns.forward]
+type = "f64"
+role = "value"                    # per slice: constant across a term's nodes; the CVI kind refuses a document where it is not
+[cvi_params.columns.atm]
+type = "f64"
+role = "value"                    # per slice: constant across a term's nodes; the CVI kind refuses a document where it is not
+[cvi_params.columns.skew]
+type = "f64"
+role = "value"                    # per slice: constant across a term's nodes; the CVI kind refuses a document where it is not
 [cvi_params.columns.anchor_date]
 type = "date"
 role = "attribute"                # document-level: constant within one document

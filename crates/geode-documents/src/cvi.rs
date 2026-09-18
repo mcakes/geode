@@ -1,6 +1,7 @@
 //! The CVI kind (spec §6.3): `marketData/underlying`, `cviParams/
 //! anchorDate`, `cviParams/spotRef`, `cviParams/nodes/node*` and
-//! `cviParams/slices/slice*`, each slice carrying a `term` and one
+//! `cviParams/slices/slice*`, each slice carrying a `term`, one
+//! `forward`/`atm`/`skew` for the whole slice (2026-09-17), and one
 //! `param` per node, positionally aligned.
 //!
 //! Hand-written as a `quick_xml::Reader` event walk rather than a serde
@@ -36,7 +37,7 @@ pub const NAME: &str = "cvi_params";
 /// should be able to see the other's format without leaving the line.
 const DATE_FORMAT: &str = "%Y-%m-%d";
 
-/// The six columns of spec §6.3's CVI document, in `document_columns()`
+/// The nine columns of spec §6.3's CVI document, in `document_columns()`
 /// order (key, axes, values, document-level attributes) — the order
 /// `check_kind_against` compares against the dataset at source-open
 /// time and the order the staging path expects.
@@ -45,15 +46,29 @@ const COLUMNS: &[(&str, ColumnType)] = &[
     ("term", ColumnType::Date),
     ("node", ColumnType::F64),
     ("param", ColumnType::F64),
+    ("forward", ColumnType::F64),
+    ("atm", ColumnType::F64),
+    ("skew", ColumnType::F64),
     ("anchor_date", ColumnType::Date),
     ("spot_ref", ColumnType::F64),
 ];
 
-/// The two axis names, in order, and the one value name — named once so
+/// The two axis names, in order, and the value names — named once so
 /// the writer's refusals and this module's doc cannot disagree.
 const AXES: [&str; 2] = ["term", "node"];
-const VALUES: [&str; 1] = ["param"];
+const VALUES: [&str; 4] = ["param", "forward", "atm", "skew"];
 const ATTRIBUTES: [&str; 2] = ["anchor_date", "spot_ref"];
+
+/// The per-slice values (2026-09-17): one `(wire tag, column)` per
+/// value a `<slice>` carries once, beside its `<term>` and ahead of its
+/// `<param>`s. Stored in the long form exactly as `param` is — repeated
+/// on every node row of the slice, "a value constant within a slice",
+/// the sibling of an attribute's "constant within a document" — so no
+/// storage or document-family change carries them. One table for both
+/// directions, so the parser's leaf and the writer's emission cannot
+/// drift. **The tag names are an assumption until the desk's XSD
+/// arrives**; the column names are the dataset's and stay.
+const SLICE_VALUES: [(&str, &str); 3] = [("forward", "forward"), ("atm", "atm"), ("skew", "skew")];
 
 /// The CVI document kind. A unit struct: a kind carries no state, and
 /// `builtin_kinds()` hands the same one to every source configured for
@@ -132,6 +147,8 @@ enum Leaf {
     Node,
     Term,
     Param,
+    /// One of [`SLICE_VALUES`], by index.
+    SliceValue(usize),
 }
 
 /// The model as a path table. Matching on depth and the last two
@@ -162,6 +179,10 @@ fn classify(path: &[String]) -> Shape {
         5 => match (seg(3), seg(4)) {
             ("slice", "term") => Shape::Leaf(Leaf::Term),
             ("slice", "param") => Shape::Leaf(Leaf::Param),
+            ("slice", tag) => match SLICE_VALUES.iter().position(|(t, _)| *t == tag) {
+                Some(i) => Shape::Leaf(Leaf::SliceValue(i)),
+                None => Shape::Unknown,
+            },
             _ => Shape::Unknown,
         },
         _ => Shape::Unknown,
@@ -245,12 +266,15 @@ impl PathStack {
 #[derive(Default)]
 struct Slice {
     term: Option<NaiveDate>,
+    /// [`SLICE_VALUES`] by index, each read at most once per slice.
+    values: [Option<f64>; SLICE_VALUES.len()],
     params: Vec<f64>,
 }
 
 impl Slice {
     fn restart(&mut self) {
         self.term = None;
+        self.values = [None; SLICE_VALUES.len()];
         self.params.clear();
     }
 }
@@ -278,6 +302,8 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
     let mut term_col: Vec<NaiveDate> = Vec::new();
     let mut node_col: Vec<f64> = Vec::new();
     let mut param_col: Vec<f64> = Vec::new();
+    // One column per slice value, filled once per node row of a slice.
+    let mut slice_cols: [Vec<f64>; SLICE_VALUES.len()] = Default::default();
     let mut slices = 0usize;
     let mut slice = Slice::default();
     // The containers this model reads at most once. The singular LEAVES
@@ -390,10 +416,31 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                         slice.term = Some(date("term", trimmed)?)
                     }
                     Shape::Leaf(Leaf::Param) => slice.params.push(number("param", trimmed)?),
+                    Shape::Leaf(Leaf::SliceValue(i)) => {
+                        // The singular-leaf rule inside a slice: a second
+                        // `<forward>` would otherwise win silently.
+                        let (tag, _) = SLICE_VALUES[i];
+                        if slice.values[i].is_some() {
+                            return Err(already_filled(tag));
+                        }
+                        slice.values[i] = Some(number(tag, trimmed)?);
+                    }
                     Shape::Slice => {
                         let term = slice.term.ok_or_else(|| {
                             parse_err(format!("slice {} has no term", slices + 1))
                         })?;
+                        // Every slice value is required, named by the slice
+                        // it is missing from — the `spotRef is missing`
+                        // spelling one level down.
+                        let mut values = [0.0; SLICE_VALUES.len()];
+                        for (i, (tag, _)) in SLICE_VALUES.iter().enumerate() {
+                            values[i] = slice.values[i].ok_or_else(|| {
+                                parse_err(format!(
+                                    "slice {} is missing {tag}",
+                                    term.format(DATE_FORMAT)
+                                ))
+                            })?;
+                        }
                         // Two slices for one term are the singular-element
                         // defect one level down: their rows carry the same
                         // (term, node) pairs, which nothing downstream can
@@ -432,6 +479,11 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                             term_col.push(term);
                             node_col.push(*node);
                             param_col.push(*param);
+                            // Repeated per node row: the long form's
+                            // spelling of "constant within the slice".
+                            for (col, v) in slice_cols.iter_mut().zip(values) {
+                                col.push(v);
+                            }
                         }
                         slices += 1;
                     }
@@ -513,7 +565,14 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                 (AXES[0].to_string(), Column::Date(term_col)),
                 (AXES[1].to_string(), Column::F64(node_col)),
             ],
-            values: vec![(VALUES[0].to_string(), Column::F64(param_col))],
+            values: std::iter::once((VALUES[0].to_string(), Column::F64(param_col)))
+                .chain(
+                    SLICE_VALUES
+                        .iter()
+                        .zip(slice_cols)
+                        .map(|((_, column), col)| (column.to_string(), Column::F64(col))),
+                )
+                .collect(),
         },
         unknown_paths,
     })
@@ -548,7 +607,8 @@ fn check_vocabulary(rows: &DocumentRows) -> Result<(), WriteError> {
     }
     if names(&rows.values) != VALUES {
         return Err(write_err(format!(
-            "CVI values are [param], got [{}]",
+            "CVI values are [{}], got [{}]",
+            VALUES.join(", "),
             names(&rows.values).join(", ")
         )));
     }
@@ -648,6 +708,15 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
     let Column::F64(params) = &rows.values[0].1 else {
         return Err(write_err("CVI value 'param' is f64; the column is not"));
     };
+    let mut slice_cols: [&[f64]; SLICE_VALUES.len()] = [&[]; SLICE_VALUES.len()];
+    for (i, (_, column)) in SLICE_VALUES.iter().enumerate() {
+        let Column::F64(col) = &rows.values[1 + i].1 else {
+            return Err(write_err(format!(
+                "CVI value '{column}' is f64; the column is not"
+            )));
+        };
+        slice_cols[i] = col;
+    }
     let (Value::Date(anchor_date), Value::F64(spot_ref)) =
         (&rows.attributes[0].1, &rows.attributes[1].1)
     else {
@@ -719,6 +788,27 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
             .map_err(io)?;
         date_into(&mut buf, *term);
         leaf(&mut w, "term", &buf)?;
+        // The slice values, read off the slice's FIRST row and refused
+        // when any later row of the slice disagrees — the ragged-slice
+        // rule's sibling. The document form says each once per slice, so
+        // a slice whose rows carry two forwards has no honest surface;
+        // writing the first would silently drop the other.
+        let start = t * grid.nodes.len();
+        let end = start + grid.nodes.len();
+        for ((tag, column), col) in SLICE_VALUES.iter().zip(&slice_cols) {
+            let first = col[start];
+            if let Some(r) = (start + 1..end).find(|&r| col[r] != first) {
+                return Err(write_err(format!(
+                    "term {}'s {column} differs within the slice ({first} on node {} against {} on node {}); a slice value is constant across a term's nodes",
+                    term.format(DATE_FORMAT),
+                    grid.nodes[0],
+                    col[r],
+                    grid.nodes[r - start]
+                )));
+            }
+            num_into(&mut buf, column, first)?;
+            leaf(&mut w, tag, &buf)?;
+        }
         // One `<param>` per node, in node order: the document's whole
         // meaning is the positional alignment against `<nodes>`, so any
         // other order writes a different surface.
@@ -758,8 +848,8 @@ mod tests {
     <spotRef>7650</spotRef>
     <nodes><node>-20.0</node><node>-1</node><node>3.5</node></nodes>
     <slices>
-      <slice><term>2026-09-18</term><param>-0.34</param><param>0.1</param><param>1.3</param></slice>
-      <slice><term>2026-10-16</term><param>-0.3</param><param>0.12</param><param>1.25</param></slice>
+      <slice><term>2026-09-18</term><forward>7655.5</forward><atm>0.182</atm><skew>-1.1</skew><param>-0.34</param><param>0.1</param><param>1.3</param></slice>
+      <slice><term>2026-10-16</term><forward>7671.25</forward><atm>0.19</atm><skew>-0.95</skew><param>-0.3</param><param>0.12</param><param>1.25</param></slice>
     </slices>
   </cviParams>
 </marketData>"#;
@@ -786,10 +876,26 @@ mod tests {
                     Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
                 ),
             ],
-            values: vec![(
-                "param".into(),
-                Column::F64(vec![-0.34, 0.1, 1.3, -0.3, 0.12, 1.25]),
-            )],
+            values: vec![
+                (
+                    "param".into(),
+                    Column::F64(vec![-0.34, 0.1, 1.3, -0.3, 0.12, 1.25]),
+                ),
+                // The slice values, repeated on every node row of their
+                // slice (the long form's "constant within a slice").
+                (
+                    "forward".into(),
+                    Column::F64(vec![7655.5, 7655.5, 7655.5, 7671.25, 7671.25, 7671.25]),
+                ),
+                (
+                    "atm".into(),
+                    Column::F64(vec![0.182, 0.182, 0.182, 0.19, 0.19, 0.19]),
+                ),
+                (
+                    "skew".into(),
+                    Column::F64(vec![-1.1, -1.1, -1.1, -0.95, -0.95, -0.95]),
+                ),
+            ],
         }
     }
 
@@ -803,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn the_kind_names_itself_and_its_six_columns_in_document_order() {
+    fn the_kind_names_itself_and_its_nine_columns_in_document_order() {
         use geode_core::schema::ColumnType;
         assert_eq!(CviKind.name(), NAME);
         assert_eq!(NAME, "cvi_params");
@@ -814,10 +920,17 @@ mod tests {
                 ("term", ColumnType::Date),
                 ("node", ColumnType::F64),
                 ("param", ColumnType::F64),
+                ("forward", ColumnType::F64),
+                ("atm", ColumnType::F64),
+                ("skew", ColumnType::F64),
                 ("anchor_date", ColumnType::Date),
                 ("spot_ref", ColumnType::F64),
             ]
         );
+        // The wire table and the column table name the same values in
+        // the same order — one place a rename must land twice.
+        let slice_columns: Vec<&str> = SLICE_VALUES.iter().map(|(_, c)| *c).collect();
+        assert_eq!(&VALUES[1..], slice_columns.as_slice());
     }
 
     /// The §6.4 load-time contract, against the dataset the desk really
@@ -848,6 +961,15 @@ role = "axis"
 type = "f64"
 role = "axis"
 [cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.forward]
+type = "f64"
+role = "value"
+[cvi_params.columns.atm]
+type = "f64"
+role = "value"
+[cvi_params.columns.skew]
 type = "f64"
 role = "value"
 [cvi_params.columns.anchor_date]
@@ -964,6 +1086,14 @@ role = "attribute"
                 "<anchorDate>2026-09-12</anchorDate>",
                 "<anchorDate>2026-09-12</anchorDate><anchorDate>2026-09-11</anchorDate>",
             ),
+            // A slice value is singular within its slice: a second
+            // `<forward>` in one `<slice>` is the same defect one level
+            // down, and the same rule.
+            (
+                "forward",
+                "<forward>7655.5</forward>",
+                "<forward>7655.5</forward><forward>7700</forward>",
+            ),
         ] {
             let doc = DOC.replacen(needle, second, 1);
             let err = CviKind.parse(doc.as_bytes()).unwrap_err();
@@ -1000,7 +1130,7 @@ role = "attribute"
     fn a_repeated_slice_term_is_refused_naming_the_term() {
         let doc = DOC.replacen(
             "<slices>",
-            "<slices><slice><term>2026-09-18</term><param>1</param><param>2</param><param>3</param></slice>",
+            "<slices><slice><term>2026-09-18</term><forward>1</forward><atm>1</atm><skew>1</skew><param>1</param><param>2</param><param>3</param></slice>",
             1,
         );
         let err = CviKind.parse(doc.as_bytes()).unwrap_err();
@@ -1103,6 +1233,23 @@ role = "attribute"
             let err = CviKind.parse(doc.as_bytes()).unwrap_err();
             assert!(err.message.contains(what), "{what}: {}", err.message);
         }
+        // A slice missing one of its per-slice values is refused naming
+        // the slice's term and the tag — never filled from the previous
+        // slice or left NULL (the long form has no NULL here: every node
+        // row of the slice would have to carry one).
+        for (needle, what) in [
+            ("<forward>7671.25</forward>", "forward"),
+            ("<atm>0.19</atm>", "atm"),
+            ("<skew>-0.95</skew>", "skew"),
+        ] {
+            let doc = DOC.replace(needle, "");
+            let err = CviKind.parse(doc.as_bytes()).unwrap_err();
+            assert!(
+                err.message.contains("2026-10-16") && err.message.contains(what),
+                "{what}: {}",
+                err.message
+            );
+        }
         // No `<slices>` at all, and a `<slices>` holding no `<slice>`:
         // both are "the document carries no grid".
         for replacement in ["", "<slices></slices>"] {
@@ -1163,12 +1310,18 @@ role = "attribute"
     <slices>
       <slice>
         <term>2026-09-18</term>
+        <forward>7655.5</forward>
+        <atm>0.182</atm>
+        <skew>-1.1</skew>
         <param>-0.34</param>
         <param>0.1</param>
         <param>1.3</param>
       </slice>
       <slice>
         <term>2026-10-16</term>
+        <forward>7671.25</forward>
+        <atm>0.19</atm>
+        <skew>-0.95</skew>
         <param>-0.3</param>
         <param>0.12</param>
         <param>1.25</param>
@@ -1203,6 +1356,38 @@ role = "attribute"
         let err = CviKind.write(&rows).unwrap_err();
         assert!(err.message.contains("2026-10-16"), "{}", err.message);
         assert!(err.message.contains("nodes"), "{}", err.message);
+    }
+
+    /// A slice value is said once per `<slice>` on the wire, so rows of
+    /// one slice that disagree on it have no honest surface: writing the
+    /// first row's value would silently drop the other. Refused naming
+    /// the term and the column — the ragged-slice rule's sibling.
+    #[test]
+    fn write_refuses_a_slice_whose_rows_disagree_on_a_slice_value() {
+        for (i, column) in [(1, "forward"), (2, "atm"), (3, "skew")] {
+            let mut rows = expected();
+            let Column::F64(col) = &mut rows.values[i].1 else {
+                panic!("slice values are f64 columns");
+            };
+            // The second slice's middle node disagrees with its first.
+            col[4] += 0.5;
+            let err = CviKind.write(&rows).unwrap_err();
+            assert!(
+                err.message.contains("2026-10-16"),
+                "{column}: {}",
+                err.message
+            );
+            assert!(err.message.contains(column), "{column}: {}", err.message);
+            assert!(
+                err.message.contains("within the slice"),
+                "{column}: {}",
+                err.message
+            );
+        }
+        // Read off the FIRST row, not averaged: the surviving value in a
+        // consistent slice is exactly the one every row carries.
+        let text = String::from_utf8(CviKind.write(&expected()).unwrap()).unwrap();
+        assert!(text.contains("<forward>7671.25</forward>"), "{text}");
     }
 
     /// A term that appears in two separate blocks is not a term-major
@@ -1241,7 +1426,7 @@ role = "attribute"
                 .write(&rows)
                 .unwrap_err()
                 .message
-                .contains("values are [param]")
+                .contains("values are [param, forward, atm, skew]")
         );
         let mut rows = expected();
         rows.attributes.swap(0, 1);
@@ -1288,20 +1473,30 @@ role = "attribute"
             // without a second strategy whose length would have to track
             // terms × nodes.
             let mut x = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let mut draw = || {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (x >> 11) as f64 / (1u64 << 53) as f64
+            };
             let mut params = Vec::new();
+            let mut slice_cols: [Vec<f64>; 3] = Default::default();
             let mut term_col = Vec::new();
             let mut node_col = Vec::new();
             for t in &term_dates {
+                // One draw per slice value per term, repeated on every
+                // node row — the shape the parser produces.
+                let per_slice = [draw() * 9000.0, draw(), draw() * -2.0];
                 for n in &nodes {
-                    x = x
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    let u = (x >> 11) as f64 / (1u64 << 53) as f64;
-                    params.push(u * 4.0 - 2.0);
+                    params.push(draw() * 4.0 - 2.0);
+                    for (col, v) in slice_cols.iter_mut().zip(per_slice) {
+                        col.push(v);
+                    }
                     term_col.push(*t);
                     node_col.push(*n);
                 }
             }
+            let [forward, atm, skew] = slice_cols;
             let rows = DocumentRows {
                 key: vec!["SPX.Z".into()],
                 attributes: vec![
@@ -1312,7 +1507,12 @@ role = "attribute"
                     ("term".into(), Column::Date(term_col)),
                     ("node".into(), Column::F64(node_col)),
                 ],
-                values: vec![("param".into(), Column::F64(params))],
+                values: vec![
+                    ("param".into(), Column::F64(params)),
+                    ("forward".into(), Column::F64(forward)),
+                    ("atm".into(), Column::F64(atm)),
+                    ("skew".into(), Column::F64(skew)),
+                ],
             };
             let bytes = CviKind.write(&rows).unwrap();
             let parsed = CviKind.parse(&bytes).unwrap();
