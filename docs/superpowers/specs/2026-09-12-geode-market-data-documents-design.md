@@ -1214,9 +1214,12 @@ are all untouched; what changed is what paints the grid.
    shell: `render` still consumes the flag but **withholds the focus move
    only while the focused tile's occupant itself HOLDS the focused handle
    in insert mode** — `ShellView::occupant_holds_insert_focus`
-   (`shell/occupants.rs`): window focus on a handle the shell does not
-   own, the focused tile's occupant answering `TileContent::holds_focus`
-   for it, AND its context stack carrying `mode == insert`. The insert
+   (`shell/occupants.rs`): the focused tile's occupant answering
+   `TileContent::holds_focus` for the focused handle — its own input,
+   which is never a shell surface, so no separate non-shell test sits in
+   front of it (one did in the first fix build and the harness showed it
+   as a SURVIVED: nothing could tell it from the ownership check) — AND
+   its context stack carrying `mode == insert`. The insert
    branch in `handle_key_down` reads the same door
    (`occupant_insert_stack`), so the two cannot drift. A module whose own
    field holds the keyboard in insert mode owns it; the shell's chords

@@ -340,10 +340,11 @@ fn a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore(cx: &mut gpu
 
 /// The control for the test above: the same press on the same tile with
 /// insert mode OFF. The view's `track_focus` handle takes window focus on
-/// the press — a non-shell handle, so `holds_shell_focus` is false there
-/// too — and the frame the press schedules hands the keyboard back to the
-/// shell root, exactly as before the ruling. Insert mode, not "some
-/// occupant handle is focused", is what withholds the restore.
+/// the press — an occupant handle, but not an input the occupant HOLDS,
+/// and with no editor open at all — and the frame the press schedules
+/// hands the keyboard back to the shell root, exactly as before the
+/// ruling. An owned input in insert mode, not "some occupant handle is
+/// focused", is what withholds the restore.
 #[gpui::test]
 fn a_tile_out_of_insert_mode_still_hands_focus_back_on_a_mouse_down(cx: &mut gpui::TestAppContext) {
     let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);

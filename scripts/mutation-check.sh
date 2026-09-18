@@ -10088,13 +10088,16 @@ run_mutation "fragments: a reload re-states the fragment diagnostics in the conf
 
 # ---- Part 3 Task 4: insert mode (market-data documents §8.6) ----
 
-# The branch must key on a TILE holding the keyboard, not on the mode
-# alone: with the shell root focused (one tile click away, via
+# The branch must key on the TILE'S OWN INPUT holding the keyboard
+# (`TileContent::holds_focus`, review C-1 of 2026-09-17), not on the
+# mode alone: with the shell root focused (one tile click away, via
 # `pending_focus_restore`) nothing is being typed into an input, so the
-# matcher — counts and all — has to stay in charge.
+# matcher — counts and all — has to stay in charge. The same ownership
+# line carries the `focus:` entry for the two-tile scenario; this one is
+# the single-tile, shell-root-focused half of the same rule.
 run_mutation "insert: the insert branch runs even while a shell surface holds focus" \
   crates/geode-shell/src/shell/occupants.rs \
-  '        if self.holds_shell_focus(&focused, cx) {
+  '        if !self.occupants.get(&tile)?.content.holds_focus(window, cx) {
             return None;
         }' \
   '        if false {

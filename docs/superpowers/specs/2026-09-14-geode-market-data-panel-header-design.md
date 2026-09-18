@@ -592,9 +592,10 @@ it. Neither listener stops propagation: the shell's tile-level
 mouse-down runs as before, and what keeps the opened editor focused is a
 shell rule — `ShellView::render` withholds `pending_focus_restore`'s
 focus move only while the focused tile's occupant itself HOLDS the
-focused handle in insert mode (`occupant_holds_insert_focus`: non-shell
-focus, `TileContent::holds_focus` answered by that occupant — this panel
-answers off its editor's and picker's own focus handles — and `mode ==
+focused handle in insert mode (`occupant_holds_insert_focus`:
+`TileContent::holds_focus` answered by that occupant for the focused
+handle — this panel answers off its editor's and picker's own focus
+handles, which are never shell surfaces — and `mode ==
 insert`; the insert branch's own predicate, shared) — never a swallowed
 event.
 

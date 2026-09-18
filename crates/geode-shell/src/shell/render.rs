@@ -92,9 +92,9 @@ impl Render for ShellView {
         //
         // SKIPPED — flag cleared, focus left exactly where it is — while a
         // tile's occupant ITSELF holds the focused handle in insert mode
-        // (`occupant_holds_insert_focus`, occupants.rs: window focus on a
-        // handle the shell does not own, the focused tile's occupant
-        // answering `TileContent::holds_focus` for it, AND its context
+        // (`occupant_holds_insert_focus`, occupants.rs: the focused tile's
+        // occupant answering `TileContent::holds_focus` for the focused
+        // handle — its own input, never a shell surface — AND its context
         // stack carrying `mode == insert`; user ruling 2026-09-17,
         // reversing the 2026-09-14 "editing is keyboard-only" ruling —
         // the ownership half is review C-1's, see the predicate's doc).

@@ -384,11 +384,20 @@ impl ShellView {
 
     /// Does the FOCUSED TILE's occupant itself hold the keyboard, in
     /// insert mode, right now? Answers that tile's context stack when
-    /// three things hold at once — window focus is on a handle the shell
-    /// does not own (`!holds_shell_focus`), the focused tile's occupant
-    /// reports that one of ITS OWN inputs is the focused handle
+    /// two things hold at once — the focused tile's occupant reports that
+    /// one of ITS OWN inputs is the focused handle
     /// (`TileContent::holds_focus`), and its stack carries `mode ==
-    /// insert` — and `None` otherwise.
+    /// insert` — and `None` otherwise (nothing focused included).
+    ///
+    /// There is deliberately no separate "focus is not on a shell
+    /// surface" test in front of the ownership one: an occupant's own
+    /// input is never one of the shell's surfaces, so ownership already
+    /// implies it, and the harness showed the extra check as a SURVIVED
+    /// — no fixture could tell it apart from the ownership check it
+    /// duplicated. `holds_shell_focus` stays the rule for the two doors
+    /// that ask the OTHER question (is the caret on something of the
+    /// shell's own?): `ensure_occupants`' backstop and
+    /// `note_keyboard_focus_move`.
     ///
     /// **The one predicate behind two doors, which must not drift** (user
     /// ruling 2026-09-17, reversing the 2026-09-14 "editing is
@@ -428,10 +437,7 @@ impl ShellView {
         window: &Window,
         cx: &App,
     ) -> Option<Vec<crate::keymap::KeyContext>> {
-        let focused = window.focused(cx)?;
-        if self.holds_shell_focus(&focused, cx) {
-            return None;
-        }
+        window.focused(cx)?;
         let tile = self.services.workspaces.active().focused_tile()?;
         if !self.occupants.get(&tile)?.content.holds_focus(window, cx) {
             return None;
@@ -453,9 +459,12 @@ impl ShellView {
     /// into? Anything else that holds window focus belongs to a tile's
     /// occupant view. Two callers read it for that one distinction:
     /// `ensure_occupants`'s backstop above (see it for why the distinction
-    /// is the whole decision) and `occupant_insert_stack` just above,
-    /// which routes typing at a tile only while a tile — never a shell
-    /// surface — actually holds the keyboard.
+    /// is the whole decision) and `note_keyboard_focus_move`, which arms
+    /// the restore only when a tile — never a shell surface — is holding
+    /// the keyboard as tile focus moves. The insert-focus predicate
+    /// (`occupant_insert_stack`) asks the module directly instead
+    /// (`TileContent::holds_focus`), see its doc for why that subsumes
+    /// this.
     pub(super) fn holds_shell_focus(&self, handle: &FocusHandle, cx: &App) -> bool {
         *handle == self.focus_handle
             || [
