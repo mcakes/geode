@@ -10082,9 +10082,13 @@ run_mutation "fragments: a reload re-states the fragment diagnostics in the conf
 # `pending_focus_restore`) nothing is being typed into an input, so the
 # matcher — counts and all — has to stay in charge.
 run_mutation "insert: the insert branch runs even while a shell surface holds focus" \
-  crates/geode-shell/src/shell/input.rs \
-  '            .is_some_and(|focused| !self.holds_shell_focus(&focused, cx))' \
-  '            .is_some_and(|_focused| true)' \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if self.holds_shell_focus(&focused, cx) {
+            return None;
+        }' \
+  '        if false {
+            return None;
+        }' \
   geode-shell the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode
 
 # Resolved against the whole stack, not `workspace` alone (the filter
@@ -10093,8 +10097,8 @@ run_mutation "insert: the insert branch runs even while a shell surface holds fo
 # the bindings that must win while its input has the keyboard.
 run_mutation "insert: single-keystroke bindings resolve against workspace alone, not the tile's stack" \
   crates/geode-shell/src/shell/input.rs \
-  '                        .single_keystroke_binding(&ks, &insert_contexts(&stack, &ks))' \
-  '                        .single_keystroke_binding(&ks, &[KeyContext::new("workspace")])' \
+  '                    .single_keystroke_binding(&ks, &insert_contexts(&stack, &ks))' \
+  '                    .single_keystroke_binding(&ks, &[KeyContext::new("workspace")])' \
   geode-shell typed_keys_reach_a_tiles_focused_input_in_insert_mode
 
 # The early return is the "never feed the matcher" half: without it a
@@ -10102,13 +10106,11 @@ run_mutation "insert: single-keystroke bindings resolve against workspace alone,
 # typed digit becomes a count prefix again.
 run_mutation "insert: a non-binding keystroke falls through to the matcher" \
   crates/geode-shell/src/shell/input.rs \
-  '                return;
-            }
+  '            return;
         }
 
         // Deliberately no analogous "if palette_input is focused, return' \
-  '            }
-        }
+  '        }
 
         // Deliberately no analogous "if palette_input is focused, return' \
   geode-shell a_count_prefix_typed_in_insert_mode_is_text_not_a_count
@@ -11068,10 +11070,10 @@ run_mutation "mdtable: the delegate's cursor mirror follows the tile's cursor" \
 # from. The cancel is `close_editor`, so blur-then-drop and never a commit.
 run_mutation "mdtable: a click while editing cancels the editor" \
   crates/geode-marketdata/src/tile.rs \
-  '                if this.editor.is_some() {
-                    this.close_editor(window, cx);' \
-  '                if false {
-                    this.close_editor(window, cx);' \
+  '                    if this.editor.is_some() {
+                        this.close_editor(window, cx);' \
+  '                    if false {
+                        this.close_editor(window, cx);' \
   geode-marketdata \
   a_click_while_editing_cancels_the_editor_then_moves
 
