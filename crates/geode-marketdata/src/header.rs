@@ -9,8 +9,9 @@ use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
 use geode_shell::fonts;
+use geode_shell::tips;
 use gpui::prelude::*;
-use gpui::{Entity, SharedString, div, px};
+use gpui::{ElementId, Entity, SharedString, div, px};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{Theme, h_flex};
 
@@ -75,6 +76,12 @@ pub(crate) struct HeaderModel {
     /// A clone of `model.header` — `Rc`-cheap `SharedString`s, prepared by
     /// [`crate::core::matrix::MatrixModel::build`] already.
     pub attrs: Vec<HeaderCell>,
+    /// The draft's badge, carried alongside `state` so `render` can tell
+    /// a `Behind` state run from the other `Tone::Warn` runs (`state`'s
+    /// own tone doesn't distinguish "different document received" from
+    /// "no document yet"/"edits await a document") without reparsing
+    /// `state`'s text.
+    pub badge: DraftBadge,
     /// The one short state run (spec §4 item 5), if any.
     pub state: Option<(SharedString, Tone)>,
     pub notice: Option<SharedString>,
@@ -92,12 +99,12 @@ impl HeaderModel {
     /// at — so `render` never formats.
     pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         let underlying = i.key.map(|k| SharedString::from(display_key(k)));
-        let (dirty, mut state) = match i.badge {
+        let (dirty, mut state) = match &i.badge {
             DraftBadge::Clean => (false, None),
             DraftBadge::Dirty => (true, None),
             DraftBadge::Behind { newer } => (
                 true,
-                Some((format!("update {}", local_hhmm(&newer)).into(), Tone::Warn)),
+                Some((format!("update {}", local_hhmm(newer)).into(), Tone::Warn)),
             ),
             DraftBadge::Sent => (false, Some(("sent".into(), Tone::Time))),
         };
@@ -113,6 +120,7 @@ impl HeaderModel {
             underlying,
             dirty,
             attrs: i.model.header.clone(),
+            badge: i.badge,
             state,
             notice: i.notice.cloned(),
             time: i.source_at.map(|t| {
@@ -175,6 +183,8 @@ pub(crate) fn render(
     tones: &FlooredTones,
     tile: &Entity<MarketDataTile>,
     tile_id: u64,
+    menu_tip_selector: SharedString,
+    state_tip_selector: SharedString,
 ) -> impl IntoElement {
     let muted = theme.muted_foreground;
     let mut row = h_flex()
@@ -283,8 +293,20 @@ pub(crate) fn render(
     if let Some((text, tone)) = &h.state {
         row = row.child(
             div()
+                .id(ElementId::NamedInteger("marketdata-state".into(), tile_id))
+                .debug_selector(move || format!("marketdata-state-{tile_id}"))
                 .text_color(tone_colour(*tone, false, theme, tones))
-                .child(text.clone()),
+                .child(text.clone())
+                .when(matches!(h.badge, DraftBadge::Behind { .. }), |el| {
+                    el.tooltip(tips::tip_with(
+                        state_tip_selector,
+                        text.clone(),
+                        None,
+                        Some(SharedString::new_static(
+                            ":rebase adopts it · :discard drops your edits",
+                        )),
+                    ))
+                }),
         );
     }
     if let Some(n) = &h.notice {
@@ -348,6 +370,10 @@ pub(crate) fn render(
     // never a propagation question at all (it always let Bubble run).
     row = row.child(
         div()
+            .id(ElementId::NamedInteger(
+                "marketdata-menu-button".into(),
+                tile_id,
+            ))
             .px_1p5()
             .rounded_sm()
             .border_1()
@@ -364,7 +390,13 @@ pub(crate) fn render(
                     }
                     tile.update(cx, |t, cx| t.toggle_menu(window, cx))
                 }
-            }),
+            })
+            .tooltip(tips::tip_with(
+                menu_tip_selector,
+                SharedString::new_static("Actions"),
+                Some("marketdata::menu"),
+                None,
+            )),
     );
     row
 }
