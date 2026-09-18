@@ -4,8 +4,8 @@
 //! gpui-component's own theme-config format, applied through its own theme
 //! global — nothing here invents a raw color.
 //!
-//! ## Checkout findings (gpui-component rev `0e2fb7a`, pinned in the
-//! workspace root `Cargo.toml`)
+//! ## Registry findings (gpui-component 0.6.2, pinned in the workspace
+//! root `Cargo.toml`)
 //!
 //! Two theme sources exist in the pinned release:
 //! - `gpui-component-0.6.2/src/theme/default-theme.json` — the crate's

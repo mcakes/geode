@@ -164,11 +164,44 @@ a change in any of them is a finding to report, not a test to relax:
 |---|---|
 | `Root` holds a focused `InputState` strongly; an occupant must blur, then drop (CLAUDE.md, market-data §8.7) | `the_editor_gives_up_focus_before_it_is_dropped`, `menu_closes_an_open_picker_with_a_blur_before_opening` (`geode-marketdata/src/tile.rs`) |
 | `TableState` caches `column()`'s answers in `col_groups`; a plan change needs `refresh` | `a_presentation_change_rebuilds_the_plan_on_a_same_column_snapshot` (`geode-blotter/src/delegate.rs`), `the_line_numbers_global_paints_a_gutter_on_the_next_draw` (`geode-blotter/src/tile.rs`); the CVI ladder header is a display check |
-| `TableState::set_selected_row` stops propagation of its own | `the_menu_rows_stop_propagation_keeps_the_pickers_focus`, `a_double_click_only_moves_the_cursor` (`geode-marketdata/src/tile.rs`) |
+| `TableState::set_selected_row` stops propagation of its own | `the_menu_rows_stop_propagation_keeps_the_pickers_focus`, `a_double_click_opens_the_editor_on_the_cell` (`geode-marketdata/src/tile.rs`) |
 | `warning_foreground` falls back to `primary_foreground`; `muted_foreground` over `muted` is under 3:1 on 15 themes | `dirty_and_sent_cells_are_readable_on_every_bundled_theme` (`geode-marketdata/src/delegate.rs`), `every_header_tone_is_readable_on_every_bundled_theme` (`tile.rs`), `every_bundled_theme_keeps_generated_hues_readable` (`geode-shell/src/theme.rs`) |
 | `DataTable`'s key context is bound to `NoAction` so vim keys reach the blotter | the blotter and market-data key tests as a body |
 | The theme JSON schema (38 bundled themes load) | `geode-shell/src/theme.rs`'s bundled-theme tests |
 | `Dialog`'s 250 ms entrance animation is still hardwired (`dialog/dialog.rs`, `ANIMATION_DURATION`, ungated by `reduce_motion` even on git HEAD) | not a test — recorded so nobody reopens "use `Dialog` now" without reading §4.1 |
+
+**As verified (Task 8 of the plan, 2026-09-18):** every behaviour in the
+table held at gpui-component 0.6.2 / gpui-pre 0.3.5 and every named test
+passed unchanged — except that one named test, `a_double_click_only_moves_the_cursor`,
+had already been superseded on `main` by `a_double_click_opens_the_editor_on_the_cell`
+before this branch started (the 2026-09-17 mouse-editing reversal, `main`
+ea429bb→eddb4ea: a double-click now opens the editor); the table above now
+names the successor, and the pinned-rev behaviour that row guards
+(`TableState::set_selected_row` stopping propagation of its own) is still
+covered by `the_menu_rows_stop_propagation_keeps_the_pickers_focus`. Of the
+63 comment sites that cited the pinned checkout, 59 were re-pointed after
+their claim was confirmed at the new versions and 7 were reported as
+changed, restated under a controller ruling rather than left:
+
+- `crates/geode-shell/src/shell/dialog.rs:225` — gpui-base's
+  `on_action_search` now propagates `ctrl-f` when the input is not
+  `searchable` (it returned without propagating at the old pinned rev)
+- `crates/geode-shell/src/tiling/docks.rs:17` — the dock framework is now
+  split between `gpui-component-0.6.2/src/dock/` (`Panel`/`PanelView`/
+  `TabPanel`) and `gpui-base-0.6.2/src/dock/` (`DockArea`/`PaneTree`/
+  `DockAreaState`/drag-and-drop), not one directory
+- `crates/geode-shell/src/listfilter.rs:23` — `left`/`right` now
+  propagate at the text's edges when the selection is empty, rather than
+  being swallowed unconditionally
+- `crates/geode-shell/src/shell/occupants.rs:318` —
+  `Window::focused_node_id` was renamed `focus_node_id_in_rendered_frame`
+- `crates/geode-shell/src/shell/hot_reload.rs:429` — the zed-checkout
+  path citation is re-pointed to `App::push_effect` in
+  `gpui-pre-0.3.5/src/app.rs`
+- `crates/geode-shell/src/shell/mod.rs:1133` — the Windows activation
+  wiring citation was not re-read on this macOS host
+- `crates/geode-marketdata/src/popup.rs:60` — `SharedString` now wraps
+  `smol_str::SmolStr`, inline at ≤ 23 bytes
 
 ### 3.5 Verification
 

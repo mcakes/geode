@@ -7,9 +7,7 @@
 //! # Inventory (recorded before wiring, per plan constraint)
 //!
 //! Checked against the pinned releases named in the root `Cargo.toml` —
-//! zed rev `e3adf43` (`~/.cargo/git/checkouts/
-//! zed-a70e2ad075855582/e3adf43/`) and gpui-component rev `0e2fb7a`
-//! (`~/.cargo/git/checkouts/gpui-component-95ce574d8a0da8b8/0e2fb7a/`):
+//! gpui-pre 0.3.5 and gpui-component 0.6.2:
 //!
 //! - **Embedded-font API.** `App::text_system(&self) -> &Arc<TextSystem>`
 //!   (`gpui-pre-0.3.5/src/app.rs`); `TextSystem::add_fonts(&self, fonts:
@@ -22,9 +20,9 @@
 //!   shape [`register`] follows below, except bytes come from
 //!   `include_bytes!` (no runtime file I/O, no extra `AssetSource`) rather
 //!   than listing a `rust_embed` folder, since the brief calls embedded
-//!   bytes fine and this repo's `AssetSource` is `gpui_component_assets::
-//!   Assets` (vendored upstream, not ours to extend with an app-specific
-//!   `fonts/` folder).
+//!   bytes fine and this repo's `AssetSource` is `gpui_kit_assets::Assets`
+//!   (vendored upstream, not ours to extend with an app-specific `fonts/`
+//!   folder).
 //! - **Theme font-family seam.** `gpui_component::Theme`
 //!   (`gpui-component-0.6.2/src/theme/mod.rs`) carries `font_family:
 //!   SharedString` (default `.SystemUIFont`, the macOS system UI font —
