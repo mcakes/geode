@@ -871,34 +871,33 @@ impl ShellView {
         // removed from the tree never reaches (`module::recording`'s
         // commit/cancel arm has the full note; a real panel owes the same
         // two steps).
-        if window
-            .focused(cx)
-            .is_some_and(|focused| !self.holds_shell_focus(&focused, cx))
-        {
-            let stack = self.context_stack(cx);
-            if stack.iter().any(|c| c.get("mode") == Some("insert")) {
-                if let Some(ks) = convert_keystroke(&event.keystroke)
-                    // `Cow`, not two `Vec`s: a chord resolves against the
-                    // stack that is already in hand and allocates nothing,
-                    // and the bare path — every keystroke of a trader's
-                    // typing — allocates one short filtered stack rather
-                    // than cloning the whole one.
-                    && let Some(action) = self
-                        .single_keystroke_binding(&ks, &insert_contexts(&stack, &ks))
-                        .map(|binding| binding.action.clone())
-                    && action.0 != UNBOUND_ACTION
-                {
-                    self.dispatch(&action, None, window, cx);
-                    // Stopped for the same reason the filter field stops a
-                    // dispatched chord: a claimed keystroke must not ALSO
-                    // reach the window's text-input phase and type itself
-                    // into the input behind the action (gpui runs that
-                    // phase only while the event still propagates).
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-                return;
+        //
+        // `occupant_insert_stack` (occupants.rs) is the ONE predicate for
+        // "an occupant holds the keyboard in insert mode": `render`'s
+        // focus-restore skip reads the same door (user ruling 2026-09-17),
+        // so the two can never disagree about whose keyboard it is.
+        if let Some(stack) = self.occupant_insert_stack(window, cx) {
+            if let Some(ks) = convert_keystroke(&event.keystroke)
+                // `Cow`, not two `Vec`s: a chord resolves against the
+                // stack that is already in hand and allocates nothing,
+                // and the bare path — every keystroke of a trader's
+                // typing — allocates one short filtered stack rather
+                // than cloning the whole one.
+                && let Some(action) = self
+                    .single_keystroke_binding(&ks, &insert_contexts(&stack, &ks))
+                    .map(|binding| binding.action.clone())
+                && action.0 != UNBOUND_ACTION
+            {
+                self.dispatch(&action, None, window, cx);
+                // Stopped for the same reason the filter field stops a
+                // dispatched chord: a claimed keystroke must not ALSO
+                // reach the window's text-input phase and type itself
+                // into the input behind the action (gpui runs that
+                // phase only while the event still propagates).
+                cx.stop_propagation();
+                cx.notify();
             }
+            return;
         }
 
         // Deliberately no analogous "if palette_input is focused, return

@@ -250,6 +250,117 @@ fn the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode(
     );
 }
 
+/// A mouse-down on the tile's own view, at a point away from its input
+/// — what a real double-click's second press lands on — through the
+/// tile cell's listener, which arms `pending_focus_restore`. The view's
+/// `track_focus` handle takes window focus on the same press, exactly as
+/// the market-data panel's own view does, so the editor focus is
+/// re-taken afterwards by the caller when the flow under test does that
+/// (a double-click opens the editor on the CLICK, after the mouse-down
+/// has already moved focus).
+fn mouse_down_on_the_rec_tile(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext) {
+    let tile = shell.read_with(vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap().0
+    });
+    let selector: &'static str = Box::leak(format!("tile-content-{tile}").into_boxed_str());
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let bounds = vcx.debug_bounds(selector).expect("the rec tile is painted");
+    let at = gpui::point(
+        bounds.origin.x + bounds.size.width - px(8.),
+        bounds.origin.y + bounds.size.height - px(8.),
+    );
+    vcx.simulate_mouse_down(at, MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_up(at, MouseButton::Left, gpui::Modifiers::none());
+}
+
+/// User ruling 2026-09-17 (reversing 2026-09-14's "editing is
+/// keyboard-only"): the focus restore every tile mouse-down arms is
+/// SKIPPED when a tile's occupant holds the keyboard in insert mode —
+/// `occupant_holds_insert_focus`, the very predicate the insert branch
+/// keys on — so an editor a module opens from a double-click keeps the
+/// keyboard past the next frame instead of going deaf. The flag is still
+/// consumed (cleared), only the focus move is withheld.
+///
+/// Two timelines, both covered here. The PRESS arms the flag and (the
+/// view `track_focus`es, as the panel's `DataTable` does) moves window
+/// focus onto the view's own handle; the test harness draws inside the
+/// simulated event, so the render that used to hand the keyboard to the
+/// shell root has already run by the time the press returns — and with
+/// insert mode on it must have left focus where it was, off the root.
+/// Then the tight timeline: an attribute's own press opens the editor in
+/// the SAME event the tile listener arms the flag, so the editor is
+/// focused and the flag armed when the frame comes; stood in for by
+/// re-focusing the fixture's open editor and arming the flag by hand.
+/// Typing afterwards proves the keyboard really stayed.
+#[gpui::test]
+fn a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore(cx: &mut gpui::TestAppContext) {
+    let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
+    let (window, mut vcx) = open_shell(cx, services);
+    let (shell, shell_focus) = enter_insert_mode(&window, &mut vcx);
+    let editor = input.borrow().clone().expect("the editor is open");
+
+    mouse_down_on_the_rec_tile(&shell, &mut vcx);
+    assert!(
+        !shell.read_with(&vcx, |s, _| s.pending_focus_restore),
+        "the flag is consumed on the frame the press schedules"
+    );
+    assert!(
+        !vcx.update(|window, _cx| shell_focus.is_focused(window)),
+        "in insert mode the restore is withheld: the shell root did not take the keyboard"
+    );
+
+    vcx.update(|window, cx| editor.read(cx).focus_handle(cx).focus(window, cx));
+    shell.update(&mut vcx, |s, _| s.pending_focus_restore = true);
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        !shell.read_with(&vcx, |s, _| s.pending_focus_restore),
+        "the flag is consumed either way"
+    );
+    assert!(
+        vcx.update(|window, cx| editor.read(cx).focus_handle(cx).is_focused(window)),
+        "the editor keeps the keyboard: the restore was skipped, not deferred"
+    );
+    vcx.simulate_input("x");
+    assert_eq!(
+        rec_input_value(&input, &vcx).as_deref(),
+        Some("x"),
+        "and typing still reaches it"
+    );
+}
+
+/// The control for the test above: the same press on the same tile with
+/// insert mode OFF. The view's `track_focus` handle takes window focus on
+/// the press — a non-shell handle, so `holds_shell_focus` is false there
+/// too — and the frame the press schedules hands the keyboard back to the
+/// shell root, exactly as before the ruling. Insert mode, not "some
+/// occupant handle is focused", is what withholds the restore.
+#[gpui::test]
+fn a_tile_out_of_insert_mode_still_hands_focus_back_on_a_mouse_down(cx: &mut gpui::TestAppContext) {
+    let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
+    let (window, mut vcx) = open_shell(cx, services);
+    let (shell, shell_focus) = enter_insert_mode(&window, &mut vcx);
+    // `escape` is the fragment's `rec::cancel`: blur, drop, insert off.
+    vcx.simulate_keystrokes("escape");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        rec_input_value(&input, &vcx).is_none(),
+        "fixture check: editor closed"
+    );
+
+    // The same press as the test above — the only difference is the mode.
+    mouse_down_on_the_rec_tile(&shell, &mut vcx);
+    assert!(
+        vcx.update(|window, _cx| shell_focus.is_focused(window)),
+        "out of insert mode the restore runs and the shell root has the keyboard"
+    );
+}
+
 /// I-3 (final whole-branch review): a KEYBOARD focus move out of a tile
 /// that owns a focused editor must hand the keyboard back to the shell,
 /// exactly as a tile click already does. `mod+h` moves the FOCUSED TILE

@@ -89,9 +89,26 @@ impl Render for ShellView {
         // what makes `handle_key_down` stop firing until a mouse click
         // claims focus elsewhere first. Kept ahead of everything else in
         // render, per its contract.
+        //
+        // SKIPPED — flag cleared, focus left exactly where it is — while a
+        // tile's occupant holds the keyboard in insert mode
+        // (`occupant_holds_insert_focus`, occupants.rs: window focus on a
+        // handle the shell does not own AND the focused tile's context
+        // stack carrying `mode == insert`; user ruling 2026-09-17,
+        // reversing the 2026-09-14 "editing is keyboard-only" ruling).
+        // Every tile mouse-down re-arms this flag, so without the skip an
+        // editor a module opened from a double-click would lose the
+        // keyboard on the very next frame. A module in insert mode owns
+        // the keyboard, and the shell's chords still dispatch from there
+        // through `handle_key_down`'s insert branch — the same predicate —
+        // so nothing goes dead. The orphaned-focus case this flag was born
+        // for has no occupant claiming `insert`, and the workspace-switch
+        // case lives in `ensure_occupants`, so both stay covered.
         if self.pending_focus_restore {
             self.pending_focus_restore = false;
-            self.focus_handle.focus(window, cx);
+            if !self.occupant_holds_insert_focus(window, cx) {
+                self.focus_handle.focus(window, cx);
+            }
         }
 
         // The safety net under that flag: a window with NOTHING focused

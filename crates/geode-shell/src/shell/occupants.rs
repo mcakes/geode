@@ -382,12 +382,58 @@ impl ShellView {
         }
     }
 
+    /// Does a tile's occupant hold the keyboard IN INSERT MODE right now?
+    /// Answers the focused tile's context stack when window focus is on a
+    /// handle the shell does not own (`!holds_shell_focus`) AND that
+    /// stack carries `mode == insert`; `None` otherwise.
+    ///
+    /// **The one predicate behind two doors, which must not drift** (user
+    /// ruling 2026-09-17, reversing the 2026-09-14 "editing is
+    /// keyboard-only" ruling): `handle_key_down`'s insert branch routes
+    /// typing at the occupant's input exactly while this is `Some`, and
+    /// `render`'s consumption of `pending_focus_restore` SKIPS the
+    /// restore — flag cleared, focus left where it is — under the same
+    /// condition, so an editor a module opened from a mouse event (a
+    /// double-click on a cell or an attribute) keeps the keyboard past
+    /// the frame that would otherwise have handed it to the shell root.
+    /// A module in insert mode owns the keyboard; the shell's chords
+    /// still dispatch from there through the insert branch, so nothing
+    /// goes dead. Both other reasons the flag exists stay covered: the
+    /// orphaned-focus case (`apply_reload`'s palette close) has no
+    /// occupant claiming `insert`, and the workspace-switch case is
+    /// caught in `ensure_occupants` itself, never through the flag.
+    ///
+    /// Returns the stack rather than a bare `bool` because the insert
+    /// branch resolves the keystroke against it next, and computing the
+    /// stack twice per typed character is the kind of churn this crate
+    /// avoids; [`Self::occupant_holds_insert_focus`] is the `bool` form.
+    pub(super) fn occupant_insert_stack(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<Vec<crate::keymap::KeyContext>> {
+        let focused = window.focused(cx)?;
+        if self.holds_shell_focus(&focused, cx) {
+            return None;
+        }
+        let stack = self.context_stack(cx);
+        stack
+            .iter()
+            .any(|c| c.get("mode") == Some("insert"))
+            .then_some(stack)
+    }
+
+    /// [`Self::occupant_insert_stack`] as a yes/no — `render`'s door.
+    pub(super) fn occupant_holds_insert_focus(&self, window: &Window, cx: &App) -> bool {
+        self.occupant_insert_stack(window, cx).is_some()
+    }
+
     /// Is `handle` one of the shell's own focusable surfaces — the root,
     /// or one of the four `Entity<InputState>`s a user can be typing
     /// into? Anything else that holds window focus belongs to a tile's
     /// occupant view. Two callers read it for that one distinction:
     /// `ensure_occupants`'s backstop above (see it for why the distinction
-    /// is the whole decision) and `handle_key_down`'s insert-mode branch,
+    /// is the whole decision) and `occupant_insert_stack` just above,
     /// which routes typing at a tile only while a tile — never a shell
     /// surface — actually holds the keyboard.
     pub(super) fn holds_shell_focus(&self, handle: &FocusHandle, cx: &App) -> bool {

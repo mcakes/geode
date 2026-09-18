@@ -6723,6 +6723,16 @@ run_mutation "focus: the drag grab re-arms the focus restore" \
   '        cx.stop_propagation();' \
   geode-shell a_grab_leaves_the_shell_focused_on_the_next_frame
 
+# User ruling 2026-09-17 (reversing "editing is keyboard-only"): the
+# restore is withheld while a tile's occupant holds the keyboard in insert
+# mode, so a double-click-opened editor keeps it. Mutated to always
+# restore, the frame after the press hands the keyboard to the shell root.
+run_mutation "focus: a tile in insert mode keeps focus through the mouse-down restore" \
+  crates/geode-shell/src/shell/render.rs \
+  '            if !self.occupant_holds_insert_focus(window, cx) {' \
+  '            if true {' \
+  geode-shell a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore
+
 run_mutation "focus: a window with nothing focused gets the shell root back" \
   crates/geode-shell/src/shell/render.rs \
   '        if window.focused(cx).is_none() {
