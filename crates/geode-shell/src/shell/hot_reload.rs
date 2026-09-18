@@ -426,10 +426,9 @@ impl ShellView {
             // subscriber-registration order; it flushes the queue it
             // built while this function ran, and an `Effect::Notify` is
             // deduped to the position of its *first* queueing per emitter
-            // (`pending_notifications` in gpui's `App::push_effect` —
-            // `~/.cargo/git/checkouts/zed-*/*/crates/gpui/src/app.rs`
-            // around line 1650). `groupings_changed` and `views_changed`
-            // both key off `dimensions` (line ~153), and
+            // (`pending_notifications` in gpui's `App::push_effect`,
+            // `gpui-pre-0.3.5/src/app.rs`). `groupings_changed` and
+            // `views_changed` both key off `dimensions` (line ~153), and
             // `GroupingSlots::from_doc` really does depend on that doc, so
             // a single reload can make `groupings_changed`'s own
             // `frame.update(..) { .. cx.notify() }` fire below. If the

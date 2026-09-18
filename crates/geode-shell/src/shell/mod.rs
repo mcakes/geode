@@ -1127,15 +1127,17 @@ impl ShellView {
         // window — without this observer the stale ACTIVE drag survived,
         // and the click that re-activated the window could advance and
         // apply it. `cx.observe_window_activation` is available at the
-        // pinned gpui rev (`gpui-pre-0.3.5/src/app/context.rs`; the
+        // pinned gpui rev (`gpui-pre-0.3.5/src/app/context.rs`); the
         // platform layer feeds it from `on_active_status_change`, which
-        // macOS and Windows both wire). Each drag kind ends per its own
-        // recorded semantics — the same split as the Escape cancel in
-        // `handle_key_down`: a tile drag CANCELS (nothing was applied, so
-        // nothing is lost) and a divider drag FINISHES (its resizes were
-        // applied live and persist; `cancel_divider_drag` keeps them and
-        // dirties the session). The BUG 4 buttonless-move cancel remains
-        // the backstop for any deactivation a platform fails to report.
+        // macOS wires (`gpui-pre-macos-0.3.5/src/window.rs`) — the
+        // Windows wiring (`gpui-pre-windows`) was not re-read on this
+        // host. Each drag kind ends per its own recorded semantics — the
+        // same split as the Escape cancel in `handle_key_down`: a tile
+        // drag CANCELS (nothing was applied, so nothing is lost) and a
+        // divider drag FINISHES (its resizes were applied live and
+        // persist; `cancel_divider_drag` keeps them and dirties the
+        // session). The BUG 4 buttonless-move cancel remains the backstop
+        // for any deactivation a platform fails to report.
         cx.observe_window_activation(window, |view, window, cx| {
             if !window.is_window_active()
                 && (view.tile_drag.is_some() || view.divider_drag.is_some())

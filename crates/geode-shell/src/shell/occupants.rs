@@ -314,10 +314,12 @@ impl ShellView {
         // still `Some` and `render`'s `is_none()` net cannot see this at
         // all. What actually breaks is dispatch: gpui resolves the
         // focused id against the RENDERED tree and falls back to
-        // `root_node_id` when it is absent (`Window::focused_node_id`,
-        // pinned rev), and that node carries none of `ShellView`'s
-        // element key listeners — so `handle_key_down` stops firing and
-        // every shell chord is dead until a click claims focus.
+        // `root_node_id` when it is absent (`Window::
+        // focus_node_id_in_rendered_frame`, `gpui-pre-0.3.5/src/window.rs`
+        // — `focused_node_id` at the old git rev), and that node carries
+        // none of `ShellView`'s element key listeners — so
+        // `handle_key_down` stops firing and every shell chord is dead
+        // until a click claims focus.
         //
         // Focus is taken back HERE rather than through
         // `pending_focus_restore`, because the flag is consumed at the
