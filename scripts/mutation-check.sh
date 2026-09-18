@@ -6733,6 +6733,17 @@ run_mutation "focus: a tile in insert mode keeps focus through the mouse-down re
   '            if true {' \
   geode-shell a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore
 
+# Review C-1 on that rule: the skip keys on OWNERSHIP — the focused tile's
+# occupant itself holds the focused handle (`TileContent::holds_focus`) —
+# not on the focused tile merely claiming insert mode. Mutated out, `i` in
+# A, mod+l, `i` in B, mod+h leaves B's field focused under A's ring and
+# types every following bare key into B against A's stack.
+run_mutation "focus: an abandoned editor in the focused tile does not keep another tile's field focused" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if !self.occupants.get(&tile)?.content.holds_focus(window, cx) {' \
+  '        if false {' \
+  geode-shell an_abandoned_editor_in_the_focused_tile_does_not_keep_another_tiles_field_focused
+
 run_mutation "focus: a window with nothing focused gets the shell root back" \
   crates/geode-shell/src/shell/render.rs \
   '        if window.focused(cx).is_none() {
@@ -11659,8 +11670,8 @@ run_mutation "mdedit: a double-click on a cell opens the editor" \
 # double-click is a single click.
 run_mutation "mdedit: a double-click on an attribute opens its editor" \
   crates/geode-marketdata/src/tile.rs \
-  '        if click_count >= 2 && matches!(self.cursor, Cursor::Attr(_)) {' \
-  '        if click_count >= 3 && matches!(self.cursor, Cursor::Attr(_)) {' \
+  '        if click_count == 2 && matches!(self.cursor, Cursor::Attr(_)) {' \
+  '        if click_count == 3 && matches!(self.cursor, Cursor::Attr(_)) {' \
   geode-marketdata a_double_click_on_an_attribute_opens_its_editor
 
 # Nudging (2026-09-17): `up` steps a cell by one unit of the column's

@@ -382,10 +382,13 @@ impl ShellView {
         }
     }
 
-    /// Does a tile's occupant hold the keyboard IN INSERT MODE right now?
-    /// Answers the focused tile's context stack when window focus is on a
-    /// handle the shell does not own (`!holds_shell_focus`) AND that
-    /// stack carries `mode == insert`; `None` otherwise.
+    /// Does the FOCUSED TILE's occupant itself hold the keyboard, in
+    /// insert mode, right now? Answers that tile's context stack when
+    /// three things hold at once — window focus is on a handle the shell
+    /// does not own (`!holds_shell_focus`), the focused tile's occupant
+    /// reports that one of ITS OWN inputs is the focused handle
+    /// (`TileContent::holds_focus`), and its stack carries `mode ==
+    /// insert` — and `None` otherwise.
     ///
     /// **The one predicate behind two doors, which must not drift** (user
     /// ruling 2026-09-17, reversing the 2026-09-14 "editing is
@@ -396,12 +399,25 @@ impl ShellView {
     /// condition, so an editor a module opened from a mouse event (a
     /// double-click on a cell or an attribute) keeps the keyboard past
     /// the frame that would otherwise have handed it to the shell root.
-    /// A module in insert mode owns the keyboard; the shell's chords
-    /// still dispatch from there through the insert branch, so nothing
-    /// goes dead. Both other reasons the flag exists stay covered: the
-    /// orphaned-focus case (`apply_reload`'s palette close) has no
-    /// occupant claiming `insert`, and the workspace-switch case is
-    /// caught in `ensure_occupants` itself, never through the flag.
+    /// A module whose own field holds the keyboard in insert mode owns
+    /// it; the shell's chords still dispatch from there through the
+    /// insert branch, so nothing goes dead. Both other reasons the flag
+    /// exists stay covered: the orphaned-focus case (`apply_reload`'s
+    /// palette close) has no occupant holding a field, and the
+    /// workspace-switch case is caught in `ensure_occupants` itself,
+    /// never through the flag.
+    ///
+    /// **The ownership check is the load-bearing half** (review C-1): a
+    /// module reports `mode == insert` while its editor is OPEN, and the
+    /// keyboard's own rule (`note_keyboard_focus_move`) leaves an editor
+    /// open when tile focus moves away. With two panels, `i` in A,
+    /// `mod+l`, `i` in B, `mod+h` puts the ring on A — whose abandoned
+    /// editor still claims insert — while B's field holds the keyboard;
+    /// read from the mode alone, that withheld the restore and typed every
+    /// following bare key into B against A's stack. The restore is
+    /// withheld only while the focused tile's occupant itself HOLDS the
+    /// focused handle in insert mode, and the insert branch resolves
+    /// only then too.
     ///
     /// Returns the stack rather than a bare `bool` because the insert
     /// branch resolves the keystroke against it next, and computing the
@@ -414,6 +430,10 @@ impl ShellView {
     ) -> Option<Vec<crate::keymap::KeyContext>> {
         let focused = window.focused(cx)?;
         if self.holds_shell_focus(&focused, cx) {
+            return None;
+        }
+        let tile = self.services.workspaces.active().focused_tile()?;
+        if !self.occupants.get(&tile)?.content.holds_focus(window, cx) {
             return None;
         }
         let stack = self.context_stack(cx);

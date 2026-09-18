@@ -91,11 +91,13 @@ impl Render for ShellView {
         // render, per its contract.
         //
         // SKIPPED — flag cleared, focus left exactly where it is — while a
-        // tile's occupant holds the keyboard in insert mode
+        // tile's occupant ITSELF holds the focused handle in insert mode
         // (`occupant_holds_insert_focus`, occupants.rs: window focus on a
-        // handle the shell does not own AND the focused tile's context
+        // handle the shell does not own, the focused tile's occupant
+        // answering `TileContent::holds_focus` for it, AND its context
         // stack carrying `mode == insert`; user ruling 2026-09-17,
-        // reversing the 2026-09-14 "editing is keyboard-only" ruling).
+        // reversing the 2026-09-14 "editing is keyboard-only" ruling —
+        // the ownership half is review C-1's, see the predicate's doc).
         // Every tile mouse-down re-arms this flag, so without the skip an
         // editor a module opened from a double-click would lose the
         // keyboard on the very next frame. A module in insert mode owns

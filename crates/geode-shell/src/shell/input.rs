@@ -873,9 +873,13 @@ impl ShellView {
         // two steps).
         //
         // `occupant_insert_stack` (occupants.rs) is the ONE predicate for
-        // "an occupant holds the keyboard in insert mode": `render`'s
-        // focus-restore skip reads the same door (user ruling 2026-09-17),
-        // so the two can never disagree about whose keyboard it is.
+        // "the focused tile's occupant itself holds the keyboard in insert
+        // mode" — ownership included (`TileContent::holds_focus`), so a
+        // keystroke with the ring on one tile and the keyboard in
+        // another's abandoned field never resolves against the first's
+        // insert stack. `render`'s focus-restore skip reads the same door
+        // (user ruling 2026-09-17), so the two can never disagree about
+        // whose keyboard it is.
         if let Some(stack) = self.occupant_insert_stack(window, cx) {
             if let Some(ks) = convert_keystroke(&event.keystroke)
                 // `Cow`, not two `Vec`s: a chord resolves against the

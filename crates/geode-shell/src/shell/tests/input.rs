@@ -277,23 +277,28 @@ fn mouse_down_on_the_rec_tile(shell: &Entity<ShellView>, vcx: &mut gpui::VisualT
 
 /// User ruling 2026-09-17 (reversing 2026-09-14's "editing is
 /// keyboard-only"): the focus restore every tile mouse-down arms is
-/// SKIPPED when a tile's occupant holds the keyboard in insert mode —
-/// `occupant_holds_insert_focus`, the very predicate the insert branch
-/// keys on — so an editor a module opens from a double-click keeps the
+/// SKIPPED only while the focused tile's occupant itself HOLDS the focused
+/// handle in insert mode — `occupant_holds_insert_focus`, the very
+/// predicate the insert branch keys on — so an editor a module opens
+/// from a double-click keeps the
 /// keyboard past the next frame instead of going deaf. The flag is still
 /// consumed (cleared), only the focus move is withheld.
 ///
-/// Two timelines, both covered here. The PRESS arms the flag and (the
-/// view `track_focus`es, as the panel's `DataTable` does) moves window
-/// focus onto the view's own handle; the test harness draws inside the
-/// simulated event, so the render that used to hand the keyboard to the
-/// shell root has already run by the time the press returns — and with
-/// insert mode on it must have left focus where it was, off the root.
-/// Then the tight timeline: an attribute's own press opens the editor in
-/// the SAME event the tile listener arms the flag, so the editor is
-/// focused and the flag armed when the frame comes; stood in for by
-/// re-focusing the fixture's open editor and arming the flag by hand.
-/// Typing afterwards proves the keyboard really stayed.
+/// Two phases. First, the RECORDER's own press timeline: its view
+/// `track_focus`es its handle, so the press arms the flag AND moves window
+/// focus onto that handle — which is NOT an input the occupant holds, so
+/// ownership (`TileContent::holds_focus`, review C-1) fails and the
+/// restore runs even though the editor is still open (the test harness
+/// draws inside the simulated event, so it has run by the time the press
+/// returns). That is the fixture's shape, not the panel's: the panel's
+/// view tracks no focus — a cell press lands on its `DataTable`'s tracked
+/// handle and an attribute press on nothing — and in the panel the editor
+/// is opened and focused on the click, after the press. Then the tight
+/// timeline the panel's attribute press really has: the editor is opened
+/// and focused in the SAME event the tile listener arms the flag, so both
+/// hold when the frame comes; stood in for by re-focusing the fixture's
+/// open editor and arming the flag by hand. Typing afterwards proves the
+/// keyboard really stayed.
 #[gpui::test]
 fn a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore(cx: &mut gpui::TestAppContext) {
     let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
@@ -307,8 +312,9 @@ fn a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore(cx: &mut gpu
         "the flag is consumed on the frame the press schedules"
     );
     assert!(
-        !vcx.update(|window, _cx| shell_focus.is_focused(window)),
-        "in insert mode the restore is withheld: the shell root did not take the keyboard"
+        vcx.update(|window, _cx| shell_focus.is_focused(window)),
+        "the recorder's press moved focus onto its VIEW's handle, which is not an input the \
+         occupant holds: ownership fails, so the restore runs even with an editor open"
     );
 
     vcx.update(|window, cx| editor.read(cx).focus_handle(cx).focus(window, cx));
@@ -358,6 +364,123 @@ fn a_tile_out_of_insert_mode_still_hands_focus_back_on_a_mouse_down(cx: &mut gpu
     assert!(
         vcx.update(|window, _cx| shell_focus.is_focused(window)),
         "out of insert mode the restore runs and the shell root has the keyboard"
+    );
+}
+
+/// Review C-1 on the 2026-09-17 rule: the restore is withheld only while
+/// the focused tile's occupant itself HOLDS the focused handle in insert
+/// mode (`TileContent::holds_focus`), never because the focused tile
+/// merely CLAIMS insert. Two tiles, four keystrokes: `i` in A, `mod+l`
+/// (A's editor is left open — the I-3 ruling), `i` in B, `mod+h`. The
+/// ring is now on A, whose abandoned editor still reports `mode ==
+/// insert`, while B's field holds the keyboard. Read from the mode alone,
+/// the predicate withheld the restore here: the keyboard stayed in B's
+/// cell with the ring on A, every bare key was typed into B against A's
+/// stack, and `escape` — A's cancel, which blurs only its OWN field —
+/// then left B's field focused for good with no restore pending (I-3's
+/// exact failure, with no recovery until a click). With ownership, the
+/// restore runs: the shell root has the keyboard, a typed `3` is the
+/// matcher's count and types into nobody's cell, and `enter` reaches the
+/// FOCUSED tile's own action.
+#[gpui::test]
+fn an_abandoned_editor_in_the_focused_tile_does_not_keep_another_tiles_field_focused(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let shell_focus = shell.read_with(&vcx, |s, _| s.focus_handle.clone());
+    let draw = |vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    };
+
+    vcx.simulate_keystrokes("ctrl-v");
+    let a = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    let b = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_ne!(a, b, "fixture check: two tiles");
+
+    // `i` in A, `mod+l` (`alt+l` is `workspace::focus_right`), `i` in B.
+    vcx.simulate_keystrokes("alt-h");
+    vcx.simulate_keystrokes("i");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("alt-l");
+    draw(&mut vcx);
+    assert!(
+        vcx.update(|window, _cx| shell_focus.is_focused(window)),
+        "fixture check: I-3 — the move out of A handed the keyboard back"
+    );
+    vcx.simulate_keystrokes("i");
+    draw(&mut vcx);
+    let b_editor = input.borrow().clone().expect("B's editor is open");
+    assert!(
+        vcx.update(|window, cx| b_editor.read(cx).focus_handle(cx).is_focused(window)),
+        "fixture check: B's field holds the keyboard"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.services.workspaces.active().focused_tile()),
+        Some(b)
+    );
+
+    // `mod+h`: the ring goes to A, whose abandoned editor still claims
+    // insert mode. The restore must run regardless.
+    vcx.simulate_keystrokes("alt-h");
+    draw(&mut vcx);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.services.workspaces.active().focused_tile()),
+        Some(a),
+        "fixture check: the ring moved to A"
+    );
+    assert!(
+        shell.read_with(&vcx, |s, cx| {
+            s.occupants
+                .get(&a)
+                .unwrap()
+                .content
+                .key_context(cx)
+                .get("mode")
+                == Some("insert")
+        }),
+        "fixture check: A's abandoned editor still reports insert mode"
+    );
+    assert!(
+        vcx.update(|window, _cx| shell_focus.is_focused(window)),
+        "the restore ran: A does not hold B's field, so B's field does not keep the keyboard"
+    );
+
+    // The matcher governs: a bare key is a count, typed into nobody's
+    // cell, and the next action is the FOCUSED tile's own.
+    vcx.simulate_input("3");
+    assert_eq!(
+        rec_input_value(&input, &vcx).as_deref(),
+        Some(""),
+        "nothing may type itself into B's abandoned-by-focus field"
+    );
+    assert_eq!(shell.read_with(&vcx, |s, _| s.matcher.count()), Some(3));
+    vcx.simulate_keystrokes("enter");
+    let commits: Vec<(TileId, Option<u32>)> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            crate::module::recording::Recorded::Dispatch(tile, action, count)
+                if action.0 == "rec::commit" =>
+            {
+                Some((*tile, *count))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        commits,
+        vec![(a, Some(3))],
+        "the count reaches the focused tile's own action, and only its: {:?}",
+        log.borrow()
     );
 }
 

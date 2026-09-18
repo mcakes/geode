@@ -619,6 +619,22 @@ impl MarketDataTile {
         KeyContext::new("marketdata").pair("mode", mode).counts()
     }
 
+    /// `TileContent::holds_focus` (review C-1, 2026-09-17): does THIS
+    /// panel's open editor or its picker's field hold window focus? The
+    /// mode above says an editor is OPEN; this says whose field the
+    /// keyboard is actually in — two different facts once an editor has
+    /// been left open by a tile-focus move (I-3), and the shell's
+    /// insert-focus predicate needs the second.
+    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        let editor = self
+            .editor
+            .as_ref()
+            .is_some_and(|e| e.state.read(cx).focus_handle(cx).is_focused(window));
+        let picker = matches!(&self.popup, Some(Popup::Picker(p))
+            if p.input.read(cx).focus_handle(cx).is_focused(window));
+        editor || picker
+    }
+
     // ---- the request -------------------------------------------------
 
     /// Whether the frame has moved in a way a document request depends
@@ -1127,7 +1143,7 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) {
         self.cursor_to_attr(i, window, cx);
-        if click_count >= 2 && matches!(self.cursor, Cursor::Attr(_)) {
+        if click_count == 2 && matches!(self.cursor, Cursor::Attr(_)) {
             self.begin_edit(window, cx);
             self.sync_cursor(cx);
             self.changed(cx);
@@ -1548,7 +1564,11 @@ impl MarketDataTile {
     /// else the panel's), an `F64`/`I64` attribute at the places its text
     /// paints (attributes paint with `{}`, so `5000` steps by one), and a
     /// `Date` attribute by whole days — [`crate::core::nudge_text`] is
-    /// the arithmetic, this only decides the type and precision.
+    /// the arithmetic, this only decides the type and precision. The two
+    /// sources differ on purpose: a cell's precision comes from its
+    /// COLUMN's format, because that is what the cell paints with, while
+    /// an attribute's comes from its own TEXT, because an attribute has no
+    /// format and paints exactly the places the document sent.
     /// Text that does not parse leaves the editor untouched and says so
     /// in the notice. Answers whether the header needs re-preparing.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) -> bool {

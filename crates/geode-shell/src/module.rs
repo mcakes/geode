@@ -101,6 +101,24 @@ pub trait TileContent {
     fn set_visible(&self, visible: bool, cx: &mut App);
     /// State for `session.toml` (§3.5); stored opaquely by the shell.
     fn serialize(&self, cx: &App) -> toml::Table;
+    /// Does one of THIS occupant's own text inputs hold window focus right
+    /// now — its open cell editor, its picker's field? Default `false`:
+    /// an occupant with no input of its own (the blotter, the
+    /// diagnostics tile, the placeholder) never holds the keyboard.
+    ///
+    /// The ownership half of the shell's insert-focus predicate
+    /// (`ShellView::occupant_insert_stack`, user ruling 2026-09-17 and its
+    /// review's C-1): a module reports `mode == insert` while its editor
+    /// is OPEN, and the keyboard's own rule (`note_keyboard_focus_move`)
+    /// deliberately leaves an editor open when tile focus moves away — so
+    /// "the focused tile claims insert" and "the focused handle is this
+    /// tile's" are two different facts, and the shell must read the
+    /// second from the module itself. Answered off the focus handles, not
+    /// off the mode: `focus_handle(cx).is_focused(window)` on each input
+    /// the occupant owns.
+    fn holds_focus(&self, _window: &Window, _cx: &App) -> bool {
+        false
+    }
 }
 
 pub struct TileOccupant {
@@ -570,6 +588,17 @@ pub mod recording {
         }
         fn serialize(&self, _: &App) -> toml::Table {
             self.state.borrow().clone()
+        }
+        /// The panel's own answer, off THIS tile's view's own input —
+        /// never the factory-shared `input` cell, which holds whichever
+        /// tile's editor opened last and would make a tile whose editor
+        /// was abandoned (I-3) claim another tile's field as its own.
+        fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+            self.view
+                .read(cx)
+                .input
+                .as_ref()
+                .is_some_and(|state| state.read(cx).focus_handle(cx).is_focused(window))
         }
     }
 

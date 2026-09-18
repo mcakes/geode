@@ -1212,20 +1212,40 @@ are all untouched; what changed is what paints the grid.
    following frame — a shell-side decision this spec deferred rather than
    worked around from inside a module. That decision is now made, in the
    shell: `render` still consumes the flag but **withholds the focus move
-   while a tile's occupant holds the keyboard in insert mode** —
-   `ShellView::occupant_holds_insert_focus` (`shell/occupants.rs`):
-   window focus on a handle the shell does not own AND the focused tile's
-   context stack carrying `mode == insert`. That is exactly the predicate
-   `handle_key_down`'s insert branch already keyed on, and both sites now
-   read the one door (`occupant_insert_stack`), so they cannot drift. A
-   module in insert mode owns the keyboard; the shell's chords still
-   dispatch from there through the insert branch, so nothing goes dead;
-   the orphaned-focus case the flag was born for (`apply_reload`) has no
-   occupant claiming `insert`, and the workspace-switch case is caught in
-   `ensure_occupants` itself, so both stay covered. Pinned in
-   `geode-shell` by
-   `a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore` and
-   its out-of-insert-mode control.
+   only while the focused tile's occupant itself HOLDS the focused handle
+   in insert mode** — `ShellView::occupant_holds_insert_focus`
+   (`shell/occupants.rs`): window focus on a handle the shell does not
+   own, the focused tile's occupant answering `TileContent::holds_focus`
+   for it, AND its context stack carrying `mode == insert`. The insert
+   branch in `handle_key_down` reads the same door
+   (`occupant_insert_stack`), so the two cannot drift. A module whose own
+   field holds the keyboard in insert mode owns it; the shell's chords
+   still dispatch from there through the insert branch, so nothing goes
+   dead; the orphaned-focus case the flag was born for (`apply_reload`)
+   has no occupant holding a field, and the workspace-switch case is
+   caught in `ensure_occupants` itself, so both stay covered.
+   `TileContent::holds_focus(&self, window, cx) -> bool` is new on the
+   hosting contract (default `false`): this panel answers `true` iff its
+   open editor's `state` or its picker's `input` `is_focused(window)`
+   (`MarketDataTile::holds_focus`), the recording fixture answers off its
+   view's own input, and the blotter, diagnostics tile and placeholder
+   take the default. **The ownership half is the load-bearing one**
+   (review C-1 on the first build, which read the mode alone): a module
+   reports `mode == insert` while its editor is merely OPEN, and the
+   keyboard's own rule (I-3, `note_keyboard_focus_move`) leaves an editor
+   open when tile focus moves away — so with two panels, `i` in A,
+   `mod+l`, `i` in B, `mod+h` puts the ring on A, whose abandoned editor
+   still claims insert, while B's field holds the keyboard. Mode alone
+   withheld the restore there: every following bare key was typed into B
+   against A's stack, `up` nudged A's editor, `enter` committed A's value,
+   and `escape` (A's cancel, which blurs only its own field) then left B's
+   field focused for good with no restore pending — I-3's exact failure.
+   Pinned in `geode-shell` by
+   `a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore`, its
+   out-of-insert-mode control, and
+   `an_abandoned_editor_in_the_focused_tile_does_not_keep_another_tiles_field_focused`
+   (the four-keystroke scenario; harness `focus: an abandoned editor in
+   the focused tile does not keep another tile's field focused`).
 
    The panel's two mappings on top of that rule: `TableEvent::
    DoubleClickedCell(row, col)` moves the cursor and runs `begin_edit` —

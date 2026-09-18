@@ -203,6 +203,9 @@ impl TileContent for MarketDataContent {
     fn serialize(&self, cx: &App) -> toml::Table {
         self.tile.read(cx).serialize()
     }
+    fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.tile.read(cx).holds_focus(window, cx)
+    }
 }
 
 /// Builds one panel's tiles. One factory per [`PanelSpec`] — the roster

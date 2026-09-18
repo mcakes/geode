@@ -591,9 +591,12 @@ the cursor, and a click elsewhere while an editor is open still cancels
 it. Neither listener stops propagation: the shell's tile-level
 mouse-down runs as before, and what keeps the opened editor focused is a
 shell rule — `ShellView::render` withholds `pending_focus_restore`'s
-focus move while a tile's occupant holds the keyboard in insert mode
-(`occupant_holds_insert_focus`, the insert branch's own predicate,
-shared) — never a swallowed event.
+focus move only while the focused tile's occupant itself HOLDS the
+focused handle in insert mode (`occupant_holds_insert_focus`: non-shell
+focus, `TileContent::holds_focus` answered by that occupant — this panel
+answers off its editor's and picker's own focus handles — and `mode ==
+insert`; the insert branch's own predicate, shared) — never a swallowed
+event.
 
 The insert-mode `up`/`down` pair is no longer the picker's `menu_up`/
 `menu_down`: `up`/`down`/`shift+up`/`shift+down` bind
