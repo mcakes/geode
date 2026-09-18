@@ -34,7 +34,7 @@
 | `CLAUDE.md` | the invariant bullet (Task 4), the glossary sentence (Task 4), the "gpui skills" section (Task 3) |
 | `skills-lock.json`, `.agents/skills/**`, `.claude/skills/*` | the vendored skills (Task 3) |
 | 28 source files listed in Tasks 5–7 | comment re-pointing; no code changes |
-| `docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md` | §3.4 gains an "as verified" note if any behaviour changed (Task 8) |
+| `docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md` | §3.4 gains an "as verified" paragraph recording the outcome (Task 8) |
 
 No new files. No test files change.
 
