@@ -11643,6 +11643,57 @@ run_mutation "mdmenu: the arrow keys move the menu highlight" \
 "enter" = "marketdata::menu_pick"' \
   geode-marketdata dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode
 
+# 2026-09-17 (reversing "editing is keyboard-only"): a double-click on a
+# grid cell opens the editor there. Mutated to never match a model
+# column, the double-click moves nothing and opens nothing.
+run_mutation "mdedit: a double-click on a cell opens the editor" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if let Some(col) = MatrixDelegate::model_col(*col) {' \
+  '                    if let Some(col) = MatrixDelegate::model_col(*col).filter(|_| false) {' \
+  geode-marketdata a_double_click_opens_the_editor_on_the_cell
+
+# The strip's half of the same ruling: the second press of a pair on an
+# attribute value opens its editor. Mutated to want a third press, the
+# double-click is a single click.
+run_mutation "mdedit: a double-click on an attribute opens its editor" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if click_count >= 2 && matches!(self.cursor, Cursor::Attr(_)) {' \
+  '        if click_count >= 3 && matches!(self.cursor, Cursor::Attr(_)) {' \
+  geode-marketdata a_double_click_on_an_attribute_opens_its_editor
+
+# Nudging (2026-09-17): `up` steps a cell by one unit of the column's
+# painted precision. Mutated to a precision of zero, `0.1000` steps to
+# `1`.
+run_mutation "mdnudge: up steps one unit of the painted precision" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    .map_or(self.spec.format.precision, |s| s.format.precision);' \
+  '                    .map_or(0, |s| s.format.precision);' \
+  geode-marketdata up_steps_a_cell_one_unit_of_its_precision_and_shift_ten
+
+# `shift+up` is ten units. Mutated to one, the two nudges land on
+# `0.1002` rather than `0.1011`.
+run_mutation "mdnudge: shift is ten steps" \
+  crates/geode-marketdata/src/tile.rs \
+  '                        let magnitude = if verb.ends_with("_big") { 10 } else { 1 };' \
+  '                        let magnitude = if verb.ends_with("_big") { 1 } else { 1 };' \
+  geode-marketdata up_steps_a_cell_one_unit_of_its_precision_and_shift_ten
+
+# A slice column (`fwd`, two places) carries its own precision. Mutated
+# to never look one up, `fwd` steps at the panel's four places.
+run_mutation "mdnudge: a slice column steps at its own precision" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    .filter(|_| *col < self.model.slice_columns)' \
+  '                    .filter(|_| false)' \
+  geode-marketdata a_slice_column_nudges_at_its_own_precision
+
+# A `Date` attribute steps whole days. Mutated to step none, the text
+# comes back unchanged.
+run_mutation "mdnudge: a date steps whole days" \
+  crates/geode-marketdata/src/core/nudge.rs \
+  '                d.checked_add_signed(chrono::Duration::days(steps))' \
+  '                d.checked_add_signed(chrono::Duration::days(0))' \
+  geode-marketdata an_attribute_nudges_by_days_or_by_its_painted_places
+
 run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
   crates/geode-shell/src/vimnav.rs \
   '        NavCommand::Move(delta) if delta.abs() == 1 && len > 0 => {' \

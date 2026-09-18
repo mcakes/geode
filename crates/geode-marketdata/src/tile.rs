@@ -412,45 +412,64 @@ impl MarketDataTile {
                 .col_movable(false)
                 .sortable(false)
         });
-        // The mouse's whole part in this panel: a click selects a cell.
-        // The cursor moves to it, and that is all — a click on the
-        // row-label column moves the row and leaves the column alone, and a
-        // DOUBLE-click does exactly what the single click already did.
+        // The mouse's part in this panel: a click selects a cell — the
+        // cursor moves to it, a click on the row-label column moves the
+        // row and leaves the column alone — and a DOUBLE-click opens the
+        // editor on that cell (user ruling 2026-09-17, reversing the
+        // 2026-09-14 "editing is keyboard-only" ruling), exactly as `i`
+        // would: the same refusals (`Behind`, no document), and none at
+        // all on the row-label column, where there is no cell to edit.
         //
-        // **Editing is keyboard-only** (`i`/`enter`), by controller ruling
-        // 2026-09-14: every tile mouse-down re-arms the shell's
-        // `pending_focus_restore` (CLAUDE.md's focus rule), which the next
-        // `ShellView::render` consumes by focusing the shell root — so an
-        // editor opened from a mouse event would lose the keyboard on the
-        // very next frame. Whether an occupant may deliberately keep focus
-        // through that restore is a shell-side decision, deferred; until it
-        // is made, this panel does not offer an affordance it cannot honour,
-        // which is why `TableEvent::DoubleClickedCell` is not matched here.
+        // What made the mapping honourable is a SHELL rule, not anything
+        // here: every tile mouse-down re-arms the shell's
+        // `pending_focus_restore` (CLAUDE.md's focus rule), and
+        // `ShellView::render` now withholds the restore while a tile's
+        // occupant holds the keyboard in insert mode
+        // (`occupant_holds_insert_focus`) — so the editor `begin_edit`
+        // focuses on the click keeps it past the next frame. The table
+        // emits `SelectCell` and then `DoubleClickedCell` for the second
+        // click of a pair, so the first arm below has already cancelled
+        // any open editor by the time the second opens one.
         //
-        // `SelectRow`/`SelectColumn` are deliberately not matched either:
+        // `SelectRow`/`SelectColumn` are deliberately not matched:
         // `sync_cursor` emits both, so matching them would re-enter this
         // handler on every cursor move.
         //
-        // `subscribe_in` (and so a `Window`) for the cancel below alone.
+        // `subscribe_in` (and so a `Window`) for the cancel and the open.
         cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
-            if let TableEvent::SelectCell(row, col) = event {
-                // A click while the cell editor is open CANCELS it
-                // (controller ruling 2026-09-14, review Minor 5) — through
-                // `close_editor`, so blur then drop, and never a commit: a
-                // click is not `enter`, and silently writing a half-typed
-                // number because the trader clicked elsewhere is the one
-                // outcome nobody asked for. Cancelling is not optional
-                // either, because the same mouse-down has already re-armed
-                // the shell's focus restore: left open, the editor would sit
-                // painted on the cell the cursor just left, deaf to the
-                // keyboard, with `mode == insert` still claimed.
-                if this.editor.is_some() {
-                    this.close_editor(window, cx);
-                    // `cancel`'s own chrome step in `dispatch`: the header
-                    // is re-prepared once, off the render thread.
-                    this.changed(cx);
+            match event {
+                TableEvent::SelectCell(row, col) => {
+                    // A click while the cell editor is open CANCELS it
+                    // (controller ruling 2026-09-14, review Minor 5) —
+                    // through `close_editor`, so blur then drop, and never
+                    // a commit: a click is not `enter`, and silently
+                    // writing a half-typed number because the trader
+                    // clicked elsewhere is the one outcome nobody asked
+                    // for. Cancelling is not optional either: left open,
+                    // the editor would sit painted on the cell the cursor
+                    // just left while `mode == insert` is still claimed.
+                    if this.editor.is_some() {
+                        this.close_editor(window, cx);
+                        // `cancel`'s own chrome step in `dispatch`: the
+                        // header is re-prepared once, off the render
+                        // thread.
+                        this.changed(cx);
+                    }
+                    this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)
                 }
-                this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)
+                TableEvent::DoubleClickedCell(row, col) => {
+                    if let Some(col) = MatrixDelegate::model_col(*col) {
+                        this.cursor_to(*row, Some(col), cx);
+                        this.begin_edit(window, cx);
+                        // `dispatch`'s own tail: the delegate paints the
+                        // editor only once `sync_cursor` has handed it over.
+                        this.sync_cursor(cx);
+                        // `edit`'s own chrome step: the header paints the
+                        // notice a refusal leaves.
+                        this.changed(cx);
+                    }
+                }
+                _ => {}
             }
         })
         .detach();
@@ -576,8 +595,11 @@ impl MarketDataTile {
     ///
     /// **No context distinguishes the picker from the plain cell editor
     /// (controller ruling, superseding this crate's own earlier attempt
-    /// at one).** The picker's highlight moves on bare `up`/`down` alone,
-    /// deliberately not a chord: CLAUDE.md's standing rule for a module's
+    /// at one).** The picker's highlight moves on bare `up`/`down` alone
+    /// (the neutral `insert_up`/`insert_down` pair, which nudges the
+    /// editor's number instead when the editor is what is open —
+    /// `dispatch` tells the two apart, not the context), deliberately
+    /// not a chord: CLAUDE.md's standing rule for a module's
     /// insert-mode field is that a shipped chord (`ctrl+k` is the
     /// palette) still fires from inside it, because a chord resolves
     /// against the WHOLE context stack and a module must never take a
@@ -1088,6 +1110,30 @@ impl MarketDataTile {
         cx.notify();
     }
 
+    /// An attribute value's mouse-down with its click count
+    /// (`header::render` attaches this): every press is
+    /// [`Self::cursor_to_attr`], and the second press of a pair ALSO
+    /// opens the editor on that attribute (user ruling 2026-09-17,
+    /// reversing 2026-09-14's "editing is keyboard-only") — `i`'s exact
+    /// path, refusals included. The strip focuses nothing of its own, so
+    /// the editor `begin_edit` focuses here holds the keyboard when the
+    /// shell's tile-level listener arms its focus restore on this same
+    /// press, and `ShellView::render`'s insert-mode rule withholds it.
+    pub(crate) fn attr_clicked(
+        &mut self,
+        i: usize,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cursor_to_attr(i, window, cx);
+        if click_count >= 2 && matches!(self.cursor, Cursor::Attr(_)) {
+            self.begin_edit(window, cx);
+            self.sync_cursor(cx);
+            self.changed(cx);
+        }
+    }
+
     /// The one door every mutation ends at: re-prepare the header (which
     /// formats, and so must never happen in `render`) and notify.
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -1148,6 +1194,9 @@ impl MarketDataTile {
         // a picker open they route to IT rather than closing it —
         // `key_context` reports `insert` while one is open, which is
         // exactly what puts `commit`/`cancel` in a trader's hand for it.
+        // The four `insert_*` verbs join them too (2026-09-17): with a
+        // picker open they ARE its highlight step, so closing it first
+        // would leave them nothing to move.
         //
         // `close_popup_with_window`, never plain `close_popup`: this is
         // reachable with a `Popup::Picker` open (any OTHER action, an
@@ -1157,7 +1206,17 @@ impl MarketDataTile {
         // rule).
         if !matches!(
             verb,
-            "menu" | "menu_down" | "menu_up" | "menu_pick" | "menu_close" | "commit" | "cancel"
+            "menu"
+                | "menu_down"
+                | "menu_up"
+                | "menu_pick"
+                | "menu_close"
+                | "commit"
+                | "cancel"
+                | "insert_up"
+                | "insert_down"
+                | "insert_up_big"
+                | "insert_down_big"
         ) && self.popup.is_some()
         {
             self.close_popup_with_window(window, cx);
@@ -1288,6 +1347,29 @@ impl MarketDataTile {
                     None => {}
                 }
                 false
+            }
+            // The insert-mode arrow pair (2026-09-17), whose meaning
+            // follows which input is open: the picker's highlight step
+            // while the picker holds the keyboard (`_big` is the same one
+            // step — a list has no "big"), a nudge of the editor's number
+            // while the cell or attribute editor does, and nothing at all
+            // with neither (the palette can reach these; a `false` there
+            // is "not handled", not a silent success).
+            "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big" => {
+                let up = verb.starts_with("insert_up");
+                match &mut self.popup {
+                    Some(Popup::Picker(p)) => {
+                        p.rows.step_highlighted(if up { -n } else { n });
+                        false
+                    }
+                    Some(Popup::Menu(_)) => return false,
+                    None if self.editor.is_some() => {
+                        let magnitude = if verb.ends_with("_big") { 10 } else { 1 };
+                        let steps = (if up { magnitude } else { -magnitude }) * n as i64;
+                        self.nudge(steps, window, cx)
+                    }
+                    None => return false,
+                }
             }
             "menu_pick" => {
                 if let Some(Popup::Menu(m)) = &self.popup {
@@ -1453,6 +1535,72 @@ impl MarketDataTile {
             }
             EditTarget::Attr { index, column } => {
                 self.commit_attr_edit(index, column, &text, window, cx)
+            }
+        }
+    }
+
+    /// `marketdata::insert_up`/`insert_down` (and `_big`) with the editor
+    /// open (2026-09-17): step the number the editor currently spells by
+    /// `steps` units and write the result back into the SAME editor —
+    /// nothing is committed, `enter` commits and `escape` cancels exactly
+    /// as before. The unit is the target's own painted precision: a cell
+    /// steps at its column's format (a slice column's own `precision`,
+    /// else the panel's), an `F64`/`I64` attribute at the places its text
+    /// paints (attributes paint with `{}`, so `5000` steps by one), and a
+    /// `Date` attribute by whole days — [`crate::core::nudge_text`] is
+    /// the arithmetic, this only decides the type and precision.
+    /// Text that does not parse leaves the editor untouched and says so
+    /// in the notice. Answers whether the header needs re-preparing.
+    fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(editing) = self.editor.as_ref() else {
+            return false;
+        };
+        let text = editing.state.read(cx).value().to_string();
+        let (ty, precision) = match &editing.target {
+            EditTarget::Cell { cell: (_, col), .. } => {
+                // A slice column (`fwd` at two places beside `param`'s
+                // four) carries its own format; resolved by LABEL, the
+                // same identity the draft files an edit under, and only
+                // inside the slice block, so a ladder label could never
+                // be mistaken for one.
+                let precision = self
+                    .model
+                    .columns
+                    .get(*col)
+                    .filter(|_| *col < self.model.slice_columns)
+                    .and_then(|label| {
+                        self.spec
+                            .slice_values
+                            .iter()
+                            .find(|s| s.label == label.as_ref())
+                    })
+                    .map_or(self.spec.format.precision, |s| s.format.precision);
+                (self.spec.value_type, Some(usize::from(precision)))
+            }
+            EditTarget::Attr { column, .. } => {
+                let Some(attr) = self
+                    .spec
+                    .header
+                    .iter()
+                    .find(|a| a.column == column.as_ref())
+                else {
+                    self.notice = Some(CELL_MOVED.into());
+                    return true;
+                };
+                (attr.ty, None)
+            }
+        };
+        match crate::core::nudge_text(&text, ty, precision, steps) {
+            Ok(next) => {
+                let state = editing.state.clone();
+                state.update(cx, |s, cx| s.set_value(next, window, cx));
+                // A cleared notice is header paint; an unchanged `None`
+                // is not.
+                self.notice.take().is_some()
+            }
+            Err(e) => {
+                self.notice = Some(e.into());
+                true
             }
         }
     }
@@ -3347,18 +3495,16 @@ mod tests {
         assert_eq!(h.selection(&vcx), (Some(1), Some(3)));
     }
 
-    /// A double-click does what the single click already did — move the
-    /// cursor — and opens NO editor (controller ruling 2026-09-14).
-    ///
-    /// Editing is keyboard-only because a mouse-opened editor could not
-    /// keep the keyboard: every tile mouse-down re-arms the shell's
-    /// `pending_focus_restore`, and the next render focuses the shell root.
-    /// Offering a double-click that opened an editor which then went deaf
-    /// would be a broken affordance, so the panel does not offer it; `i`
-    /// and `enter` are the edit keys, and this test is what stops a future
-    /// change from reintroducing the mapping quietly.
+    /// A double-click opens the editor on the clicked cell (user ruling
+    /// 2026-09-17, reversing 2026-09-14's "editing is keyboard-only"):
+    /// the cursor lands on it, the editor is seeded with the cell's own
+    /// painted text, `key_context` reports `insert`, and after a draw the
+    /// editor's input still holds window focus. What made the mapping
+    /// honourable is the shell's insert-mode rule on its focus restore
+    /// (`ShellView::render`, tested in `geode-shell`); this crate's part
+    /// is to open on the click and focus the input.
     #[gpui::test]
-    fn a_double_click_only_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+    fn a_double_click_opens_the_editor_on_the_cell(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
 
@@ -3371,22 +3517,84 @@ mod tests {
             "the cursor moved to the clicked cell"
         );
         assert_eq!(
-            h.editor_value(&vcx),
-            None,
-            "and no editor opened — editing is `i`/`enter` only"
+            h.editor_value(&vcx).as_deref(),
+            Some("0.5000"),
+            "the editor opened, seeded with the cell's painted text"
         );
-        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.mode(&vcx), "insert");
+        draw(&mut vcx);
+        let input = h.tile.read_with(&vcx, |t, _| t.editor_state()).unwrap();
+        assert!(
+            vcx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window)),
+            "the editor's input holds the keyboard after the next frame"
+        );
         assert!(
             h.tile
-                .read_with(&vcx, |t, cx| t.table().read(cx).delegate().editor.is_none()),
-            "nothing to paint in the cell either"
+                .read_with(&vcx, |t, cx| t.table().read(cx).delegate().editor.is_some()),
+            "and it is painted in the cell"
         );
+    }
 
-        // The keyboard still opens one on that same cell, so the cell the
-        // mouse chose is the cell `i` edits.
+    /// A single click still only moves the cursor: the editor is the
+    /// double-click's alone.
+    #[gpui::test]
+    fn a_single_click_still_only_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+
+        let at = centre_of(&mut vcx, "marketdata-cell-1-5");
+        click_at(&mut vcx, at, 1);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 4 }
+        );
+        assert_eq!(h.editor_value(&vcx), None, "one click opens nothing");
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    /// A double-click on the row-label column is a click: the row moves,
+    /// the column stays, and nothing opens — there is no cell to edit.
+    #[gpui::test]
+    fn a_double_click_on_a_row_label_opens_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2));
+
+        let at = centre_of(&mut vcx, "marketdata-cell-1-0");
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 2 }
+        );
+        assert_eq!(h.editor_value(&vcx), None);
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    /// A double-click meets `i`'s own refusals: while the draft is
+    /// `Behind` the notice names `:rebase`/`:discard`, nothing opens, and
+    /// the mode stays `normal`.
+    #[gpui::test]
+    fn a_double_click_while_behind_is_refused_with_the_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
         h.dispatch(&mut vcx, "edit", None);
-        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.5000"));
-        assert_eq!(h.mode(&vcx), "insert");
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+
+        let at = centre_of(&mut vcx, "marketdata-cell-1-5");
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        assert_eq!(h.editor_value(&vcx), None, "nothing opened");
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(BEHIND_REFUSED.to_string())
+        );
     }
 
     /// A click while the cell editor is open CANCELS it and then moves the
@@ -5602,6 +5810,143 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
     }
 
+    // ---- nudging (2026-09-17) -----------------------------------------
+
+    /// `up` in an open cell editor steps the text by one unit of the
+    /// column's painted precision — a `param` at four places by `0.0001`
+    /// — `shift+up` (`insert_up_big`) by ten units, and the two compose
+    /// in the editor's text; `enter` then commits the nudged value, so
+    /// the arrows write nothing of their own.
+    #[gpui::test]
+    fn up_steps_a_cell_one_unit_of_its_precision_and_shift_ten(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(3)); // the first node: 0.1000
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.1000"));
+
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.1001"));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "a nudge commits nothing"
+        );
+        h.dispatch(&mut vcx, "insert_up_big", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.1011"));
+        assert_eq!(h.mode(&vcx), "insert");
+
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, SLICE), ("0.1011".to_string(), true));
+    }
+
+    /// A slice column carries its own precision: `fwd` paints two places,
+    /// so `down` steps it by `0.01`, not by the panel's `0.0001`.
+    #[gpui::test]
+    fn a_slice_column_nudges_at_its_own_precision(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None); // (0, 0) is `fwd`: 4500.00
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("4500.00"));
+        h.dispatch(&mut vcx, "insert_down", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("4499.99"));
+    }
+
+    /// A `Date` attribute steps whole days — `shift+down` is ten of them —
+    /// and an `F64` attribute steps at the places its text paints (`5000`
+    /// by one).
+    #[gpui::test]
+    fn an_attribute_nudges_by_days_or_by_its_painted_places(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "up", None); // Attr(0) = anchor_date
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("2026-09-12"));
+        h.dispatch(&mut vcx, "insert_down_big", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("2026-09-02"));
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("2026-09-03"));
+        h.dispatch(&mut vcx, "cancel", None);
+
+        h.dispatch(&mut vcx, "right", None); // Attr(1) = spot_ref
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("5000"));
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("5001"));
+    }
+
+    /// Text the arrows cannot step is left alone with a notice naming it,
+    /// and `escape` after a nudge leaves the draft empty — the editor's
+    /// text is the only thing a nudge ever touched.
+    #[gpui::test]
+    fn a_nudge_refuses_unparseable_text_and_escape_discards_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "abc");
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("abc"));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("'abc' is not a number".into())
+        );
+        assert_eq!(h.mode(&vcx), "insert");
+
+        h.set_editor(&mut vcx, "0.1000");
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.1001"));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            None,
+            "a nudge that lands clears the refusal"
+        );
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    }
+
+    /// With the picker open the same pair moves its highlight (the picker
+    /// has no number to nudge and no "big": `_big` is one step too), and
+    /// with neither input open the verbs are not handled at all.
+    #[gpui::test]
+    fn the_insert_pair_moves_the_picker_highlight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["AAA.Z", "BBB.Z", "CCC.Z"]));
+            cx.notify();
+        });
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "load_underlying", None);
+        h.dispatch(&mut vcx, "insert_down", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("BBB.Z".into())
+        );
+        h.dispatch(&mut vcx, "insert_down_big", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("CCC.Z".into()),
+            "big is one step in a list"
+        );
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("BBB.Z".into())
+        );
+        assert_eq!(h.mode(&vcx), "insert", "the picker is still open");
+        h.dispatch(&mut vcx, "cancel", None);
+
+        let handled = vcx.update(|window, cx| {
+            h.tile.update(cx, |t, cx| {
+                t.dispatch(&ActionId("marketdata::insert_up".into()), None, window, cx)
+            })
+        });
+        assert!(!handled, "nothing open: not handled");
+    }
+
     /// `:set` writes the same draft `i`/`enter` would, without moving the
     /// cursor into the strip at all; an unknown attribute names the real
     /// vocabulary; `:revert` clears the attribute edit and the dirty dot
@@ -5638,9 +5983,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// A click on an attribute value moves the cursor to `Attr(i)` and
-    /// opens nothing (spec §5.1) — the same rule a grid cell's click
-    /// keeps, and the same reason: editing is keyboard-only.
+    /// A single click on an attribute value moves the cursor to `Attr(i)`
+    /// and opens nothing (spec §5.1) — the same rule a grid cell's single
+    /// click keeps.
     #[gpui::test]
     fn a_click_on_an_attribute_moves_the_cursor_and_opens_nothing(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -5650,6 +5995,40 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(1));
         assert_eq!(h.mode(&vcx), "normal");
         assert_eq!(h.editor_value(&vcx), None, "the click opened no editor");
+    }
+
+    /// A double-click on an attribute value opens its editor (user ruling
+    /// 2026-09-17), seeded with the painted value, in the strip — and
+    /// the press's own listener does not swallow the event, so the
+    /// host's tile-level mouse-down (the shell's focus re-arm stand-in)
+    /// still saw both presses. After a draw the editor's input holds
+    /// window focus.
+    #[gpui::test]
+    fn a_double_click_on_an_attribute_opens_its_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let before = h.host_clicks();
+        let at = centre_of(&mut vcx, &format!("marketdata-attr-{TILE}-1"));
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor()), Cursor::Attr(1));
+        assert_eq!(h.mode(&vcx), "insert");
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("5000"));
+        assert_eq!(
+            h.host_clicks(),
+            before + 2,
+            "neither press was swallowed on its way to the host"
+        );
+        draw(&mut vcx);
+        let input = h.tile.read_with(&vcx, |t, _| t.editor_state()).unwrap();
+        assert!(
+            vcx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window)),
+            "the attribute editor holds the keyboard after the next frame"
+        );
+        // And it is the real editor: `enter` commits it into the draft.
+        h.set_editor(&mut vcx, "4520");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().attrs.len()), 1);
     }
 
     /// An attribute edit is unsent work exactly as a cell edit is: a

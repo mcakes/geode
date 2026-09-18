@@ -242,16 +242,21 @@ pub(crate) fn render(
             })
             .debug_selector(move || format!("marketdata-attr-{tile_id}-{i}"))
             // The mouse's form of `k` (spec §5.1): a click on an
-            // attribute value moves the cursor to `Attr(i)` and opens
-            // nothing — and cancels an open cell editor first, exactly
-            // as a grid cell click does (the `window` is for that alone).
-            // Deliberately no `cx.stop_propagation()` — the shell's own
-            // tile-level mouse-down (focus re-arm) must still run, the
-            // same rule every other tile mouse-down in this codebase
-            // keeps (CLAUDE.md's focus rule).
+            // attribute value moves the cursor to `Attr(i)` — cancelling
+            // an open cell editor first, exactly as a grid cell click
+            // does — and a DOUBLE-click opens the editor on it (user
+            // ruling 2026-09-17; `attr_clicked` is the door, the count
+            // decides). Deliberately no `cx.stop_propagation()` — the
+            // shell's own tile-level mouse-down (focus re-arm) must still
+            // run, the same rule every other tile mouse-down in this
+            // codebase keeps (CLAUDE.md's focus rule); it is the shell's
+            // insert-mode rule on that restore, not a swallowed event,
+            // that keeps the opened editor focused.
             .on_mouse_down(gpui::MouseButton::Left, {
                 let tile = tile.clone();
-                move |_, window, cx| tile.update(cx, |t, cx| t.cursor_to_attr(i, window, cx))
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.attr_clicked(i, event.click_count, window, cx))
+                }
             });
         value = match editor {
             Some((e, state)) if e == i => {
