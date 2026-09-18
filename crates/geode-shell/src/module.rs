@@ -375,17 +375,6 @@ pub mod recording {
         /// every other fixture keeps the ordinary behaviour without
         /// naming a string twice.
         pub contexts: &'static [&'static str],
-        /// The insert-mode toggle (market-data spec §8.6): `true` while
-        /// the hosted view owns a focused `InputState` — this fixture's
-        /// stand-in for the panel's cell editor. [`TileContent::
-        /// key_context`] reports `mode == insert` instead of `mode ==
-        /// normal` while it is set, which is the whole of what the shell's
-        /// insert branch keys on. Shared with the created content, which
-        /// flips it in `dispatch` (`<kind>::edit` sets it, `<kind>::commit`
-        /// and `<kind>::cancel` clear it) — so a test drives it through a
-        /// real keypress rather than poking at it, and can still read what
-        /// the shell was told.
-        pub insert: Rc<Cell<bool>>,
         /// The `InputState` the hosted view owns while insert mode is on,
         /// `None` otherwise — the fixture's window into the cell editor,
         /// for the same reason `last_focus` exists: the view type is
@@ -413,7 +402,6 @@ pub mod recording {
                 last_focus: Rc::new(RefCell::new(None)),
                 fragment: None,
                 contexts: &[],
-                insert: Rc::new(Cell::new(false)),
                 input: Rc::new(RefCell::new(None)),
             }
         }
@@ -456,10 +444,23 @@ pub mod recording {
         /// `InputState` somewhere that is PAINTED, and the view is the only
         /// thing the shell renders.
         view: Entity<RecordingView>,
-        /// Shared with [`RecordingFactory::insert`] and
-        /// [`RecordingFactory::input`]; see those two fields for what a
-        /// test reads them for.
-        insert: Rc<Cell<bool>>,
+        /// The insert-mode toggle (market-data spec §8.6): `true` while
+        /// THIS tile's view owns a focused `InputState` — the fixture's
+        /// stand-in for the panel's cell editor. [`TileContent::
+        /// key_context`] reports `mode == insert` instead of `mode ==
+        /// normal` while it is set, which is the whole of what the shell's
+        /// insert branch keys on. Flipped in `dispatch` (`<kind>::edit`
+        /// sets it, `<kind>::commit` and `<kind>::cancel` clear it), so a
+        /// test drives it through a real keypress rather than poking at
+        /// it. **Per tile, never per factory** (2026-09-17): a real module's
+        /// editor belongs to one tile, and the shell's insert-focus
+        /// predicate (`occupant_insert_stack`) reads the FOCUSED tile's
+        /// context — a flag shared across a factory's tiles made a second
+        /// tile claim insert mode for an editor it did not own, which is
+        /// a state no real module can reach.
+        insert: Cell<bool>,
+        /// Shared with [`RecordingFactory::input`]; see it for what a test
+        /// reads it for.
         input: Rc<RefCell<Option<Entity<InputState>>>>,
     }
 
@@ -637,7 +638,7 @@ pub mod recording {
                     command_result: self.command_result.clone(),
                     state: RefCell::new(restored.cloned().unwrap_or_default()),
                     view,
-                    insert: self.insert.clone(),
+                    insert: Cell::new(false),
                     input: self.input.clone(),
                 }),
             }

@@ -576,3 +576,39 @@ and main's `a_bare_row_step_wraps_and_the_full_page_keys_move_ten`
 (window; its top-row `k` step now asserts the strip). Main's harness entry
 for the wrap was re-anchored from `move_cursor` (deleted here) to that
 grid-row arm. Harness count after the merge: 968.
+
+### 11.y Mouse editing and arrow nudging (2026-09-17)
+
+User ruling 2026-09-17 reverses §5.1's and §8.8.6's "the mouse opens
+nothing": **a double-click on an attribute value opens its editor**, in
+the strip, seeded with the painted value — `MarketDataTile::attr_clicked
+(i, click_count, ..)` is the door `header::render` now attaches, every
+press being `cursor_to_attr` and the second press of a pair also running
+`begin_edit` (the same refusals `i` has) — and a double-click on a grid
+cell opens the cell's (`TableEvent::DoubleClickedCell`; the documents
+spec's §8.8.6 has the whole account). A single click still only moves
+the cursor, and a click elsewhere while an editor is open still cancels
+it. Neither listener stops propagation: the shell's tile-level
+mouse-down runs as before, and what keeps the opened editor focused is a
+shell rule — `ShellView::render` withholds `pending_focus_restore`'s
+focus move while a tile's occupant holds the keyboard in insert mode
+(`occupant_holds_insert_focus`, the insert branch's own predicate,
+shared) — never a swallowed event.
+
+The insert-mode `up`/`down` pair is no longer the picker's `menu_up`/
+`menu_down`: `up`/`down`/`shift+up`/`shift+down` bind
+`marketdata::insert_up`/`insert_down`/`insert_up_big`/`insert_down_big`,
+whose meaning follows which input is open. With the picker open (§7)
+they step its highlight exactly as before (`_big` is one step too — a
+list has no "big"). With the cell or attribute editor open they NUDGE
+its text: one unit (ten with `shift`) of the target's painted precision
+— a cell at its column's format, a slice column's own `precision`
+first; an `F64`/`I64` attribute at the places its text paints, so
+`spot`'s `5000` steps by one; a `Date` attribute by whole days, so
+`anchor` steps `2026-09-12` to `2026-09-13`. `core::nudge::nudge_text`
+is the arithmetic (scaled-integer, so no float rounding leaks into the
+text); nothing is committed by a nudge — `enter` commits and `escape`
+cancels exactly as before, and unparseable text is left alone with the
+usual inline notice. `menu_up`/`menu_down` stay the menu block's verbs
+(`j`/`k`/`up`/`down` in `mode == menu`). Harness: `mdedit: a
+double-click on an attribute opens its editor`, four `mdnudge:` entries.

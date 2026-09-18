@@ -1203,28 +1203,73 @@ are all untouched; what changed is what paints the grid.
    table is never focused, `close_editor` still blurs then drops, and
    `key_context` still reports `insert` exactly while `editor` is
    `Some`.
-6. **Editing is keyboard-only, by controller ruling 2026-09-14: the
-   mouse selects a cell, `i`/`enter` edit it.** A double-click was
-   briefly wired to `marketdata::edit` and was withdrawn before review,
-   because the editor it opened could not keep the keyboard: every tile
-   mouse-down re-arms the shell's `pending_focus_restore` (CLAUDE.md's
-   focus rule), which the next `ShellView::render` consumes by focusing
-   the shell root, so the `Input` `begin_edit` had just focused went
-   deaf on the following frame — the state `geode-shell`'s own
-   `the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode`
-   pins as legitimate (the editor stays open, the matcher governs the
-   keyboard, `escape` cancels). A panel does not offer an affordance it
-   cannot honour, and documenting one as broken is worse than not
-   shipping it. Whether a tile occupant may deliberately hold focus
-   through that restore is a shell-side focus decision, **deferred** —
-   not a panel limitation to work around from inside a module. Should it
-   be made, reinstating the mapping is one more arm in the `TableEvent`
-   subscription (`DoubleClickedCell` -> `begin_edit`, which needs
-   `cx.subscribe_in` for its `Window`), and
-   `a_double_click_only_moves_the_cursor` is the test that would have to
-   change with it. A click while an editor IS open cancels it (item 4),
-   which is the same ruling read from the other side: the mouse may end
-   an edit, never start one.
+6. **A double-click opens the editor (user ruling 2026-09-17, reversing
+   the controller ruling of 2026-09-14 that editing was keyboard-only).**
+   The 2026-09-14 ruling stood on one fact: every tile mouse-down
+   re-arms the shell's `pending_focus_restore` (CLAUDE.md's focus rule),
+   which the next `ShellView::render` consumed by focusing the shell
+   root, so an editor `begin_edit` had just focused went deaf on the
+   following frame — a shell-side decision this spec deferred rather than
+   worked around from inside a module. That decision is now made, in the
+   shell: `render` still consumes the flag but **withholds the focus move
+   while a tile's occupant holds the keyboard in insert mode** —
+   `ShellView::occupant_holds_insert_focus` (`shell/occupants.rs`):
+   window focus on a handle the shell does not own AND the focused tile's
+   context stack carrying `mode == insert`. That is exactly the predicate
+   `handle_key_down`'s insert branch already keyed on, and both sites now
+   read the one door (`occupant_insert_stack`), so they cannot drift. A
+   module in insert mode owns the keyboard; the shell's chords still
+   dispatch from there through the insert branch, so nothing goes dead;
+   the orphaned-focus case the flag was born for (`apply_reload`) has no
+   occupant claiming `insert`, and the workspace-switch case is caught in
+   `ensure_occupants` itself, so both stay covered. Pinned in
+   `geode-shell` by
+   `a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore` and
+   its out-of-insert-mode control.
+
+   The panel's two mappings on top of that rule: `TableEvent::
+   DoubleClickedCell(row, col)` moves the cursor and runs `begin_edit` —
+   `i`'s exact path, its refusals (`Behind`, no document) included, and
+   nothing at all on the row-label column, where there is no cell to
+   edit; the single-click `SelectCell` arm is unchanged, still cancelling
+   an open editor first, and the table emits it ahead of
+   `DoubleClickedCell` on the second click of a pair, so a double-click
+   on an editing cell cancels then reopens. The attribute strip's
+   mouse-down goes through `MarketDataTile::attr_clicked(i, click_count,
+   ..)`: every press is `cursor_to_attr`, the second press of a pair also
+   opens the editor. Neither listener stops propagation — the shell's
+   tile-level mouse-down must still run, and it is the shell's rule on
+   the restore, not a swallowed event, that keeps the opened editor
+   focused. Tests: `a_double_click_opens_the_editor_on_the_cell`,
+   `a_double_click_on_an_attribute_opens_its_editor`,
+   `a_single_click_still_only_moves_the_cursor`,
+   `a_double_click_on_a_row_label_opens_nothing`,
+   `a_double_click_while_behind_is_refused_with_the_notice`; harness
+   `mdedit: a double-click on a cell opens the editor` and `… on an
+   attribute opens its editor`. Item 4's other half stands: a click
+   elsewhere while an editor is open still cancels it and never commits.
+
+   **Nudging (same date):** the insert-mode arrow pair is neutral —
+   `up`/`down`/`shift+up`/`shift+down` bind `marketdata::insert_up`/
+   `insert_down`/`insert_up_big`/`insert_down_big` — and its meaning
+   follows which input is open: the picker's highlight step while the
+   picker holds the keyboard (one step either way; a list has no "big"),
+   a nudge of the open editor's text by one (ten) unit of the target's
+   painted precision while the cell or attribute editor does, and "not
+   handled" with neither. A cell steps at its column's format (a slice
+   column's own `precision`, else the panel's), an `F64`/`I64` attribute
+   at the places its text paints (attributes paint with `{}`, so `5000`
+   steps by one), a `Date` attribute by whole days. `core::nudge::
+   nudge_text(text, ty, precision, steps)` is the pure arithmetic — done
+   on the scaled integer, so `0.1` + one step at one place is `0.2` and
+   never `0.20000000000000001` — and the tile only decides type and
+   precision and writes the result back into the same `Input`. Nothing is
+   committed by a nudge: `enter` commits, `escape` cancels, exactly as
+   before; unparseable text is left alone with the usual inline notice.
+   `menu_up`/`menu_down` remain the menu block's own verbs. Harness:
+   `mdnudge: up steps one unit of the painted precision`, `… shift is ten
+   steps`, `… a slice column steps at its own precision`, `… a date steps
+   whole days`.
 7. **Display checks are pending on a real window**, as §8.7.21's are —
    and this change adds to that list rather than clearing any of it:
    the table body's own chrome next to a blotter's, the cursor cell's

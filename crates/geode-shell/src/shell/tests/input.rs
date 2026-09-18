@@ -423,13 +423,18 @@ fn a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell(cx: &mut gpui::Tes
         Some(3),
         "the count belongs to the matcher once the shell holds the keyboard"
     );
-    vcx.simulate_keystrokes("enter");
+    // The newly focused tile is in NORMAL mode (insert is per tile —
+    // the editor belongs to the one left behind), so its own normal-mode
+    // `j` is the action the count reaches, and the abandoned editor's
+    // `enter` is out of reach until focus goes back there.
+    vcx.simulate_keystrokes("j");
     assert_eq!(
-        dispatched(&log, "rec::commit"),
+        dispatched(&log, "rec::down"),
         vec![Some(3)],
         "and it reaches the action, exactly as it would after a click: {:?}",
         log.borrow()
     );
+    assert!(dispatched(&log, "rec::commit").is_empty());
 }
 
 /// A BARE keystroke in insert mode resolves only against the contexts that
