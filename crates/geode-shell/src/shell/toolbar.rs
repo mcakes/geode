@@ -104,11 +104,13 @@ pub fn toolbar(
                     // column (Phase 4a §3.3) — the close glyph below
                     // stays a separate hit target so clicking it drops
                     // the dimension instead of opening the picker.
-                    // `c.summary`/`c.full` are already cloned into
-                    // `child(..)`/the tooltip below every render, exactly
-                    // as before Task 3 — the tooltip closure captures
-                    // those same clones and allocates nothing further
-                    // until hover.
+                    // `c.summary`/`c.full`/`c.tip_selector` are all
+                    // `build_model`'s own fields (fix round 1): attaching
+                    // the tooltip here costs a `SharedString` clone (a
+                    // refcount bump, or a stack copy for anything under
+                    // `SmolStr`'s inline cap) per render, never a fresh
+                    // `format!`/heap `String` the way the first cut of
+                    // this task did.
                     chip(
                         ElementId::NamedInteger("scope-chip".into(), i as u64),
                         c.summary.clone(),
@@ -118,9 +120,9 @@ pub fn toolbar(
                     )
                     .cursor_pointer()
                     .tooltip(tips::tip_with(
-                        format!("scope-chip-{}", c.column),
+                        c.tip_selector.clone(),
                         c.full.clone(),
-                        Some("frame::pick".to_string()),
+                        Some("frame::pick"),
                         Some("click: pick values".into()),
                     ))
                     .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
@@ -133,8 +135,8 @@ pub fn toolbar(
                         .child(Icon::new(IconName::Close).text_color(chip_fg))
                         .debug_selector(move || format!("scope-chip-close-{close_column}"))
                         .tooltip(tips::tip_with(
-                            format!("scope-chip-close-{}", c.column),
-                            format!("Remove {}", c.column),
+                            c.close_selector.clone(),
+                            c.close_title.clone(),
                             None,
                             None,
                         ))
@@ -153,9 +155,9 @@ pub fn toolbar(
                 chip_bg,
                 || "scope-text-chip".to_string(),
             )
-            .tooltip(tips::tip(
-                "scope-text-chip",
-                model.text.clone().unwrap_or_default(),
+            .tooltip(tips::tip_with(
+                "tip-scope-text-chip".into(),
+                model.text_tip.clone().unwrap_or_default(),
                 Some("frame::focus_text"),
                 None,
             )),
@@ -171,7 +173,7 @@ pub fn toolbar(
                 || "scope-expr-chip".to_string(),
             )
             .tooltip(tips::tip_with(
-                "scope-expr-chip".into(),
+                "tip-scope-expr-chip".into(),
                 model.expr_full.clone().unwrap_or_default(),
                 None,
                 Some(":filter <expr> sets it".into()),
@@ -191,7 +193,7 @@ pub fn toolbar(
                 || "scope-impossible-chip".to_string(),
             )
             .tooltip(tips::tip(
-                "scope-impossible-chip",
+                "tip-scope-impossible-chip",
                 "No row can match: two scope layers select disjoint values on this dimension",
                 None,
                 None,
@@ -228,9 +230,12 @@ pub fn toolbar(
                         // must be unmissable, not a small badge easy to
                         // miss at the edge of the eye. `scope-asof` names
                         // the badge text itself for tests. `badge` is
-                        // already the finished "AS OF …" string
+                        // already the finished "AS OF …" `SharedString`
                         // (`ScopeBarModel::as_of_badge`, Phase 4b Task 1
-                        // fix round 1 MAJ-2) — this only clones it.
+                        // fix round 1 MAJ-2; `SharedString` since Task 3
+                        // fix round 1) — both the painted label and the
+                        // tooltip title below are refcount-bump clones of
+                        // the one string `build_model` built.
                         el.bg(theme.warning.opacity(0.25))
                             .px_2()
                             .rounded(px(4.))
@@ -239,8 +244,8 @@ pub fn toolbar(
                                     .id("scope-asof")
                                     .text_color(theme.warning_foreground)
                                     .debug_selector(|| "scope-asof".to_string())
-                                    .tooltip(tips::tip(
-                                        "scope-asof",
+                                    .tooltip(tips::tip_with(
+                                        "tip-scope-asof".into(),
                                         badge.clone(),
                                         Some("frame::as_of"),
                                         Some(":live returns to now".into()),

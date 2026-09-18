@@ -81,6 +81,21 @@ const WORKSPACE_SITE: [&str; 9] = [
     "sidebar-workspace-8",
     "sidebar-workspace-9",
 ];
+/// The already-prefixed tooltip selectors (fix round 1: `tips::tip` no
+/// longer `format!`s a `"tip-"` prefix onto its `site` argument — see
+/// that function's own doc — so the prefix has to live here instead;
+/// `WORKSPACE_SITE` above stays un-prefixed, it names the disc itself).
+const WORKSPACE_TIP: [&str; 9] = [
+    "tip-sidebar-workspace-1",
+    "tip-sidebar-workspace-2",
+    "tip-sidebar-workspace-3",
+    "tip-sidebar-workspace-4",
+    "tip-sidebar-workspace-5",
+    "tip-sidebar-workspace-6",
+    "tip-sidebar-workspace-7",
+    "tip-sidebar-workspace-8",
+    "tip-sidebar-workspace-9",
+];
 const WORKSPACE_TITLE: [&str; 9] = [
     "Workspace 1",
     "Workspace 2",
@@ -119,7 +134,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                 ))
                 .debug_selector(move || WORKSPACE_SITE[(n - 1) as usize].to_string())
                 .tooltip(crate::tips::tip(
-                    WORKSPACE_SITE[(n - 1) as usize],
+                    WORKSPACE_TIP[(n - 1) as usize],
                     WORKSPACE_TITLE[(n - 1) as usize],
                     Some(WORKSPACE_SWITCH[(n - 1) as usize]),
                     None,
@@ -173,7 +188,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         .id("sidebar-profile")
         .debug_selector(|| "sidebar-profile".to_string())
         .tooltip(crate::tips::tip(
-            "sidebar-profile",
+            "tip-sidebar-profile",
             "Settings",
             Some("settings::open"),
             None,

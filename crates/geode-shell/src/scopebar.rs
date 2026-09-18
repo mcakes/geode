@@ -8,17 +8,37 @@
 
 use crate::frame::Frame;
 use chrono::{Local, NaiveDate};
+use gpui::SharedString;
 
 /// One dimension's chip in the scope bar (Task 4 renders these
 /// individually; Task 3 only needs the summary text, which the toolbar
 /// joins the way `Frame::readout` used to).
+///
+/// `full`/`tip_selector`/`close_selector`/`close_title` are
+/// `SharedString`, not `String` (fix round 1, Task 3 review): every one
+/// of them feeds a `.tooltip(..)` attached inline in `shell::toolbar`'s
+/// render path, so a `String` field would mean a fresh heap clone (or,
+/// for `tip_selector`/`close_selector`, a `format!`) on every paint of
+/// every chip. `build_model` already runs once per frame-version
+/// change, not per render (see the module doc), so building these once
+/// here and cloning a `SharedString` at the paint site (a refcount
+/// bump, or a stack copy for anything under `SmolStr`'s 23-byte inline
+/// cap) is the whole fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chip {
     pub column: String,
     pub summary: String,
     /// The whole selection, un-elided — `"{column} ∈ {v1}, {v2}, …"`
     /// with every value — what a hover on the chip shows (Task 3).
-    pub full: String,
+    pub full: SharedString,
+    /// The chip body's own already-prefixed tooltip selector
+    /// (`"tip-scope-chip-{column}"`).
+    pub tip_selector: SharedString,
+    /// The close glyph's own already-prefixed tooltip selector
+    /// (`"tip-scope-chip-close-{column}"`).
+    pub close_selector: SharedString,
+    /// The close glyph's tooltip title (`"Remove {column}"`).
+    pub close_title: SharedString,
 }
 
 /// What the scope bar shows for one frame state — everything already
@@ -38,12 +58,18 @@ pub struct ScopeBarModel {
     /// Task 1 fix round 1, MAJ-2): `Some("text \"{t}\"")` when `text` is
     /// `Some`, built here for the same reason as `slot_label`.
     pub text_chip: Option<String>,
+    /// The raw, un-decorated text (fix round 1) — the text chip's
+    /// tooltip title; `text_chip` above is the painted `"text \"…\""`
+    /// label. `SharedString` for the same reason as `Chip`'s tooltip
+    /// fields: cloned into a `.tooltip(..)` attachment on every render.
+    pub text_tip: Option<SharedString>,
     /// Elided source text (≤ 40 chars + `…`), or `None` when the scope has
     /// no expression.
     pub expr: Option<String>,
     /// The whole expression source, un-elided — what a hover on the
-    /// elided `expr` chip shows.
-    pub expr_full: Option<String>,
+    /// elided `expr` chip shows. `SharedString` (fix round 1) for the
+    /// same reason as `text_tip`.
+    pub expr_full: Option<SharedString>,
     /// `Some("∅ {column}")` when the scope is a contradiction (spec
     /// §4.1's `Scope::impossible`) — named, not merely hidden, per
     /// `Scope::columns`'s own doc comment.
@@ -56,8 +82,11 @@ pub struct ScopeBarModel {
     /// Task 1 fix round 1, MAJ-2): `Some("AS OF {as_of}")`, built here
     /// for the same reason as `slot_label`/`text_chip` — distinct from
     /// `as_of` itself, which the status bar reads bare (no "AS OF "
-    /// prefix).
-    pub as_of_badge: Option<String>,
+    /// prefix). `SharedString` (fix round 1, Task 3 review): this is
+    /// both the painted label AND the badge's tooltip title, so a
+    /// `String` here would mean two heap clones per render rather than
+    /// two refcount bumps.
+    pub as_of_badge: Option<SharedString>,
 }
 
 /// Build the scope bar model for `frame`, given today's local date (for
@@ -83,15 +112,18 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
             } else {
                 format!("{} ∈ {{{}}}", d.column, d.values.len())
             },
-            full: format!("{} ∈ {}", d.column, d.values.join(", ")),
+            full: format!("{} ∈ {}", d.column, d.values.join(", ")).into(),
+            tip_selector: format!("tip-scope-chip-{}", d.column).into(),
+            close_selector: format!("tip-scope-chip-close-{}", d.column).into(),
+            close_title: format!("Remove {}", d.column).into(),
         })
         .collect();
-    let expr_full = scope.expression.as_ref().map(|e| e.to_string());
+    let expr_full: Option<SharedString> = scope.expression.as_ref().map(|e| e.to_string().into());
     let expr = expr_full.as_ref().map(|s| {
         if s.chars().count() > 40 {
             format!("{}…", s.chars().take(40).collect::<String>())
         } else {
-            s.clone()
+            s.to_string()
         }
     });
     let impossible = scope.impossible.then(|| {
@@ -114,13 +146,15 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         None => "view default".to_string(),
     };
     let text_chip = scope.text.as_ref().map(|t| format!("text \"{t}\""));
-    let as_of_badge = as_of.as_ref().map(|t| format!("AS OF {t}"));
+    let text_tip: Option<SharedString> = scope.text.clone().map(Into::into);
+    let as_of_badge: Option<SharedString> = as_of.as_ref().map(|t| format!("AS OF {t}").into());
     ScopeBarModel {
         slot,
         slot_label,
         chips,
         text: scope.text.clone(),
         text_chip,
+        text_tip,
         expr,
         expr_full,
         impossible,

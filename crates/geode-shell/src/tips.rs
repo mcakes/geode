@@ -74,14 +74,26 @@ use gpui_component::{ActiveTheme as _, h_flex, tooltip::Tooltip, v_flex};
 /// literals. The model is resolved INSIDE the closure — on hover, never
 /// per frame. `try_global`: a module test fixture that never installed
 /// `Chords` paints a chord-less tooltip rather than panicking.
+///
+/// `selector` is the FULL, already-prefixed selector (`"tip-sidebar-
+/// profile"`, not `"sidebar-profile"`) — fix round 1: this function used
+/// to `format!("tip-{site}")` every call, and since `.tooltip(tips::
+/// tip(..))` is invoked inline in a render path, that `format!` ran once
+/// per chip per render rather than once per hover (charter: per-frame
+/// heap churn is a defect). A `&'static str` literal costs nothing to
+/// convert (`SharedString`'s `&str` conversion is a stack copy for any
+/// selector this crate uses, all well under `SmolStr`'s 23-byte inline
+/// cap) or heap-allocates once for a longer one — either way there is
+/// exactly one conversion per render, not the two-plus a dynamic
+/// `format!` used to cost.
 pub fn tip(
-    site: &'static str,
+    selector: &'static str,
     title: impl Into<SharedString>,
     action: Option<&'static str>,
     detail: Option<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let title: SharedString = title.into();
-    let selector: SharedString = format!("tip-{site}").into();
+    let selector: SharedString = selector.into();
     move |window, cx| {
         let empty = Vec::new();
         let bindings = cx
@@ -97,23 +109,30 @@ pub fn tip(
     }
 }
 
-/// As [`tip`], for a site whose name and action id are built at render
-/// time (`scope-chip-{column}`, `workspace::switch_{n}`).
+/// As [`tip`], for a site whose selector and title are built at render
+/// time (`"tip-scope-chip-{column}"`) rather than being `&'static`. Both
+/// arrive as `SharedString`s the caller already holds (a model field
+/// built once in `build_model`/equivalent, not `format!`ed here) —
+/// fix round 1: this function used to take `site: String`/`action:
+/// Option<String>` and both `format!("tip-{site}")` and `title.into()`
+/// itself fresh every call; every action id in this codebase is a
+/// literal, so `Option<&'static str>` is the honest type and there is
+/// nothing left to build here but a clone (a refcount bump, or an
+/// inline-string copy for anything under `SmolStr`'s cap) of what the
+/// caller already owns.
 pub fn tip_with(
-    site: String,
-    title: impl Into<SharedString>,
-    action: Option<String>,
+    selector: SharedString,
+    title: SharedString,
+    action: Option<&'static str>,
     detail: Option<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    let title: SharedString = title.into();
-    let selector: SharedString = format!("tip-{site}").into();
     move |window, cx| {
         let empty = Vec::new();
         let bindings = cx
             .try_global::<Chords>()
             .map(|c| c.0.as_slice())
             .unwrap_or(&empty);
-        let model = TipModel::resolve(title.clone(), action.as_deref(), detail.clone(), bindings);
+        let model = TipModel::resolve(title.clone(), action, detail.clone(), bindings);
         Tooltip::element({
             let selector = selector.clone();
             move |_window, cx| render_tip(&model, selector.clone(), cx)
