@@ -10486,6 +10486,7 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                 .cells
                 .iter()
                 .enumerate()
+                .skip(self.model.slice_columns)
                 .filter_map(|(ci, cell)| cell.value.map(|v| ((row, ci), v)))
                 .collect(),' \
   '            BumpAxis::Row => self
