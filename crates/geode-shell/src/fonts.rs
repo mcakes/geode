@@ -38,11 +38,12 @@
 //! - **Theme JSON does not fight this.** `ThemeConfig`
 //!   (`gpui-component-0.6.2/src/theme/schema.rs`) carries the *optional*
 //!   mirror fields `font_family: Option<SharedString>` /
-//!   `mono_font_family: Option<SharedString>`
-//!   (schema.rs:51,57); `apply_to` only overwrites `Theme::font_family` /
-//!   `mono_font_family` when the config's field is `Some`
-//!   (schema.rs:1084-1089). None of this repo's 44 bundled `assets/
-//!   themes/*.json` themes set either key (`grep -l font_family
+//!   `mono_font_family: Option<SharedString>` — `ThemeConfig`'s own
+//!   `font_family`/`mono_font_family` fields; `Theme::apply_config` only
+//!   overwrites `Theme::font_family` / `mono_font_family` when the
+//!   config's field is `Some`, in its font-family assignment block. None
+//!   of this repo's 44 bundled `assets/themes/*.json` themes set either
+//!   key (`grep -l font_family
 //!   assets/themes/*.json` → zero matches, checked at implementation
 //!   time), so switching theme family/mode via `theme::Registry::
 //!   apply_theme` (which calls `Theme::global_mut(cx).apply_config`) never

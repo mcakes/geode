@@ -33,7 +33,8 @@
 //! **Workspace discs are avatar-shaped but hand-built:** `Avatar` cannot
 //! render theme-tokened text — its `.name(...)` branch hard-codes a
 //! hashed-hue disc and text color on an *inner* fallback element
-//! (`avatar.rs:107-110`) that caller styles never reach, and the
+//! (`gpui-component-0.6.2/src/avatar/avatar.rs`, the `identity`-branch
+//! of `Avatar`'s render) that caller styles never reach, and the
 //! composable `BaseAvatar`/`AvatarFallback` primitives live in the
 //! library-internal `gpui_base` crate, which gpui-component does not
 //! re-export. So the indicators take `Avatar::small()`'s scale (24px,

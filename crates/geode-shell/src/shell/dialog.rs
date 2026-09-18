@@ -224,12 +224,14 @@ pub fn set_title_extra(
 ///
 /// 2. **`ctrl-f`**, scoped to `"Input"` and app-wide (not `"GeodeModal"`).
 ///    gpui-component binds `ctrl-f` to the editor `Search` action in the
-///    `"Input"` context on non-macOS (`gpui-base-0.6.2/src/input/base/
-///    state.rs`, pinned release); at the pinned release the handler
-///    propagates when the input is not `searchable` (at the old git rev
-///    0e2fb7a it returned without propagating, which is why this reclaim
-///    was first added), but a searchable input still swallows it, and
-///    Geode must own the chord regardless of any input's flag — so the
+///    `"Input"` context on non-macOS (the binding itself,
+///    `gpui-base-0.6.2/src/input/base/state.rs`, pinned release); at the
+///    pinned release the handler (`on_action_search`,
+///    `gpui-base-0.6.2/src/input/editor/search.rs`) propagates when the
+///    input is not `searchable` (at the old git rev 0e2fb7a it returned
+///    without propagating, which is why this reclaim was first added),
+///    but a searchable input still swallows it, and Geode must own the
+///    chord regardless of any input's flag — so the
 ///    app-wide `NoAction` reclaim is kept as the binding's guarantee
 ///    rather than its only rescue — so `ctrl+f`, which both list dialogs
 ///    and (per Task 5) the command palette use for "page down"
@@ -666,9 +668,10 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
 /// input is blurred — while listening for a binding, and (since it went
 /// modal, `crate::dialogmode`) throughout normal mode — because a caret
 /// would be a lie about where keystrokes are going. It keeps the icon, and
-/// hand-matches `Input`'s own medium-size prefix gap (`px(6.)`,
-/// `input.rs:504-508`), so entering and leaving capture doesn't shift the
-/// query text sideways.
+/// hand-matches `Input`'s own medium-size prefix gap (`px(6.)`, the
+/// `gap_x` match in `gpui-component-0.6.2/src/input/input.rs`, `Input`'s
+/// render), so entering and leaving capture doesn't shift the query
+/// text sideways.
 ///
 /// An empty frozen query — the state every normal-mode dialog OPENS in —
 /// is the one case that paints something the query itself did not
