@@ -185,3 +185,39 @@ fn the_as_of_list_takes_ctrl_n_and_clamps_a_page_step(cx: &mut gpui::TestAppCont
     cx.simulate_keystrokes("ctrl-u");
     assert_eq!(selected(&cx), 0, "a page step clamps");
 }
+
+/// Task 3 (tooltips): hovering the AS OF badge names its full text
+/// (`ScopeBarModel::as_of_badge`) and `frame::as_of`'s chord — the
+/// selector that reopens the very dialog that set it.
+#[gpui::test]
+fn hovering_the_as_of_badge_names_the_selector_chord(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let at = chrono::Utc::now() - chrono::Duration::hours(1);
+    frame.update(&mut vcx, |f, cx| {
+        if f.set_as_of(AsOf::At(at)) {
+            cx.notify();
+        }
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.run_until_parked();
+
+    let badge = vcx.debug_bounds("scope-asof").expect("badge painted");
+    vcx.simulate_mouse_move(
+        badge.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-scope-asof").is_some());
+    assert!(
+        vcx.debug_bounds("tip-scope-asof-chord-mod+t").is_some()
+            || vcx.debug_bounds("tip-scope-asof-chord-alt+t").is_some(),
+        "the tooltip must name frame::as_of's chord"
+    );
+}

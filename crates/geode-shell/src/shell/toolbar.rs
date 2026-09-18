@@ -23,12 +23,15 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{App, Div, Entity, Hsla, IntoElement, MouseButton, Window, div, px};
+use gpui::{
+    App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, Stateful, Window, div, px,
+};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
+use crate::tips;
 
 /// Compact width of the filter field (brief: "~200px").
 const FILTER_WIDTH: f32 = 200.0;
@@ -41,9 +44,20 @@ const FILTER_WIDTH: f32 = 200.0;
 /// `String` handed in here would pay full allocation cost every render
 /// for a value release builds never read — matching the `frame-readout`/
 /// `scope-asof` selectors two calls away, which build their (static)
-/// strings the same lazy way.
-fn chip(label: String, fg: Hsla, bg: Hsla, selector: impl Fn() -> String + 'static) -> Div {
+/// strings the same lazy way. Takes an `id` (Task 3) so the caller can
+/// chain `.tooltip(..)` — a tooltip needs a stable `Stateful<Div>`
+/// identity across renders, the same reason every hovered element in
+/// this crate (`sidebar.rs`'s discs and profile icon) already carries
+/// one.
+fn chip(
+    id: ElementId,
+    label: String,
+    fg: Hsla,
+    bg: Hsla,
+    selector: impl Fn() -> String + 'static,
+) -> Stateful<Div> {
     div()
+        .id(id)
         .px_2()
         .py_0p5()
         .rounded(px(4.))
@@ -67,7 +81,7 @@ pub fn toolbar(
     let chip_bg = theme.muted;
 
     let mut chips_row = h_flex().gap_1().items_center();
-    for c in &model.chips {
+    for (i, c) in model.chips.iter().enumerate() {
         // `Rc<str>`, not `String`: the mouse-down handler, the chip-body
         // selector and the close-glyph selector are three separate
         // `'static` closures, each needing its own owned handle to the
@@ -90,18 +104,40 @@ pub fn toolbar(
                     // column (Phase 4a §3.3) — the close glyph below
                     // stays a separate hit target so clicking it drops
                     // the dimension instead of opening the picker.
-                    chip(c.summary.clone(), chip_fg, chip_bg, move || {
-                        format!("scope-chip-{body_column}")
-                    })
+                    // `c.summary`/`c.full` are already cloned into
+                    // `child(..)`/the tooltip below every render, exactly
+                    // as before Task 3 — the tooltip closure captures
+                    // those same clones and allocates nothing further
+                    // until hover.
+                    chip(
+                        ElementId::NamedInteger("scope-chip".into(), i as u64),
+                        c.summary.clone(),
+                        chip_fg,
+                        chip_bg,
+                        move || format!("scope-chip-{body_column}"),
+                    )
                     .cursor_pointer()
+                    .tooltip(tips::tip_with(
+                        format!("scope-chip-{}", c.column),
+                        c.full.clone(),
+                        Some("frame::pick".to_string()),
+                        Some("click: pick values".into()),
+                    ))
                     .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                         on_open(&open_column, window, cx)
                     }),
                 )
                 .child(
                     div()
+                        .id(ElementId::NamedInteger("scope-chip-close".into(), i as u64))
                         .child(Icon::new(IconName::Close).text_color(chip_fg))
                         .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                        .tooltip(tips::tip_with(
+                            format!("scope-chip-close-{}", c.column),
+                            format!("Remove {}", c.column),
+                            None,
+                            None,
+                        ))
                         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                             on_close(&column, window, cx)
                         }),
@@ -109,25 +145,58 @@ pub fn toolbar(
         );
     }
     if let Some(t) = &model.text_chip {
-        chips_row = chips_row.child(chip(t.clone(), chip_fg, chip_bg, || {
-            "scope-text-chip".to_string()
-        }));
+        chips_row = chips_row.child(
+            chip(
+                "scope-text-chip".into(),
+                t.clone(),
+                chip_fg,
+                chip_bg,
+                || "scope-text-chip".to_string(),
+            )
+            .tooltip(tips::tip(
+                "scope-text-chip",
+                model.text.clone().unwrap_or_default(),
+                Some("frame::focus_text"),
+                None,
+            )),
+        );
     }
     if let Some(expr) = &model.expr {
-        chips_row = chips_row.child(chip(expr.clone(), chip_fg, chip_bg, || {
-            "scope-expr-chip".to_string()
-        }));
+        chips_row = chips_row.child(
+            chip(
+                "scope-expr-chip".into(),
+                expr.clone(),
+                chip_fg,
+                chip_bg,
+                || "scope-expr-chip".to_string(),
+            )
+            .tooltip(tips::tip_with(
+                "scope-expr-chip".into(),
+                model.expr_full.clone().unwrap_or_default(),
+                None,
+                Some(":filter <expr> sets it".into()),
+            )),
+        );
     }
     if let Some(named) = &model.impossible {
         // The contradiction chip: `theme.danger`/`danger_foreground`, not
         // the muted scheme every other chip uses — a scope that can match
         // nothing must read as an error, not routine state.
-        chips_row = chips_row.child(chip(
-            named.clone(),
-            theme.danger_foreground,
-            theme.danger.opacity(0.25),
-            || "scope-impossible-chip".to_string(),
-        ));
+        chips_row = chips_row.child(
+            chip(
+                "scope-impossible-chip".into(),
+                named.clone(),
+                theme.danger_foreground,
+                theme.danger.opacity(0.25),
+                || "scope-impossible-chip".to_string(),
+            )
+            .tooltip(tips::tip(
+                "scope-impossible-chip",
+                "No row can match: two scope layers select disjoint values on this dimension",
+                None,
+                None,
+            )),
+        );
     }
     let has_chips = !model.chips.is_empty()
         || model.text.is_some()
@@ -167,8 +236,15 @@ pub fn toolbar(
                             .rounded(px(4.))
                             .child(
                                 div()
+                                    .id("scope-asof")
                                     .text_color(theme.warning_foreground)
                                     .debug_selector(|| "scope-asof".to_string())
+                                    .tooltip(tips::tip(
+                                        "scope-asof",
+                                        badge.clone(),
+                                        Some("frame::as_of"),
+                                        Some(":live returns to now".into()),
+                                    ))
                                     .child(badge.clone()),
                             )
                     })

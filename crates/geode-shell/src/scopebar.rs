@@ -16,6 +16,9 @@ use chrono::{Local, NaiveDate};
 pub struct Chip {
     pub column: String,
     pub summary: String,
+    /// The whole selection, un-elided — `"{column} ∈ {v1}, {v2}, …"`
+    /// with every value — what a hover on the chip shows (Task 3).
+    pub full: String,
 }
 
 /// What the scope bar shows for one frame state — everything already
@@ -38,6 +41,9 @@ pub struct ScopeBarModel {
     /// Elided source text (≤ 40 chars + `…`), or `None` when the scope has
     /// no expression.
     pub expr: Option<String>,
+    /// The whole expression source, un-elided — what a hover on the
+    /// elided `expr` chip shows.
+    pub expr_full: Option<String>,
     /// `Some("∅ {column}")` when the scope is a contradiction (spec
     /// §4.1's `Scope::impossible`) — named, not merely hidden, per
     /// `Scope::columns`'s own doc comment.
@@ -77,14 +83,15 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
             } else {
                 format!("{} ∈ {{{}}}", d.column, d.values.len())
             },
+            full: format!("{} ∈ {}", d.column, d.values.join(", ")),
         })
         .collect();
-    let expr = scope.expression.as_ref().map(|e| {
-        let s = e.to_string();
+    let expr_full = scope.expression.as_ref().map(|e| e.to_string());
+    let expr = expr_full.as_ref().map(|s| {
         if s.chars().count() > 40 {
             format!("{}…", s.chars().take(40).collect::<String>())
         } else {
-            s
+            s.clone()
         }
     });
     let impossible = scope.impossible.then(|| {
@@ -115,6 +122,7 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         text: scope.text.clone(),
         text_chip,
         expr,
+        expr_full,
         impossible,
         as_of,
         as_of_badge,
@@ -128,8 +136,45 @@ mod tests {
     use chrono::TimeZone;
     use geode_core::groupings::GroupingSlots;
     use geode_core::query::AsOf;
-    use geode_core::scope::{DimensionSelection, Scope};
+    use geode_core::scope::{DimensionSelection, Scope, parse_expr};
     use geode_core::scopes::SavedScopes;
+
+    /// Task 3 (tooltips): a chip's hover wants the full selection, not
+    /// the elided `summary` a trader sees on the bar itself.
+    #[test]
+    fn a_chip_carries_the_full_selection_beside_its_elided_summary() {
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        f.set_scope(Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["A".into(), "B".into(), "C".into()],
+            }],
+            ..Scope::default()
+        });
+        let m = build_model(&f, chrono::Local::now().date_naive());
+        assert_eq!(m.chips[0].summary, "book ∈ {3}");
+        assert_eq!(m.chips[0].full, "book ∈ A, B, C");
+    }
+
+    /// Task 3 (tooltips): the expr chip elides past 40 chars, but a
+    /// hover wants the whole expression source. `Expr::Display` fully
+    /// parenthesises every `and`/`or` operand (round-trip grammar, not
+    /// brevity — see its own doc comment) so it does not reproduce the
+    /// typed text verbatim; comparing against `expr.to_string()` is the
+    /// brief's own documented fallback for that case.
+    #[test]
+    fn expr_full_is_the_whole_expression_while_expr_is_elided() {
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        let long = "npv > 1000000 and delta < -50000 and book = 'ABCDEFGH'";
+        let expr = parse_expr(long).unwrap();
+        f.set_scope(Scope {
+            expression: Some(expr.clone()),
+            ..Scope::default()
+        });
+        let m = build_model(&f, chrono::Local::now().date_naive());
+        assert!(m.expr.as_deref().unwrap().ends_with('…'));
+        assert_eq!(m.expr_full.as_deref(), Some(expr.to_string().as_str()));
+    }
 
     /// Phase 4b Task 1 fix round 1, MAJ-2: `shell::toolbar` used to
     /// `format!` the text chip, the AS OF badge and the slot readout
