@@ -36,6 +36,35 @@ fn typing_a_time_and_enter_sets_as_of_and_paints_the_stripe_and_segment(
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
 }
 
+/// Hovering the status bar's AS OF segment (Task 4, spec §5.1) names the
+/// same `frame::as_of` chord the toolbar's own AS OF badge does — the
+/// keyboard twin to "click it to reopen the as-of selector".
+#[gpui::test]
+fn hovering_the_status_as_of_segment_names_the_selector_chord(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let _frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    vcx.simulate_keystrokes("alt-t");
+    vcx.simulate_input("14:05");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+
+    let seg = vcx.debug_bounds("status-as-of").expect("segment painted");
+    vcx.simulate_mouse_move(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-status-as-of").is_some());
+    assert!(
+        vcx.debug_bounds("tip-status-as-of-chord-mod+t").is_some()
+            || vcx.debug_bounds("tip-status-as-of-chord-alt+t").is_some()
+    );
+}
+
 /// A bad time shows inline (`as-of-error`) and `enter` does nothing: the
 /// modal stays open and the frame stays live — the mutation entry "as-of:
 /// a bad time never sets the frame" pins the failure arm never calling

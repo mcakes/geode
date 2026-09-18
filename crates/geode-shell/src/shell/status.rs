@@ -23,7 +23,7 @@
 //! workaround, which predated those tokens' use here.
 
 use gpui::prelude::*;
-use gpui::{App, IntoElement, MouseButton, Window, div, px};
+use gpui::{App, IntoElement, MouseButton, SharedString, Window, div, px};
 use gpui_component::ActiveTheme as _;
 use gpui_component::status_bar::StatusBar;
 
@@ -135,9 +135,16 @@ pub fn status_bar(
     if let Some(message) = diagnostics_summary {
         bar = bar.left(
             div()
+                .id("diagnostics-summary")
                 .text_color(theme.warning)
                 .debug_selector(|| "diagnostics-summary".to_string())
                 .child(message.to_string())
+                .tooltip(crate::tips::tip(
+                    "tip-diagnostics-summary",
+                    "Open the diagnostics tile",
+                    None,
+                    Some(SharedString::new_static("click to open")),
+                ))
                 .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                     on_diagnostics_click(window, cx);
                 }),
@@ -147,15 +154,25 @@ pub fn status_bar(
         // The same warning-toned badge treatment the toolbar's own AS OF
         // readout uses (`shell::toolbar`'s "scope-asof" child) — an
         // unmissable second reminder in the one place a maximised tile
-        // cannot hide (spec §3.6/§4.5).
+        // cannot hide (spec §3.6/§4.5). `as_of_text` is built once and
+        // reused for both the painted child and the tooltip's title (a
+        // clone of the same `SharedString` — no second `format!`).
+        let as_of_text: SharedString = format!("AS OF {t} · :live to return").into();
         bar = bar.left(
             div()
+                .id("status-as-of")
                 .bg(theme.warning.opacity(0.25))
                 .text_color(theme.warning_foreground)
                 .px_2()
                 .rounded(px(4.))
                 .debug_selector(|| "status-as-of".to_string())
-                .child(format!("AS OF {t} · :live to return")),
+                .tooltip(crate::tips::tip_with(
+                    SharedString::new_static("tip-status-as-of"),
+                    as_of_text.clone(),
+                    Some("frame::as_of"),
+                    Some(SharedString::new_static(":live returns to now")),
+                ))
+                .child(as_of_text),
         );
     }
 
