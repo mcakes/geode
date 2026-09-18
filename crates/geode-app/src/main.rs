@@ -89,7 +89,7 @@ fn main() {
     }
 
     gpui_platform::application()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(gpui_kit_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
             // Reclaim `tab`/`shift-tab` (from gpui-component's `Root` focus

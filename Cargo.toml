@@ -33,23 +33,40 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ] }
 tracing-appender = "0.2"
 
-# gpui-component's own Cargo.toml depends on `gpui`/`gpui_platform` via an
-# unpinned git reference (no rev). Cargo keys a git dependency's identity on
-# URL + reference, so if we pinned a `rev` here, cargo would treat our copy
-# and gpui-component's copy as two different sources and build two
-# incompatible copies of gpui (type errors across the crate boundary) — and
-# `[patch]` can't fix this either, since cargo refuses to patch a git source
-# with a different reference to itself. So these two stay unpinned and rely
-# on the committed Cargo.lock for reproducibility, same as gpui-component's
-# own resolution. Resolved at the time of writing: rev
-# e3adf43f37d7a2a9c165a78b255d293b0848d2d0 (zed-industries/zed).
-gpui = { git = "https://github.com/zed-industries/zed" }
+# GPUI and gpui-kit come from crates.io and every one of them is `=`-pinned
+# (spec: docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md §2).
+#
+# gpui-kit publishes weekly snapshots of zed's gpui crates as `gpui-pre`,
+# `gpui-pre-platform` and `gpui-pre-macros` (each crate's description on
+# crates.io names the zed rev it snapshots — 0.3.5 is zed@d89e9c2). gpui-kit
+# itself depends on `gpui-pre` with a CARET, so an unpinned entry here would
+# let a plain `cargo update` move gpui under us to a snapshot nobody has
+# read. The `=` pins make this manifest and the committed Cargo.lock agree;
+# a bump is a deliberate change on a branch, both families together.
+#
+# There is no git dependency on zed or on gpui-kit any more, so the old
+# two-copies hazard (a git dep keyed on URL+reference, which a `rev` pin on
+# our side used to split from gpui-component's unpinned copy) cannot recur:
+# we and gpui-component both name the same registry crate.
+#
+# `gpui-pre-macros` rewrites `gpui::` paths inside macro output to
+# `gpui_kit::` only when the calling crate depends on the `gpui-kit`
+# umbrella. Geode never does — it aliases `gpui = { package = "gpui-pre" }`
+# — so `#[gpui::test]` and every other macro path is unchanged.
+gpui = { package = "gpui-pre", version = "=0.3.5" }
 # runtime_shaders: compile Metal shaders at runtime; builds without full Xcode. No-op on non-macOS.
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "runtime_shaders"] }
-# gpui-component / gpui-component-assets are only depended on by us, so
-# pinning them directly is safe (no sibling unpinned reference to collide with).
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "0e2fb7acdf1d40d4db3d458da3893fe9865e901e" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "0e2fb7acdf1d40d4db3d458da3893fe9865e901e" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = ["font-kit", "runtime_shaders"] }
+gpui-component = "=0.6.2"
+# Renamed upstream from `gpui-component-assets` with the gpui-kit rebrand.
+gpui-kit-assets = "=0.6.2"
+# gpui-component names these two siblings with a CARET (`gpui-base =
+# "0.6.2"`), so without a direct `=` pin on our side a `cargo update` can
+# float them to a newer release than the gpui-component they were built
+# with — which is exactly what happened on 2026-09-18 (a 0.6.1 component
+# over a 0.6.2 base failed to compile inside gpui-component itself). They
+# are depended on by `geode-app` for that reason alone.
+gpui-base = "=0.6.2"
+gpui-component-macros = "=0.6.2"
 
 # Release builds keep debug symbols: profiling support from day one (spec §7.4).
 [profile.release]
