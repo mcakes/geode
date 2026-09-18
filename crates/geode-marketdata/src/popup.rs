@@ -56,11 +56,17 @@ pub(crate) const PICKER_ROWS: usize = 12;
 /// [`geode_shell::listfilter::rank`] takes `&[String]`. `labels` is the
 /// separate, PREPARED `SharedString` for each `all` entry (review fix
 /// round 1, IMPORTANT-3) — [`Self::new`] and [`Self::replace_all`] both
-/// fill it off the render thread, so [`render_picker`] only ever clones an
-/// `Arc` per row; `SharedString::from(&str)` is a real allocation (there
-/// is no inline small-string form at the pinned rev), so doing that
-/// conversion once per row PER FRAME, as the first build did, violated
-/// "nothing allocates in render" on every repaint while a picker was open.
+/// fill it off the render thread, so [`render_picker`] only ever clones a
+/// prepared `SharedString` per row (an inline copy or an `Arc` bump, never
+/// an allocation); at the pinned release `SharedString` wraps
+/// `smol_str::SmolStr` (`gpui-pre-shared-string-0.3.5/
+/// gpui_shared_string.rs`), which stores up to 23 bytes inline, so
+/// `SharedString::from(&str)` heap-allocates only for a longer string
+/// — it had no inline form at the old git rev — but an underlying key
+/// can exceed that, and the charter's "nothing allocates in render" is
+/// about the rule, not the byte count, so the conversion still happens
+/// once per row when `all` changes, never per frame (as the first
+/// build did on every repaint while a picker was open).
 ///
 /// `query` is the text `ranked` was last built against — kept so
 /// [`Self::refilter`] can tell "the trader typed something new" from

@@ -89,7 +89,7 @@ fn main() {
     }
 
     gpui_platform::application()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(gpui_kit_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
             // Reclaim `tab`/`shift-tab` (from gpui-component's `Root` focus
@@ -230,9 +230,10 @@ fn main() {
             }
 
             // Best-effort flush on quit: `App::on_app_quit` exists at the
-            // pinned gpui rev (checked against the vendored checkout), so
-            // wire it up as a belt-and-suspenders save — the post-dispatch
-            // save in `ShellView::dispatch` already covers crash-robustness
+            // pinned gpui rev (checked against the pinned release,
+            // `gpui-pre-0.3.5/src/app.rs`), so wire it up as a
+            // belt-and-suspenders save — the post-dispatch save in
+            // `ShellView::dispatch` already covers crash-robustness
             // for every workspace-mutating action; this only additionally
             // catches a workspace mutation made just before quitting, ahead
             // of the background watcher's next ~500ms flush. (A theme
@@ -299,8 +300,10 @@ fn main() {
                 // (`geode_shell::shell::toolbar`), so the window itself
                 // must be opened with gpui-component's title-bar-owned
                 // options (window controls, drag/double-click ownership) —
-                // see the doc comment on `TitleBar::window_options` and the
-                // `window_title` example at the pinned checkout.
+                // see `TitleBar::window_options`'s own doc comment
+                // (`gpui-component-0.6.2/src/title_bar.rs`), which carries
+                // the same worked example upstream's `examples/window_title`
+                // does.
                 let window = cx
                     .open_window(TitleBar::window_options(), |window, cx| {
                         let view = cx.new(|cx| ShellView::new(services, desk, user, window, cx));

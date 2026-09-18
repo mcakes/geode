@@ -20,7 +20,12 @@ profiling = ["geode-shell/profiling"]
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
-gpui-component-assets.workspace = true
+gpui-kit-assets.workspace = true
+# Sibling pins — see the root Cargo.toml's dependency comment: gpui-component
+# names these with a caret, and a direct `=` here is what keeps the family
+# in step under `cargo update`. Not imported by this crate.
+gpui-base.workspace = true
+gpui-component-macros.workspace = true
 geode-shell = { path = "../geode-shell" }
 geode-core.workspace = true
 # The data bridge (spec §5.1, src/bridge.rs) is the one place the shell

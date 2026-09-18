@@ -555,7 +555,7 @@ pub struct ShellView {
     /// `Input` consumes printable characters, caret movement, ctrl+a
     /// (select-all), and — new versus the old free-text palette — ctrl+v
     /// (paste) natively, via its own `KeyBinding`-bound actions
-    /// (`crates/base/src/input/base/state.rs`'s `CONTEXT = "Input"`
+    /// (`gpui-base-0.6.2/src/input/base/state.rs`'s `CONTEXT = "Input"`
     /// bindings): those actions run and stop propagation *before*
     /// `ShellView`'s own `on_key_down` (`handle_key_down`) ever sees the
     /// raw `KeyDownEvent` (confirmed by reading `dispatch_key_event`
@@ -564,14 +564,14 @@ pub struct ShellView {
     /// which is what fires raw key listeners). Up/down, ctrl+p/ctrl+n,
     /// enter, and escape all still reach `handle_palette_key` as bubbled
     /// `KeyDownEvent`s, for three different reasons each confirmed against
-    /// the pinned checkout rather than assumed: up/down have a global
+    /// the pinned release rather than assumed: up/down have a global
     /// `KeyBinding` in the "Input" context, but the *element* only
     /// attaches an `on_action` listener for them `.when(self.is_multi_
     /// line(), ..)` — this field is single-line, so no listener exists to
     /// consume them and the raw event falls through untouched; ctrl+p and
     /// ctrl+n have no `KeyBinding` in "Input" at all (grepped the whole
-    /// `crates/base/src/input` tree — absent), so they're never matched in
-    /// the first place; enter and escape *are* bound and *do* have
+    /// `gpui-base-0.6.2/src/input` tree — absent), so they're never
+    /// matched in the first place; enter and escape *are* bound and *do* have
     /// listeners (`InputBaseState::enter`/`escape`), but for a single-line,
     /// non-`clean_on_escape` input those handlers explicitly call
     /// `cx.propagate()` after emitting their `InputEvent`, letting the
@@ -1127,9 +1127,11 @@ impl ShellView {
         // window — without this observer the stale ACTIVE drag survived,
         // and the click that re-activated the window could advance and
         // apply it. `cx.observe_window_activation` is available at the
-        // pinned gpui rev (App/context.rs; the platform layer feeds it
-        // from `on_active_status_change`, which macOS and Windows both
-        // wire). Each drag kind ends per its own recorded semantics — the
+        // pinned gpui rev (`gpui-pre-0.3.5/src/app/context.rs`); the
+        // platform layer feeds it from `on_active_status_change`, which
+        // macOS wires (`gpui-pre-macos-0.3.5/src/window.rs`) — the
+        // Windows wiring (`gpui-pre-windows`) was not re-read on this
+        // host. Each drag kind ends per its own recorded semantics — the
         // same split as the Escape cancel in `handle_key_down`: a tile
         // drag CANCELS (nothing was applied, so nothing is lost) and a
         // divider drag FINISHES (its resizes were applied live and

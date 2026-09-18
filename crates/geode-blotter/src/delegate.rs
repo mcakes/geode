@@ -77,11 +77,12 @@ pub struct BlotterDelegate {
     pub semi_joined: Vec<String>,
     /// The last window `refill_window` was actually asked to fill,
     /// *not* `cache.window()`. `TableState` (`update_visible_range_if_need`,
-    /// pinned gpui-component checkout) only records a new visible range
-    /// when it has more than one row — a filter/narrow that shrinks the
-    /// table to 0 or 1 rows leaves `TableState`'s own recorded range
-    /// stale, so when the rows return to the same count as before, it
-    /// never fires `visible_rows_changed` again. `invalidate_cells` must
+    /// pinned release, `gpui-component-0.6.2/src/table/state.rs`) only
+    /// records a new visible range when it has more than one row — a
+    /// filter/narrow that shrinks the table to 0 or 1 rows leaves
+    /// `TableState`'s own recorded range stale, so when the rows return
+    /// to the same count as before, it never fires
+    /// `visible_rows_changed` again. `invalidate_cells` must
     /// refill *this* field, not the (possibly shrunken) format cache's
     /// own window, or the cache stays stuck at the shrunken size forever
     /// — every cell outside it paints blank with nothing left to ever
@@ -454,12 +455,13 @@ impl BlotterDelegate {
     /// Refills `requested_window`, not `self.cache.window()`: gpui-
     /// component's `TableState::update_visible_range_if_need` stops
     /// reporting a new visible range once it has length ≤ 1 (`if
-    /// visible_range.len() <= 1 { return; }`, the pinned gpui-component
-    /// checkout), so a filter/narrow that shrinks the table to 0 or 1
-    /// rows leaves the *cache's* window stuck at that shrunken size —
-    /// when the row count later returns to what `TableState` last
-    /// recorded, it sees no change and never fires `visible_rows_changed`
-    /// again, so a `cache.window()`-based refill here would have nothing
+    /// visible_range.len() <= 1 { return; }`, pinned release,
+    /// `gpui-component-0.6.2/src/table/state.rs`), so a filter/narrow
+    /// that shrinks the table to 0 or 1 rows leaves the *cache's*
+    /// window stuck at that shrunken size — when the row count later
+    /// returns to what `TableState` last recorded, it sees no change
+    /// and never fires `visible_rows_changed` again, so a
+    /// `cache.window()`-based refill here would have nothing
     /// to widen back out from. `requested_window` is what the table last
     /// actually asked to see (remembered by `refill_window`, the only
     /// place that writes it), independent of how small the cache
@@ -916,9 +918,9 @@ impl TableDelegate for BlotterDelegate {
             // `cx.debug_bounds` and, via `TableDelegate::cache`, read
             // back what was painted into it. `debug_selector` is a
             // gpui-provided no-op in a non-test/non-`test-support` build
-            // (the closure is dropped unevaluated, `crates/gpui/src/
-            // elements/div.rs`), so this costs nothing on the render
-            // thread in release.
+            // (the closure is dropped unevaluated, pinned release,
+            // `gpui-pre-0.3.5/src/elements/div.rs`), so this costs
+            // nothing on the render thread in release.
             .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"))
             .when(kind == Some(ColumnKind::Measure), |el| el.justify_end())
             .when(is_cursor, |el| {
@@ -1176,9 +1178,10 @@ mod tests {
     }
 
     /// Regression for the successor to C1: `TableState::
-    /// update_visible_range_if_need` (pinned gpui-component checkout)
-    /// only records a new visible range when it has more than one row,
-    /// so a snapshot that shrinks the table to 0 or 1 rows leaves
+    /// update_visible_range_if_need` (pinned release,
+    /// `gpui-component-0.6.2/src/table/state.rs`) only records a new
+    /// visible range when it has more than one row, so a snapshot
+    /// that shrinks the table to 0 or 1 rows leaves
     /// `TableState`'s own recorded range stale. When rows return to a
     /// count `TableState` has already seen, it never fires
     /// `visible_rows_changed` again — a refill keyed off the format

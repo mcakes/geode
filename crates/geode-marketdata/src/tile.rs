@@ -1003,13 +1003,14 @@ impl MarketDataTile {
 
     /// Hand the current model to the delegate and refresh the table.
     ///
-    /// **Every model swap ends here**, and the `refresh` is the reason: the
-    /// pinned gpui-component caches each `column()`'s answer in
-    /// `col_groups` at prepare time and paints its HEADER from that cache
-    /// alone, so a document whose node ladder changed would keep the
-    /// previous one's headers (and lay its cells out at the previous
-    /// widths) until something else happened to refresh. The same trap
-    /// CLAUDE.md records for the blotter's gutter.
+    /// **Every model swap ends here**, and the `refresh` is the reason:
+    /// the pinned release (`gpui-component-0.6.2/src/table/state.rs`)
+    /// caches each `column()`'s answer in `col_groups` at prepare time
+    /// and paints its HEADER from that cache alone, so a document whose
+    /// node ladder changed would keep the previous one's headers (and
+    /// lay its cells out at the previous widths) until something else
+    /// happened to refresh. The same trap CLAUDE.md records for the
+    /// blotter's gutter.
     ///
     /// One `Rc::clone` — a refcount — never the model itself.
     fn install_model(&mut self, cx: &mut Context<Self>) {

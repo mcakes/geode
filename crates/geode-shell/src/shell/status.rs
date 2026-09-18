@@ -13,9 +13,10 @@
 //! bar to report.
 //!
 //! **Inventory decision:** migrated onto gpui-component's `StatusBar`
-//! (pinned checkout: `crates/ui/src/status_bar.rs`) rather than a hand-
-//! rolled `h_flex` — its `left`/`right`/center-`child` regions are exactly
-//! this bar's shape (pending+reload on the left, theme name on the right,
+//! (pinned release: `gpui-component-0.6.2/src/status_bar.rs`) rather
+//! than a hand-rolled `h_flex` — its `left`/`right`/center-`child`
+//! regions are exactly this bar's shape (pending+reload on the left,
+//! theme name on the right,
 //! nothing in the center), and it pulls in the dedicated `status_bar`/
 //! `status_bar_border` theme tokens (confirmed present in the pinned
 //! `theme_color.rs`) instead of this bar's previous `sidebar`-token

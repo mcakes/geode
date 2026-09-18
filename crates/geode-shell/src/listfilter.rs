@@ -17,9 +17,15 @@
 //!
 //! With a single-line gpui-component `Input` focused, the dialogs can
 //! only claim keys that input does not consume first. Verified against
-//! the pinned rev (spec §2): `left`/`right`/`home`/`end` are swallowed
-//! unconditionally; `up`/`down`/`pageup`/`pagedown` and `tab`/`shift+tab`
-//! attach their listeners only for multi-line inputs, so they fall
+//! the pinned rev (spec §2): `home`/`end` are swallowed unconditionally;
+//! `left`/`right` are swallowed except when a single empty selection
+//! sits at the very start or end of the text, where the pinned release
+//! propagates them (`gpui-base-0.6.2/src/input/base/movement.rs`,
+//! `left`/`right`; they were swallowed unconditionally at the old git
+//! rev) — `nav_command` claims neither, pinned by
+//! `nav_command_claims_nothing_else`, so the vocabulary is unaffected;
+//! `up`/`down`/`pageup`/`pagedown` and `tab`/`shift+tab` attach their
+//! listeners only for multi-line inputs, so they fall
 //! through; `ctrl+d`/`u`/`b`/`n`/`p` are unbound in the `"Input"` context
 //! on both platforms. `ctrl+f` is bound to the editor's Search on
 //! non-macOS and is reclaimed for us by a `NoAction` binding in

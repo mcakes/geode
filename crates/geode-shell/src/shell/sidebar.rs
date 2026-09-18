@@ -4,9 +4,10 @@
 //! profile icon that dispatches `settings::open`.
 //!
 //! **Inventory decision (not gpui-component's `Sidebar<E>`):** the pinned
-//! checkout's `crates/ui/src/sidebar/mod.rs` `Sidebar` is a ~255px-default
-//! (48px collapsed), `ListState`-virtualized, animated collapse/expand nav
-//! panel whose content is a list of `SidebarItem`-implementing groups with
+//! release's `gpui-component-0.6.2/src/sidebar/mod.rs` `Sidebar` is a
+//! ~255px-default (48px collapsed), `ListState`-virtualized, animated
+//! collapse/expand nav panel whose content is a list of
+//! `SidebarItem`-implementing groups with
 //! headers/menus — built for a wide app-navigation drawer (see its
 //! `SidebarCollapsible`, `DEFAULT_WIDTH`/`COLLAPSED_WIDTH`, and its own
 //! 200ms width-transition machinery). Our rail is the opposite shape: a
@@ -19,9 +20,10 @@
 //! `sidebar_primary`) so it still themes consistently with the rest of the
 //! library.
 //!
-//! **Avatar:** uses gpui-component's `avatar::Avatar` (pinned checkout:
-//! `crates/ui/src/avatar/avatar.rs`) for the profile icon, at its `small`
-//! (24px) size. No `.name(...)` is set — there is no real user identity
+//! **Avatar:** uses gpui-component's `avatar::Avatar` (pinned release:
+//! `gpui-component-0.6.2/src/avatar/avatar.rs`) for the profile icon, at
+//! its `small` (24px) size. No `.name(...)` is set — there is no real
+//! user identity
 //! yet, and `Avatar` without a name falls back to a plain `IconName::User`
 //! glyph rather than synthesizing fake initials. Upstream paints that
 //! placeholder glyph in `theme.background` on a `secondary` disc — near
@@ -31,10 +33,12 @@
 //! **Workspace discs are avatar-shaped but hand-built:** `Avatar` cannot
 //! render theme-tokened text — its `.name(...)` branch hard-codes a
 //! hashed-hue disc and text color on an *inner* fallback element
-//! (`avatar.rs:107-110`) that caller styles never reach, and the
+//! (`gpui-component-0.6.2/src/avatar/avatar.rs`, the `identity`-branch
+//! of `Avatar`'s render) that caller styles never reach, and the
 //! composable `BaseAvatar`/`AvatarFallback` primitives live in the
-//! library-internal `gpui_base` crate, which gpui-component does not
-//! re-export. So the indicators take `Avatar::small()`'s scale (24px,
+//! separate `gpui-base` crate, which gpui-component does not re-export
+//! and geode-shell does not depend on. So the indicators take
+//! `Avatar::small()`'s scale (24px,
 //! 1px `theme.border` ring, `text_xs` label) as a rounded square on the
 //! theme's global `radius` token (per user direction — full circles
 //! didn't read well at this size) and color it
