@@ -139,4 +139,4 @@ geode-demo-data    deterministic seeded synthetic risk data (SoA) + the criterio
 
 ## gpui skills
 
-The `gpui` and `gpui-component` skills (available via the Skill tool) are vendored into this repo from longbridge/gpui-component and tracked in `skills-lock.json`. Use them when touching any gpui rendering, entity, async, focus, or component code.
+The `gpui-kit` and `gpui-kit-design-guides` skills (available via the Skill tool) are vendored into this repo from longbridge/gpui-kit and tracked in `skills-lock.json` (they replaced the retired `gpui` and `gpui-component` skills on 2026-09-17, with the upgrade to the crates.io releases). Use them when touching any gpui rendering, entity, async, focus, or component code. **One translation to keep in mind:** the skills are written for the `gpui-kit` umbrella crate and spell paths as `gpui_kit::component::X` / `gpui_kit::base::X`; Geode does not depend on the umbrella (see the dependency comment in the root `Cargo.toml`), so those are `gpui_component::X` and, for the unstyled layer, a re-export or `gpui_base::X` here — the item names and signatures are the same, only the prefix differs.
