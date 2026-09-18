@@ -4,11 +4,10 @@
 //! `gpui-component-0.6.2/src/title_bar.rs`), which already draws the
 //! platform window controls (macOS traffic lights overlay it via
 //! `traffic_light_position`; Windows/Linux get real caption buttons) and
-//! owns window-drag/double-
-//! click — `TitleBar::title_bar_options()` feeds `main.rs`'s
-//! `WindowOptions`, and the `window_title` example
-//! (`examples/window_title/src/main.rs`) is the reference for putting
-//! content inside it via `TitleBar::new().child(...)`.
+//! owns window-drag/double-click — `TitleBar::title_bar_options()` feeds
+//! `main.rs`'s `WindowOptions`, and the `window_title` example (upstream
+//! repo's `examples/window_title/src/main.rs`) is the reference for
+//! putting content inside it via `TitleBar::new().child(...)`.
 //!
 //! Content: the app title left, the frame readout centered in the
 //! previously-reserved middle region (Task 6, spec §4.4 — slot, scope

@@ -13,7 +13,8 @@
 //!   `is_default: true`.
 //!   `gpui_component::init` loads these into a `ThemeRegistry` global and
 //!   immediately applies `"Default Light"` (`theme::mod.rs::init`).
-//! - a repo-root `themes/*.json` directory of 21 further theme families
+//! - **upstream repo (`longbridge/gpui-kit`), not the registry crate:** a
+//!   repo-root `themes/*.json` directory of 21 further theme families
 //!   (Adventure, Alduin, ... Twilight). The crate's own `story` example app
 //!   loads these via `ThemeRegistry::watch_dir`, which does real filesystem
 //!   I/O against a `./themes` directory at runtime — exactly what the shell

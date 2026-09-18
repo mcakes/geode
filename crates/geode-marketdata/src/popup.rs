@@ -56,8 +56,9 @@ pub(crate) const PICKER_ROWS: usize = 12;
 /// [`geode_shell::listfilter::rank`] takes `&[String]`. `labels` is the
 /// separate, PREPARED `SharedString` for each `all` entry (review fix
 /// round 1, IMPORTANT-3) — [`Self::new`] and [`Self::replace_all`] both
-/// fill it off the render thread, so [`render_picker`] only ever clones an
-/// `Arc` per row; at the pinned release `SharedString` wraps
+/// fill it off the render thread, so [`render_picker`] only ever clones a
+/// prepared `SharedString` per row (an inline copy or an `Arc` bump, never
+/// an allocation); at the pinned release `SharedString` wraps
 /// `smol_str::SmolStr` (`gpui-pre-shared-string-0.3.5/
 /// gpui_shared_string.rs`), which stores up to 23 bytes inline, so
 /// `SharedString::from(&str)` heap-allocates only for a longer string

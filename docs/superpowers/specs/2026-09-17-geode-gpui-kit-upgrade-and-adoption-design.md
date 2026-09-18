@@ -181,17 +181,20 @@ names the successor, and the pinned-rev behaviour that row guards
 covered by `the_menu_rows_stop_propagation_keeps_the_pickers_focus`. The
 plan enumerated 63 comment sites citing the pinned checkout; the sweeps
 found 9 more the regexes had missed (72 in all). Every one was re-read at
-the new versions: 7 no longer held as written and were restated under a
-controller ruling rather than left, and the rest were confirmed, with
-those citing a path or line number re-pointed:
+the new versions: 5 no longer held as written and were restated under a
+controller ruling, and 2 more were rewritten under a ruling on other
+grounds (a missed checkout path; a wiring not re-readable on this host),
+and the rest were confirmed, with those citing a path or line number
+re-pointed:
 
 - `crates/geode-shell/src/shell/dialog.rs:225` — gpui-base's
   `on_action_search` now propagates `ctrl-f` when the input is not
   `searchable` (it returned without propagating at the old pinned rev)
 - `crates/geode-shell/src/tiling/docks.rs:17` — the dock framework is now
-  split between `gpui-component-0.6.2/src/dock/` (`Panel`/`PanelView`/
-  `TabPanel`) and `gpui-base-0.6.2/src/dock/` (`DockArea`/`PaneTree`/
-  `DockAreaState`/drag-and-drop), not one directory
+  split between `gpui-component-0.6.2/src/dock/` (the `Panel`/`PanelView`
+  skins and `DockSkin`) and `gpui-base-0.6.2/src/dock/`
+  (`DockArea`/`PaneTree`/`TabGroup`/`DockAreaState`/drag-and-drop), not one
+  directory
 - `crates/geode-shell/src/listfilter.rs:23` — `left`/`right` now
   propagate at the text's edges when the selection is empty, rather than
   being swallowed unconditionally

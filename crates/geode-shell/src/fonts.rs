@@ -14,13 +14,13 @@
 //!   Vec<Cow<'static, [u8]>>) -> Result<()>` (`gpui-pre-0.3.5/src/
 //!   text_system.rs`, delegating to `PlatformTextSystem::add_fonts`,
 //!   `gpui-pre-0.3.5/src/platform.rs`) is the exact registration call.
-//!   Zed's own bootstrap (`crates/zed/src/main.rs::load_embedded_fonts`,
-//!   around line 1822) lists an asset dir for `.ttf` paths, loads each
+//!   Zed's own bootstrap (zed's own repo, `crates/zed/src/main.rs`,
+//!   `load_embedded_fonts`) lists an asset dir for `.ttf` paths, loads each
 //!   file's bytes, and makes one `add_fonts(Vec<Cow<..>>)` call — the same
 //!   shape [`register`] follows below, except bytes come from
 //!   `include_bytes!` (no runtime file I/O, no extra `AssetSource`) rather
-//!   than listing a `rust_embed` folder, since the brief calls embedded
-//!   bytes fine and this repo's `AssetSource` is `gpui_kit_assets::Assets`
+//!   than listing a `rust_embed` folder, since the brief calls embedded bytes
+//!   fine and this repo's `AssetSource` is `gpui_kit_assets::Assets`
 //!   (vendored upstream, not ours to extend with an app-specific `fonts/`
 //!   folder).
 //! - **Theme font-family seam.** `gpui_component::Theme`
@@ -115,7 +115,7 @@ mod tests {
 
     /// **Honest limitation** (brief: "asserting the families resolve in the
     /// text system if the API allows; else document"): it doesn't, under
-    /// `#[gpui::test]`. `TestAppContext::new` (`gpui-pre-0.3.5/src/app/
+    /// `#[gpui::test]`. `TestAppContext::build` (`gpui-pre-0.3.5/src/app/
     /// test_context.rs`) builds its platform via `TestPlatform::new`,
     /// which wires up `Arc::new(NoopTextSystem)` (`gpui-pre-0.3.5/src/
     /// platform/test/platform.rs`) rather than a real `cosmic_text`-backed

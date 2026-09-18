@@ -36,8 +36,9 @@
 //! (`gpui-component-0.6.2/src/avatar/avatar.rs`, the `identity`-branch
 //! of `Avatar`'s render) that caller styles never reach, and the
 //! composable `BaseAvatar`/`AvatarFallback` primitives live in the
-//! library-internal `gpui_base` crate, which gpui-component does not
-//! re-export. So the indicators take `Avatar::small()`'s scale (24px,
+//! separate `gpui-base` crate, which gpui-component does not re-export
+//! and geode-shell does not depend on. So the indicators take
+//! `Avatar::small()`'s scale (24px,
 //! 1px `theme.border` ring, `text_xs` label) as a rounded square on the
 //! theme's global `radius` token (per user direction — full circles
 //! didn't read well at this size) and color it
