@@ -12,11 +12,13 @@
 //! mutate these; rendering consumes [`layout`] for the dock frames and each
 //! dock's own `Tree::layout` for the tiles within.
 //!
-//! **Inventory decision (not gpui-component's `dock` module):** the pinned
-//! checkout ships a whole `crates/ui/src/dock/` framework — `DockArea`,
-//! `PaneTree`, `Panel`/`PanelView`, `TabPanel`, `StackPanel` — that is a
-//! competing layout *and persistence* system: it owns its own split tree,
-//! its own drag-and-drop docking, its own serde-based `DockAreaState`
+//! **Inventory decision (not gpui-component's `dock` module):** the
+//! pinned release ships the dock framework across two crates —
+//! `gpui-component-0.6.2/src/dock/` (`Panel`/`PanelView`/`TabPanel`) and
+//! `gpui-base-0.6.2/src/dock/` (`DockArea`, `PaneTree`, `DockAreaState`,
+//! drag-and-drop) — that is a competing layout *and persistence* system:
+//! it owns its own split tree, its own drag-and-drop docking, its own
+//! serde-based `DockAreaState`
 //! save/restore, and its own notion of which panel is active. Geode already
 //! has all of those seams, deliberately elsewhere: the split tree is
 //! `tiling::Tree` (the single geometry authority `Tree::layout`, which hjkl

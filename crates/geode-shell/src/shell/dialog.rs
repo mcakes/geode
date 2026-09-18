@@ -223,12 +223,17 @@ pub fn set_title_extra(
 ///    `Input` in filter mode, say. Bullet 5 covers the other half.
 ///
 /// 2. **`ctrl-f`**, scoped to `"Input"` and app-wide (not `"GeodeModal"`).
-///    gpui-component binds `ctrl-f` to its editor `Search` action in the
-///    `"Input"` key context on non-macOS (`crates/base/src/input/base/
-///    state.rs`, pinned rev), and that handler returns without
-///    `cx.propagate()` when the input isn't searchable — so `ctrl+f`,
-///    which both list dialogs and (per Task 5) the command palette use for
-///    "page down" (`crate::listfilter::nav_command`), would work on macOS
+///    gpui-component binds `ctrl-f` to the editor `Search` action in the
+///    `"Input"` context on non-macOS (`gpui-base-0.6.2/src/input/base/
+///    state.rs`, pinned release); at the pinned release the handler
+///    propagates when the input is not `searchable` (at the old git rev
+///    0e2fb7a it returned without propagating, which is why this reclaim
+///    was first added), but a searchable input still swallows it, and
+///    Geode must own the chord regardless of any input's flag — so the
+///    app-wide `NoAction` reclaim is kept as the binding's guarantee
+///    rather than its only rescue — so `ctrl+f`, which both list dialogs
+///    and (per Task 5) the command palette use for "page down"
+///    (`crate::listfilter::nav_command`), would work on macOS
 ///    (where gpui-component doesn't bind it at all) and die silently on
 ///    Windows and Linux. This one can't be scoped to `"GeodeModal"` the
 ///    way `tab` is: the command palette is not a [`render_modal`] surface,
