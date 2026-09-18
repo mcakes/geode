@@ -177,8 +177,8 @@ Expected: exit 0 (no stale or duplicated anchors — this plan moved no code, so
 
 - [ ] **Step 6: Run the app headless-smoke for a panic-free start**
 
-Run: `timeout 20 cargo run -p geode-app -- --demo 1000 2>&1 | grep -iE "panic|error" | head`
-Expected: no `panic` line. (A `timeout` exit of 124 is the normal outcome — the app runs until killed. An `error` line from the theme or asset loader is a finding: gpui-kit-assets must serve the same icon set the old assets crate did.) If no display is available the window will not open; that is fine, the check is for a panic before or during window creation only.
+Run: `cargo build -p geode-app && (./target/debug/geode --demo 1000 > /tmp/geode-smoke.log 2>&1 & pid=$!; sleep 20; kill $pid; grep -iE "panic|error" /tmp/geode-smoke.log | head)`
+Expected: no `panic` line. (macOS ships no `timeout`; the app runs until killed. An `error` line from the theme or asset loader is a finding: gpui-kit-assets must serve the same icon set the old assets crate did.) If no display is available the window will not open; that is fine, the check is for a panic before or during window creation only.
 
 - [ ] **Step 7: Commit (only if Step 2 changed something)**
 
@@ -261,7 +261,7 @@ Replace the bullet that begins `- **gpui / gpui_platform git deps must stay unpi
 
 - [ ] **Step 2: Check nothing else in CLAUDE.md still describes the git form**
 
-Run: `grep -nE "unpinned|zed-industries|0e2fb7a|gpui-component-assets|gpui_component_assets" CLAUDE.md`
+Run: `grep -nE "stay unpinned|zed-industries|0e2fb7a|gpui-component-assets|gpui_component_assets" CLAUDE.md`
 Expected: no output. Any hit is a leftover to rewrite in the same commit (quote it in the task report).
 
 - [ ] **Step 3: Commit**
@@ -289,7 +289,7 @@ These ten files cite `crates/ui/src/<file>` paths, some with line numbers, as th
 - [ ] **Step 1: List the sites and confirm the count**
 
 Run: `grep -nE 'pinned checkout|pinned rev|pinned gpui-component|crates/ui/src|pinned component|pinned gpui|vendored checkout' crates/geode-shell/src/shell/dialog.rs crates/geode-shell/src/palette.rs crates/geode-shell/src/fonts.rs crates/geode-shell/src/theme.rs crates/geode-shell/src/shell/sidebar.rs crates/geode-shell/src/shell/toolbar.rs crates/geode-shell/src/shell/status.rs crates/geode-shell/src/tiling/docks.rs crates/geode-shell/src/listfilter.rs crates/geode-shell/src/fontsize.rs | wc -l`
-Expected: 33.
+Expected: 36.
 
 - [ ] **Step 2: Verify and rewrite each claim**
 
