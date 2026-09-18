@@ -657,6 +657,28 @@ and `param*`. Parsing rules:
   → written → parsed round-trips exactly (§11's property test), and
   so an upload sends what the panel showed.
 
+**Slice values (2026-09-17).** A CVI document carries three per-slice
+values — `forward`, `atm`, `skew` — one each per `<slice>`, beside its
+`<term>` and ahead of its `<param>`s. They are stored in the long form
+exactly as `param` is: repeated on every node row of the slice, "a value
+constant within a slice" (the sibling of an attribute's "constant within
+a document"), so no document-family or storage change carries them;
+`cvi_params` declares them as three `role = "value"` columns after
+`param`. The kind refuses a slice missing one (naming the term and the
+tag), a duplicate within a slice (the singular-leaf rule), and — on
+write — a slice whose rows disagree, the ragged-slice rule's sibling;
+the written value is the slice's first row's. The wire tag names
+(`<forward>`, `<atm>`, `<skew>`) are an assumption until the desk's XSD
+arrives and live in one table (`SLICE_VALUES`) the parser and writer
+share. The panel (§8) paints them as the FIRST grid columns ahead of the
+node ladder — `PanelSpec.slice_values`, `MatrixModel.slice_columns` —
+each with its own `ColumnFormat` (a forward at two places, a vol at
+four), refuses a within-slice disagreement like a hole, and a row bump
+walks the ladder alone while a column bump on `fwd` moves every term's
+forward; an edit to a slice cell rebases by `(term, label)` like any
+other. A document that does not carry a spec-named slice column paints
+the ladder alone, as a missing header attribute is left out.
+
 ### 6.4 Registration
 
 `DataServiceConfig` gains `documents: DocumentRegistry`, name-keyed,

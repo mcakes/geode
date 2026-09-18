@@ -11912,6 +11912,59 @@ run_mutation "mdpicker: hovering a picker row moves the highlight" \
   geode-marketdata \
   hovering_a_picker_row_moves_the_highlight_and_occludes_the_grid
 
+# CVI slice values (2026-09-17): a slice missing `<forward>` (or `<atm>`,
+# `<skew>`) is refused naming the term and the tag. Filled with 0.0
+# instead, the document parses, the long form carries a forward the
+# desk never sent, and the panel paints it.
+run_mutation "cvi: a slice missing forward is refused" \
+  crates/geode-documents/src/cvi.rs \
+  '                            values[i] = slice.values[i].ok_or_else(|| {' \
+  '                            values[i] = slice.values[i].or(Some(0.0)).ok_or_else(|| {' \
+  geode-documents each_missing_required_element_fails
+
+# The writer says a slice value once per `<slice>`, read off the first
+# row; rows of one slice that disagree have no honest surface and are
+# refused. Mutated to never look, the first row's value ships and the
+# disagreeing rows vanish silently.
+run_mutation "cvi: a slice whose rows disagree on atm is refused on write" \
+  crates/geode-documents/src/cvi.rs \
+  '            if let Some(r) = (start + 1..end).find(|&r| col[r] != first) {' \
+  '            if let Some(r) = (start + 1..end).find(|&_r| false) {' \
+  geode-documents write_refuses_a_slice_whose_rows_disagree_on_a_slice_value
+
+# The slice values are the FIRST grid columns; their cells are laid down
+# first too. Labels emitted after the ladder would sit over the wrong
+# cells — a forward under a node header.
+run_mutation "matrix: slice values are the first grid columns" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        slices
+            .iter()
+            .map(|(sv, _)| SharedString::from(sv.label))
+            .chain(grid.columns.into_iter().map(SharedString::from))
+            .collect(),' \
+  '        grid.columns
+            .into_iter()
+            .map(SharedString::from)
+            .chain(slices.iter().map(|(sv, _)| SharedString::from(sv.label)))
+            .collect(),' \
+  geode-marketdata a_pivot_puts_the_row_axis_down_the_side_and_the_column_axis_across
+
+# A slice value the long form repeats per node row must agree across the
+# slice; the pivot refuses a disagreement like a hole. Mutated to never
+# compare, the first row's value paints and the contradiction is hidden.
+run_mutation "matrix: a within-slice disagreement is refused, never averaged" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '                    if snapshot.f64_at(*idx, first) != snapshot.f64_at(*idx, srow) {' \
+  '                    if false {' \
+  geode-marketdata a_within_slice_disagreement_is_refused_naming_the_term_and_column
+
+# A row bump walks the ladder and skips the term's own forward/atm/skew.
+run_mutation "mdbump: a row bump skips the slice cells" \
+  crates/geode-marketdata/src/tile.rs \
+  '                .skip(self.model.slice_columns)' \
+  '                .skip(0)' \
+  geode-marketdata a_row_bump_skips_the_slice_cells_and_a_column_bump_on_fwd_moves_every_term
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
