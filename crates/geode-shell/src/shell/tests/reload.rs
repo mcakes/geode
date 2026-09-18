@@ -87,6 +87,53 @@ fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
     });
 }
 
+/// `tips::Chords` (the workspace's second gpui global — see its own doc
+/// comment) is written at startup and refreshed on every reload
+/// (`hot_reload::apply_reload`, right after `self.services.keymap =
+/// keymap;`); this is the reload half of that pair. Same fixture and
+/// drive as the test above — a real user config dir, `reload::
+/// load_config` off the live `services.builtin`, then `apply_reload`
+/// directly (the watcher's own ~500ms poll cannot be driven from a
+/// `#[gpui::test]`, per `config_with_mod`'s doc comment) — except this
+/// one writes `keymap.toml` rather than `app.toml`, in the same
+/// `[[bindings]]` / `[bindings.keys]` shape `keymap_edit` writes and
+/// `bad_config_and_shell`'s own keymap.toml fixture uses.
+#[gpui::test]
+fn a_keymap_reload_refreshes_the_chords_global(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+
+    let before = vcx.update(|_, cx| {
+        crate::tips::chord_for(&cx.global::<crate::tips::Chords>().0, "palette::toggle")
+    });
+    assert!(
+        before.is_some(),
+        "the builtin binding is visible at startup"
+    );
+
+    // Rebind in the user layer the way keymap_edit writes it: shadow the
+    // builtin ctrl+k with "none" and bind ctrl+space to the same action.
+    std::fs::write(
+        dir.path().join("keymap.toml"),
+        "config_version = 1\n[[bindings]]\n[bindings.keys]\n\"ctrl+k\" = \"none\"\n\"ctrl+space\" = \"palette::toggle\"\n",
+    )
+    .unwrap();
+
+    let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
+    let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    let after = vcx.update(|_, cx| {
+        crate::tips::chord_for(&cx.global::<crate::tips::Chords>().0, "palette::toggle")
+    });
+    assert_eq!(
+        after,
+        Some(crate::keymap::parse_binding("ctrl+space", crate::keymap::Modifiers::NONE).unwrap()),
+        "the global follows the reload"
+    );
+}
+
 /// 2c §6.2: a named colour is part of what a tile paints, so a
 /// `colours.toml` edit must reach the modules the same way a `views`
 /// edit does — through `ConfigReloaded`, which is what makes the app's
