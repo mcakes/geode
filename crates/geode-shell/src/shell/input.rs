@@ -137,6 +137,10 @@ impl ShellView {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .record(&action.0);
+        // The one line every dispatched action leaves in the daily log
+        // (`[log] shell = "debug"`): which action, with what count. The
+        // branch that resolved it says so on its own line just before.
+        tracing::debug!(target: "geode::shell", action = %action.0, count = ?count, "dispatch");
 
         // Every workspace verb below ignores the count; only the module
         // fall-through at the end (Phase 3 §3.3) is count-aware today.
@@ -752,6 +756,12 @@ impl ShellView {
                 let action = self
                     .single_keystroke_binding(&ks, &stack)
                     .map(|binding| binding.action.clone());
+                tracing::debug!(
+                    target: "geode::shell",
+                    key = ?ks,
+                    resolved = ?action.as_ref().map(|a| a.0.as_str()),
+                    "key: filter-field chord"
+                );
                 if let Some(action) = action {
                     if action.0 != UNBOUND_ACTION {
                         self.dispatch(&action, None, window, cx);
@@ -881,15 +891,25 @@ impl ShellView {
         // (user ruling 2026-09-17), so the two can never disagree about
         // whose keyboard it is.
         if let Some(stack) = self.occupant_insert_stack(window, cx) {
-            if let Some(ks) = convert_keystroke(&event.keystroke)
-                // `Cow`, not two `Vec`s: a chord resolves against the
-                // stack that is already in hand and allocates nothing,
-                // and the bare path — every keystroke of a trader's
-                // typing — allocates one short filtered stack rather
-                // than cloning the whole one.
-                && let Some(action) = self
-                    .single_keystroke_binding(&ks, &insert_contexts(&stack, &ks))
+            let ks = convert_keystroke(&event.keystroke);
+            let resolved = ks.as_ref().and_then(|ks| {
+                self.single_keystroke_binding(ks, &insert_contexts(&stack, ks))
                     .map(|binding| binding.action.clone())
+            });
+            // Debug-level, never formatted unless `geode::shell` is at
+            // `debug`: which key reached the insert branch, whether it
+            // came in as a chord (resolved against the whole stack) or
+            // bare (insert contexts only), and what it resolved to — the
+            // question "why did this key type / not type" is answered
+            // from the daily log rather than by guessing.
+            tracing::debug!(
+                target: "geode::shell",
+                key = ?ks,
+                chord = ks.as_ref().is_some_and(|k| k.mods.is_chord()),
+                resolved = ?resolved.as_ref().map(|a| a.0.as_str()),
+                "key: insert branch"
+            );
+            if let Some(action) = resolved
                 && action.0 != UNBOUND_ACTION
             {
                 self.dispatch(&action, None, window, cx);
@@ -967,7 +987,20 @@ impl ShellView {
             return;
         };
         let stack = self.context_stack(cx);
-        match self.matcher.press(&self.services.keymap, keystroke, &stack) {
+        let result = self
+            .matcher
+            .press(&self.services.keymap, keystroke.clone(), &stack);
+        // The matcher's answer beside the stack it was asked against —
+        // the context names and their `mode` pairs are what decide a
+        // binding, so a surprising resolution reads straight off this line.
+        tracing::debug!(
+            target: "geode::shell",
+            key = ?keystroke,
+            result = ?result,
+            stack = ?stack,
+            "key: matcher"
+        );
+        match result {
             MatchResult::Matched { action, count } => {
                 self.dispatch(&action, count, window, cx);
                 cx.notify();
