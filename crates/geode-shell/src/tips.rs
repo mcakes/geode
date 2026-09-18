@@ -226,6 +226,19 @@ mod tests {
 
     #[test]
     fn chord_for_follows_a_user_layer_rebind() {
+        // A bare unbind — no replacement key — never carries the real
+        // action id (its own action is "none"), so a naive "last binding
+        // whose action matches" search skips it entirely and reports the
+        // builtin as if still live. Only a search that also checks
+        // whether a later binding SHADOWS the candidate's keystroke (this
+        // one does: same "ctrl+k", no context) sees the unbind and
+        // reports unbound.
+        let unbound_only = vec![
+            binding("ctrl+k", "palette::toggle", Layer::Builtin, 0),
+            binding("ctrl+k", "none", Layer::User, 1),
+        ];
+        assert_eq!(chord_for(&unbound_only, "palette::toggle"), None);
+
         // The builtin says ctrl+k; the user layer rebinds to ctrl+space
         // and unbinds ctrl+k with a "none" shadow, exactly what
         // keymap_edit writes. The tooltip must show ctrl+space.

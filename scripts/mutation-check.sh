@@ -2920,8 +2920,10 @@ run_mutation "blotter: :filter narrows only this tile" \
   crates/geode-blotter/src/tile.rs \
   '                self.validate_tile_scope(&scope)?;
                 self.tile_scope = scope;
+                self.filter_tip = filter_summary(&self.tile_scope).into();
                 self.requery(cx);' \
   '                self.validate_tile_scope(&scope)?;
+                self.filter_tip = filter_summary(&self.tile_scope).into();
                 self.requery(cx);' \
   geode-blotter filter_narrows_only_this_tile_marks_it_and_round_trips_the_session
 
@@ -10855,8 +10857,8 @@ run_mutation "final: a painting delivery clears the previous delivery's notice" 
 # pinned assertions.
 run_mutation "final: the Behind chip does not call an older document newer" \
   crates/geode-marketdata/src/header.rs \
-  'Some((format!("update {}", local_hhmm(&newer)).into(), Tone::Warn)),' \
-  'Some((format!("newer document received {}", local_hhmm(&newer)).into(), Tone::Warn)),' \
+  'Some((format!("update {}", local_hhmm(newer)).into(), Tone::Warn)),' \
+  'Some((format!("newer document received {}", local_hhmm(newer)).into(), Tone::Warn)),' \
   geode-marketdata \
   a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base
 
@@ -11263,8 +11265,8 @@ run_mutation "mddraft: a malformed attribute entry is skipped, not the whole dra
 
 run_mutation "mdheader: behind reads update HH:MM" \
   crates/geode-marketdata/src/header.rs \
-  'format!("update {}", local_hhmm(&newer))' \
-  'format!("different document received {}", local_hhmm(&newer))' \
+  'format!("update {}", local_hhmm(newer))' \
+  'format!("different document received {}", local_hhmm(newer))' \
   geode-marketdata dirty_is_a_dot_and_behind_reads_update_hhmm
 
 run_mutation "mdheader: a dirty draft sets the dot flag" \
