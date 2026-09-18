@@ -62,6 +62,119 @@ impl TipModel {
     }
 }
 
+// ───────────────────────── render (the only gpui-touching part) ────────
+
+use gpui::{
+    AnyElement, AnyView, App, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
+    prelude::FluentBuilder,
+};
+use gpui_component::{ActiveTheme as _, h_flex, tooltip::Tooltip, v_flex};
+
+/// The tooltip closure for a site whose name and action id are
+/// literals. The model is resolved INSIDE the closure — on hover, never
+/// per frame. `try_global`: a module test fixture that never installed
+/// `Chords` paints a chord-less tooltip rather than panicking.
+pub fn tip(
+    site: &'static str,
+    title: impl Into<SharedString>,
+    action: Option<&'static str>,
+    detail: Option<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let title: SharedString = title.into();
+    let selector: SharedString = format!("tip-{site}").into();
+    move |window, cx| {
+        let empty = Vec::new();
+        let bindings = cx
+            .try_global::<Chords>()
+            .map(|c| c.0.as_slice())
+            .unwrap_or(&empty);
+        let model = TipModel::resolve(title.clone(), action, detail.clone(), bindings);
+        Tooltip::element({
+            let selector = selector.clone();
+            move |_window, cx| render_tip(&model, selector.clone(), cx)
+        })
+        .build(window, cx)
+    }
+}
+
+/// As [`tip`], for a site whose name and action id are built at render
+/// time (`scope-chip-{column}`, `workspace::switch_{n}`).
+pub fn tip_with(
+    site: String,
+    title: impl Into<SharedString>,
+    action: Option<String>,
+    detail: Option<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let title: SharedString = title.into();
+    let selector: SharedString = format!("tip-{site}").into();
+    move |window, cx| {
+        let empty = Vec::new();
+        let bindings = cx
+            .try_global::<Chords>()
+            .map(|c| c.0.as_slice())
+            .unwrap_or(&empty);
+        let model = TipModel::resolve(title.clone(), action.as_deref(), detail.clone(), bindings);
+        Tooltip::element({
+            let selector = selector.clone();
+            move |_window, cx| render_tip(&model, selector.clone(), cx)
+        })
+        .build(window, cx)
+    }
+}
+
+/// The content: title, then the chord as `key_chip`s (one per
+/// keystroke of a sequence), then the detail line, muted. Chip colours
+/// are the keybindings dialog's own (`muted_foreground` on `muted`).
+/// Selectors: `{selector}` on the root, `{selector}-title` on the title,
+/// `{selector}-chord-{ctrl+k}` on each chip — what the hover tests read.
+pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let chip_fg = theme.muted_foreground;
+    let chip_bg = theme.muted;
+    let chord_row = model.chord.as_ref().map(|keys| {
+        let mut row = h_flex().gap_1().items_center();
+        for ks in keys {
+            let text = crate::palette::render_keystroke(ks);
+            row = row.child(
+                div()
+                    .debug_selector({
+                        let s = format!("{selector}-chord-{text}");
+                        move || s.clone()
+                    })
+                    .child(crate::shell::keybindings_view::key_chip(
+                        ks, chip_fg, chip_bg,
+                    )),
+            );
+        }
+        row
+    });
+    v_flex()
+        .gap_1()
+        .debug_selector({
+            let s = selector.to_string();
+            move || s.clone()
+        })
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_color(theme.popover_foreground)
+                        .debug_selector({
+                            let s = format!("{selector}-title");
+                            move || s.clone()
+                        })
+                        .child(model.title.clone()),
+                )
+                .when_some(chord_row, |el, row| el.child(row)),
+        )
+        .when_some(model.detail.clone(), |el, d| {
+            el.child(div().text_xs().text_color(theme.muted_foreground).child(d))
+        })
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
