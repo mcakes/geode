@@ -80,20 +80,25 @@ use gpui_component::{ActiveTheme as _, h_flex, tooltip::Tooltip, v_flex};
 /// to `format!("tip-{site}")` every call, and since `.tooltip(tips::
 /// tip(..))` is invoked inline in a render path, that `format!` ran once
 /// per chip per render rather than once per hover (charter: per-frame
-/// heap churn is a defect). A `&'static str` literal costs nothing to
-/// convert (`SharedString`'s `&str` conversion is a stack copy for any
-/// selector this crate uses, all well under `SmolStr`'s 23-byte inline
-/// cap) or heap-allocates once for a longer one — either way there is
-/// exactly one conversion per render, not the two-plus a dynamic
-/// `format!` used to cost.
+/// heap churn is a defect).
+///
+/// `selector` and `title` are both `&'static str`, built via
+/// `SharedString::new_static` rather than `.into()` — fix round 2: a
+/// literal is always spelled through `new_static`, never `.into()`
+/// (`From<&str>` inlines ≤ 23 bytes and heap-allocates above, so a site
+/// must not depend on a title's length to stay allocation-free; this
+/// crate's own impossible-chip title is 75 bytes and its selector is 25,
+/// both well past the inline cap). Every `tip()` caller passes literals
+/// (the sidebar's consts, the profile icon, the impossible chip); a
+/// caller with an owned title uses [`tip_with`] instead.
 pub fn tip(
     selector: &'static str,
-    title: impl Into<SharedString>,
+    title: &'static str,
     action: Option<&'static str>,
     detail: Option<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    let title: SharedString = title.into();
-    let selector: SharedString = selector.into();
+    let title = SharedString::new_static(title);
+    let selector = SharedString::new_static(selector);
     move |window, cx| {
         let empty = Vec::new();
         let bindings = cx

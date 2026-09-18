@@ -24,7 +24,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, Stateful, Window, div, px,
+    App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, SharedString, Stateful, Window,
+    div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
@@ -123,7 +124,7 @@ pub fn toolbar(
                         c.tip_selector.clone(),
                         c.full.clone(),
                         Some("frame::pick"),
-                        Some("click: pick values".into()),
+                        Some(SharedString::new_static("click: pick values")),
                     ))
                     .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                         on_open(&open_column, window, cx)
@@ -156,7 +157,7 @@ pub fn toolbar(
                 || "scope-text-chip".to_string(),
             )
             .tooltip(tips::tip_with(
-                "tip-scope-text-chip".into(),
+                SharedString::new_static("tip-scope-text-chip"),
                 model.text_tip.clone().unwrap_or_default(),
                 Some("frame::focus_text"),
                 None,
@@ -173,10 +174,10 @@ pub fn toolbar(
                 || "scope-expr-chip".to_string(),
             )
             .tooltip(tips::tip_with(
-                "tip-scope-expr-chip".into(),
+                SharedString::new_static("tip-scope-expr-chip"),
                 model.expr_full.clone().unwrap_or_default(),
                 None,
-                Some(":filter <expr> sets it".into()),
+                Some(SharedString::new_static(":filter <expr> sets it")),
             )),
         );
     }
@@ -245,10 +246,10 @@ pub fn toolbar(
                                     .text_color(theme.warning_foreground)
                                     .debug_selector(|| "scope-asof".to_string())
                                     .tooltip(tips::tip_with(
-                                        "tip-scope-asof".into(),
+                                        SharedString::new_static("tip-scope-asof"),
                                         badge.clone(),
                                         Some("frame::as_of"),
-                                        Some(":live returns to now".into()),
+                                        Some(SharedString::new_static(":live returns to now")),
                                     ))
                                     .child(badge.clone()),
                             )
