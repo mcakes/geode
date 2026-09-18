@@ -1673,6 +1673,34 @@ impl MarketDataTile {
         cx.notify();
     }
 
+    /// A hover over menu row `index` — the mouse form of `j`/`k`. Cheap
+    /// on purpose: gpui fires `on_mouse_move` on every pointer move over
+    /// the row, so only a CHANGE notifies; a pointer resting on the
+    /// highlighted row costs a compare.
+    pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(Popup::Menu(m)) = &mut self.popup else {
+            return;
+        };
+        if m.highlighted == index || index >= m.rows.len() {
+            return;
+        }
+        m.highlighted = index;
+        cx.notify();
+    }
+
+    /// A hover over painted picker row `row` — the mouse form of
+    /// `up`/`down`; the same change-only rule as [`Self::menu_hover`].
+    pub(crate) fn picker_hover(&mut self, row: usize, cx: &mut Context<Self>) {
+        let Some(Popup::Picker(p)) = &mut self.popup else {
+            return;
+        };
+        if p.rows.highlighted == row || row >= p.rows.painted_len() {
+            return;
+        }
+        p.rows.highlighted = row;
+        cx.notify();
+    }
+
     /// `enter` on the highlighted row, or a click on any row (spec
     /// §6.2): a disabled row's reason becomes the notice and the popup
     /// stays open; an enabled one closes the popup and re-enters
@@ -2456,6 +2484,15 @@ impl MarketDataTile {
     /// re-rank (a keystroke, or a catalog change) must preserve, read by
     /// KEY rather than by index so a test can tell a real preservation
     /// from a coincidence.
+    /// The open menu's highlighted row index, `None` with no menu open.
+    #[cfg(test)]
+    pub(crate) fn menu_highlighted(&self) -> Option<usize> {
+        match &self.popup {
+            Some(Popup::Menu(m)) => Some(m.highlighted),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn picker_highlighted_key(&self) -> Option<String> {
         match &self.popup {
@@ -2807,6 +2844,10 @@ mod tests {
     struct Host {
         tile: Entity<MarketDataTile>,
         clicks: Rc<StdCell<u32>>,
+        /// Bubble-phase, hover-gated mouse moves that reached the host —
+        /// the stand-in for the grid rows beneath a popup: a move over an
+        /// OCCLUDING popup must not count here, a move over the grid must.
+        moves: Rc<StdCell<u32>>,
     }
     impl gpui::Render for Host {
         fn render(
@@ -2815,10 +2856,14 @@ mod tests {
             _cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             let clicks = self.clicks.clone();
+            let moves = self.moves.clone();
             gpui::div()
                 .size_full()
                 .on_mouse_down(gpui::MouseButton::Left, move |_, _, _cx| {
                     clicks.set(clicks.get() + 1);
+                })
+                .on_mouse_move(move |_, _, _cx| {
+                    moves.set(moves.get() + 1);
                 })
                 .child(self.tile.clone())
         }
@@ -2832,6 +2877,7 @@ mod tests {
         frame: Entity<Frame>,
         diagnostics: Entity<Diagnostics>,
         clicks: Rc<StdCell<u32>>,
+        moves: Rc<StdCell<u32>>,
     }
 
     struct Harness {
@@ -2852,6 +2898,9 @@ mod tests {
         /// [`Host`]'s own bubble-phase click counter — the shell's
         /// tile-level mouse-down stand-in.
         clicks: Rc<StdCell<u32>>,
+        /// [`Host`]'s hover-gated mouse-move counter — what a popup must
+        /// occlude.
+        moves: Rc<StdCell<u32>>,
     }
 
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
@@ -2883,14 +2932,20 @@ mod tests {
                     );
                     let tile = occupant.view.clone().downcast::<MarketDataTile>().unwrap();
                     let clicks = Rc::new(StdCell::new(0));
+                    let moves = Rc::new(StdCell::new(0));
                     *slot.borrow_mut() = Some(Built {
                         content: occupant.content,
                         tile: tile.clone(),
                         frame,
                         diagnostics,
                         clicks: clicks.clone(),
+                        moves: moves.clone(),
                     });
-                    let host = cx.new(|_| Host { tile, clicks });
+                    let host = cx.new(|_| Host {
+                        tile,
+                        clicks,
+                        moves,
+                    });
                     // Wrapped in `Root`, exactly as `main.rs` wraps the
                     // shell — and load-bearing here rather than decorative:
                     // gpui-component registers the FOCUSED `InputState` on
@@ -2918,6 +2973,7 @@ mod tests {
                 rx,
                 data,
                 clicks: built.clicks,
+                moves: built.moves,
             },
             vcx,
         )
@@ -2996,6 +3052,9 @@ mod tests {
         /// tile-level mouse-down stand-in (see `Host`'s own doc comment).
         fn host_clicks(&self) -> u32 {
             self.clicks.get()
+        }
+        fn host_moves(&self) -> u32 {
+            self.moves.get()
         }
         /// Seed the open editor — the one thing a test cannot do through a
         /// key press. Typing for real is exercised in
@@ -3102,6 +3161,18 @@ mod tests {
         vcx.debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} is painted"))
             .center()
+    }
+
+    /// A bare mouse move to `at` — what hovering is made of. Two frames
+    /// follow, since gpui resolves hover on the draw after the move.
+    fn move_to(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        vcx.simulate_event(gpui::MouseMoveEvent {
+            position: at,
+            pressed_button: None,
+            modifiers: gpui::Modifiers::default(),
+        });
+        draw(vcx);
+        draw(vcx);
     }
 
     /// A left mouse-down/up pair at `at` carrying `click_count` — gpui's
@@ -5646,6 +5717,80 @@ edits = [["2099-01-01", "-1", 1.0]]
             h.host_clicks(),
             2,
             "the second click — the one that closes the menu — bubbles too"
+        );
+    }
+
+    /// User report 2026-09-17: "mousing over the list items should focus
+    /// them but instead it's still changing the highlighting of the rows
+    /// in the grid underneath." Two halves. The popup must OCCLUDE — a
+    /// hover over it may not reach anything painted beneath (the host's
+    /// hover-gated counter stands in for the grid's row hover) — and a
+    /// hover over an action row moves the highlight, the mouse form of
+    /// `j`/`k`.
+    #[gpui::test]
+    fn hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        // A move over the grid reaches the host: the counter works.
+        let cell = centre_of(&mut vcx, "marketdata-cell-1-1");
+        move_to(&mut vcx, cell);
+        let over_grid = h.host_moves();
+        assert!(over_grid >= 1, "a move over the grid is seen beneath");
+
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.menu_highlighted()), Some(0));
+        // Row 2 is "Revert edits" on a clean draft — greyed, but a hover
+        // is a hover: the highlight follows the mouse, enabled or not.
+        let row = centre_of(&mut vcx, &format!("marketdata-menu-row-{TILE}-2"));
+        move_to(&mut vcx, row);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.menu_highlighted()),
+            Some(2),
+            "the hovered row is the highlighted one"
+        );
+        assert_eq!(
+            h.host_moves(),
+            over_grid,
+            "a move over the popup never reaches what is painted beneath it"
+        );
+        let first = centre_of(&mut vcx, &format!("marketdata-menu-row-{TILE}-0"));
+        move_to(&mut vcx, first);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.menu_highlighted()), Some(0));
+    }
+
+    /// The picker is the same popup shell and gets the same two halves.
+    #[gpui::test]
+    fn hovering_a_picker_row_moves_the_highlight_and_occludes_the_grid(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["AAA.Z", "BBB.Z", "CCC.Z"]));
+            cx.notify();
+        });
+        h.with_document(&mut vcx);
+        let cell = centre_of(&mut vcx, "marketdata-cell-1-1");
+        move_to(&mut vcx, cell);
+        let over_grid = h.host_moves();
+
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("AAA.Z".into())
+        );
+        let row = centre_of(&mut vcx, &format!("marketdata-picker-row-{TILE}-2"));
+        move_to(&mut vcx, row);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
+            Some("CCC.Z".into()),
+            "the hovered row is the highlighted one"
+        );
+        assert_eq!(
+            h.host_moves(),
+            over_grid,
+            "a move over the picker never reaches what is painted beneath it"
         );
     }
 

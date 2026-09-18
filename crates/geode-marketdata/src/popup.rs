@@ -215,6 +215,11 @@ pub(crate) fn render_menu(
         .text_sm()
         .shadow_md()
         .debug_selector(move || format!("marketdata-menu-{tile_id}"))
+        // The popup OCCLUDES (user report 2026-09-17): without this, gpui
+        // keeps hit-testing the grid painted beneath it, so hovering a
+        // menu row lit up the table row under the pointer instead. The
+        // shell's own modal (`dialog.rs`) makes the same call.
+        .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
             move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
@@ -277,6 +282,15 @@ pub(crate) fn render_menu(
                             tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
                         }
                     })
+                    // Hovering a row is the mouse form of `j`/`k`: the
+                    // highlight follows the pointer (greyed rows too — a
+                    // hover is a hover, and `enter` on one is a notice).
+                    // gpui gates this on the row's own hitbox, so it never
+                    // fires for the row beneath the pointer's neighbour.
+                    .on_mouse_move({
+                        let tile = tile.clone();
+                        move |_, _, cx| tile.update(cx, |t, cx| t.menu_hover(i, cx))
+                    })
                     .child(title.clone())
                     .child(div().text_color(theme.muted_foreground).child(reason))
                     .into_any_element()
@@ -316,6 +330,8 @@ pub(crate) fn render_picker(
         .text_sm()
         .shadow_md()
         .debug_selector(move || format!("marketdata-picker-{tile_id}"))
+        // Occludes for the same reason the menu does (see `render_menu`).
+        .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
             move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
@@ -363,6 +379,11 @@ pub(crate) fn render_picker(
                             cx.stop_propagation();
                             tile.update(cx, |t, cx| t.picker_pick(row_i, window, cx))
                         }
+                    })
+                    // The mouse form of `up`/`down` (see `render_menu`).
+                    .on_mouse_move({
+                        let tile = tile.clone();
+                        move |_, _, cx| tile.update(cx, |t, cx| t.picker_hover(row_i, cx))
                     })
                     .child(text)
                     .into_any_element(),
