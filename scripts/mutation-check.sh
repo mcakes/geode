@@ -11876,6 +11876,42 @@ run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
 
+# ---- Popup hover (user report 2026-09-17) ------------------------------
+#
+# The popup must OCCLUDE: without `occlude()` gpui keeps hit-testing the
+# grid beneath it, so a hover over a menu row lit up the table row under
+# the pointer. Mutated out, every keyboard test passes — only the test
+# Host's hover-gated move counter (the grid's stand-in) sees the leak.
+run_mutation "mdmenu: the popup occludes what is painted beneath it" \
+  crates/geode-marketdata/src/popup.rs \
+  '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))
+        // The popup OCCLUDES (user report 2026-09-17): without this, gpui
+        // keeps hit-testing the grid painted beneath it, so hovering a
+        // menu row lit up the table row under the pointer instead. The
+        // shell'"'"'s own modal (`dialog.rs`) makes the same call.
+        .occlude()' \
+  '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))' \
+  geode-marketdata \
+  hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid
+
+# Hovering a row moves the highlight. Mutated to a no-op, the row still
+# paints and clicks; only the highlight stays where the keys left it.
+run_mutation "mdmenu: hovering a menu row moves the highlight" \
+  crates/geode-marketdata/src/tile.rs \
+  '        m.highlighted = index;
+        cx.notify();' \
+  '        let _ = index;' \
+  geode-marketdata \
+  hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid
+
+run_mutation "mdpicker: hovering a picker row moves the highlight" \
+  crates/geode-marketdata/src/tile.rs \
+  '        p.rows.highlighted = row;
+        cx.notify();' \
+  '        let _ = row;' \
+  geode-marketdata \
+  hovering_a_picker_row_moves_the_highlight_and_occludes_the_grid
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
