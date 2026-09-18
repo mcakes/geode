@@ -124,13 +124,18 @@ CLAUDE.md, the `gpui-component-inventory-check` memory and several module
 headers say "the pinned checkout's `crates/ui/src/…`". After Phase 1 the
 source a maintainer reads is the registry copy,
 `~/.cargo/registry/src/*/gpui-component-0.6.1/src/` (and `gpui-base-0.6.1/`
-for the unstyled layer). CLAUDE.md and the memory are updated to say so.
-Module headers that cite `crates/ui/src/<file>` as the basis of a recorded
-decision (`sidebar.rs`, `toolbar.rs`, `dialog.rs`) are left as written —
-they describe what was read when the decision was made, and upstream has
-since moved the tree to `crates/component/src/` anyway, so no path in a
-comment will match a checkout for long. New comments cite the registry path
-with the version in it.
+for the unstyled layer). CLAUDE.md, the memory and **every module header
+or comment that cites the pinned checkout** (`sidebar.rs`, `toolbar.rs`,
+`dialog.rs`, the market-data and blotter delegates' "pinned rev" remarks,
+and any other `crates/ui/src/<file>` citation `grep` finds) are updated to
+cite the registry path with the version in it
+(`gpui-component-0.6.1/src/<file>`) — user ruling 2026-09-17: a comment
+that names a path a maintainer cannot open is worse than none. Where a
+header records a decision made against the old rev ("the pinned checkout's
+`Sidebar` is a 255 px drawer…"), the implementer re-reads the cited file at
+0.6.1 and either confirms the basis still holds (and cites the new path) or
+reports that it no longer does — a re-pointed citation must not vouch for a
+file that changed.
 
 ### 3.4 Re-verification list
 
@@ -203,9 +208,10 @@ the user approved 1, 3 and 4 for Phase 3.
    restart to apply", a rejected reload, an egress ack. Deferred; today's
    stripes and tile notices stay.
 3. **`DatePicker`/`Calendar`** for the as-of selector. **Approved → §5.2.**
-4. **`Spinner`/`Progress`/`Skeleton`** — ingest progress, a tile awaiting a
-   delivery. **Approved for the status bar only → §5.3**; the tile-skeleton
-   and requery-in-flight forms were offered and not taken.
+4. **`Progress` (indeterminate)/`Spinner`/`Skeleton`** — ingest progress, a
+   tile awaiting a delivery. **Approved for the status bar only → §5.3**,
+   as an indeterminate `Progress` strip (the spinner's look was ruled out);
+   the tile-skeleton and requery-in-flight forms were offered and not taken.
 5. **`TextView`** (Markdown) + `highlighter` — a help tile rendering `docs/`,
    perhaps a highlighted `:filter <expr>`. Not the retired config editor
    (Phase 4c ruling stands: no editor, no `tree-sitter-toml`). Deferred.
@@ -318,17 +324,31 @@ whose path matches; a mismatched clear is ignored, so an event delivered
 out of order cannot erase a newer load's record. The bridge routes the
 event beside `Health`.
 
-**Status bar:** a new segment paints gpui-kit `Spinner` + `loading
-<source> · <n> queued` while `ingest` is `Some`, and paints nothing when
-it is `None` — so the animation's redraw loop runs only during a load and
-an idle window pays nothing per frame (charter: nothing may stall the
-render thread; per-frame churn is a defect). The segment reads the entity's
-cached summary the way the diagnostics-summary segment does, never
-formatting per frame.
+**Status bar:** while `ingest` is `Some`, two things paint; while it is
+`None`, neither does, so the animation's redraw loop runs only during a
+load and an idle window pays nothing per frame (charter: nothing may stall
+the render thread; per-frame churn is a defect).
 
-**Why `Spinner`, not `Progress`:** a CSV load has no known fraction —
-staging reads the whole file before it knows the row count — and a
-document publish is milliseconds. A determinate bar would be invented.
+1. **A 2 px indeterminate strip along the status bar's top edge** — gpui-kit
+   `Progress::new("ingest").loading(true)` at `Size::Size(px(2.))`, full
+   width, themed on `primary` by the component's default. It is placed on
+   the bar's top border rather than inside a segment so that nothing in the
+   bar's layout moves when a load starts or ends: the strip appears, slides,
+   and vanishes; the segments beside it never shift. `loading(true)` is the
+   component's own indeterminate mode (a sliding indicator over a
+   20 %-tinted track, 1 s repeat, ease-in-out), and it already honours
+   `reduce_motion` by parking a static centred segment — no Geode code
+   animates anything.
+2. **A text segment**, `loading <source> · <n> queued`, static, reading the
+   entity's cached summary the way the diagnostics-summary segment does,
+   never formatting per frame.
+
+**Why an indeterminate bar, not `Spinner` or a determinate `Progress`:** a
+CSV load has no known fraction — staging reads the whole file before it
+knows the row count — and a document publish is milliseconds, so a
+determinate bar would be invented; and the user ruled against the spinner's
+appearance (2026-09-17). The indeterminate strip is the idiom every browser
+and IDE uses for "working, duration unknown", and gpui-kit ships it.
 
 **Diagnostics tile:** the sources section paints the same record on the
 loading source's row (`loading <path> since HH:MM:SS`).
@@ -336,13 +356,14 @@ loading source's row (`loading <path> since HH:MM:SS`).
 **Tests:** runner tests that `Started` precedes each `Published`/`Failed`
 with the right depth; a shell test that `Loading` then `Published` for the
 same path leaves `ingest` `None` and a foreign path's `Published` leaves it
-`Some`; a status-bar test that the segment is absent when idle; mutation
-entries for the path-matched clear and the idle-absent rule.
+`Some`; a status-bar test that neither the strip nor the segment is present when
+idle and both are while loading; mutation entries for the path-matched
+clear and the idle-absent rule.
 
 ## 6. Out of scope
 
 - Replacing any surface in §4.1. Each ruling there is deliberate and dated.
-- The tile-skeleton and requery-in-flight spinner (§4.2 item 4, not taken).
+- The tile-skeleton and requery-in-flight indicator (§4.2 item 4, not taken).
 - A git-rev pin of gpui-kit, `gpui_kit::test`, `InputGroup`, charts, the
   help tile, notifications, focus-trap — all §4.2 deferrals with their
   reason beside them.
