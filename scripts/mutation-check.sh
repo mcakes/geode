@@ -10111,8 +10111,8 @@ run_mutation "insert: the insert branch runs even while a shell surface holds fo
 # the bindings that must win while its input has the keyboard.
 run_mutation "insert: single-keystroke bindings resolve against workspace alone, not the tile's stack" \
   crates/geode-shell/src/shell/input.rs \
-  '                    .single_keystroke_binding(&ks, &insert_contexts(&stack, &ks))' \
-  '                    .single_keystroke_binding(&ks, &[KeyContext::new("workspace")])' \
+  '                self.single_keystroke_binding(ks, &insert_contexts(&stack, ks))' \
+  '                self.single_keystroke_binding(ks, &[KeyContext::new("workspace")])' \
   geode-shell typed_keys_reach_a_tiles_focused_input_in_insert_mode
 
 # The early return is the "never feed the matcher" half: without it a
@@ -12062,6 +12062,21 @@ run_mutation "mdbump: a row bump skips the slice cells" \
   '                .skip(self.model.slice_columns)' \
   '                .skip(0)' \
   geode-marketdata a_row_bump_skips_the_slice_cells_and_a_column_bump_on_fwd_moves_every_term
+
+# ---- shift-arrows reclaimed from the component's Input (2026-09-18) ----
+#
+# Without the reclaim, gpui-base's Input binding for shift-up fires first,
+# the single-line editor ignores it without stopping propagation, and the
+# DataTable's own SelectUp handler moves the row under the tile's cursor.
+# Mutated out, every keyboard test still passes — only the panel test that
+# drives gpui's real key pipeline sees the selection move.
+run_mutation "reclaim: shift-up in an Input falls through to the keymap" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        gpui::KeyBinding::new("shift-up", gpui::NoAction, Some("Input")),
+        gpui::KeyBinding::new("shift-down", gpui::NoAction, Some("Input")),' \
+  '' \
+  geode-marketdata \
+  shift_up_in_the_editor_no_longer_moves_the_tables_selection
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
