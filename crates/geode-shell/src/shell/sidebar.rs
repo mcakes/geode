@@ -47,7 +47,7 @@
 //! `secondary` — matching the profile avatar's family visually.
 
 use gpui::prelude::*;
-use gpui::{Context, IntoElement, MouseButton, div, px};
+use gpui::{Context, IntoElement, MouseButton, SharedString, div, px};
 use gpui_component::avatar::Avatar;
 use gpui_component::{ActiveTheme as _, Sizable as _, v_flex};
 
@@ -129,7 +129,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         indicators = indicators.child(
             div()
                 .id(gpui::ElementId::NamedInteger(
-                    "sidebar-workspace".into(),
+                    SharedString::new_static("sidebar-workspace"),
                     n as u64,
                 ))
                 .debug_selector(move || WORKSPACE_SITE[(n - 1) as usize].to_string())

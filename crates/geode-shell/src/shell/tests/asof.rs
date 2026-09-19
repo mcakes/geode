@@ -63,6 +63,12 @@ fn hovering_the_status_as_of_segment_names_the_selector_chord(cx: &mut gpui::Tes
         vcx.debug_bounds("tip-status-as-of-chord-mod+t").is_some()
             || vcx.debug_bounds("tip-status-as-of-chord-alt+t").is_some()
     );
+    // Final review, spec §5.1: the title is the full resolved timestamp
+    // (`ScopeBarModel::as_of_full`), not the elided `"AS OF … · :live to
+    // return"` segment text — the width comparison lives on the scope-bar
+    // badge's own test below, since the segment's OWN text is longer than
+    // the bare timestamp and so is not the shorter side here.
+    assert!(vcx.debug_bounds("tip-status-as-of-title").is_some());
 }
 
 /// A bad time shows inline (`as-of-error`) and `enter` does nothing: the
@@ -248,5 +254,16 @@ fn hovering_the_as_of_badge_names_the_selector_chord(cx: &mut gpui::TestAppConte
         vcx.debug_bounds("tip-scope-asof-chord-mod+t").is_some()
             || vcx.debug_bounds("tip-scope-asof-chord-alt+t").is_some(),
         "the tooltip must name frame::as_of's chord"
+    );
+    // Final review, spec §5.1: the title is the FULL resolved timestamp
+    // (`ScopeBarModel::as_of_full`), not the elided badge text — wider,
+    // since it always carries the date and seconds the badge itself
+    // elides away.
+    let title = vcx
+        .debug_bounds("tip-scope-asof-title")
+        .expect("tooltip title painted");
+    assert!(
+        title.size.width > badge.size.width,
+        "the full timestamp is wider than the elided badge"
     );
 }

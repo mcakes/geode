@@ -113,7 +113,7 @@ pub fn toolbar(
                     // `format!`/heap `String` the way the first cut of
                     // this task did.
                     chip(
-                        ElementId::NamedInteger("scope-chip".into(), i as u64),
+                        ElementId::NamedInteger(SharedString::new_static("scope-chip"), i as u64),
                         c.summary.clone(),
                         chip_fg,
                         chip_bg,
@@ -132,7 +132,10 @@ pub fn toolbar(
                 )
                 .child(
                     div()
-                        .id(ElementId::NamedInteger("scope-chip-close".into(), i as u64))
+                        .id(ElementId::NamedInteger(
+                            SharedString::new_static("scope-chip-close"),
+                            i as u64,
+                        ))
                         .child(Icon::new(IconName::Close).text_color(chip_fg))
                         .debug_selector(move || format!("scope-chip-close-{close_column}"))
                         .tooltip(tips::tip_with(
@@ -225,35 +228,42 @@ pub fn toolbar(
                     .font_family(fonts::MONO)
                     .text_sm()
                     .debug_selector(|| "frame-readout".to_string())
-                    .when_some(model.as_of_badge.as_ref(), |el, badge| {
-                        // The existing warning treatment on the whole bar
-                        // (slot + chips + badge) — a stray as-of scope
-                        // must be unmissable, not a small badge easy to
-                        // miss at the edge of the eye. `scope-asof` names
-                        // the badge text itself for tests. `badge` is
-                        // already the finished "AS OF …" `SharedString`
-                        // (`ScopeBarModel::as_of_badge`, Phase 4b Task 1
-                        // fix round 1 MAJ-2; `SharedString` since Task 3
-                        // fix round 1) — both the painted label and the
-                        // tooltip title below are refcount-bump clones of
-                        // the one string `build_model` built.
-                        el.bg(theme.warning.opacity(0.25))
-                            .px_2()
-                            .rounded(px(4.))
-                            .child(
-                                div()
-                                    .id("scope-asof")
-                                    .text_color(theme.warning_foreground)
-                                    .debug_selector(|| "scope-asof".to_string())
-                                    .tooltip(tips::tip_with(
-                                        SharedString::new_static("tip-scope-asof"),
-                                        badge.clone(),
-                                        Some("frame::as_of"),
-                                        Some(SharedString::new_static(":live returns to now")),
-                                    ))
-                                    .child(badge.clone()),
-                            )
-                    })
+                    .when_some(
+                        model.as_of_badge.as_ref().zip(model.as_of_full.as_ref()),
+                        |el, (badge, full)| {
+                            // The existing warning treatment on the whole
+                            // bar (slot + chips + badge) — a stray as-of
+                            // scope must be unmissable, not a small badge
+                            // easy to miss at the edge of the eye.
+                            // `scope-asof` names the badge text itself
+                            // for tests. `badge`/`full` are both
+                            // `build_model`'s own finished strings
+                            // (`ScopeBarModel::as_of_badge`/`as_of_full`)
+                            // — the tooltip's TITLE is the full resolved
+                            // timestamp (final review, spec §5.1: a
+                            // trader hovering to see exactly when must
+                            // not get the same elided text the badge
+                            // already shows), and the elided badge text
+                            // moves to the detail line. Both clones below
+                            // are refcount bumps, never a fresh `format!`.
+                            el.bg(theme.warning.opacity(0.25))
+                                .px_2()
+                                .rounded(px(4.))
+                                .child(
+                                    div()
+                                        .id("scope-asof")
+                                        .text_color(theme.warning_foreground)
+                                        .debug_selector(|| "scope-asof".to_string())
+                                        .tooltip(tips::tip_with(
+                                            SharedString::new_static("tip-scope-asof"),
+                                            full.clone(),
+                                            Some("frame::as_of"),
+                                            Some(badge.clone()),
+                                        ))
+                                        .child(badge.clone()),
+                                )
+                        },
+                    )
                     .child(
                         div()
                             .text_color(theme.muted_foreground)

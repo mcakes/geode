@@ -2,9 +2,27 @@
 //! affordance that has a keyboard twin — the title, the chord that does
 //! the same thing (from the LIVE keymap, so a trader's rebinding shows),
 //! and an optional detail line. Pure above the render section; the
-//! render helper builds the view only inside the hover closure so an
-//! idle window pays nothing per frame (charter: per-frame churn is a
-//! defect).
+//! render helper builds the [`TipModel`] only inside the hover closure,
+//! never per frame.
+//!
+//! Attaching a tooltip allocates nothing of OURS per render — the model
+//! owns every string as a `SharedString` and every literal call site
+//! spells its title/selector through `SharedString::new_static` — while
+//! gpui's own `.tooltip()` plumbing (`Rc::new` of the builder at attach,
+//! plus the hover-check closures and boxed mouse listeners at paint,
+//! roughly eight small objects per stateful element per paint) is the
+//! same unavoidable cost every `on_mouse_down` in this crate already
+//! pays; an idle window draws no frame and pays nothing of either kind.
+//! Nor does this module decide the hover delay: it inherits gpui's own
+//! `DEFAULT_TOOLTIP_SHOW_DELAY` (500 ms) and sets nothing — what it
+//! decides is the content shape (title, chord, detail) and the chip
+//! formatting. And [`render_tip`] itself is built once per hover, not
+//! once per frame — but the element tree it returns is re-rendered by
+//! gpui on every frame the tooltip stays shown, which is why its own
+//! `debug_selector` closures must stay lazy (formatted only when a debug
+//! build's selector lookup actually calls them, never eagerly at
+//! `render_tip`'s own call site) rather than `format!`ed ahead of the
+//! closure the way an earlier cut of this file did.
 //!
 //! `Chords` is the second gpui global in the workspace, beside
 //! `linenumbers::UiSettings`, for the same reason: a module (the
@@ -162,8 +180,8 @@ pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> 
             row = row.child(
                 div()
                     .debug_selector({
-                        let s = format!("{selector}-chord-{text}");
-                        move || s.clone()
+                        let selector = selector.clone();
+                        move || format!("{selector}-chord-{text}")
                     })
                     .child(crate::shell::keybindings_view::key_chip(
                         ks, chip_fg, chip_bg,
@@ -175,8 +193,8 @@ pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> 
     v_flex()
         .gap_1()
         .debug_selector({
-            let s = selector.to_string();
-            move || s.clone()
+            let selector = selector.clone();
+            move || selector.to_string()
         })
         .child(
             h_flex()
@@ -186,8 +204,8 @@ pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> 
                     div()
                         .text_color(theme.popover_foreground)
                         .debug_selector({
-                            let s = format!("{selector}-title");
-                            move || s.clone()
+                            let selector = selector.clone();
+                            move || format!("{selector}-title")
                         })
                         .child(model.title.clone()),
                 )

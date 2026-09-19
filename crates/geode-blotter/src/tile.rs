@@ -360,6 +360,19 @@ impl BlotterTile {
         }
     }
 
+    /// The one place `tile_scope` is assigned (final review, spec §5.1):
+    /// `filter_tip` is the tile's own filter, spelled out in full for a
+    /// hover (`filter_summary`), and it must never drift from
+    /// `tile_scope` itself — three separate assignment pairs (`:filter`,
+    /// `:filter text`, `:filter clear`) each had their own chance to
+    /// update one and forget the other. Building `filter_tip` from
+    /// `scope` before moving it into `self.tile_scope` costs nothing
+    /// extra: `filter_summary` already borrows its argument.
+    fn set_tile_scope(&mut self, scope: Scope) {
+        self.filter_tip = filter_summary(&scope).into();
+        self.tile_scope = scope;
+    }
+
     fn grouping(&self, frame: &Frame, view: &ViewSpec) -> Vec<String> {
         match &self.pin {
             Pin::Grouping(g) => g.clone(),
@@ -914,20 +927,17 @@ impl BlotterTile {
                 let mut scope = self.tile_scope.clone();
                 scope.expression = Some(expr);
                 self.validate_tile_scope(&scope)?;
-                self.tile_scope = scope;
-                self.filter_tip = filter_summary(&self.tile_scope).into();
+                self.set_tile_scope(scope);
                 self.requery(cx);
             }
             Command::FilterText(words) => {
                 let mut scope = self.tile_scope.clone();
                 scope.text = (!words.trim().is_empty()).then_some(words);
-                self.tile_scope = scope;
-                self.filter_tip = filter_summary(&self.tile_scope).into();
+                self.set_tile_scope(scope);
                 self.requery(cx);
             }
             Command::FilterClear => {
-                self.tile_scope = Scope::default();
-                self.filter_tip = filter_summary(&self.tile_scope).into();
+                self.set_tile_scope(Scope::default());
                 self.requery(cx);
             }
             Command::ScopeExpr(text) => {
@@ -1322,7 +1332,7 @@ impl gpui::Render for BlotterTile {
             header = header.child(
                 div()
                     .id(ElementId::NamedInteger(
-                        "blotter-unscoped".into(),
+                        SharedString::new_static("blotter-unscoped"),
                         self.tile.0,
                     ))
                     .text_color(theme.warning_foreground)
@@ -1342,7 +1352,7 @@ impl gpui::Render for BlotterTile {
             header = header.child(
                 div()
                     .id(ElementId::NamedInteger(
-                        "blotter-filtered".into(),
+                        SharedString::new_static("blotter-filtered"),
                         self.tile.0,
                     ))
                     .text_color(theme.warning_foreground)
@@ -2656,6 +2666,48 @@ mod tests {
         assert!(
             title.size.width > pill.size.width,
             "the filter text is longer than the word 'filtered'"
+        );
+    }
+
+    /// `Command::FilterText` recomputes `filter_tip` exactly as
+    /// `Command::FilterExpr` does (`set_tile_scope`, final review, spec
+    /// §5.1) — a `:filter text` line must show up in the pill's hover
+    /// exactly as a `:filter <expr>` one does above, not the stale
+    /// pre-filter tip a missed recompute would leave painted.
+    #[gpui::test]
+    fn hovering_the_filtered_pill_after_filter_text_shows_the_text(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests); // A's initial query
+        let _ = next_query(&h.requests); // B's initial query
+
+        h.a.update(&mut vcx, |t, cx| {
+            t.command("filter text underlying", cx).unwrap()
+        });
+        let _ = next_query(&h.requests);
+
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let pill = vcx
+            .debug_bounds("blotter-filtered-7")
+            .expect("pill painted");
+        vcx.simulate_mouse_move(
+            pill.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("tip-blotter-filtered-7").is_some());
+        let title = vcx
+            .debug_bounds("tip-blotter-filtered-7-title")
+            .expect("tooltip title painted");
+        assert!(
+            title.size.width > pill.size.width,
+            "the text filter's own summary (`text \"underlying\"`) is longer than the word 'filtered'"
         );
     }
 

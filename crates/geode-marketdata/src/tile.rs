@@ -6264,6 +6264,30 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert!(vcx.debug_bounds(tip_selector).is_some());
     }
 
+    /// The state run's `Behind`-explaining tooltip (`header.rs`'s
+    /// `.when(matches!(h.badge, DraftBadge::Behind { .. }))`) must not
+    /// paint for any other state that run shows — "no document yet" here,
+    /// a real painted state run (badge `Clean`) with nothing behind to
+    /// rebase or discard. Without the gate this negative case has no
+    /// failing test to catch it.
+    #[gpui::test]
+    fn a_tile_that_is_not_behind_has_no_rebase_tooltip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+
+        let run_selector: &'static str =
+            Box::leak(format!("marketdata-state-{TILE}").into_boxed_str());
+        let run = centre_of(&mut vcx, run_selector);
+        vcx.simulate_mouse_move(run, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        let tip_selector: &'static str =
+            Box::leak(format!("tip-marketdata-state-{TILE}").into_boxed_str());
+        assert!(vcx.debug_bounds(tip_selector).is_none());
+    }
+
     #[gpui::test]
     fn a_kind_action_answers_not_built_yet(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);

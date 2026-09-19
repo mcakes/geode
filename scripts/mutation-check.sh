@@ -1991,6 +1991,30 @@ run_mutation "scopebar: a chip's full text lists every value" \
   geode-shell \
   a_chip_carries_the_full_selection_beside_its_elided_summary
 
+# Final review (2026-09-18): the Behind-explaining tooltip on the state
+# run must be gated on the badge really being `Behind` — otherwise a
+# tile reading "no document yet" or a plain dirty dot would carry a
+# ":rebase adopts it · :discard drops your edits" tooltip that makes no
+# sense for either state.
+run_mutation "marketdata: the Behind tooltip is gated on the badge" \
+  crates/geode-marketdata/src/header.rs \
+  '                .when(matches!(h.badge, DraftBadge::Behind { .. }), |el| {' \
+  '                .when(true, |el| {' \
+  geode-marketdata \
+  a_tile_that_is_not_behind_has_no_rebase_tooltip
+
+# Final review (2026-09-18): `set_tile_scope` is the one place
+# `filter_tip` is recomputed from `tile_scope` — drop the recompute and
+# a `:filter text` (or any other `:filter` line) leaves the `filtered`
+# pill's tooltip showing whatever the tile's filter used to be, not what
+# it is now.
+run_mutation "blotter: set_tile_scope recomputes filter_tip" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.filter_tip = filter_summary(&scope).into();' \
+  '        let _ = &scope;' \
+  geode-blotter \
+  hovering_the_filtered_pill_after_filter_text_shows_the_text
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \
@@ -2915,15 +2939,17 @@ run_mutation "tile: the configured threshold is the one used" \
 
 # `Command::FilterExpr`, which is the arm the named test drives
 # (`filter model_code = 'EURP'`); `Command::FilterText` right below it
-# assigns and requeries identically.
+# assigns and requeries identically. Final review (2026-09-18) folded the
+# `tile_scope`/`filter_tip` assignment pair into `set_tile_scope` — the
+# anchor now targets THAT call rather than the two lines it replaced, so
+# a build that never actually reassigns `tile_scope` is still exercised.
 run_mutation "blotter: :filter narrows only this tile" \
   crates/geode-blotter/src/tile.rs \
   '                self.validate_tile_scope(&scope)?;
-                self.tile_scope = scope;
-                self.filter_tip = filter_summary(&self.tile_scope).into();
+                self.set_tile_scope(scope);
                 self.requery(cx);' \
   '                self.validate_tile_scope(&scope)?;
-                self.filter_tip = filter_summary(&self.tile_scope).into();
+                let _ = scope;
                 self.requery(cx);' \
   geode-blotter filter_narrows_only_this_tile_marks_it_and_round_trips_the_session
 

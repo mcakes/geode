@@ -293,7 +293,10 @@ pub(crate) fn render(
     if let Some((text, tone)) = &h.state {
         row = row.child(
             div()
-                .id(ElementId::NamedInteger("marketdata-state".into(), tile_id))
+                .id(ElementId::NamedInteger(
+                    SharedString::new_static("marketdata-state"),
+                    tile_id,
+                ))
                 .debug_selector(move || format!("marketdata-state-{tile_id}"))
                 .text_color(tone_colour(*tone, false, theme, tones))
                 .child(text.clone())
@@ -371,7 +374,7 @@ pub(crate) fn render(
     row = row.child(
         div()
             .id(ElementId::NamedInteger(
-                "marketdata-menu-button".into(),
+                SharedString::new_static("marketdata-menu-button"),
                 tile_id,
             ))
             .px_1p5()

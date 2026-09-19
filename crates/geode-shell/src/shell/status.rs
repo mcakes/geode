@@ -65,7 +65,7 @@ pub const HEIGHT: f32 = 26.0;
 /// colors come from `cx.theme()`; no other input is read, so the same
 /// call always renders the same tree for the same arguments.
 ///
-/// Nine plain, independently-`Option`al inputs rather than a bundling
+/// Ten plain, independently-`Option`al inputs rather than a bundling
 /// struct (clippy's `too_many_arguments`, `-D warnings`-enforced):
 /// `render.rs`'s one call site already has each of these as its own
 /// separate local (`self.matcher.pending()`, `self.last_reload.
@@ -83,6 +83,11 @@ pub fn status_bar(
     diagnostics_summary: Option<&str>,
     on_diagnostics_click: impl Fn(&mut Window, &mut App) + 'static,
     as_of: Option<&str>,
+    // The as-of instant's full resolved timestamp (`ScopeBarModel::
+    // as_of_full`), `Some` exactly when `as_of` is — the segment's
+    // tooltip TITLE (final review, spec §5.1), with the painted `as_of`
+    // text moving to the detail line.
+    as_of_full: Option<&SharedString>,
     theme_name: &str,
     cx: &App,
 ) -> impl IntoElement {
@@ -150,13 +155,17 @@ pub fn status_bar(
                 }),
         );
     }
-    if let Some(t) = as_of {
+    if let Some((t, full)) = as_of.zip(as_of_full) {
         // The same warning-toned badge treatment the toolbar's own AS OF
         // readout uses (`shell::toolbar`'s "scope-asof" child) — an
         // unmissable second reminder in the one place a maximised tile
         // cannot hide (spec §3.6/§4.5). `as_of_text` is built once and
-        // reused for both the painted child and the tooltip's title (a
-        // clone of the same `SharedString` — no second `format!`).
+        // reused for both the painted child and the tooltip's detail
+        // line (a clone of the same `SharedString` — no second
+        // `format!`); the tooltip's TITLE is `full`, the as-of instant's
+        // whole resolved timestamp (final review, spec §5.1) — a trader
+        // hovering to see exactly when must not get the same elided text
+        // the segment already shows.
         let as_of_text: SharedString = format!("AS OF {t} · :live to return").into();
         bar = bar.left(
             div()
@@ -168,9 +177,9 @@ pub fn status_bar(
                 .debug_selector(|| "status-as-of".to_string())
                 .tooltip(crate::tips::tip_with(
                     SharedString::new_static("tip-status-as-of"),
-                    as_of_text.clone(),
+                    full.clone(),
                     Some("frame::as_of"),
-                    Some(SharedString::new_static(":live returns to now")),
+                    Some(as_of_text.clone()),
                 ))
                 .child(as_of_text),
         );

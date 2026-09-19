@@ -82,11 +82,23 @@ pub struct ScopeBarModel {
     /// Task 1 fix round 1, MAJ-2): `Some("AS OF {as_of}")`, built here
     /// for the same reason as `slot_label`/`text_chip` — distinct from
     /// `as_of` itself, which the status bar reads bare (no "AS OF "
-    /// prefix). `SharedString` (fix round 1, Task 3 review): this is
-    /// both the painted label AND the badge's tooltip title, so a
-    /// `String` here would mean two heap clones per render rather than
-    /// two refcount bumps.
+    /// prefix). `SharedString` (fix round 1, Task 3 review): this used to
+    /// double as the badge's tooltip TITLE too; since the final review
+    /// (spec §5.1) the tooltip title is [`as_of_full`](Self::as_of_full)
+    /// and this string moved to the tooltip's detail line instead — a
+    /// `SharedString` here still means a refcount bump wherever it feeds
+    /// either the painted label or that detail line, never a heap clone.
     pub as_of_badge: Option<SharedString>,
+    /// The as-of instant's FULL resolved timestamp, `%Y-%m-%d %H:%M:%S`
+    /// in the trader's local clock, whatever `as_of`'s own elision does —
+    /// `as_of` drops the date on today and always drops seconds, which is
+    /// fine for a glance at the badge but not for a hover that exists to
+    /// answer "exactly when". Built alongside `as_of` from the same
+    /// `DateTime<Local>` conversion (final review, spec §5.1): the
+    /// toolbar's AS OF badge and the status bar's as-of segment both use
+    /// this as their tooltip TITLE, with the elided `as_of_badge`/segment
+    /// text moved to the tooltip's detail line instead.
+    pub as_of_full: Option<SharedString>,
 }
 
 /// Build the scope bar model for `frame`, given today's local date (for
@@ -130,15 +142,17 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         let named = scope.columns().into_iter().next().unwrap_or_default();
         format!("∅ {named}")
     });
-    let as_of = match frame.as_of() {
-        geode_core::query::AsOf::Live => None,
+    let (as_of, as_of_full) = match frame.as_of() {
+        geode_core::query::AsOf::Live => (None, None),
         geode_core::query::AsOf::At(t) => {
             let local = t.with_timezone(&Local);
-            Some(if local.date_naive() == today {
+            let elided = if local.date_naive() == today {
                 local.format("%H:%M").to_string()
             } else {
                 local.format("%Y-%m-%d %H:%M").to_string()
-            })
+            };
+            let full: SharedString = local.format("%Y-%m-%d %H:%M:%S").to_string().into();
+            (Some(elided), Some(full))
         }
     };
     let slot_label = match &slot {
@@ -160,6 +174,7 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         impossible,
         as_of,
         as_of_badge,
+        as_of_full,
     }
 }
 
@@ -252,6 +267,28 @@ mod tests {
         );
     }
 
+    /// Final review, spec §5.1: the as-of tooltip must show the FULL
+    /// resolved timestamp, not `as_of`'s own elided form (which drops the
+    /// date on today and always drops seconds). Built alongside `as_of`
+    /// from the same local-time conversion, so a seconds-precision
+    /// instant does not silently round to the minute in the one place a
+    /// trader hovers to see exactly when.
+    #[test]
+    fn as_of_full_is_the_unelided_local_timestamp_while_as_of_elides_it() {
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        let at = Local.with_ymd_and_hms(2026, 9, 8, 14, 5, 30).unwrap();
+        f.set_as_of(AsOf::At(at.with_timezone(&chrono::Utc)));
+        let today = at.date_naive();
+
+        let m = build_model(&f, today);
+        assert_eq!(m.as_of.as_deref(), Some("14:05"), "the elided badge form");
+        assert_eq!(
+            m.as_of_full.as_deref(),
+            Some("2026-09-08 14:05:30"),
+            "the full resolved timestamp, seconds included"
+        );
+    }
+
     #[test]
     fn no_active_slot_labels_as_view_default() {
         let f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
@@ -260,5 +297,6 @@ mod tests {
         assert_eq!(m.slot_label, "view default");
         assert_eq!(m.text_chip, None);
         assert_eq!(m.as_of_badge, None);
+        assert_eq!(m.as_of_full, None);
     }
 }
