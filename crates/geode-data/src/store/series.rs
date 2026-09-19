@@ -198,6 +198,14 @@ fn append_in_transaction(
 /// `received_at` exists for the same ts) and older than the window; the
 /// live row survives whatever its age. `history` deletes rows and
 /// coverage whose `ts`/`to_ts` are older than the window.
+///
+/// A span that is already older than `history` when appended is inserted
+/// and then swept in the same transaction, coverage included, so a
+/// direct caller sees `appended == swept` and no trace remains
+/// afterwards. The service never sends such a span — it clips a fetch to
+/// the history window before subtracting coverage (timeseries spec
+/// §4.7 as built) — so this is reachable only by calling `append_series`
+/// directly.
 pub fn sweep_pair(
     conn: &Connection,
     ds: &DatasetSpec,
@@ -664,6 +672,33 @@ mod tests {
             cov,
             vec![sp("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z")],
             "the ancient coverage row went with its rows"
+        );
+    }
+
+    #[test]
+    fn a_span_entirely_outside_history_is_swept_by_its_own_append() {
+        let (_d, store, ds) = fixture(); // history = 5y
+        let ancient = series_rows("2019-01-05T14:30:00Z", 2, 1.0);
+        let out = append(
+            &store,
+            &ds,
+            &ancient,
+            ("2019-01-05T00:00:00Z", "2019-01-06T00:00:00Z"),
+            "2026-01-06T09:00:00Z",
+        );
+        assert_eq!(
+            out,
+            SeriesAppended {
+                appended: 2,
+                swept: 2
+            }
+        );
+        assert!(all_rows(&store).is_empty());
+        assert!(
+            coverage(store.writer(), "series", "demo_kdb", "SPX.close")
+                .unwrap()
+                .is_empty(),
+            "the coverage row went with the rows"
         );
     }
 
