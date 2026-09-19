@@ -12404,6 +12404,21 @@ run_mutation "mdauto: exactly one policy row is checked" \
   geode-marketdata \
   exactly_one_policy_row_is_checked_and_it_follows_the_policy
 
+# The picker no longer refuses while the draft has edits (per-underlying
+# drafts, 2026-09-19): a switch parks the draft. Mutated back to the old
+# refusal, `u` on a dirty panel answers a notice and opens nothing.
+run_mutation "mdpark: the picker opens while the draft has edits" \
+  crates/geode-marketdata/src/tile.rs \
+  '    pub(crate) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {' \
+  '    pub(crate) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.draft.is_empty() {
+            self.notice = Some("edits pending".into());
+            cx.notify();
+            return;
+        }' \
+  geode-marketdata \
+  the_picker_opens_while_the_draft_has_edits
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

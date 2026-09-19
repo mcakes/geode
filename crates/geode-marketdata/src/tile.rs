@@ -2695,6 +2695,14 @@ impl MarketDataTile {
         // A different document is a different question: the next
         // delivery is never the one already asked for.
         self.acted = None;
+        // The tag moves on EVERY switch, visible or not (final review of
+        // the per-underlying drafts branch, Minor 6): `requery` bumps it
+        // on the visible path, but a hidden panel only `changed` — and an
+        // outcome for the OLD key that slipped past `set_visible(false)`'s
+        // cancel would then pass `deliver`'s tag check and be rebased onto
+        // the new key's restored draft. Bumping here makes the invariant
+        // hold by construction rather than by reachability.
+        self.tag += 1;
         self.cursor = Cursor::Cell { row: 0, col: 0 };
         self.last_grid_col = 0;
         self.rebuild_model(cx);

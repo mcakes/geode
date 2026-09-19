@@ -87,8 +87,9 @@ pub(crate) const PICKER_ROWS: usize = 12;
 /// the decorated label, so typing `sp` cannot match a phrase's own
 /// letters. Kept here so [`Self::replace_all`] can re-decorate a fresh
 /// catalog without asking the tile again — the parked map only changes
-/// through `set_key`, which closes this popup first, so the marks can
-/// never go stale while the picker is open.
+/// through `set_key`, and both of its callers (`picker_pick`, the `:`
+/// line) close this popup before calling it, so the marks can never go
+/// stale while the picker is open; a third caller would owe the same.
 pub(crate) struct PickerRows {
     pub all: Vec<String>,
     pub labels: Vec<SharedString>,
