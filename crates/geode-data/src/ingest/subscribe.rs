@@ -26,7 +26,7 @@
 //! bytes never yielded a key), and the adapter's own `HealthSink` for
 //! connection state (the DISCOVERY lane). Both are built by
 //! `DataService::open`, because the health-lane rules are the service's
-//! (CLAUDE.md, Phase 4b: a clean discovery report must never clear a
+//! (`docs/phase-history.md`, Phase 4b: a clean discovery report must never clear a
 //! load-lane problem) and a receiver thread that reported health itself
 //! would be a second place those rules live.
 //!

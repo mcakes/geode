@@ -4116,7 +4116,7 @@ fn clicking_a_groupings_row_opens_the_chooser(cx: &mut gpui::TestAppContext) {
 ///
 /// The typed text is `wd`, not `mine` and not `wide` itself. The browse
 /// list underneath is deliberately still ranked by the naming text
-/// (CLAUDE.md's Phase 4c Part 2a paragraph — "so a near-collision stays
+/// (`docs/phase-history.md`, Phase 4c Part 2a — "so a near-collision stays
 /// visible before `enter` refuses it"), and the ranker is a *subsequence*
 /// matcher, so `mine` — no fuzzy match against this fixture's `tree` or
 /// `wide` — would leave no row to click at all, exercising the ranking
