@@ -681,11 +681,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             cx.notify();
                         });
                     }
-                    // `source` is ignored on purpose: one ingest runner
-                    // draining one FIFO queue means loads are strictly
-                    // sequential, so the load that just ended is always
-                    // the one `note_loading` last recorded.
-                    DataEvent::LoadEnded { .. } => {
+                    // Carries no `source` (finding 2, 2026-09-19 final
+                    // review): one ingest runner draining one FIFO queue
+                    // means loads are strictly sequential, so the load
+                    // that just ended is always the one `note_loading`
+                    // last recorded, and `note_load_ended` is a no-op
+                    // when nothing is — including the extra copy the
+                    // queue drain now sends after every `Published`/
+                    // `Failed`'s own.
+                    DataEvent::LoadEnded => {
                         diagnostics.update(cx, |d, cx| {
                             let before = d.version();
                             d.note_load_ended();
@@ -1012,10 +1016,7 @@ role = "key"
             ("risk", "/data/risk/EOD.csv", 4)
         );
 
-        tx.try_send(DataEvent::LoadEnded {
-            source: "risk".into(),
-        })
-        .unwrap();
+        tx.try_send(DataEvent::LoadEnded).unwrap();
         vcx.run_until_parked();
         assert!(
             diagnostics.read_with(&vcx, |d, _| d.ingest.is_none()),

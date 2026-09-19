@@ -79,20 +79,28 @@ pub enum DataEvent {
         books: Vec<Option<String>>,
     },
     /// The ingest runner popped a job (spec 2026-09-17 §5.3): the status
-    /// bar's progress strip starts here. Ended by [`DataEvent::LoadEnded`].
+    /// bar's progress strip starts here. Mirrors `IngestEvent::Started`
+    /// verbatim, so for a file it is likewise never sent for a re-queued
+    /// already-loaded file (finding 1, 2026-09-19 final review) — only
+    /// once the pop-time stale re-check passes, and so always followed by
+    /// a real load outcome. Ended by [`DataEvent::LoadEnded`].
     Loading {
         source: String,
         path: String,
         queued: usize,
     },
-    /// The job announced by the last `Loading` finished — published or
-    /// failed — sent unconditionally, because a failed load's `Health`
-    /// is deduplicated by the tracker and may never reach the shell,
-    /// and the strip must not stick. One runner on one FIFO channel
-    /// makes loads sequential, so this always ends the current one.
-    LoadEnded {
-        source: String,
-    },
+    /// Sent after every `Published`, every `Failed`, and at every queue
+    /// drain (`IngestEvent::PlanComplete`) — so a dropped end event (the
+    /// event channel refused it) is repaired at the latest when the
+    /// queue empties, and `note_load_ended` is a no-op when nothing is
+    /// recorded, so the runner's startup drain costs nothing. Carries no
+    /// `source`: nothing reads it (`Diagnostics::note_load_ended` clears
+    /// whatever is currently recorded, since one runner on one FIFO
+    /// channel makes loads sequential) and the `PlanComplete` arm has
+    /// none to offer. Sent unconditionally from `Published`/`Failed`,
+    /// because a failed load's `Health` is deduplicated by the tracker
+    /// and may never reach the shell, and the strip must not stick.
+    LoadEnded,
     /// The worst state discovery found for a source on its last poll.
     Health {
         source: String,
@@ -864,7 +872,7 @@ impl DataService {
                     // `LoadEnded` — not `Health` — is what the status
                     // bar's progress strip relies on to know a load is
                     // over.
-                    let _ = sink(DataEvent::LoadEnded { source });
+                    let _ = sink(DataEvent::LoadEnded);
                     delivered && health_delivered
                 }
                 IngestEvent::Failed {
@@ -917,10 +925,21 @@ impl DataService {
                     );
                     // Unconditional, same reasoning as the `Published`
                     // arm's own `LoadEnded` send above.
-                    let _ = sink(DataEvent::LoadEnded { source });
+                    let _ = sink(DataEvent::LoadEnded);
                     health_delivered
                 }
-                IngestEvent::PlanComplete => true,
+                // Finding 2 (2026-09-19 final review): the queue draining
+                // is also an end signal — a refused `LoadEnded` on the
+                // last load of a burst (a momentarily full channel) would
+                // otherwise stick the strip forever, since nothing else
+                // ever follows it. The send's own result is returned, so
+                // a refusal here is logged exactly the way `run`'s own
+                // `if !sink(IngestEvent::PlanComplete) { … }` already
+                // treats a refusal — once, via `log_refused_event`'s
+                // latch, never retried (the runner does not re-announce
+                // an idle drain; the next real `Started`/`LoadEnded` pair
+                // is what a trader next sees).
+                IngestEvent::PlanComplete => sink(DataEvent::LoadEnded),
             })
         };
         let ingest = Arc::new(IngestRunner::spawn(
@@ -1804,6 +1823,32 @@ mod tests {
         }
     }
 
+    /// Asserts nothing but the runner's own harmless idle-queue
+    /// `LoadEnded` (finding 2, 2026-09-19 final review: the queue drain
+    /// at startup announces itself even when no source ever had work to
+    /// give it, and `note_load_ended` is a no-op with nothing recorded)
+    /// arrives within `timeout` — used by the skipped-source tests below,
+    /// where a fixture with exactly one source, itself unservable, never
+    /// submits any other work for the drain to follow.
+    fn assert_nothing_but_the_idle_drain_arrives(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        timeout: Duration,
+    ) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            match rx.recv_timeout(remaining) {
+                Ok(DataEvent::LoadEnded) => continue,
+                Ok(other) => panic!("a skipped source subscribes to nothing: {other:?}"),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return,
+                Err(e) => panic!("channel closed unexpectedly: {e:?}"),
+            }
+        }
+    }
+
     #[test]
     fn a_subscribed_source_publishes_what_the_feed_sends_and_serves_it_back() {
         let (_dir, feed, svc, rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
@@ -1888,13 +1933,7 @@ mod tests {
             "cvi/SPX.Z",
             FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
         );
-        assert!(
-            matches!(
-                rx.recv_timeout(Duration::from_millis(300)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ),
-            "a skipped source subscribes to nothing"
-        );
+        assert_nothing_but_the_idle_drain_arrives(&rx, Duration::from_millis(300));
         svc.shutdown();
     }
 
@@ -1916,13 +1955,7 @@ mod tests {
             "cvi/SPX.Z",
             FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
         );
-        assert!(
-            matches!(
-                rx.recv_timeout(Duration::from_millis(300)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ),
-            "a skipped source subscribes to nothing"
-        );
+        assert_nothing_but_the_idle_drain_arrives(&rx, Duration::from_millis(300));
         svc.shutdown();
     }
 
@@ -2610,6 +2643,15 @@ mod tests {
         // Task 1: the status bar's progress strip starts on `Loading` and
         // ends on `LoadEnded`, unconditionally — one file, one source
         // named "risk", so there is nothing queued behind it.
+        //
+        // Finding 2 (2026-09-19 final review): `LoadEnded` is now also
+        // sent when `IngestEvent::PlanComplete` announces the queue has
+        // drained, so a single file's own load produces TWO of them —
+        // one from the `Published` arm, one from the drain that follows
+        // it immediately after (one runner, one thread: nothing can land
+        // between the two). The exact four-deep sequence is what stays
+        // deterministic; asserting only "at least one" would let a
+        // regression silently drop the drain's own `LoadEnded` again.
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let csv_path = src.path().join("risk_2026-08-24_BK0.csv");
@@ -2635,6 +2677,15 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
+                // Pinned (finding 3, 2026-09-19 final review): long
+                // enough that the cold-start poll is the only one to
+                // ever run within this test, the same reasoning
+                // `a_clean_publish_of_another_batch_does_not_clear_a_
+                // degraded_batch`'s fixture documents — an un-pinned
+                // default let a second poll re-submit the already-loaded
+                // file and blow the test's 30 s budget waiting out the
+                // extra events.
+                poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
                 ..crate::source::SourceSpec::directory(
@@ -2649,7 +2700,11 @@ mod tests {
         .unwrap();
 
         let mut kinds = Vec::new();
-        while let Ok(e) = rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        let mut ended = 0;
+        while ended < 2 {
+            let e = rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("loading, published and two LoadEnded events");
             match e {
                 DataEvent::Loading {
                     ref source,
@@ -2662,16 +2717,28 @@ mod tests {
                     kinds.push("loading");
                 }
                 DataEvent::Published { .. } => kinds.push("published"),
-                DataEvent::LoadEnded { ref source } => {
-                    assert_eq!(source, "risk");
+                DataEvent::LoadEnded if kinds.is_empty() => {
+                    // The runner's own startup drain (queue empty before
+                    // discovery ever submits this file) can win the race
+                    // and announce first — a real `LoadEnded` with
+                    // nothing recorded yet, harmless by construction
+                    // (`note_load_ended` is a no-op when idle) and not
+                    // part of the sequence this test asserts.
+                }
+                DataEvent::LoadEnded => {
                     kinds.push("ended");
-                    break;
+                    ended += 1;
                 }
                 _ => {}
             }
         }
-        assert_eq!(kinds, ["loading", "published", "ended"]);
-        drop(svc);
+        // Exactly two `LoadEnded`: the `Published` arm's own send, then
+        // the queue-drain's (`IngestEvent::PlanComplete`) — deterministic
+        // because one runner thread sends both in order with nothing else
+        // queued behind this file (the pinned `poll_interval` above rules
+        // out a second poll landing a third pair).
+        assert_eq!(kinds, ["loading", "published", "ended", "ended"]);
+        svc.shutdown();
     }
 
     #[test]
@@ -2684,16 +2751,27 @@ mod tests {
         // status bar's strip, so this must drive a real failure through
         // a real `DataService` rather than a synthetic tracker call.
         //
-        // The CSV's header omits `NPV`, a column the `.done` sentinel
-        // still declares present: `read_csv`'s projection asks for a
-        // column the file does not have and fails at the SQL step,
+        // Finding 2 (2026-09-19 final review) added a SECOND end signal
+        // — the queue drain's own `LoadEnded` — which, with only one
+        // file queued, would fire immediately after this file's failure
+        // and mask the Failed arm's own send going missing. A second,
+        // well-formed file (BK1, an OLDER `as_of` so BK0 — the malformed
+        // one — sorts first and loads first: `ingest::plan::build_plan`
+        // breaks a priority tie by newest `source_time` first) keeps the
+        // queue non-empty across BK0's failure, so the drain cannot fire
+        // until BK1 is done too — isolating the Failed arm's own
+        // `LoadEnded` as the only thing that can end the strip between
+        // the two loads.
+        //
+        // The first CSV's header omits `NPV`, a column the `.done`
+        // sentinel still declares present: `read_csv`'s projection asks
+        // for a column the file does not have and fails at the SQL step,
         // before any row is staged — a malformed CSV, not a synthetic
         // error.
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
-        let csv_path = src.path().join("risk_2026-08-24_BK0.csv");
         std::fs::write(
-            &csv_path,
+            src.path().join("risk_2026-08-24_BK0.csv"),
             "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency\n\
              BK0,L0,P1,C,I1,USD\n",
         )
@@ -2701,6 +2779,17 @@ mod tests {
         std::fs::write(
             src.path().join("risk_2026-08-24_BK0.csv.done"),
             r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-23_BK1.csv"),
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK1,L0,P2,C,I2,USD,50\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-23_BK1.csv.done"),
+            r#"{"as_of":"2026-08-23T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK1"]}"#,
         )
         .unwrap();
 
@@ -2714,6 +2803,11 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
+                // Pinned (finding 3, 2026-09-19 final review) — same
+                // reasoning as the sibling fixture above: without it a
+                // second poll can re-submit a file and the test waits
+                // out its 30 s budget on events this test does not need.
+                poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
                 ..crate::source::SourceSpec::directory(
@@ -2728,25 +2822,42 @@ mod tests {
         .unwrap();
 
         // `Health`, `Polled` and `Diagnostics` events are the failure's
-        // own report; this test cares only that the strip starts and
-        // ends around it, so everything but `Loading`/`LoadEnded` is
-        // ignored (matching the brief's ["loading", "ended"]).
+        // own report; this test cares only about the `Loading`/
+        // `Published`/`LoadEnded` sequence. The runner's own startup
+        // drain can win the race and send a `LoadEnded` before either
+        // file is even submitted (harmless — `note_load_ended` is a
+        // no-op when idle) — ignored the same way the sibling test above
+        // ignores it. Collected until the queue-drain's own trailing
+        // `LoadEnded` (the third) arrives.
         let mut kinds = Vec::new();
-        while let Ok(e) = rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        let mut ended = 0;
+        while ended < 3 {
+            let e = rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("loading, ended, loading, published and two more LoadEnded events");
             match e {
                 DataEvent::Loading { ref source, .. } => {
                     assert_eq!(source, "risk");
                     kinds.push("loading");
                 }
-                DataEvent::LoadEnded { ref source } => {
-                    assert_eq!(source, "risk");
+                DataEvent::Published { .. } => kinds.push("published"),
+                DataEvent::LoadEnded if kinds.is_empty() => {}
+                DataEvent::LoadEnded => {
                     kinds.push("ended");
-                    break;
+                    ended += 1;
                 }
                 _ => {}
             }
         }
-        assert_eq!(kinds, ["loading", "ended"]);
+        // BK0 (malformed) fails and ends the strip on the Failed arm's
+        // own send BEFORE BK1 even starts loading — the queue is not yet
+        // empty, so the drain cannot have supplied that first "ended"
+        // instead. BK1 then loads cleanly, and the drain supplies the
+        // trailing "ended" once both are done.
+        assert_eq!(
+            kinds,
+            ["loading", "ended", "loading", "published", "ended", "ended"]
+        );
         svc.shutdown();
     }
 

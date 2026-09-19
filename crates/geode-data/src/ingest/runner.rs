@@ -64,8 +64,12 @@ pub enum IngestEvent {
     /// {dataset}` for a document (its batch is not known until the rows
     /// are read, and the strip never needs it); `queued` is how many
     /// items — files and documents — still waited behind it at the
-    /// instant it was popped. Always followed by exactly one `Published`
-    /// or `Failed` for the same job: one runner, one FIFO queue.
+    /// instant it was popped. For a file, emitted only after the pop-time
+    /// stale re-check passes (2026-09-19 final review, finding 1) — a
+    /// re-queued already-loaded file produces no `Started` at all, rather
+    /// than one with nothing to end it. Always followed by exactly one
+    /// `Published` or `Failed` for the same job: one runner, one FIFO
+    /// queue.
     Started {
         source: String,
         path: String,
@@ -551,30 +555,22 @@ fn run(
         };
 
         let (work, queued) = work;
-        let (started_source, started_path) = match &work {
-            Work::Document(job) => (
-                job.source.clone(),
-                format!("document://{}/{}", job.source, job.dataset),
-            ),
-            Work::File(item) => (
-                item.source.clone(),
-                item.candidate.csv_path.to_string_lossy().into_owned(),
-            ),
-        };
-        if !sink(IngestEvent::Started {
-            source: started_source,
-            path: started_path,
-            queued,
-        }) {
-            log_refused_event(&refusal_logged, "a load-started announcement");
-        }
 
         // A document is published here and the loop starts over: none of
         // the file machinery below applies to it — no pop-time change
         // detection (there is no file to re-`stat`), no `in_flight` to
-        // clear (it was never set), no sentinel.
+        // clear (it was never set), no sentinel. Its `Started` is emitted
+        // right here, before the publish, since a document has no stale
+        // check to emit it after.
         let item = match work {
             Work::Document(job) => {
+                if !sink(IngestEvent::Started {
+                    source: job.source.clone(),
+                    path: format!("document://{}/{}", job.source, job.dataset),
+                    queued,
+                }) {
+                    log_refused_event(&refusal_logged, "a load-started announcement");
+                }
                 publish_one_document(&store, &schema, &sink, publish, &refusal_logged, job);
                 continue;
             }
@@ -620,6 +616,19 @@ fn run(
         if stale {
             clear_in_flight(&queue);
             continue;
+        }
+
+        // Emitted only now — after the stale check passed — so a
+        // re-queued already-loaded file (finding 1, 2026-09-19 final
+        // review) never starts the strip: a `Started` with no
+        // `Published`/`Failed` to follow it would leave the status bar
+        // stuck.
+        if !sink(IngestEvent::Started {
+            source: item.source.clone(),
+            path: item.candidate.csv_path.to_string_lossy().into_owned(),
+            queued,
+        }) {
+            log_refused_event(&refusal_logged, "a load-started announcement");
         }
 
         // The dataset is resolved per item (Phase 3 §2.5). An undeclared
@@ -1649,6 +1658,23 @@ mod tests {
                 |e| matches!(e, IngestEvent::Published { batch, .. } if *batch == fresh.batch)
             ),
             "the fresh file must still load: {events:?}"
+        );
+
+        // Finding 1 (2026-09-19 final review): a stale-skipped file must
+        // never even announce a `Started` — one with no `Published`/
+        // `Failed` to follow it would start the status bar's strip and
+        // leave it stuck.
+        let stale_path = stale.candidate.csv_path.to_string_lossy().into_owned();
+        let started_paths: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                IngestEvent::Started { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !started_paths.contains(&stale_path.as_str()),
+            "a stale skip must not start the strip: {started_paths:?}"
         );
     }
 

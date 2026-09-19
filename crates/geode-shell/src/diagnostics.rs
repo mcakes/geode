@@ -100,9 +100,13 @@ impl Default for SourceState {
 }
 
 /// What the ingest runner is loading right now (spec 2026-09-17 §5.3),
-/// set by `DataEvent::Loading` and cleared by `DataEvent::LoadEnded`.
-/// `label` is prepared here, once per event, so the status bar clones a
-/// `SharedString` per paint and formats nothing per frame.
+/// set by `DataEvent::Loading` and cleared by `DataEvent::LoadEnded` —
+/// which, for a file, is always preceded by a `Loading` for the same
+/// job: a re-queued already-loaded file produces neither event at all
+/// (finding 1, 2026-09-19 final review), rather than a `Loading` with
+/// nothing to clear it. `label` is prepared here, once per event, so the
+/// status bar clones a `SharedString` per paint and formats nothing per
+/// frame.
 #[derive(Debug, Clone)]
 pub struct IngestActivity {
     pub source: String,
@@ -355,9 +359,13 @@ impl Diagnostics {
         self.versions.sources += 1;
     }
 
-    /// The load ended (`DataEvent::LoadEnded`), published or failed. A
-    /// no-op when nothing was recorded — an end with no start bumps
-    /// nothing.
+    /// The load ended (`DataEvent::LoadEnded`) — sent after every
+    /// `Published`, every `Failed`, and again at every queue drain
+    /// (finding 2, 2026-09-19 final review), so a dropped end event is
+    /// repaired at the latest when the queue empties. A no-op when
+    /// nothing was recorded — an end with no start bumps nothing, which
+    /// is what makes the drain's own copy, and the runner's startup
+    /// drain before any load ever ran, free.
     pub fn note_load_ended(&mut self) {
         if self.ingest.take().is_some() {
             self.version += 1;
