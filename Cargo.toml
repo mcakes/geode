@@ -63,8 +63,10 @@ gpui-kit-assets = "=0.6.2"
 # "0.6.2"`), so without a direct `=` pin on our side a `cargo update` can
 # float them to a newer release than the gpui-component they were built
 # with — which is exactly what happened on 2026-09-18 (a 0.6.1 component
-# over a 0.6.2 base failed to compile inside gpui-component itself). They
-# are depended on by `geode-app` for that reason alone.
+# over a 0.6.2 base failed to compile inside gpui-component itself).
+# `geode-app` depends on both for that reason alone; `geode-shell` also
+# depends on `gpui-base` for one type, `CalendarView`, which
+# gpui-component does not re-export (user ruling 2026-09-19).
 gpui-base = "=0.6.2"
 gpui-component-macros = "=0.6.2"
 

@@ -219,21 +219,13 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     }
     view.as_of_dialog = Some(AsOfState::default());
     // The field opens blank, so seed the calendar to today rather than
-    // leaving it on whatever day the last open (or the default) left it.
-    //
-    // Final review, finding 8: the same case is made for resetting the
-    // calendar's VIEW to the day grid on open (so closing from the month
-    // or year picker doesn't leave the next open showing it too) —
-    // `CalendarState::set_view` is public in `gpui-base`, but its
-    // parameter (`CalendarView`) is not reachable from here:
-    // `gpui-component` re-exports only `CalendarEvent`/`CalendarState`/
-    // `Date`/`Matcher` from `gpui-base::calendar` (`gpui-component-0.6.2/
-    // src/time/calendar.rs:11`), and this crate has no direct dependency
-    // on `gpui-base` to name the type by its own path — only `geode-app`
-    // does, and this workspace's root `Cargo.toml` comments that in as
-    // deliberate ("depended on by `geode-app` for that reason alone").
-    // Not built here; see the fix-wave report.
+    // leaving it on whatever day the last open (or the default) left it —
+    // and put it back on the DAY grid, so closing from the month or year
+    // picker does not leave the next open showing that picker (the
+    // slice-2 final review's finding 8, built once `gpui-base` became a
+    // direct dependency for `CalendarView`, user ruling 2026-09-19).
     view.as_of_calendar.update(cx, |c, cx| {
+        c.set_view(gpui_base::CalendarView::Day);
         c.set_date(chrono::Local::now().date_naive(), window, cx)
     });
     let entity = cx.entity();

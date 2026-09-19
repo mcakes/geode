@@ -2623,6 +2623,7 @@ dependencies = [
  "chrono",
  "criterion",
  "geode-core",
+ "gpui-base",
  "gpui-component",
  "gpui-pre",
  "serde_json",

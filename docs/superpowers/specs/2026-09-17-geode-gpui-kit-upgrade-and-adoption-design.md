@@ -463,6 +463,17 @@ machine running it. Display check pending: the calendar's size beside
 the presets and its theme colours on a real window. The dialog widened
 from 480 to 640 px to seat the small calendar beside the presets.
 
+**Post-merge (2026-09-19):** every open also returns the calendar to the
+DAY grid (`CalendarState::set_view(CalendarView::Day)` beside the seed to
+today in `asof_view::open`), so a close from the month or year picker is
+not what the next open shows — the slice's final review finding 8, parked
+because `gpui-component` re-exports `CalendarState` but not
+`CalendarView`. By user ruling `geode-shell` now depends on `gpui-base`
+directly (the root's `=0.6.2` pin; the crate's `Cargo.toml` comment names
+the one type it is there for). The parking's other option, a
+`gpui-component` upstream re-export, was not pursued: the dependency is
+one line and the pin already existed.
+
 ### 5.3 Ingest progress in the status bar
 
 **Data layer:** the ingest runner emits `IngestEvent::Started { source,

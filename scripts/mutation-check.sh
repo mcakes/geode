@@ -11879,6 +11879,16 @@ run_mutation "asof: the mirror ignores a failed parse" \
   geode-shell \
   an_invalid_intermediate_keystroke_leaves_the_calendar_where_it_was
 
+# As-of picker (2026-09-19): every open puts the calendar back on the day
+# grid, so a close from the month/year picker is not what the next open
+# shows.
+run_mutation "asof: open returns the calendar to the day grid" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '        c.set_view(gpui_base::CalendarView::Day);' \
+  '        let _ = gpui_base::CalendarView::Day;' \
+  geode-shell \
+  reopening_the_dialog_returns_the_calendar_to_the_day_grid
+
 # Ingest progress (2026-09-19): `queued` is what still WAITS behind the
 # popped job. Counting the job itself (+1) would paint "1 queued" for a
 # lone file and never reach 0 while anything loads.

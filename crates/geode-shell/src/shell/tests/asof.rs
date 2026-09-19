@@ -513,3 +513,27 @@ fn an_invalid_intermediate_keystroke_leaves_the_calendar_where_it_was(
         "a failed intermediate parse must not move the calendar off the day it showed"
     );
 }
+
+/// Slice-2 final review, finding 8 (built 2026-09-19): closing the dialog
+/// from the month or year picker must not leave the next open showing
+/// that picker — `open` puts the calendar back on the day grid.
+#[gpui::test]
+fn reopening_the_dialog_returns_the_calendar_to_the_day_grid(cx: &mut gpui::TestAppContext) {
+    use gpui_base::CalendarView;
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-t");
+    let calendar = shell.read_with(&vcx, |s, _| s.as_of_calendar().clone());
+    // What the header's month button does: switch to the month picker.
+    calendar.update(&mut vcx, |c, _| c.set_view(CalendarView::Month));
+    assert!(calendar.read_with(&vcx, |c, _| c.view().is_month()));
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()), "closed");
+    vcx.simulate_keystrokes("alt-t");
+    vcx.run_until_parked();
+    assert!(
+        calendar.read_with(&vcx, |c, _| c.view().is_day()),
+        "a reopen must paint the day grid, not the picker it was closed from"
+    );
+}

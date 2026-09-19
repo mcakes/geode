@@ -25,6 +25,11 @@ test-support = []
 geode-core.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+# For `CalendarView` alone: `gpui-component` re-exports `CalendarState`
+# but not the enum its `set_view` takes, and the as-of dialog resets the
+# calendar to the day grid on every open (`asof_view::open`). The pin is
+# the root's `=0.6.2`; nothing else from the unstyled layer is used here.
+gpui-base.workspace = true
 toml = "1.1.4"
 serde_json = "1.0.151"
 toml_edit = "0.25.13"
