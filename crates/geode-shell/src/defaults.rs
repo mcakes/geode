@@ -490,12 +490,29 @@ pub fn register_pick_actions(reg: &mut ActionRegistry, columns: &[crate::shell::
 /// path even when there is nothing to register.
 pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scopes::SavedScopes) {
     for name in saved.keys() {
-        action(
-            reg,
-            &format!("scope::{name}"),
-            &format!("Scope: {name}"),
-            "Scope",
-        );
+        let id = format!("scope::{name}");
+        // A config VALUE must never panic the app, however it reached
+        // disk — `Frame::save_scope` and this dialog's own naming prompt
+        // both refuse `geode_core::scopes::RESERVED_NAMES` (chiefly
+        // `save_current`, this crate's own `scope::save_current` action
+        // id), but that is belt, not suspenders: a hand-edited or
+        // desk-layer `scopes.toml` reaches this loop with no door to
+        // check it first, and `action`'s `.expect("builtin action ids
+        // are unique by construction")` used to take that literally,
+        // crashing at every launch with no in-app way for a trader to
+        // fix the file that caused it (the review finding this closes).
+        // Skipping and logging once is the whole fix: the saved scope
+        // still exists and loads fine through `:scope load`/`Frame::
+        // load_scope`, it simply gets no palette row of its own under a
+        // name something else already claimed.
+        if reg.contains(&ActionId(id.clone())) {
+            tracing::warn!(
+                target: "geode::config",
+                "scopes: '{name}' collides with an existing action id ({id}); no palette row for it"
+            );
+            continue;
+        }
+        action(reg, &id, &format!("Scope: {name}"), "Scope");
     }
 }
 
@@ -676,6 +693,44 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} not registered"));
             assert_eq!(def.category, "Dock", "{id}");
         }
+    }
+
+    /// Review finding: `Frame::save_scope`/`Domain::Scopes` reserve
+    /// `save_current`, but a `scopes.toml` written before that ruling
+    /// (or edited by hand, or landed at the desk layer where no dialog
+    /// runs the check) can still name a scope `save_current` — and
+    /// `register_scope_actions` used to hand that straight to `action`'s
+    /// `.expect("builtin action ids are unique by construction")`,
+    /// panicking the whole app at every launch. It must skip the
+    /// collision instead: the builtin `scope::save_current` action
+    /// (registered by `register_builtin_actions`, ahead of this call in
+    /// every real startup) keeps its own title, and an unrelated saved
+    /// scope alongside it still gets its own row.
+    #[test]
+    fn register_scope_actions_skips_a_collision_and_does_not_panic() {
+        use crate::actions::ActionId;
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        let mut saved = geode_core::scopes::SavedScopes::new();
+        saved.insert(
+            "save_current".to_string(),
+            geode_core::scope::Scope::default(),
+        );
+        saved.insert("eu".to_string(), geode_core::scope::Scope::default());
+
+        register_scope_actions(&mut reg, &saved); // must not panic
+
+        let builtin = reg
+            .get(&ActionId("scope::save_current".to_string()))
+            .expect("the builtin action must still be registered");
+        assert_eq!(
+            builtin.title, "Scope: Save current as…",
+            "the collision must not overwrite the builtin action's own title"
+        );
+        assert!(
+            reg.contains(&ActionId("scope::eu".to_string())),
+            "a saved scope with no colliding id still gets its own row"
+        );
     }
 
     #[test]

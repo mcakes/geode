@@ -437,17 +437,23 @@ impl Domain {
     /// outside its own doc (Part 2c §6.1) — `Colours`: a column's
     /// `colour` field already spells `none` and `sign` itself, so a
     /// named colour object by either name would be unreachable through
-    /// that field and confusing everywhere else. `Scopes` reserves
-    /// `save_current` too (scope-save spec's amendment): it is the
-    /// `scope::save_current` palette action's own id, and a saved scope
-    /// by that name would collide with it in the palette (two rows
+    /// that field and confusing everywhere else. `Scopes` reads
+    /// [`geode_core::scopes::RESERVED_NAMES`] — `save_current`, the
+    /// `scope::save_current` palette action's own id, since a saved
+    /// scope by that name would collide with it in the palette (two rows
     /// reading "Scope: Save current…"/"Scope: save_current") and shadow
-    /// it from `input.rs`'s `scope::<name>` dispatch arm besides. Empty
-    /// for every other domain, which has no such collision.
+    /// it from `input.rs`'s `scope::<name>` dispatch arm besides. The
+    /// list is shared with `Frame::save_scope` (`:scope save` on a
+    /// tile's command line reaches that door directly, with no dialog in
+    /// between) rather than duplicated here — a review finding after
+    /// this dialog's own copy shipped: refusing only at the dialog left
+    /// `:scope save save_current` free to write an unfixable
+    /// `scopes.toml` entry that panicked the app at the next start.
+    /// Empty for every other domain, which has no such collision.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
             Domain::Colours => &geode_core::colour::RESERVED_NAMES,
-            Domain::Scopes => &["save_current"],
+            Domain::Scopes => &geode_core::scopes::RESERVED_NAMES,
             Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => &[],
         }
     }

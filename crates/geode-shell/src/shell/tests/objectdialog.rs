@@ -2998,20 +2998,6 @@ fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
 // to do — open the naming prompt seeded from the frame's own scope.
 // ---------------------------------------------------------------------
 
-/// Dispatch `action` through `ShellView::dispatch` directly — the same
-/// route `config::views` etc. reach in this file's own tests (see the
-/// inline dispatch a few pages up, `sanity: the step landed on the
-/// other dataset`'s neighbour), pulled out here since this section calls
-/// it from several tests. `shell::tests::picker`'s own `dispatch_action`
-/// helper is the same shape but private to that module.
-fn dispatch_action(shell: &Entity<ShellView>, action: &str, cx: &mut gpui::VisualTestContext) {
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.dispatch(&ActionId(action.to_string()), None, window, cx);
-        });
-    });
-}
-
 fn set_frame_book_scope(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, book: &str) {
     shell.update(cx, |s, cx| {
         s.frame.update(cx, |f, _| {
@@ -3185,6 +3171,39 @@ fn escape_from_save_current_naming_writes_nothing(cx: &mut gpui::TestAppContext)
         "cancel_naming resets naming_seed like every other seed"
     );
     assert!(!dir.path().join("scopes.toml").exists());
+}
+
+/// Review finding: `render::open`'s own guard (`shell.modal.is_some()`)
+/// refuses to open a SECOND modal, but it returns silently — and
+/// `open_save_scope` used to run past that refusal anyway, mutating
+/// whatever `object_dialog` was already there. With a Views dialog open,
+/// `scope::save_current` must leave it exactly as it was: still Views,
+/// still browsing, `naming_seed` still `Empty` (a Scopes-only field on
+/// an unrelated domain's state that must never be touched at all).
+#[gpui::test]
+fn scope_save_current_does_not_touch_an_already_open_dialog(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    set_frame_book_scope(&shell, &mut cx, "BK009");
+
+    dispatch_action(&shell, "scope::save_current", &mut cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.domain),
+        objectdialog::Domain::Views,
+        "the open dialog must still be Views, not Scopes"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "still browsing — scope::save_current must not have entered naming"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_seed.clone()),
+        objectdialog::NameSeed::Empty
+    );
 }
 
 /// A `SCOPES_KEY` outcome reaches the Values stage; a `PICKER_KEY` one

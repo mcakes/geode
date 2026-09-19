@@ -54,7 +54,7 @@ const FILTER_WIDTH: f32 = 200.0;
 /// one.
 fn chip(
     id: ElementId,
-    label: String,
+    label: impl Into<SharedString>,
     fg: Hsla,
     bg: Hsla,
     radius: Pixels,
@@ -67,7 +67,7 @@ fn chip(
         .rounded(radius)
         .bg(bg)
         .text_color(fg)
-        .child(label)
+        .child(label.into())
         .debug_selector(selector)
 }
 
@@ -199,7 +199,7 @@ pub fn toolbar(
     chips_row = chips_row.child(
         chip(
             "scope-pick-chip".into(),
-            "+".to_string(),
+            SharedString::new_static("+"),
             chip_fg,
             chip_bg,
             chip_radius,
@@ -224,7 +224,7 @@ pub fn toolbar(
         chips_row = chips_row.child(
             chip(
                 "scope-save-chip".into(),
-                "save".to_string(),
+                SharedString::new_static("save"),
                 chip_fg,
                 chip_bg,
                 chip_radius,

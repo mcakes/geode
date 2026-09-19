@@ -653,57 +653,63 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         .as_ref()
         .map(|s| s.naming_seed.clone())
         .unwrap_or(NameSeed::Empty);
-    // Cloned rather than matched by value here: `seed` is matched again
-    // below for `NameSeed::FromFrame`, and `NameSeed` has no `Copy` to
-    // spare — a bare `if let .. = seed` would move it out from under
-    // that second check regardless of which arm (if any) matches.
-    if let NameSeed::CopyOf(source) = seed.clone() {
-        // Verbatim, from the pending-aware config: inside the 250 ms write
-        // debounce `services.config` is the source as it stood before its
-        // last edit (`apply::config_with_pending`'s own doc has the
-        // trace) — the same reason `enter_edit_stage` derives from it
-        // rather than from `services.config` alone.
-        let folded = apply::config_with_pending(shell);
-        let config = folded.as_ref().unwrap_or(&shell.services.config);
-        let Some(table) = config
-            .doc(domain.doc())
-            .and_then(|doc| doc.value.get(&source))
-            .and_then(|v| v.as_table())
-            .cloned()
-        else {
-            set_notice(shell, format!("'{source}' is gone — nothing to copy"));
-            cx.notify();
-            return;
-        };
-        draft.source = table;
-        draft.fields = domain.fields_from_source(config, &draft.source);
-        draft.diagnostics = domain.validate(&draft, config);
-    }
-    if let NameSeed::FromFrame = seed {
-        // `scope::save_current` / the scope bar's `save` chip
-        // (`open_save_scope`, spec §6's amendment): the frame's current
-        // scope IS the new object's criteria — the same read
-        // `run_confirmed`'s `Confirm::Overwrite` arm makes, for the same
-        // reason it is made here and not in the pure core. Checked again
-        // rather than trusted from `open_save_scope`'s own gate: the
-        // scope can still empty out between opening the naming prompt
-        // and pressing `enter` on it (`:filter clear` on a tile, an
-        // undo), and a `commit_create` on an accidentally-empty object
-        // would silently save "everything" under the typed name.
-        let scope = shell.frame.read(cx).scope().clone();
-        if scope.is_empty() {
-            set_notice(shell, EMPTY_SCOPE_NOTICE.to_string());
-            cx.notify();
-            return;
+    // One `match` rather than two `if let`s (review finding): `seed` is
+    // an owned, non-`Copy` value with exactly one consumer, and a second
+    // `if let` reading it after a first one already moved it needed a
+    // defensive `.clone()` that a single exhaustive match makes
+    // unnecessary — the compiler enforces there is nothing a fourth
+    // `NameSeed` variant could add without a reminder here too.
+    match seed {
+        NameSeed::Empty => {}
+        NameSeed::CopyOf(source) => {
+            // Verbatim, from the pending-aware config: inside the 250 ms
+            // write debounce `services.config` is the source as it stood
+            // before its last edit (`apply::config_with_pending`'s own
+            // doc has the trace) — the same reason `enter_edit_stage`
+            // derives from it rather than from `services.config` alone.
+            let folded = apply::config_with_pending(shell);
+            let config = folded.as_ref().unwrap_or(&shell.services.config);
+            let Some(table) = config
+                .doc(domain.doc())
+                .and_then(|doc| doc.value.get(&source))
+                .and_then(|v| v.as_table())
+                .cloned()
+            else {
+                set_notice(shell, format!("'{source}' is gone — nothing to copy"));
+                cx.notify();
+                return;
+            };
+            draft.source = table;
+            draft.fields = domain.fields_from_source(config, &draft.source);
+            draft.diagnostics = domain.validate(&draft, config);
         }
-        // Pending-aware, like `c`'s copy just above: inside the 250 ms
-        // write debounce `services.config` alone is the config as it
-        // stood before the last edit, which would build the available
-        // dimensions list one keystroke stale.
-        let folded = apply::config_with_pending(shell);
-        let config = folded.as_ref().unwrap_or(&shell.services.config);
-        scopes::overwrite_with(&mut draft, &scope, config);
-        draft.diagnostics = domain.validate(&draft, config);
+        NameSeed::FromFrame => {
+            // `scope::save_current` / the scope bar's `save` chip
+            // (`open_save_scope`, spec §6's amendment): the frame's
+            // current scope IS the new object's criteria — the same
+            // read `run_confirmed`'s `Confirm::Overwrite` arm makes, for
+            // the same reason it is made here and not in the pure core.
+            // Checked again rather than trusted from `open_save_scope`'s
+            // own gate: the scope can still empty out between opening
+            // the naming prompt and pressing `enter` on it (`:filter
+            // clear` on a tile, an undo), and a `commit_create` on an
+            // accidentally-empty object would silently save "everything"
+            // under the typed name.
+            let scope = shell.frame.read(cx).scope().clone();
+            if scope.is_empty() {
+                set_notice(shell, EMPTY_SCOPE_NOTICE.to_string());
+                cx.notify();
+                return;
+            }
+            // Pending-aware, like `c`'s copy just above: inside the
+            // 250 ms write debounce `services.config` alone is the
+            // config as it stood before the last edit, which would
+            // build the available dimensions list one keystroke stale.
+            let folded = apply::config_with_pending(shell);
+            let config = folded.as_ref().unwrap_or(&shell.services.config);
+            scopes::overwrite_with(&mut draft, &scope, config);
+            draft.diagnostics = domain.validate(&draft, config);
+        }
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
     if let Some(notice) = apply::commit_create(shell, cx) {
@@ -811,6 +817,19 @@ pub(in crate::shell) fn open_save_scope(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
+    // `open`'s own guard (below) refuses to open a SECOND modal, but it
+    // returns silently — this door kept going past that refusal and
+    // mutated whatever `object_dialog` was already there instead (a
+    // Views dialog's `begin_naming`/`naming_seed`, say), because a
+    // second `open(..)` call two lines down is a no-op while the first
+    // branch's `state.notice = ..` and this function's own
+    // `begin_naming` read `shell.object_dialog` regardless of whose it
+    // is. Guarding here, before either branch touches it, is what makes
+    // "no modal is already open" the one precondition both branches
+    // share with `open` itself (review finding).
+    if shell.modal.is_some() {
+        return;
+    }
     if shell.frame.read(cx).scope().is_empty() {
         open(shell, Domain::Scopes, window, cx);
         if let Some(state) = shell.object_dialog.as_mut() {

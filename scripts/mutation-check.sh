@@ -7139,8 +7139,8 @@ run_mutation "scopes dialog: n creates an empty scope, never the frame's" \
 # `mine`'s own `book = ["BK001"]` selection.
 run_mutation "scopes dialog: c copies verbatim" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        draft.source = table;' \
-  '        let _ = table;' \
+  '            draft.source = table;' \
+  '            let _ = table;' \
   geode-shell \
   c_duplicates_the_selected_scope_under_a_new_name
 
@@ -7155,11 +7155,11 @@ run_mutation "scopes dialog: c copies verbatim" \
 # gone source, no file is written, no draft exists) fails under it.
 run_mutation "scopes dialog: c refuses a source that vanished before enter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            .and_then(|v| v.as_table())
-            .cloned()' \
-  '            .and_then(|v| v.as_table())
-            .cloned()
-            .or(Some(toml::Table::new()))' \
+  '                .and_then(|v| v.as_table())
+                .cloned()' \
+  '                .and_then(|v| v.as_table())
+                .cloned()
+                .or(Some(toml::Table::new()))' \
   geode-shell \
   c_refuses_when_the_source_vanished_before_enter
 
@@ -7330,10 +7330,47 @@ run_mutation "scope-save: the save chip's savable gate" \
 # both in the palette and in `input.rs`'s `scope::<name>` dispatch arm.
 run_mutation "scope-save: save_current is a reserved scope name" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            Domain::Scopes => &["save_current"],' \
+  '            Domain::Scopes => &geode_core::scopes::RESERVED_NAMES,' \
   '            Domain::Scopes => &[],' \
   geode-shell \
   scope_save_current_refuses_its_own_name_as_reserved
+
+# Review round 2 (Critical): the dialog's own reserved list is not
+# enough — `Frame::save_scope` is `:scope save`'s door, reached directly
+# from a tile's command line with no dialog in between, and a scope
+# literally named `save_current` written there used to panic
+# `register_scope_actions` at the NEXT startup (two actions claiming
+# `scope::save_current`). Dropping the check here reopens exactly that.
+run_mutation "scope-save: Frame::save_scope refuses the reserved name too" \
+  crates/geode-shell/src/frame.rs \
+  '        if geode_core::scopes::RESERVED_NAMES.contains(&name) {' \
+  '        if false {' \
+  geode-shell \
+  save_scope_refuses_the_reserved_save_current_name
+
+# The second, independent backstop (review round 2): even with both
+# reserved-name checks in place, a hand-edited or desk-layer
+# `scopes.toml` reaches `register_scope_actions` with no door to refuse
+# it first, so the loop itself must skip a colliding id rather than
+# `.expect` it into a startup panic. Disabling the skip recreates the
+# panic the review found.
+run_mutation "scope-save: register_scope_actions skips a colliding id" \
+  crates/geode-shell/src/defaults.rs \
+  '        if reg.contains(&ActionId(id.clone())) {' \
+  '        if false {' \
+  geode-shell \
+  register_scope_actions_skips_a_collision_and_does_not_panic
+
+# The scope bar's own painter gate: `savable` decides whether the `save`
+# chip exists at all, not just whether its click would do anything —
+# `if true` paints it over an empty scope too, where a click can only
+# open naming and refuse at once.
+run_mutation "scope-save: the toolbar only paints the save chip while savable" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '    if model.savable {' \
+  '    if true {' \
+  geode-shell \
+  the_save_chip_only_paints_with_a_savable_scope_and_opens_naming
 
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
