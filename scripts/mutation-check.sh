@@ -13129,6 +13129,18 @@ run_mutation "stacks: fullscreen follows a cycle" \
   geode-shell \
   fullscreen_follows_a_cycle
 
+# Whole-branch review, Important 1: `stack_after`'s own `insert` sets
+# `active` to the new member's index before `set_focus` calls
+# `activate`, so `activate`'s outgoing-member check never fires and a
+# fullscreen held by the stack's old active member survives hidden.
+run_mutation "stacks: stacking onto a fullscreen tile exits fullscreen" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        // hidden — `Tree::layout` paints it (any tile `contains(fs)`).
+        self.fullscreen = None;' \
+  '        // hidden — `Tree::layout` paints it (any tile `contains(fs)`).' \
+  geode-shell \
+  stacking_onto_a_fullscreen_tile_exits_fullscreen
+
 # Brief's original pick (drop the `ix < active` branch entirely) turned
 # out unreachable: both `remove_focused` and `pop_out` always target
 # `self.focused`, which the `set_focus`/`activate` invariant guarantees is
@@ -13209,6 +13221,13 @@ run_mutation "stacks: set_stack is sent once per change" \
   '' \
   geode-shell \
   a_stacked_add_tells_both_members_their_position_once_and_hides_the_old_one
+
+run_mutation "stacks: a replaced occupant is re-told its position" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            self.stack_sent.remove(id);' \
+  '' \
+  geode-shell \
+  a_replaced_occupant_is_re_told_its_position
 
 run_mutation "stacks: hidden members leave the visible set" \
   crates/geode-shell/src/shell/occupants.rs \
