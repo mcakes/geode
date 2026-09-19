@@ -245,7 +245,7 @@ In order:
 
 | Row | Hint | Disabled when (reason) |
 |---|---|---|
-| Load underlying… | `u` | draft has edits (`revert or upload first`) |
+| Load underlying… | `u` | never (since 2026-09-19 — a pick parks the draft; was: draft has edits, `revert or upload first`) |
 | Upload | `:upload` | not built (`not built yet`, until Part 4); clean (`nothing to upload`); Behind (`rebase or revert first`) |
 | Rebase onto HH:MM | `:rebase` | shown only while Behind |
 | Revert edits | `:revert` | clean (`nothing to revert`) |
@@ -301,6 +301,21 @@ same update, the existing rule) so the list is fresh. Refused with a
 notice while the draft has edits, naming `:revert`. With no bridge or
 no catalog yet the list shows `no underlyings known` and `enter` is
 inert.
+
+*Amended 2026-09-19 (user ruling, "keep them per underlying"):* the
+picker is never refused for a dirty draft — a pick goes through
+`set_key`, which parks the current draft under its underlying and
+restores any parked one for the pick (market-data spec §8.3's
+amendment). A row whose underlying holds a parked draft reads
+`SPX.Z · 1 cell, spot_ref` (`Draft::count_phrase`, prepared once per
+open through `PickerRows::with_marks` from the tile's parked tables and
+re-applied by `replace_all` when the catalog refreshes); the current
+underlying's row stays bare, since the header's dirty dot already
+speaks for it. Ranking runs over the bare key in `all`, never the
+decorated label, and `:underlying`'s completions stay bare keys. Tests:
+`the_picker_opens_while_the_draft_has_edits`,
+`a_picker_row_names_an_underlyings_parked_edits`,
+`a_parked_key_is_marked_in_its_label_but_ranked_by_the_bare_key`.
 
 ## 8. Session and commands
 
@@ -653,3 +668,24 @@ and the `Rebase onto HH:MM` row are `hold`'s alone. Harness: seven
 `mdauto:` entries (the `rebase` and `replace` steps, the session read,
 the restore rule, the transition gate, the empty-document guard, and
 the menu's single tick).
+
+### 11.aa Per-underlying drafts (2026-09-19)
+
+User ruling ("keep them per underlying"): loading a different
+underlying no longer requires `:revert`. `set_key` parks the current
+draft under the outgoing key (`MarketDataTile.parked`, label-pair
+tables — `Draft::to_toml`, the session form) and installs a parked
+draft for the incoming key through the restore path (`Draft::from_toml`
++ `unresolved_restore`), so the return is a restore in every respect:
+resolved by label on the first non-empty built model, `Behind` when
+the document moved, first delivery `hold` whatever `:auto` says. §7's
+refusal and §6.2's greyed `Load underlying…` row are gone; the picker
+marks a parked underlying's row with its count phrase; the session
+carries `[drafts.<key>]` per underlying (market-data spec §8.5's
+amendment) and still reads the legacy `draft`. Every draft verb and
+the header's dot read the current underlying's draft alone; Part 4's
+upload will send it alone. Harness: six `mdpark:` entries (the park,
+the restore flag, the session write, the picker mark, the current-only
+revert, the live menu row); the `mdtile:`/`mdpicker:` refusal entries
+they replace are deleted. Display check pending on a real window: the
+decorated picker row beside a bare one.

@@ -71,12 +71,15 @@ fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = MenuRow> {
     })
 }
 
-/// The action list, in order (spec §6.2's table): `Load underlying…`,
-/// `Upload`, `Rebase` only while `Behind`, `Revert edits`, then a
-/// separator and the `On new document` section (three policy rows, one
-/// ticked — always enabled, since a policy is a setting and not a verb on
-/// the draft), then — only while the spec names any — a separator, the
-/// kind's own section header, and one row per [`KindAction`].
+/// The action list, in order (spec §6.2's table): `Load underlying…`
+/// (always enabled since 2026-09-19 — a switch PARKS the current draft
+/// under its underlying rather than being refused by it, spec §7's
+/// amendment), `Upload`, `Rebase` only while `Behind`, `Revert edits`,
+/// then a separator and the `On new document` section (three policy
+/// rows, one ticked — always enabled, since a policy is a setting and not
+/// a verb on the draft), then — only while the spec names any — a
+/// separator, the kind's own section header, and one row per
+/// [`KindAction`].
 pub fn rows(i: &MenuInputs) -> Vec<MenuRow> {
     let dirty = !matches!(i.badge, DraftBadge::Clean);
     let behind = matches!(i.badge, DraftBadge::Behind { .. });
@@ -85,11 +88,7 @@ pub fn rows(i: &MenuInputs) -> Vec<MenuRow> {
             "marketdata::load_underlying",
             "Load underlying…",
             "u",
-            if dirty {
-                Err("revert or upload first")
-            } else {
-                Ok(())
-            },
+            Ok(()),
         ),
         action(
             "marketdata::upload",
@@ -247,15 +246,14 @@ mod tests {
         assert_eq!(enabled(&rows, "Reanchor"), Err("not built yet"));
     }
 
+    /// Per-underlying drafts (2026-09-19): a dirty draft no longer greys
+    /// `Load underlying…` — a switch parks it under its own underlying.
     #[test]
-    fn a_dirty_draft_greys_load_and_a_built_upload_is_live() {
+    fn a_dirty_draft_leaves_load_live_and_a_built_upload_is_live() {
         let mut i = inputs(DraftBadge::Dirty);
         i.upload_built = true;
         let dirty_rows = rows(&i);
-        assert_eq!(
-            enabled(&dirty_rows, "Load underlying…"),
-            Err("revert or upload first")
-        );
+        assert_eq!(enabled(&dirty_rows, "Load underlying…"), Ok(()));
         assert_eq!(enabled(&dirty_rows, "Upload"), Ok(()));
         assert_eq!(enabled(&dirty_rows, "Revert edits"), Ok(()));
         let clean = rows(&MenuInputs {
