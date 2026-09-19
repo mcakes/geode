@@ -10826,7 +10826,7 @@ run_mutation "matrix: a hole in the pivot is an error, not a zero" \
   '                None => {
                     return Err(format!(
                         "the document has no cell for {}='"'"'{row_label}'"'"' {axis}='"'"'{col_label}'"'"'",
-                        spec.rows
+                        spec.rows.column
                     ));
                 }' \
   '                None => cells.push(Cell {
@@ -10911,7 +10911,7 @@ run_mutation "matrix: flatten refuses a repeated row label" \
             return Err(format!(
                 "the document repeats {}='"'"'{label}'"'"' (rows {previous} and {row}): a row \
                  label identifies an edit, so it must name one row",
-                spec.rows
+                spec.rows.column
             ));
         }' \
   '        seen.insert(label.clone(), row);' \
