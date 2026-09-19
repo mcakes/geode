@@ -13,6 +13,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::attribution::{Attribution, ScopeSemantics};
+use geode_core::document::Value;
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
 use geode_core::view::ColumnFormat;
@@ -241,7 +242,7 @@ fn bench(c: &mut Criterion) {
         draft.set(
             cell,
             (labels.0.to_string(), labels.1.to_string()),
-            i as f64,
+            Value::F64(i as f64),
             BASE,
         );
     }

@@ -118,7 +118,7 @@ pub struct Draft {
     /// The source time of the generation every edit was made against,
     /// RFC 3339. `None` exactly when there are no edits.
     pub base: Option<String>,
-    pub edits: BTreeMap<(usize, usize), f64>,
+    pub edits: BTreeMap<(usize, usize), Value>,
     /// Document-level attribute edits, keyed by column name. Part of the
     /// same draft as `edits` (one base, one state) because both are unsent
     /// work against the same document generation.
@@ -175,7 +175,13 @@ impl Draft {
     /// screen; it is stored only while the draft is empty, because every
     /// edit in one draft is against one generation and a later keystroke
     /// must never quietly restamp the set.
-    pub fn set(&mut self, cell: (usize, usize), labels: (String, String), value: f64, base: &str) {
+    pub fn set(
+        &mut self,
+        cell: (usize, usize),
+        labels: (String, String),
+        value: Value,
+        base: &str,
+    ) {
         if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
         }
@@ -186,6 +192,18 @@ impl Draft {
         // `Sent` does not — the draft no longer matches what was sent.
         if matches!(self.state, DraftState::Clean | DraftState::Sent) {
             self.state = DraftState::Editing;
+        }
+    }
+
+    /// A cell edit's numeric reading — `F64`/`I64` widened to `f64`,
+    /// `None` for a `Date`/`Utf8` edit or no edit at all. `:bump`'s own
+    /// door: only a `Number` cell is ever bumped, so this is the one
+    /// place that decision is made rather than repeated at each caller.
+    pub fn numeric_edit(&self, cell: (usize, usize)) -> Option<f64> {
+        match self.edits.get(&cell)? {
+            Value::F64(v) => Some(*v),
+            Value::I64(v) => Some(*v as f64),
+            Value::Utf8(_) | Value::Date(_) => None,
         }
     }
 
@@ -220,6 +238,15 @@ impl Draft {
     /// painting, which is the draft's own value where one exists — so that
     /// `:bump` composes with an edit already made rather than reading
     /// through to the document underneath it.
+    ///
+    /// **Number cells only, by construction of the caller, not this
+    /// function**: `:bump` is a per-cell arithmetic op, so a caller (the
+    /// tile) reads each candidate cell's [`CellKind`] through
+    /// [`MatrixModel::kind_of`] and passes only the `Number` ones —
+    /// exactly the same door `f64_at`-vs-`display_at` reading in
+    /// `matrix::cell_of` decides by. A bumped cell always lands as
+    /// [`Value::F64`]: `delta` is itself an `f64`, and preserving an
+    /// `I64` cell's own type through a bump is not this slice's problem.
     pub fn bump(
         &mut self,
         cells: impl Iterator<Item = ((usize, usize), (String, String), f64)>,
@@ -228,7 +255,7 @@ impl Draft {
     ) -> usize {
         let mut n = 0;
         for (cell, labels, current) in cells {
-            self.set(cell, labels, current + delta, base);
+            self.set(cell, labels, Value::F64(current + delta), base);
             n += 1;
         }
         n
@@ -331,7 +358,7 @@ impl Draft {
                 .map(|(&ri, &ci)| (ri, ci));
             match target {
                 Some(new_cell) => {
-                    edits.insert(new_cell, *value);
+                    edits.insert(new_cell, value.clone());
                     labels.insert(new_cell, (row_label.clone(), col_label.clone()));
                 }
                 None => dropped.push((row_label.clone(), col_label.clone())),
@@ -415,7 +442,7 @@ impl Draft {
                 Some(toml::Value::Array(vec![
                     toml::Value::String(row_label.clone()),
                     toml::Value::String(col_label.clone()),
-                    toml::Value::Float(*value),
+                    value_to_toml(value),
                 ]))
             })
             .collect();
@@ -444,11 +471,15 @@ impl Draft {
     /// than taking the whole draft with it (unsent work is worth more than
     /// tidiness).
     ///
-    /// An attribute's `String` is read back as a [`Value::Date`] when it
-    /// parses `%Y-%m-%d` and a [`Value::Utf8`] otherwise: a date string is
+    /// A cell edit's value is read through [`value_from_toml`] — a bare
+    /// number or a tagged date/text, never a guess. An attribute's
+    /// `String` is read back as a [`Value::Date`] when it parses
+    /// `%Y-%m-%d` and a [`Value::Utf8`] otherwise: a date string is
     /// unambiguous (`to_toml` writes no other string in that exact shape),
     /// and a free-text attribute never happens to look like one — so the
-    /// direction of the guess costs nothing either way.
+    /// direction of the guess costs nothing either way. The two spellings
+    /// differ on purpose (§4.3's ruling): `attrs` predates typed cells and
+    /// nothing forces its shape to change to match.
     pub fn from_toml(t: &toml::Table) -> Draft {
         let base = t.get("base").and_then(|v| v.as_str()).map(str::to_string);
         let mut edits = BTreeMap::new();
@@ -466,9 +497,11 @@ impl Draft {
             if triple.len() != 3 {
                 continue;
             }
-            let (Some(row_label), Some(col_label), Some(value)) =
-                (triple[0].as_str(), triple[1].as_str(), as_f64(&triple[2]))
-            else {
+            let (Some(row_label), Some(col_label), Some(value)) = (
+                triple[0].as_str(),
+                triple[1].as_str(),
+                value_from_toml(&triple[2]),
+            ) else {
                 continue;
             };
             let cell = (i, UNRESOLVED_COLUMN);
@@ -509,12 +542,54 @@ impl Draft {
     }
 }
 
-fn as_f64(value: &toml::Value) -> Option<f64> {
-    // A whole number round-trips through TOML as an integer, so a draft
-    // written as `1.0` reads back as `1` and must still be a value.
-    value
-        .as_float()
-        .or_else(|| value.as_integer().map(|i| i as f64))
+/// A cell edit's value on the wire: a number bare (`toml::Value::Float`/
+/// `Integer`, matching whichever `to_toml` wrote), a date or text edit
+/// TAGGED — see [`tagged`] — so a restored `2026-12-18` cannot be
+/// confused with the text edit `"2026-12-18"` a trader might just as
+/// well have typed into a `Utf8` cell.
+fn value_to_toml(value: &Value) -> toml::Value {
+    match value {
+        Value::F64(f) => toml::Value::Float(*f),
+        Value::I64(i) => toml::Value::Integer(*i),
+        Value::Date(d) => tagged("date", d.format("%Y-%m-%d").to_string()),
+        Value::Utf8(s) => tagged("text", s.clone()),
+    }
+}
+
+/// `{ type = "<ty>", value = "<value>" }` — a date and a text edit are
+/// both strings on the wire, and only a tag keeps a restored
+/// `2026-12-18` from reading back as text.
+fn tagged(ty: &str, value: String) -> toml::Value {
+    let mut t = toml::Table::new();
+    t.insert("type".into(), toml::Value::String(ty.to_string()));
+    t.insert("value".into(), toml::Value::String(value));
+    toml::Value::Table(t)
+}
+
+/// The inverse of [`value_to_toml`]: a bare `Float`/`Integer` reads back
+/// as the matching numeric variant, a `{ type, value }` table as the
+/// date or text it tags. A bare `String` — the shape [`attr_text`]'s
+/// sibling below writes for an attribute, never a cell edit — is refused
+/// rather than guessed: a cell edit's date or text is only ever spelled
+/// tagged, so an untagged string here is malformed, skipped the same as
+/// any other unreadable entry.
+fn value_from_toml(value: &toml::Value) -> Option<Value> {
+    match value {
+        toml::Value::Float(f) => Some(Value::F64(*f)),
+        toml::Value::Integer(i) => Some(Value::I64(*i)),
+        toml::Value::Table(t) => {
+            let ty = t.get("type")?.as_str()?;
+            let text = t.get("value")?.as_str()?;
+            match ty {
+                "date" => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                    .ok()
+                    .map(Value::Date),
+                "text" => Some(Value::Utf8(text.to_string())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Local, like every other displayed time in this codebase (Phase 4a's
@@ -644,6 +719,9 @@ mod tests {
             source_time: Some(source_time.to_string()),
             header: Vec::new(),
             slice_columns: 0,
+            // `rebase` never reads a column's `CellKind` — only its label
+            // — so an empty vec here is honest, not a shortcut.
+            column_kinds: Vec::new(),
             columns: cols
                 .iter()
                 .map(|c| SharedString::from(c.to_string()))
@@ -671,12 +749,12 @@ mod tests {
     fn the_first_edit_records_the_base_and_a_second_edit_on_one_cell_keeps_the_latest() {
         let mut draft = Draft::default();
         assert_eq!(draft.state, DraftState::Clean);
-        draft.set((0, 1), pair("T1", "-1"), 0.5, BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.5), BASE);
         assert_eq!(draft.state, DraftState::Editing);
         assert_eq!(draft.base.as_deref(), Some(BASE));
-        draft.set((0, 1), pair("T1", "-1"), 0.7, BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.7), BASE);
         assert_eq!(draft.edits.len(), 1);
-        assert_eq!(draft.edits.get(&(0, 1)), Some(&0.7));
+        assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(0.7)));
         assert_eq!(
             draft.base.as_deref(),
             Some(BASE),
@@ -687,7 +765,7 @@ mod tests {
     #[test]
     fn on_delivered_stays_editing_on_the_same_generation_and_goes_behind_on_a_newer_one() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
 
         assert!(
             !draft.on_delivered(BASE),
@@ -703,7 +781,7 @@ mod tests {
             }
         );
         assert_eq!(draft.edits.len(), 1, "a newer document never clobbers work");
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&1.0));
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.0)));
         assert_eq!(
             draft.base.as_deref(),
             Some(BASE),
@@ -724,7 +802,7 @@ mod tests {
     #[test]
     fn the_base_generation_redelivered_brings_a_behind_draft_back_to_editing() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
         let older = "2026-09-12T09:00:00Z";
 
         assert!(draft.on_delivered(older), "an as-of step back is Behind");
@@ -741,7 +819,7 @@ mod tests {
         );
         assert_eq!(draft.state, DraftState::Editing);
         assert_eq!(draft.edits.len(), 1, "the edits are untouched");
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&1.0));
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.0)));
         assert_eq!(draft.base.as_deref(), Some(BASE));
         assert!(
             !draft.on_delivered(BASE),
@@ -760,8 +838,8 @@ mod tests {
     fn rebase_moves_an_edit_to_its_new_index_by_label_and_reports_a_dropped_one() {
         let mut draft = Draft::default();
         // Two edits on a document whose rows were [T_b, T_a].
-        draft.set((1, 1), pair("T_a", "-1"), 0.5, BASE);
-        draft.set((0, 0), pair("T_b", "-20"), 0.25, BASE);
+        draft.set((1, 1), pair("T_a", "-1"), Value::F64(0.5), BASE);
+        draft.set((0, 0), pair("T_b", "-20"), Value::F64(0.25), BASE);
         draft.on_delivered(NEWER);
 
         // The new document dropped T_b and so lists T_a first: the kept
@@ -774,7 +852,7 @@ mod tests {
         assert_eq!(draft.edits.len(), 1);
         assert_eq!(
             draft.edits.get(&(0, 1)),
-            Some(&0.5),
+            Some(&Value::F64(0.5)),
             "T_a × -1 is cell (0,1) in the new document"
         );
         assert_eq!(draft.state, DraftState::Editing);
@@ -788,7 +866,7 @@ mod tests {
     #[test]
     fn rebase_onto_a_document_that_lost_every_label_is_clean_again() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T_a", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T_a", "-20"), Value::F64(1.0), BASE);
         draft.on_delivered(NEWER);
         let (kept, dropped) = draft.rebase(&model(&["T_z"], &["-20"], NEWER));
         assert_eq!(kept, 0);
@@ -800,8 +878,8 @@ mod tests {
     #[test]
     fn revert_clears_the_edits_and_counts_them() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
-        draft.set((0, 1), pair("T1", "-1"), 2.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(2.0), BASE);
         assert_eq!(draft.revert(), 2);
         assert_eq!(draft.state, DraftState::Clean);
         assert!(draft.edits.is_empty());
@@ -812,7 +890,7 @@ mod tests {
     #[test]
     fn revert_clears_everything_including_the_behind_state() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
         draft.on_delivered(NEWER);
         draft.revert();
         assert!(draft.edits.is_empty());
@@ -829,14 +907,35 @@ mod tests {
             ((0, 1), pair("T1", "-1"), 2.5),
         ];
         assert_eq!(draft.bump(cells.into_iter(), 0.5, BASE), 2);
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&1.5));
-        assert_eq!(draft.edits.get(&(0, 1)), Some(&3.0));
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.5)));
+        assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(3.0)));
         assert_eq!(draft.state, DraftState::Editing);
         // Bumping again reads the caller's *current* value, which is the
         // draft's own by then — the tile passes what the model paints.
         let again = vec![((0, 0), pair("T1", "-20"), 1.5)];
         assert_eq!(draft.bump(again.into_iter(), 0.5, BASE), 1);
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&2.0));
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
+    }
+
+    /// `:bump` only ever reaches a `Number` cell (the tile filters by
+    /// `MatrixModel::kind_of` before it ever builds the iterator `bump`
+    /// takes), so `numeric_edit` is the door that check is really made
+    /// through: `F64`/`I64` widen to `f64`, a `Date`/`Utf8` edit (or no
+    /// edit at all) answers `None` rather than being coerced.
+    #[test]
+    fn numeric_edit_reads_f64_and_i64_and_ignores_other_kinds() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.5), BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::I64(7), BASE);
+        draft.set((0, 2), pair("T1", "0"), Value::Utf8("x".into()), BASE);
+        assert_eq!(draft.numeric_edit((0, 0)), Some(1.5));
+        assert_eq!(draft.numeric_edit((0, 1)), Some(7.0));
+        assert_eq!(
+            draft.numeric_edit((0, 2)),
+            None,
+            "a text edit is not numeric"
+        );
+        assert_eq!(draft.numeric_edit((9, 9)), None, "no edit at all");
     }
 
     #[test]
@@ -845,12 +944,12 @@ mod tests {
         assert_eq!(draft.badge(), DraftBadge::Clean);
         assert_eq!(draft.count_phrase(), "");
 
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
         assert_eq!(draft.badge(), DraftBadge::Dirty);
         assert_eq!(draft.count_phrase(), "1 cell");
 
-        draft.set((0, 1), pair("T1", "-1"), 1.0, BASE);
-        draft.set((1, 1), pair("T2", "-1"), 1.0, BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(1.0), BASE);
+        draft.set((1, 1), pair("T2", "-1"), Value::F64(1.0), BASE);
         assert_eq!(draft.count_phrase(), "3 cells");
 
         draft.state = DraftState::Sent;
@@ -890,8 +989,8 @@ mod tests {
     #[test]
     fn to_toml_and_from_toml_round_trip_the_edits_by_label_and_the_base() {
         let mut draft = Draft::default();
-        draft.set((0, 1), pair("T1", "-1"), 0.5, BASE);
-        draft.set((1, 0), pair("T2", "-20"), 0.25, BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.5), BASE);
+        draft.set((1, 0), pair("T2", "-20"), Value::F64(0.25), BASE);
 
         let table = draft.to_toml();
         assert_eq!(table.get("base").and_then(|v| v.as_str()), Some(BASE));
@@ -924,8 +1023,16 @@ mod tests {
         let (kept, dropped) = {
             let mut restored = restored;
             let resolved = restored.rebase(&model(&["T2", "T1"], &["-20", "-1"], BASE));
-            assert_eq!(restored.edits.get(&(1, 1)), Some(&0.5), "T1 × -1");
-            assert_eq!(restored.edits.get(&(0, 0)), Some(&0.25), "T2 × -20");
+            assert_eq!(
+                restored.edits.get(&(1, 1)),
+                Some(&Value::F64(0.5)),
+                "T1 × -1"
+            );
+            assert_eq!(
+                restored.edits.get(&(0, 0)),
+                Some(&Value::F64(0.25)),
+                "T2 × -20"
+            );
             resolved
         };
         assert_eq!(kept, 2);
@@ -953,7 +1060,56 @@ mod tests {
         );
         let draft = Draft::from_toml(&table);
         assert_eq!(draft.edits.len(), 1, "the readable edit survives");
-        assert_eq!(draft.edits.values().next(), Some(&3.0));
+        assert_eq!(draft.edits.values().next(), Some(&Value::I64(3)));
+    }
+
+    /// §4.3: a date or text cell edit is spelled `{ type, value }` on the
+    /// wire, never a bare string — the same tag `to_toml` writes and the
+    /// only shape `from_toml` accepts for either, so a stray untagged
+    /// string (however it got into the file) is refused like any other
+    /// malformed entry rather than guessed at.
+    #[test]
+    fn typed_edits_round_trip_through_toml_with_a_type_tag() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), pair("D1", "ex"), Value::Date(d(2026, 12, 20)), BASE);
+        draft.set((0, 1), pair("D1", "amount"), Value::F64(1.5), BASE);
+        draft.set(
+            (0, 2),
+            pair("D1", "status"),
+            Value::Utf8("paid".into()),
+            BASE,
+        );
+
+        let table = draft.to_toml();
+        let back = Draft::from_toml(&table);
+        let values: Vec<_> = back.edits.values().cloned().collect();
+        assert!(values.contains(&Value::Date(d(2026, 12, 20))));
+        assert!(values.contains(&Value::F64(1.5)));
+        assert!(values.contains(&Value::Utf8("paid".into())));
+
+        // A date is a tagged table, never a bare string a text edit
+        // could be confused with.
+        let text = toml::to_string(&table).unwrap();
+        assert!(text.contains("type = \"date\""), "{text}");
+        assert!(text.contains("type = \"text\""), "{text}");
+    }
+
+    /// A bare, untagged string in a cell edit's value slot — the shape a
+    /// hand-edited file, or a session written by a future mistake, might
+    /// carry — is refused rather than guessed as text or a date.
+    #[test]
+    fn an_untagged_string_cell_edit_is_skipped_not_guessed() {
+        let mut table = toml::Table::new();
+        table.insert(
+            "edits".into(),
+            toml::Value::Array(vec![toml::Value::Array(vec![
+                toml::Value::String("T1".into()),
+                toml::Value::String("-1".into()),
+                toml::Value::String("paid".into()),
+            ])]),
+        );
+        let draft = Draft::from_toml(&table);
+        assert!(draft.edits.is_empty(), "an untagged string is malformed");
     }
 
     #[test]
@@ -1104,12 +1260,12 @@ mod tests {
     #[test]
     fn count_phrase_names_cells_and_attributes() {
         let mut draft = Draft::default();
-        draft.set((0, 0), ("1M".into(), "-20".into()), 0.1, "t0");
-        draft.set((0, 1), ("1M".into(), "-10".into()), 0.1, "t0");
+        draft.set((0, 0), ("1M".into(), "-20".into()), Value::F64(0.1), "t0");
+        draft.set((0, 1), ("1M".into(), "-10".into()), Value::F64(0.1), "t0");
         draft.set_attr("spot_ref", Value::F64(1.0), "t0");
         assert_eq!(draft.count_phrase(), "2 cells, spot_ref");
         let mut one = Draft::default();
-        one.set((0, 0), ("1M".into(), "-20".into()), 0.1, "t0");
+        one.set((0, 0), ("1M".into(), "-20".into()), Value::F64(0.1), "t0");
         assert_eq!(one.count_phrase(), "1 cell");
     }
 

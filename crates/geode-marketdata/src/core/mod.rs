@@ -19,6 +19,6 @@ pub mod spec;
 pub use cursor::Cursor;
 pub use datefield::{DateField, Segment, SegmentText};
 pub use draft::{Draft, DraftBadge, DraftState, UpdatePolicy, attr_text, parse_attr, parse_cell};
-pub use matrix::{Cell, MatrixModel, RowModel};
+pub use matrix::{Cell, CellKind, MatrixModel, RowModel, cell_text};
 pub use nudge::nudge_text;
 pub use spec::{CVI, Columns, KindAction, PanelSpec};

@@ -54,8 +54,8 @@ use crate::core::cursor::{self, Cursor, Grid, Motion};
 use crate::core::draft::local_hhmm;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::{
-    DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment, UpdatePolicy, parse_attr,
-    parse_cell,
+    Cell, CellKind, Columns, DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment,
+    UpdatePolicy, parse_attr, parse_cell,
 };
 use crate::delegate::MatrixDelegate;
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -2038,24 +2038,28 @@ impl MarketDataTile {
         let text = state.read(cx).value().to_string();
         let (ty, precision) = match &editing.target {
             EditTarget::Cell { cell: (_, col), .. } => {
-                // A slice column (`fwd` at two places beside `param`'s
-                // four) carries its own format; resolved by LABEL, the
-                // same identity the draft files an edit under, and only
-                // inside the slice block, so a ladder label could never
-                // be mistaken for one.
-                let precision = self
-                    .model
-                    .columns
-                    .get(*col)
-                    .filter(|_| *col < self.model.slice_columns)
-                    .and_then(|label| {
-                        self.spec
-                            .slice_values
-                            .iter()
-                            .find(|s| s.label == label.as_ref())
-                    })
-                    .map_or(self.spec.format.precision, |s| s.format.precision);
-                (self.spec.value_type, Some(usize::from(precision)))
+                // The column's own `CellKind` says both how far this cell
+                // steps (its `ColumnFormat`'s own `precision` — a slice
+                // column's own, distinct from the ladder's) and whether
+                // it steps at all: the other three kinds are Task 4's,
+                // so a non-`Number` cell — reachable while its (today,
+                // plain-text) editor is still open — is refused here the
+                // same way `commit_cell_edit` refuses committing one.
+                let Some(CellKind::Number(format)) = self.model.kind_of(*col) else {
+                    self.notice = Some("not a numeric cell".into());
+                    return true;
+                };
+                // The declared type, same rule `commit_cell_edit` reads
+                // it by: the panel's one `value_type` under a pivot, the
+                // column's OWN `ValueColumn::ty` under a flat panel,
+                // since a schedule's columns need not agree.
+                let ty = match &self.spec.columns {
+                    Columns::Axis(_) => self.spec.value_type,
+                    Columns::Values(cols) => {
+                        cols.get(*col).map_or(self.spec.value_type, |vc| vc.ty)
+                    }
+                };
+                (ty, Some(usize::from(format.precision)))
             }
             EditTarget::Attr { column, .. } => {
                 let Some(attr) = self
@@ -2104,13 +2108,44 @@ impl MarketDataTile {
             self.notice = Some(CELL_MOVED.into());
             return true;
         }
-        let value = match parse_cell(text, self.spec.value_type) {
+        // The column's declared type, per its `CellKind` — `Number`
+        // under a pivot is always `self.spec.value_type` (one value
+        // column, one declared type), under a flat panel it is the
+        // column's OWN `ValueColumn::ty`, since a schedule's columns can
+        // each declare a different one. `Date`/`Text`/`Choice` are
+        // Task 4's: refused here rather than guessed at, so this task
+        // stays green while that editor does not exist yet.
+        let ty = match self.model.kind_of(cell.1) {
+            Some(CellKind::Number(_)) => match &self.spec.columns {
+                Columns::Axis(_) => self.spec.value_type,
+                Columns::Values(cols) => match cols.get(cell.1) {
+                    Some(vc) => vc.ty,
+                    // Unreachable given the label check above (the model
+                    // and the spec's flat columns are built in lockstep),
+                    // but refused rather than guessed at.
+                    None => {
+                        self.close_editor(window, cx);
+                        self.notice = Some(CELL_MOVED.into());
+                        return true;
+                    }
+                },
+            },
+            _ => {
+                self.notice = Some("not a numeric cell".into());
+                return true;
+            }
+        };
+        let parsed = match parse_cell(text, ty) {
             Ok(value) => value,
             Err(e) => {
                 // Stay in insert mode, with the text as typed.
                 self.notice = Some(e.into());
                 return true;
             }
+        };
+        let value = match ty {
+            ColumnType::I64 => Value::I64(parsed as i64),
+            _ => Value::F64(parsed),
         };
         let base = match self.edit_base() {
             Ok(base) => base,
@@ -2502,16 +2537,19 @@ impl MarketDataTile {
         self.base_snapshot = None;
     }
 
-    /// `:bump <delta> [row|col]` — add `delta` to every cell along the
-    /// cursor's ROW by default (a term's whole node ladder is the shape a
-    /// trader nudges) or down its column on request.
+    /// `:bump <delta> [row|col]` — add `delta` to every NUMBER cell along
+    /// the cursor's ROW by default (a term's whole node ladder is the
+    /// shape a trader nudges) or down its column on request.
     ///
     /// Each cell's CURRENT painted value is what is added to, which is the
     /// draft's own value wherever one exists, so two bumps compose instead
     /// of the second reading through to the document underneath
     /// (`Draft::bump`'s own contract). A NULL cell is skipped: there is no
     /// number to add to, and inventing one would put a value on screen the
-    /// document never carried.
+    /// document never carried. A cell whose column is not `CellKind::Number`
+    /// (a flat panel's date or status column) is skipped the same way —
+    /// `:bump` is arithmetic, and a schedule's non-numeric columns have
+    /// nothing to add to either.
     fn bump(&mut self, delta: f64, axis: BumpAxis, cx: &mut Context<Self>) -> Result<(), String> {
         if self.draft.is_behind() {
             return Err(BEHIND_REFUSED.to_string());
@@ -2522,6 +2560,14 @@ impl MarketDataTile {
             // has neither, and there is no cell here to name.
             return Err("bump needs a grid cell — the cursor is in the header".to_string());
         };
+        // `F64`/`I64` widened to `f64` — the same reading `Draft::numeric_edit`
+        // does for an already-drafted cell, here for a delivered one.
+        let numeric_value = |cell: &Cell| match &cell.value {
+            Some(Value::F64(v)) => Some(*v),
+            Some(Value::I64(v)) => Some(*v as f64),
+            Some(Value::Utf8(_) | Value::Date(_)) | None => None,
+        };
+        let mut skipped = 0usize;
         let values: Vec<((usize, usize), f64)> = match axis {
             // A row bump walks the LADDER: the leading `slice_columns`
             // cells are the term's own forward/atm/skew, and bumping a
@@ -2533,23 +2579,37 @@ impl MarketDataTile {
                 .iter()
                 .enumerate()
                 .skip(self.model.slice_columns)
-                .filter_map(|(ci, cell)| cell.value.map(|v| ((row, ci), v)))
-                .collect(),
-            BumpAxis::Col => self
-                .model
-                .rows
-                .iter()
-                .enumerate()
-                .filter_map(|(ri, r)| {
-                    r.cells
-                        .get(col)
-                        .and_then(|cell| cell.value)
-                        .map(|v| ((ri, col), v))
+                .filter_map(|(ci, cell)| {
+                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
+                        skipped += 1;
+                        return None;
+                    }
+                    numeric_value(cell).map(|v| ((row, ci), v))
                 })
                 .collect(),
+            BumpAxis::Col => {
+                if !matches!(self.model.kind_of(col), Some(CellKind::Number(_))) {
+                    return Err("not a numeric column".to_string());
+                }
+                self.model
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ri, r)| {
+                        r.cells
+                            .get(col)
+                            .and_then(numeric_value)
+                            .map(|v| ((ri, col), v))
+                    })
+                    .collect()
+            }
         };
         if values.is_empty() {
-            return Err("no values to bump".to_string());
+            return Err(if skipped > 0 {
+                format!("no numeric cells to bump ({skipped} skipped)")
+            } else {
+                "no values to bump".to_string()
+            });
         }
         // Collected rather than handed to `Draft::bump` as a lazy iterator:
         // the labels come off `self.model` while the draft is borrowed

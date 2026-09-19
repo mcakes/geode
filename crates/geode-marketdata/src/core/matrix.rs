@@ -13,13 +13,48 @@
 //! only about a grid.
 
 use crate::core::draft::{Draft, attr_text};
-use crate::core::spec::{Columns, PanelSpec};
+use crate::core::spec::{Columns, PanelSpec, ValueColumn};
 use geode_core::attribution::Attribution;
+use geode_core::document::Value;
 use geode_core::format::format_number;
+use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
 use geode_core::view::ColumnFormat;
 use gpui::SharedString;
 use std::collections::HashMap;
+
+/// One column's edited shape (spec §4.3): a number paints through its own
+/// `ColumnFormat` exactly as before, a date paints ISO, and text/choice
+/// paint themselves. Parallel to [`MatrixModel::columns`] — the pivot's
+/// ladder and slice columns are always `Number`, a flat panel's columns
+/// are whatever each [`ValueColumn::ty`] declares.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CellKind {
+    Number(ColumnFormat),
+    Date,
+    Text,
+    Choice(&'static [&'static str]),
+}
+
+/// The one formatter a [`Cell`]'s text is ever built through — the
+/// document's own value and an edited one alike, so a typed edit paints
+/// in exactly the shape the document would have.
+///
+/// A number in a non-number column (and vice versa) is spelled plainly
+/// rather than through a format the column does not have: the mismatch
+/// itself is a defect elsewhere (a spec whose `ValueColumn::ty` disagrees
+/// with what it reads), and this function's job is to paint something
+/// honest, not to hide that.
+pub fn cell_text(value: &Value, kind: &CellKind) -> String {
+    match (kind, value) {
+        (CellKind::Number(format), Value::F64(v)) => format_number(*v, format).text,
+        (CellKind::Number(format), Value::I64(v)) => format_number(*v as f64, format).text,
+        (_, Value::Date(d)) => d.format("%Y-%m-%d").to_string(),
+        (_, Value::Utf8(s)) => s.clone(),
+        (_, Value::F64(v)) => format!("{v}"),
+        (_, Value::I64(v)) => v.to_string(),
+    }
+}
 
 /// One header attribute as painted: prepared text, and whether the draft
 /// has overridden it — `true` exactly when [`header_of`] found a
@@ -35,11 +70,11 @@ pub struct HeaderCell {
 /// One prepared cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
-    /// Formatted with the panel's `ColumnFormat`, or empty for a NULL.
-    /// Empty is the honest rendering of "no value here" (§6.3): a blank
-    /// cell and a `0.0000` are different claims.
+    /// Formatted through [`cell_text`], or empty for a NULL. Empty is the
+    /// honest rendering of "no value here" (§6.3): a blank cell and a
+    /// `0.0000` are different claims.
     pub text: SharedString,
-    pub value: Option<f64>,
+    pub value: Option<Value>,
     pub edited: bool,
     pub sent: bool,
     /// The grid index this cell sits at, which is also the key a
@@ -69,6 +104,11 @@ pub struct MatrixModel {
     /// The slice-value labels first (`slice_columns` of them), then the
     /// ladder.
     pub columns: Vec<SharedString>,
+    /// Parallel to `columns`: each column's [`CellKind`], so a cell's own
+    /// column says how it paints and how a typed edit to it is parsed —
+    /// a pivot's are always `Number`, a flat panel's follow each
+    /// [`ValueColumn::ty`].
+    pub column_kinds: Vec<CellKind>,
     /// How many of `columns` (and of every row's leading `cells`) are the
     /// spec's per-slice values rather than the pivot's own ladder — what
     /// lets a row bump skip them and the delegate rule them off.
@@ -77,6 +117,12 @@ pub struct MatrixModel {
 }
 
 impl MatrixModel {
+    /// The [`CellKind`] a column paints and edits through, if `col` is in
+    /// range.
+    pub fn kind_of(&self, col: usize) -> Option<&CellKind> {
+        self.column_kinds.get(col)
+    }
+
     /// Pivot or flatten `snapshot` per `spec`, with `draft`'s edits
     /// painted over the document's own values.
     ///
@@ -121,11 +167,11 @@ impl MatrixModel {
             .ok_or_else(|| format!("the document has no '{}' column", spec.rows.column))?;
         let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec, draft);
-        let (columns, slice_columns, rows) = match &spec.columns {
+        let (columns, column_kinds, slice_columns, rows) = match &spec.columns {
             Columns::Axis(axis) => pivot(snapshot, spec, draft, rows_idx, axis)?,
             Columns::Values(_) => {
-                let (columns, rows) = flatten(snapshot, spec, draft, rows_idx)?;
-                (columns, 0, rows)
+                let (columns, column_kinds, rows) = flatten(snapshot, spec, draft, rows_idx)?;
+                (columns, column_kinds, 0, rows)
             }
         };
         Ok(MatrixModel {
@@ -133,6 +179,7 @@ impl MatrixModel {
             source_time,
             header,
             columns,
+            column_kinds,
             slice_columns,
             rows,
         })
@@ -381,13 +428,18 @@ fn index_grid(
 /// `Grid::at` is keyed by the labels themselves rather than by their
 /// indices precisely so that this ordering decision is separable from
 /// where the values come from.
+/// `pivot`'s own result: the column headers (slice labels then the
+/// ladder), each one's [`CellKind`] in the same order, how many of the
+/// two leading vecs are slice columns, and the built rows.
+type PivotResult = Result<(Vec<SharedString>, Vec<CellKind>, usize, Vec<RowModel>), String>;
+
 fn pivot(
     snapshot: &Snapshot,
     spec: &PanelSpec,
     draft: &Draft,
     rows_idx: usize,
     axis: &str,
-) -> Result<(Vec<SharedString>, usize, Vec<RowModel>), String> {
+) -> PivotResult {
     let col_idx = snapshot
         .column_index(axis)
         .ok_or_else(|| format!("the document has no '{axis}' column"))?;
@@ -421,6 +473,19 @@ fn pivot(
             ));
         }
     };
+    // The pivot's one cell column must be numeric: `display_at` reads
+    // text, dictionaries, dates, timestamps and bools and deliberately
+    // leaves numbers alone (`label_at`'s own rule, above), so `Some` here
+    // means "this is one of the types `display_at` covers" — i.e. not a
+    // number. Row 0 stands for the whole column: a document's columns are
+    // uniformly typed, so one row settles it.
+    if snapshot.display_at(value_idx, 0).is_some() {
+        let name = snapshot
+            .meta_at(value_idx)
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        return Err(format!("a pivot's value column '{name}' must be numeric"));
+    }
 
     let grid = index_grid(snapshot, spec, rows_idx, col_idx, axis)?;
 
@@ -466,25 +531,40 @@ fn pivot(
     }
     let slice_columns = slices.len();
 
+    // A slice column carries its own format (a forward at two places
+    // beside `param`'s four); every ladder column shares the panel's
+    // `spec.format`. Both are always `Number` — the refusal above is what
+    // makes that true of the ladder, and a slice value is `f64` only by
+    // the spec's own doc comment.
+    let mut column_kinds: Vec<CellKind> = slices
+        .iter()
+        .map(|(sv, _)| CellKind::Number(sv.format.clone()))
+        .collect();
+    column_kinds.extend(
+        std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),
+    );
+
     let mut rows = Vec::with_capacity(grid.rows.len());
     for (ri, row_label) in grid.rows.iter().enumerate() {
         let mut cells = Vec::with_capacity(slice_columns + grid.columns.len());
         // Every row label came out of `index_grid`'s pass over the
         // snapshot rows, so each has a first row.
         let first = first_row[ri].unwrap_or_default();
-        for (ci, (sv, idx)) in slices.iter().enumerate() {
-            cells.push(cell_of(snapshot, *idx, first, (ri, ci), &sv.format, draft));
+        for (ci, (_, idx)) in slices.iter().enumerate() {
+            let value = snapshot.f64_at(*idx, first).map(Value::F64);
+            cells.push(cell_of(value, (ri, ci), &column_kinds[ci], draft));
         }
         for (ci, col_label) in grid.columns.iter().enumerate() {
             match grid.at.get(row_label).and_then(|m| m.get(col_label)) {
-                Some(&srow) => cells.push(cell_of(
-                    snapshot,
-                    value_idx,
-                    srow,
-                    (ri, slice_columns + ci),
-                    &spec.format,
-                    draft,
-                )),
+                Some(&srow) => {
+                    let value = snapshot.f64_at(value_idx, srow).map(Value::F64);
+                    cells.push(cell_of(
+                        value,
+                        (ri, slice_columns + ci),
+                        &column_kinds[slice_columns + ci],
+                        draft,
+                    ));
+                }
                 None => {
                     return Err(format!(
                         "the document has no cell for {}='{row_label}' {axis}='{col_label}'",
@@ -504,30 +584,93 @@ fn pivot(
             .map(|(sv, _)| SharedString::from(sv.label))
             .chain(grid.columns.into_iter().map(SharedString::from))
             .collect(),
+        column_kinds,
         slice_columns,
         rows,
     ))
 }
 
-/// The flat shape: one row per document row, one column per value column.
-fn flatten(
-    snapshot: &Snapshot,
-    spec: &PanelSpec,
-    draft: &Draft,
-    rows_idx: usize,
-) -> Result<(Vec<SharedString>, Vec<RowModel>), String> {
-    let value_idxs = value_columns(snapshot, spec);
-    if value_idxs.is_empty() {
+/// The [`CellKind`] a flat [`ValueColumn`] paints and edits through: a
+/// number for `F64`/`I64`, `Date` for a date, and for `Utf8` either
+/// `Choice` (the column declares a fixed vocabulary) or plain `Text`.
+/// `Timestamp`/`Bool` are not yet a shape this crate's typed cells cover
+/// and fall back to `Text` — the same "paint something honest" rule
+/// [`cell_text`] follows for a mismatch, rather than refuse a spec that
+/// declares one.
+fn flat_kind(vc: &ValueColumn) -> CellKind {
+    match (vc.ty, vc.choices) {
+        (ColumnType::F64 | ColumnType::I64, _) => CellKind::Number(vc.format.clone()),
+        (ColumnType::Date, _) => CellKind::Date,
+        (_, Some(choices)) => CellKind::Choice(choices),
+        (ColumnType::Utf8 | ColumnType::Timestamp | ColumnType::Bool, None) => CellKind::Text,
+    }
+}
+
+/// One flat cell's document value, read per its column's declared type —
+/// `f64_at`/`i64_at` for a number, `display_at` for everything else
+/// (a `Date32` displays as `%Y-%m-%d`, [`label_at`]'s own rule, so the
+/// round trip back into a [`Value::Date`] is exact).
+fn read_flat_value(snapshot: &Snapshot, idx: usize, row: usize, ty: ColumnType) -> Option<Value> {
+    match ty {
+        ColumnType::F64 => snapshot.f64_at(idx, row).map(Value::F64),
+        ColumnType::I64 => snapshot.i64_at(idx, row).map(Value::I64),
+        ColumnType::Date => snapshot
+            .display_at(idx, row)
+            .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
+            .map(Value::Date),
+        ColumnType::Utf8 | ColumnType::Timestamp | ColumnType::Bool => {
+            snapshot.display_at(idx, row).map(Value::Utf8)
+        }
+    }
+}
+
+/// `flatten`'s own result: the column headers, each one's [`CellKind`] in
+/// the same order, and the built rows.
+type FlattenResult = Result<(Vec<SharedString>, Vec<CellKind>, Vec<RowModel>), String>;
+
+/// The flat shape: one row per document row, one column per
+/// [`PanelSpec::flat_columns`] entry, in the spec's own order — the paint
+/// order, not the document's column order.
+fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize) -> FlattenResult {
+    let flat_columns = spec.flat_columns();
+    if flat_columns.is_empty() {
         return Err(format!(
             "the document '{}' has no value column",
             spec.dataset
         ));
     }
-    let columns = value_idxs
+    // Resolve each spec-declared column against the document, in spec
+    // order: this loop's order is what `columns`, `column_kinds` and
+    // every row's `cells` inherit.
+    let mut idxs = Vec::with_capacity(flat_columns.len());
+    for vc in flat_columns {
+        let idx = snapshot
+            .column_index(vc.column)
+            .ok_or_else(|| format!("the document has no '{}' column", vc.column))?;
+        idxs.push(idx);
+    }
+    // The reverse direction: a value column the document carries that the
+    // spec does not list is refused, never painted unlabelled — a schema
+    // drifting under a spec is reported rather than silently shown or
+    // silently dropped.
+    for idx in 0..snapshot.columns() {
+        let name = snapshot
+            .meta_at(idx)
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        if is_value(snapshot, idx) && spec.value_column(&name).is_none() {
+            return Err(format!(
+                "the document carries a value column '{name}' this panel does not declare"
+            ));
+        }
+    }
+
+    let columns = flat_columns
         .iter()
-        .filter_map(|i| snapshot.meta_at(*i))
-        .map(|m| SharedString::from(m.name.clone()))
+        .map(|vc| SharedString::from(vc.label))
         .collect();
+    let column_kinds: Vec<CellKind> = flat_columns.iter().map(flat_kind).collect();
+
     // A row label must name exactly one row, the same rule `index_grid`
     // applies to a pivot's (row, column) pair and for the same reason: a
     // draft resolves its edits by label across generations, so a repeated
@@ -545,45 +688,46 @@ fn flatten(
                 spec.rows.column
             ));
         }
+        let cells = idxs
+            .iter()
+            .zip(flat_columns.iter())
+            .zip(column_kinds.iter())
+            .enumerate()
+            .map(|(ci, ((&idx, vc), kind))| {
+                let value = read_flat_value(snapshot, idx, row, vc.ty);
+                cell_of(value, (row, ci), kind, draft)
+            })
+            .collect();
         rows.push(RowModel {
             label: SharedString::from(label),
-            cells: value_idxs
-                .iter()
-                .enumerate()
-                .map(|(ci, &idx)| cell_of(snapshot, idx, row, (row, ci), &spec.format, draft))
-                .collect(),
+            cells,
         });
     }
-    Ok((columns, rows))
+    Ok((columns, column_kinds, rows))
 }
 
-/// One cell: the draft's value where there is an edit, the document's
-/// otherwise, formatted with `format` — the panel's own for a ladder
-/// cell, the slice value's own for one of those.
-fn cell_of(
-    snapshot: &Snapshot,
-    value_idx: usize,
-    srow: usize,
-    cell_ref: (usize, usize),
-    format: &ColumnFormat,
-    draft: &Draft,
-) -> Cell {
-    if let Some(&edited) = draft.edits.get(&cell_ref) {
+/// One cell: the draft's value where there is an edit, `value` (already
+/// read off the document, per the caller's own rule — `f64_at` for a
+/// pivot cell, [`read_flat_value`] for a flat one) otherwise. Both are
+/// formatted through [`cell_text`] and `kind`, the column's own.
+fn cell_of(value: Option<Value>, cell_ref: (usize, usize), kind: &CellKind, draft: &Draft) -> Cell {
+    if let Some(edited) = draft.edits.get(&cell_ref) {
         return Cell {
-            text: SharedString::from(format_number(edited, format).text),
-            value: Some(edited),
+            text: SharedString::from(cell_text(edited, kind)),
+            value: Some(edited.clone()),
             edited: true,
             sent: draft.is_sent(),
             cell_ref,
         };
     }
-    // `f64_at`, never a raw values slice: a NULL there is a deliberate
-    // "this number does not belong to this row" and reads back as 0.0
-    // out of the storage buffer.
-    let value = snapshot.f64_at(value_idx, srow);
+    // NULL here is a deliberate "this number does not belong to this
+    // row" (never a real value coerced away, since `read_flat_value` and
+    // the pivot's own `f64_at` read both return `None` for one) and reads
+    // back as a blank cell rather than a confident zero.
     Cell {
         text: value
-            .map(|v| SharedString::from(format_number(v, format).text))
+            .as_ref()
+            .map(|v| SharedString::from(cell_text(v, kind)))
             .unwrap_or_default(),
         value,
         edited: false,
@@ -603,7 +747,7 @@ mod tests {
     use geode_core::document::Value;
     use geode_core::schema::ColumnType;
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
-    use geode_core::view::ColumnFormat;
+    use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
     use proptest::prelude::*;
 
     const TERMS: [&str; 2] = ["2026-10-16", "2026-11-20"];
@@ -638,8 +782,10 @@ mod tests {
     /// grouping.
     ///
     /// `term` is a dictionary column of date text rather than a real
-    /// `Date32`: `TestColumn` has no date arm, and what the panel reads
-    /// off an axis is its label either way.
+    /// `Date32`: an axis's own value is read as a label either way
+    /// ([`label_at`]'s rule), so nothing here needs `TestColumn::Date` —
+    /// [`schedule_snapshot`] (below) is what exercises that arm, since a
+    /// flat panel's `ex_date` is a typed `Value::Date` cell, not a label.
     ///
     /// The per-slice values (`forward`/`atm`/`skew`) ride on every node
     /// row of their term, from [`slice_values_for`] — the long form the
@@ -763,7 +909,7 @@ mod tests {
             labels(&model, 0),
             vec!["4512.30", "0.1820", "-1.1000", "0.1000", "0.2000", "0.3000"]
         );
-        assert_eq!(model.rows[0].cells[0].value, Some(4512.3));
+        assert_eq!(model.rows[0].cells[0].value, Some(Value::F64(4512.3)));
         assert_eq!(model.rows[0].cells[0].cell_ref, (0, 0));
 
         let cell = &model.rows[0].cells[4];
@@ -772,7 +918,7 @@ mod tests {
             "0.2000",
             "CVI formats to four places"
         );
-        assert_eq!(cell.value, Some(0.2));
+        assert_eq!(cell.value, Some(Value::F64(0.2)));
         assert!(!cell.edited);
         assert!(!cell.sent);
         assert_eq!(
@@ -999,7 +1145,12 @@ mod tests {
     #[test]
     fn an_edited_slice_cell_paints_the_draft_in_the_slice_values_own_format() {
         let mut draft = Draft::default();
-        draft.set((1, 0), ("2026-11-20".into(), "fwd".into()), 4600.0, BASE);
+        draft.set(
+            (1, 0),
+            ("2026-11-20".into(), "fwd".into()),
+            Value::F64(4600.0),
+            BASE,
+        );
         let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
         let cell = &model.rows[1].cells[0];
         assert_eq!(cell.text.to_string(), "4600.00");
@@ -1051,14 +1202,14 @@ mod tests {
         draft.set(
             (0, 4),
             ("2026-10-16".into(), "-1".into()),
-            0.9,
+            Value::F64(0.9),
             "2026-09-12T14:00:00Z",
         );
         let model = MatrixModel::build(&snap, &CVI, &draft).expect("a complete grid");
 
         let cell = &model.rows[0].cells[4];
         assert_eq!(cell.text.to_string(), "0.9000");
-        assert_eq!(cell.value, Some(0.9));
+        assert_eq!(cell.value, Some(Value::F64(0.9)));
         assert!(cell.edited);
         assert!(!cell.sent, "an edit is sent only once an upload said so");
         assert_eq!(
@@ -1092,7 +1243,12 @@ mod tests {
     #[test]
     fn a_sent_draft_marks_its_own_cells_sent() {
         let mut draft = Draft::default();
-        draft.set((1, 3), ("2026-11-20".into(), "-20".into()), 0.5, BASE);
+        draft.set(
+            (1, 3),
+            ("2026-11-20".into(), "-20".into()),
+            Value::F64(0.5),
+            BASE,
+        );
         draft.state = DraftState::Sent;
         let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
         assert!(model.rows[1].cells[3].sent);
@@ -1117,9 +1273,12 @@ mod tests {
         );
     }
 
-    /// A schedule-shaped panel: one row per document row, the value
-    /// columns laid flat.
-    const SCHEDULE: PanelSpec = PanelSpec {
+    /// A flat-shaped panel over two plain `F64` value columns — the
+    /// generic "columns are flat" fixture the tests below use for
+    /// behaviour that has nothing to do with a column's own type (row
+    /// routing, repeated labels, the pivot's one-value-column rule).
+    /// [`SCHEDULE`] (below) is the typed-cell fixture proper.
+    const FLAT_SPEC: PanelSpec = PanelSpec {
         kind: "sched",
         title: "Dividends",
         dataset: "div_schedule",
@@ -1157,13 +1316,13 @@ mod tests {
         actions: &[],
     };
 
-    fn schedule() -> Snapshot {
-        schedule_dated(&["2026-10-16", "2026-11-20", "2026-12-18"])
+    fn flat_snapshot() -> Snapshot {
+        flat_snapshot_dated(&["2026-10-16", "2026-11-20", "2026-12-18"])
     }
 
     /// The same three-row schedule with the row axis spelled by the caller,
     /// so a repeat can be delivered.
-    fn schedule_dated(dates: &[&str; 3]) -> Snapshot {
+    fn flat_snapshot_dated(dates: &[&str; 3]) -> Snapshot {
         Snapshot::for_tests_with_provenance(
             vec![
                 (
@@ -1194,8 +1353,8 @@ mod tests {
 
     #[test]
     fn values_columns_lay_the_documents_value_columns_flat() {
-        let model =
-            MatrixModel::build(&schedule(), &SCHEDULE, &Draft::default()).expect("a flat document");
+        let model = MatrixModel::build(&flat_snapshot(), &FLAT_SPEC, &Draft::default())
+            .expect("a flat document");
         assert_eq!(model.rows.len(), 3, "one row per document row");
         assert_eq!(columns_of(&model), vec!["gross", "net"]);
         assert_eq!(model.key, vec!["SPX.Z".to_string()]);
@@ -1223,8 +1382,14 @@ mod tests {
     #[test]
     fn an_edit_lands_on_the_right_value_column_when_the_columns_are_flat() {
         let mut draft = Draft::default();
-        draft.set((2, 1), ("2026-12-18".into(), "net".into()), 9.0, BASE);
-        let model = MatrixModel::build(&schedule(), &SCHEDULE, &draft).expect("a flat document");
+        draft.set(
+            (2, 1),
+            ("2026-12-18".into(), "net".into()),
+            Value::F64(9.0),
+            BASE,
+        );
+        let model =
+            MatrixModel::build(&flat_snapshot(), &FLAT_SPEC, &draft).expect("a flat document");
         assert_eq!(labels(&model, 2), vec!["3.50", "9.00"]);
         assert!(model.rows[2].cells[1].edited);
         assert!(!model.rows[2].cells[0].edited);
@@ -1268,8 +1433,8 @@ mod tests {
         // reviewer's case, where `rebase` silently kept one and reported
         // nothing dropped.
         let err = MatrixModel::build(
-            &schedule_dated(&["2026-10-16", "2026-10-16", "2026-12-18"]),
-            &SCHEDULE,
+            &flat_snapshot_dated(&["2026-10-16", "2026-10-16", "2026-12-18"]),
+            &FLAT_SPEC,
             &Draft::default(),
         )
         .expect_err("a row label must name one row");
@@ -1298,7 +1463,7 @@ mod tests {
             format: ColumnFormat::MEASURE,
             actions: &[],
         };
-        let err = MatrixModel::build(&schedule(), &PIVOTED, &Draft::default())
+        let err = MatrixModel::build(&flat_snapshot(), &PIVOTED, &Draft::default())
             .expect_err("one value per cell");
         assert!(err.contains("gross") && err.contains("net"), "{err}");
         assert!(err.contains("currency"), "{err}");
@@ -1381,6 +1546,256 @@ mod tests {
         assert!(err.contains("underlying_ref"), "{err}");
     }
 
+    fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    /// `amount`'s own format: four places, no grouping — the same
+    /// reasoning `spec::CVI_FORMAT` gives for a small number whose fourth
+    /// place is real, distinct from [`FLAT_SPEC`]'s `ColumnFormat::MEASURE`
+    /// so this fixture actually exercises a column with its OWN format
+    /// rather than the panel's default.
+    const SCHEDULE_AMOUNT_FORMAT: ColumnFormat = ColumnFormat {
+        precision: 4,
+        thousands: false,
+        negative: Negative::Minus,
+        colour: Colour::None,
+        scale: Scale::None,
+    };
+
+    /// A dividend schedule (spec §4.3): one row per dividend, minted row
+    /// identity (the trader does not name a row), three typed value
+    /// columns — a date, a number at its own precision, and a status
+    /// chosen from a fixed vocabulary — the shape [`CellKind`] exists to
+    /// paint and edit correctly.
+    const SCHEDULE: PanelSpec = PanelSpec {
+        kind: "sched",
+        title: "Dividends",
+        dataset: "div_schedule",
+        document: "div_schedule",
+        rows: RowAxis {
+            column: "dividend_id",
+            identity: RowIdentity::Minted,
+        },
+        columns: Columns::Values(&[
+            ValueColumn {
+                column: "ex_date",
+                label: "ex",
+                ty: ColumnType::Date,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+            ValueColumn {
+                column: "amount",
+                label: "amount",
+                ty: ColumnType::F64,
+                format: SCHEDULE_AMOUNT_FORMAT,
+                choices: None,
+                required: true,
+            },
+            ValueColumn {
+                column: "status",
+                label: "status",
+                ty: ColumnType::Utf8,
+                format: ColumnFormat::MEASURE,
+                choices: Some(&["estimated", "declared", "paid", "cancelled"]),
+                required: true,
+            },
+        ]),
+        header: &[],
+        slice_values: &[],
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: &[],
+    };
+
+    /// A [`SCHEDULE`] document: `(dividend_id, ex_date, amount, status)`
+    /// per row. `ex_date` is a real `Date32` column
+    /// (`TestColumn::Date`) — unlike [`document`]'s axis columns, a flat
+    /// panel's `ex_date` is a typed `Value::Date` CELL, not a row label,
+    /// so `MatrixModel::build` must read it as one.
+    fn schedule_snapshot(rows: &[(&str, &str, f64, &str)]) -> Snapshot {
+        let n = rows.len();
+        Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("SPX.Z".into()); n]),
+                ),
+                (
+                    meta("dividend_id", Attribution::Additive),
+                    TestColumn::Dict(rows.iter().map(|r| Some(r.0.to_string())).collect()),
+                ),
+                (
+                    meta("ex_date", Attribution::DeterminedNonAdditive),
+                    TestColumn::Date(
+                        rows.iter()
+                            .map(|r| {
+                                Some(
+                                    chrono::NaiveDate::parse_from_str(r.1, "%Y-%m-%d")
+                                        .expect("a valid fixture date"),
+                                )
+                            })
+                            .collect(),
+                    ),
+                ),
+                (
+                    meta("amount", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(rows.iter().map(|r| Some(r.2)).collect()),
+                ),
+                (
+                    meta("status", Attribution::DeterminedNonAdditive),
+                    TestColumn::Dict(rows.iter().map(|r| Some(r.3.to_string())).collect()),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        )
+    }
+
+    /// One [`schedule_snapshot`] row, plus an extra value column the spec
+    /// does not declare — what a schema drifting under a spec looks
+    /// like.
+    fn schedule_snapshot_with_extra_value(extra: &str) -> Snapshot {
+        Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("SPX.Z".into())]),
+                ),
+                (
+                    meta("dividend_id", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("D1".into())]),
+                ),
+                (
+                    meta("ex_date", Attribution::DeterminedNonAdditive),
+                    TestColumn::Date(vec![Some(date(2026, 12, 18))]),
+                ),
+                (
+                    meta("amount", Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(vec![Some(1.25)]),
+                ),
+                (
+                    meta("status", Attribution::DeterminedNonAdditive),
+                    TestColumn::Dict(vec![Some("declared".into())]),
+                ),
+                (
+                    meta(extra, Attribution::DeterminedNonAdditive),
+                    TestColumn::F64(vec![Some(9.0)]),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        )
+    }
+
+    /// A CVI document whose `param` column carries TEXT instead of a
+    /// number — the pivot's one value column must be numeric, and this
+    /// is what a misdeclared spec (or a genuinely non-numeric dataset)
+    /// looks like. No slice values: CVI's own are optional (see
+    /// `a_document_without_the_slice_columns_builds_the_ladder_alone`
+    /// above), so this fixture can leave them out.
+    fn cvi_with_text_param() -> Snapshot {
+        let n = 2;
+        Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("SPX.Z".into()); n]),
+                ),
+                (
+                    meta("term", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("2026-10-16".into()); n]),
+                ),
+                (
+                    meta("node", Attribution::Additive),
+                    TestColumn::F64(vec![Some(-20.0), Some(-1.0)]),
+                ),
+                (
+                    meta("param", Attribution::DeterminedNonAdditive),
+                    TestColumn::Dict(vec![Some("n/a".into()); n]),
+                ),
+                (
+                    meta("anchor_date", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("2026-09-12".into()); n]),
+                ),
+                (
+                    meta("spot_ref", Attribution::Additive),
+                    TestColumn::F64(vec![Some(5000.0); n]),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        )
+    }
+
+    /// §4.3: a flat panel's cells are typed per column — a date paints
+    /// ISO, text paints itself, a number paints through its column's
+    /// own format — and `column_kinds` runs parallel to `columns`.
+    #[test]
+    fn a_flat_model_types_each_column_by_its_spec() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ]);
+        let model = MatrixModel::build(&snapshot, &SCHEDULE, &Draft::default()).unwrap();
+        assert_eq!(model.columns, ["ex", "amount", "status"]);
+        assert!(matches!(model.column_kinds[0], CellKind::Date));
+        assert!(matches!(model.column_kinds[1], CellKind::Number(_)));
+        assert!(matches!(model.column_kinds[2], CellKind::Choice(_)));
+        assert_eq!(model.rows[0].cells[0].text.as_ref(), "2026-12-18");
+        assert_eq!(model.rows[0].cells[1].text.as_ref(), "1.2500");
+        assert_eq!(model.rows[0].cells[2].text.as_ref(), "declared");
+        assert_eq!(
+            model.rows[1].cells[0].value,
+            Some(Value::Date(date(2027, 3, 19)))
+        );
+    }
+
+    /// A value column the spec does not list is refused, never painted
+    /// unlabelled: a schema drifting under a spec is reported.
+    #[test]
+    fn a_flat_model_refuses_a_value_column_the_spec_does_not_list() {
+        let snapshot = schedule_snapshot_with_extra_value("bonus");
+        let err = MatrixModel::build(&snapshot, &SCHEDULE, &Draft::default()).unwrap_err();
+        assert!(
+            err.contains("'bonus'") && err.contains("does not declare"),
+            "{err}"
+        );
+    }
+
+    /// The pivot's one cell column must be numeric.
+    #[test]
+    fn a_pivot_refuses_a_non_numeric_value_column() {
+        let snapshot = cvi_with_text_param();
+        let err = MatrixModel::build(&snapshot, &CVI, &Draft::default()).unwrap_err();
+        assert!(err.contains("numeric"), "{err}");
+    }
+
+    /// A typed edit paints in its column's own kind.
+    #[test]
+    fn a_typed_edit_paints_by_its_columns_kind() {
+        let snapshot = schedule_snapshot(&[("D1", "2026-12-18", 1.25, "declared")]);
+        let mut draft = Draft::default();
+        draft.set(
+            (0, 2),
+            ("D1".into(), "status".into()),
+            Value::Utf8("paid".into()),
+            "t0",
+        );
+        draft.set(
+            (0, 0),
+            ("D1".into(), "ex".into()),
+            Value::Date(date(2026, 12, 20)),
+            "t0",
+        );
+        let model = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(model.rows[0].cells[2].text.as_ref(), "paid");
+        assert!(model.rows[0].cells[2].edited);
+        assert_eq!(model.rows[0].cells[0].text.as_ref(), "2026-12-20");
+    }
+
     proptest! {
         /// The pivot is a bijection between the document's rows and the
         /// grid's cells, and it is POSITIONAL: cell (i, j) holds the value
@@ -1445,7 +1860,7 @@ mod tests {
                 prop_assert_eq!(row.cells.len(), s + n);
                 for (j, cell) in row.cells.iter().enumerate().skip(s) {
                     let want = want_value[&(want_rows[i].clone(), want_columns[j - s].clone())];
-                    prop_assert_eq!(cell.value, Some(want));
+                    prop_assert_eq!(cell.value.clone(), Some(Value::F64(want)));
                     prop_assert_eq!(cell.cell_ref, (i, j));
                 }
             }
