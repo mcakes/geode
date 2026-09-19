@@ -2193,9 +2193,20 @@ fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         state.leave_edit();
     }
     let rows = landing_rows(shell);
+    // By name where the object survives; where it is gone (a delete,
+    // whose name the pending-aware rows no longer hold) the neighbour —
+    // its position in the rows as they still stand, clamped to the list
+    // the removal leaves — so an edit-stage delete lands exactly where a
+    // browse delete does (`after_removal`), never on row 0.
+    let before = derive_rows(shell);
     if let Some(state) = shell.object_dialog.as_mut() {
         let visible = super::visible_rows(state, &rows);
-        state.selected = super::filtered_position(&visible, &rows, &name).unwrap_or(0);
+        state.selected = super::filtered_position(&visible, &rows, &name).unwrap_or_else(|| {
+            let was = super::visible_rows(state, &before);
+            super::filtered_position(&was, &before, &name)
+                .unwrap_or(0)
+                .min(visible.len().saturating_sub(1))
+        });
     }
     let selected = shell
         .object_dialog
@@ -2214,10 +2225,13 @@ fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 /// naming, and in browse when the filter hides every row — not a row the
 /// trader was pointing at.
 ///
-/// This is the one place the target is resolved, and it is resolved at
-/// arming AND at answering time rather than stored beside the confirm —
-/// safe because nothing can move it in between: the armed block claims
-/// every other key, and a row click is dropped (`on_row_clicked`).
+/// This is the one place the target is resolved. `arm_confirm` records
+/// its answer beside the question (`ObjectDialogState::confirm_target`)
+/// and `run_confirmed` resolves it again and refuses a mismatch: the
+/// dialog's own doors cannot move it while a question stands (the armed
+/// block claims every other key, and a row click is dropped —
+/// `on_row_clicked`), but a config reload can re-rank the browse list
+/// under an index cursor.
 fn target_object(shell: &ShellView) -> Option<String> {
     let state = shell.object_dialog.as_ref()?;
     match &state.stage {
@@ -3127,8 +3141,13 @@ fn build(
     // while a question stands, the confirm row in the bar's place,
     // exactly as `build_edit` swaps them.
     let action_block = match state.confirm {
+        // The RECORDED target, never the cursor's current answer: after
+        // a reload re-ranks the list the index names a different row,
+        // and the prompt must name the object the answer is about — the
+        // one `run_confirmed` will refuse for otherwise. Also the one
+        // read here that derives nothing per frame.
         Some(confirm) => {
-            let name = target_object(shell).unwrap_or_default();
+            let name = state.confirm_target.clone().unwrap_or_default();
             confirm_row(confirm, &name, entity, cx)
         }
         None => browse_action_bar(state, &rows, &visible, entity, cx),
@@ -4261,15 +4280,22 @@ fn confirm_row(
         Rc::new(|shell, _window, cx| answer_confirm(shell, true, cx));
     let on_no: dialog::ConfirmHandler =
         Rc::new(|shell, _window, cx| answer_confirm(shell, false, cx));
-    dialog::confirm_row(
-        confirm.prompt(name),
-        yes_label,
-        "objectdialog",
-        entity,
-        on_yes,
-        on_no,
-        cx,
-    )
+    let selector = format!("objectdialog-confirm-prompt-{name}");
+    div()
+        // Names the object the prompt is about, so a test can tell which
+        // one the row was painted for — `dialog::confirm_row`'s own
+        // selectors are per surface, not per object.
+        .debug_selector(move || selector.clone())
+        .child(dialog::confirm_row(
+            confirm.prompt(name),
+            yes_label,
+            "objectdialog",
+            entity,
+            on_yes,
+            on_no,
+            cx,
+        ))
+        .into_any_element()
 }
 
 /// §5.3: the chip naming the layer in force on a column-stage field,

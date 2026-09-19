@@ -4148,7 +4148,7 @@ run_mutation "objectdialog: a browse removal walks leave_edit and drops the filt
 run_mutation "objectdialog: the removal landing clamps against the pre-flush rows" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        Some(config) => state.domain.objects(&config),' \
-  '        Some(_) => derive_rows(shell),' \
+  '        Some(_) => state.domain.objects(&shell.services.config),' \
   geode-shell \
   a_browse_delete_of_the_last_row_lands_the_cursor_on_the_new_last_row
 

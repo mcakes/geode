@@ -1916,6 +1916,14 @@ fn ticking_a_dimension_in_an_empty_slot_writes_it_without_asking(cx: &mut gpui::
         cx.debug_bounds("objectdialog-confirm").is_none(),
         "nothing to fork"
     );
+    // Since a fork never asks (2026-09-14) the confirm's absence proves
+    // nothing on its own — the fork is announced in the NOTICE now, so
+    // that is where "an unconfigured slot forks nothing" has to be read.
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        !notice.as_deref().unwrap_or_default().contains("copied"),
+        "an empty slot has no layer to copy from, got {notice:?}"
+    );
     // The edit is queued on the keystroke with no confirm in the way —
     // there is no desk copy for a fork question to be about. The batch
     // itself, like every other field edit, reaches `services.config`
@@ -7093,4 +7101,82 @@ fn d_on_an_empty_slot_from_browse_names_the_browse_remedy(cx: &mut gpui::TestApp
         "got {notice:?}"
     );
     assert!(cx.debug_bounds("objectdialog-confirm").is_none());
+}
+
+/// Re-review minor (2026-09-19): one verb, one landing. A delete from the
+/// EDIT stage lands the cursor on the deleted row's neighbour exactly as
+/// a browse delete does — not on row 0, which is where a by-name lookup
+/// against the pending-aware rows (the name is gone) fell through to.
+#[gpui::test]
+fn an_edit_stage_delete_lands_the_cursor_on_the_neighbour(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // risk·live, risk·mine, vol·vols, vol·zz — delete `zz` (last).
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_user_sources(&[("mine", "risk"), ("zz", "vol")]),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("j j j enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "zz".to_string()
+        }
+    );
+    cx.simulate_keystrokes("d enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert!(cx.debug_bounds("objectdialog-row-zz").is_none());
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.selected),
+        2,
+        "the cursor lands on the new last row (vols), as a browse delete would"
+    );
+}
+
+/// Re-review minor (2026-09-19): the armed prompt names the object the
+/// question was RECORDED for, not whatever the index resolves to on the
+/// current frame — after a reload re-ranks the list under it, the prompt
+/// and the refusal agree about which object was asked about.
+#[gpui::test]
+fn the_armed_prompt_names_the_recorded_target(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_user_sources(&[("mine", "risk")]),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("j d");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.confirm_target.clone()),
+        Some("mine".to_string())
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-confirm-prompt-mine")
+            .is_some()
+    );
+
+    let reloaded = services_with_user_sources(&[("mina", "risk"), ("mine", "risk")]);
+    shell.update(&mut cx, |shell, cx| {
+        shell.services.config = reloaded.config;
+        shell.services.builtin = reloaded.builtin;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm-prompt-mine")
+            .is_some(),
+        "the prompt still names mine, the object the question is about"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-confirm-prompt-mina")
+            .is_none()
+    );
 }
