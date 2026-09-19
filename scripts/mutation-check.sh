@@ -11878,6 +11878,39 @@ run_mutation "asof: the mirror ignores a failed parse" \
   geode-shell \
   an_invalid_intermediate_keystroke_leaves_the_calendar_where_it_was
 
+# Ingest progress (2026-09-19): `queued` is what still WAITS behind the
+# popped job. Counting the job itself (+1) would paint "1 queued" for a
+# lone file and never reach 0 while anything loads.
+run_mutation "ingest: queued counts what waits behind the popped job" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    break (work, q.items.len() + q.documents.len());' \
+  '                    break (work, q.items.len() + q.documents.len() + 1);' \
+  geode-data \
+  started_precedes_each_publish_and_counts_what_is_still_queued
+
+# LoadEnded must be sent from the Failed arm too: a failed load's Health
+# is deduplicated by the tracker, so without it the strip sticks on a
+# second identical failure.
+run_mutation "ingest: a failed load still ends the strip" \
+  crates/geode-data/src/service.rs \
+  '                    // Unconditional, same reasoning as the `Published`
+                    // arm'"'"'s own `LoadEnded` send above.
+                    let _ = sink(DataEvent::LoadEnded { source });' \
+  '                    // Unconditional, same reasoning as the `Published`
+                    // arm'"'"'s own `LoadEnded` send above.
+                    // let _ = sink(DataEvent::LoadEnded { source });' \
+  geode-data \
+  a_failed_load_still_ends_the_strip
+
+# Idle costs nothing: the strip and segment exist only while `ingest` is
+# Some. Painting them unconditionally survives every entity test.
+run_mutation "status: the strip paints only while loading" \
+  crates/geode-shell/src/shell/status.rs \
+  '        .when(ingest.is_some(), |el| {' \
+  '        .when(true, |el| {' \
+  geode-shell \
+  the_ingest_strip_and_segment_paint_only_while_a_load_is_running
+
 run_mutation "palette: tab is reclaimed inside the palette (spec §20.5)" \
   crates/geode-shell/src/shell/dialog.rs \
   '        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodePalette")),' \

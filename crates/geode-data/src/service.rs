@@ -2675,6 +2675,82 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_load_still_ends_the_strip() {
+        // Ingest progress (2026-09-19), harness entry "ingest: a failed
+        // load still ends the strip": the Failed arm's own `LoadEnded`
+        // send is a separate line from the Published arm's, and a failed
+        // load's `Health` is deduplicated by the tracker and may never
+        // reach the entity — `LoadEnded` is what actually ends the
+        // status bar's strip, so this must drive a real failure through
+        // a real `DataService` rather than a synthetic tracker call.
+        //
+        // The CSV's header omits `NPV`, a column the `.done` sentinel
+        // still declares present: `read_csv`'s projection asks for a
+        // column the file does not have and fails at the SQL step,
+        // before any row is staged — a malformed CSV, not a synthetic
+        // error.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let csv_path = src.path().join("risk_2026-08-24_BK0.csv");
+        std::fs::write(
+            &csv_path,
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency\n\
+             BK0,L0,P1,C,I1,USD\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-24_BK0.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(carried_schema());
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
+            }],
+            adapters: Default::default(),
+            documents: Default::default(),
+        })
+        .unwrap();
+
+        // `Health`, `Polled` and `Diagnostics` events are the failure's
+        // own report; this test cares only that the strip starts and
+        // ends around it, so everything but `Loading`/`LoadEnded` is
+        // ignored (matching the brief's ["loading", "ended"]).
+        let mut kinds = Vec::new();
+        while let Ok(e) = rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            match e {
+                DataEvent::Loading { ref source, .. } => {
+                    assert_eq!(source, "risk");
+                    kinds.push("loading");
+                }
+                DataEvent::LoadEnded { ref source } => {
+                    assert_eq!(source, "risk");
+                    kinds.push("ended");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(kinds, ["loading", "ended"]);
+        svc.shutdown();
+    }
+
+    #[test]
     fn a_load_failure_reports_health_under_the_source_name_not_the_dataset_name() {
         // MAJ-1 (final review): `[sources.eod_risk] dataset = "risk_snapshot"`
         // — the source's own name differs from the dataset it feeds, which

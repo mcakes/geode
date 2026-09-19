@@ -515,6 +515,29 @@ same path leaves `ingest` `None` and a foreign path's `Published` leaves it
 idle and both are while loading; mutation entries for the path-matched
 clear and the idle-absent rule.
 
+**As built (2026-09-19):** `IngestEvent::Started { source, path, queued }`
+is emitted by the runner after `take_work`, with the queue lock released
+(`queued` = files + documents still waiting; a document's path is
+`document://{source}/{dataset}`, its batch unknown until the rows are
+read); the service forwards it as `DataEvent::Loading` and sends
+`DataEvent::LoadEnded { source }` after every `Published` AND every
+`Failed` — an explicit end event rather than the paragraph's "the
+matching `Published`/`Failed` by path", because a failed load's `Health`
+is deduplicated by the tracker and may never arrive, and one runner on
+one FIFO channel makes loads strictly sequential, so path matching
+guards nothing (the bridge ignores `LoadEnded.source`). The shell's
+`Diagnostics.ingest: Option<IngestActivity>` carries the record with its
+label prepared once (`note_loading`/`note_load_ended`, both bumping
+`versions.sources`); `status::status_bar` paints gpui-kit
+`Progress::loading(true)` at 2 px as an ABSOLUTE overlay on the bar's top
+edge — not a sibling above it, so the tile area never shrinks when a load
+starts — plus a muted `loading <source> · <n> queued` segment, both only
+while `ingest` is `Some`; the diagnostics tile's sources section adds
+`loading <path> since HH:MM:SS` under that source. Display check pending:
+the strip's colour and motion on a real window. The diagnostics tile's
+`loading … since` sub-row paints under a source with no health report yet
+too — a first-ever load is exactly that case (Task 2 fix round 1).
+
 ## 6. Out of scope
 
 - Replacing any surface in §4.1. Each ruling there is deliberate and dated.
