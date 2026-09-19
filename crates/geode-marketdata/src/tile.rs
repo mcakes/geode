@@ -3114,6 +3114,11 @@ mod tests {
         restored: Option<toml::Table>,
     ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
+        // The shell's own reclaims ride along, exactly as `main.rs`
+        // installs them after the component's init: the panel's editor is
+        // a component `Input` inside a component table, and which of the
+        // two sees a keystroke first is decided by these bindings.
+        cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
         let (data, rx) = DataHandle::for_tests();
         let factory = MarketDataFactory::new(data.clone(), &CVI, Duration::from_secs(15 * 60));
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
@@ -6279,6 +6284,42 @@ edits = [["2099-01-01", "-1", 1.0]]
             over_grid,
             "a move over the picker never reaches what is painted beneath it"
         );
+    }
+
+    /// User report 2026-09-18: `shift+up` in an open cell editor moved the
+    /// GRID's row selection instead of nudging. gpui-base's `Input` binds
+    /// `shift-up`/`shift-down` to `SelectUp`/`SelectDown`; a single-line
+    /// input returns from `select_up` without stopping propagation, so the
+    /// action bubbled to the enclosing `DataTable`'s own `SelectUp` handler
+    /// — one action type, re-exported by gpui-component — and moved the
+    /// selection out from under the tile's cursor, before the shell's key
+    /// handler ever saw the keystroke. The shell now reclaims both keys in
+    /// the `Input` context (`dialog::init_reclaimed_keybindings`), so the
+    /// keystroke falls through to the keymap; this pins the half a panel
+    /// harness can see — the table's selection stays put.
+    #[gpui::test]
+    fn shift_up_in_the_editor_no_longer_moves_the_tables_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(h.selection(&vcx), (Some(1), Some(1)));
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        vcx.simulate_keystrokes("shift-up");
+        draw(&mut vcx);
+        assert_eq!(
+            h.selection(&vcx),
+            (Some(1), Some(1)),
+            "the component's SelectUp must not reach the table from the editor"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        assert_eq!(h.mode(&vcx), "insert", "the editor is still open");
+        vcx.simulate_keystrokes("shift-down");
+        draw(&mut vcx);
+        assert_eq!(h.selection(&vcx), (Some(1), Some(1)));
     }
 
     /// Fix round 1, IMPORTANT-2: `/` is a shell-owned `tile`-context
