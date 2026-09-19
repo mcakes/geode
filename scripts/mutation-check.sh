@@ -11840,6 +11840,21 @@ run_mutation "asof: the calendar hides under live" \
   geode-shell \
   the_calendar_hides_only_under_live
 
+# Display check 2026-09-19: the preset list painted at the dialog's full
+# WIDTH ran on under the calendar, and gpui hit-tests a plain div behind
+# another — so a day click also fired the covered preset row's own
+# on_mouse_down (commit_at → close_modal). Only the bounds assertion plus
+# a real click through the pane sees it; the entity-driven day-click
+# tests never go through the hitbox at all.
+run_mutation "asof: the preset list stays in its own column" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '        .id("as-of-presets")
+        .w_full()' \
+  '        .id("as-of-presets")
+        .w(px(WIDTH))' \
+  geode-shell \
+  a_calendar_click_over_the_preset_list_neither_commits_nor_closes
+
 # Final whole-branch review, finding 2: END_OF_DAY must be the LAST
 # MICROSECOND of the day, not the last whole second — a subscribed
 # document's source_time is sub-second, and the as-of predicate compares

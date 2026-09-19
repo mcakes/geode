@@ -437,6 +437,15 @@ fn build(
                 div()
                     .flex_none()
                     .debug_selector(|| "as-of-calendar".to_string())
+                    // Display check 2026-09-19: the pane must OCCLUDE — a
+                    // plain div does not, so gpui hit-tests whatever sits
+                    // behind it too, and a day click also fired a preset
+                    // row's own `on_mouse_down` (`commit_at`, which closes
+                    // the dialog). The list no longer runs under the pane
+                    // (`build_presets` takes its slot's width, not
+                    // `WIDTH`), and this keeps that true whatever is
+                    // painted behind it later.
+                    .occlude()
                     // Final review, finding 1: any click on the calendar's
                     // own chrome (‹/›, the month/year toggles, the pane's
                     // padding — everything but a day cell, which
@@ -481,9 +490,13 @@ fn build_presets(
             .child("no recent publishes")
             .into_any_element();
     }
+    // `w_full`, not `w(px(WIDTH))`: the list sits in a `flex_1` column
+    // beside the calendar and must take that column's width — at the
+    // dialog's full width it ran on under the pane, its covered rows
+    // still hit-tested (display check 2026-09-19).
     let mut list = v_flex()
         .id("as-of-presets")
-        .w(px(WIDTH))
+        .w_full()
         .gap_1()
         .debug_selector(|| "as-of-presets".to_string());
     for (position, (at, label)) in presets.iter().enumerate() {

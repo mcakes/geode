@@ -399,6 +399,44 @@ fn clicking_the_calendars_chrome_leaves_the_field_focused(cx: &mut gpui::TestApp
     );
 }
 
+/// Display check 2026-09-19: with presets present, a click on the calendar
+/// DISMISSED the dialog. `build_presets` painted the list at the dialog's
+/// full `WIDTH` inside its `flex_1` slot, so every preset row ran on
+/// under the calendar; gpui hit-tests a plain div behind another, so the
+/// day click also fired the covered row's `on_mouse_down` → `commit_at`
+/// → `close_modal` (and the selected row's highlight showed through).
+/// The list must stay in its own column and the pane must occlude.
+#[gpui::test]
+fn a_calendar_click_over_the_preset_list_neither_commits_nor_closes(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_as_of_with_presets(cx, 20);
+    vcx.run_until_parked();
+    let list = vcx.debug_bounds("as-of-presets").expect("presets painted");
+    let pane = vcx
+        .debug_bounds("as-of-calendar")
+        .expect("calendar painted");
+    assert!(
+        list.right() <= pane.left(),
+        "the preset list ({:?}) must not run under the calendar ({:?})",
+        list,
+        pane
+    );
+    // A click in the middle of the pane — the day grid, where the rows
+    // used to be hit-tested through it.
+    let centre = pane.center();
+    vcx.simulate_mouse_down(centre, MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_up(centre, MouseButton::Left, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        "the dialog must stay open after a calendar click"
+    );
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert!(
+        matches!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::Live),
+        "no preset row may commit through the calendar"
+    );
+}
+
 /// Final review, finding 3: `on_calendar_selected`'s own refocus, in
 /// isolation from any backstop — the calendar's own focus handle is
 /// given focus first (a click on the pane's DAY grid does briefly
