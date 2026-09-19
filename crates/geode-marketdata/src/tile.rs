@@ -861,8 +861,20 @@ impl MarketDataTile {
         // The notice is decided now and written at the commit point
         // below, ahead of the restore block's own, so it is never wiped
         // by the "clear on the delivery that paints" rule.
+        //
+        // **The first delivery after a restore is always `hold`**
+        // (ruling 2026-09-19): the policy governs LIVE deliveries while
+        // the trader is working, and a draft restored from the session
+        // has not been seen this session at all — `replace` dropping it
+        // on a delivery nobody was watching breaks §8.5's "unsent work
+        // survives a restart" with only a notice for company, and
+        // `rebase` would move edits onto a generation the trader never
+        // chose. So while `unresolved_restore` is set the delivery takes
+        // the `hold` path (a differing base lands `Behind`, a matching
+        // one resolves through the restore block below as today), and
+        // the policy resumes from the next delivery.
         let mut notice: Option<SharedString> = None;
-        if draft.is_behind() && self.policy != UpdatePolicy::Hold {
+        if draft.is_behind() && self.policy != UpdatePolicy::Hold && !self.unresolved_restore {
             match self.policy {
                 UpdatePolicy::Hold => unreachable!("guarded above"),
                 UpdatePolicy::Rebase => {
@@ -7475,5 +7487,85 @@ auto = "discard"
             h.editor_value(&vcx).is_none(),
             "and the editor closed on commit"
         );
+    }
+
+    /// A draft restored with `auto = "<policy>"` whose base differs from
+    /// the first delivery: the restored edits, the base and the newer
+    /// generation exactly as `hold` would leave them.
+    fn restored_first_delivery(
+        cx: &mut gpui::TestAppContext,
+        policy: &str,
+    ) -> (Harness, gpui::VisualTestContext) {
+        let restored: toml::Table = format!(
+            r#"
+underlying = ["SPX.Z"]
+auto = "{policy}"
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        (h, vcx)
+    }
+
+    /// The first delivery after a restore is always `hold` (ruling
+    /// 2026-09-19): under `replace`, a restored draft meeting a newer
+    /// generation lands `Behind` with its edits intact — never dropped on
+    /// a delivery the trader was not watching — and no `replaced` notice
+    /// is written.
+    #[gpui::test]
+    fn a_restored_drafts_first_delivery_is_hold_under_replace(cx: &mut gpui::TestAppContext) {
+        let (h, vcx) = restored_first_delivery(cx, "replace");
+        let (policy, state, len, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.policy(),
+                t.draft().state.clone(),
+                t.draft().len(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert_eq!(
+            policy,
+            UpdatePolicy::Replace,
+            "the policy itself is restored"
+        );
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            "Behind, as hold would leave it — got {state:?}"
+        );
+        assert_eq!(len, 1, "the restored edit survives");
+        assert!(
+            notice.as_deref().is_none_or(|n| !n.contains("replaced")),
+            "nothing was replaced: {notice:?}"
+        );
+    }
+
+    /// The same rule under `rebase`: the restored draft is not rebased onto
+    /// a generation the trader never chose — it lands `Behind`, and
+    /// `:rebase` (or the policy, from the NEXT delivery) is what moves it.
+    #[gpui::test]
+    fn a_restored_drafts_first_delivery_is_hold_under_rebase(cx: &mut gpui::TestAppContext) {
+        let (h, vcx) = restored_first_delivery(cx, "rebase");
+        let (policy, state, base, len) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.policy(),
+                t.draft().state.clone(),
+                t.draft().base.clone(),
+                t.draft().len(),
+            )
+        });
+        assert_eq!(policy, UpdatePolicy::Rebase);
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            "Behind, not rebased — got {state:?}"
+        );
+        assert_eq!(base.as_deref(), Some(BASE), "the base is the restored one");
+        assert_eq!(len, 1);
     }
 }

@@ -841,11 +841,19 @@ code would enter `Behind` — `Draft::on_delivered` decides, the tile
 branches after it — so a clean panel and the base's own as-of round
 trip are untouched, a switch never acts retroactively on a draft
 already `Behind` (that draft moves onto the NEWEST generation on its
-next delivery under `rebase`/`replace`), and a restored draft whose
-base differs meets the restart's first delivery under the same rule.
-Everything is still decided on copies and committed after a successful
-build; `rebase` builds twice (a clean model for the new labels, then
-the re-placed draft).
+next delivery under `rebase`/`replace`). **The first delivery after a
+restore is always `hold`** (ruling, same day): the policy governs live
+deliveries while the trader is working, and a draft restored from the
+session has not been seen this session at all — under `replace` it
+would go on a delivery nobody was watching, breaking §8.5's "unsent
+work survives a restart" with only a notice for company, and under
+`rebase` it would move onto a generation the trader never chose. So
+while the tile's `unresolved_restore` flag is set the delivery takes
+the `hold` path whatever the policy (a differing base lands `Behind`,
+a matching one resolves as today), and the policy resumes from the next
+delivery. Everything is still decided on copies and committed after a
+successful build; `rebase` builds twice (a clean model for the new
+labels, then the re-placed draft).
 
 ### 8.5 Session
 

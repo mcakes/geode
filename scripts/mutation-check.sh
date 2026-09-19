@@ -12233,6 +12233,18 @@ run_mutation "mdauto: the policy is read from the session" \
   geode-marketdata \
   the_policy_round_trips_through_the_session
 
+# Ruling 2026-09-19: the first delivery after a restore is always `hold`.
+# Mutated away, a `replace` panel drops a draft restored from the session
+# on a delivery the trader was not watching — §8.5's "unsent work survives
+# a restart" broken with only a notice for company — and a `rebase` panel
+# moves the restored edits onto a generation the trader never chose.
+run_mutation "mdauto: a restored draft's first delivery is always hold" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if draft.is_behind() && self.policy != UpdatePolicy::Hold && !self.unresolved_restore {' \
+  '        if draft.is_behind() && self.policy != UpdatePolicy::Hold {' \
+  geode-marketdata \
+  a_restored_drafts_first_delivery_is_hold_under_replace
+
 # Mutated away, all three `On new document` rows carry the tick, and the
 # menu no longer says which policy is in force.
 run_mutation "mdauto: exactly one policy row is checked" \
