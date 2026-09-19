@@ -8450,10 +8450,10 @@ run_mutation "schema/document: measure vocabulary is dropped per column" \
   crates/geode-core/src/schema/mod.rs \
   '    ds.columns.retain(|c| !foreign.contains(&c.name));
 
-    // A value is a number: it feeds the numeric cell of the document' \
+    // A value is a per-row fact that is not identity (spec 2026-09-19' \
   '    let _ = &foreign;
 
-    // A value is a number: it feeds the numeric cell of the document' \
+    // A value is a per-row fact that is not identity (spec 2026-09-19' \
   geode-core measure_vocabulary_on_a_document_dataset_is_refused_per_column
 
 run_mutation "schema/measures: document vocabulary is dropped per column" \
@@ -8838,15 +8838,15 @@ run_mutation "schema/document: an empty axes list drops the dataset" \
   '    if false {' \
   geode-core a_document_dataset_needs_a_non_empty_key_and_axes
 
-# Minor 8: the non-numeric value DROP, not just its diagnostic. A test
+# Minor 8: the unsupported value DROP, not just its diagnostic. A test
 # asserting on the diagnostic alone cannot see a column that was reported
-# and kept -- and a kept utf8 value reaches the DDL as a VARCHAR the
-# blotter would then read through `f64_at`.
-run_mutation "schema/document: a non-numeric value column is really dropped" \
+# and kept -- and a kept bool value reaches the DDL as a column type the
+# blotter's f64/i64/date/utf8 reads cannot handle.
+run_mutation "schema/document: an unsupported value column is really dropped" \
   crates/geode-core/src/schema/mod.rs \
-  '    ds.columns.retain(|c| !non_numeric.contains(&c.name));' \
-  '    let _ = &non_numeric;' \
-  geode-core a_non_numeric_value_column_is_dropped_and_the_dataset_kept
+  '    ds.columns.retain(|c| !non_value.contains(&c.name));' \
+  '    let _ = &non_value;' \
+  geode-core an_unsupported_value_column_is_dropped_and_the_dataset_kept
 
 # Minor 8: "at least one value", anchored on the RULE rather than on the
 # push guard the existing entry mutates. A document dataset with no value
@@ -8857,6 +8857,14 @@ run_mutation "schema/document: the at-least-one-value rule itself" \
   '    if !ds.columns.iter().any(|c| c.role == ColumnRole::Value) {' \
   '    if false {' \
   geode-core a_document_dataset_declares_at_least_one_value
+
+# Spec 2026-09-19 §4.1: a document value may be a date or text. Mutated
+# back to the numeric-only rule, a dividend's ex date is dropped at load.
+run_mutation "schema: a document value may be a date or text" \
+  crates/geode-core/src/schema/mod.rs \
+  '                    ColumnType::F64 | ColumnType::I64 | ColumnType::Date | ColumnType::Utf8' \
+  '                    ColumnType::F64 | ColumnType::I64' \
+  geode-core a_document_value_may_be_a_date_or_text
 
 # Minor 7: a declared-but-absent axis column is a message, not a panic --
 # and not a silently skipped check either. `continue` would let a document
