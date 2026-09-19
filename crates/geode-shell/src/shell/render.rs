@@ -926,6 +926,7 @@ impl Render for ShellView {
             reload_message.as_deref(),
             self.config_write_error.as_deref(),
             self.restart_required.as_deref(),
+            self.notice,
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
             on_diagnostics_click,
             ingest,

@@ -23,6 +23,11 @@ use super::keys::convert_keystroke;
 use super::profiling_hook;
 use super::{ShellView, asof_view, dialog, keybindings_view, objectdialog, picker, settings_view};
 
+/// A stack verb's refusal on a tile that is not a stack member
+/// (tile-stacks spec §4) — `ShellView::notice`'s value for the rest of
+/// that one dispatch.
+pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
+
 impl ShellView {
     /// The active context stack for key resolution, outermost first:
     /// `workspace` is always active; `palette` layers on top while open.
@@ -141,6 +146,51 @@ impl ShellView {
         // (`[log] shell = "debug"`): which action, with what count. The
         // branch that resolved it says so on its own line just before.
         tracing::debug!(target: "geode::shell", action = %action.0, count = ?count, "dispatch");
+
+        // A stack verb's refusal notice (tile-stacks spec §4) says its
+        // piece for exactly one dispatch — the next one, whatever it is,
+        // clears it.
+        self.notice = None;
+
+        if action.0 == "stack::next" || action.0 == "stack::prev" {
+            // Tile stacks (spec §4): count-aware, so not in the router.
+            let n = i64::from(count.unwrap_or(1).max(1));
+            let delta = if action.0 == "stack::next" { n } else { -n };
+            if self.services.workspaces.active_mut().stack_step(delta) {
+                self.session_dirty = true;
+                self.note_keyboard_focus_move(window, cx);
+            } else {
+                self.notice = Some(NOT_IN_A_STACK);
+            }
+            return;
+        }
+        if action.0 == "stack::unstack" {
+            let rect = self
+                .services
+                .workspaces
+                .active()
+                .focused_tile_rect(super::render::content_area(window));
+            let orientation = self.add_direction.resolve(None, rect);
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .unstack_focused(orientation)
+            {
+                self.session_dirty = true;
+                self.note_keyboard_focus_move(window, cx);
+            } else {
+                self.notice = Some(NOT_IN_A_STACK);
+            }
+            return;
+        }
+        if action.0 == "stack::pick" {
+            match self.services.workspaces.active().focused_tile() {
+                Some(tile) => self.open_stack_list(tile, window, cx),
+                None => self.notice = Some(NOT_IN_A_STACK),
+            }
+            return;
+        }
 
         // Every workspace verb below ignores the count; only the module
         // fall-through at the end (Phase 3 §3.3) is count-aware today.
@@ -337,13 +387,14 @@ impl ShellView {
                     cx.notify();
                 }
             });
-        } else if let Some((kind, direction)) = crate::defaults::parse_add_action(&action.0) {
+        } else if let Some((kind, placement)) = crate::defaults::parse_add_action(&action.0) {
             // A palette row from `register_add_actions` (spec 2026-09-08
             // add-tile §3.2) — "<Kind>: Split" follows the setting; the
-            // suffixed pair say where. Always adds (or fills); never
+            // suffixed rows say where, `_stacked` onto the focused tile
+            // (tile-stacks spec §6.1). Always adds (or fills); never
             // focuses an existing tile — that is `open_module`'s job.
             let kind = kind.to_string();
-            self.add_tile(&kind, direction, None, window, cx);
+            self.add_tile(&kind, placement, None, window, cx);
         } else if action.0 == "workspace::duplicate_horizontal" {
             self.duplicate_tile(Orientation::Horizontal, window, cx);
         } else if action.0 == "workspace::duplicate_vertical" {

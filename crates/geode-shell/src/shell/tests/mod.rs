@@ -577,4 +577,5 @@ mod picker;
 mod reload;
 mod scopebar;
 mod session;
+mod stacks;
 mod tiling_keys;

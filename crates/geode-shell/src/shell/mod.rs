@@ -803,6 +803,19 @@ pub struct ShellView {
     /// The tiles painted last frame, to diff visibility without touching
     /// every occupant every frame.
     visible_tiles: HashSet<TileId>,
+    /// The last `(index, len)` `ensure_occupants` delivered to each tile
+    /// through `TileContent::set_stack` (tile-stacks spec §5.1) — a
+    /// missing entry means "unsent", so a fresh occupant always hears its
+    /// stack position once (`None` included) and a later render tells it
+    /// again only when the value actually changes. Retained to live tiles
+    /// at the end of every `ensure_occupants`, the same lifecycle
+    /// `pending_tiles`/`unplaced_records` follow.
+    stack_sent: HashMap<TileId, Option<(usize, usize)>>,
+    /// A stack verb's one-line refusal (tile-stacks spec §4: every verb
+    /// on a non-member is a no-op with `"not in a stack"`), cleared at
+    /// the top of the next `dispatch`. Painted by the status bar's
+    /// `shell-notice` segment.
+    notice: Option<&'static str>,
     /// Scratch storage for `ensure_occupants`'s per-frame tile-set diff
     /// (fix-round finding: `all_tiles`/`active_tiles` used to allocate a
     /// fresh `HashSet` every render). Always cleared and refilled there;
@@ -1551,6 +1564,8 @@ impl ShellView {
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
+            stack_sent: HashMap::new(),
+            notice: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
             scratch_visible_keys: Vec::new(),

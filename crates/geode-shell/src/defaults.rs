@@ -115,6 +115,8 @@ context = "workspace"
 "ctrl+[" = "dock::toggle_left"
 "ctrl+]" = "dock::toggle_right"
 "ctrl+/" = "dock::toggle_bottom"
+"mod+]" = "stack::next"
+"mod+[" = "stack::prev"
 "ctrl+{" = "dock::move_left"
 "ctrl+}" = "dock::move_right"
 "ctrl+?" = "dock::move_bottom"
@@ -231,6 +233,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "dock::move_left", "Move tile to left dock", "Dock");
     action(reg, "dock::move_right", "Move tile to right dock", "Dock");
     action(reg, "dock::move_bottom", "Move tile to bottom dock", "Dock");
+    // Tile stacks (spec 2026-09-19 §4): cycle the focused member, open the
+    // member list, pop the member out. `pick`/`unstack` are palette-only.
+    action(reg, "stack::next", "Stack: Next", "Workspace");
+    action(reg, "stack::prev", "Stack: Previous", "Workspace");
+    action(reg, "stack::pick", "Stack: Pick…", "Workspace");
+    action(reg, "stack::unstack", "Stack: Unstack", "Workspace");
     for i in 1..=9 {
         action(
             reg,
@@ -512,6 +520,12 @@ pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) {
             &format!("{title}: Split Vertical"),
             "Tiles",
         );
+        action(
+            reg,
+            &format!("tile::add_{kind}_stacked"),
+            &format!("{title}: Stack"),
+            "Tiles",
+        );
     }
 }
 
@@ -523,22 +537,33 @@ fn capitalize(kind: &str) -> String {
     }
 }
 
+/// How an add row places its tile (spec 2026-09-08 §4.2, tile-stacks
+/// spec §6.1): a split in an explicit or setting-resolved direction, or
+/// stacked onto the focused tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddPlacement {
+    Split(Option<crate::tiling::Orientation>),
+    Stacked,
+}
+
 /// The inverse of [`register_add_actions`] for `ShellView::dispatch`:
-/// `(kind, explicit direction)` for a `tile::add_*` id, `None` for
-/// anything else. The suffix is peeled BEFORE the kind is read, so a
-/// kind can never be misparsed by a suffix of its own name, and an empty
-/// kind is not an add.
-pub fn parse_add_action(id: &str) -> Option<(&str, Option<crate::tiling::Orientation>)> {
+/// `(kind, placement)` for a `tile::add_*` id, `None` for anything else.
+/// The suffix is peeled BEFORE the kind is read, so a kind can never be
+/// misparsed by a suffix of its own name, and an empty kind is not an
+/// add.
+pub fn parse_add_action(id: &str) -> Option<(&str, AddPlacement)> {
     use crate::tiling::Orientation;
     let rest = id.strip_prefix("tile::add_")?;
-    let (kind, dir) = if let Some(k) = rest.strip_suffix("_horizontal") {
-        (k, Some(Orientation::Horizontal))
+    let (kind, placement) = if let Some(k) = rest.strip_suffix("_horizontal") {
+        (k, AddPlacement::Split(Some(Orientation::Horizontal)))
     } else if let Some(k) = rest.strip_suffix("_vertical") {
-        (k, Some(Orientation::Vertical))
+        (k, AddPlacement::Split(Some(Orientation::Vertical)))
+    } else if let Some(k) = rest.strip_suffix("_stacked") {
+        (k, AddPlacement::Stacked)
     } else {
-        (rest, None)
+        (rest, AddPlacement::Split(None))
     };
-    (!kind.is_empty()).then_some((kind, dir))
+    (!kind.is_empty()).then_some((kind, placement))
 }
 
 /// The default primary modifier (spec §3.1: Alt, remappable).
@@ -761,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn register_add_actions_registers_three_rows_per_kind_in_the_tiles_category() {
+    fn register_add_actions_registers_four_rows_per_kind_in_the_tiles_category() {
         let mut reg = ActionRegistry::default();
         register_add_actions(&mut reg, &["blotter", "diagnostics"]);
         let expect = |id: &str, title: &str| {
@@ -775,8 +800,9 @@ mod tests {
         expect("tile::add_blotter", "Blotter: Split");
         expect("tile::add_blotter_horizontal", "Blotter: Split Horizontal");
         expect("tile::add_blotter_vertical", "Blotter: Split Vertical");
+        expect("tile::add_blotter_stacked", "Blotter: Stack");
         expect("tile::add_diagnostics", "Diagnostics: Split");
-        assert_eq!(reg.iter().count(), 6);
+        assert_eq!(reg.iter().count(), 8);
         let mut empty = ActionRegistry::default();
         register_add_actions(&mut empty, &[]);
         assert_eq!(empty.iter().count(), 0);
@@ -787,15 +813,22 @@ mod tests {
         use crate::tiling::Orientation;
         assert_eq!(
             parse_add_action("tile::add_blotter"),
-            Some(("blotter", None))
+            Some(("blotter", AddPlacement::Split(None)))
         );
         assert_eq!(
             parse_add_action("tile::add_blotter_horizontal"),
-            Some(("blotter", Some(Orientation::Horizontal)))
+            Some((
+                "blotter",
+                AddPlacement::Split(Some(Orientation::Horizontal))
+            ))
         );
         assert_eq!(
             parse_add_action("tile::add_blotter_vertical"),
-            Some(("blotter", Some(Orientation::Vertical)))
+            Some(("blotter", AddPlacement::Split(Some(Orientation::Vertical))))
+        );
+        assert_eq!(
+            parse_add_action("tile::add_blotter_stacked"),
+            Some(("blotter", AddPlacement::Stacked))
         );
         assert_eq!(parse_add_action("tile::add_"), None);
         assert_eq!(parse_add_action("tile::add__vertical"), None);

@@ -82,14 +82,16 @@ impl ShellView {
     }
 
     /// The tiles of the active workspace: what is on screen. Same
-    /// out-parameter shape as `fill_all_tiles`, same reason.
+    /// out-parameter shape as `fill_all_tiles`, same reason. `visible_
+    /// tiles()` (tile-stacks spec §3), not `tiles()`: a hidden stack
+    /// member is not on screen and must not be told `set_visible(true)`.
     fn fill_active_tiles(&self, out: &mut HashSet<TileId>) {
         out.clear();
         let ws = self.services.workspaces.active();
-        out.extend(ws.tree().tiles());
+        out.extend(ws.tree().visible_tiles());
         for (_, dock) in ws.docks().iter() {
             if dock.visible() {
-                out.extend(dock.tree().tiles());
+                out.extend(dock.tree().visible_tiles());
             }
         }
     }
@@ -119,7 +121,7 @@ impl ShellView {
         let ws = self.services.workspaces.active();
         out.extend(
             ws.tree()
-                .tiles()
+                .visible_tiles()
                 .into_iter()
                 .filter(has_real_occupant)
                 .map(|id| QueryKey(id.0)),
@@ -128,7 +130,7 @@ impl ShellView {
             if dock.visible() {
                 out.extend(
                     dock.tree()
-                        .tiles()
+                        .visible_tiles()
                         .into_iter()
                         .filter(has_real_occupant)
                         .map(|id| QueryKey(id.0)),
@@ -305,6 +307,34 @@ impl ShellView {
                 o.content.set_visible(true, cx);
             }
         }
+
+        // Stack positions (tile-stacks spec §5.1): every occupant is told
+        // its `(index, len)` on its first render and on every change,
+        // never on an unrelated render — `stack_sent` remembers the last
+        // value sent per tile, and a missing entry means "unsent", so a
+        // fresh occupant always hears once, `None` included.
+        let weak = cx.entity().downgrade();
+        for id in &creation_order {
+            let now = self.services.workspaces.stack_position(*id);
+            if self.stack_sent.get(id) == Some(&now) {
+                continue;
+            }
+            self.stack_sent.insert(*id, now);
+            let Some(o) = self.occupants.get(id) else {
+                continue;
+            };
+            let handle = now.map(|(index, len)| {
+                let weak = weak.clone();
+                let tile = *id;
+                crate::module::StackHandle::new(index, len, move |window, cx| {
+                    let _ = weak.update(cx, |view, cx| view.open_stack_list(tile, window, cx));
+                })
+            });
+            o.content.set_stack(handle, cx);
+        }
+        self.stack_sent
+            .retain(|id, _| self.scratch_all_tiles.contains(id));
+
         // The focus backstop (review finding, Important 1). A tile that
         // leaves the visible set is unmounted as an *element* but keeps
         // its occupant: `fill_all_tiles` spans every workspace, so a
@@ -346,6 +376,17 @@ impl ShellView {
         self.visible_tiles.clear();
         self.visible_tiles.extend(active.iter().copied());
         self.scratch_active_tiles = active;
+    }
+
+    /// Open the transient stack-member list on `tile` (spec §5.2) — a
+    /// stub Task 7 replaces; `StackHandle::open_list` and `stack::pick`
+    /// both call this door.
+    pub(super) fn open_stack_list(
+        &mut self,
+        _tile: TileId,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
     }
 
     /// A keyboard verb moved which TILE has focus — hand the keyboard
