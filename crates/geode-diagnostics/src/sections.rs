@@ -87,8 +87,22 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
 
     let mut out = Vec::new();
     for (name, state) in reported.into_iter().chain(unreported) {
+        // Computed once per source, ahead of the reported/unreported
+        // split, and pushed in BOTH arms below: an ingest `Started` can
+        // land before that source's first-ever `Health` note (the
+        // exact cold-start moment this row exists for), so a source
+        // still reading "no report yet" must show it too, not only a
+        // source with a health row already.
+        let loading = d.ingest.as_ref().filter(|a| a.source == *name);
         let Some(health) = &state.health else {
             out.push(row(format!("{name}: no report yet"), 0, Tone::Muted));
+            if let Some(a) = loading {
+                out.push(row(
+                    format!("loading {} since {}", a.path, local_hms(a.since)),
+                    1,
+                    Tone::Muted,
+                ));
+            }
             push_spec_detail(&mut out, state);
             continue;
         };
@@ -121,9 +135,7 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
             .unwrap_or_default();
         text.push_str(&format!(" (since {since}{elapsed})"));
         out.push(row(text, 0, tone));
-        if let Some(a) = &d.ingest
-            && a.source == *name
-        {
+        if let Some(a) = loading {
             out.push(row(
                 format!("loading {} since {}", a.path, local_hms(a.since)),
                 1,
@@ -746,6 +758,39 @@ mod tests {
         let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
         assert_eq!(rows[0].text.as_ref(), "risk: no report yet");
         assert_eq!(rows[0].tone, Tone::Muted);
+    }
+
+    /// Fix round 1: `Started`/`Loading` can land before that source's
+    /// first-ever `Health` note — the cold-start moment the loading
+    /// sub-row exists for — so a source still reading "no report yet"
+    /// must show it too, directly under that row, not only a source
+    /// whose health is already known.
+    #[test]
+    fn a_loading_source_with_no_report_yet_still_shows_what_it_is_loading() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.describe_source(
+            "risk",
+            SourceSummary {
+                paths: vec![],
+                priority: "p".into(),
+                readiness: "r".into(),
+                adapter: "csv_dir".into(),
+                topics: Vec::new(),
+            },
+        );
+        let at = SystemTime::now();
+        d.note_loading("risk", "/data/risk/EOD.csv", 1, at);
+        let rows = sources_rows(&d, at);
+        assert_eq!(rows[0].text.as_ref(), "risk: no report yet");
+        assert_eq!(
+            rows[1].text.as_ref(),
+            format!("loading /data/risk/EOD.csv since {}", local_hms(at)),
+            "the loading row sits directly under the no-report-yet row"
+        );
+
+        d.note_load_ended();
+        let rows = sources_rows(&d, at);
+        assert!(!rows.iter().any(|r| r.text.starts_with("loading ")));
     }
 
     fn dataset_catalog() -> DatasetCatalog {
