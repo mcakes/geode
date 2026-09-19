@@ -116,7 +116,7 @@ use std::rc::Rc;
 
 use geode_core::config::{Layer, Severity, check_object_name};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
+use gpui::{AnyElement, App, Context, Div, Entity, MouseButton, Window, div, px, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
@@ -3308,6 +3308,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let chips_live = writable && state.confirm.is_none() && draft.text_entry.is_none();
     let rows = draft.rows();
     let visible = draft.visible_rows();
+    // The row under the cursor, resolved once from the two lists above
+    // for everything the footer asks about it (its vocabulary, its help)
+    // — `Draft::selected_row` would rebuild both per question.
+    let selected_row = visible
+        .get(draft.selected)
+        .and_then(|m| rows.get(m.row).copied());
     // §19.5: which rows a current diagnostic names, computed once per
     // render rather than per row — `Draft::flagged_rows` is a linear scan
     // of the diagnostic list, and doing it once here keeps the per-row
@@ -3773,7 +3779,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // the row under the CURSOR, not from the domain — see
     // [`RowVocabulary`]. Computed once, here, so the column stage and the
     // object stage cannot drift about what a row offers.
-    let vocabulary = draft.selected_vocabulary(state.domain);
+    let vocabulary = draft.vocabulary_of(selected_row, state.domain);
     // Can `i` open a field on this row? Groupings is the exception the
     // vocabulary cannot answer for: there `i` opens the slot's whole
     // chain (§18.8) rather than the selected row's own value, so it is
@@ -3977,18 +3983,39 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // notice wins for exactly the keystroke it reports on, since the
     // door clears it on the next. The slot keeps its height on a row
     // with nothing to say (`min_h`), for the same reason.
-    let help = draft
-        .selected_field_key()
-        .map(|key| domain.help(&state.stage, key))
-        .unwrap_or("");
+    //
+    // Blank under an armed confirm: the confirm row is one compact
+    // decision, and a sentence about whichever row the cursor is on is
+    // noise beside `Delete 'live'?`. Kept while a text field is open —
+    // the value grammar is most useful while typing.
+    //
+    // Structurally one line: `line_height` pinned to the `min_h` (gpui's
+    // default is `phi()`, which at `text_sm` runs 2px taller than
+    // `min_h_5` and would let an empty slot shrink the footer), and the
+    // text never wraps — a sentence that outgrows the width clips rather
+    // than growing the footer. The tables keep under ~90 characters.
+    let help = if state.confirm.is_some() {
+        ""
+    } else {
+        selected_row
+            .and_then(|row| draft.field_key_of(row))
+            .map(|key| domain.help(&state.stage, key))
+            .unwrap_or("")
+    };
+    let one_line = |el: Div| {
+        el.text_sm()
+            .line_height(rems(1.25))
+            .min_h_5()
+            .whitespace_nowrap()
+            .overflow_hidden()
+    };
     let slot = match state.notice.as_ref() {
-        Some(notice) => div()
-            .text_sm()
+        Some(notice) => one_line(div())
             .text_color(theme.warning)
             .debug_selector(|| "objectdialog-notice".to_string())
             .child(notice.clone()),
         None => {
-            let line = div().text_sm().min_h_5().text_color(theme.muted_foreground);
+            let line = one_line(div()).text_color(theme.muted_foreground);
             if help.is_empty() {
                 line
             } else {

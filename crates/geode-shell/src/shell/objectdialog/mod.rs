@@ -1436,7 +1436,14 @@ impl Draft {
     /// what [`Domain::help`] is asked with: a row of a list explains the
     /// list. `None` off the end of a filtered list.
     pub fn selected_field_key(&self) -> Option<&str> {
-        let field = match self.selected_row()? {
+        self.field_key_of(self.selected_row()?)
+    }
+
+    /// [`Self::selected_field_key`] for a row the caller has already
+    /// resolved — the paint path holds `rows`/`visible` and must not
+    /// derive them a third time per frame just to ask this.
+    pub fn field_key_of(&self, row: EditRow) -> Option<&str> {
+        let field = match row {
             EditRow::Field(field) => field,
             EditRow::Item { field, .. } | EditRow::Available { field, .. } => field,
         };

@@ -135,19 +135,6 @@ pub fn describe_column(column: &ColumnSpec) -> String {
 /// dataset's overlay table is read ONCE for the whole list rather than
 /// per column, since it is one `toml::Table` clone and there are as many
 /// columns as a dataset has.
-/// What each row means, for the edit footer's help line
-/// ([`Domain::help`](super::Domain::help)). The keys are per column
-/// (`columns.<name>`, `derived.<name>`), so this matches on the prefix.
-pub fn help(key: &str) -> &'static str {
-    if key.starts_with("columns.") {
-        "The column as datasets.toml declares it: type, role, the grain that carries it, and its flags — open it to set how it paints"
-    } else if key.starts_with("derived.") {
-        "A derived dimension: values mapped from another column by dimensions.toml, groupable like any other"
-    } else {
-        ""
-    }
-}
-
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let Some(name) = object else {
         return Vec::new();
@@ -241,6 +228,21 @@ pub fn validate(draft: &Draft, _config: &Config) -> Vec<Diagnostic> {
         }],
     );
     SchemaSpec::from_doc(&doc).1
+}
+
+/// What each row means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)). The keys are per column
+/// (`columns.<name>`, `derived.<name>`), so this matches on the prefix;
+/// the row's own text already spells type, role and grain, so the
+/// sentence says only what the row does not.
+pub fn help(key: &str) -> &'static str {
+    if key.starts_with("columns.") {
+        "As datasets.toml declares it — open the column to set how it paints"
+    } else if key.starts_with("derived.") {
+        "A derived dimension from dimensions.toml — groupable like any other"
+    } else {
+        ""
+    }
 }
 
 #[cfg(test)]

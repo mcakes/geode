@@ -7240,7 +7240,11 @@ fn a_notice_displaces_the_help_line_for_one_keystroke(cx: &mut gpui::TestAppCont
         dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    let before = cx.debug_bounds("objectdialog-help").unwrap();
+    assert!(cx.debug_bounds("objectdialog-help").is_some());
+    // The hint chip BELOW the slot is what would move if the slot grew
+    // or shrank — the slot's own `origin.y` is the footer's first child
+    // either way and proves nothing.
+    let chip_before = cx.debug_bounds("objectdialog-hint-change").unwrap();
 
     // `q` is no verb here: a notice.
     cx.simulate_keystrokes("q");
@@ -7250,18 +7254,53 @@ fn a_notice_displaces_the_help_line_for_one_keystroke(cx: &mut gpui::TestAppCont
         cx.debug_bounds("objectdialog-help").is_none(),
         "the notice owns the slot while it stands"
     );
-    let notice = cx.debug_bounds("objectdialog-notice").unwrap();
+    assert!(cx.debug_bounds("objectdialog-notice").is_some());
+    let chip = cx.debug_bounds("objectdialog-hint-change").unwrap();
     assert_eq!(
-        notice.origin.y, before.origin.y,
-        "the same slot, so nothing moves"
+        chip.origin.y, chip_before.origin.y,
+        "one slot: the hints do not move"
     );
 
-    cx.simulate_keystrokes("j");
+    // Two rows down is `readiness`, a `Choice` like `dataset`, so the
+    // same change chip is there to measure against.
+    cx.simulate_keystrokes("j j");
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("objectdialog-help").is_some(),
         "and help returns"
     );
+    let chip = cx.debug_bounds("objectdialog-hint-change").unwrap();
+    assert_eq!(chip.origin.y, chip_before.origin.y);
+}
+
+/// A subscribed source alone in its doc, so the sweep below opens it
+/// first and walks the four subscribed-only rows the directory-source
+/// fixtures never paint (`document`, `topics`, `coalesce`, `source_time`).
+/// `sources::fields` reads the raw table, so no adapter registry is
+/// needed for the dialog to show them.
+fn services_with_a_subscribed_source() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[vol.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    let sources = LayerDoc::builtin(
+        "sources",
+        "[cvi]\ndataset = \"vol\"\nadapter = \"demo_bus\"\ndocument = \"cvi\"\n\
+         topics = [\"marketdata/cvi/>\"]\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            sources,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
 }
 
 /// A list item and an available row explain the list they belong to:
@@ -7297,9 +7336,10 @@ fn a_list_row_shows_its_lists_help(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
     type Fixture = fn() -> ShellServices;
-    let cases: [(&str, Fixture); 6] = [
+    let cases: [(&str, Fixture); 7] = [
         ("config::views", services_with_a_desk_view),
         ("config::sources", services_with_sources),
+        ("config::sources", services_with_a_subscribed_source),
         ("config::groupings", || services_with_slot_3(&["book"])),
         ("config::scopes", services_with_a_saved_scope),
         ("config::colours", services_with_colours),
@@ -7316,13 +7356,13 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
             draft
                 .fields
                 .iter()
-                .filter(|f| state.domain.help(&state.stage, &f.key).is_empty())
+                .filter(|f| !help_fits(state.domain.help(&state.stage, &f.key)))
                 .map(|f| f.key.clone())
                 .collect()
         });
         assert!(
             missing.is_empty(),
-            "{action}: fields without help: {missing:?}"
+            "{action}: fields without help, or over the width: {missing:?}"
         );
         cx.simulate_keystrokes("escape escape");
         cx.run_until_parked();
@@ -7340,12 +7380,19 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
         draft
             .fields
             .iter()
-            .filter(|f| state.domain.help(&state.stage, &f.key).is_empty())
+            .filter(|f| !help_fits(state.domain.help(&state.stage, &f.key)))
             .map(|f| f.key.clone())
             .collect()
     });
     assert!(
         missing.is_empty(),
-        "column stage: fields without help: {missing:?}"
+        "column stage: fields without help, or over the width: {missing:?}"
     );
+}
+
+/// Non-empty and under the one-line slot's width: ~95 characters fit
+/// `WIDTH` at the largest font size, so the tables keep to 90. A longer
+/// sentence would clip (the slot never wraps), which is silent.
+fn help_fits(help: &str) -> bool {
+    !help.is_empty() && help.chars().count() <= 90
 }

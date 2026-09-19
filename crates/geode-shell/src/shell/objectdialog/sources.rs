@@ -287,50 +287,6 @@ pub fn seed_dataset(draft: &mut Draft, dataset: &str) {
     }
 }
 
-/// What each field means, for the edit footer's help line
-/// ([`Domain::help`](super::Domain::help)). Meaning and value grammar
-/// only; the keys are the hint rows' job.
-pub fn help(key: &str) -> &'static str {
-    match key {
-        "dataset" => {
-            "The dataset this source's files are loaded into, as datasets.toml declares it"
-        }
-        "paths" => {
-            "Directory globs to watch for CSV files, separated by ' | ' — empty leaves the source idle"
-        }
-        "readiness" => {
-            "When a new file counts as complete: a <name>.done sentinel beside it, or its size unchanged across stable polls"
-        }
-        "stable_polls" => {
-            "Polls of unchanged size before a file is loaded — read only with readiness = stable"
-        }
-        "priority" => "Cold-start order: latest_risk loads first, then latest_other, then backfill",
-        "poll_interval" => "How often the directories are scanned for new files — 30s, 2m, 1h",
-        "pending_timeout" => {
-            "How long a file may sit incomplete before the source reports it stuck — 10m, 1h"
-        }
-        "batch_pattern" => {
-            "Regex over the file stem with a named 'batch' capture, so dated files share a partition — empty uses the whole stem"
-        }
-        "adapter" => {
-            "Which channel feeds this source: csv_dir watches directories; anything else subscribes to a message bus"
-        }
-        "document" => {
-            "The document kind a subscribed source publishes, which decides how each message is parsed"
-        }
-        "topics" => {
-            "Topic patterns to subscribe to, '/'-separated — '*' matches one level, a trailing '>' matches the rest"
-        }
-        "coalesce" => {
-            "At most one publish per key within this window — 500ms; 0 publishes every message"
-        }
-        "source_time" => {
-            "Which clock stamps a publish: receive (this process's clock) or document:<field>, a date attribute on the document"
-        }
-        _ => "",
-    }
-}
-
 /// May `i` edit the `Text` row keyed `key`? Every genuinely free-text
 /// field: `dataset`/`readiness`/`priority`/`stable_polls` are `Choice`
 /// and `Number` rows already reachable through `space`/`i` on their own
@@ -479,6 +435,48 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
     super::object_text(&draft.name, to_table(draft, Destination::Doc))
         .parse::<toml::Table>()
         .unwrap_or_default()
+}
+
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)). Meaning and value grammar
+/// only — the keys are the hint rows' job — and under ~90 characters,
+/// since the slot is one line and never wraps (4c spec §22).
+///
+/// `readiness`/`stable_polls` say out loud that `stable_mtime` is not
+/// implemented: the `Choice` offers it (`READINESS`) and discovery
+/// orphans every file of such a source, so a sentence presenting it as
+/// a working alternative would stop a trader's source loading.
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "dataset" => "The dataset this source's files load into, as datasets.toml declares it",
+        "paths" => "Directory globs to watch for CSV files, ';'-separated — empty leaves it idle",
+        "readiness" => {
+            "A file is complete once its .done sentinel exists — stable_mtime never loads"
+        }
+        "stable_polls" => {
+            "Polls of unchanged size and mtime before a load — stable_mtime only, unbuilt"
+        }
+        "priority" => "Cold-start order: latest_risk first, then latest_other, then backfill",
+        "poll_interval" => "How often the directories are scanned for new files — 30s, 2m, 1h",
+        "pending_timeout" => {
+            "How long a file may wait for its sentinel before it is reported stuck — 10m"
+        }
+        "batch_pattern" => {
+            "Regex over the file stem with a named 'batch' capture — empty uses the stem"
+        }
+        "adapter" => "csv_dir watches directories; any other adapter subscribes to a message bus",
+        "document" => "The document kind a subscribed source publishes, which decides its parsing",
+        "topics" => {
+            "Topic patterns to subscribe to, levels '/'-separated — '*' one level, '>' the rest"
+        }
+        "coalesce" => {
+            "At most one publish per key within this window — 500ms; 0 publishes every message"
+        }
+        "source_time" => {
+            "What stamps a publish: receive, or document:<field> (a date or RFC 3339 attribute)"
+        }
+        _ => "",
+    }
 }
 
 #[cfg(test)]

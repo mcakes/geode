@@ -4199,9 +4199,9 @@ run_mutation "objectdialog: a list row asks with its own index as a field" \
   a_list_row_shows_its_lists_help
 
 # One slot, two occupants: the notice wins for the keystroke it reports
-# on. Painting help regardless would stack the two lines and shift the
-# footer on every refused key — which only a test reading the notice's
-# bounds against the help's can see.
+# on. Painting help regardless leaves `objectdialog-help` on screen while
+# a notice stands (and, painted in the notice's place, drops the notice
+# itself) — the displacement test's own two selector checks see it.
 run_mutation "objectdialog: the help line paints under a notice" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    let slot = match state.notice.as_ref() {' \

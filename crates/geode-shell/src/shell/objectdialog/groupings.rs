@@ -106,18 +106,6 @@ pub fn summary(value: &toml::Value) -> String {
 /// blind to the very content a trader opened it to fix (the same reason
 /// `views::fields` keeps a view's own dataset in its `Choice` even when
 /// the schema no longer has it).
-/// What each field means, for the edit footer's help line
-/// ([`Domain::help`](super::Domain::help)).
-pub fn help(key: &str) -> &'static str {
-    match key {
-        "slot" => "The slot's number — ctrl+<slot> regroups the focused blotter by this chain",
-        "dimensions" => {
-            "The group-by chain, outermost first: every column the dataset can group by is offered"
-        }
-        _ => "",
-    }
-}
-
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let current: Vec<String> = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
@@ -415,6 +403,20 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
     super::object_text(&draft.name, to_table(draft, Destination::Doc))
         .parse::<toml::Table>()
         .unwrap_or_default()
+}
+
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)). No chord in the sentence:
+/// the title crumb already paints `ctrl+N`, and a slot regroups every
+/// tile following the shared frame, not one blotter (`frame::slot_N`).
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "slot" => "The slot's number — activating it regroups every tile following the frame",
+        "dimensions" => {
+            "The group-by chain, outermost first — every column the dataset can group by"
+        }
+        _ => "",
+    }
 }
 
 #[cfg(test)]
