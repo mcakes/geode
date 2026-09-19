@@ -229,7 +229,7 @@ mod tests {
         );
         assert_eq!(
             parse("level nope info").unwrap_err(),
-            "unknown target 'nope' (ingest, query, config, session, shell, theme)"
+            "unknown target 'nope' (ingest, query, config, session, shell, theme, pricing)"
         );
     }
 
