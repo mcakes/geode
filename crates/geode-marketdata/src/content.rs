@@ -59,7 +59,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::upload", "Upload"),
     ("marketdata::revert", "Revert edits"),
     ("marketdata::rebase", "Rebase"),
-    ("marketdata::discard", "Discard edits"),
 ];
 
 /// This module's default bindings (market-data spec §8.3/§8.6), handed to
@@ -361,7 +360,6 @@ mod tests {
         "marketdata::upload",
         "marketdata::revert",
         "marketdata::rebase",
-        "marketdata::discard",
         "marketdata::cvi_reanchor",
         "marketdata::cvi_recalc_forward",
     ];

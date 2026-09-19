@@ -263,18 +263,27 @@ pub(crate) fn render_menu(
                         theme.popover_foreground
                     })
                     .debug_selector(move || format!("marketdata-menu-row-{tile_id}-{i}"))
-                    // **`stop_propagation` here is LOAD-BEARING** (final
-                    // review, B5) for the menu-row → picker path: "Load
-                    // underlying…" opens the picker and focuses its
-                    // field inside this very handler, and if the click
-                    // bubbled on, the shell's own tile-level mouse-down
-                    // would re-arm `pending_focus_restore` and the next
-                    // render would take the keyboard back from that
-                    // field — a picker painted open and deaf. Contrast
-                    // the `⋯` button (`header.rs`), which must NOT stop
-                    // propagation: no field is focused after it, so the
-                    // shell's click-to-focus is exactly what should run.
-                    // Do not be fooled by the grid case: the pinned
+                    // `stop_propagation` here is NOT load-bearing for
+                    // focus any more (it was, per the final review's B5,
+                    // until the 2026-09-17 insert-focus rule): "Load
+                    // underlying…" opens the picker and focuses its field
+                    // inside this very handler, and even were the click
+                    // to bubble on, `render`'s `pending_focus_restore`
+                    // consumption now SKIPS the restore whenever the
+                    // focused tile's occupant holds its own input in
+                    // insert mode (`occupant_holds_insert_focus`) — the
+                    // field keeps the keyboard either way.
+                    //
+                    // The stop is kept for a different reason: a click
+                    // that means "pick a row" must not ALSO run the
+                    // shell's ordinary tile-level click handling (drag
+                    // arming, dock focus) for the tile underneath the
+                    // popup — the same reason the popup occludes what is
+                    // painted beneath it. Contrast the `⋯` button
+                    // (`header.rs`), which must NOT stop propagation: no
+                    // field is focused after it, so the shell's
+                    // click-to-focus is exactly what should run. Do not
+                    // be fooled by the grid case: the pinned
                     // `TableState::set_selected_row` (run by `sync_cursor`
                     // at the end of every `dispatch`) stops propagation
                     // of its own, so with the cursor in the grid this

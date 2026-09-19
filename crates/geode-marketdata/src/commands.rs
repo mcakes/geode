@@ -4,7 +4,7 @@
 //! tested without a window.
 //!
 //! The vocabulary is `underlying <value>` (trader-facing; `key` is a silent
-//! alias), `revert`, `bump <delta> [row|col]`, `rebase`, `discard`,
+//! alias), `revert`, `bump <delta> [row|col]`, `rebase`,
 //! `upload`, `set <attr> [value...]`, `menu`. Every verb is built and
 //! executed by the tile (`MarketDataTile::command`) — `upload` alone
 //! parses here and answers "upload is not built yet" until Part 4
@@ -45,7 +45,6 @@ pub enum Command {
         axis: BumpAxis,
     },
     Rebase,
-    Discard,
     Upload,
     /// Open the action list (spec §6.1), the typed door onto exactly what
     /// `.`/`⋯` open.
@@ -62,23 +61,22 @@ pub enum Command {
 
 /// Every verb, in the order completions offer them. `key` is a silent
 /// alias of `underlying` (the trader-facing word, spec §3) and is not
-/// listed: it parses, it is not taught. `rebase`/`discard` are filtered by
-/// the caller's `behind` flag (spec §8.3: they are offered only while a
-/// newer generation sits under the draft) — listed here so one table is the
+/// listed: it parses, it is not taught. `rebase` is filtered by the
+/// caller's `behind` flag (spec §8.3: it is offered only while a newer
+/// generation sits under the draft) — listed here so one table is the
 /// vocabulary and the filter is one line.
-const VERBS: [&str; 8] = [
+const VERBS: [&str; 7] = [
     "underlying",
     "revert",
     "bump",
     "rebase",
-    "discard",
     "upload",
     "set",
     "menu",
 ];
 
 fn behind_only(verb: &str) -> bool {
-    verb == "rebase" || verb == "discard"
+    verb == "rebase"
 }
 
 /// Parse a `:` line, without its leading colon. `Err` is one line, shown
@@ -135,7 +133,6 @@ pub fn parse(line: &str) -> Result<Command, String> {
             Ok(Command::Bump { delta, axis })
         }
         Some("rebase") => Ok(Command::Rebase),
-        Some("discard") => Ok(Command::Discard),
         Some("upload") => Ok(Command::Upload),
         Some("set") => {
             let attr = words
@@ -167,8 +164,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// guessing.
 ///
 /// `keys` is the catalog's own document keys in this panel's dataset, in
-/// the `/`-separated display spelling, and `behind` gates `rebase`/
-/// `discard` (spec §8.3). `behind` is a fourth parameter the brief's
+/// the `/`-separated display spelling, and `behind` gates `rebase`
+/// (spec §8.3). `behind` is a fourth parameter the brief's
 /// sketch left out: the rule it implements is the brief's own, and this
 /// core has no `Draft` to read it off. `attrs` is the panel's own header
 /// attribute column names, in spec order, for `set`'s first word.
@@ -260,7 +257,6 @@ mod tests {
     fn the_other_verbs_parse_and_an_unknown_one_is_named() {
         assert_eq!(parse("revert"), Ok(Command::Revert));
         assert_eq!(parse("rebase"), Ok(Command::Rebase));
-        assert_eq!(parse("discard"), Ok(Command::Discard));
         assert_eq!(parse("upload"), Ok(Command::Upload));
         assert_eq!(parse("rebse"), Err("unknown command 'rebse'".to_string()));
         assert_eq!(parse("   "), Err("empty command".to_string()));
@@ -272,7 +268,7 @@ mod tests {
         assert_eq!(
             completions("", 0, &keys, false, &[]),
             vec!["underlying", "revert", "bump", "upload", "set", "menu"],
-            "rebase and discard are offered only while behind"
+            "rebase is offered only while behind"
         );
         assert_eq!(
             completions("", 0, &keys, true, &[]),
@@ -281,7 +277,6 @@ mod tests {
                 "revert",
                 "bump",
                 "rebase",
-                "discard",
                 "upload",
                 "set",
                 "menu"

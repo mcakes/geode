@@ -15,7 +15,7 @@
 //! its body is painted through (gpui-component's table, user ruling
 //! 2026-09-14), and the `TileContent`/`ModuleFactory` pair the shell hosts
 //! it through. Cell editing (insert mode, `:bump`, `:revert`) and the
-//! draft states (`Behind`, `:rebase`, `:discard`) are both here; `:upload`
+//! draft states (`Behind`, `:rebase`) are both here; `:upload`
 //! is Part 4, and the vocabulary already answers so.
 
 pub mod commands;

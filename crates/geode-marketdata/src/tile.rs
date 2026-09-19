@@ -43,7 +43,7 @@
 //! painting the BASE generation (`base_snapshot`) under the edits rather
 //! than the newer one it just received — `:rebase` moves the edits onto
 //! the newer document by label (a dropped label is reported, never
-//! silently lost) and starts painting it; `:discard` drops the edits and
+//! silently lost) and starts painting it; `:revert` drops the edits and
 //! shows the newer document, clean. Both are refused outside `Behind`
 //! (there is no "newer" to move onto), and so are `edit`/`:bump`
 //! (controller ruling 2026-09-14) — an edit made now would be keyed
@@ -174,11 +174,11 @@ const CELL_MOVED: &str = "the document changed under the edit — nothing was wr
 /// `:rebase` would then map that parked value onto whatever cell the same
 /// label resolves to in the newer document — a live edit and a restored
 /// one are exactly the same risk here, so this checks the draft's state
-/// and not how it got there. `:rebase`/`:discard` are the only doors
+/// and not how it got there. `:rebase`/`:revert` are the only doors
 /// forward, and the notice names both.
-const BEHIND_REFUSED: &str = "the draft is behind — :rebase or :discard first";
+const BEHIND_REFUSED: &str = "the draft is behind — :rebase or :revert first";
 
-/// What `:rebase`/`:discard` answer outside `Behind` — there is no
+/// What `:rebase`/`:revert` answer outside `Behind` — there is no
 /// "newer" document to move onto or fall back to.
 const NOT_BEHIND: &str = "nothing to rebase — the draft is on the live document";
 
@@ -275,7 +275,7 @@ pub struct MarketDataTile {
     /// painting the newest snapshot — including a draft restored from a
     /// session, which lands `Behind` with no base generation ever having
     /// been received, and is honestly painted against the newest one
-    /// until `:rebase`/`:discard` (Task 8).
+    /// until `:rebase`/`:revert` (Task 8).
     base_snapshot: Option<Arc<Snapshot>>,
     /// `Rc`, not a plain `MatrixModel`: the delegate paints from this on
     /// every frame — every shell repaint, not just this tile's own
@@ -1417,12 +1417,6 @@ impl MarketDataTile {
                 }
                 true
             }
-            "discard" => {
-                if let Err(e) = self.discard(cx) {
-                    self.notice = Some(e.into());
-                }
-                true
-            }
             "load_underlying" => {
                 self.open_picker(window, cx);
                 false
@@ -2027,7 +2021,7 @@ impl MarketDataTile {
     /// `Clean` means "on the live document". `leave_behind()` makes that
     /// true of the PANEL too: without it, `base_snapshot` stayed set with
     /// no draft left to explain it, the panel kept painting a generation
-    /// the header no longer said anything about, and `:rebase`/`:discard`
+    /// the header no longer said anything about, and `:rebase`/`:revert`
     /// were both refused (there is no draft to move or drop) — the only
     /// way out was a `:key` retype or waiting for the next delivery.
     fn revert(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
@@ -2037,6 +2031,14 @@ impl MarketDataTile {
         self.draft.revert();
         self.leave_behind();
         self.rebuild_model(cx);
+        // `rebuild_model` only ever WRITES `notice` on a build failure, so
+        // one already wins by being left in place. On success, clear only
+        // the BEHIND-refusal notice — the one thing this verb is itself
+        // the escape from — and leave anything else (a delivery error,
+        // say) alone: it has nothing to do with reverting a draft.
+        if self.notice.as_deref() == Some(BEHIND_REFUSED) {
+            self.notice = None;
+        }
         self.changed(cx);
         Ok(())
     }
@@ -2044,11 +2046,10 @@ impl MarketDataTile {
     /// Drop whatever generation was retained under `Behind` so the next
     /// [`Self::rebuild_model`] paints the newest delivered one instead.
     ///
-    /// The one door both `:discard` and a `:revert` that empties a
-    /// `Behind` draft leave through — harmless to call when the draft was
-    /// never `Behind` (`base_snapshot` is already `None`), which is why
-    /// `revert` above calls it unconditionally rather than guarding on
-    /// `is_behind()` first.
+    /// The one door both `:revert` and `:rebase` leave through — harmless
+    /// to call when the draft was never `Behind` (`base_snapshot` is
+    /// already `None`), which is why `revert` above calls it
+    /// unconditionally rather than guarding on `is_behind()` first.
     fn leave_behind(&mut self) {
         self.base_snapshot = None;
     }
@@ -2156,28 +2157,6 @@ impl MarketDataTile {
         // apply, by simply arriving second and this check yielding to it.
         if self.notice.is_none() && !dropped.is_empty() {
             self.notice = Some(dropped_notice(&dropped).into());
-        }
-        self.changed(cx);
-        Ok(())
-    }
-
-    /// `:discard` (spec §8.4): drop the edits outright and show the newer
-    /// document — a trader saying "show me the new document" rather than
-    /// "move my numbers onto it".
-    fn discard(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        if !self.draft.is_behind() {
-            return Err(NOT_BEHIND.to_string());
-        }
-        self.draft.discard();
-        self.leave_behind();
-        self.rebuild_model(cx);
-        // `rebuild_model` only ever WRITES `notice` on a build failure, so
-        // one already wins by being left in place. On success, clear only
-        // the BEHIND-refusal notice — the one thing this verb is itself
-        // the escape from — and leave anything else (a delivery error,
-        // say) alone: it has nothing to do with discarding a draft.
-        if self.notice.as_deref() == Some(BEHIND_REFUSED) {
-            self.notice = None;
         }
         self.changed(cx);
         Ok(())
@@ -2387,7 +2366,6 @@ impl MarketDataTile {
             Command::Revert => self.revert(cx),
             Command::Bump { delta, axis } => self.bump(delta, axis, cx),
             Command::Rebase => self.rebase(cx),
-            Command::Discard => self.discard(cx),
             // Parsed, not executed: the grammar a trader types is the one
             // Part 4 wires up.
             Command::Upload => Err("upload is not built yet".into()),
@@ -3610,7 +3588,7 @@ mod tests {
     }
 
     /// A double-click meets `i`'s own refusals: while the draft is
-    /// `Behind` the notice names `:rebase`/`:discard`, nothing opens, and
+    /// `Behind` the notice names `:rebase`/`:revert`, nothing opens, and
     /// the mode stays `normal`.
     #[gpui::test]
     fn a_double_click_while_behind_is_refused_with_the_notice(cx: &mut gpui::TestAppContext) {
@@ -4969,8 +4947,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// Controller ruling 2026-09-14: `:revert` while `Behind` reduces to
-    /// `:discard` — `Clean` means "on the live document" — so the newer
+    /// Controller ruling 2026-09-14: `:revert` while `Behind` is the whole
+    /// story — `Clean` means "on the live document" — so the newer
     /// document paints, not the base the edits were made against with
     /// nothing left to explain why.
     #[gpui::test]
@@ -5014,13 +4992,9 @@ edits = [["2026-11-20", "-1", 9.5]]
                 && !chips.iter().any(|c| c.contains("update")),
             "nothing left to explain a generation that is no longer retained: {chips:?}"
         );
-        // Both are now refused again — there is no draft to move or drop.
+        // Rebase is now refused again — there is no draft to move.
         assert_eq!(
             h.command(&mut vcx, "rebase"),
-            Err("nothing to rebase — the draft is on the live document".to_string())
-        );
-        assert_eq!(
-            h.command(&mut vcx, "discard"),
             Err("nothing to rebase — the draft is on the live document".to_string())
         );
     }
@@ -5173,7 +5147,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     /// A SECOND newer generation arriving on top of an already-`Behind`
     /// draft moves the header's own `newer` marker forward — but the
     /// `base_snapshot` a trader is still looking at must not move: they
-    /// have not chosen `:rebase`/`:discard` for the FIRST newer document
+    /// have not chosen `:rebase`/`:revert` for the FIRST newer document
     /// yet, let alone this one.
     #[gpui::test]
     fn a_second_newer_generation_keeps_the_base_and_updates_newer(cx: &mut gpui::TestAppContext) {
@@ -5288,47 +5262,6 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// `:discard` drops the edits outright and shows the newer document —
-    /// clean, no `base_snapshot` left behind.
-    #[gpui::test]
-    fn discard_shows_the_newer_document_clean(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open(cx);
-        h.command(&mut vcx, "key SPX.Z").unwrap();
-        h.visible(&mut vcx, true);
-        let tag = h.document_request().unwrap().tag;
-        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
-
-        h.dispatch(&mut vcx, "edit", None);
-        h.set_editor(&mut vcx, "0.5");
-        h.dispatch(&mut vcx, "commit", None);
-
-        h.deliver(
-            &mut vcx,
-            tag,
-            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
-        );
-        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
-
-        h.command(&mut vcx, "discard")
-            .expect("behind: discard applies");
-
-        let (state, rows, cell) = h.tile.read_with(&vcx, |t, _| {
-            (
-                t.draft().state.clone(),
-                t.model().rows.len(),
-                t.model().rows[0].cells[0].clone(),
-            )
-        });
-        assert_eq!(state, DraftState::Clean);
-        assert_eq!(rows, 1, "the newer document, its one term");
-        assert_eq!(cell.text.to_string(), "4500.00", "the document's own value");
-        assert!(!cell.edited);
-        assert!(
-            !h.tile.read_with(&vcx, |t, _| t.header_dirty()),
-            "no dirty dot left"
-        );
-    }
-
     /// Outside `Behind` — a clean panel and one with edits still against
     /// the live document alike — there is no "newer" to move onto or
     /// fall back to.
@@ -5340,10 +5273,6 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.command(&mut vcx, "rebase"),
             Err("nothing to rebase — the draft is on the live document".to_string())
         );
-        assert_eq!(
-            h.command(&mut vcx, "discard"),
-            Err("nothing to rebase — the draft is on the live document".to_string())
-        );
 
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
@@ -5353,14 +5282,10 @@ edits = [["2026-11-20", "-1", 9.5]]
             Err("nothing to rebase — the draft is on the live document".to_string()),
             "edits present, but still on the document they were made against"
         );
-        assert_eq!(
-            h.command(&mut vcx, "discard"),
-            Err("nothing to rebase — the draft is on the live document".to_string())
-        );
     }
 
     #[gpui::test]
-    fn completions_offer_rebase_and_discard_only_while_behind(cx: &mut gpui::TestAppContext) {
+    fn completions_offer_rebase_only_while_behind(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.command(&mut vcx, "key SPX.Z").unwrap();
         h.visible(&mut vcx, true);
@@ -5369,7 +5294,6 @@ edits = [["2026-11-20", "-1", 9.5]]
 
         let before = h.tile.read_with(&vcx, |t, cx| t.completions("", 0, cx));
         assert!(!before.contains(&"rebase".to_string()));
-        assert!(!before.contains(&"discard".to_string()));
 
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "0.5");
@@ -5382,7 +5306,6 @@ edits = [["2026-11-20", "-1", 9.5]]
 
         let behind = h.tile.read_with(&vcx, |t, cx| t.completions("", 0, cx));
         assert!(behind.contains(&"rebase".to_string()));
-        assert!(behind.contains(&"discard".to_string()));
     }
 
     /// Controller ruling 2026-09-14: an edit on top of a `Behind` draft —
@@ -5415,17 +5338,57 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("the draft is behind — :rebase or :discard first".to_string())
+            Some("the draft is behind — :rebase or :revert first".to_string())
         );
         assert_eq!(
             h.command(&mut vcx, "bump 1"),
-            Err("the draft is behind — :rebase or :discard first".to_string())
+            Err("the draft is behind — :rebase or :revert first".to_string())
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.draft().len()),
             1,
             "no second edit was written"
         );
+    }
+
+    /// `:revert` is the escape from the BEHIND-refusal notice `i`/`edit`
+    /// leaves behind — it must clear that specific notice on success, not
+    /// just the draft, or the panel reads Behind's own refusal after the
+    /// draft is already Clean and nothing is left to explain it.
+    #[gpui::test]
+    fn revert_clears_the_behind_refusal_notice_it_resolves(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("the draft is behind — :rebase or :revert first".to_string())
+        );
+        assert_eq!(h.mode(&vcx), "normal");
+
+        h.command(&mut vcx, "revert").expect("an edit to clear");
+
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            None
+        );
+        assert_eq!(h.mode(&vcx), "normal");
     }
 
     /// I-1 (final whole-branch review): a stage taken under an as-of
@@ -6239,7 +6202,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     }
 
     #[gpui::test]
-    fn hovering_the_behind_state_explains_rebase_and_discard(cx: &mut gpui::TestAppContext) {
+    fn hovering_the_behind_state_explains_rebase_and_revert(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.command(&mut vcx, "key SPX.Z").unwrap();
         h.visible(&mut vcx, true);
@@ -6273,7 +6236,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     /// `.when(matches!(h.badge, DraftBadge::Behind { .. }))`) must not
     /// paint for any other state that run shows — "no document yet" here,
     /// a real painted state run (badge `Clean`) with nothing behind to
-    /// rebase or discard. Without the gate this negative case has no
+    /// rebase or revert. Without the gate this negative case has no
     /// failing test to catch it.
     #[gpui::test]
     fn a_tile_that_is_not_behind_has_no_rebase_tooltip(cx: &mut gpui::TestAppContext) {
@@ -6763,14 +6726,19 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.cell(&vcx, 0, 0).0, "4500.00");
     }
 
-    /// B5: the menu row's `stop_propagation` is load-bearing for the
-    /// menu-row → picker path. "Load underlying…" opens the picker and
-    /// focuses its field inside the row's own handler; were the click to
-    /// bubble on, the shell's tile-level mouse-down would re-arm
-    /// `pending_focus_restore` and the next render would take the
-    /// keyboard back. [`Host`]'s counter stands in for that bubble (its
-    /// own doc comment): it must NOT move on this click, and the field
-    /// must hold the keyboard afterwards.
+    /// The menu-row → picker path leaves the picker's field holding the
+    /// keyboard. This no longer rests on the row's own
+    /// `stop_propagation` (B5's original claim, since superseded — see
+    /// `popup.rs`'s comment on that handler): the 2026-09-17 insert-focus
+    /// rule (`occupant_holds_insert_focus`) means `render`'s own
+    /// `pending_focus_restore` consumption is skipped whenever the
+    /// focused tile's occupant holds its own input in insert mode, so a
+    /// bubbled click could no longer take the keyboard back on the next
+    /// render either way. [`Host`]'s counter (its own doc comment) still
+    /// stands in for that bubble and still reads zero here, though the
+    /// stop it once credited is now kept for an unrelated reason (a click
+    /// that means "pick a row" must not also run the shell's ordinary
+    /// tile click handling — see `popup.rs`).
     ///
     /// The cursor is put in the STRIP first, deliberately: with it in the
     /// grid, the pinned `TableState::set_selected_row` (which `sync_cursor`
@@ -6779,7 +6747,7 @@ edits = [["2099-01-01", "-1", 1.0]]
     /// `sync_cursor` calls `clear_selection`, which stops nothing, so the
     /// row's own stop is the only thing between the click and the bubble.
     #[gpui::test]
-    fn the_menu_rows_stop_propagation_keeps_the_pickers_focus(cx: &mut gpui::TestAppContext) {
+    fn the_menu_row_to_picker_path_leaves_the_pickers_field_focused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
         h.dispatch(&mut vcx, "up", None);
@@ -6802,8 +6770,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(
             h.host_clicks(),
             0,
-            "the row click never bubbled to the tile's own listeners — the shell's \
-             focus re-arm must not run behind a field that was just focused"
+            "the row click never bubbled to the tile's own listeners"
         );
     }
 
