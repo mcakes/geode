@@ -279,8 +279,10 @@ the reader already applies to leaves). A hostile file therefore never
 produces a stack the tree's own verbs could not have built. `Tree`'s
 derived `PartialEq` stays, so `session.rs`'s dock-table skip is
 unaffected, and `SESSION_CONFIG_VERSION` is unchanged: an older reader
-meets a `kind = "stack"` node it does not know and drops it as it drops
-any child of unknown kind, losing the members but nothing else.
+meets a `kind = "stack"` node as an unknown node kind, which
+`node_from_toml` reports as an error and the workspace parse
+propagates — that workspace's whole layout is refused, not just the
+stack child dropped.
 
 Hidden members are serialised through `serialize` like any tile; there
 is nothing stack-specific in a tile record.
