@@ -2883,6 +2883,20 @@ mod tests {
             h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
             "tree · lhu / underlying_ref"
         );
+
+        // A one-member "stack" (defensive only — a live tree never keeps
+        // one) is gated off exactly like no stack at all: `len > 1` is
+        // the filter, not merely `is_some()`.
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_stack(Some(StackHandle::new(1, 1, |_, _| {})), cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            vcx.debug_bounds("stack-marker-7").is_none(),
+            "a stack of one paints no marker"
+        );
     }
 
     /// Paints the tile and hands back the centre of one painted element
