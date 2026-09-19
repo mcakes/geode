@@ -54,9 +54,16 @@
 //! active = 1
 //! ```
 //! An older build meets `kind = "stack"` as an unknown node kind, which
-//! `node_from_toml` reports as an error and the workspace parse
-//! propagates — that workspace's whole layout is refused, not just the
-//! stack child dropped.
+//! `node_from_toml` reports as an error — but the two trees it can appear
+//! in diverge sharply from there. A stack in a workspace's MAIN tree
+//! propagates through `parse_workspace`'s `?` into `from_toml`'s
+//! `errors`, so `from_toml` returns `Err` and `load` answers a wholly
+//! fresh session (`fresh(errors)`): every workspace, every tile record
+//! and the palette usage history are discarded, and the next periodic
+//! flush overwrites the file with that empty state. A stack in a DOCK
+//! tree is caught inside `parse_docks`'s own `match node_from_toml { .. }`
+//! arm, which only warns and drops that one dock's tree — the main tree,
+//! the workspace's other docks and every other workspace survive intact.
 //!
 //! Dock-regions task adds two optional per-workspace shapes (absent in
 //! every pre-dock file, which therefore loads unchanged — no

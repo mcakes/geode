@@ -13135,15 +13135,16 @@ run_mutation "stacks: fullscreen follows a cycle" \
 # already its stack's active member — so `ix < active` never holds and no
 # test, however written, can see that branch break. The clamp itself
 # (`active.min(n - 1)`) IS reachable, on the boundary case this test
-# builds (the active member is also the LAST one): loosen it to `n` and
-# the freshly-closed last member's old index survives one past the
-# shrunk `children`, read back by `children[*active]` on the very next
-# lookup (`remove_focused`'s own "own stack" refocus, immediately after)
-# — an out-of-bounds panic, caught as a test failure.
+# builds (the active member is also the LAST one): forcing the whole
+# expression to `0` (both arms of the `if`/`else` are `usize`, so this
+# still compiles) picks the WRONG in-bounds member instead of panicking
+# — the review round found `active.min(n)` here instead, which is only
+# ever caught by an index-out-of-bounds panic on the very next lookup,
+# never by the test's own `focused() == Some(TileId(2))` assertion.
 run_mutation "stacks: closing the last member activates the previous" \
   crates/geode-shell/src/tiling/tree.rs \
   'active.min(n - 1)' \
-  'active.min(n)' \
+  '0' \
   geode-shell \
   closing_the_last_member_activates_the_previous_one
 
