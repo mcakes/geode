@@ -1625,7 +1625,12 @@ fn double_click(
 fn mod_double_click_toggles_fullscreen_on_that_tile(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .focused()),
         Some(left),
         "sanity: focus starts on the left tile"
     );
@@ -1639,9 +1644,16 @@ fn mod_double_click_toggles_fullscreen_on_that_tile(cx: &mut gpui::TestAppContex
             Some(right),
             "the double-clicked tile went fullscreen"
         );
-        assert_eq!(tree.focused(), Some(right), "and took tile focus on the way");
+        assert_eq!(
+            tree.focused(),
+            Some(right),
+            "and took tile focus on the way"
+        );
         assert!(shell.tile_drag.is_none(), "no drag is left armed");
-        assert!(shell.session_dirty, "a fullscreen toggle persists like mod+f");
+        assert!(
+            shell.session_dirty,
+            "a fullscreen toggle persists like mod+f"
+        );
     });
 
     shell.update(&mut cx, |shell, _| shell.session_dirty = false);
