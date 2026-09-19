@@ -346,6 +346,7 @@ pub mod cvi {
                 family: Family::Document,
                 key: vec!["underlying_ref".to_string()],
                 axes: vec!["term".to_string(), "node".to_string()],
+                local: false,
                 columns: vec![
                     col(
                         "underlying_ref",
