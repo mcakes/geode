@@ -164,6 +164,14 @@ rule) and while the model is empty.
 refusals, attribute names as completions. `:set` with no value shows
 the current value as the notice.
 
+**Amendment (2026-09-19, §11.ab):** a `Date` attribute does not open
+the text `InputState` above. It opens a Geode-owned segmented date
+field in the value's place — `YYYY`‑`MM`‑`DD`, one segment active,
+opened on the DAY — whose value is a valid date at every moment, so
+`enter` has nothing to refuse and `parse_attr`'s `Date` arm serves
+`:set` alone. The rest of this section (`F64`/`I64`/`Utf8`, the cell
+rule, the `Behind` and empty-model refusals) is unchanged.
+
 ### 5.3 One draft
 
 ```rust
@@ -689,3 +697,88 @@ the restore flag, the session write, the picker mark, the current-only
 revert, the live menu row); the `mdtile:`/`mdpicker:` refusal entries
 they replace are deleted. Display check pending on a real window: the
 decorated picker row beside a bare one.
+
+### 11.ab The segmented date field (2026-09-19)
+
+User ruling 2026-09-19 (mockup "Segmented date field — the anchor date
+editor", approved "Looks good", option A: open on the day): a `Date`
+attribute's editor is no longer a text `Input` a trader retypes a
+`YYYY-MM-DD` into, but a segmented field in the value's place — three
+spans in the data face separated by `-`, the active segment on the
+theme's `primary`, a segment mid-typing on `accent`, the container
+bordered as the cell editor is.
+
+**Keys while the field is open** (the mockup's table, verbatim in
+behaviour): `←`/`→` move between year, month and day, clamped at both
+ends (a click on a segment does the same); `↑`/`↓` step the active
+segment by one — days roll over into the next month, months clamp the
+day to the new month's length, years clamp Feb 29 to the 28th, and a
+step past chrono's range saturates rather than panics; `shift+↑`/
+`shift+↓` step ten, the number nudge's own rule; `0`–`9` OVERWRITE the
+active segment (a typed digit replaces the value, never appends) and a
+complete segment advances to the next, the day staying the day — a
+year completes at four digits, a first month digit `2`–`9` completes
+as `0d` at once while `0`/`1` waits for a second (a second making `00`
+or more than `12` is refused and the first digit stays), a first day
+digit `4`–`9` completes at once while `0`–`3` waits (a second making
+`00` or more than the month holds is refused); `backspace` clears what
+was typed into the segment and the previous value shows again;
+`enter` commits and `escape` cancels — the value is always a valid
+date, so there is nothing to refuse; and a chord (`ctrl+k` and the
+rest) passes through to the shell as it does from any editor.
+
+**As built.** `core::datefield::DateField` is the pure core (`open`,
+`left`/`right`/`select`, `step`, `digit -> bool` (completed), `backspace`,
+`text`, `segments() -> [SegmentText; 3]`, `value`), with every rule
+above under a unit test. In the tile, `Editing.state` is
+`EditorState::{Text(Entity<InputState>), Date { field, focus:
+FocusHandle, paint: DateFieldPaint }}`: `begin_edit` on a header
+attribute whose spec type is `ColumnType::Date` parses the painted text
+(falling back to today's local date when it does not parse — an empty
+NULL, say) and focuses a handle of its own, so `holds_focus`, the
+shell's insert branch and `key_context`'s `insert` all read exactly as
+they do for an `Input`. The field's element carries `track_focus` and
+an `on_key_down` (`header::render_date_field`) that runs
+`MarketDataTile::date_field_key` ahead of the shell root's listener and
+stops propagation only for a key it consumed — never for one carrying
+ctrl, alt or cmd — and the fragment's `commit`/`cancel`/`insert_*`
+verbs reach the same `commit_edit`/`close_editor`/`nudge` doors
+(`nudge`'s `Date` arm is `field.step`), so the two routes cannot
+disagree. `commit_attr_edit` now takes `AttrInput::{Text, Value}`: the
+field hands a known-valid `Value::Date`, the text editor and `:set`
+still hand text to `parse_attr`. `close_editor` blurs when the field's
+handle is focused, then drops — the blur-then-drop rule, one guard
+(`EditorState::is_focused`) for both forms. `DateFieldPaint::of`
+prepares the three `SharedString`s on every key; `render` formats
+nothing. A segment's mouse-down `select`s it and stops propagation,
+because the attribute value's own `attr_clicked` would otherwise
+cancel the editor the click was aimed into; the container's padding
+and the separators still bubble, so a click elsewhere cancels as
+before. `core::nudge::nudge_text` no longer handles a `Date`.
+
+**Colours.** The active segment is `primary` under
+`FlooredTones::primary_text`: `primary_foreground` floored by
+`readable_on` against `primary` itself, toward pure black or pure white
+(whichever contrasts more with `primary`) — seven bundled themes ship
+the pair under 3:1 (Gruvbox Light 2.19:1, Ayu Light, Everforest Light,
+Catppuccin Latte, Flexoki Light, Asciinema, Spaceduck), and on three of
+them the theme's own `foreground` is itself under 3:1 against `primary`,
+so a floor toward it had no `t` that cleared. A typing segment is
+`accent`/`accent_foreground`, which every bundled theme's pair clears
+as shipped. `date_segment_colours_are_readable_on_every_bundled_theme`
+sweeps all three states.
+
+Tests: eighteen unit tests on the core; window tests for the open
+(insert mode, the field's handle focused, the fixture's date, day
+active), the arrows and `enter` (`2027-08-25` into the draft, the
+header edited with the dot), typing (`1` waits, `12` advances, `39`
+refused, `backspace` restores, `30` then `enter`), `escape` (draft
+empty, painted date back, `Window::focused` `None`), a segment click,
+a chord reaching the host's own key listener past the field, and
+`spot_ref` still opening the text editor. Harness: `mddate: the field
+opens on the day segment`, `mddate: the day rolls over into the next
+month`, `mddate: a month step clamps the day`, `mddate: a first month
+digit 2-9 completes at once`, `mddate: escape restores the painted
+date`; `mdnudge: a date steps whole days` is retired. Display check
+pending on a real window: the three segments and their highlight in
+the strip beside the other attributes.
