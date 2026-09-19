@@ -2269,7 +2269,13 @@ mod tests {
 
     #[test]
     fn take_work_pops_documents_then_series_then_files() {
+        // Every lane populated at once, in the reverse of pop order, so a
+        // swap of any two `pop_front`s in `take_work` (documents/series or
+        // series/files) is caught here rather than passing every other
+        // test in the crate — the earlier version of this test queued no
+        // document at all and so could not see that first ordering break.
         let mut q = Queue::default();
+        q.documents.push_back(job("cvi_params", spx()));
         q.series
             .push_back(series_job("SPX.close", SeriesRows::default()));
         q.items.push(work_item(
@@ -2279,9 +2285,11 @@ mod tests {
             Priority::Backfill,
         ));
         let first = take_work(&mut q).unwrap();
-        assert!(matches!(first, Work::Series(_)));
+        assert!(matches!(first, Work::Document(_)));
         let second = take_work(&mut q).unwrap();
-        assert!(matches!(second, Work::File(_)));
+        assert!(matches!(second, Work::Series(_)));
+        let third = take_work(&mut q).unwrap();
+        assert!(matches!(third, Work::File(_)));
         assert!(take_work(&mut q).is_none());
     }
 }
