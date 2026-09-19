@@ -12192,6 +12192,55 @@ run_mutation "reclaim: shift-up in an Input falls through to the keymap" \
   geode-marketdata \
   shift_up_in_the_editor_no_longer_moves_the_tables_selection
 
+# ---- Market-data update policy (spec §8.4, 2026-09-19) -------------------
+#
+# `hold`/`rebase`/`replace` is applied in `MarketDataTile::apply` at the
+# one point `on_delivered` decides `Behind`. Each entry breaks one policy's
+# own step; the `hold` path is the existing Behind entries' business.
+
+# Mutated away, the `rebase` arm builds the clean model and then never
+# re-places the edits: the draft stays `Behind`, `retained` pins the base,
+# and a `rebase` panel silently behaves as `hold` — the policy a trader set
+# does nothing, with no notice saying so.
+run_mutation "mdauto: rebase policy re-places edits instead of holding" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    let (_, dropped) = draft.rebase(&clean);' \
+  '                    let dropped: Vec<(String, String)> = Vec::new();
+                    let _ = &clean;' \
+  geode-marketdata \
+  auto_rebase_re_places_the_edits_onto_a_newer_document
+
+# The count is taken BEFORE the revert. Swapped, the notice reads
+# `update HH:MM replaced ` with nothing after it — the one disclosure of
+# unsent work gone by a standing choice, saying nothing about what went.
+run_mutation "mdauto: replace policy drops the edits and says how many" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    let phrase = draft.count_phrase();
+                    draft.revert();' \
+  '                    draft.revert();
+                    let phrase = draft.count_phrase();' \
+  geode-marketdata \
+  auto_replace_drops_the_edits_and_says_how_many
+
+# Mutated away, every restored tile opens as `hold` whatever the session
+# says — the policy is written and never read back, so a restart quietly
+# reverts a trader's choice.
+run_mutation "mdauto: the policy is read from the session" \
+  crates/geode-marketdata/src/tile.rs \
+  '            .and_then(UpdatePolicy::parse)' \
+  '            .and_then(|_| None::<UpdatePolicy>)' \
+  geode-marketdata \
+  the_policy_round_trips_through_the_session
+
+# Mutated away, all three `On new document` rows carry the tick, and the
+# menu no longer says which policy is in force.
+run_mutation "mdauto: exactly one policy row is checked" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '            checked: Some(p == policy),' \
+  '            checked: Some(true),' \
+  geode-marketdata \
+  exactly_one_policy_row_is_checked_and_it_follows_the_policy
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
