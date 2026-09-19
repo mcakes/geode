@@ -12144,53 +12144,72 @@ run_mutation "listrow: every highlight run takes the door's accent" \
   every_highlight_run_takes_the_doors_accent
 
 # ---- Clickable controls (`shell::control`, affordance follow-up) --------
-# The design guide owes every control a hover and a pressed state; the
-# door borrows gpui-component's own button tokens and floors the text
-# over each state's fill. `muted_foreground` — the chips' text — over
-# `secondary_hover` is under 3:1 on 16 bundled themes unfloored
-# (Catppuccin Latte 1.93:1); over `secondary_active` on 19; `warning`
-# (the status bar's diagnostics segment) over the pressed fill on 15.
-# Mutated to the raw text, a hovered scope chip is unreadable on those
-# themes and the sweep is the only test that reads a control's COLOUR.
-run_mutation "control: a filled control's hover text is floored over the hover fill" \
+# The design guide owes every control a hover and a pressed state. The
+# door borrows gpui-component's button tokens where they are VISIBLY
+# distinct from the rest fill and synthesises a step toward `foreground`
+# where they are not (on 28 bundled themes `secondary_hover` is within
+# 1.10:1 of `secondary`; on 6 it IS the rest fill), and floors the
+# control's text over each state's fill composited on the control's own
+# SURFACE (`muted_foreground` over `secondary_hover` is under 3:1 on 16
+# themes unfloored). Only the two sweeps read a control's COLOUR.
+run_mutation "control: hover text is floored over the hover fill" \
   crates/geode-shell/src/shell/control.rs \
-  '            hover_text: floored(theme, text, theme.secondary_hover),' \
-  '            hover_text: text,' \
+  '        hover_text: to_hsla(readable_on(text, hover, toward)),' \
+  '        hover_text: to_hsla(text),' \
   geode-shell \
   every_control_state_is_readable_on_every_bundled_theme
 
-run_mutation "control: a filled control's pressed text is floored over the pressed fill" \
+run_mutation "control: pressed text is floored over the pressed fill" \
   crates/geode-shell/src/shell/control.rs \
-  '            hover_text: floored(theme, text, theme.secondary_hover),
-            pressed,
-            pressed_text: floored(theme, text, pressed),' \
-  '            hover_text: floored(theme, text, theme.secondary_hover),
-            pressed,
-            pressed_text: text,' \
+  '        pressed_text: to_hsla(readable_on(text, pressed, toward)),' \
+  '        pressed_text: to_hsla(text),' \
   geode-shell \
   every_control_state_is_readable_on_every_bundled_theme
 
-run_mutation "control: a bare control's pressed text is floored over the pressed fill" \
+# The raw token, however indistinct, is what the first cut shipped.
+# Mutated so `distinct_fill` always hands the candidate back, every chip
+# on Fahrenheit and every workspace disc on six themes has no hover.
+run_mutation "control: an indistinct hover token is stepped toward the foreground" \
   crates/geode-shell/src/shell/control.rs \
-  '            hover_text: floored(theme, theme.accent_foreground, theme.accent),
-            pressed,
-            pressed_text: floored(theme, text, pressed),' \
-  '            hover_text: floored(theme, theme.accent_foreground, theme.accent),
-            pressed,
-            pressed_text: text,' \
+  '    if clears(candidate) {
+        return candidate;
+    }' \
+  '    if clears(candidate) || true {
+        return candidate;
+    }' \
   geode-shell \
-  every_control_state_is_readable_on_every_bundled_theme
+  every_control_state_is_distinct_from_rest_on_every_bundled_theme
 
-# The two rests borrow DIFFERENT button pairs: a filled chip steps its
-# own fill (secondary), a bare glyph lights an accent box (ghost). Mutated
-# so a bare control hovers to `secondary_hover`, a chevron or `×` on the
-# tile surface hovers to a fill tuned for a chip, not a surface.
+# The rest fill is composited over the control's SURFACE before anything
+# is measured against it: 16 bundled `muted`/`secondary` values are
+# translucent, and a rest read as the bare token is a different colour
+# from the one on screen, so "distinct from rest" measures the wrong
+# thing. The distinctness sweep composites for itself and disagrees.
+run_mutation "control: the rest fill is composited over the surface" \
+  crates/geode-shell/src/shell/control.rs \
+  '    let rest = match inputs.rest {
+        Rest::Filled(fill) => over(fill, surface),
+        Rest::Bare => surface,
+    };
+    let hover_token' \
+  '    let rest = match inputs.rest {
+        Rest::Filled(fill) => to_rgb(fill),
+        Rest::Bare => surface,
+    };
+    let hover_token' \
+  geode-shell \
+  every_control_state_is_distinct_from_rest_on_every_bundled_theme
+
+# The two rests borrow DIFFERENT tokens: a filled chip steps its own
+# fill (secondary), a bare glyph lights an accent box (ghost). Mutated
+# so a bare control asks for `secondary_hover`, Nord's gear hovers to a
+# fill tuned for a chip and the token test sees the wrong colour.
 run_mutation "control: a bare control hovers to accent, a filled one to secondary_hover" \
   crates/geode-shell/src/shell/control.rs \
-  '            hover: theme.accent,' \
-  '            hover: theme.secondary_hover,' \
+  '        Rest::Bare => inputs.accent,' \
+  '        Rest::Bare => inputs.secondary_hover,' \
   geode-shell \
-  rests_resolve_to_their_documented_tokens
+  a_distinct_component_token_is_used_as_is
 
 # ---- Chrome on the rem scale (`shell::scale`, design-guide audit) -------
 # `FontSize` moves the window rem; every chrome length is authored in

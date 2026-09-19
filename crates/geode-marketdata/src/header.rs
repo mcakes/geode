@@ -495,10 +495,20 @@ pub(crate) fn render(
             .border_color(theme.border)
             .when(menu_open, |d| d.bg(theme.secondary))
             .text_color(muted)
-            // A bare control's pointer states (`control::PointerStates`);
-            // the open state above stays its own persistent fill, as the
-            // guide asks of a button that owns a popup.
-            .pointer_states(control::control_paint(theme, control::Rest::Bare, muted))
+            // A bare control's pointer states (`control::PointerStates`)
+            // while CLOSED; open, the button keeps its persistent fill
+            // above and answers the pointer with nothing, as the guide
+            // asks of a button that owns a popup (and as gpui-component's
+            // own `Button` does while `selected`). The header sits on the
+            // tile surface, the window background.
+            .when(!menu_open, |d| {
+                d.pointer_states(control::paint(
+                    theme,
+                    control::Rest::Bare,
+                    theme.background,
+                    muted,
+                ))
+            })
             .child("⋯")
             .debug_selector(move || format!("marketdata-menu-button-{tile_id}"))
             .capture_any_mouse_down({

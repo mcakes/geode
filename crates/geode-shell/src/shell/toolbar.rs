@@ -116,8 +116,13 @@ pub fn toolbar(
     // chips, `+`, save) and for the bare `×` glyph; the text, expression
     // and contradiction chips have no listener and take none — a hover
     // fill promises a click (design guide, interaction states).
-    let chip_states = control::control_paint(theme, control::Rest::Filled, chip_fg);
-    let glyph_states = control::control_paint(theme, control::Rest::Bare, chip_fg);
+    let chip_states = control::paint(
+        theme,
+        control::Rest::Filled(chip_bg),
+        theme.title_bar,
+        chip_fg,
+    );
+    let glyph_states = control::paint(theme, control::Rest::Bare, theme.title_bar, chip_fg);
 
     let mut chips_row = h_flex().gap_1().items_center();
     for (i, c) in model.chips.iter().enumerate() {

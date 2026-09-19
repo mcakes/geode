@@ -132,9 +132,18 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
     // takes none: it is the selected tab, and "selected" must stay
     // distinct from "hovered" (the guide's state table) — a click on it
     // switches to the workspace already shown.
-    let disc_states =
-        control::control_paint(theme, control::Rest::Filled, theme.sidebar_foreground);
-    let gear_states = control::control_paint(theme, control::Rest::Bare, theme.sidebar_foreground);
+    let disc_states = control::paint(
+        theme,
+        control::Rest::Filled(theme.secondary),
+        theme.sidebar,
+        theme.sidebar_foreground,
+    );
+    let gear_states = control::paint(
+        theme,
+        control::Rest::Bare,
+        theme.sidebar,
+        theme.sidebar_foreground,
+    );
 
     let mut indicators = v_flex().w_full().items_center().gap_2().pt_2();
     for n in 1..=9u8 {

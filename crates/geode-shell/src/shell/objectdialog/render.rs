@@ -3877,8 +3877,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let chip_radius = theme.radius;
     // Pointer states for the two controls a row carries besides itself:
     // the steppable value chip (a filled chip) and the tick (a bare glyph).
-    let chip_states = control::control_paint(theme, control::Rest::Filled, chip_fg);
-    let tick_states = control::control_paint(theme, control::Rest::Bare, chip_fg);
+    // Both sit on `popover`, the modal panel's fill. The tick hands in
+    // its UNTICKED text; a ticked tick's `success` is painted per row
+    // below, so the ticked form is derived here too.
+    let chip_states = control::paint(
+        theme,
+        control::Rest::Filled(chip_bg),
+        theme.popover,
+        chip_fg,
+    );
+    let tick_states = control::paint(theme, control::Rest::Bare, theme.popover, chip_fg);
+    let ticked_states = control::paint(theme, control::Rest::Bare, theme.popover, theme.success);
     let row = target_row(shell);
 
     // §6.1: on Colours, the swatch beside the name — resolved from the
@@ -4269,7 +4278,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                             } else {
                                 theme.muted_foreground
                             })
-                            .pointer_states(tick_states)
+                            .pointer_states(if entry.included {
+                                ticked_states
+                            } else {
+                                tick_states
+                            })
                             .debug_selector(move || tick_id)
                             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                 cx.stop_propagation();

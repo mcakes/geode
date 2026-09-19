@@ -168,9 +168,10 @@ pub fn status_bar(
                 .px_1()
                 .rounded(theme.radius_tokens().sm)
                 .text_color(theme.warning)
-                .pointer_states(control::control_paint(
+                .pointer_states(control::paint(
                     theme,
                     control::Rest::Bare,
+                    theme.status_bar,
                     theme.warning,
                 ))
                 .debug_selector(|| "diagnostics-summary".to_string())
