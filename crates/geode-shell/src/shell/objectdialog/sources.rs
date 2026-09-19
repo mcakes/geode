@@ -448,8 +448,8 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 /// a working alternative would stop a trader's source loading.
 pub fn help(key: &str) -> &'static str {
     match key {
-        "dataset" => "The dataset this source's files load into, as datasets.toml declares it",
-        "paths" => "Directory globs to watch for CSV files, ';'-separated — empty leaves it idle",
+        "dataset" => "The dataset this source's data loads into, as datasets.toml declares it",
+        "paths" => "Globs matching the CSV files to load, ';'-separated — empty leaves it idle",
         "readiness" => {
             "A file is complete once its .done sentinel exists — stable_mtime never loads"
         }

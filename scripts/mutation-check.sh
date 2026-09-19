@@ -4209,6 +4209,17 @@ run_mutation "objectdialog: the help line paints under a notice" \
   geode-shell \
   a_notice_displaces_the_help_line_for_one_keystroke
 
+# Blank beside a question: the confirm row is one compact decision. Help
+# painted regardless keeps every other help test green (none arms a
+# confirm) and puts a sentence about the cursor's row under `Delete
+# 'mine'?`.
+run_mutation "objectdialog: the help line paints beside an armed confirm" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let help = if state.confirm.is_some() {' \
+  '    let help = if false {' \
+  geode-shell \
+  the_help_line_is_blank_under_an_armed_confirm
+
 # The opening mode is one line, and it silently restores the pre-modal
 # model: every filter test still passes with the dialog opening
 # filter-first (`/` is harmless when the field is already focused), and

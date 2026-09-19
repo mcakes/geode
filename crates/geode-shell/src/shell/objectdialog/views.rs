@@ -1008,9 +1008,9 @@ pub const COLUMN_KEYS: [&str; 7] = [
 
 /// The value `width` takes when the column has none of its own — a real
 /// value in the field rather than an empty string, because "no width" is
-/// something a trader chooses (the table measures the column) and an
-/// empty text box would read as an unset field they had failed to fill
-/// in.
+/// something a trader chooses (the column takes its kind's default
+/// width — `geode-blotter`'s plan, not a measurement) and an empty text
+/// box would read as an unset field they had failed to fill in.
 pub(super) const AUTO: &str = "auto";
 
 /// The largest width the stage will accept, and the smallest. A column
@@ -1456,6 +1456,7 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
         .parse::<toml::Table>()
         .unwrap_or_default()
 }
+
 /// What each field means, for the edit footer's help line
 /// ([`Domain::help`](super::Domain::help)); under ~90 characters, since
 /// the slot is one line (4c spec §22).

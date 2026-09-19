@@ -3992,8 +3992,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // Structurally one line: `line_height` pinned to the `min_h` (gpui's
     // default is `phi()`, which at `text_sm` runs 2px taller than
     // `min_h_5` and would let an empty slot shrink the footer), and the
-    // text never wraps — a sentence that outgrows the width clips rather
-    // than growing the footer. The tables keep under ~90 characters.
+    // text never wraps — a sentence that outgrows the width truncates
+    // with an ellipsis rather than growing the footer. The tables keep
+    // under 90 characters (`help_fits`), so the ellipsis is a backstop.
     let help = if state.confirm.is_some() {
         ""
     } else {
@@ -4002,18 +4003,25 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             .map(|key| domain.help(&state.stage, key))
             .unwrap_or("")
     };
-    let one_line = |el: Div| {
-        el.text_sm()
-            .line_height(rems(1.25))
-            .min_h_5()
-            .whitespace_nowrap()
-            .overflow_hidden()
-    };
-    let slot = match state.notice.as_ref() {
+    let one_line = |el: Div| el.text_sm().line_height(rems(1.25)).min_h_5().truncate();
+    // A notice can carry a newline — `regex::Error`'s Display is
+    // multi-line and `check_batch_pattern` forwards it verbatim — and
+    // gpui breaks a line on `\n` whatever the wrap mode, which would
+    // grow the slot. Flattened here, at the one paint site, and only
+    // when there is one to flatten: a notice stands for one keystroke,
+    // so the rare allocation is not per-frame churn on the common path.
+    let notice = state.notice.as_ref().map(|notice| {
+        if notice.contains('\n') {
+            notice.split_whitespace().collect::<Vec<_>>().join(" ")
+        } else {
+            notice.clone()
+        }
+    });
+    let slot = match notice {
         Some(notice) => one_line(div())
             .text_color(theme.warning)
             .debug_selector(|| "objectdialog-notice".to_string())
-            .child(notice.clone()),
+            .child(notice),
         None => {
             let line = one_line(div()).text_color(theme.muted_foreground);
             if help.is_empty() {

@@ -7336,16 +7336,27 @@ fn a_list_row_shows_its_lists_help(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
     type Fixture = fn() -> ShellServices;
-    let cases: [(&str, Fixture); 7] = [
-        ("config::views", services_with_a_desk_view),
-        ("config::sources", services_with_sources),
-        ("config::sources", services_with_a_subscribed_source),
-        ("config::groupings", || services_with_slot_3(&["book"])),
-        ("config::scopes", services_with_a_saved_scope),
-        ("config::colours", services_with_colours),
-        ("config::schema", services_with_schema),
+    // The third element names one row the fixture MUST have opened with,
+    // so a case cannot pass vacuously — the subscribed source's four
+    // extra rows in particular, which a directory source never paints.
+    let cases: [(&str, Fixture, &str); 7] = [
+        ("config::views", services_with_a_desk_view, "columns"),
+        ("config::sources", services_with_sources, "batch_pattern"),
+        (
+            "config::sources",
+            services_with_a_subscribed_source,
+            "source_time",
+        ),
+        (
+            "config::groupings",
+            || services_with_slot_3(&["book"]),
+            "dimensions",
+        ),
+        ("config::scopes", services_with_a_saved_scope, "selects"),
+        ("config::colours", services_with_colours, "token"),
+        ("config::schema", services_with_schema, "columns.book"),
     ];
-    for (action, services) in cases {
+    for (action, services, expected) in cases {
         let dir = tempfile::tempdir().unwrap();
         let (shell, mut cx) = dialog_test_shell_in_dir(cx, services(), dir.path(), action);
         cx.simulate_keystrokes("enter");
@@ -7353,6 +7364,10 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
         let missing: Vec<String> = shell.read_with(&cx, |shell, _| {
             let state = shell.object_dialog.as_ref().unwrap();
             let draft = state.draft.as_ref().unwrap();
+            assert!(
+                draft.fields.iter().any(|f| f.key == expected),
+                "{action}: the fixture did not open with a '{expected}' row"
+            );
             draft
                 .fields
                 .iter()
@@ -7395,4 +7410,52 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
 /// sentence would clip (the slot never wraps), which is silent.
 fn help_fits(help: &str) -> bool {
     !help.is_empty() && help.chars().count() <= 90
+}
+
+/// The filled slot is exactly one line of 1.25rem — `line_height` pinned
+/// to the `min_h` — so an empty slot (the same `min_h`) is the same
+/// height and the footer never moves between a row with help and one
+/// without. gpui's default `phi()` line height would make a filled
+/// slot ~2px taller than an empty one.
+#[gpui::test]
+fn the_help_slot_is_exactly_one_line(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let rem = cx.update(|window, _cx| window.rem_size());
+    let help = cx.debug_bounds("objectdialog-help").unwrap();
+    assert_eq!(help.size.height, rem * 1.25, "one line of 1.25rem");
+}
+
+/// Under an armed confirm the slot is blank: the confirm row is one
+/// compact decision, and a sentence about whichever row the cursor is on
+/// is noise beside it.
+#[gpui::test]
+fn the_help_line_is_blank_under_an_armed_confirm(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_only_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-help").is_some());
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-help").is_none(),
+        "no help beside a question"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(dialog_state(&shell, &cx, |s| s.confirm.is_none()));
+    assert!(
+        cx.debug_bounds("objectdialog-help").is_some(),
+        "and it is back"
+    );
 }
