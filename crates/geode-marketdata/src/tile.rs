@@ -3408,6 +3408,7 @@ impl gpui::Render for MarketDataTile {
             self.id.0,
             self.menu_tip_selector.clone(),
             self.state_tip_selector.clone(),
+            self.stack.as_ref(),
         );
         // The popup is anchored off a zero-size, absolutely positioned
         // sibling at the header's own right edge (spec §6.1) — `relative`
@@ -4485,6 +4486,29 @@ mod tests {
             chips.iter().any(|c| c == &local),
             "the source time on the trader's own clock ({local}): {chips:?}"
         );
+    }
+
+    /// The stack marker (tile-stacks spec §5.1) paints only while the
+    /// tile is a stack member with more than one member, first in the
+    /// header strip.
+    #[gpui::test]
+    fn the_stack_marker_paints_only_while_a_member(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert!(vcx.debug_bounds("stack-marker-3").is_none());
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_stack(Some(StackHandle::new(2, 4, |_, _| {})), cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let marker = vcx.debug_bounds("stack-marker-3").expect("painted");
+        let header = vcx.debug_bounds("marketdata-header-3").unwrap();
+        assert!(
+            marker.left() - header.left() < gpui::px(20.0),
+            "first in the strip"
+        );
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.title()).as_ref(), "CVI");
     }
 
     /// `BASE` plus `secs` seconds — the injected clock `header_texts_at`

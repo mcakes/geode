@@ -538,3 +538,33 @@ fn a_centre_drop_across_regions_stacks_into_the_targets_dock(cx: &mut gpui::Test
     );
     assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().is_empty()));
 }
+
+/// Task 9: the marker chip paints in the placeholder occupant too, not
+/// just the modules — built here with the `Workspaces` API directly
+/// (no `rec` roster verb, no session restore) so both stack members are
+/// plain placeholders: a leaf, then a second tile stacked onto it. Only
+/// the ACTIVE member (`b`, shown) paints the marker; the other member
+/// (`a`, hidden by the stack) paints nothing.
+#[gpui::test]
+fn a_placeholder_paints_the_marker_for_the_active_member_only(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let a = services
+        .workspaces
+        .split_active(crate::tiling::Orientation::Horizontal);
+    let b = services
+        .workspaces
+        .stack_active()
+        .expect("a focused tile to stack onto");
+    let (_window, mut cx) = open_shell(cx, services);
+
+    let a_sel: &'static str = Box::leak(format!("stack-marker-{}", a.0).into_boxed_str());
+    let b_sel: &'static str = Box::leak(format!("stack-marker-{}", b.0).into_boxed_str());
+    assert!(
+        cx.debug_bounds(b_sel).is_some(),
+        "the active, visible member paints the marker"
+    );
+    assert!(
+        cx.debug_bounds(a_sel).is_none(),
+        "the hidden member paints nothing (it isn't even rendered)"
+    );
+}

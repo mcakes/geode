@@ -329,9 +329,11 @@ impl ModuleRoster {
 /// the palette; never a blank, never a panic.
 pub mod placeholder {
     use super::*;
+    use crate::fonts;
+    use crate::shell::chip;
     use gpui::prelude::*;
-    use gpui::{Context, Render, div};
-    use gpui_component::ActiveTheme as _;
+    use gpui::{Context, ElementId, MouseButton, Render, div};
+    use gpui_component::{ActiveTheme as _, v_flex};
 
     /// The kind string a placeholder occupant's `TileOccupant::kind`
     /// carries (Phase 4b Task 1 fix round 1, MIN-7) — named here, next
@@ -353,14 +355,39 @@ pub mod placeholder {
 
     impl Render for PlaceholderView {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = cx.theme();
+            let mut content = v_flex().items_center().justify_center().gap_1();
+            if let Some(stack) = self.stack.as_ref().filter(|s| s.len > 1) {
+                let neutral_chip = chip::chip_paint(theme, chip::Tone::Neutral);
+                let open = stack.clone();
+                content = content.child(
+                    div()
+                        .id(ElementId::NamedInteger(
+                            SharedString::new_static("stack-marker"),
+                            self.tile.0,
+                        ))
+                        .text_color(neutral_chip.text)
+                        .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
+                        .px_1()
+                        .rounded(theme.radius_tokens().sm)
+                        .font_family(fonts::MONO)
+                        .debug_selector(|| format!("stack-marker-{}", self.tile.0))
+                        .child(stack.text.clone())
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            cx.stop_propagation();
+                            open.open_list(window, cx);
+                        }),
+                );
+            }
+            content = content.child("ctrl+k → Add a tile");
             div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(theme.muted_foreground)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
-                .child("ctrl+k → Add a tile")
+                .child(content)
         }
     }
 

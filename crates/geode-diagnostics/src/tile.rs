@@ -22,8 +22,8 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, IntoElement, ScrollStrategy, SharedString, UniformListScrollHandle,
-    Window, div, uniform_list,
+    App, Context, ElementId, Entity, IntoElement, ScrollStrategy, SharedString,
+    UniformListScrollHandle, Window, div, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -695,8 +695,28 @@ impl gpui::Render for DiagnosticsTile {
             .text_color(theme.muted_foreground)
             .border_b_1()
             .border_color(theme.border)
-            .debug_selector(|| format!("diagnostics-header-{}", self.tile.0))
-            .child(self.header_text.clone());
+            .debug_selector(|| format!("diagnostics-header-{}", self.tile.0));
+        if let Some(stack) = self.stack.as_ref().filter(|s| s.len > 1) {
+            let open = stack.clone();
+            header = header.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("stack-marker"),
+                        self.tile.0,
+                    ))
+                    .text_color(neutral_chip.text)
+                    .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .debug_selector(|| format!("stack-marker-{}", self.tile.0))
+                    .child(stack.text.clone())
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        open.open_list(window, cx);
+                    }),
+            );
+        }
+        header = header.child(self.header_text.clone());
         // MIN-11 (fix round 1): a tile restored from a session with a
         // saved `filter` used to paint a narrowed list with no on-screen
         // indication why — same "filtered" pill the blotter's own header
@@ -1330,6 +1350,32 @@ mod tests {
     #[gpui::test]
     fn title_names_the_section(cx: &mut gpui::TestAppContext) {
         let (h, vcx) = open(cx);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "diagnostics · sources"
+        );
+    }
+
+    /// The stack marker (tile-stacks spec §5.1) paints only while the
+    /// tile is a stack member with more than one member, first in the
+    /// header strip.
+    #[gpui::test]
+    fn the_stack_marker_paints_only_while_a_member(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert!(vcx.debug_bounds("stack-marker-9").is_none());
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_stack(Some(StackHandle::new(2, 4, |_, _| {})), cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let marker = vcx.debug_bounds("stack-marker-9").expect("painted");
+        let header = vcx.debug_bounds("diagnostics-header-9").unwrap();
+        assert!(
+            marker.left() - header.left() < gpui::px(20.0),
+            "first in the strip"
+        );
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
             "diagnostics · sources"
