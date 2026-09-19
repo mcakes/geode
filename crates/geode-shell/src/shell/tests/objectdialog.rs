@@ -2905,6 +2905,79 @@ fn c_duplicates_the_selected_scope_under_a_new_name(cx: &mut gpui::TestAppContex
     assert!(edit_draft(&shell, &cx, |d| d.is_new));
 }
 
+/// A source deleted out from under an armed `c` — between the keystroke
+/// that recorded its name in `naming_seed` and the `enter` that would
+/// copy it — is refused with a notice, never written as a blank copy
+/// under the new name. `naming_seed` records the source by NAME rather
+/// than by row index for exactly this reason (see its own doc comment),
+/// but the name itself can still stop resolving if the object is gone
+/// from the live config by the time `enter` reads it back.
+#[gpui::test]
+fn c_refuses_when_the_source_vanished_before_enter(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("c");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_seed.clone()),
+        objectdialog::NameSeed::CopyOf("mine".to_string())
+    );
+    // `mine` vanishes from the LIVE config before `enter` — the same
+    // datasets doc `services_with_a_saved_scope` uses, but an empty
+    // `scopes` doc rather than one still holding `mine`.
+    shell.update(&mut cx, |shell, cx| {
+        let datasets = LayerDoc::builtin(
+            "datasets",
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+             [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+        )
+        .unwrap();
+        let scopes = LayerDoc::builtin("scopes", "").unwrap();
+        (shell.services.config, shell.services.builtin) =
+            ShellServices::config_and_builtin(ConfigSources {
+                builtin: vec![
+                    LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+                    datasets,
+                    scopes,
+                ],
+                desk: None,
+                user: None,
+            });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.simulate_input("mine2");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // Still naming — `enter` refused rather than creating.
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("'mine' is gone — nothing to copy".to_string())
+    );
+    // No `scopes.toml` written under the new name at all — the refusal
+    // happens before `enter_edit_stage`/`commit_create` ever run.
+    let written_path = dir.path().join("scopes.toml");
+    if written_path.exists() {
+        let written = std::fs::read_to_string(&written_path).unwrap();
+        assert!(!written.contains("mine2"), "{written}");
+    }
+    assert!(dialog_state(&shell, &cx, |s| s.draft.is_none()));
+}
+
 /// `c` is Scopes-only for now: elsewhere it is an unbound letter.
 #[gpui::test]
 fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {

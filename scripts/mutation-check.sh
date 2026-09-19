@@ -7143,6 +7143,25 @@ run_mutation "scopes dialog: c copies verbatim" \
   geode-shell \
   c_duplicates_the_selected_scope_under_a_new_name
 
+# Review finding (2026-09-19): a source deleted between `c` and `enter`
+# must be refused, never silently copied as a blank object under the new
+# name. `.or(Some(toml::Table::new()))` makes the lookup's `Option` always
+# `Some`, so the `let Some(table) = … else { … }` below never takes its
+# refusal branch — the mutation recreates the exact defect the test
+# guards against (a blank `mine2` created and opened instead of a
+# refusal), rather than merely dropping the notice text: every one of the
+# test's four assertions (stage stays `Naming`, the notice names the
+# gone source, no file is written, no draft exists) fails under it.
+run_mutation "scopes dialog: c refuses a source that vanished before enter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            .and_then(|v| v.as_table())
+            .cloned()' \
+  '            .and_then(|v| v.as_table())
+            .cloned()
+            .or(Some(toml::Table::new()))' \
+  geode-shell \
+  c_refuses_when_the_source_vanished_before_enter
+
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
 # to normal mode, which keeps the query applied) must still be emptied
