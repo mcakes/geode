@@ -229,7 +229,17 @@ fn hovering_the_as_of_badge_names_the_selector_chord(cx: &mut gpui::TestAppConte
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-    let at = chrono::Utc::now() - chrono::Duration::hours(1);
+    // Pinned to today-local NOON, not `now − 1h`: in the hour after local
+    // midnight the latter falls on yesterday, the badge stops eliding to
+    // `HH:MM`, and the width assertion below fails by construction.
+    let at = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .single()
+        .expect("noon exists in every zone")
+        .to_utc();
     frame.update(&mut vcx, |f, cx| {
         if f.set_as_of(AsOf::At(at)) {
             cx.notify();
