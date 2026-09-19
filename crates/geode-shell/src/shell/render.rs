@@ -26,7 +26,8 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, commandline_view, dialog, perf_overlay, picker, sidebar, status, toolbar, whichkey,
+    ShellView, commandline_view, dialog, objectdialog, perf_overlay, picker, sidebar, status,
+    toolbar, whichkey,
 };
 
 /// gpui hover-group name shared by every divider strip (drag-splitters
@@ -961,11 +962,32 @@ impl Render for ShellView {
                 picker::open(view, Some(column), window, cx);
             });
         };
+        // The scope bar's `+` pick chip (scope-save spec's amendment) —
+        // the mouse form of `mod+p`, opened on the column-choice stage
+        // exactly as `frame::pick` is. Same `cx.entity()`-captured shape
+        // as `on_chip_open` just above.
+        let pick_chip_entity = cx.entity();
+        let on_pick = move |window: &mut Window, cx: &mut App| {
+            pick_chip_entity.update(cx, |view, cx| {
+                picker::open(view, None, window, cx);
+            });
+        };
+        // The scope bar's `save` chip — the mouse form of
+        // `scope::save_current`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let save_chip_entity = cx.entity();
+        let on_save = move |window: &mut Window, cx: &mut App| {
+            save_chip_entity.update(cx, |view, cx| {
+                objectdialog::render::open_save_scope(view, window, cx);
+            });
+        };
         let toolbar = toolbar::toolbar(
             &self.filter_input,
             &bar_model,
             on_chip_close,
             on_chip_open,
+            on_pick,
+            on_save,
             cx,
         );
 

@@ -304,6 +304,18 @@ impl ShellView {
             // user keymap. Opens the picker straight onto that column's
             // values stage.
             picker::open(self, Some(column.to_string()), window, cx);
+        } else if action.0 == "scope::save_current" {
+            // **Trap** (CLAUDE.md's Scopes bullet, `defaults.rs`'s own
+            // registration comment): this arm MUST come before the
+            // `strip_prefix("scope::")` one below, which would otherwise
+            // read `save_current` as the name of a saved scope to load
+            // rather than as this action's own id — the reason
+            // `Domain::Scopes.reserved_names()` refuses a scope by that
+            // name. Opens the Scopes dialog on the naming prompt, seeded
+            // from the frame's current scope (scope-save spec's
+            // amendment to Part 2a's `Domain::Scopes`) — same door the
+            // scope bar's `save` chip uses.
+            objectdialog::render::open_save_scope(self, window, cx);
         } else if let Some(name) = action.0.strip_prefix("scope::") {
             // A per-scope `scope::<name>` action (`defaults::
             // register_scope_actions`, spec §3.11) — unbound by default,

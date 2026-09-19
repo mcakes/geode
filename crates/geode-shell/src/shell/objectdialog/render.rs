@@ -653,7 +653,11 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         .as_ref()
         .map(|s| s.naming_seed.clone())
         .unwrap_or(NameSeed::Empty);
-    if let NameSeed::CopyOf(source) = seed {
+    // Cloned rather than matched by value here: `seed` is matched again
+    // below for `NameSeed::FromFrame`, and `NameSeed` has no `Copy` to
+    // spare — a bare `if let .. = seed` would move it out from under
+    // that second check regardless of which arm (if any) matches.
+    if let NameSeed::CopyOf(source) = seed.clone() {
         // Verbatim, from the pending-aware config: inside the 250 ms write
         // debounce `services.config` is the source as it stood before its
         // last edit (`apply::config_with_pending`'s own doc has the
@@ -673,6 +677,32 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         };
         draft.source = table;
         draft.fields = domain.fields_from_source(config, &draft.source);
+        draft.diagnostics = domain.validate(&draft, config);
+    }
+    if let NameSeed::FromFrame = seed {
+        // `scope::save_current` / the scope bar's `save` chip
+        // (`open_save_scope`, spec §6's amendment): the frame's current
+        // scope IS the new object's criteria — the same read
+        // `run_confirmed`'s `Confirm::Overwrite` arm makes, for the same
+        // reason it is made here and not in the pure core. Checked again
+        // rather than trusted from `open_save_scope`'s own gate: the
+        // scope can still empty out between opening the naming prompt
+        // and pressing `enter` on it (`:filter clear` on a tile, an
+        // undo), and a `commit_create` on an accidentally-empty object
+        // would silently save "everything" under the typed name.
+        let scope = shell.frame.read(cx).scope().clone();
+        if scope.is_empty() {
+            set_notice(shell, EMPTY_SCOPE_NOTICE.to_string());
+            cx.notify();
+            return;
+        }
+        // Pending-aware, like `c`'s copy just above: inside the 250 ms
+        // write debounce `services.config` alone is the config as it
+        // stood before the last edit, which would build the available
+        // dimensions list one keystroke stale.
+        let folded = apply::config_with_pending(shell);
+        let config = folded.as_ref().unwrap_or(&shell.services.config);
+        scopes::overwrite_with(&mut draft, &scope, config);
         draft.diagnostics = domain.validate(&draft, config);
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
@@ -756,6 +786,51 @@ fn begin_copy(shell: &mut ShellView, source: String) {
     }
     state.begin_naming();
     state.naming_seed = NameSeed::CopyOf(source);
+}
+
+/// The refusal `open_save_scope` and `create_from_name`'s `FromFrame`
+/// arm share: there is nothing on the frame to name and save. One
+/// string so the two sites cannot drift apart.
+const EMPTY_SCOPE_NOTICE: &str = "the frame's scope is empty — nothing to save";
+
+/// `scope::save_current` (the palette action, `input.rs`) and the scope
+/// bar's `save` chip (`toolbar.rs`) — the mouse-and-palette door onto
+/// what pre-2026-09-19 `n` used to do (scopes-editing spec §6's
+/// amendment): open the Scopes dialog straight onto the naming prompt,
+/// seeded from the frame's own current scope rather than an empty one.
+///
+/// An empty frame scope has nothing to save, so that case opens the
+/// dialog in browse instead — same door, no naming — with a notice
+/// rather than silently doing nothing (a verb that does nothing visible
+/// is the defect class this interaction model exists to remove, per
+/// `run_overwrite`'s own doc comment). `create_from_name`'s `FromFrame`
+/// arm re-checks the same condition on `enter`, since the frame can
+/// still empty out between this door and that keystroke.
+pub(in crate::shell) fn open_save_scope(
+    shell: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if shell.frame.read(cx).scope().is_empty() {
+        open(shell, Domain::Scopes, window, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.notice = Some(EMPTY_SCOPE_NOTICE.to_string());
+        }
+        cx.notify();
+        return;
+    }
+    open(shell, Domain::Scopes, window, cx);
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.begin_naming();
+        state.naming_seed = NameSeed::FromFrame;
+    }
+    // `begin_naming` puts the dialog in `DialogMode::Filter`, which is
+    // what gives the shared `Input` the keys — `sync_dialog_text` is the
+    // only thing allowed to move focus onto it (spec §16.1), and `open`
+    // above already called it once for the browse stage it opened in, so
+    // this second call is what actually focuses the name field.
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
 }
 
 /// §19.3: the dataset of the browse row under the cursor, for `n` on
@@ -3675,9 +3750,14 @@ fn build(
         // `c`'s copy names its source (scopes-editing spec §6) rather
         // than the generic "New <object>" — the trader typed `c` on a
         // specific row, and the label is what tells them which one.
+        // `FromFrame` (the `scope::save_current` action and the scope
+        // bar's `save` chip, spec §6's amendment) gets its own label
+        // too, rather than falling into the generic "New scope" wording
+        // that would suggest an empty object is about to be created.
         let label = match &state.naming_seed {
             NameSeed::CopyOf(src) => format!("Copy of {src} · name"),
             NameSeed::Empty => format!("New {} · name", object_word(state.domain)),
+            NameSeed::FromFrame => "Save scope · name".to_string(),
         };
         dialog::name_row(&shell.dialog_input, &label, cx)
     } else {

@@ -7289,6 +7289,52 @@ run_mutation "scopes dialog: a dimension row's click arms the double-click guard
         }' \
   geode-shell a_double_click_on_a_scopes_dimension_row_opens_its_values_and_not_a_field
 
+# ---- `scope::save_current` (scope-save spec's amendment): the third
+# naming door, seeded from the frame ------------------------------------
+
+# The dispatch-order trap CLAUDE.md's Scopes bullet names: `input.rs`
+# must match `scope::save_current` BEFORE its `strip_prefix("scope::")`
+# arm, or a saved-scope load ("no scope named save_current") claims the
+# dispatch instead and no modal ever opens — the same failure a
+# hypothetical reordering of the two arms would produce.
+run_mutation "scope-save: save_current is matched before the scope:: prefix arm" \
+  crates/geode-shell/src/shell/input.rs \
+  '        } else if action.0 == "scope::save_current" {' \
+  '        } else if false {' \
+  geode-shell \
+  scope_save_current_seeds_naming_from_the_frame_and_creates_it
+
+# `open_save_scope`'s one gate: an empty frame scope has nothing to save,
+# so it must open browse with the notice rather than naming. Dropping
+# the check enters naming over an empty scope instead — the door never
+# refuses at all.
+run_mutation "scope-save: an empty frame scope refuses naming" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if shell.frame.read(cx).scope().is_empty() {' \
+  '    if false {' \
+  geode-shell \
+  scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice
+
+# `ScopeBarModel::savable` is the scope bar's own gate on the `save`
+# chip: an always-true value would paint the chip over an empty scope,
+# where clicking it can only open naming and immediately refuse.
+run_mutation "scope-save: the save chip's savable gate" \
+  crates/geode-shell/src/scopebar.rs \
+  '    let savable = !scope.is_empty();' \
+  '    let savable = true;' \
+  geode-shell \
+  no_active_slot_labels_as_view_default
+
+# `save_current` must be unreachable as a saved scope's own name — a
+# scope by that name would be indistinguishable from this action's id
+# both in the palette and in `input.rs`'s `scope::<name>` dispatch arm.
+run_mutation "scope-save: save_current is a reserved scope name" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            Domain::Scopes => &["save_current"],' \
+  '            Domain::Scopes => &[],' \
+  geode-shell \
+  scope_save_current_refuses_its_own_name_as_reserved
+
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
 # to normal mode, which keeps the query applied) must still be emptied

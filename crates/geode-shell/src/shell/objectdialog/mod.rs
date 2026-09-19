@@ -167,14 +167,19 @@ pub enum Stage {
 }
 
 /// What `enter` in [`Stage::Naming`] creates (scopes-editing spec §6):
-/// the domain's empty object (`n`), or a verbatim copy of a named one
-/// (`c`). Recorded by NAME when armed — the browse cursor is an index,
-/// and a reload can re-rank the list under it (the same reason
-/// `confirm_target` records one).
+/// the domain's empty object (`n`), a verbatim copy of a named one
+/// (`c`), or the frame's own current scope (`render::open_save_scope` —
+/// the `scope::save_current` palette action and the scope bar's `save`
+/// chip, spec §6's amendment). Recorded by NAME when armed — the browse
+/// cursor is an index, and a reload can re-rank the list under it (the
+/// same reason `confirm_target` records one; `FromFrame` needs no name
+/// of its own to record, since its source is frame state rather than
+/// another row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NameSeed {
     Empty,
     CopyOf(String),
+    FromFrame,
 }
 
 /// One named object as the browse list shows it.
@@ -429,19 +434,21 @@ impl Domain {
     /// union rather than the list.
     ///
     /// The names this domain refuses outright, reserved by a grammar
-    /// outside its own doc (Part 2c §6.1) — `Colours` alone: a column's
+    /// outside its own doc (Part 2c §6.1) — `Colours`: a column's
     /// `colour` field already spells `none` and `sign` itself, so a
     /// named colour object by either name would be unreachable through
-    /// that field and confusing everywhere else. Empty for every other
-    /// domain, which has no such collision.
+    /// that field and confusing everywhere else. `Scopes` reserves
+    /// `save_current` too (scope-save spec's amendment): it is the
+    /// `scope::save_current` palette action's own id, and a saved scope
+    /// by that name would collide with it in the palette (two rows
+    /// reading "Scope: Save current…"/"Scope: save_current") and shadow
+    /// it from `input.rs`'s `scope::<name>` dispatch arm besides. Empty
+    /// for every other domain, which has no such collision.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
             Domain::Colours => &geode_core::colour::RESERVED_NAMES,
-            Domain::Views
-            | Domain::Groupings
-            | Domain::Scopes
-            | Domain::Schema
-            | Domain::Sources => &[],
+            Domain::Scopes => &["save_current"],
+            Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => &[],
         }
     }
 

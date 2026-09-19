@@ -99,6 +99,16 @@ pub struct ScopeBarModel {
     /// this as their tooltip TITLE, with the elided `as_of_badge`/segment
     /// text moved to the tooltip's detail line instead.
     pub as_of_full: Option<SharedString>,
+    /// Whether the frame's scope has anything worth saving — `!scope.
+    /// is_empty()`. `shell::toolbar` reads this to decide whether the
+    /// scope bar's `save` chip paints at all (scope-save spec's
+    /// amendment): a `save` chip over an empty scope would either do
+    /// nothing (the same "verb that visibly does nothing" defect the
+    /// dialog's own `run_overwrite` refuses to ship) or paint the
+    /// notice on every click, so the chip is withdrawn instead of
+    /// disabled. The `+` pick chip carries no such gate — it is always
+    /// useful, empty scope or not.
+    pub savable: bool,
 }
 
 /// Build the scope bar model for `frame`, given today's local date (for
@@ -162,6 +172,7 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
     let text_chip = scope.text.as_ref().map(|t| format!("text \"{t}\""));
     let text_tip: Option<SharedString> = scope.text.clone().map(Into::into);
     let as_of_badge: Option<SharedString> = as_of.as_ref().map(|t| format!("AS OF {t}").into());
+    let savable = !scope.is_empty();
     ScopeBarModel {
         slot,
         slot_label,
@@ -175,6 +186,7 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         as_of,
         as_of_badge,
         as_of_full,
+        savable,
     }
 }
 
@@ -265,6 +277,10 @@ mod tests {
             m.slot_label, "1 · book / lhu",
             "the slot readout's own display string"
         );
+        assert!(
+            m.savable,
+            "a non-empty scope is savable — the toolbar's save chip paints"
+        );
     }
 
     /// Final review, spec §5.1: the as-of tooltip must show the FULL
@@ -298,5 +314,6 @@ mod tests {
         assert_eq!(m.text_chip, None);
         assert_eq!(m.as_of_badge, None);
         assert_eq!(m.as_of_full, None);
+        assert!(!m.savable, "an empty scope has nothing to save");
     }
 }

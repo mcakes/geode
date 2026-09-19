@@ -386,6 +386,25 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "frame::scope_undo", "Undo scope change", "Frame");
     action(reg, "frame::scope_redo", "Redo scope change", "Frame");
     action(reg, "frame::scope_clear", "Clear scope", "Frame");
+    // Save the frame's current scope as a new named one (scope-save
+    // spec's amendment to Part 2a's `Domain::Scopes`): opens the Scopes
+    // dialog straight onto the naming prompt, seeded from the frame
+    // (`objectdialog::render::open_save_scope`) — the palette door onto
+    // what pre-2026-09-19 `n` used to do. Category "Scope", matching
+    // `register_scope_actions`'s own per-scope rows, not "Frame" — this
+    // is the save half of the same vocabulary. Palette-only, like
+    // `frame::scope_clear` above: an occasional deliberate act. **Trap**
+    // (CLAUDE.md's Scopes bullet has the same warning): `input.rs`'s
+    // dispatch must match this id BEFORE its `strip_prefix("scope::")`
+    // arm, which would otherwise read `save_current` as the name of a
+    // saved scope to load — `Domain::Scopes.reserved_names()` refuses a
+    // saved scope named `save_current` for the same reason.
+    action(
+        reg,
+        "scope::save_current",
+        "Scope: Save current as…",
+        "Scope",
+    );
     // The dimension picker (Phase 4a §3.3), opened on the column-choice
     // stage — `mod+p`. The per-column `frame::pick_<column>` actions
     // (opening straight onto one column's values stage) are registered
