@@ -6163,6 +6163,30 @@ fn tab_completes_and_escape_cancels_a_choice_field(cx: &mut gpui::TestAppContext
         dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
     cx.simulate_keystrokes("enter j j i");
     cx.run_until_parked();
+    // A click on a row OTHER than the currently lit one is `tab` on
+    // THAT row — not a no-op replay of whatever the field already
+    // holds. The highlight opens on "none" (the field's current
+    // value); clicking "muted" (a different, unrelated row, still
+    // painted since the query is empty) must narrow the field to
+    // "muted" and stay open.
+    let muted = cx.debug_bounds("objectdialog-choice-muted").unwrap();
+    cx.simulate_mouse_down(
+        muted.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(dialog_input_text(&shell, &cx), "muted");
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "a click completes, it does not pick"
+    );
+    // Cancel and reopen fresh (query cleared, every option painted
+    // again) for the down/tab dance below.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
     let lit = edit_draft(&shell, &cx, |d| {
@@ -6226,6 +6250,76 @@ fn i_is_refused_on_the_schema_inspector(cx: &mut gpui::TestAppContext) {
     assert!(!edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
     assert!(notice.contains("open a column"), "{notice}");
+}
+
+/// Review finding (2026-09-19): the column stage's `scale`/`negative`/
+/// `colour` rows are multi-option `Choice` fields, so `i` opens a
+/// typeahead there exactly as it does on the object stage's own `Choice`
+/// rows — the footer must say "choose a value", not "type a value", and
+/// `i` must actually open the typeahead rather than the plain text field
+/// the stale comment above this site used to claim it would refuse.
+///
+/// The footer paints no selector on the hint's WORD (only on its key
+/// chip), so the word is read through `render::i_hint_word` directly —
+/// the same pure door the footer itself now calls (`help_line`'s own
+/// pattern for reading painted-but-unselectored text, a few tests
+/// below) — rather than by measuring pixels.
+#[gpui::test]
+fn the_column_stages_choice_rows_teach_choose_and_i_opens_the_typeahead(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // Onto `npv`'s column stage: label(0), width(1), scale(2),
+    // precision(3), thousands(4), negative(5), colour(6).
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    cx.simulate_keystrokes("j j"); // label -> width -> scale
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(2)),
+        "on scale"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .selected_vocabulary(objectdialog::Domain::Views)),
+        objectdialog::RowVocabulary::StepsAndTypes,
+        "a multi-option Choice steps and types"
+    );
+    assert!(cx.debug_bounds("objectdialog-hint-i").is_some());
+    let word = edit_draft(&shell, &cx, |d| {
+        objectdialog::render::i_hint_word(d.selected_row(), d).to_string()
+    });
+    assert_eq!(word, "choose a value", "scale is a Choice row");
+
+    // `i` opens the typeahead here too — not the plain text field the
+    // stale comment above this footer site used to describe.
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "i on scale opens the typeahead, same as any other Choice row"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.choice_entry()));
+
+    cx.simulate_keystrokes("j"); // scale -> precision
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(3)),
+        "on precision"
+    );
+    let word = edit_draft(&shell, &cx, |d| {
+        objectdialog::render::i_hint_word(d.selected_row(), d).to_string()
+    });
+    assert_eq!(word, "type a value", "precision is a Number row");
 }
 
 /// The two keyboard-only verbs gain buttons: `i` on the edit stage's bar

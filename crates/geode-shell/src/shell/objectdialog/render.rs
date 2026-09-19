@@ -3243,6 +3243,29 @@ fn build(
         .into_any_element()
 }
 
+/// The `i` chip's word (spec 2026-09-19 §3.2), off a row `types` is true
+/// for. A multi-option `Choice` row's `i` opens the typeahead, not a
+/// plain value field — the chip says "choose a value" there rather than
+/// the generic "type a value" a trader would read as inviting free text
+/// over a fixed vocabulary. One function for both footer sites in
+/// [`build_edit`] below (the object stage's own row and the column
+/// stage's `scale`/`negative`/`colour` rows) so they cannot say
+/// different things about the same row shape — and `pub(crate)` so a
+/// window test can read it directly rather than measuring painted pixel
+/// widths, which the footer's own selector (on the `i` key chip alone,
+/// never the trailing word) cannot do.
+pub(crate) fn i_hint_word(row: Option<EditRow>, draft: &Draft) -> &'static str {
+    let chooses = matches!(
+        row,
+        Some(EditRow::Field(i)) if matches!(draft.fields[i].kind, FieldKind::Choice { .. })
+    );
+    if chooses {
+        "choose a value"
+    } else {
+        "type a value"
+    }
+}
+
 /// The edit stage: the object's header, its diagnostics, the scrolling
 /// row list, and — **outside** that scroll — the action bar.
 ///
@@ -3960,6 +3983,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let opens_column = column_stage_target(shell).is_some();
     let open_column =
         || Hint::new(HintRow::Go, &["enter"], "open column").selector("objectdialog-hint-enter");
+    let i_hint = |row: Option<EditRow>| -> Hint {
+        Hint::new(HintRow::Edit, &["i"], i_hint_word(row, draft)).selector("objectdialog-hint-i")
+    };
     let hints: Vec<Hint> = if state.confirm.is_some() {
         vec![
             Hint::prose(HintRow::Go, "this needs an answer first"),
@@ -4028,18 +4054,18 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // reorder or demote from, and this footer's standing rule is to
         // name only the keys that act on THESE rows. Its seven rows are
         // exactly where the 2026-09-13 ruling bites: `label` and `width`
-        // take `i` and nothing else, `scale` steps and `i` would only
-        // refuse, `precision` does both — so both groups come from
-        // `vocabulary` rather than being stated unconditionally the way
-        // `i` was here before. `escape` names the object it goes back
-        // to, since "back to the list" would be a lie about a rung that
-        // stops at the view.
+        // take `i` alone (`Text`), `thousands` steps alone (`Bool`),
+        // `precision` does both (`Number`), and — since spec 2026-09-19
+        // §3.2 taught `i` to open a multi-option `Choice` row's
+        // typeahead — so now do `scale`, `negative` and `colour`, all
+        // three `Choice` — so both groups come from `vocabulary` rather
+        // than being stated unconditionally the way `i` was here before.
+        // `escape` names the object it goes back to, since "back to the
+        // list" would be a lie about a rung that stops at the view.
         let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
         hints.extend(change_hint(false));
         if types {
-            hints.push(
-                Hint::new(HintRow::Edit, &["i"], "type a value").selector("objectdialog-hint-i"),
-            );
+            hints.push(i_hint(selected_row));
         }
         hints.extend(leave(format!("back to {}", draft.name)));
         hints
@@ -4080,20 +4106,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             );
             hints.push(Hint::range(HintRow::Go, "1", "9", "jump to slot"));
         } else if types {
-            // Spec 2026-09-19 §3.2: a multi-option `Choice` row's `i`
-            // opens the typeahead, not a plain value field — the footer
-            // says so, rather than the generic "type a value" a trader
-            // would read as inviting free text over a fixed vocabulary.
-            let chooses = matches!(
-                selected_row,
-                Some(EditRow::Field(i)) if matches!(draft.fields[i].kind, FieldKind::Choice { .. })
-            );
-            let word = if chooses {
-                "choose a value"
-            } else {
-                "type a value"
-            };
-            hints.push(Hint::new(HintRow::Edit, &["i"], word).selector("objectdialog-hint-i"));
+            hints.push(i_hint(selected_row));
         }
         if opens_column {
             hints.push(open_column());

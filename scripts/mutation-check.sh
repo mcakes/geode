@@ -7870,6 +7870,14 @@ run_mutation "choice: a one-option Choice does not open" \
   '        let mut list = crate::choice::ChoiceList::new' \
   geode-shell a_one_option_choice_does_not_open_and_neither_does_a_text_row
 
+# A row click is `tab` on THAT row: mutated to do nothing, a click on a
+# row other than the currently-lit one leaves the field's text unchanged.
+run_mutation "choice: a row click completes that row" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        draft.choice_click(row);' \
+  '' \
+  geode-shell tab_completes_and_escape_cancels_a_choice_field
+
 # ---- Settings dialog goes modal (interaction-model spec §18, 2026-09-12) --
 #
 # The same four silent failures spec §12 lists for the keybinding dialog,

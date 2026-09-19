@@ -243,12 +243,21 @@ mod tests {
         // The case above never actually distinguishes "kept by text"
         // from "kept by index" — every re-rank there leaves exactly one
         // surviving candidate, so falling back to row 0 lands on the
-        // same option either way. Here the re-rank leaves TWO: "am"
-        // ranks "Ambrose" (the prefix match) ahead of "Bamboo" (a
-        // mid-word match), so an index-based — or dropped — identity
-        // would land the highlight on "Ambrose", the wrong row.
-        let mut rivals = ChoiceList::new(opts(&["Ambrose", "Bamboo"]), 12);
+        // same option either way. Here "Bamboo" is placed at row 0 (its
+        // DECLARED index), and the re-rank leaves TWO candidates: "am"
+        // scores "Ambrose" higher (it matches at the very start of the
+        // word) than "Bamboo" (a mid-word match), so after the re-rank
+        // "Ambrose" is ranked row 0 and "Bamboo" row 1 — a kept-by-INDEX
+        // identity (or a dropped one, which falls back to row 0) would
+        // both land the highlight on "Ambrose"; only kept-by-TEXT still
+        // finds "Bamboo".
+        let mut rivals = ChoiceList::new(opts(&["Bamboo", "Ambrose"]), 12);
         rivals.place(Some("Bamboo"));
+        assert_eq!(
+            rivals.highlighted_text(),
+            Some("Bamboo"),
+            "placed at its declared row 0"
+        );
         assert!(rivals.set_query("am"));
         assert_eq!(
             rivals.highlighted_text(),
