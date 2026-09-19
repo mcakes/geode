@@ -1160,13 +1160,20 @@ pub(crate) fn hint_rows(hints: &[Hint], chip_fg: Hsla, chip_bg: Hsla) -> AnyElem
     };
     let mut lines = v_flex().gap_0p5();
     for (row, members) in footer::rows(hints) {
-        let mut line = h_flex().gap_1().items_center().flex_wrap().child(
-            div()
-                .w(px(30.))
-                .flex_shrink_0()
-                .text_xs()
-                .child(row.label()),
-        );
+        let label = row.label();
+        let mut line = h_flex()
+            .gap_1()
+            .items_center()
+            .flex_wrap()
+            .debug_selector(move || format!("hint-row-{label}"))
+            .child(div().w(px(30.)).flex_shrink_0().text_xs().child(label));
+        // An empty row keeps a full row's height, so the footer never
+        // grows or shrinks with the selected row's vocabulary: the label
+        // alone is a `text_xs` line, shorter than a chip, so an unpainted
+        // chip sets the height — `invisible` lays out and paints nothing.
+        if members.is_empty() {
+            line = line.child(div().invisible().child(chip("space")));
+        }
         let last = members.len().saturating_sub(1);
         for (i, hint) in members.into_iter().enumerate() {
             for (k, key) in hint.keys.iter().enumerate() {

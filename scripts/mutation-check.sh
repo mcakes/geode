@@ -11251,23 +11251,35 @@ run_mutation "settings: the normal-mode footer names tab beside space and l" \
 # where); only the pure test reading the layout can see it.
 run_mutation "footer: a hint's row is its position, not its category" \
   crates/geode-shell/src/footer.rs \
-  '            let members: Vec<&Hint> = hints.iter().filter(|h| h.row == row).collect();' \
-  '            let members: Vec<&Hint> = hints
-                .iter()
-                .filter(|_| row == HintRow::Move)
-                .collect();' \
+  '        .map(|row| (row, hints.iter().filter(|h| h.row == row).collect()))' \
+  '        .map(|row| (row, hints.iter().filter(|_| row == HintRow::Move).collect()))' \
   geode-shell \
   a_hints_category_decides_its_row_not_its_position
 
-# A row nobody put a hint on must not paint — a read-only stage has no
-# edit row, the naming stage only a go row — or the labels `edit` / `go`
-# stand over nothing.
-run_mutation "footer: an empty row is painted anyway" \
+# Every row is laid out every time (user report 2026-09-19): dropping an
+# empty one is the pre-report behaviour, where the footer grew a line on
+# an editable row and lost it on a read-only one, shifting everything
+# below. The pure test reads the layout; the window test measures the go
+# row's y across the two kinds of row.
+run_mutation "footer: an empty row is dropped from the layout" \
   crates/geode-shell/src/footer.rs \
-  '            (!members.is_empty()).then_some((row, members))' \
-  '            Some((row, members))' \
+  '        .map(|row| (row, hints.iter().filter(|h| h.row == row).collect()))
+        .collect()' \
+  '        .map(|row| (row, hints.iter().filter(|h| h.row == row).collect::<Vec<_>>()))
+        .filter(|(_, members)| !members.is_empty())
+        .collect()' \
   geode-shell \
-  an_empty_row_is_dropped_and_the_order_holds
+  an_empty_row_is_kept_empty_and_the_order_holds
+
+# And an empty row is as TALL as a full one — the label alone is a
+# `text_xs` line, shorter than a chip, so without the unpainted chip the
+# footer still moved by a few pixels between the two kinds of row.
+run_mutation "footer: an empty row is shorter than a full one" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            line = line.child(div().invisible().child(chip("space")));' \
+  '            let _ = &chip;' \
+  geode-shell \
+  the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit
 
 # The row-sensitive footer: paint the change group on EVERY row, the
 # fixed group the ruling replaced. A `Text` row that cannot step is where

@@ -7459,3 +7459,41 @@ fn the_help_line_is_blank_under_an_armed_confirm(cx: &mut gpui::TestAppContext) 
         "and it is back"
     );
 }
+
+/// User report 2026-09-19: moving the cursor from an editable row to a
+/// read-only one dropped the footer's edit row, so the dialog shrank by a
+/// line and everything below it shifted. Every hint row is now laid out
+/// every time — an empty one painted blank at the same height — so the
+/// go row sits at one y whichever row is selected.
+#[gpui::test]
+fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // `dataset` is a `Choice`: the edit row names the step keys.
+    assert!(cx.debug_bounds("objectdialog-hint-change").is_some());
+    let go_before = cx.debug_bounds("hint-row-go").unwrap();
+    let edit_before = cx.debug_bounds("hint-row-edit").unwrap();
+
+    // `k` wraps to the last row, `adapter`, a read-only `Text`: nothing
+    // to edit, so the edit row is empty — but still there, same height.
+    cx.simulate_keystrokes("k");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .selected_vocabulary(objectdialog::Domain::Sources)),
+        objectdialog::RowVocabulary::Inert
+    );
+    assert!(cx.debug_bounds("objectdialog-hint-change").is_none());
+    let edit = cx.debug_bounds("hint-row-edit").unwrap();
+    assert_eq!(
+        edit.size.height, edit_before.size.height,
+        "an empty row keeps a full row's height"
+    );
+    let go = cx.debug_bounds("hint-row-go").unwrap();
+    assert_eq!(go.origin.y, go_before.origin.y, "so nothing below it moves");
+}

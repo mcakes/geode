@@ -109,15 +109,17 @@ impl Hint {
 }
 
 /// Lay the hints out as rows, in [`HintRow::ALL`] order, each row
-/// keeping its hints in the order they were given and a row with no
-/// hints not appearing at all.
+/// keeping its hints in the order they were given — and **every row
+/// present, empty or not**. A row with no hints used to be dropped, so
+/// the footer grew a line when the cursor reached a row with something
+/// to edit and lost it again on a read-only one, shifting everything
+/// below (user report 2026-09-19). The painter gives an empty row a full
+/// row's height, so the footer is the same three lines whichever row is
+/// selected.
 pub fn rows(hints: &[Hint]) -> Vec<(HintRow, Vec<&Hint>)> {
     HintRow::ALL
         .into_iter()
-        .filter_map(|row| {
-            let members: Vec<&Hint> = hints.iter().filter(|h| h.row == row).collect();
-            (!members.is_empty()).then_some((row, members))
-        })
+        .map(|row| (row, hints.iter().filter(|h| h.row == row).collect()))
         .collect()
 }
 
@@ -152,29 +154,34 @@ mod tests {
     }
 
     /// A row nobody put a hint on is not painted — a read-only surface
-    /// has no edit row, the naming stage has only a go row — and the
-    /// rows that remain keep their fixed order.
+    /// has no edit row, the naming stage has only a go row — but every
+    /// row is still laid out, empty, in its fixed place (user report
+    /// 2026-09-19: a footer that dropped its empty edit row grew and
+    /// shrank as the cursor moved between editable and read-only rows,
+    /// shifting everything below it).
     #[test]
-    fn an_empty_row_is_dropped_and_the_order_holds() {
+    fn an_empty_row_is_kept_empty_and_the_order_holds() {
         let hints = vec![
             Hint::new(HintRow::Go, &["enter"], "create"),
             Hint::new(HintRow::Go, &["escape"], "cancel"),
         ];
         let laid = rows(&hints);
-        assert_eq!(laid.len(), 1);
-        assert_eq!(laid[0].0, HintRow::Go);
-        assert_eq!(laid[0].1.len(), 2);
+        assert_eq!(
+            laid.iter().map(|(row, _)| *row).collect::<Vec<_>>(),
+            HintRow::ALL.to_vec(),
+            "every row, every time"
+        );
+        assert!(laid[0].1.is_empty() && laid[1].1.is_empty());
+        assert_eq!(laid[2].1.len(), 2);
 
         let hints = vec![
             Hint::new(HintRow::Go, &["escape"], "close"),
             Hint::prose(HintRow::Move, "type to filter"),
         ];
         let laid = rows(&hints);
-        assert_eq!(
-            laid.iter().map(|(row, _)| *row).collect::<Vec<_>>(),
-            vec![HintRow::Move, HintRow::Go]
-        );
+        assert_eq!(laid.len(), 3);
         assert!(laid[0].1[0].keys.is_empty(), "prose carries no chips");
+        assert!(laid[1].1.is_empty(), "no edit hints, but the row is there");
     }
 
     /// The constructors spell the three shapes a hint takes.
