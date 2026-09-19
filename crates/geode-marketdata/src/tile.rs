@@ -81,6 +81,7 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, v_flex};
 use std::cell::Cell as StdCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -303,11 +304,27 @@ pub struct MarketDataTile {
     /// construction and cleared by the first delivery, which is the one
     /// that has a model to rebase against.
     ///
-    /// `set_key` deliberately does not clear it: this being `true` implies
-    /// a non-empty draft, and a key change with edits pending is refused
-    /// outright (ruling 2026-09-14), so it can never be left set against
-    /// a document its labels did not come from.
+    /// `set_key` SETS it, to whether the draft it installs is non-empty
+    /// (2026-09-19, per-underlying drafts): a switch back to an
+    /// underlying with a parked draft is a restore in every respect —
+    /// the same label-pair form, the same resolution against the first
+    /// non-empty built model, the same "first delivery is `hold`" rule —
+    /// and a switch to one without is an empty draft with nothing to
+    /// resolve. Either way it can never be left set against a document
+    /// its labels did not come from.
     unresolved_restore: bool,
+    /// Every OTHER underlying's unsent draft, keyed by document key
+    /// (user ruling 2026-09-19, "keep them per underlying"): a switch
+    /// parks the current draft here as `Draft::to_toml`'s label-pair
+    /// table — the session's own portable form, which is what makes
+    /// grid indices irrelevant across documents — and a switch back
+    /// removes the entry and installs it through the restore path. The
+    /// table IS the parked form: nothing here is parsed until it is
+    /// needed (a picker's row marks, a session write), so a parked draft
+    /// costs no model, no snapshot and no cursor. Every draft verb
+    /// (`:revert`, `:bump`, `:set`, a cell edit) acts on `draft` — the
+    /// CURRENT underlying's — alone; the header's dirty dot likewise.
+    parked: BTreeMap<Vec<String>, toml::Table>,
     /// A grid cell — the same index a `Draft` edit is keyed by, and the
     /// truth the table's own selection mirrors (never the other way
     /// round) — or an attribute in the header strip (spec 2026-09-14
@@ -403,10 +420,40 @@ impl MarketDataTile {
                     .collect::<Vec<_>>()
             })
             .filter(|k| !k.is_empty());
-        let draft = restored
-            .and_then(|t| t.get("draft"))
+        // Every underlying's unsent draft rides the session as
+        // `[drafts.<display key>]` (spec §8.5, 2026-09-19). The restored
+        // underlying's own entry is the CURRENT draft, installed exactly
+        // as the legacy single `draft` key was; every other entry stays
+        // parked, as a table, until its underlying is loaded. `draft`
+        // itself is still read — a session written before this change —
+        // and means the current underlying's draft, but only when no
+        // `drafts` entry already speaks for it.
+        let mut parked: BTreeMap<Vec<String>, toml::Table> = restored
+            .and_then(|t| t.get("drafts"))
             .and_then(|v| v.as_table())
-            .map(Draft::from_toml)
+            .map(|drafts| {
+                drafts
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        let parts = parse_display_key(k);
+                        if parts.is_empty() {
+                            return None;
+                        }
+                        Some((parts, v.as_table()?.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let draft = key
+            .as_ref()
+            .and_then(|k| parked.remove(k))
+            .or_else(|| {
+                restored
+                    .and_then(|t| t.get("draft"))
+                    .and_then(|v| v.as_table())
+                    .cloned()
+            })
+            .map(|t| Draft::from_toml(&t))
             .unwrap_or_default();
         // An unknown or missing `auto` is the default, never a refusal:
         // a session file is the trader's own layout and a tile that
@@ -568,6 +615,7 @@ impl MarketDataTile {
             data,
             model: Rc::new(MatrixModel::empty(spec, key.as_deref().unwrap_or(&[]))),
             unresolved_restore: !draft.is_empty(),
+            parked,
             key,
             tag: 0,
             acted: None,
@@ -2032,20 +2080,17 @@ impl MarketDataTile {
 
     /// `u` (normal mode) and the menu row (spec §7): open the underlying
     /// picker over the dataset's catalog keys, ranked by `listfilter` as
-    /// the trader types. Refused, exactly as `:key`/`:underlying`, while
-    /// the draft has edits — `set_key`'s own wording, so a trader reads
-    /// the same sentence from either door. Re-requests the catalog on the
-    /// way in (the existing rule: `request_catalog()` + `cx.notify()` in
-    /// the same update) so the list is fresh even if this panel has never
-    /// asked before; a catalog that arrives later, while the picker is
-    /// still open, is folded in by the diagnostics observer in `new`.
+    /// the trader types. Never refused for a dirty draft (2026-09-19):
+    /// a pick PARKS the current draft under its underlying (`set_key`),
+    /// and a row whose underlying already holds a parked draft says so in
+    /// its label (`NKY.Z · 1 cell, spot_ref`, prepared here from
+    /// [`Self::parked_marks`], never in `render`). Re-requests the catalog
+    /// on the way in (the existing rule: `request_catalog()` +
+    /// `cx.notify()` in the same update) so the list is fresh even if
+    /// this panel has never asked before; a catalog that arrives later,
+    /// while the picker is still open, is folded in by the diagnostics
+    /// observer in `new`.
     pub(crate) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.draft.is_empty() {
-            self.notice =
-                Some(format!("{} pending — :revert first", self.draft.count_phrase()).into());
-            self.changed(cx);
-            return;
-        }
         // Defensive: unreachable through the shipped keymap (`edit` is a
         // normal-mode binding, and `load_underlying`'s own `dispatch`
         // guard above already closes any OTHER open popup before this
@@ -2055,7 +2100,7 @@ impl MarketDataTile {
             self.close_editor(window, cx);
         }
         self.request_catalog(cx);
-        let rows = PickerRows::new(self.catalog_keys(cx));
+        let rows = PickerRows::with_marks(self.catalog_keys(cx), self.parked_marks());
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("underlying"));
         cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
             // `InputState::set_value` emits no `Change` at all (a test
@@ -2127,14 +2172,7 @@ impl MarketDataTile {
         };
         let key = p.rows.all[i].clone();
         self.close_popup_with_window(window, cx);
-        let parts: Vec<String> = key
-            .split(KEY_DISPLAY_SEPARATOR)
-            .map(str::to_string)
-            .collect();
-        if let Err(e) = self.set_key(parts, window, cx) {
-            self.notice = Some(e.into());
-            self.changed(cx);
-        }
+        self.set_key(parse_display_key(&key), window, cx);
     }
 
     /// `:revert` (spec §8.4) — drop every edit. The document's own numbers
@@ -2487,7 +2525,10 @@ impl MarketDataTile {
             self.close_popup_with_window(window, cx);
         }
         match command {
-            Command::Key(key) => self.set_key(key, window, cx),
+            Command::Key(key) => {
+                self.set_key(key, window, cx);
+                Ok(())
+            }
             Command::Revert => self.revert(cx),
             Command::Bump { delta, axis } => self.bump(delta, axis, cx),
             Command::Rebase => self.rebase(cx),
@@ -2595,13 +2636,21 @@ impl MarketDataTile {
 
     /// Point the panel at another document.
     ///
-    /// **Refused while the draft has edits** (ruling 2026-09-14), never
-    /// discarding them: a draft's cells are grid indices into the
-    /// document they were made on, so carrying them across would paint
-    /// one document's numbers onto another's ladder — and dropping them
-    /// silently would throw unsent work away on a keystroke that reads
-    /// like navigation. The notice names the count in the header's own
-    /// spelling and the verb that clears it.
+    /// **A switch is a restore** (user ruling 2026-09-19, "keep them per
+    /// underlying", superseding the 2026-09-14 refusal): a draft's cells
+    /// are grid indices into the document they were made on, so they
+    /// cannot travel to another document's ladder — instead the current
+    /// draft is PARKED under the outgoing key as `Draft::to_toml`'s
+    /// label pairs (the session's own form, where indices do not exist),
+    /// and a parked draft for the INCOMING key is installed through the
+    /// restore path: `Draft::from_toml` parks every edit at
+    /// `UNRESOLVED_COLUMN` and `unresolved_restore` hands it to the first
+    /// non-empty built model, which re-places it by label — or lands it
+    /// `Behind` when the document moved while the trader was away, with
+    /// the `:auto` policy's "first delivery after a restore is `hold`"
+    /// rule covering it exactly as a session restore is covered. Nothing
+    /// is ever refused and nothing is ever dropped: unsent work on every
+    /// underlying survives, each under its own key.
     ///
     /// An open cell editor is CANCELLED, never committed, before the
     /// document is swapped (final review, B2) — a key change is
@@ -2609,25 +2658,31 @@ impl MarketDataTile {
     /// label-identity check on a same-ladder underlying and file the typed
     /// number into the NEW document's draft. Reachable: `i`, then `mod+l`
     /// (focus to the shell root, editor still open), then `:underlying`.
-    /// That close is the only reason this takes a `Window`.
-    fn set_key(
-        &mut self,
-        key: Vec<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    /// That close is the only reason this takes a `Window`. It happens
+    /// BEFORE the park, so the parked table is the draft as committed,
+    /// never the draft plus a half-typed cell.
+    fn set_key(&mut self, key: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if self.key.as_deref() == Some(key.as_slice()) {
-            return Ok(());
-        }
-        if !self.draft.is_empty() {
-            return Err(format!(
-                "{} pending — :revert first",
-                self.draft.count_phrase()
-            ));
+            return;
         }
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
+        // Park the outgoing draft under its own underlying. A non-empty
+        // draft with NO key (a hand-edited session's `draft` with no
+        // `underlying`) has nothing to park under and stays put — the
+        // first underlying named claims it, exactly as the constructor
+        // already leaves it waiting for one.
+        if let Some(outgoing) = self.key.take()
+            && !self.draft.is_empty()
+        {
+            self.parked.insert(outgoing, self.draft.to_toml());
+            self.draft = Draft::default();
+        }
+        if let Some(table) = self.parked.remove(&key) {
+            self.draft = Draft::from_toml(&table);
+        }
+        self.unresolved_restore = !self.draft.is_empty();
         self.key = Some(key);
         self.snapshot = None;
         self.base_snapshot = None;
@@ -2648,7 +2703,18 @@ impl MarketDataTile {
         } else {
             self.changed(cx);
         }
-        Ok(())
+    }
+
+    /// The picker's row marks (spec 2026-09-14 §7, amended 2026-09-19):
+    /// every parked underlying's display key to its draft's own
+    /// `count_phrase`. Parsed from the parked tables HERE, once per
+    /// picker open, never in `render`; the current underlying's own draft
+    /// is not among them — the header's dirty dot already says so.
+    fn parked_marks(&self) -> BTreeMap<String, String> {
+        self.parked
+            .iter()
+            .map(|(key, table)| (display_key(key), Draft::from_toml(table).count_phrase()))
+            .collect()
     }
 
     pub fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
@@ -2740,8 +2806,30 @@ impl MarketDataTile {
         // Unsent edits are work and survive a restart (spec §8.5), as
         // label pairs — never indices, so a restart onto a newer
         // generation lands `Behind` instead of against misaligned cells.
+        // One `[drafts.<display key>]` per underlying that carries any
+        // (2026-09-19): the current one's beside every parked one, the
+        // parked tables written verbatim since they already ARE this
+        // form. `toml::Table` insertion quotes a dotted key (`"SPX.Z"`)
+        // on the way out, so the spelling round-trips through the
+        // session file untouched. The legacy bare `draft` is written only
+        // for a non-empty draft with no underlying at all — the one
+        // shape that has no key to file it under.
+        let mut drafts = toml::Table::new();
         if !self.draft.is_empty() {
-            t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));
+            match &self.key {
+                Some(key) => {
+                    drafts.insert(display_key(key), toml::Value::Table(self.draft.to_toml()));
+                }
+                None => {
+                    t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));
+                }
+            }
+        }
+        for (key, table) in &self.parked {
+            drafts.insert(display_key(key), toml::Value::Table(table.clone()));
+        }
+        if !drafts.is_empty() {
+            t.insert("drafts".into(), toml::Value::Table(drafts));
         }
         // Only a non-default policy is worth a key: a `hold` tile reads
         // exactly as one written before the key existed.
@@ -2843,6 +2931,29 @@ impl MarketDataTile {
         }
     }
 
+    /// The open picker's painted labels in RANKED order — what a trader
+    /// reads, marks included — `None` with no picker open.
+    #[cfg(test)]
+    pub(crate) fn picker_labels(&self) -> Option<Vec<String>> {
+        match &self.popup {
+            Some(Popup::Picker(p)) => Some(
+                p.rows
+                    .ranked
+                    .iter()
+                    .map(|&i| p.rows.labels[i].to_string())
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// The parked underlyings, in display spelling, with each draft's
+    /// count phrase.
+    #[cfg(test)]
+    pub(crate) fn parked(&self) -> Vec<(String, String)> {
+        self.parked_marks().into_iter().collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
@@ -2889,6 +3000,19 @@ impl MarketDataTile {
 /// what a trader sees or types.
 pub(crate) fn display_key(key: &[String]) -> String {
     key.join(&KEY_DISPLAY_SEPARATOR.to_string())
+}
+
+/// [`display_key`]'s inverse — a picker row's key, or a session's
+/// `drafts.<key>` table name, back into the dataset's key parts. An
+/// empty string is an empty key (no parts), which every reader treats
+/// as "no key" rather than a one-part key of nothing.
+pub(crate) fn parse_display_key(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split(KEY_DISPLAY_SEPARATOR)
+        .map(str::to_string)
+        .collect()
 }
 
 /// `:rebase`'s notice about the edits it could not carry over — a row or
@@ -4400,50 +4524,331 @@ mod tests {
         );
     }
 
-    /// Ruling 2026-09-14: unsent edits are never discarded by a key
-    /// change. A draft's cells are grid indices into the document they
-    /// were made on, so the panel cannot carry them — and must not throw
-    /// them away on a keystroke that reads like navigation.
+    /// User ruling 2026-09-19 ("keep them per underlying"), superseding
+    /// the 2026-09-14 refusal: a key change with edits pending PARKS the
+    /// current draft under its own underlying and switches. Nothing is
+    /// discarded and nothing is refused — the new document is requested,
+    /// the header's dot goes off (it reads the CURRENT draft alone) and
+    /// the parked draft is on record for the picker and the session.
     #[gpui::test]
-    fn a_key_change_is_refused_while_the_draft_has_edits(cx: &mut gpui::TestAppContext) {
-        let restored: toml::Table = format!(
-            r#"
-key = ["SPX.Z"]
-[draft]
-base = "{BASE}"
-edits = [["2026-11-20", "-1", 9.5]]
-"#
-        )
-        .parse()
-        .unwrap();
-        let (h, mut vcx) = open_with(cx, Some(restored));
-        h.visible(&mut vcx, true);
+    fn a_key_change_parks_the_draft_instead_of_refusing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        assert!(h.tile.read_with(&vcx, |t, _| t.header_dirty()));
+
+        assert_eq!(h.command(&mut vcx, "underlying NKY.Z"), Ok(()));
+        let (dirty, len, parked, key) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.header_dirty(),
+                t.draft().len(),
+                t.parked(),
+                t.serialize()["underlying"][0].as_str().map(str::to_string),
+            )
+        });
+        assert!(!dirty, "the dot reads the current draft, which is empty");
+        assert_eq!(len, 0);
+        assert_eq!(
+            parked,
+            vec![("SPX.Z".to_string(), "1 cell, spot_ref".to_string())],
+            "SPX's draft is parked under SPX, as a count the picker can name"
+        );
+        assert_eq!(key.as_deref(), Some("NKY.Z"));
+        let req = h.document_request().expect("the switch asks for NKY");
+        assert_eq!(req.document_key, vec!["NKY.Z".to_string()]);
+    }
+
+    /// Coming back is a restore: the parked draft is installed through
+    /// the same door a session's draft is, resolved by label against the
+    /// first non-empty model, so the edits are back on their cells and
+    /// the attribute edit on its chip — `Editing`, not `Behind`, because
+    /// the document did not move while the trader was away.
+    #[gpui::test]
+    fn returning_to_an_underlying_restores_its_parked_draft(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
         let tag = h.document_request().unwrap().tag;
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
-
-        assert_eq!(
-            h.command(&mut vcx, "key NDX.Z"),
-            Err("1 cell pending — :revert first".to_string()),
-            "the count is spelled as the header spells it, and the verb is named"
-        );
-        let (key, edits) = h
-            .tile
-            .read_with(&vcx, |t, _| (t.serialize(), t.draft().len()));
-        assert_eq!(edits, 1, "the edit is still there");
-        assert_eq!(
-            key.get("underlying")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len()),
-            Some(1)
-        );
-        assert_eq!(
-            key["underlying"][0].as_str(),
-            Some("SPX.Z"),
-            "and the panel is still on the document those edits belong to"
-        );
         assert!(
-            h.document_request().is_none(),
-            "a refused key change asks for nothing"
+            !h.cell(&vcx, 0, 0).1,
+            "an SPX edit never paints on NKY's grid"
+        );
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.model().header[1].text.to_string()),
+            "5000",
+            "nor does its attribute edit"
+        );
+
+        h.command(&mut vcx, "underlying SPX.Z").unwrap();
+        let (dirty, len, parked) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.header_dirty(), t.draft().len(), t.parked()));
+        assert!(dirty, "the dot is back on the keystroke that switches");
+        assert_eq!(len, 2, "the cell and the attribute, awaiting a document");
+        assert!(parked.is_empty(), "nothing is parked any more");
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        let (text, edited) = h.cell(&vcx, 0, 0);
+        assert_eq!(text, "9.90");
+        assert!(edited, "the cell edit is back on its cell");
+        let (spot, spot_edited, state) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.model().header[1].text.to_string(),
+                t.model().header[1].edited,
+                t.draft().state.clone(),
+            )
+        });
+        assert_eq!(spot, "4520");
+        assert!(spot_edited);
+        assert_eq!(state, DraftState::Editing, "same generation: not Behind");
+    }
+
+    /// The document moved while the draft was parked: the return lands
+    /// `Behind` with the edits parked at their labels and the header
+    /// reading `update HH:MM` — and, being a restore, the first delivery
+    /// is `hold` even under `:auto replace` (ruling 2026-09-19); the
+    /// policy acts only on the NEXT new generation.
+    #[gpui::test]
+    fn a_parked_draft_whose_document_moved_returns_behind_and_holds_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        h.command(&mut vcx, "auto replace").unwrap();
+
+        h.command(&mut vcx, "underlying SPX.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        let (state, len) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().state.clone(), t.draft().len()));
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            "held, not replaced, on the first delivery after a restore — got {state:?}"
+        );
+        assert_eq!(len, 1, "the edit survives, parked at its label");
+        let local = chrono::DateTime::parse_from_rfc3339(NEWER)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string();
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
+        assert!(
+            chips.iter().any(|c| c == &format!("update {local}")),
+            "{chips:?}"
+        );
+
+        // The next NEW generation is a live delivery, and `replace` acts.
+        h.deliver(&mut vcx, tag, Arc::new(cvi("2026-09-12T14:20:00Z")));
+        let (state, len) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().state.clone(), t.draft().len()));
+        assert_eq!(state, DraftState::Clean, "replaced on the next generation");
+        assert_eq!(len, 0);
+    }
+
+    /// Two underlyings, two drafts, switched back and forth twice: each
+    /// comes back intact under its own key, and neither ever paints on
+    /// the other's grid.
+    #[gpui::test]
+    fn two_underlyings_keep_two_drafts_with_no_cross_talk(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+
+        // NKY: a different cell, a different value.
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "7.7");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(!h.cell(&vcx, 0, 0).1, "SPX's cell is clean on NKY");
+        assert_eq!(h.cell(&vcx, 0, 1), ("7.7000".to_string(), true));
+
+        for _ in 0..2 {
+            h.command(&mut vcx, "underlying SPX.Z").unwrap();
+            let tag = h.document_request().unwrap().tag;
+            h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+            assert_eq!(h.cell(&vcx, 0, 0), ("9.90".to_string(), true));
+            assert!(!h.cell(&vcx, 0, 1).1, "NKY's cell is clean on SPX");
+            assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 1);
+
+            h.command(&mut vcx, "underlying NKY.Z").unwrap();
+            let tag = h.document_request().unwrap().tag;
+            h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+            assert_eq!(h.cell(&vcx, 0, 1), ("7.7000".to_string(), true));
+            assert!(!h.cell(&vcx, 0, 0).1, "SPX's cell is clean on NKY");
+            assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 1);
+        }
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.parked()),
+            vec![("SPX.Z".to_string(), "1 cell".to_string())]
+        );
+    }
+
+    /// `:revert` (and every other draft verb) acts on the CURRENT
+    /// underlying's draft alone: reverting NKY leaves SPX's parked draft
+    /// exactly where it was.
+    #[gpui::test]
+    fn revert_touches_only_the_current_underlyings_draft(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        h.command(&mut vcx, "set spot_ref 1").unwrap();
+
+        h.command(&mut vcx, "revert").unwrap();
+        let (len, parked) = h.tile.read_with(&vcx, |t, _| (t.draft().len(), t.parked()));
+        assert_eq!(len, 0, "NKY's draft is gone");
+        assert_eq!(
+            parked,
+            vec![("SPX.Z".to_string(), "1 cell".to_string())],
+            "SPX's is untouched"
+        );
+        h.command(&mut vcx, "underlying SPX.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        assert_eq!(h.cell(&vcx, 0, 0), ("9.90".to_string(), true));
+    }
+
+    /// Parked drafts ride the session (spec §8.5, amended 2026-09-19):
+    /// one `[drafts.<underlying>]` per underlying with edits — the
+    /// current one's beside every parked one — and a restore installs the
+    /// restored underlying's own entry as the current draft, keeping the
+    /// rest parked until each is loaded.
+    #[gpui::test]
+    fn parked_drafts_ride_the_session(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+
+        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        assert!(
+            written.get("draft").is_none(),
+            "the legacy key is not written"
+        );
+        let drafts = written["drafts"].as_table().expect("a drafts table");
+        assert_eq!(
+            drafts.keys().cloned().collect::<Vec<_>>(),
+            vec!["NKY.Z".to_string(), "SPX.Z".to_string()],
+            "the current draft and the parked one, each under its key"
+        );
+        assert_eq!(
+            drafts["SPX.Z"]["edits"][0][2].as_float(),
+            Some(9.9),
+            "SPX's cell edit as a label pair"
+        );
+        assert_eq!(
+            drafts["NKY.Z"]["attrs"]["spot_ref"].as_float(),
+            Some(4520.0)
+        );
+        // A dotted key is quoted on the way to disk and comes back whole.
+        let text = toml::to_string(&written).unwrap();
+        assert!(text.contains("[drafts.\"SPX.Z\"]"), "{text}");
+        let reread: toml::Table = text.parse().unwrap();
+        assert_eq!(reread, written);
+
+        // A restart onto NKY (the written `underlying`): NKY's edits are
+        // back on the first delivery, SPX's are parked.
+        let (h, mut vcx) = open_with(cx, Some(reread));
+        h.visible(&mut vcx, true);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.parked()),
+            vec![("SPX.Z".to_string(), "1 cell".to_string())]
+        );
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        let (spot, spot_edited) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.model().header[1].text.to_string(),
+                t.model().header[1].edited,
+            )
+        });
+        assert_eq!(spot, "4520");
+        assert!(spot_edited, "NKY's attribute edit is restored");
+        h.command(&mut vcx, "underlying SPX.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        assert_eq!(
+            h.cell(&vcx, 0, 0),
+            ("9.90".to_string(), true),
+            "and SPX's cell edit once SPX is loaded"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.parked()),
+            vec![("NKY.Z".to_string(), "spot_ref".to_string())],
+            "NKY's restored draft is now the parked one"
+        );
+    }
+
+    /// The picker names an underlying's parked edits in its row label —
+    /// `SPX.Z · 1 cell, spot_ref` — while the current underlying's row
+    /// stays bare, and the query still ranks over the bare key.
+    #[gpui::test]
+    fn a_picker_row_names_an_underlyings_parked_edits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["NKY.Z", "SPX.Z"]));
+            cx.notify();
+        });
+
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert_eq!(
+            h.mode(&vcx),
+            "insert",
+            "the picker opened on a dirty history"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.picker_labels()),
+            Some(vec![
+                "NKY.Z".to_string(),
+                "SPX.Z \u{b7} 1 cell, spot_ref".to_string()
+            ])
+        );
+        h.set_picker_text(&mut vcx, "sp");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.serialize()["underlying"][0]
+                .as_str()
+                .map(str::to_string)),
+            Some("SPX.Z".to_string()),
+            "`sp` ranked the bare key and enter loaded it"
         );
     }
 
@@ -4715,7 +5120,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         let restored: toml::Table = format!(
             r#"
 underlying = ["SPX.Z"]
-[draft]
+[drafts."SPX.Z"]
 base = "{BASE}"
 edits = [["2026-11-20", "-1", 9.5]]
 "#
@@ -4728,6 +5133,30 @@ edits = [["2026-11-20", "-1", 9.5]]
             written, restored,
             "the underlying and the draft survive a restart, labels and all"
         );
+    }
+
+    /// A session written before 2026-09-19 carries the current draft as
+    /// a bare `draft`: it is still read as the restored underlying's own
+    /// and written back under `drafts.<underlying>`.
+    #[gpui::test]
+    fn a_legacy_draft_key_still_restores_as_the_underlyings_draft(cx: &mut gpui::TestAppContext) {
+        let legacy: toml::Table = format!(
+            r#"
+underlying = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, vcx) = open_with(cx, Some(legacy.clone()));
+        let (len, written) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().len(), t.serialize()));
+        assert_eq!(len, 1, "the legacy draft is the current draft");
+        assert!(written.get("draft").is_none());
+        assert_eq!(written["drafts"]["SPX.Z"], legacy["draft"]);
     }
 
     #[gpui::test]
@@ -6651,21 +7080,20 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Exactly as `:key`/`:underlying` are refused while the draft has
-    /// edits (`set_key`'s own guard): picking a different document out
-    /// from under unsent edits would throw them away with nothing left to
-    /// revert them against. `open_picker` checks this BEFORE ever
-    /// creating the field, so the panel stays in `normal` mode.
+    /// Exactly as `:key`/`:underlying` now park rather than refuse
+    /// (2026-09-19): `u` with a dirty draft OPENS the picker — a pick
+    /// parks the draft under its underlying, so there is nothing to warn
+    /// about and no `:revert` to name.
     #[gpui::test]
-    fn the_picker_is_refused_while_the_draft_has_edits(cx: &mut gpui::TestAppContext) {
+    fn the_picker_opens_while_the_draft_has_edits(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
         h.command(&mut vcx, "set spot_ref 1").unwrap();
         h.dispatch(&mut vcx, "load_underlying", None);
-        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.mode(&vcx), "insert");
         assert!(
-            h.tile
-                .read_with(&vcx, |t, _| t.notice().unwrap_or("").contains(":revert"))
+            h.tile.read_with(&vcx, |t, _| t.notice().is_none()),
+            "no refusal notice"
         );
     }
 

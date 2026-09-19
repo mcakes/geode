@@ -15,6 +15,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{Theme, h_flex, v_flex};
+use std::collections::BTreeMap;
 
 /// What the tile currently has open. `Menu` is the action list (spec
 /// §6.1); `Picker` is the underlying picker (spec §7) — its `input`
@@ -55,7 +56,7 @@ pub(crate) const PICKER_ROWS: usize = 12;
 /// `all: Vec<String>`, not `Vec<SharedString>`, because
 /// [`geode_shell::listfilter::rank`] takes `&[String]`. `labels` is the
 /// separate, PREPARED `SharedString` for each `all` entry (review fix
-/// round 1, IMPORTANT-3) — [`Self::new`] and [`Self::replace_all`] both
+/// round 1, IMPORTANT-3) — [`Self::with_marks`] and [`Self::replace_all`] both
 /// fill it off the render thread, so [`render_picker`] only ever clones a
 /// prepared `SharedString` per row (an inline copy or an `Arc` bump, never
 /// an allocation); at the pinned release `SharedString` wraps
@@ -77,12 +78,24 @@ pub(crate) const PICKER_ROWS: usize = 12;
 /// all) — so `u`, `down`, `down`, `enter` always loaded the TOP match,
 /// silently discarding whichever row the trader had actually
 /// highlighted.
+///
+/// `marks` (2026-09-19, per-underlying drafts): the underlyings that
+/// carry PARKED edits, keyed by `display_key` and valued with the
+/// draft's own `count_phrase` ("1 cell, spot_ref"), taken once at open
+/// from the tile's parked map. A marked row's label reads `NKY.Z · 1
+/// cell, spot_ref`; ranking still runs over the bare key in `all`, never
+/// the decorated label, so typing `sp` cannot match a phrase's own
+/// letters. Kept here so [`Self::replace_all`] can re-decorate a fresh
+/// catalog without asking the tile again — the parked map only changes
+/// through `set_key`, which closes this popup first, so the marks can
+/// never go stale while the picker is open.
 pub(crate) struct PickerRows {
     pub all: Vec<String>,
     pub labels: Vec<SharedString>,
     pub ranked: Vec<usize>,
     pub highlighted: usize,
     pub query: String,
+    pub marks: BTreeMap<String, String>,
 }
 
 /// The underlying picker's own state: its filter field, which HOLDS the
@@ -95,9 +108,10 @@ pub(crate) struct PickerState {
 
 impl PickerRows {
     /// Every key ranked in catalog order under an empty query, the
-    /// highlight on row 0.
-    pub(crate) fn new(all: Vec<String>) -> Self {
-        let labels = Self::labels_for(&all);
+    /// highlight on row 0, each label decorated with its parked-draft
+    /// mark where `marks` names it (the struct's own doc comment).
+    pub(crate) fn with_marks(all: Vec<String>, marks: BTreeMap<String, String>) -> Self {
+        let labels = Self::labels_for(&all, &marks);
         let ranked = (0..all.len()).collect();
         Self {
             all,
@@ -105,13 +119,21 @@ impl PickerRows {
             ranked,
             highlighted: 0,
             query: String::new(),
+            marks,
         }
     }
 
     /// The prepared row text, one per `all` entry — built here and in
-    /// [`Self::replace_all`], never in `render_picker`.
-    fn labels_for(all: &[String]) -> Vec<SharedString> {
-        all.iter().map(|s| SharedString::from(s.as_str())).collect()
+    /// [`Self::replace_all`], never in `render_picker`. A key with a
+    /// parked draft is spelled `<key> · <count phrase>`; every other key
+    /// is bare.
+    fn labels_for(all: &[String], marks: &BTreeMap<String, String>) -> Vec<SharedString> {
+        all.iter()
+            .map(|s| match marks.get(s) {
+                Some(phrase) => SharedString::from(format!("{s} \u{b7} {phrase}")),
+                None => SharedString::from(s.as_str()),
+            })
+            .collect()
     }
 
     /// How many ranked rows are painted — the first [`PICKER_ROWS`] of
@@ -158,7 +180,7 @@ impl PickerRows {
     /// has not changed, but `all` has, and a re-rank must run regardless.
     pub(crate) fn replace_all(&mut self, all: Vec<String>) {
         let keep = self.highlighted_key().map(str::to_string);
-        self.labels = Self::labels_for(&all);
+        self.labels = Self::labels_for(&all, &self.marks);
         self.all = all;
         self.place(keep.as_deref());
     }
@@ -439,7 +461,10 @@ mod tests {
     use super::*;
 
     fn rows(keys: &[&str]) -> PickerRows {
-        PickerRows::new(keys.iter().map(|k| k.to_string()).collect())
+        PickerRows::with_marks(
+            keys.iter().map(|k| k.to_string()).collect(),
+            BTreeMap::new(),
+        )
     }
 
     #[test]
@@ -449,6 +474,37 @@ mod tests {
         assert_eq!(p.highlighted, 0);
         assert_eq!(p.highlighted_key(), Some("AAA.Z"));
         assert_eq!(p.labels.len(), 3);
+    }
+
+    /// Per-underlying drafts (2026-09-19): a parked key's label carries
+    /// its count phrase, every other label is bare, ranking runs over the
+    /// bare key alone, and a fresh catalog is re-decorated from the same
+    /// marks.
+    #[test]
+    fn a_parked_key_is_marked_in_its_label_but_ranked_by_the_bare_key() {
+        let marks: BTreeMap<String, String> =
+            [("SPX.Z".to_string(), "1 cell, spot_ref".to_string())].into();
+        let mut p = PickerRows::with_marks(
+            ["NKY.Z", "SPX.Z"].iter().map(|k| k.to_string()).collect(),
+            marks,
+        );
+        assert_eq!(p.labels[0].as_ref(), "NKY.Z");
+        assert_eq!(p.labels[1].as_ref(), "SPX.Z \u{b7} 1 cell, spot_ref");
+        // `sp` is in SPX's phrase ("spot_ref") AND its key; `cell` is in
+        // the phrase alone — only the key is searchable.
+        p.refilter("cell");
+        assert!(p.ranked.is_empty(), "the phrase is not searchable");
+        p.refilter("sp");
+        assert_eq!(p.ranked, vec![1]);
+        p.refilter("");
+        p.replace_all(
+            ["NDX.Z", "NKY.Z", "SPX.Z"]
+                .iter()
+                .map(|k| k.to_string())
+                .collect(),
+        );
+        assert_eq!(p.labels[2].as_ref(), "SPX.Z \u{b7} 1 cell, spot_ref");
+        assert_eq!(p.labels[0].as_ref(), "NDX.Z");
     }
 
     /// The round-1 CRITICAL: an unchanged query is a no-op, so the
@@ -540,7 +596,7 @@ mod tests {
     #[test]
     fn the_highlight_never_leaves_the_painted_rows() {
         let keys: Vec<String> = (0..20).map(|i| format!("K{i:02}.Z")).collect();
-        let mut p = PickerRows::new(keys);
+        let mut p = PickerRows::with_marks(keys, BTreeMap::new());
         assert_eq!(p.ranked.len(), 20, "ranking is unbounded");
         assert_eq!(p.painted_len(), PICKER_ROWS);
         p.step_highlighted(100);
