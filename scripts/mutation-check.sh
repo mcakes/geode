@@ -11839,30 +11839,30 @@ run_mutation "mdmenu: closing an orphaned picker never blurs a foreign field" \
 # `enter` actually goes through.
 run_mutation "mdpicker: enter loads the highlighted row, not the top match" \
   crates/geode-marketdata/src/tile.rs \
-  '        let index = p.rows.highlighted;' \
+  '        let index = p.rows.highlighted();' \
   '        let index = 0;' \
   geode-marketdata enter_loads_the_highlighted_row_not_the_top_match
 
 # Review fix round 2 (a NEW breakage the round-1 fix itself
 # introduced): the diagnostics observer must capture the highlighted
-# KEY (a string) BEFORE `p.all` is overwritten, never after — capturing
-# it once `all` already holds the reordered catalog reads the OLD
-# ranked position back out of the NEW `all` array, exactly reproducing
+# KEY (a string) BEFORE the option list is overwritten, never after —
+# capturing it once the list already holds the reordered catalog reads
+# the OLD ranked position back out of the NEW list, exactly reproducing
 # the positional-index bug the string identity was built to fix (a
 # catalog reorder shifts every later index, so the "preserved"
 # highlight silently lands on whatever key now sits at that number).
-# Mutated by swapping the capture below the reassignment (the logic
-# lives in `PickerRows::replace_all` since the final review split the
-# picker's pure half out; the window test still reaches it through the
-# diagnostics observer).
+# Mutated by swapping the capture below the reassignment. Re-anchored
+# 2026-09-19: the logic now lives in `ChoiceList::replace_options`
+# (Task 5, `PickerRows::replace_all` is a thin wrapper over it) — the
+# window test still reaches it through the diagnostics observer.
 run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its old index" \
-  crates/geode-marketdata/src/popup.rs \
-  '        let keep = self.highlighted_key().map(str::to_string);
-        self.labels = Self::labels_for(&all, &self.marks);
-        self.all = all;' \
-  '        self.labels = Self::labels_for(&all, &self.marks);
-        self.all = all;
-        let keep = self.highlighted_key().map(str::to_string);' \
+  crates/geode-shell/src/choice.rs \
+  '        let keep = self.highlighted_text().map(str::to_string);
+        self.options = options;
+        self.place(keep.as_deref());' \
+  '        self.options = options;
+        let keep = self.highlighted_text().map(str::to_string);
+        self.place(keep.as_deref());' \
   geode-marketdata a_resorted_catalog_keeps_the_highlighted_key_not_its_old_index
 
 # ---- Panel header: final review fix wave (2026-09-17) -------------------
@@ -11940,37 +11940,56 @@ run_mutation "mdattr: a find cancelled from the strip returns to the strip" \
                 }' \
   geode-marketdata a_find_cancelled_from_the_strip_returns_to_the_strip
 
-# A1: a kept key the query filtered OUT (or one ranked past the painted
-# rows) has no row to land on and falls to row 0. Mutated to keep the
-# stale index, `highlighted` points past `ranked` and `enter` loads
-# nothing — the picker looks open and inert.
+# A1: a kept key the query filtered OUT has no row to land on and falls
+# to row 0. Mutated to keep the stale index, `highlighted` points past
+# `ranked` and `enter` loads nothing — the picker looks open and inert.
+# Re-anchored 2026-09-19: the logic now lives in `ChoiceList::place`
+# (Task 5) — the "or ranked past the painted rows" half of the old
+# comment is gone with it, since the window now follows a value ranked
+# past the cap into view rather than falling back to row 0 for it.
 run_mutation "mdpicker: place falls back to row 0 when the key is gone" \
-  crates/geode-marketdata/src/popup.rs \
-  '            .filter(|&row| row < PICKER_ROWS)
+  crates/geode-shell/src/choice.rs \
+  '            .and_then(|declared| self.ranked.iter().position(|r| r.row == declared))
             .unwrap_or(0);' \
-  '            .filter(|&row| row < PICKER_ROWS)
+  '            .and_then(|declared| self.ranked.iter().position(|r| r.row == declared))
             .unwrap_or(self.highlighted);' \
   geode-marketdata a_key_the_query_filtered_out_falls_to_row_0
 
 # A3: the picker paints at most PICKER_ROWS ranked keys; the query
 # narrows the rest. Mutated to paint them all, a 300-key catalog paints
-# 300 rows off the bottom of the window.
+# 300 rows off the bottom of the window. Re-anchored 2026-09-19: the cap
+# is no longer a `.take(PICKER_ROWS)` in `render_picker`'s own loop —
+# it is `ChoiceList::painted_len` (Task 5), which `render_picker` (and
+# `PickerRows::painted_len`) now defer to entirely.
 run_mutation "mdpicker: the picker paints at most PICKER_ROWS rows" \
-  crates/geode-marketdata/src/popup.rs \
-  '        for (row_i, &i) in rows.ranked.iter().take(PICKER_ROWS).enumerate() {' \
-  '        for (row_i, &i) in rows.ranked.iter().enumerate() {' \
+  crates/geode-shell/src/choice.rs \
+  '    pub fn painted_len(&self) -> usize {
+        (self.ranked.len() - self.window).min(self.cap)
+    }' \
+  '    pub fn painted_len(&self) -> usize {
+        self.ranked.len() - self.window
+    }' \
   geode-marketdata the_picker_paints_at_most_twelve_rows
 
-# A3's other half: the highlight is clamped to the PAINTED rows, so
-# `enter` can never load a row the trader cannot see. Mutated to clamp
-# to the whole ranked list, `down` walks the highlight off the bottom of
-# the painted list into rows that exist only in `ranked`.
+# A3's other half: the highlight is always painted, so `enter` can
+# never load a row the trader cannot see. Superseded 2026-09-19 by the
+# window-following cap (Task 5, `ChoiceList`/spec §3.1): a step no
+# longer clamps the highlight to a fixed painted range — it clamps over
+# the WHOLE ranked list (`nav_clamped`) and the WINDOW follows
+# (`follow`) so the highlight stays inside it. Mutated to stop the
+# window advancing forward, a step past the cap leaves the highlight
+# ahead of the window — painted past what `render_picker` actually
+# draws, exactly the bug `follow`'s forward branch exists to prevent.
 run_mutation "mdpicker: step stops at the last painted row" \
-  crates/geode-marketdata/src/popup.rs \
-  '        let painted = self.painted_len();
-        if painted == 0 {' \
-  '        let painted = self.ranked.len();
-        if painted == 0 {' \
+  crates/geode-shell/src/choice.rs \
+  '        if self.highlighted < self.window {
+            self.window = self.highlighted;
+        } else if self.highlighted >= self.window + self.cap {
+            self.window = self.highlighted + 1 - self.cap;
+        }' \
+  '        if self.highlighted < self.window {
+            self.window = self.highlighted;
+        }' \
   geode-marketdata the_highlight_never_leaves_the_painted_rows
 
 # A4: an I64 attribute parses as `i64` directly. Mutated back to the
@@ -12560,11 +12579,20 @@ run_mutation "mdmenu: hovering a menu row moves the highlight" \
   geode-marketdata \
   hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid
 
+# Re-anchored 2026-09-19 (Task 5): the set moved into the guard itself
+# (`ChoiceList::set_highlighted`, refused past the painted range), so
+# the mutation drops both the set and the notify by narrowing the guard
+# to the change-only compare alone.
 run_mutation "mdpicker: hovering a picker row moves the highlight" \
   crates/geode-marketdata/src/tile.rs \
-  '        p.rows.highlighted = row;
+  '        if p.rows.highlighted() == row || !p.rows.set_highlighted(row) {
+            return;
+        }
         cx.notify();' \
-  '        let _ = row;' \
+  '        if p.rows.highlighted() == row {
+            return;
+        }
+        let _ = row;' \
   geode-marketdata \
   hovering_a_picker_row_moves_the_highlight_and_occludes_the_grid
 

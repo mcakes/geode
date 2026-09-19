@@ -697,7 +697,7 @@ impl MarketDataTile {
             // a diagnostics tile open) — comparing first is what keeps an
             // unrelated notification from resetting the highlight and
             // from re-cloning the catalog into `labels` for nothing.
-            if p.rows.all == all {
+            if p.rows.all() == all.as_slice() {
                 return;
             }
             // Review fix round 2: `replace_all` captures the highlighted
@@ -2324,10 +2324,9 @@ impl MarketDataTile {
         let Some(Popup::Picker(p)) = &mut self.popup else {
             return;
         };
-        if p.rows.highlighted == row || row >= p.rows.painted_len() {
+        if p.rows.highlighted() == row || !p.rows.set_highlighted(row) {
             return;
         }
-        p.rows.highlighted = row;
         cx.notify();
     }
 
@@ -2410,38 +2409,39 @@ impl MarketDataTile {
 
     /// `commit` (`enter`) with the picker open (spec §7): re-rank from the
     /// field's CURRENT text before resolving the highlighted row. A real
-    /// keystroke already kept `ranked` current through the `Change`
+    /// keystroke already kept the ranking current through the `Change`
     /// subscription in `open_picker`, but `InputState::set_value` emits
     /// none at all (CLAUDE.md's own trap, exercised by a test harness that
-    /// writes the field that way) — trusting whatever `ranked` happens to
-    /// hold would let the choice depend on a rank that was never actually
-    /// run. `refilter` is a no-op when the text has not actually changed
+    /// writes the field that way) — trusting whatever was last ranked
+    /// would let the choice depend on a rank that was never actually run.
+    /// `refilter` is a no-op when the text has not actually changed
     /// (`PickerRows`'s own doc comment, review fix round 1, CRITICAL),
     /// so this defensive call never resets the highlight the trader
     /// already moved to — it only re-ranks, preserving the highlighted
-    /// KEY, when there is a real query to catch up on. An empty ranked
-    /// list (no catalog, or nothing matches) is inert (spec §7): nothing
-    /// to load, and the picker stays open.
+    /// KEY, when there is a real query to catch up on. Nothing painted
+    /// (no catalog, or nothing matches) is inert (spec §7): nothing to
+    /// load, and the picker stays open.
     fn commit_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Popup::Picker(p)) = &mut self.popup else {
             return;
         };
         let query = p.input.read(cx).value().to_string();
         p.rows.refilter(&query);
-        if p.rows.ranked.is_empty() {
+        if p.rows.painted_len() == 0 {
             return;
         }
-        let index = p.rows.highlighted;
+        let index = p.rows.highlighted();
         self.picker_pick(index, window, cx);
     }
 
     /// A row click, or `enter` after [`Self::commit_picker`]'s own
-    /// re-rank (spec §7): load the key at `ranked[index]` through the
-    /// same door `:underlying`/`:key` use, closing the picker first —
-    /// exactly as [`Self::menu_pick`] closes the menu before dispatching
-    /// its own row, and for the same reason: `set_key` needs no keyboard,
-    /// and the picker's own field is done being useful the moment a row
-    /// is chosen.
+    /// re-rank (spec §7): load the key at painted row `index` (a
+    /// WINDOW-relative index, matching [`PickerRows::highlighted`] and
+    /// the row a click carries) through the same door `:underlying`/`:key`
+    /// use, closing the picker first — exactly as [`Self::menu_pick`]
+    /// closes the menu before dispatching its own row, and for the same
+    /// reason: `set_key` needs no keyboard, and the picker's own field is
+    /// done being useful the moment a row is chosen.
     pub(crate) fn picker_pick(
         &mut self,
         index: usize,
@@ -2451,10 +2451,10 @@ impl MarketDataTile {
         let Some(Popup::Picker(p)) = &self.popup else {
             return;
         };
-        let Some(&i) = p.rows.ranked.get(index) else {
+        let Some(i) = p.rows.painted().nth(index) else {
             return;
         };
-        let key = p.rows.all[i].clone();
+        let key = p.rows.all()[i].clone();
         self.close_popup_with_window(window, cx);
         self.set_key(parse_display_key(&key), window, cx);
     }
@@ -3246,16 +3246,15 @@ impl MarketDataTile {
         }
     }
 
-    /// The open picker's painted labels in RANKED order — what a trader
-    /// reads, marks included — `None` with no picker open.
+    /// The open picker's painted labels, in painted order — what a
+    /// trader reads, marks included — `None` with no picker open.
     #[cfg(test)]
     pub(crate) fn picker_labels(&self) -> Option<Vec<String>> {
         match &self.popup {
             Some(Popup::Picker(p)) => Some(
                 p.rows
-                    .ranked
-                    .iter()
-                    .map(|&i| p.rows.labels[i].to_string())
+                    .painted()
+                    .map(|i| p.rows.labels[i].to_string())
                     .collect(),
             ),
             _ => None,
@@ -8175,9 +8174,11 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// A3: the picker paints at most `PICKER_ROWS` of its ranked keys
-    /// (the query narrows the rest), and the highlight cannot step past
-    /// the last painted row.
+    /// A3: the picker paints at most `PICKER_ROWS` of its ranked keys at
+    /// once (the query narrows the rest). Window semantics (2026-09-19
+    /// ruling): stepping past the cap does not stop the highlight at the
+    /// last painted row — it drags the window along, so the highlight
+    /// lands on the last DECLARED key with the window following.
     #[gpui::test]
     fn the_picker_paints_at_most_twelve_rows(cx: &mut gpui::TestAppContext) {
         use crate::popup::PICKER_ROWS;
@@ -8204,8 +8205,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         h.dispatch(&mut vcx, "menu_down", Some(100));
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.picker_highlighted_key()),
-            Some(keys[PICKER_ROWS - 1].clone()),
-            "the highlight stops on the last painted row"
+            Some(keys[19].clone()),
+            "the highlight follows to the last declared row, with the \
+             window sliding to keep it painted"
         );
     }
 

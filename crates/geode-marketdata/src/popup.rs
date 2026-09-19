@@ -35,67 +35,60 @@ pub(crate) struct MenuState {
     pub highlighted: usize,
 }
 
-/// How many ranked rows the picker PAINTS (final review, A3). The
-/// ranked list itself is unbounded — a dataset's catalog can hold hundreds
-/// of keys — but the popup paints only the top `PICKER_ROWS` and the
-/// query narrows the rest: a cap rather than a bounded scroll container,
-/// because a cap needs no scroll state and the picker is a type-to-narrow
-/// surface, never a browse-by-scrolling one. The highlight is clamped to
-/// the painted range ([`PickerRows::place`], [`PickerRows::step_highlighted`])
-/// so `enter` can never load a row the trader cannot see.
+/// How many ranked rows the picker PAINTS at once (final review, A3;
+/// window semantics, 2026-09-19): a cap rather than a bounded scroll
+/// container, because a cap needs no scroll state and the picker is a
+/// type-to-narrow surface, never a browse-by-scrolling one. This IS
+/// [`geode_shell::choice::DEFAULT_CAP`]'s own value — one cap for every
+/// choice surface, spec 2026-09-19 §3.1 — and the assert below is what
+/// keeps the two from drifting apart. The painted rows are a WINDOW that
+/// follows the highlight (`ChoiceList::follow`), not a truncation of the
+/// ranked list, so `enter` can never load a row the trader cannot see
+/// even when the current value ranks past row `PICKER_ROWS`.
 pub(crate) const PICKER_ROWS: usize = 12;
+const _: () = assert!(PICKER_ROWS == geode_shell::choice::DEFAULT_CAP);
 
 /// The underlying picker's PURE half (spec §7; split out by the final
-/// review, A1, so it is testable without a window): the dataset's catalog
-/// keys (`all`, taken once at open — a fresh catalog while the picker
-/// stays open is folded back in by the tile's own diagnostics observer
-/// through [`Self::replace_all`], never read here), the current ranking
-/// of `all`'s indices (`geode_shell::listfilter::rank`, over
-/// `display_key`'s own spelling), and which ranked row is highlighted.
+/// review, A1, so it is testable without a window): a thin wrapper over
+/// [`geode_shell::choice::ChoiceList`] (spec 2026-09-19 §3.1), which owns
+/// the ranking, the highlight, the identity-by-key-string rule across a
+/// re-rank and the painted-window cap — one core shared with the object
+/// and settings dialogs' own `Choice` fields, so those rules are spelled
+/// once. This struct adds only what the picker needs beyond a plain
+/// choice field.
 ///
-/// `all: Vec<String>`, not `Vec<SharedString>`, because
-/// [`geode_shell::listfilter::rank`] takes `&[String]`. `labels` is the
-/// separate, PREPARED `SharedString` for each `all` entry (review fix
-/// round 1, IMPORTANT-3) — [`Self::with_marks`] and [`Self::replace_all`] both
-/// fill it off the render thread, so [`render_picker`] only ever clones a
-/// prepared `SharedString` per row (an inline copy or an `Arc` bump, never
-/// an allocation); at the pinned release `SharedString` wraps
-/// `smol_str::SmolStr` (`gpui-pre-shared-string-0.3.5/
-/// gpui_shared_string.rs`), which stores up to 23 bytes inline, so
-/// `SharedString::from(&str)` heap-allocates only for a longer string
-/// — it had no inline form at the old git rev — but an underlying key
-/// can exceed that, and the charter's "nothing allocates in render" is
-/// about the rule, not the byte count, so the conversion still happens
-/// once per row when `all` changes, never per frame (as the first
-/// build did on every repaint while a picker was open).
-///
-/// `query` is the text `ranked` was last built against — kept so
-/// [`Self::refilter`] can tell "the trader typed something new" from
-/// "nothing changed, don't touch the highlight" (review fix round 1,
-/// CRITICAL): the first build re-ranked (and reset the highlight to 0)
-/// on every call, including the ONE `commit`/`enter` always makes to
-/// cover a test harness's `set_value` (which fires no `Change` event at
-/// all) — so `u`, `down`, `down`, `enter` always loaded the TOP match,
-/// silently discarding whichever row the trader had actually
-/// highlighted.
+/// `labels` is the separate, PREPARED `SharedString` for each catalog key
+/// (review fix round 1, IMPORTANT-3) — [`Self::with_marks`] and
+/// [`Self::replace_all`] both fill it off the render thread, so
+/// [`render_picker`] only ever clones a prepared `SharedString` per row
+/// (an inline copy or an `Arc` bump, never an allocation); at the pinned
+/// release `SharedString` wraps `smol_str::SmolStr`
+/// (`gpui-pre-shared-string-0.3.5/gpui_shared_string.rs`), which stores
+/// up to 23 bytes inline, so `SharedString::from(&str)` heap-allocates
+/// only for a longer string — it had no inline form at the old git rev —
+/// but an underlying key can exceed that, and the charter's "nothing
+/// allocates in render" is about the rule, not the byte count, so the
+/// conversion still happens once per row when the catalog changes, never
+/// per frame (as the first build did on every repaint while a picker was
+/// open).
 ///
 /// `marks` (2026-09-19, per-underlying drafts): the underlyings that
 /// carry PARKED edits, keyed by `display_key` and valued with the
 /// draft's own `count_phrase` ("1 cell, spot_ref"), taken once at open
 /// from the tile's parked map. A marked row's label reads `NKY.Z · 1
-/// cell, spot_ref`; ranking still runs over the bare key in `all`, never
-/// the decorated label, so typing `sp` cannot match a phrase's own
-/// letters. Kept here so [`Self::replace_all`] can re-decorate a fresh
-/// catalog without asking the tile again — the parked map only changes
-/// through `set_key`, and both of its callers (`picker_pick`, the `:`
-/// line) close this popup before calling it, so the marks can never go
-/// stale while the picker is open; a third caller would owe the same.
+/// cell, spot_ref`; ranking still runs over the bare key, never the
+/// decorated label, so typing `sp` cannot match a phrase's own letters.
+/// Kept here so [`Self::replace_all`] can re-decorate a fresh catalog
+/// without asking the tile again — the parked map only changes through
+/// `set_key`, and both of its callers (`picker_pick`, the `:` line)
+/// close this popup before calling it, so the marks can never go stale
+/// while the picker is open; a third caller would owe the same.
 pub(crate) struct PickerRows {
-    pub all: Vec<String>,
+    /// The ranking and the highlight (spec 2026-09-19 §3.1): one core
+    /// with the dialogs' choice fields, so the cap, the identity rule
+    /// and the re-rank guard are spelled once.
+    list: geode_shell::choice::ChoiceList,
     pub labels: Vec<SharedString>,
-    pub ranked: Vec<usize>,
-    pub highlighted: usize,
-    pub query: String,
     pub marks: BTreeMap<String, String>,
 }
 
@@ -113,13 +106,9 @@ impl PickerRows {
     /// mark where `marks` names it (the struct's own doc comment).
     pub(crate) fn with_marks(all: Vec<String>, marks: BTreeMap<String, String>) -> Self {
         let labels = Self::labels_for(&all, &marks);
-        let ranked = (0..all.len()).collect();
         Self {
-            all,
+            list: geode_shell::choice::ChoiceList::new(all, PICKER_ROWS),
             labels,
-            ranked,
-            highlighted: 0,
-            query: String::new(),
             marks,
         }
     }
@@ -137,89 +126,112 @@ impl PickerRows {
             .collect()
     }
 
-    /// How many ranked rows are painted — the first [`PICKER_ROWS`] of
-    /// them.
+    /// The catalog itself, in declared order.
+    pub(crate) fn all(&self) -> &[String] {
+        self.list.options()
+    }
+
+    /// The text the ranking was last built against — a test-only
+    /// accessor; production code only ever sets it, through
+    /// [`Self::refilter`].
+    #[cfg(test)]
+    pub(crate) fn query(&self) -> &str {
+        self.list.query()
+    }
+
+    /// How many ranked rows are painted — [`geode_shell::choice::ChoiceList::painted_len`].
     pub(crate) fn painted_len(&self) -> usize {
-        self.ranked.len().min(PICKER_ROWS)
+        self.list.painted_len()
+    }
+
+    /// The declared indices of the painted rows, in ranked order — what
+    /// [`render_picker`] paints, and what [`Self::highlighted`] indexes
+    /// into.
+    pub(crate) fn painted(&self) -> impl Iterator<Item = usize> + '_ {
+        self.list.painted().iter().map(|r| r.row)
+    }
+
+    /// The highlighted row, WINDOW-relative — an index into
+    /// [`Self::painted`], never into the whole ranked list.
+    pub(crate) fn highlighted(&self) -> usize {
+        self.list.highlighted()
     }
 
     /// The catalog key currently highlighted, `None` with an empty
-    /// `ranked` list — the identity every re-rank preserves.
+    /// ranked list — the identity every re-rank preserves. A test-only
+    /// accessor (`tile::picker_highlighted_key`'s own door); production
+    /// code resolves a pick through [`Self::painted`] and [`Self::all`]
+    /// instead ([`crate::tile::MarketDataTile::picker_pick`]).
+    #[cfg(test)]
     pub(crate) fn highlighted_key(&self) -> Option<&str> {
-        self.ranked
-            .get(self.highlighted)
-            .map(|&i| self.all[i].as_str())
+        self.list.highlighted_text()
     }
 
-    /// Re-rank against `new_query`, but ONLY if it actually differs from
-    /// the query `ranked` was last built against — a no-op otherwise, so
-    /// a defensive re-rank at commit time (the field's current text may
-    /// never have reached this struct through a real `Change` event)
-    /// costs nothing when nothing changed, and never resets the
-    /// highlight out from under a trader who typed nothing at all.
-    /// Captures the currently highlighted KEY before rebuilding and
-    /// hands it to [`Self::place`], the one door every re-rank path
-    /// (this one, and [`Self::replace_all`], review fix round 1,
-    /// IMPORTANT-2) goes through.
+    /// A click or hover on painted row `row` (window-relative, matching
+    /// [`Self::highlighted`]): refused past the painted range, which a
+    /// click or hover cannot reach anyway.
+    pub(crate) fn set_highlighted(&mut self, row: usize) -> bool {
+        self.list.set_highlighted(row)
+    }
+
+    /// Re-rank against `new_query`, a no-op when it is unchanged from the
+    /// query the ranking was last built against — so a defensive re-rank
+    /// at commit time (the field's current text may never have reached
+    /// this struct through a real `Change` event) costs nothing when
+    /// nothing changed, and never resets the highlight out from under a
+    /// trader who typed nothing at all
+    /// ([`geode_shell::choice::ChoiceList::set_query`]'s own doc comment
+    /// has the full story, including the keep-by-text rule review fix
+    /// round 1, CRITICAL, established).
     pub(crate) fn refilter(&mut self, new_query: &str) {
-        if new_query == self.query {
-            return;
-        }
-        let keep = self.highlighted_key().map(str::to_string);
-        self.query = new_query.to_string();
-        self.place(keep.as_deref());
+        self.list.set_query(new_query);
     }
 
     /// Swap in a fresh catalog (the diagnostics observer's door), keeping
-    /// the highlighted KEY across it. Review fix round 2: the key is
-    /// captured BEFORE `all` is overwritten, and by string rather than by
-    /// index — `catalog_keys()` returns a freshly SORTED list, so a new
-    /// underlying that sorts ahead of the highlighted one shifts every
-    /// later index, and re-placing by the OLD index once `all` has
-    /// already changed would silently highlight a different row. Forced
-    /// through [`Self::place`] rather than [`Self::refilter`]: the query
-    /// has not changed, but `all` has, and a re-rank must run regardless.
+    /// the highlighted KEY across it —
+    /// [`geode_shell::choice::ChoiceList::replace_options`]'s own
+    /// identity-by-string rule (review fix round 2: the key is captured
+    /// BEFORE the option list is overwritten, and by string rather than
+    /// by index — `catalog_keys()` returns a freshly SORTED list, so a
+    /// new underlying that sorts ahead of the highlighted one shifts
+    /// every later index, and re-placing by the OLD index once the
+    /// catalog has already changed would silently highlight a different
+    /// row).
     pub(crate) fn replace_all(&mut self, all: Vec<String>) {
-        let keep = self.highlighted_key().map(str::to_string);
         self.labels = Self::labels_for(&all, &self.marks);
-        self.all = all;
-        self.place(keep.as_deref());
+        self.list.replace_options(all);
     }
 
-    /// Rebuild `ranked` against the CURRENT `all`/`query`, then put the
-    /// highlight on `key` — falling back to row 0 when `key` is `None`,
-    /// no longer present in `all` at all, or ranked past the painted
-    /// range (a row the trader cannot see is not one `enter` may load).
+    /// Rebuild the ranking against the CURRENT catalog/query, then put
+    /// the highlight on `key` — falling back to row 0 when `key` is
+    /// `None` or no longer present in the catalog at all. Unlike the old
+    /// truncating cap, a `key` that ranks past `PICKER_ROWS` is still
+    /// found and lit, with the window dragged along so it is actually
+    /// visible ([`geode_shell::choice::ChoiceList::place`]'s own doc
+    /// comment).
     ///
     /// **Identity is the KEY STRING, never a positional index** (review
     /// fix round 2, the bug the first fix's own `rerank` reintroduced by
     /// capturing `was_highlighted` as an ALL-index and looking that same
-    /// number up in the NEW `all`): see [`Self::replace_all`]. This
-    /// method reads the key back out of `all` as it stands when called —
-    /// never before — which is why `replace_all` captures first.
+    /// number up in the NEW catalog): see [`Self::replace_all`]. A
+    /// test-only door directly onto [`geode_shell::choice::ChoiceList::place`] —
+    /// [`Self::refilter`] and [`Self::replace_all`] go straight to the
+    /// list's own `set_query`/`replace_options` in production, which
+    /// call it internally.
+    #[cfg(test)]
     pub(crate) fn place(&mut self, key: Option<&str>) {
-        self.ranked = geode_shell::listfilter::rank(&self.all, &self.query)
-            .into_iter()
-            .map(|r| r.row)
-            .collect();
-        self.highlighted = key
-            .and_then(|k| self.all.iter().position(|s| s == k))
-            .and_then(|all_index| self.ranked.iter().position(|&r| r == all_index))
-            .filter(|&row| row < PICKER_ROWS)
-            .unwrap_or(0);
+        self.list.place(key);
     }
 
-    /// Move the highlight `delta` steps over the PAINTED rows, clamped at
-    /// either end (never wrapping — `core::menu::step`'s own rule, spec
-    /// §7's `up`/`down`).
+    /// Move the highlight `delta` steps over the WHOLE ranked list,
+    /// clamped at either end (never wrapping — `core::menu::step`'s own
+    /// rule, spec §7's `up`/`down`;
+    /// [`geode_shell::choice::ChoiceList::nav_clamped`]). The window
+    /// follows, so the highlight is always painted even when it steps
+    /// past the old cap.
     pub(crate) fn step_highlighted(&mut self, delta: isize) {
-        let painted = self.painted_len();
-        if painted == 0 {
-            self.highlighted = 0;
-            return;
-        }
-        let moved = (self.highlighted as isize + delta).clamp(0, painted as isize - 1);
-        self.highlighted = moved as usize;
+        self.list
+            .nav_clamped(geode_shell::vimnav::NavCommand::Move(delta as i64));
     }
 }
 
@@ -407,7 +419,7 @@ pub(crate) fn render_picker(
                 .child(Input::new(&p.input).appearance(false).w_full()),
         );
     let rows = &p.rows;
-    if rows.ranked.is_empty() {
+    if rows.painted_len() == 0 {
         list = list.child(
             div()
                 .px_3()
@@ -416,9 +428,10 @@ pub(crate) fn render_picker(
                 .child("no underlyings known"),
         );
     } else {
-        // Only the first `PICKER_ROWS` ranked rows are painted (the
-        // constant's own doc comment): the query narrows the rest.
-        for (row_i, &i) in rows.ranked.iter().take(PICKER_ROWS).enumerate() {
+        // Only the painted WINDOW is painted (the constant's own doc
+        // comment): the query narrows the ranked list, and stepping past
+        // the cap slides the window rather than adding rows.
+        for (row_i, i) in rows.painted().enumerate() {
             // `labels[i]` is prepared off-render (`PickerRows`'s own
             // doc comment, review fix round 1, IMPORTANT-3) — this is a
             // refcount clone, never a conversion.
@@ -427,7 +440,7 @@ pub(crate) fn render_picker(
                 h_flex()
                     .px_3()
                     .py_0p5()
-                    .when(row_i == rows.highlighted, |d| d.bg(theme.list_active))
+                    .when(row_i == rows.highlighted(), |d| d.bg(theme.list_active))
                     .text_color(theme.popover_foreground)
                     .debug_selector(move || format!("marketdata-picker-row-{tile_id}-{row_i}"))
                     .on_mouse_down(MouseButton::Left, {
@@ -471,8 +484,8 @@ mod tests {
     #[test]
     fn a_new_picker_ranks_every_key_in_catalog_order_with_the_top_row_highlighted() {
         let p = rows(&["AAA.Z", "BBB.Z", "CCC.Z"]);
-        assert_eq!(p.ranked, vec![0, 1, 2]);
-        assert_eq!(p.highlighted, 0);
+        assert_eq!(p.painted().collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(p.highlighted(), 0);
         assert_eq!(p.highlighted_key(), Some("AAA.Z"));
         assert_eq!(p.labels.len(), 3);
     }
@@ -494,9 +507,9 @@ mod tests {
         // `sp` is in SPX's phrase ("spot_ref") AND its key; `cell` is in
         // the phrase alone — only the key is searchable.
         p.refilter("cell");
-        assert!(p.ranked.is_empty(), "the phrase is not searchable");
+        assert_eq!(p.painted_len(), 0, "the phrase is not searchable");
         p.refilter("sp");
-        assert_eq!(p.ranked, vec![1]);
+        assert_eq!(p.painted().collect::<Vec<_>>(), vec![1]);
         p.refilter("");
         p.replace_all(
             ["NDX.Z", "NKY.Z", "SPX.Z"]
@@ -517,8 +530,9 @@ mod tests {
         p.step_highlighted(2);
         assert_eq!(p.highlighted_key(), Some("CCC.Z"));
         p.refilter("");
-        assert_eq!(p.highlighted, 2, "same query, same row");
+        assert_eq!(p.highlighted(), 2, "same query, same row");
         assert_eq!(p.highlighted_key(), Some("CCC.Z"));
+        assert_eq!(p.query(), "");
     }
 
     /// A changed query re-ranks and re-finds the highlighted KEY at its
@@ -529,25 +543,26 @@ mod tests {
         p.step_highlighted(2);
         assert_eq!(p.highlighted_key(), Some("BBC.Z"));
         p.refilter("bb");
-        assert!(!p.ranked.contains(&0), "AAA.Z does not match");
+        assert_eq!(p.query(), "bb");
+        let painted: Vec<usize> = p.painted().collect();
+        assert!(!painted.contains(&0), "AAA.Z does not match");
         assert_eq!(
             p.highlighted_key(),
             Some("BBC.Z"),
-            "the highlight followed the key, not its old index: {:?}",
-            p.ranked
+            "the highlight followed the key, not its old index: {painted:?}"
         );
     }
 
     /// A kept key the query filters OUT has no row to land on: the
-    /// highlight falls to row 0 rather than pointing past `ranked`.
+    /// highlight falls to row 0 rather than pointing past the ranking.
     #[test]
     fn a_key_the_query_filtered_out_falls_to_row_0() {
         let mut p = rows(&["AAA.Z", "BBB.Z", "CCC.Z"]);
         p.step_highlighted(1);
         assert_eq!(p.highlighted_key(), Some("BBB.Z"));
         p.refilter("CCC");
-        assert_eq!(p.ranked, vec![2]);
-        assert_eq!(p.highlighted, 0);
+        assert_eq!(p.painted().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(p.highlighted(), 0);
         assert_eq!(p.highlighted_key(), Some("CCC.Z"));
     }
 
@@ -558,12 +573,38 @@ mod tests {
         let mut p = rows(&["BBB.Z", "CCC.Z"]);
         p.step_highlighted(1);
         p.replace_all(vec!["AAA.Z".into(), "BBB.Z".into(), "CCC.Z".into()]);
-        assert_eq!(p.highlighted, 2, "CCC.Z shifted from index 1 to 2");
+        assert_eq!(p.highlighted(), 2, "CCC.Z shifted from index 1 to 2");
         assert_eq!(p.highlighted_key(), Some("CCC.Z"));
         assert_eq!(p.labels.len(), 3, "labels follow the catalog");
+        assert_eq!(
+            p.all().to_vec(),
+            vec![
+                "AAA.Z".to_string(),
+                "BBB.Z".to_string(),
+                "CCC.Z".to_string()
+            ]
+        );
         p.replace_all(vec!["BBB.Z".into()]);
-        assert_eq!(p.highlighted, 0);
+        assert_eq!(p.highlighted(), 0);
         assert_eq!(p.highlighted_key(), Some("BBB.Z"));
+    }
+
+    /// `place` is a thin, test-only door directly onto
+    /// [`geode_shell::choice::ChoiceList::place`] (production reaches the
+    /// same logic through `refilter`/`replace_all`, which call it on the
+    /// list itself) — exercised here on its own so the wrapper is proven
+    /// to forward, not just the list underneath it.
+    #[test]
+    fn place_jumps_the_highlight_to_a_named_key() {
+        let mut p = rows(&["AAA.Z", "BBB.Z", "CCC.Z"]);
+        p.place(Some("CCC.Z"));
+        assert_eq!(p.highlighted_key(), Some("CCC.Z"));
+        p.place(None);
+        assert_eq!(
+            p.highlighted_key(),
+            Some("AAA.Z"),
+            "None falls back to row 0"
+        );
     }
 
     #[test]
@@ -571,49 +612,71 @@ mod tests {
         let mut p = rows(&[]);
         assert_eq!(p.highlighted_key(), None);
         p.step_highlighted(3);
-        assert_eq!(p.highlighted, 0);
+        assert_eq!(p.highlighted(), 0);
         p.step_highlighted(-3);
-        assert_eq!(p.highlighted, 0);
+        assert_eq!(p.highlighted(), 0);
         assert_eq!(p.highlighted_key(), None);
         p.refilter("x");
         assert_eq!(p.highlighted_key(), None);
     }
 
+    /// Spec §20.5's own rule, on the picker: a bare ±1 step is CLAMPED
+    /// here, never wrapping — `step_highlighted` goes through
+    /// [`geode_shell::choice::ChoiceList::nav_clamped`], not `nav`, which
+    /// is the one thing distinguishing the picker from a dialog's
+    /// `Choice` field (whose bare step wraps).
     #[test]
     fn step_clamps_at_both_ends() {
         let mut p = rows(&["AAA.Z", "BBB.Z", "CCC.Z"]);
         p.step_highlighted(-5);
-        assert_eq!(p.highlighted, 0);
-        p.step_highlighted(50);
-        assert_eq!(p.highlighted, 2);
+        assert_eq!(p.highlighted(), 0);
         p.step_highlighted(-1);
-        assert_eq!(p.highlighted, 1);
+        assert_eq!(p.highlighted(), 0, "a bare -1 clamps at row 0, never wraps");
+        p.step_highlighted(50);
+        assert_eq!(p.highlighted(), 2);
+        p.step_highlighted(1);
+        assert_eq!(
+            p.highlighted(),
+            2,
+            "a bare +1 clamps at the last row, never wraps"
+        );
     }
 
-    /// A3: the ranked list is unbounded, but the highlight lives inside
-    /// the painted `PICKER_ROWS` — `step` cannot pass the last painted
-    /// row, and a kept key ranked past it falls to row 0 rather than
-    /// highlighting a row nobody can see.
+    /// A3, amended for the window-following cap (2026-09-19 ruling): the
+    /// ranked list is unbounded, but a step that lands the highlight past
+    /// the cap drags the WINDOW along rather than clamping the highlight
+    /// to whatever the window last showed — `enter` can never load a row
+    /// the trader cannot see, even when the current value ranks past row
+    /// `PICKER_ROWS`.
     #[test]
     fn the_highlight_never_leaves_the_painted_rows() {
         let keys: Vec<String> = (0..20).map(|i| format!("K{i:02}.Z")).collect();
-        let mut p = PickerRows::with_marks(keys, BTreeMap::new());
-        assert_eq!(p.ranked.len(), 20, "ranking is unbounded");
-        assert_eq!(p.painted_len(), PICKER_ROWS);
+        let mut p = PickerRows::with_marks(keys.clone(), BTreeMap::new());
+        assert_eq!(p.painted_len(), PICKER_ROWS, "the window opens at the top");
         p.step_highlighted(100);
         assert_eq!(
-            p.highlighted,
-            PICKER_ROWS - 1,
-            "step stops at the last painted row"
+            p.highlighted_key(),
+            Some(keys[19].as_str()),
+            "clamped at the last DECLARED row, not the last painted one"
         );
-        // Highlight K11 (painted row 11), then a catalog with a key that
-        // sorts ahead of it pushes it to ranked position 12 — unpainted.
-        let mut all: Vec<String> = (0..20).map(|i| format!("K{i:02}.Z")).collect();
+        assert_eq!(
+            p.highlighted(),
+            PICKER_ROWS - 1,
+            "the last row OF the window"
+        );
+        assert_eq!(p.painted_len(), PICKER_ROWS, "still a full window");
+
+        // A catalog with a key that sorts ahead of the highlighted one
+        // shifts its declared index — the window follows it into view
+        // rather than dropping it to row 0 the way the old truncating cap
+        // once did.
+        let mut all = keys.clone();
         all.insert(0, "A00.Z".into());
         p.replace_all(all);
         assert_eq!(
-            p.highlighted, 0,
-            "a key ranked past the painted rows falls to 0"
+            p.highlighted_key(),
+            Some("K19.Z"),
+            "still found and kept in view past the cap"
         );
     }
 }
