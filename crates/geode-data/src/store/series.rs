@@ -191,12 +191,90 @@ fn append_in_transaction(
     Ok(SeriesAppended { appended, swept })
 }
 
+/// Sorts `spans` and merges any that overlap or touch, in place.
+pub fn merge_spans(spans: &mut Vec<Span>) {
+    spans.retain(|(f, t)| f < t);
+    spans.sort();
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    for &(f, t) in spans.iter() {
+        match out.last_mut() {
+            Some(last) if f <= last.1 => last.1 = last.1.max(t),
+            _ => out.push((f, t)),
+        }
+    }
+    *spans = out;
+}
+
+/// `requested` minus the union of `loaded`: the spans a fetch still has
+/// to ask the source for. Pure, so the service thread can run it over the
+/// coverage rows it read (timeseries spec §4.6).
+pub fn missing_spans(requested: Span, loaded: &[Span]) -> Vec<Span> {
+    let (from, to) = requested;
+    if from >= to {
+        return Vec::new();
+    }
+    let mut loaded = loaded.to_vec();
+    merge_spans(&mut loaded);
+    let mut out = Vec::new();
+    let mut cursor = from;
+    for (f, t) in loaded {
+        if t <= cursor {
+            continue;
+        }
+        if f >= to {
+            break;
+        }
+        if f > cursor {
+            out.push((cursor, f));
+        }
+        cursor = cursor.max(t);
+        if cursor >= to {
+            return out;
+        }
+    }
+    if cursor < to {
+        out.push((cursor, to));
+    }
+    out
+}
+
+/// The pair's loaded spans, merged. A coverage row is written per fetch
+/// (`append_series` step 4), so this is the union of every fetch so far.
+pub fn coverage(
+    conn: &Connection,
+    dataset: &str,
+    source: &str,
+    identity: &str,
+) -> Result<Vec<Span>, StoreError> {
+    let sql = format!(
+        "select epoch_us(from_ts), epoch_us(to_ts) from {} where source = ? and series_id = ? \
+         order by from_ts",
+        coverage_table(dataset)
+    );
+    let mut stmt = conn.prepare(&sql).map_err(sql_err(&sql))?;
+    let rows = stmt
+        .query_map(duckdb::params![source, identity], |r| {
+            Ok((
+                from_micros(r.get::<_, i64>(0)?),
+                from_micros(r.get::<_, i64>(1)?),
+            ))
+        })
+        .map_err(sql_err(&sql))?;
+    let mut spans = Vec::new();
+    for row in rows {
+        spans.push(row.map_err(sql_err(&sql))?);
+    }
+    merge_spans(&mut spans);
+    Ok(spans)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::Store;
     use crate::store::catalog::Catalog;
     use crate::store::ddl::tests_support::{series_dataset, series_rows, ts};
+    use proptest::prelude::*;
 
     fn fixture() -> (tempfile::TempDir, Store, DatasetSpec) {
         let dir = tempfile::tempdir().unwrap();
@@ -470,6 +548,111 @@ mod tests {
             vec![100.0, 101.0, 100.0],
             "in received_at order: {got:?}"
         );
+    }
+
+    fn sp(a: &str, b: &str) -> Span {
+        (ts(a), ts(b))
+    }
+
+    #[test]
+    fn missing_spans_subtracts_loaded_spans() {
+        let req = sp("2026-01-01T00:00:00Z", "2026-01-10T00:00:00Z");
+        assert_eq!(missing_spans(req, &[]), vec![req]);
+        assert_eq!(missing_spans(req, &[req]), vec![]);
+        let loaded = [sp("2026-01-03T00:00:00Z", "2026-01-05T00:00:00Z")];
+        assert_eq!(
+            missing_spans(req, &loaded),
+            vec![
+                sp("2026-01-01T00:00:00Z", "2026-01-03T00:00:00Z"),
+                sp("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z")
+            ]
+        );
+        // A loaded span wider than the request leaves nothing.
+        assert_eq!(
+            missing_spans(req, &[sp("2025-12-01T00:00:00Z", "2026-02-01T00:00:00Z")]),
+            vec![]
+        );
+        // Touching spans merge: [1,3) and [3,5) leave [5,10).
+        assert_eq!(
+            missing_spans(
+                req,
+                &[
+                    sp("2026-01-01T00:00:00Z", "2026-01-03T00:00:00Z"),
+                    sp("2026-01-03T00:00:00Z", "2026-01-05T00:00:00Z")
+                ]
+            ),
+            vec![sp("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z")]
+        );
+        // An empty request is nothing.
+        assert_eq!(
+            missing_spans(sp("2026-01-05T00:00:00Z", "2026-01-05T00:00:00Z"), &[]),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn coverage_reads_back_merged_spans() {
+        let (_d, store, ds) = fixture();
+        let rows = SeriesRows::default();
+        append(
+            &store,
+            &ds,
+            &rows,
+            ("2026-01-01T00:00:00Z", "2026-01-03T00:00:00Z"),
+            "2026-01-06T09:00:00Z",
+        );
+        append(
+            &store,
+            &ds,
+            &rows,
+            ("2026-01-02T00:00:00Z", "2026-01-05T00:00:00Z"),
+            "2026-01-06T09:01:00Z",
+        );
+        append(
+            &store,
+            &ds,
+            &rows,
+            ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z"),
+            "2026-01-06T09:02:00Z",
+        );
+        let got = coverage(store.writer(), "series", "demo_kdb", "SPX.close").unwrap();
+        assert_eq!(
+            got,
+            vec![
+                sp("2026-01-01T00:00:00Z", "2026-01-05T00:00:00Z"),
+                sp("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z")
+            ]
+        );
+        assert!(
+            coverage(store.writer(), "series", "demo_kdb", "VIX")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    proptest! {
+        /// loaded ∪ missing covers requested exactly, and missing is
+        /// disjoint from loaded.
+        #[test]
+        fn missing_and_loaded_partition_the_request(
+            req_from in 0i64..1000, req_len in 0i64..1000,
+            loaded in prop::collection::vec((0i64..1000, 1i64..300), 0..6),
+        ) {
+            let base = ts("2026-01-01T00:00:00Z");
+            let at = |h: i64| base + chrono::Duration::hours(h);
+            let req = (at(req_from), at(req_from + req_len));
+            let loaded: Vec<Span> = loaded.iter().map(|(f, l)| (at(*f), at(f + l))).collect();
+            let missing = missing_spans(req, &loaded);
+            for h in req_from..req_from + req_len {
+                let t = at(h);
+                let in_loaded = loaded.iter().any(|(f, to)| *f <= t && t < *to);
+                let in_missing = missing.iter().any(|(f, to)| *f <= t && t < *to);
+                prop_assert_ne!(in_loaded, in_missing, "hour {} must be in exactly one", h);
+            }
+            for w in missing.windows(2) {
+                prop_assert!(w[0].1 <= w[1].0, "missing spans are sorted and disjoint");
+            }
+        }
     }
 
     #[test]
