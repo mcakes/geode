@@ -281,6 +281,15 @@ pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
     }
 }
 
+/// A row's typeahead while it is open (spec 2026-09-19 §3.3): which
+/// setting, and the ranked options. The settings dialog has no draft;
+/// every row IS a value list, so this is the whole of its choice state.
+#[derive(Debug)]
+pub struct ChoiceEntry {
+    pub id: SettingId,
+    pub list: crate::choice::ChoiceList,
+}
+
 /// Persistent state for one open settings dialog session — the exact
 /// shape of `KeybindingsState` minus the rebind-capture field and the
 /// notice (there is nothing to "listen" for here; editing is stepping,
@@ -302,6 +311,11 @@ pub struct SettingsState {
     /// reconciles gpui to this after every transition, so a transition
     /// site only ever writes this field.
     pub mode: DialogMode,
+    /// A row's typeahead, open over its own values (spec 2026-09-19
+    /// §3.3). `Some` withdraws the row list in favour of
+    /// [`dialog::choice_rows`] and the filter row in favour of
+    /// [`dialog::name_row`] — see [`build`].
+    pub choice: Option<ChoiceEntry>,
 }
 
 /// Hand-written rather than derived so the opening mode is one explicit,
@@ -315,6 +329,7 @@ impl Default for SettingsState {
             selected: 0,
             query: String::new(),
             mode: DialogMode::Normal,
+            choice: None,
         }
     }
 }
@@ -324,10 +339,31 @@ impl SettingsState {
         Self::default()
     }
 
+    /// The text the shared `Input` should hold: the choice field's own
+    /// query while one is open, the filter query otherwise — what
+    /// `dialog::sync_dialog_text` mirrors (the object dialog's
+    /// `effective_query`, for the same reason).
+    pub fn effective_query(&self) -> &str {
+        match self.choice.as_ref() {
+            Some(entry) => entry.list.query(),
+            None => self.query.as_str(),
+        }
+    }
+
+    pub fn choosing(&self) -> bool {
+        self.choice.is_some()
+    }
+
     /// Replace the query and reset the selection to the top match — the
     /// pure half of the `InputEvent::Change` subscription in
-    /// `ShellView::new`.
+    /// `ShellView::new`. While a choice field is open the keystroke feeds
+    /// ITS query instead (`SettingsState::query` is the filter's alone),
+    /// exactly as `effective_query` reads back whichever is live.
     pub fn set_query(&mut self, query: String) {
+        if let Some(entry) = self.choice.as_mut() {
+            entry.list.set_query(&query);
+            return;
+        }
         self.query = query;
         self.selected = 0;
     }
@@ -384,8 +420,15 @@ pub enum KeyAction {
     LeaveFilter,
     /// The ladder's second rung: clear the applied query.
     ClearQuery,
-    /// Claimed and dropped — `enter` in either mode (inert and reserved,
-    /// see [`handle_key`]), and every key normal mode does not name.
+    /// `i` or a bare `enter` in normal mode (spec 2026-09-19 §3.3/§7):
+    /// open the selected row's typeahead over its own values.
+    OpenChoice,
+    /// A keystroke while a row's typeahead is open — the one table every
+    /// choice field reads (`crate::choice::route`).
+    Choice(crate::choice::ChoiceKey),
+    /// Claimed and dropped — a bare `enter` in filter mode (there is no
+    /// row-level verb the `Input` should lose it to), and every key
+    /// normal mode does not name.
     Drop,
     /// Not this dialog's to claim: a printable key on its way to the
     /// focused filter, or the ladder's last rung, which the shell's own
@@ -411,8 +454,11 @@ fn tab_step(ks: &Keystroke) -> Option<StepDirection> {
 }
 
 /// Map a keystroke to its [`KeyAction`] (interaction-model spec §2/§4/§5,
-/// as this dialog wears it):
+/// as this dialog wears it; the choice field is spec 2026-09-19 §3.3/§7):
 ///
+/// 0. while `choosing` (a row's typeahead is open), the field owns the
+///    keys outright, through the one table every choice field reads
+///    (`crate::choice::route`) — nothing below this rung runs;
 /// 1. `escape` walks [`dialogmode::escape_step`]'s ladder in both modes
 ///    (`has_previous_stage: false` — one flat list). Modifiers are
 ///    ignored, for the reason the keybinding dialog records: the shell's
@@ -420,20 +466,30 @@ fn tab_step(ks: &Keystroke) -> Option<StepDirection> {
 ///    `shift+escape` into a key normal mode claims and drops;
 /// 2. `tab`/`shift+tab` step in both modes ([`tab_step`]);
 /// 3. [`listfilter::nav_command`]'s motions move in both modes;
-/// 4. bare `enter` is claimed and dropped in both modes — inert and
-///    reserved, since a step applies the instant it happens and there is
-///    nothing for `enter` to confirm (see [`handle_key`] for why claiming
-///    it, rather than ignoring it, is what makes it inert);
+/// 4. bare `enter` opens the row's typeahead in [`DialogMode::Normal`]
+///    (amended 2026-09-19 — it used to be inert and reserved here, since
+///    a step used to be the only way to change a value) and stays
+///    claimed and dropped in [`DialogMode::Filter`], where there is no
+///    row-level verb the `Input` should lose it to;
 /// 5. in [`DialogMode::Filter`], everything else passes through to the
 ///    focused `Input` as text;
 /// 6. in [`DialogMode::Normal`], [`dialogmode::normal_command`] decides:
 ///    `/` enters filter mode, `space`/`shift+space` (`Toggle`/
 ///    `ToggleBack`, the keys Phase 4c's `Choice` rows step with) step
-///    the value, `j`/`k`/`g`/`shift+g` move, and anything else — `enter`'s
-///    `Commit`, `i`, the item movers, a stray letter — is claimed and
-///    dropped, because normal mode's contract is that an unclaimed key
-///    does nothing rather than reaching the shell underneath.
-pub fn route(mode: DialogMode, query_is_empty: bool, ks: &Keystroke) -> KeyAction {
+///    the value, `j`/`k`/`g`/`shift+g` move, `i` (`EditText`) opens the
+///    row's typeahead beside `enter`, and anything else — the item
+///    movers, a stray letter — is claimed and dropped, because normal
+///    mode's contract is that an unclaimed key does nothing rather than
+///    reaching the shell underneath.
+pub fn route(mode: DialogMode, query_is_empty: bool, choosing: bool, ks: &Keystroke) -> KeyAction {
+    // Spec 2026-09-19 §3.3: while a row's typeahead is open the field
+    // owns the keys, through the one table every choice field reads.
+    if choosing {
+        return match crate::choice::route(ks) {
+            Some(key) => KeyAction::Choice(key),
+            None => KeyAction::PassThrough,
+        };
+    }
     if ks.key == "escape" {
         return match dialogmode::escape_step(mode, query_is_empty, false) {
             EscapeStep::LeaveFilter => KeyAction::LeaveFilter,
@@ -451,7 +507,14 @@ pub fn route(mode: DialogMode, query_is_empty: bool, ks: &Keystroke) -> KeyActio
         return KeyAction::Nav(cmd);
     }
     if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        return KeyAction::Drop;
+        // §18's "enter inert" is amended (spec 2026-09-19 §7): in
+        // normal mode it opens the row's typeahead beside `i`; in filter
+        // mode it stays claimed and dropped, since there is no row-level
+        // verb the `Input` should lose it to.
+        return match mode {
+            DialogMode::Normal => KeyAction::OpenChoice,
+            DialogMode::Filter => KeyAction::Drop,
+        };
     }
     match mode {
         DialogMode::Filter => KeyAction::PassThrough,
@@ -460,6 +523,7 @@ pub fn route(mode: DialogMode, query_is_empty: bool, ks: &Keystroke) -> KeyActio
             Some(NormalCommand::EnterFilter) => KeyAction::EnterFilter,
             Some(NormalCommand::Toggle) => KeyAction::Step(StepDirection::Right),
             Some(NormalCommand::ToggleBack) => KeyAction::Step(StepDirection::Left),
+            Some(NormalCommand::EditText) => KeyAction::OpenChoice,
             _ => KeyAction::Drop,
         },
     }
@@ -669,12 +733,20 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         false,
     );
     // §18.1: the mode pill lives in the modal's own title row
-    // (`dialog::render_modal`'s `title_extra` slot).
+    // (`dialog::render_modal`'s `title_extra` slot). A row's typeahead
+    // paints `choose` in its place (spec 2026-09-19 §3.3) — `filter`
+    // would misdescribe what `enter` does over an open choice field.
     dialog::set_title_extra(view, |shell, cx| {
         shell
             .settings
             .as_ref()
-            .map(|s| dialog::mode_pill(s.mode, cx))
+            .map(|s| {
+                if s.choice.is_some() {
+                    dialog::choose_pill(cx)
+                } else {
+                    dialog::mode_pill(s.mode, cx)
+                }
+            })
             .unwrap_or_else(|| div().into_any_element())
     });
 }
@@ -715,7 +787,7 @@ fn handle_key(
     };
     let visible = visible_rows(state, &rows);
 
-    match route(state.mode, state.query.is_empty(), ks) {
+    match route(state.mode, state.query.is_empty(), state.choosing(), ks) {
         KeyAction::Nav(cmd) => {
             state.selected = vimnav::apply(state.selected, visible.len(), cmd);
             let selected = state.selected;
@@ -748,6 +820,52 @@ fn handle_key(
             // on this handler's return, not here (spec §16.1).
             shell.settings_scroll.scroll_to_item(0);
         }
+        KeyAction::OpenChoice => {
+            let selected = state.selected;
+            // An empty filtered list has nothing to open: claimed, dropped.
+            if let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row)) {
+                let mut list =
+                    crate::choice::ChoiceList::new(row.values.clone(), crate::choice::DEFAULT_CAP);
+                list.place(row.values.get(row.current).map(String::as_str));
+                state.choice = Some(ChoiceEntry { id: row.id, list });
+                state.mode = DialogMode::Filter;
+            }
+        }
+        KeyAction::Choice(key) => match key {
+            crate::choice::ChoiceKey::Cancel => {
+                state.choice = None;
+                state.mode = DialogMode::Normal;
+            }
+            crate::choice::ChoiceKey::Pick => {
+                // The field's live text may never have reached the list
+                // through a `Change` event (`set_value` emits none).
+                let live = shell.dialog_input.read(cx).value().to_string();
+                let Some(state) = shell.settings.as_mut() else {
+                    return true;
+                };
+                let picked = state.choice.as_mut().and_then(|entry| {
+                    entry.list.set_query(&live);
+                    entry.list.pick().map(|ix| (entry.id, ix))
+                });
+                // Nothing lit: the field stays open. The settings dialog
+                // has no notice slot; the empty list says it.
+                if let Some((id, ix)) = picked {
+                    state.choice = None;
+                    state.mode = DialogMode::Normal;
+                    apply_setting(shell, id, ix, cx);
+                }
+            }
+            crate::choice::ChoiceKey::Complete => {
+                if let Some(entry) = state.choice.as_mut() {
+                    entry.list.complete();
+                }
+            }
+            crate::choice::ChoiceKey::Nav(cmd) => {
+                if let Some(entry) = state.choice.as_mut() {
+                    entry.list.nav(cmd);
+                }
+            }
+        },
         KeyAction::Drop => return true,
         KeyAction::PassThrough => return false,
     }
@@ -769,6 +887,12 @@ fn on_row_clicked(
     let Some(state) = shell.settings.as_mut() else {
         return;
     };
+    // Spec 2026-09-19 §3.3: a click while a row's typeahead is open does
+    // nothing (the object dialog's own rule) — the row list isn't even
+    // painted then, but the guard stands regardless of what's on screen.
+    if state.choosing() {
+        return;
+    }
     let visible = visible_rows(state, &rows);
     let Some(ix) = filtered_position(&visible, &rows, clicked) else {
         return;
@@ -793,6 +917,12 @@ fn on_value_chip_clicked(
     let Some(state) = shell.settings.as_mut() else {
         return;
     };
+    // Spec 2026-09-19 §3.3: the value chip isn't even painted while a
+    // choice field is open (the filter row takes its place), but the
+    // guard stands beside `on_row_clicked`'s regardless.
+    if state.choosing() {
+        return;
+    }
     let visible = visible_rows(state, &rows);
     let Some(ix) = filtered_position(&visible, &rows, clicked) else {
         return;
@@ -834,103 +964,118 @@ fn build(
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
 
-    // The list renders ONLY the rows that survive the filter. Safe
-    // because row click handlers are keyed by `SettingId`, not position
-    // (see [`filtered_position`]).
-    let visible = visible_rows(state, &rows);
-
-    let mut list = v_flex()
-        .id("settings-list")
-        .w(px(WIDTH))
-        .h(px(
-            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
-        ))
-        .overflow_y_scroll()
-        .track_scroll(&shell.settings_scroll)
-        .debug_selector(|| "settings-list".to_string());
-
-    for (position, m) in visible.iter().enumerate() {
-        let row_ix = m.row;
-        let row = &rows[row_ix];
-        let is_selected = position == state.selected;
-
-        // `split_label_indices` (shared with `keybindings_view::build` —
-        // see its own doc comment for why this is one function, not two
-        // copies) splits the ranked char offsets back across the title
-        // and category lines they're painted on.
-        let title_len = row.title.chars().count();
-        let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
-
-        let mut row_el = h_flex()
-            .w_full()
-            .justify_between()
-            .items_center()
-            .gap_3()
-            .px_2()
-            .py_1()
-            .rounded(px(4.));
-        if is_selected {
-            row_el = row_el.bg(theme.selection).text_color(theme.primary);
-        }
-
-        let label = v_flex()
-            .gap_0p5()
-            .child(highlighted_text(row.title, &title_ix, theme.primary))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(highlighted_text(row.category, &cat_ix, theme.primary)),
-            );
-
-        // The current value, in the data face — a value readout, not
-        // prose, same register as the binding chips across the hall.
-        // Painted as a `dialog::value_chip` (spec §20.3): click steps
-        // forward, shift+click steps back, the mouse form of
-        // `space`/`shift+space` — a plain row click only selects.
-        let entity_for_chip = entity.clone();
-        let chip_id = row.id;
-        let on_step: dialog::StepHandler = Rc::new(move |forward, window, cx| {
-            entity_for_chip.update(cx, |shell, cx| {
-                on_value_chip_clicked(shell, chip_id, forward, window, cx);
+    // Row list vs. the open choice field's ranked options (spec
+    // 2026-09-19 §3.3): while a row's typeahead is open it takes over
+    // the row list's place entirely — the field loop below never runs
+    // at all, exactly the object dialog's own rule for a `Choice` row.
+    let list: AnyElement = if let Some(entry) = state.choice.as_ref() {
+        let entity_for_click = entity.clone();
+        dialog::choice_rows(&entry.list, "settings", theme, move |row, window, cx| {
+            entity_for_click.update(cx, |shell, cx| {
+                on_choice_row_clicked(shell, row, window, cx);
             });
-        });
-        let value_el = dialog::value_chip(
-            row.values[row.current].clone(),
-            format!("settings-value-{row_ix}"),
-            chip_fg,
-            chip_bg,
-            Some(on_step),
-        );
+        })
+    } else {
+        // The list renders ONLY the rows that survive the filter. Safe
+        // because row click handlers are keyed by `SettingId`, not
+        // position (see [`filtered_position`]).
+        let visible = visible_rows(state, &rows);
 
-        let entity_for_row = entity.clone();
-        let id = row.id;
-        let row_el = row_el
-            .child(label)
-            .child(value_el)
-            .debug_selector(move || format!("settings-row-{row_ix}"))
-            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                entity_for_row.update(cx, |shell, cx| {
-                    on_row_clicked(shell, id, window, cx);
-                });
-            });
+        let mut list = v_flex()
+            .id("settings-list")
+            .w(px(WIDTH))
+            .h(px(
+                (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+            ))
+            .overflow_y_scroll()
+            .track_scroll(&shell.settings_scroll)
+            .debug_selector(|| "settings-list".to_string());
 
-        list = list.child(row_el);
-    }
+        for (position, m) in visible.iter().enumerate() {
+            let row_ix = m.row;
+            let row = &rows[row_ix];
+            let is_selected = position == state.selected;
 
-    if visible.is_empty() {
-        // Zero matches: one muted line where the rows would be — the same
-        // muted treatment keybindings' empty filter gets, so an
-        // over-narrow filter reads as a state, not a rendering glitch.
-        list = list.child(
-            div()
+            // `split_label_indices` (shared with `keybindings_view::build`
+            // — see its own doc comment for why this is one function, not
+            // two copies) splits the ranked char offsets back across the
+            // title and category lines they're painted on.
+            let title_len = row.title.chars().count();
+            let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
+
+            let mut row_el = h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .gap_3()
                 .px_2()
                 .py_1()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child("no matches"),
-        );
-    }
+                .rounded(px(4.));
+            if is_selected {
+                row_el = row_el.bg(theme.selection).text_color(theme.primary);
+            }
+
+            let label = v_flex()
+                .gap_0p5()
+                .child(highlighted_text(row.title, &title_ix, theme.primary))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(highlighted_text(row.category, &cat_ix, theme.primary)),
+                );
+
+            // The current value, in the data face — a value readout, not
+            // prose, same register as the binding chips across the hall.
+            // Painted as a `dialog::value_chip` (spec §20.3): click steps
+            // forward, shift+click steps back, the mouse form of
+            // `space`/`shift+space` — a plain row click only selects.
+            let entity_for_chip = entity.clone();
+            let chip_id = row.id;
+            let on_step: dialog::StepHandler = Rc::new(move |forward, window, cx| {
+                entity_for_chip.update(cx, |shell, cx| {
+                    on_value_chip_clicked(shell, chip_id, forward, window, cx);
+                });
+            });
+            let value_el = dialog::value_chip(
+                row.values[row.current].clone(),
+                format!("settings-value-{row_ix}"),
+                chip_fg,
+                chip_bg,
+                Some(on_step),
+            );
+
+            let entity_for_row = entity.clone();
+            let id = row.id;
+            let row_el = row_el
+                .child(label)
+                .child(value_el)
+                .debug_selector(move || format!("settings-row-{row_ix}"))
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    entity_for_row.update(cx, |shell, cx| {
+                        on_row_clicked(shell, id, window, cx);
+                    });
+                });
+
+            list = list.child(row_el);
+        }
+
+        if visible.is_empty() {
+            // Zero matches: one muted line where the rows would be — the
+            // same muted treatment keybindings' empty filter gets, so an
+            // over-narrow filter reads as a state, not a rendering
+            // glitch.
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("no matches"),
+            );
+        }
+        list.into_any_element()
+    };
 
     // Footer hint chips — `keybindings_view::key_chip`, reused so key
     // names in helper text look identical across the two sibling dialogs.
@@ -950,40 +1095,56 @@ fn build(
     // Both modes' stepping groups carry the `settings-hint-change`
     // selector on their first chip, so a test can read that the group is
     // taught in both.
-    let hints: Vec<Hint> = match state.mode {
-        DialogMode::Normal => vec![
-            Hint::new(HintRow::Move, &["j", "k"], "move"),
-            Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
-            Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
-            Hint::new(
-                HintRow::Edit,
-                &["space", "shift+space", "tab", "h", "l"],
-                "change",
-            )
-            .selector("settings-hint-change"),
-            Hint::new(HintRow::Go, &["/"], "filter"),
-            // Honest about which rung the next escape takes: with a
-            // query still applied it clears the query, and only then
-            // closes.
-            Hint::new(
-                HintRow::Go,
-                &["escape"],
-                if state.query.is_empty() {
-                    "close"
-                } else {
-                    "clear the filter"
-                },
-            ),
-        ],
-        DialogMode::Filter => vec![
-            Hint::prose(HintRow::Move, "type to filter"),
+    let hints: Vec<Hint> = if state.choosing() {
+        // Spec 2026-09-19 §3.3: a row's typeahead has its own small
+        // vocabulary — narrow, move, complete, choose, cancel — ahead of
+        // the mode match below, since it owns the keys outright while
+        // open (see [`route`]'s rung 0).
+        vec![
+            Hint::prose(HintRow::Move, "type to narrow"),
             Hint::new(HintRow::Move, &["up", "down"], "move"),
-            Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
-            Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
-            Hint::new(HintRow::Edit, &["tab", "shift+tab"], "change")
+            Hint::new(HintRow::Go, &["tab"], "complete"),
+            Hint::new(HintRow::Go, &["enter"], "choose"),
+            Hint::new(HintRow::Go, &["escape"], "cancel"),
+        ]
+    } else {
+        match state.mode {
+            DialogMode::Normal => vec![
+                Hint::new(HintRow::Move, &["j", "k"], "move"),
+                Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+                Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+                Hint::new(
+                    HintRow::Edit,
+                    &["space", "shift+space", "tab", "h", "l"],
+                    "change",
+                )
                 .selector("settings-hint-change"),
-            Hint::new(HintRow::Go, &["escape"], "back to normal"),
-        ],
+                Hint::new(HintRow::Edit, &["i", "enter"], "choose")
+                    .selector("settings-hint-choose"),
+                Hint::new(HintRow::Go, &["/"], "filter"),
+                // Honest about which rung the next escape takes: with a
+                // query still applied it clears the query, and only then
+                // closes.
+                Hint::new(
+                    HintRow::Go,
+                    &["escape"],
+                    if state.query.is_empty() {
+                        "close"
+                    } else {
+                        "clear the filter"
+                    },
+                ),
+            ],
+            DialogMode::Filter => vec![
+                Hint::prose(HintRow::Move, "type to filter"),
+                Hint::new(HintRow::Move, &["up", "down"], "move"),
+                Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
+                Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
+                Hint::new(HintRow::Edit, &["tab", "shift+tab"], "change")
+                    .selector("settings-hint-change"),
+                Hint::new(HintRow::Go, &["escape"], "back to normal"),
+            ],
+        }
     };
     let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg);
 
@@ -1025,18 +1186,50 @@ fn build(
     // which `/` means something else, so the `press / to filter`
     // placeholder is never a lie. The frozen row is also the mouse form
     // of `/` (§17.1 rule 1), which is what `entity` is for.
-    let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
-        query: state.query.as_str(),
-        slash_filters: true,
-        entity: entity.clone(),
-    });
+    //
+    // Spec 2026-09-19 §3.3: while a row's typeahead is open, this slot
+    // is [`dialog::name_row`] instead — the same shared `Input`, but
+    // naming the setting being chosen rather than a query over the row
+    // list (which the choice field has already withdrawn, above).
+    let top_row = if let Some(entry) = state.choice.as_ref() {
+        let title = rows
+            .iter()
+            .find(|r| r.id == entry.id)
+            .map(|r| r.title)
+            .unwrap_or("");
+        dialog::name_row(&shell.dialog_input, &format!("{title} · choose"), cx)
+    } else {
+        let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
+            query: state.query.as_str(),
+            slash_filters: true,
+            entity: entity.clone(),
+        });
+        dialog::filter_row(&shell.dialog_input, frozen_query, cx)
+    };
 
     v_flex()
         .gap_2()
-        .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
+        .child(top_row)
         .child(list)
         .child(footer)
         .into_any_element()
+}
+
+/// A click on a choice-field row is `tab` on it (spec 2026-09-19 §3.3).
+/// Ends in [`dialog::sync_dialog_text`], the row-click seam.
+fn on_choice_row_clicked(
+    shell: &mut ShellView,
+    row: usize,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(entry) = shell.settings.as_mut().and_then(|s| s.choice.as_mut())
+        && entry.list.set_highlighted(row)
+    {
+        entry.list.complete();
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
 }
 
 #[cfg(test)]
@@ -1298,32 +1491,87 @@ mod tests {
     fn normal_mode_routes_the_shared_vocabulary() {
         use KeyAction::*;
         let n = DialogMode::Normal;
-        assert_eq!(route(n, true, &bare("space")), Step(StepDirection::Right));
         assert_eq!(
-            route(n, true, &ks("space", SHIFT)),
+            route(n, true, false, &bare("space")),
+            Step(StepDirection::Right)
+        );
+        assert_eq!(
+            route(n, true, false, &ks("space", SHIFT)),
             Step(StepDirection::Left)
         );
-        assert_eq!(route(n, true, &bare("/")), EnterFilter);
-        assert_eq!(route(n, true, &bare("j")), Nav(NavCommand::Move(1)));
-        assert_eq!(route(n, true, &bare("k")), Nav(NavCommand::Move(-1)));
-        assert_eq!(route(n, true, &bare("g")), Nav(NavCommand::Top));
-        assert_eq!(route(n, true, &ks("g", SHIFT)), Nav(NavCommand::Bottom));
+        assert_eq!(route(n, true, false, &bare("/")), EnterFilter);
+        assert_eq!(route(n, true, false, &bare("j")), Nav(NavCommand::Move(1)));
+        assert_eq!(route(n, true, false, &bare("k")), Nav(NavCommand::Move(-1)));
+        assert_eq!(route(n, true, false, &bare("g")), Nav(NavCommand::Top));
         assert_eq!(
-            route(n, true, &bare("s")),
+            route(n, true, false, &ks("g", SHIFT)),
+            Nav(NavCommand::Bottom)
+        );
+        assert_eq!(
+            route(n, true, false, &bare("s")),
             Drop,
             "a stray letter does nothing"
         );
         assert_eq!(
-            route(n, true, &bare("i")),
-            Drop,
-            "nothing here to edit as text"
+            route(n, true, false, &bare("i")),
+            OpenChoice,
+            "spec 2026-09-19 §3.3/§7: i opens the row's typeahead"
         );
-        assert_eq!(route(n, true, &bare("enter")), Drop, "inert and reserved");
         assert_eq!(
-            route(n, true, &ks("v", Modifiers::CTRL)),
+            route(n, true, false, &bare("enter")),
+            OpenChoice,
+            "and so does a bare enter, beside it"
+        );
+        assert_eq!(
+            route(n, true, false, &ks("v", Modifiers::CTRL)),
             Drop,
             "a chord normal mode does not name is dropped like any other \
              unclaimed key (the modal branch would stop it regardless)"
+        );
+    }
+
+    /// Spec 2026-09-19 §3.3/§7: `i` and a bare `enter` open a row's
+    /// typeahead in normal mode; `enter` stays claimed and dropped in
+    /// filter mode (there is no row-level verb for the `Input` to lose
+    /// it to); and once a choice field is open, `choosing: true` routes
+    /// every keystroke through `crate::choice::route` — a letter falls
+    /// through as `PassThrough` (the field's to type) rather than being
+    /// claimed by this dialog's own vocabulary.
+    #[test]
+    fn i_and_enter_open_a_choice_in_normal_mode_and_choice_keys_route_while_open() {
+        let bare = |k: &str| Keystroke {
+            mods: Modifiers::NONE,
+            key: k.to_string(),
+        };
+        assert_eq!(
+            route(DialogMode::Normal, true, false, &bare("i")),
+            KeyAction::OpenChoice
+        );
+        assert_eq!(
+            route(DialogMode::Normal, true, false, &bare("enter")),
+            KeyAction::OpenChoice
+        );
+        assert_eq!(
+            route(DialogMode::Filter, true, false, &bare("enter")),
+            KeyAction::Drop,
+            "filter mode's enter stays inert"
+        );
+        assert_eq!(
+            route(DialogMode::Filter, false, true, &bare("enter")),
+            KeyAction::Choice(crate::choice::ChoiceKey::Pick)
+        );
+        assert_eq!(
+            route(DialogMode::Filter, false, true, &bare("escape")),
+            KeyAction::Choice(crate::choice::ChoiceKey::Cancel)
+        );
+        assert_eq!(
+            route(DialogMode::Filter, false, true, &bare("tab")),
+            KeyAction::Choice(crate::choice::ChoiceKey::Complete)
+        );
+        assert_eq!(
+            route(DialogMode::Filter, false, true, &bare("x")),
+            KeyAction::PassThrough,
+            "a letter types into the field"
         );
     }
 
@@ -1335,16 +1583,16 @@ mod tests {
     fn filter_mode_passes_printable_keys_to_the_input() {
         use KeyAction::*;
         let f = DialogMode::Filter;
-        assert_eq!(route(f, false, &bare("space")), PassThrough);
-        assert_eq!(route(f, false, &ks("space", SHIFT)), PassThrough);
-        assert_eq!(route(f, false, &bare("/")), PassThrough);
+        assert_eq!(route(f, false, false, &bare("space")), PassThrough);
+        assert_eq!(route(f, false, false, &ks("space", SHIFT)), PassThrough);
+        assert_eq!(route(f, false, false, &bare("/")), PassThrough);
         assert_eq!(
-            route(f, false, &bare("j")),
+            route(f, false, false, &bare("j")),
             PassThrough,
             "j types, never moves"
         );
         assert_eq!(
-            route(f, false, &bare("enter")),
+            route(f, false, false, &bare("enter")),
             Drop,
             "still claimed — see handle_key"
         );
@@ -1361,11 +1609,14 @@ mod tests {
     fn h_and_l_step_in_normal_mode_and_type_in_filter_mode() {
         use KeyAction::*;
         let n = DialogMode::Normal;
-        assert_eq!(route(n, true, &bare("l")), Step(StepDirection::Right));
-        assert_eq!(route(n, true, &bare("h")), Step(StepDirection::Left));
+        assert_eq!(
+            route(n, true, false, &bare("l")),
+            Step(StepDirection::Right)
+        );
+        assert_eq!(route(n, true, false, &bare("h")), Step(StepDirection::Left));
         let f = DialogMode::Filter;
-        assert_eq!(route(f, false, &bare("l")), PassThrough, "l types");
-        assert_eq!(route(f, false, &bare("h")), PassThrough, "h types");
+        assert_eq!(route(f, false, false, &bare("l")), PassThrough, "l types");
+        assert_eq!(route(f, false, false, &bare("h")), PassThrough, "h types");
     }
 
     /// The keys both modes share: `tab`/`shift+tab` step and the
@@ -1374,14 +1625,20 @@ mod tests {
     fn tab_and_the_arrows_work_in_both_modes() {
         use KeyAction::*;
         for mode in [DialogMode::Normal, DialogMode::Filter] {
-            assert_eq!(route(mode, true, &bare("tab")), Step(StepDirection::Right));
             assert_eq!(
-                route(mode, true, &ks("tab", SHIFT)),
+                route(mode, true, false, &bare("tab")),
+                Step(StepDirection::Right)
+            );
+            assert_eq!(
+                route(mode, true, false, &ks("tab", SHIFT)),
                 Step(StepDirection::Left)
             );
-            assert_eq!(route(mode, true, &bare("down")), Nav(NavCommand::Move(1)));
             assert_eq!(
-                route(mode, true, &ks("d", Modifiers::CTRL)),
+                route(mode, true, false, &bare("down")),
+                Nav(NavCommand::Move(1))
+            );
+            assert_eq!(
+                route(mode, true, false, &ks("d", Modifiers::CTRL)),
                 Nav(NavCommand::Move(5))
             );
         }
@@ -1394,23 +1651,23 @@ mod tests {
     fn escape_walks_the_ladder() {
         use KeyAction::*;
         assert_eq!(
-            route(DialogMode::Filter, false, &bare("escape")),
+            route(DialogMode::Filter, false, false, &bare("escape")),
             LeaveFilter
         );
         assert_eq!(
-            route(DialogMode::Filter, true, &bare("escape")),
+            route(DialogMode::Filter, true, false, &bare("escape")),
             LeaveFilter
         );
         assert_eq!(
-            route(DialogMode::Normal, false, &bare("escape")),
+            route(DialogMode::Normal, false, false, &bare("escape")),
             ClearQuery
         );
         assert_eq!(
-            route(DialogMode::Normal, true, &bare("escape")),
+            route(DialogMode::Normal, true, false, &bare("escape")),
             PassThrough
         );
         assert_eq!(
-            route(DialogMode::Normal, true, &ks("escape", SHIFT)),
+            route(DialogMode::Normal, true, false, &ks("escape", SHIFT)),
             PassThrough,
             "a modified escape walks the same ladder as a bare one"
         );

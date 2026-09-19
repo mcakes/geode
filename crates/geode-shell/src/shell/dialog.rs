@@ -559,7 +559,7 @@ pub(crate) fn sync_dialog_text(
     } else if let Some(state) = shell.object_dialog.as_ref() {
         (state.mode, false, state.effective_query())
     } else if let Some(state) = shell.settings.as_ref() {
-        (state.mode, false, state.query.as_str())
+        (state.mode, false, state.effective_query())
     } else {
         return;
     };

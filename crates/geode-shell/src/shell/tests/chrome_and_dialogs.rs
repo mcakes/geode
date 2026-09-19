@@ -729,6 +729,77 @@ fn space_and_shift_space_step_the_selected_value_in_normal_mode(cx: &mut gpui::T
     );
 }
 
+/// Spec 2026-09-19 §3.3: `i` on the Theme row opens the shared `Input`
+/// as a typeahead over every theme name, painted in the row list's
+/// place; `enter` applies the lit theme live (the same `set_theme_on`
+/// core a step takes) and closes; the mode is back to normal.
+#[gpui::test]
+fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let before = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    cx.simulate_keystrokes("i"); // row 0 is Theme
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert!(cx.debug_bounds("dialog-name-row").is_some());
+    assert!(cx.debug_bounds("dialog-mode-pill-choose").is_some());
+    assert!(cx.debug_bounds("settings-choice-list").is_some());
+    assert!(
+        cx.debug_bounds("settings-list").is_none(),
+        "the rows give way to the options"
+    );
+    cx.simulate_input("gruv d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("settings-choice-Gruvbox Dark").is_some());
+    assert!(cx.debug_bounds("settings-choice-Nord").is_none());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().mode),
+        crate::dialogmode::DialogMode::Normal
+    );
+    let after = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    assert_eq!(after, "Gruvbox Dark");
+    assert_ne!(before, after);
+    assert!(
+        cx.debug_bounds("settings-list").is_some(),
+        "the rows are back"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().query.clone()),
+        "",
+        "the FILTER query is untouched by the choice field"
+    );
+}
+
+/// `escape` cancels the choice field with the setting untouched; `enter`
+/// on a filtered-away list is still `Drop` (nothing to open).
+#[gpui::test]
+fn escape_cancels_a_settings_choice_field_untouched(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let before = shell.read_with(&cx, |s, _| s.font_size);
+    cx.simulate_keystrokes("j enter"); // Font size, enter opens too
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
+    cx.simulate_input("lar");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
+    assert_eq!(shell.read_with(&cx, |s, _| s.font_size), before);
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "back in normal mode"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        1,
+        "the cursor stayed on Font size"
+    );
+}
+
 /// The spec's own risk item (§11.3): `space` in FILTER mode is text, not
 /// a step. A handler that stepped on `space` regardless of mode would
 /// pass every normal-mode test and silently change a setting under a
@@ -1071,21 +1142,24 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
     }
 }
 
-/// Enter is inert and reserved here (spec §3), in BOTH modes: it must
-/// not step a value, and must not close the dialog either. (In normal
-/// mode it arrives as `NormalCommand::Commit`, which this dialog has
-/// nothing to commit with — a step applies the instant it happens.)
+/// Enter is inert and reserved in FILTER mode (spec §3): it must not
+/// step a value, and must not close the dialog either. (Amended
+/// 2026-09-19 §3.3/§7: `enter` is no longer inert in NORMAL mode — it
+/// opens the selected row's typeahead beside `i`, covered by
+/// `i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme`
+/// — so this test now presses an ordinary unclaimed letter, `s`, in
+/// normal mode to keep its "an unclaimed key does nothing" half honest.)
 #[gpui::test]
 fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("j");
     let before = shell.read_with(&cx, |shell, _| shell.font_size);
 
-    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("s");
     shell.read_with(&cx, |shell, _| {
         assert_eq!(
             shell.font_size, before,
-            "enter must not step the value in normal mode"
+            "an unclaimed key must not step the value in normal mode"
         );
         assert!(shell.modal.is_some(), "and must not close the dialog");
     });

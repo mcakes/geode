@@ -956,6 +956,13 @@ the settings state.
 The display check on a real window is pending, as it is for every
 dialog change on this branch's lineage.
 
+**Amended 2026-09-19** (choice-with-typeahead design §3.3, §7): `enter`
+is no longer inert in the settings dialog's normal mode — it and `i`
+open the selected row's typeahead (the shared `Input` in the filter
+row's place over the row's values, `ChoiceList`), `enter` there applying
+the lit value through the same `apply_setting` core a step takes.
+Filter mode's `enter` stays claimed and dropped.
+
 ## 19. Amendment — footer rows by category (2026-09-14)
 
 User request, 2026-09-14: "the dialog footer could be organized more

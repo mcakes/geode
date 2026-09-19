@@ -7956,6 +7956,15 @@ run_mutation "dialog: enter_filter_by_mouse ignores the settings dialog" \
   geode-shell \
   clicking_the_settings_frozen_filter_row_enters_filter_mode
 
+# Settings (spec 2026-09-19 §3.3): the pick applies through the one
+# `apply_setting` core. Mutated to close without applying, `gruv d` +
+# `enter` leaves the previous theme active.
+run_mutation "settings choice: enter applies the lit value" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '                    apply_setting(shell, id, ix, cx);' \
+  '                    let _ = (id, ix);' \
+  geode-shell i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme
+
 # ---- schema: the document family (market-data spec §3)
 #
 # `from_doc`'s new dataset-level reads (family, key, axes) and the
