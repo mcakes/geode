@@ -27,6 +27,7 @@ use gpui::{App, IntoElement, MouseButton, SharedString, Window, div, px};
 use gpui_component::status_bar::StatusBar;
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, progress::Progress};
 
+use super::chip;
 use crate::diagnostics::IngestActivity;
 use crate::fonts;
 use crate::keymap::Keystroke;
@@ -181,11 +182,15 @@ pub fn status_bar(
         // hovering to see exactly when must not get the same elided text
         // the segment already shows.
         let as_of_text: SharedString = format!("AS OF {t} · :live to return").into();
+        // Through the chip door (`shell::chip`): `warning_foreground` over
+        // the tint is the background family on a barely-tinted background
+        // at the pinned rev.
+        let as_of = chip::chip_paint(theme, chip::Tone::Warning);
         bar = bar.left(
             div()
                 .id("status-as-of")
-                .bg(theme.warning.opacity(0.25))
-                .text_color(theme.warning_foreground)
+                .when_some(as_of.fill, |el, fill| el.bg(fill))
+                .text_color(as_of.text)
                 .px_2()
                 .rounded(px(4.))
                 .debug_selector(|| "status-as-of".to_string())

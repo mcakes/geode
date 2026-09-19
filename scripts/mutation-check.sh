@@ -5719,11 +5719,11 @@ run_mutation "diagnostics module: MIN-11 — the header never shows the filtered
   '        if !self.filter.is_empty() {
             header = header.child(
                 div()
-                    .text_color(theme.warning_foreground)' \
+                    .text_color(warn_chip.text)' \
   '        if false {
             header = header.child(
                 div()
-                    .text_color(theme.warning_foreground)' \
+                    .text_color(warn_chip.text)' \
   geode-diagnostics a_filtered_tile_shows_the_filtered_pill
 
 # --- Task 5 fix round 2 ----------------------------------------------
@@ -11464,6 +11464,68 @@ run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
   '        let _ = Self::key(theme);' \
   geode-marketdata \
   floored_tones_refresh_only_when_an_input_changes
+
+# ---- Shell chip door (`shell::chip`, design-guide audit 2026-09-19) -----
+# The market-data fix above made the rule for every other tinted chip:
+# blotter `pinned`/`unscoped`/`filtered`/`AS OF`, the diagnostics tile's
+# `filtered`, the toolbar and status-bar as-of chips, the scope bar's
+# contradiction chip. One door, one sweep. Mutated back to the pairing it
+# retired, the tint's text is the background family — 30 of 44 bundled
+# themes under 3:1 — and every behavioural test still reads the chip's
+# TEXT, not its colour.
+run_mutation "chip: a tinted warning chip's text is foreground, not warning_foreground" \
+  crates/geode-shell/src/shell/chip.rs \
+  '        Tone::Warning => ChipPaint {
+            fill: Some(theme.warning.opacity(FILL_ALPHA)),
+            text: theme.foreground,
+        },' \
+  '        Tone::Warning => ChipPaint {
+            fill: Some(theme.warning.opacity(FILL_ALPHA)),
+            text: theme.warning_foreground,
+        },' \
+  geode-shell \
+  every_chip_tone_is_readable_on_every_bundled_theme
+
+# The danger chip the same way (31 of 44 with `danger_foreground`).
+run_mutation "chip: a tinted danger chip's text is foreground, not danger_foreground" \
+  crates/geode-shell/src/shell/chip.rs \
+  '        Tone::Danger => ChipPaint {
+            fill: Some(theme.danger.opacity(FILL_ALPHA)),
+            text: theme.foreground,
+        },' \
+  '        Tone::Danger => ChipPaint {
+            fill: Some(theme.danger.opacity(FILL_ALPHA)),
+            text: theme.danger_foreground,
+        },' \
+  geode-shell \
+  every_chip_tone_is_readable_on_every_bundled_theme
+
+# The text-only tones are floored. Mutated to the identity, a stale
+# dataset time or a degraded-source row paints the raw `warning`, which
+# ten bundled themes ship under 3:1 against their own background.
+run_mutation "chip: text-only tones are floored to 3:1 against the background" \
+  crates/geode-shell/src/shell/chip.rs \
+  '    to_hsla(readable_on(
+        to_rgb(colour),
+        to_rgb(theme.background),
+        to_rgb(theme.foreground),
+    ))' \
+  '    let _ = theme;
+    colour' \
+  geode-shell \
+  every_chip_tone_is_readable_on_every_bundled_theme
+
+# The sweep must measure the composited ground, not the tint's opaque
+# value. Mutated to ignore alpha, `foreground` over an OPAQUE warning is
+# what gets checked, and the retired-pairing guard is what notices: over
+# a solid fill `warning_foreground` is the right token and clears the
+# floor, so the guard's "still fails on 20+ themes" assertion trips.
+run_mutation "chip: the readability ground composites the tint at its alpha" \
+  crates/geode-shell/src/shell/colours.rs \
+  '    let (t, a) = (to_rgb(top), top.a);' \
+  '    let (t, a) = (to_rgb(top), 1.0);' \
+  geode-shell \
+  the_retired_pairing_still_fails_the_sweep
 
 # ---- Panel header: vocabulary (spec 2026-09-14 §3) ----------------------
 run_mutation "mdheader: a session written with key still restores" \

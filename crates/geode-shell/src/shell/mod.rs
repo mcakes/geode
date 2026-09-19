@@ -8,6 +8,7 @@
 
 mod add_tile;
 pub mod asof_view;
+pub mod chip;
 pub mod colours;
 mod commandline_ctl;
 pub mod commandline_view;

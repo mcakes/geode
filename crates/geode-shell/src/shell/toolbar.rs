@@ -30,6 +30,7 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
+use super::chip;
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
 use crate::tips;
@@ -185,15 +186,19 @@ pub fn toolbar(
         );
     }
     if let Some(named) = &model.impossible {
-        // The contradiction chip: `theme.danger`/`danger_foreground`, not
-        // the muted scheme every other chip uses — a scope that can match
-        // nothing must read as an error, not routine state.
+        // The contradiction chip: `chip::Tone::Danger`, not the muted
+        // scheme every other chip uses — a scope that can match nothing
+        // must read as an error, not routine state. Through the chip door
+        // rather than `danger_foreground` over the tint by hand: that
+        // token is the background family at the pinned rev, under 3:1 on
+        // 31 of 44 bundled themes over its own 25% tint.
+        let impossible = chip::chip_paint(theme, chip::Tone::Danger);
         chips_row = chips_row.child(
             chip(
                 "scope-impossible-chip".into(),
                 named.clone(),
-                theme.danger_foreground,
-                theme.danger.opacity(0.25),
+                impossible.text,
+                impossible.fill.unwrap_or(theme.danger),
                 || "scope-impossible-chip".to_string(),
             )
             .tooltip(tips::tip(
@@ -246,13 +251,14 @@ pub fn toolbar(
                             // already shows), and the elided badge text
                             // moves to the detail line. Both clones below
                             // are refcount bumps, never a fresh `format!`.
-                            el.bg(theme.warning.opacity(0.25))
+                            let as_of = chip::chip_paint(theme, chip::Tone::Warning);
+                            el.when_some(as_of.fill, |el, fill| el.bg(fill))
                                 .px_2()
                                 .rounded(px(4.))
                                 .child(
                                     div()
                                         .id("scope-asof")
-                                        .text_color(theme.warning_foreground)
+                                        .text_color(as_of.text)
                                         .debug_selector(|| "scope-asof".to_string())
                                         .tooltip(tips::tip_with(
                                             SharedString::new_static("tip-scope-asof"),

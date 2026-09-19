@@ -24,6 +24,7 @@ use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::FindEvent;
+use geode_shell::shell::chip::{self, Tone};
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
@@ -1295,6 +1296,13 @@ impl gpui::Render for BlotterTile {
         let theme = cx.theme();
         let delegate = self.table.read(cx).delegate();
         let snapshot = delegate.snapshot.clone();
+        // One door for every semantic chip and warning run in this header
+        // (`geode_shell::shell::chip`): `warning_foreground` over a tint
+        // of `warning` — the pairing this used to paint — is the
+        // background family on a barely-tinted background, under 3:1 on
+        // 30 of 44 bundled themes.
+        let warn_chip = chip::chip_paint(theme, Tone::Warning);
+        let warn_text = chip::chip_paint(theme, Tone::WarningText).text;
 
         // Header strip: view · grouping · markers · freshness · AS OF · … · error
         let mut header = h_flex()
@@ -1320,8 +1328,8 @@ impl gpui::Render for BlotterTile {
             _ => {
                 header = header.child(
                     div()
-                        .text_color(theme.warning_foreground)
-                        .bg(theme.warning.opacity(0.25))
+                        .text_color(warn_chip.text)
+                        .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                         .px_1()
                         .rounded(px(3.))
                         .child("pinned"),
@@ -1335,8 +1343,8 @@ impl gpui::Render for BlotterTile {
                         SharedString::new_static("blotter-unscoped"),
                         self.tile.0,
                     ))
-                    .text_color(theme.warning_foreground)
-                    .bg(theme.warning.opacity(0.25))
+                    .text_color(warn_chip.text)
+                    .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                     .px_1()
                     .rounded(px(3.))
                     .child("unscoped")
@@ -1355,8 +1363,8 @@ impl gpui::Render for BlotterTile {
                         SharedString::new_static("blotter-filtered"),
                         self.tile.0,
                     ))
-                    .text_color(theme.warning_foreground)
-                    .bg(theme.warning.opacity(0.25))
+                    .text_color(warn_chip.text)
+                    .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                     .px_1()
                     .rounded(px(3.))
                     .debug_selector(|| format!("blotter-filtered-{}", self.tile.0))
@@ -1380,17 +1388,13 @@ impl gpui::Render for BlotterTile {
                     None => format!("{} —", f.dataset),
                 };
                 let stale = self.is_stale(f.as_of.as_deref(), now);
-                header = header.child(
-                    div()
-                        .when(stale, |el| el.text_color(theme.warning))
-                        .child(text),
-                );
+                header = header.child(div().when(stale, |el| el.text_color(warn_text)).child(text));
             }
             if let Some(req) = &p.as_of_request {
                 header = header.child(
                     div()
-                        .text_color(theme.warning_foreground)
-                        .bg(theme.warning.opacity(0.4))
+                        .text_color(warn_chip.text)
+                        .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                         .px_1()
                         .rounded(px(3.))
                         .child(format!("AS OF {}", &req[..16.min(req.len())])),
@@ -1404,7 +1408,11 @@ impl gpui::Render for BlotterTile {
             header = header.child(div().child("…"));
         }
         if let Some(e) = &self.error {
-            header = header.child(div().text_color(theme.danger).child(e.clone()));
+            header = header.child(
+                div()
+                    .text_color(chip::chip_paint(theme, Tone::DangerText).text)
+                    .child(e.clone()),
+            );
         }
 
         // Footer: counts and legends.
@@ -1431,7 +1439,7 @@ impl gpui::Render for BlotterTile {
         if delegate.unplaced > 0 {
             footer = footer.child(
                 div()
-                    .text_color(theme.warning)
+                    .text_color(warn_text)
                     .child(format!("{} rows unplaced", delegate.unplaced)),
             );
         }
