@@ -230,6 +230,21 @@ pub fn validate(draft: &Draft, _config: &Config) -> Vec<Diagnostic> {
     SchemaSpec::from_doc(&doc).1
 }
 
+/// What each row means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)). The keys are per column
+/// (`columns.<name>`, `derived.<name>`), so this matches on the prefix;
+/// the row's own text already spells type, role and grain, so the
+/// sentence says only what the row does not.
+pub fn help(key: &str) -> &'static str {
+    if key.starts_with("columns.") {
+        "As datasets.toml declares it — open the column to set how it paints"
+    } else if key.starts_with("derived.") {
+        "A derived dimension from dimensions.toml — groupable like any other"
+    } else {
+        ""
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Domain;

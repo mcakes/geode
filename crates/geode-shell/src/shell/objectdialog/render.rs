@@ -116,7 +116,7 @@ use std::rc::Rc;
 
 use geode_core::config::{Layer, Severity, check_object_name};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
+use gpui::{AnyElement, App, Context, Div, Entity, MouseButton, Window, div, px, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
@@ -3308,6 +3308,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let chips_live = writable && state.confirm.is_none() && draft.text_entry.is_none();
     let rows = draft.rows();
     let visible = draft.visible_rows();
+    // The row under the cursor, resolved once from the two lists above
+    // for everything the footer asks about it (its vocabulary, its help)
+    // — `Draft::selected_row` would rebuild both per question.
+    let selected_row = visible
+        .get(draft.selected)
+        .and_then(|m| rows.get(m.row).copied());
     // §19.5: which rows a current diagnostic names, computed once per
     // render rather than per row — `Draft::flagged_rows` is a linear scan
     // of the diagnostic list, and doing it once here keeps the per-row
@@ -3773,7 +3779,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // the row under the CURSOR, not from the domain — see
     // [`RowVocabulary`]. Computed once, here, so the column stage and the
     // object stage cannot drift about what a row offers.
-    let vocabulary = draft.selected_vocabulary(state.domain);
+    let vocabulary = draft.vocabulary_of(selected_row, state.domain);
     // Can `i` open a field on this row? Groupings is the exception the
     // vocabulary cannot answer for: there `i` opens the slot's whole
     // chain (§18.8) rather than the selected row's own value, so it is
@@ -3969,19 +3975,70 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         hints
     };
     let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg);
+    // One slot above the hint rows, shared by two occupants (spec §22):
+    // the notice, when a keystroke just produced one, else the help line
+    // for the row under the cursor — what the field MEANS, beside the
+    // hint rows that say what keys act on it. One slot rather than two
+    // so the footer never grows or shifts as the cursor moves; the
+    // notice wins for exactly the keystroke it reports on, since the
+    // door clears it on the next. The slot keeps its height on a row
+    // with nothing to say (`min_h`), for the same reason.
+    //
+    // Blank under an armed confirm: the confirm row is one compact
+    // decision, and a sentence about whichever row the cursor is on is
+    // noise beside `Delete 'live'?`. Kept while a text field is open —
+    // the value grammar is most useful while typing.
+    //
+    // Structurally one line: `line_height` pinned to the `min_h` (gpui's
+    // default is `phi()`, which at `text_sm` runs 2px taller than
+    // `min_h_5` and would let an empty slot shrink the footer), and the
+    // text never wraps — a sentence that outgrows the width truncates
+    // with an ellipsis rather than growing the footer. The tables keep
+    // under 90 characters (`help_fits`), so the ellipsis is a backstop.
+    let help = if state.confirm.is_some() {
+        ""
+    } else {
+        selected_row
+            .and_then(|row| draft.field_key_of(row))
+            .map(|key| domain.help(&state.stage, key))
+            .unwrap_or("")
+    };
+    let one_line = |el: Div| el.text_sm().line_height(rems(1.25)).min_h_5().truncate();
+    // A notice can carry a newline — `regex::Error`'s Display is
+    // multi-line and `check_batch_pattern` forwards it verbatim — and
+    // gpui breaks a line on `\n` whatever the wrap mode, which would
+    // grow the slot. Flattened here, at the one paint site, and only
+    // when there is one to flatten: a notice stands for one keystroke,
+    // so the rare allocation is not per-frame churn on the common path.
+    let notice = state.notice.as_ref().map(|notice| {
+        if notice.contains('\n') {
+            notice.split_whitespace().collect::<Vec<_>>().join(" ")
+        } else {
+            notice.clone()
+        }
+    });
+    let slot = match notice {
+        Some(notice) => one_line(div())
+            .text_color(theme.warning)
+            .debug_selector(|| "objectdialog-notice".to_string())
+            .child(notice),
+        None => {
+            let line = one_line(div()).text_color(theme.muted_foreground);
+            if help.is_empty() {
+                line
+            } else {
+                line.debug_selector(|| "objectdialog-help".to_string())
+                    .child(help)
+            }
+        }
+    };
     let footer = v_flex()
         .w(px(WIDTH))
         .gap_1()
         .pt_2()
         .border_t_1()
         .border_color(theme.border)
-        .children(state.notice.as_ref().map(|notice| {
-            div()
-                .text_sm()
-                .text_color(theme.warning)
-                .debug_selector(|| "objectdialog-notice".to_string())
-                .child(notice.clone())
-        }))
+        .child(slot)
         .child(
             div()
                 .text_sm()

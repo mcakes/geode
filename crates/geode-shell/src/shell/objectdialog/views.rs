@@ -1008,9 +1008,9 @@ pub const COLUMN_KEYS: [&str; 7] = [
 
 /// The value `width` takes when the column has none of its own — a real
 /// value in the field rather than an empty string, because "no width" is
-/// something a trader chooses (the table measures the column) and an
-/// empty text box would read as an unset field they had failed to fill
-/// in.
+/// something a trader chooses (the column takes its kind's default
+/// width — `geode-blotter`'s plan, not a measurement) and an empty text
+/// box would read as an unset field they had failed to fill in.
 pub(super) const AUTO: &str = "auto";
 
 /// The largest width the stage will accept, and the smallest. A column
@@ -1456,6 +1456,41 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
         .parse::<toml::Table>()
         .unwrap_or_default()
 }
+
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)); under ~90 characters, since
+/// the slot is one line (4c spec §22).
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "dataset" => "The dataset the view reads — it decides which columns are available below",
+        "columns" => {
+            "The view's columns in display order; under AVAILABLE, the dataset's other columns"
+        }
+        _ => "",
+    }
+}
+
+/// The column stage's seven presentation fields, explained — one table
+/// for both doors (Views and Schema open the same rows, dataset-
+/// presentation spec §4.1), which is why `label`'s sentence names the
+/// layer below generically: at the Views door an emptied label falls to
+/// the dataset level where one is set and the desk otherwise, at the
+/// Schema door to each view's own (`Fold`/`FellTo`). See [`help`].
+pub fn column_help(key: &str) -> &'static str {
+    match key {
+        "label" => "The header text — empty stops overriding what the desk or dataset level sets",
+        "width" => "Column width in pixels, or auto for the kind's default width",
+        "scale" => "Divide values for display: none, k (thousands), M (millions)",
+        "precision" => "Decimal places shown, 0 to 12",
+        "thousands" => "Group digits with thousands separators",
+        "negative" => "How a negative paints: a leading minus, or parentheses",
+        "colour" => {
+            "none paints in the foreground, sign colours by sign, or a name from colours.toml"
+        }
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{Domain, EditRow, FellTo, Fold, Step};

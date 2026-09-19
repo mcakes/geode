@@ -264,6 +264,16 @@ fn scope_table_as_toml(scope: &Scope) -> toml::Table {
         .unwrap_or_default()
 }
 
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)).
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "selects" => "The saved selections, one 'column ∈ values' per dimension",
+        "text" => "The saved text filter, matched against every textual column",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{Domain, EditRow};

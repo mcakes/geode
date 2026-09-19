@@ -437,6 +437,48 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
         .unwrap_or_default()
 }
 
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)). Meaning and value grammar
+/// only — the keys are the hint rows' job — and under ~90 characters,
+/// since the slot is one line and never wraps (4c spec §22).
+///
+/// `readiness`/`stable_polls` say out loud that `stable_mtime` is not
+/// implemented: the `Choice` offers it (`READINESS`) and discovery
+/// orphans every file of such a source, so a sentence presenting it as
+/// a working alternative would stop a trader's source loading.
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "dataset" => "The dataset this source's data loads into, as datasets.toml declares it",
+        "paths" => "Globs matching the CSV files to load, ';'-separated — empty leaves it idle",
+        "readiness" => {
+            "A file is complete once its .done sentinel exists — stable_mtime never loads"
+        }
+        "stable_polls" => {
+            "Polls of unchanged size and mtime before a load — stable_mtime only, unbuilt"
+        }
+        "priority" => "Cold-start order: latest_risk first, then latest_other, then backfill",
+        "poll_interval" => "How often the directories are scanned for new files — 30s, 2m, 1h",
+        "pending_timeout" => {
+            "How long a file may wait for its sentinel before it is reported stuck — 10m"
+        }
+        "batch_pattern" => {
+            "Regex over the file stem with a named 'batch' capture — empty uses the stem"
+        }
+        "adapter" => "csv_dir watches directories; any other adapter subscribes to a message bus",
+        "document" => "The document kind a subscribed source publishes, which decides its parsing",
+        "topics" => {
+            "Topic patterns to subscribe to, levels '/'-separated — '*' one level, '>' the rest"
+        }
+        "coalesce" => {
+            "At most one publish per key within this window — 500ms; 0 publishes every message"
+        }
+        "source_time" => {
+            "What stamps a publish: receive, or document:<field> (a date or RFC 3339 attribute)"
+        }
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Domain;

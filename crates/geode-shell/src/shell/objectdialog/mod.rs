@@ -1431,6 +1431,25 @@ impl Draft {
         ranked
     }
 
+    /// The key of the FIELD the cursor's row belongs to — the field
+    /// itself, or the list a member or available row sits in — which is
+    /// what [`Domain::help`] is asked with: a row of a list explains the
+    /// list. `None` off the end of a filtered list.
+    pub fn selected_field_key(&self) -> Option<&str> {
+        self.field_key_of(self.selected_row()?)
+    }
+
+    /// [`Self::selected_field_key`] for a row the caller has already
+    /// resolved — the paint path holds `rows`/`visible` and must not
+    /// derive them a third time per frame just to ask this.
+    pub fn field_key_of(&self, row: EditRow) -> Option<&str> {
+        let field = match row {
+            EditRow::Field(field) => field,
+            EditRow::Item { field, .. } | EditRow::Available { field, .. } => field,
+        };
+        self.fields.get(field).map(|f| f.key.as_str())
+    }
+
     /// The row the cursor is on, if the cursor is in range — indexed
     /// through [`Draft::visible_rows`], so every verb acts on the row the
     /// trader is actually looking at, filtered or not (§18.3).
@@ -2703,6 +2722,39 @@ fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
 }
 
 impl Domain {
+    /// The one-line explanation of the field keyed `key` on this domain,
+    /// painted in the edit footer for the row under the cursor
+    /// (2026-09-19, spec §22). Computed at paint from `(domain, stage,
+    /// key)` rather than stored on [`Field`], so no constructor has to
+    /// carry it and the sentence is data in one table per adapter. A
+    /// list item or an available row asks with its LIST's key
+    /// ([`Draft::selected_field_key`]), so a column row explains the
+    /// columns list.
+    ///
+    /// **The column stage answers from `views::column_help` whatever the
+    /// domain**: Views and Schema open the same seven rows (dataset-
+    /// presentation spec §4.1), so one table serves both. Empty for a key
+    /// no table knows — the footer keeps the slot and paints nothing —
+    /// and `every_field_on_every_domain_has_help` sweeps every adapter's
+    /// rows so a new field cannot ship silent.
+    ///
+    /// Copy rule: the field's MEANING and its value grammar (`30s`,
+    /// `k`/`M`, a hue 0..360), never the keys — the hint rows beside it
+    /// already say which keys act on the row.
+    pub fn help(self, stage: &Stage, key: &str) -> &'static str {
+        if matches!(stage, Stage::Column { .. }) {
+            return views::column_help(key);
+        }
+        match self {
+            Domain::Views => views::help(key),
+            Domain::Sources => sources::help(key),
+            Domain::Groupings => groupings::help(key),
+            Domain::Scopes => scopes::help(key),
+            Domain::Colours => colours::help(key),
+            Domain::Schema => schema::help(key),
+        }
+    }
+
     /// May `i` edit the `Text` row keyed `key` on this domain? `false` on
     /// Groupings, Scopes, Schema and Colours — Groupings' `slot` and
     /// Scopes' two summaries are display-only `Text`s and must refuse;

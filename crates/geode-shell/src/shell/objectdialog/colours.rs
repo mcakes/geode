@@ -257,6 +257,23 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
         .unwrap_or_default()
 }
 
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)). `token` says "replaces",
+/// not "overrides": `to_table` writes only the keys in force, so a
+/// chosen token drops `hue` from the file and a reopen seeds it at 0.
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "hue" => {
+            "Hue on a 0–360 wheel — red 0, yellow 60, green 120, cyan 180, blue 240, magenta 300"
+        }
+        "tone" => "normal, or light for the theme's tint of the same hue",
+        "token" => {
+            "A theme colour by role — a token replaces the hue in the file; none uses the hue"
+        }
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Domain;

@@ -4175,6 +4175,51 @@ run_mutation "objectdialog: browse d on an empty slot tells the trader to tick" 
   geode-shell \
   d_on_an_empty_slot_from_browse_names_the_browse_remedy
 
+# ---- field help (2026-09-19, 4c spec §22)
+#
+# The column stage's seven rows are explained by one table whatever the
+# domain opened them. Routed through the domain's own table instead, Views
+# and Schema answer "" for `label`..`colour` — only the sweep's column-
+# stage leg can see it, since every other help test reads a top-level row.
+run_mutation "objectdialog: the column stage asks the domain's own help table" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if matches!(stage, Stage::Column { .. }) {' \
+  '        if false {' \
+  geode-shell \
+  every_field_on_every_domain_has_help
+
+# A list row explains its LIST. Answering the row's own index as a field
+# index would read a neighbouring field's sentence (or none) on a column
+# item — every field-row test stays green, since there the two agree.
+run_mutation "objectdialog: a list row asks with its own index as a field" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            EditRow::Item { field, .. } | EditRow::Available { field, .. } => field,' \
+  '            EditRow::Item { item, .. } | EditRow::Available { item, .. } => item,' \
+  geode-shell \
+  a_list_row_shows_its_lists_help
+
+# One slot, two occupants: the notice wins for the keystroke it reports
+# on. Painting help regardless leaves `objectdialog-help` on screen while
+# a notice stands (and, painted in the notice's place, drops the notice
+# itself) — the displacement test's own two selector checks see it.
+run_mutation "objectdialog: the help line paints under a notice" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let slot = match notice {' \
+  '    let slot = match None::<String> {' \
+  geode-shell \
+  a_notice_displaces_the_help_line_for_one_keystroke
+
+# Blank beside a question: the confirm row is one compact decision. Help
+# painted regardless keeps every other help test green (none arms a
+# confirm) and puts a sentence about the cursor's row under `Delete
+# 'mine'?`.
+run_mutation "objectdialog: the help line paints beside an armed confirm" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let help = if state.confirm.is_some() {' \
+  '    let help = if false {' \
+  geode-shell \
+  the_help_line_is_blank_under_an_armed_confirm
+
 # The opening mode is one line, and it silently restores the pre-modal
 # model: every filter test still passes with the dialog opening
 # filter-first (`/` is harmless when the field is already focused), and

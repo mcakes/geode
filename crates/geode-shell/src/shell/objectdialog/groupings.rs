@@ -405,6 +405,20 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
         .unwrap_or_default()
 }
 
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)). No chord in the sentence:
+/// the title crumb already paints `ctrl+N`, and a slot regroups every
+/// tile following the shared frame, not one blotter (`frame::slot_N`).
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "slot" => "The slot's number — activating it regroups every tile following the frame",
+        "dimensions" => {
+            "The group-by chain, outermost first — every column the dataset can group by"
+        }
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{Domain, EditRow, Step};
