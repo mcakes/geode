@@ -11895,12 +11895,28 @@ run_mutation "ingest: a failed load still ends the strip" \
   crates/geode-data/src/service.rs \
   '                    // Unconditional, same reasoning as the `Published`
                     // arm'"'"'s own `LoadEnded` send above.
-                    let _ = sink(DataEvent::LoadEnded { source });' \
+                    let _ = sink(DataEvent::LoadEnded);' \
   '                    // Unconditional, same reasoning as the `Published`
                     // arm'"'"'s own `LoadEnded` send above.
-                    // let _ = sink(DataEvent::LoadEnded { source });' \
+                    // let _ = sink(DataEvent::LoadEnded);' \
   geode-data \
   a_failed_load_still_ends_the_strip
+
+# Final whole-branch review, finding 1 (2026-09-19): a file re-queued
+# after it already loaded must not even announce `Started` — one with
+# nothing to end it would stick the status bar's strip forever.
+run_mutation "ingest: a stale skip does not start the strip" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        if stale {
+            clear_in_flight(&queue);
+            continue;
+        }' \
+  '        if false {
+            clear_in_flight(&queue);
+            continue;
+        }' \
+  geode-data \
+  a_queued_item_whose_file_was_loaded_meanwhile_is_skipped_at_pop_time
 
 # Idle costs nothing: the strip and segment exist only while `ingest` is
 # Some. Painting them unconditionally survives every entity test.
