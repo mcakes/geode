@@ -759,6 +759,13 @@ fn on_row_clicked(
     shell.object_dialog_scroll.scroll_to_item(ix);
     if opens {
         enter_edit_stage(shell, &name, None, cx);
+        // The browse list is a door too (`ObjectDialogState::
+        // click_opened_stage`): a double-click's second half lands on
+        // whatever edit row the new stage painted under the pointer, and
+        // must not open it.
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;
+        }
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
@@ -4626,8 +4633,11 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
 /// cursor was the 2c ledger's standing minor — the one row in this dialog
 /// whose `enter` did something a click would not. Both now go through
 /// [`column_stage_target`], so there is no second rule about which rows
-/// are doors. Every other row still only moves the cursor: a verb there
-/// is a second, deliberate keystroke or button press.
+/// are doors. Every other row only moves the cursor on a single click; a
+/// double-click on it is `i` (user ruling 2026-09-19, interaction-model
+/// spec §17.4) — the second mouse-down runs [`open_field`], the key's
+/// own door — unless the FIRST click of the pair opened a stage, in
+/// which case the second is inert (`click_opened_stage`).
 ///
 /// The open runs regardless of mode, because `enter` opens in either mode
 /// too ([`commit_selected_row`] is the one door both spellings take). A
@@ -4691,7 +4701,7 @@ fn on_edit_row_clicked(
         if let Some(state) = shell.object_dialog.as_mut() {
             state.click_opened_stage = true;
         }
-    } else if click_count >= 2
+    } else if click_count == 2
         && !shell
             .object_dialog
             .as_ref()

@@ -884,10 +884,12 @@ fn open_choice_on_selected(state: &mut SettingsState, rows: &[SettingRow], visib
     }
 }
 
-/// A real mouse click on the row for `clicked`: select it, nothing more
-/// (spec §20.3 — the second-click step is gone; the value chip is the
-/// mouse form of `space`). Ends in [`dialog::sync_dialog_text`], the
-/// row-click seam (spec §16.1/§17.1 rule 3).
+/// A real mouse click on the row for `clicked`: select it (spec §20.3 —
+/// the second-click step is gone; the value chip is the mouse form of
+/// `space`), and on the second mouse-down of a double-click open its
+/// typeahead, the mouse form of `i` (user ruling 2026-09-19,
+/// interaction-model spec §17.4). Ends in [`dialog::sync_dialog_text`],
+/// the row-click seam (spec §16.1/§17.1 rule 3).
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: SettingId,
@@ -913,7 +915,7 @@ fn on_row_clicked(
     // A double-click is `i` (user ruling 2026-09-19): the first
     // mouse-down selected the row above, this second one opens its
     // typeahead through the key's own door.
-    if click_count >= 2 {
+    if click_count == 2 {
         open_choice_on_selected(state, &rows, &visible);
     }
     shell.settings_scroll.scroll_to_item(ix);

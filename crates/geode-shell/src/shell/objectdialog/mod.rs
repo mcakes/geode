@@ -3189,12 +3189,15 @@ pub struct ObjectDialogState {
     /// nothing says so, because a key that appears inert is the defect
     /// class this interaction model exists to remove.
     pub notice: Option<String>,
-    /// Set by [`super::render::on_edit_row_clicked`] when a click's first
-    /// half opened a column stage, cleared by the next single click.
-    /// A double-click's second half arrives at the same point one frame
-    /// later, where the just-opened stage has painted a DIFFERENT row —
-    /// without this flag it would open `i` on whatever field now sits
-    /// under the pointer, a field the trader never aimed at. With it, a
+    /// Set when a click opened a stage — the browse list's row click
+    /// (`render::on_row_clicked`, the edit stage) or an edit-stage door
+    /// row's (`render::on_edit_row_clicked`, the column stage) — and
+    /// cleared by the next single click. A double-click's second half
+    /// arrives at the same point one frame later, where the just-opened
+    /// stage has painted a DIFFERENT row — without this flag it would
+    /// open `i` on whatever field now sits under the pointer, a field
+    /// the trader never aimed at (on Groupings, slot 3's chooser puts a
+    /// row there whose click opens the chain field). With it, a
     /// double-click on a door row is "open the stage" and nothing more.
     pub click_opened_stage: bool,
     /// The object being edited. `None` in [`Stage::Browse`], and the only

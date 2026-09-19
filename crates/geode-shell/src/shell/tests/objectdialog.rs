@@ -6126,6 +6126,39 @@ fn a_double_click_on_a_door_row_opens_the_stage_and_nothing_more(cx: &mut gpui::
     );
 }
 
+/// The browse list is a door too: a double-click on a browse row opens
+/// its edit stage and nothing more. The second click lands on whatever
+/// the new stage painted at that point — on Groupings, slot 3's chooser
+/// puts a row under the pointer that a click would otherwise open as
+/// the chain field (review finding, 2026-09-19).
+#[gpui::test]
+fn a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    let row = cx
+        .debug_bounds("objectdialog-row-3")
+        .expect("slot 3's browse row is painted");
+    let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0));
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the second click opened no field in the freshly opened stage"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+}
+
 // --- Spec §20.3 / §20.6: the value chip, the i/n buttons, the armed guard --
 
 /// Spec §20.3 on the object dialog: the hue chip steps on click and

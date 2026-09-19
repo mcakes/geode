@@ -8066,8 +8066,8 @@ run_mutation "settings choice: enter applies the lit value" \
 # count, a double-click only selects — the mouse has no route to `i`.
 run_mutation "dblclick: a double-click on a value row opens its field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    } else if click_count >= 2' \
-  '    } else if click_count >= 200' \
+  '    } else if click_count == 2' \
+  '    } else if click_count == 200' \
   geode-shell a_double_click_on_a_value_row_is_i
 
 # A double-click on a DOOR row opens the column stage and nothing more:
@@ -8079,11 +8079,36 @@ run_mutation "dblclick: the click that opened a stage does not also open a field
   '            state.click_opened_stage = false;' \
   geode-shell a_double_click_on_a_door_row_opens_the_stage_and_nothing_more
 
+# The browse list is a door too: mutated so the flag is not set there,
+# a double-click on Groupings' slot 3 opens the chain field on the stage
+# the first click painted.
+run_mutation "dblclick: the browse click that opened a stage does not also open a field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;
+        }
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+// ---- The edit stage' \
+  '        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = false;
+        }
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+// ---- The edit stage' \
+  geode-shell a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more
+
 # Settings: the same gesture through open_choice_on_selected.
 run_mutation "dblclick: a settings row's double-click opens its typeahead" \
   crates/geode-shell/src/shell/settings_view.rs \
-  '    if click_count >= 2 {' \
-  '    if click_count >= 200 {' \
+  '    if click_count == 2 {' \
+  '    if click_count == 200 {' \
   geode-shell a_double_click_on_a_settings_row_opens_its_typeahead
 
 # ---- schema: the document family (market-data spec §3)

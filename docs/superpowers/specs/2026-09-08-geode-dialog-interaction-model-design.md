@@ -722,21 +722,25 @@ pointer was already on.
   `settings_view::open_choice_on_selected` (shared with `i`/`enter`).
   The first mouse-down of the pair selects the row exactly as a single
   click does, so a single click's meaning is unchanged.
-- A double-click on a DOOR row (a Views member column, a Schema column
-  row) opens its column stage and nothing more. The second click lands
-  one frame later on whatever field the new stage painted at that
-  point, so `ObjectDialogState::click_opened_stage` — set when a click
-  enters a stage, cleared by the next single click — makes it inert;
-  without it the pair opened `i` on a field the trader never aimed at.
-  A fresh double-click inside the stage is `i` again.
-- Untouched: the browse list (a single click already opens), the
-  keybindings dialog (a single click already captures), the value chip
-  (steps), the `i` button (kept), and the market-data panel's own
-  double-click editing.
+- A double-click on a DOOR row — a browse row (whose single click opens
+  the edit stage) or a Views member / Schema column row (whose single
+  click opens the column stage) — opens that stage and nothing more.
+  The second click lands one frame later on whatever row the new stage
+  painted at that point, so `ObjectDialogState::click_opened_stage` —
+  set by both door clicks, cleared by the next single click — makes it
+  inert; without it the pair opened `i` on a row the trader never aimed
+  at (the review's probe: a double-click on Groupings' slot 3 browse row
+  opened the chain field). A fresh double-click inside the stage is `i`
+  again. Only `click_count == 2` counts: a triple-click's third down is
+  an ordinary click on whatever is painted by then.
+- Untouched: the keybindings dialog (a single click already captures),
+  the value chip (steps), the `i` button (kept), and the market-data
+  panel's own double-click editing.
 - Tests: `a_double_click_on_a_value_row_is_i`,
   `a_double_click_on_a_door_row_opens_the_stage_and_nothing_more`,
+  `a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more`,
   `a_double_click_on_a_settings_row_opens_its_typeahead`; harness
-  entries `dblclick:` ×3. The shared `tests::double_click` helper is the
+  entries `dblclick:` ×4. The shared `tests::double_click` helper is the
   fullscreen test's, lifted.
 
 ### 17.3 Tests and harness
