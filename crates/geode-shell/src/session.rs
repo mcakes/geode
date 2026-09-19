@@ -866,6 +866,25 @@ fn node_to_toml(node: &Node) -> toml::Value {
             t.insert("id".to_string(), toml::Value::Integer(tile_id_to_i64(*id)));
             toml::Value::Table(t)
         }
+        // Minimal compile-fix for the tile-stacks Task 1 gate (`Node::Stack`
+        // landed there); the real `kind = "stack"` / `members` / `active`
+        // session encoding, its healing-on-read test and this doc comment's
+        // own update are Task 4's job and will replace this arm.
+        Node::Stack { children, active } => {
+            let mut t = toml::Table::new();
+            t.insert("kind".to_string(), toml::Value::String("stack".to_string()));
+            t.insert(
+                "members".to_string(),
+                toml::Value::Array(
+                    children
+                        .iter()
+                        .map(|id| toml::Value::Integer(tile_id_to_i64(*id)))
+                        .collect(),
+                ),
+            );
+            t.insert("active".to_string(), toml::Value::Integer(*active as i64));
+            toml::Value::Table(t)
+        }
         Node::Split {
             orientation,
             children,
