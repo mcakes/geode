@@ -21,6 +21,13 @@ pub const TOP_INSET: f32 = 24.0;
 pub const MAX_WIDTH: f32 = 320.0;
 pub const MIN_WIDTH: f32 = 160.0;
 
+/// One-based row gutter digits, `1`–`9` — a stack has at most nine
+/// members (`ctrl+0..9` slot numbering's own bound), so a static lookup
+/// spares nine per-frame `String` allocations `(i + 1).to_string()` would
+/// cost while the list is open (fix round 1, Minor 3 — PHILOSOPHY.md:
+/// "per-frame heap churn is a defect").
+const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackList {
     /// The tile whose stack this lists (the focused tile while open).
@@ -51,7 +58,6 @@ pub fn jump(list: &StackList, digit: u32) -> Option<TileId> {
     list.members.get(digit.checked_sub(1)? as usize).copied()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render(
     list: &StackList,
     rows: &[Row],
@@ -63,8 +69,12 @@ pub fn render(
     let theme = cx.theme();
     let paint = row_paint(theme);
     let row_height = scale::design_px(ROW_HEIGHT, rem_size);
-    let width = scale::design_px(MAX_WIDTH, rem_size)
-        .min((tile_rect.w - 8.0).max(scale::design_px(MIN_WIDTH, rem_size)));
+    let width = scale::design_px(MAX_WIDTH, rem_size).min(
+        (tile_rect.w - scale::design_px(8.0, rem_size)).max(scale::design_px(MIN_WIDTH, rem_size)),
+    );
+    // The 2 px left offset stays a raw window pixel (a hairline inset off
+    // the tile's own border, the same as the command-line strip's own
+    // `tile.x + 1.0` — fix round 1, Minor 6).
     let left = tile_rect.x + 2.0;
     let top = tile_rect.y + scale::design_px(TOP_INSET, rem_size);
 
@@ -106,13 +116,14 @@ pub fn render(
         } else {
             el = el.hover(|s| s.bg(paint.hover));
         }
+        let digit = DIGITS.get(i).copied().unwrap_or("");
         panel = panel.child(
             el.child(
                 div()
                     .font_family(fonts::MONO)
                     .text_color(theme.muted_foreground)
                     .w(px(row_height / 2.0))
-                    .child(SharedString::from((i + 1).to_string())),
+                    .child(SharedString::new_static(digit)),
             )
             .child(div().flex_1().child(row.title.clone()))
             .child(

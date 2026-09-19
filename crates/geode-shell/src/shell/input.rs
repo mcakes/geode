@@ -1011,41 +1011,55 @@ impl ShellView {
         }
 
         if let Some(list) = self.stack_list.clone() {
-            // The member list owns the keyboard while open (spec §5.2):
-            // `j`/`k`/arrows step with wrap, a digit activates at once,
-            // `enter` activates the highlighted row, `escape` closes with
-            // no change. Every other key is swallowed here too — the list
-            // is modal in the same sense the palette is, and the matcher
-            // must not see a keystroke behind it.
-            let key = event.keystroke.key.as_str();
-            match key {
-                "escape" => self.close_stack_list(cx),
-                "j" | "down" => {
-                    let mut l = list;
-                    super::stacklist::step(&mut l, 1);
-                    self.stack_list = Some(l);
-                }
-                "k" | "up" => {
-                    let mut l = list;
-                    super::stacklist::step(&mut l, -1);
-                    self.stack_list = Some(l);
-                }
-                "enter" => {
-                    if let Some(id) = list.members.get(list.highlighted).copied() {
-                        self.activate_stack_member(id, window, cx);
+            // A CHORD (ctrl/alt/cmd — `Modifiers::is_chord`, the same line
+            // the filter-field branch above draws) is not a list key: a
+            // shipped shell chord (`ctrl+k` closes the list itself, via
+            // `toggle_palette`, before this branch even runs — see its own
+            // comment) must still fire from inside the list exactly as it
+            // does from inside a text field, and something like `ctrl+3`
+            // (a grouping slot) must not be read as "activate member 3".
+            // Deliberately NOT returning here: the keystroke falls through
+            // to the matcher below, whose `dispatch` clears `stack_list`
+            // at its own top (fix round 1, Ruling 5).
+            let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
+            if !is_chord {
+                // The member list owns the keyboard while open (spec
+                // §5.2): `j`/`k`/arrows step with wrap, a digit activates
+                // at once, `enter` activates the highlighted row, `escape`
+                // closes with no change. Every other bare key is swallowed
+                // here too — the list is modal in the same sense the
+                // palette is, and the matcher must not see a keystroke
+                // behind it.
+                let key = event.keystroke.key.as_str();
+                match key {
+                    "escape" => self.close_stack_list(cx),
+                    "j" | "down" => {
+                        let mut l = list;
+                        super::stacklist::step(&mut l, 1);
+                        self.stack_list = Some(l);
                     }
-                }
-                d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
-                    if let Some(id) =
-                        super::stacklist::jump(&list, u32::from(d.as_bytes()[0] - b'0'))
-                    {
-                        self.activate_stack_member(id, window, cx);
+                    "k" | "up" => {
+                        let mut l = list;
+                        super::stacklist::step(&mut l, -1);
+                        self.stack_list = Some(l);
                     }
+                    "enter" => {
+                        if let Some(id) = list.members.get(list.highlighted).copied() {
+                            self.activate_stack_member(id, window, cx);
+                        }
+                    }
+                    d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
+                        if let Some(id) =
+                            super::stacklist::jump(&list, u32::from(d.as_bytes()[0] - b'0'))
+                        {
+                            self.activate_stack_member(id, window, cx);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+                cx.notify();
+                return;
             }
-            cx.notify();
-            return;
         }
 
         // Escape ends an in-flight drag of either kind before the matcher

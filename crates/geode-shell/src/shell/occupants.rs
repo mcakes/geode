@@ -397,14 +397,20 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) {
         let ws = self.services.workspaces.active_mut();
-        match ws.region_of(tile) {
-            Some(crate::tiling::FocusRegion::Main) => {
-                ws.focus_main_tile(tile);
-            }
-            Some(crate::tiling::FocusRegion::Dock(side)) => {
-                ws.focus_dock_tile(side, tile);
-            }
+        let was_focused = ws.focused_tile();
+        let moved = match ws.region_of(tile) {
+            Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(tile),
+            Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, tile),
             None => return,
+        };
+        // The same "a click that actually moved focus dirties the
+        // session" rule the tile mouse-down handlers follow (`render.rs`)
+        // — `focus_main_tile`/`focus_dock_tile` answer `true` whenever
+        // `tile` is simply present, focused already or not, so the dirty
+        // flag is gated on the tile actually differing too (fix round 1,
+        // Minor 5).
+        if moved && was_focused != Some(tile) {
+            self.session_dirty = true;
         }
         let Some((index, _)) = self.services.workspaces.active().stack_position(tile) else {
             self.notice = Some(super::input::NOT_IN_A_STACK);
@@ -419,6 +425,23 @@ impl ShellView {
             members,
             highlighted: index - 1,
         });
+        // The list owns the keyboard the instant it opens (fix round 1,
+        // Ruling 5 — Important): `close_palette` above can hand focus
+        // BACK to the scope bar's own text field (`return_focus_from_
+        // overlay`'s `overlay_return_to_filter` arm), which is a shell
+        // surface `note_keyboard_focus_move`'s own `holds_shell_focus`
+        // check treats as perfectly legitimate — so that call alone
+        // cannot fix this. Take the shell root's focus directly whenever
+        // it isn't already there, unconditionally of which surface (shell
+        // or occupant) currently holds it, so `j`/`k`/digits/`escape`
+        // resolve against the list rather than typing into — or being
+        // eaten by — whatever held the keyboard a moment ago.
+        if !window
+            .focused(cx)
+            .is_some_and(|focused| focused == self.focus_handle)
+        {
+            self.focus_handle.focus(window, cx);
+        }
         self.note_keyboard_focus_move(window, cx);
         cx.notify();
     }

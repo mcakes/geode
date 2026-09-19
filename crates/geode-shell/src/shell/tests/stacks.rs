@@ -264,8 +264,6 @@ fn a_digit_enter_and_escape_do_what_the_spec_says(cx: &mut gpui::TestAppContext)
     let focused = |cx: &gpui::VisualTestContext| {
         shell.read_with(cx, |s, _| s.services.workspaces.active().tree().focused())
     };
-    cx.simulate_keystrokes("ctrl-k"); // palette, then the pick row by action
-    cx.simulate_keystrokes("escape");
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
@@ -340,7 +338,7 @@ fn a_row_click_activates_and_a_click_outside_closes(cx: &mut gpui::TestAppContex
 
 #[gpui::test]
 fn the_handle_opens_the_list_on_its_own_tile_and_ctrl_k_closes_it(cx: &mut gpui::TestAppContext) {
-    let (mut cx, shell, _log, left, right, _top) = stacked_shell(cx);
+    let (mut cx, shell, _log, _left, right, _top) = stacked_shell(cx);
     // Focus `left`, then open through `right`'s handle: the list must be
     // about `right`'s stack and `right`'s tile must take focus first.
     cx.simulate_keystrokes("alt-h");
@@ -362,7 +360,6 @@ fn the_handle_opens_the_list_on_its_own_tile_and_ctrl_k_closes_it(cx: &mut gpui:
         shell.read_with(&cx, |s, _| s.stack_list.as_ref().map(|l| l.tile)),
         Some(right)
     );
-    assert_ne!(left, right);
     cx.simulate_keystrokes("ctrl-k");
     assert!(
         shell.read_with(&cx, |s, _| s.stack_list.is_none()),
@@ -385,5 +382,62 @@ fn pick_on_a_plain_tile_refuses_with_the_notice(cx: &mut gpui::TestAppContext) {
     assert_eq!(
         shell.read_with(&cx, |s, _| s.notice),
         Some("not in a stack")
+    );
+}
+
+/// Fix round 1, Ruling 5 (Important): opening the list while the scope
+/// bar's own text field holds the keyboard used to paint the list but
+/// leave it deaf — `close_palette`'s `overlay_return_to_filter` arm (were
+/// the palette involved) or simply the field's own standing focus is a
+/// shell surface `note_keyboard_focus_move`'s `holds_shell_focus` check
+/// treats as legitimate, so that call alone never reclaimed the keyboard.
+/// `open_stack_list` must take the shell root's focus directly.
+#[gpui::test]
+fn the_list_takes_the_keyboard_from_the_scope_bar(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _log, _left, right, _top) = stacked_shell(cx);
+    cx.simulate_keystrokes("alt-/");
+    assert!(
+        filter_is_focused(&shell, &mut cx),
+        "mod+/ focused the scope bar's field"
+    );
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+        let _ = window.draw(cx);
+    });
+    assert!(
+        !filter_is_focused(&shell, &mut cx),
+        "the list took the keyboard back from the field"
+    );
+    cx.simulate_keystrokes("1");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        Some(right)
+    );
+    assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
+}
+
+/// Fix round 1, Ruling 5 (Minor 2): a chord (`ctrl`/`alt`/`cmd`) is not a
+/// list key and must fall through to the matcher, whose `dispatch`
+/// clears `stack_list` at its own top — `ctrl+3` (a grouping slot) must
+/// never be read as "activate member 3".
+#[gpui::test]
+fn a_chord_falls_through_the_list_to_the_matcher(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _log, _left, _right, top) = stacked_shell(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+    });
+    cx.simulate_keystrokes("ctrl-3");
+    assert!(
+        shell.read_with(&cx, |s, _| s.stack_list.is_none()),
+        "the chord fell through to the matcher, whose dispatch closed the list"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        Some(top),
+        "nothing was activated"
     );
 }
