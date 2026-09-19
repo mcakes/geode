@@ -477,3 +477,70 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
         "an identical diagnostics batch must not grow the history either"
     );
 }
+
+/// The status bar's 2 px loading strip and `loading <source> · <n>
+/// queued` segment (spec 2026-09-19 §5.3) paint only while
+/// `Diagnostics.ingest` is `Some`, and the strip sits on the bar's top
+/// edge as an absolute overlay — it must not move or grow the bar.
+#[gpui::test]
+fn the_ingest_strip_and_segment_paint_only_while_a_load_is_running(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("ingest-strip").is_none(), "idle: no strip");
+    assert!(
+        vcx.debug_bounds("ingest-loading").is_none(),
+        "idle: no segment"
+    );
+    let bar_before = vcx
+        .debug_bounds("shell-status-bar")
+        .expect("status bar painted");
+
+    let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+    diagnostics.update(&mut vcx, |d, cx| {
+        d.note_loading(
+            "risk",
+            "/data/risk/EOD.csv",
+            2,
+            std::time::SystemTime::now(),
+        );
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let strip = vcx
+        .debug_bounds("ingest-strip")
+        .expect("loading: the strip paints");
+    let seg = vcx
+        .debug_bounds("ingest-loading")
+        .expect("loading: the segment paints");
+    let bar = vcx.debug_bounds("shell-status-bar").unwrap();
+    assert_eq!(bar.origin.y, bar_before.origin.y, "the bar did not move");
+    assert_eq!(
+        bar.size.height, bar_before.size.height,
+        "the bar did not grow"
+    );
+    assert_eq!(
+        strip.origin.y, bar.origin.y,
+        "the strip sits on the bar's top edge"
+    );
+    assert_eq!(strip.size.height, gpui::px(2.));
+    assert!(
+        strip.size.width >= bar.size.width - gpui::px(1.),
+        "full width"
+    );
+    assert!(seg.size.width > gpui::px(0.));
+
+    diagnostics.update(&mut vcx, |d, cx| {
+        d.note_load_ended();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("ingest-strip").is_none(),
+        "ended: strip gone"
+    );
+    assert!(
+        vcx.debug_bounds("ingest-loading").is_none(),
+        "ended: segment gone"
+    );
+}

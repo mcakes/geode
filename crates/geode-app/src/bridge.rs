@@ -667,6 +667,37 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
+                    // Task 3 (ingest progress, spec 2026-09-17 §5.3): a
+                    // load began — always bumps, since a new `Loading`
+                    // is a new record even for the same source (its
+                    // path or depth moved).
+                    DataEvent::Loading {
+                        source,
+                        path,
+                        queued,
+                    } => {
+                        diagnostics.update(cx, |d, cx| {
+                            d.note_loading(&source, &path, queued, SystemTime::now());
+                            cx.notify();
+                        });
+                    }
+                    // Carries no `source` (finding 2, 2026-09-19 final
+                    // review): one ingest runner draining one FIFO queue
+                    // means loads are strictly sequential, so the load
+                    // that just ended is always the one `note_loading`
+                    // last recorded, and `note_load_ended` is a no-op
+                    // when nothing is — including the extra copy the
+                    // queue drain now sends after every `Published`/
+                    // `Failed`'s own.
+                    DataEvent::LoadEnded => {
+                        diagnostics.update(cx, |d, cx| {
+                            let before = d.version();
+                            d.note_load_ended();
+                            if d.version() != before {
+                                cx.notify();
+                            }
+                        });
+                    }
                 }
             });
             if handled.is_err() {
@@ -928,6 +959,68 @@ role = "key"
             Arc::strong_count(&dropped),
             alive - 1,
             "the drain task released its clone of `dropped` once the window was gone"
+        );
+    }
+
+    /// Task 3 (ingest progress, spec 2026-09-17 §5.3): the bridge routes
+    /// `DataEvent::Loading`/`LoadEnded` into the diagnostics entity's
+    /// `ingest` field.
+    #[gpui::test]
+    fn loading_and_load_ended_reach_the_diagnostics_entity(cx: &mut gpui::TestAppContext) {
+        let window = open_test_window(cx, test_shell_services());
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            handle,
+            factory,
+            events: rx,
+            dropped: dropped.clone(),
+            sources: Vec::new(),
+        };
+
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+
+        tx.try_send(DataEvent::Loading {
+            source: "risk".into(),
+            path: "/data/risk/EOD.csv".into(),
+            queued: 4,
+        })
+        .unwrap();
+        vcx.run_until_parked();
+        let recorded = diagnostics.read_with(&vcx, |d, _| d.ingest.clone());
+        let a = recorded.expect("Loading reached the entity");
+        assert_eq!(
+            (a.source.as_str(), a.path.as_str(), a.queued),
+            ("risk", "/data/risk/EOD.csv", 4)
+        );
+
+        tx.try_send(DataEvent::LoadEnded).unwrap();
+        vcx.run_until_parked();
+        assert!(
+            diagnostics.read_with(&vcx, |d, _| d.ingest.is_none()),
+            "LoadEnded cleared it"
         );
     }
 

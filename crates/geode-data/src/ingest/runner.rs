@@ -59,6 +59,22 @@ use std::thread::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub enum IngestEvent {
+    /// The runner popped a job and is about to load it (spec 2026-09-17
+    /// §5.3): `path` is the file's own path, or `document://{source}/
+    /// {dataset}` for a document (its batch is not known until the rows
+    /// are read, and the strip never needs it); `queued` is how many
+    /// items — files and documents — still waited behind it at the
+    /// instant it was popped. For a file, emitted only after the pop-time
+    /// stale re-check passes (2026-09-19 final review, finding 1) — a
+    /// re-queued already-loaded file produces no `Started` at all, rather
+    /// than one with nothing to end it. Always followed by exactly one
+    /// `Published` or `Failed` for the same job: one runner, one FIFO
+    /// queue.
+    Started {
+        source: String,
+        path: String,
+        queued: usize,
+    },
     Published {
         /// The `[sources.<name>]` this item came from (Phase 4b final
         /// review, MAJ-1) — distinct from `dataset`: `SourceSpec` names
@@ -513,7 +529,7 @@ fn run(
                 // which is the only state that announces a drain.
                 if let Some(work) = take_work(&mut q) {
                     announced_idle = false;
-                    break work;
+                    break (work, q.items.len() + q.documents.len());
                 }
                 if !announced_idle {
                     announced_idle = true;
@@ -538,12 +554,23 @@ fn run(
             }
         };
 
+        let (work, queued) = work;
+
         // A document is published here and the loop starts over: none of
         // the file machinery below applies to it — no pop-time change
         // detection (there is no file to re-`stat`), no `in_flight` to
-        // clear (it was never set), no sentinel.
+        // clear (it was never set), no sentinel. Its `Started` is emitted
+        // right here, before the publish, since a document has no stale
+        // check to emit it after.
         let item = match work {
             Work::Document(job) => {
+                if !sink(IngestEvent::Started {
+                    source: job.source.clone(),
+                    path: format!("document://{}/{}", job.source, job.dataset),
+                    queued,
+                }) {
+                    log_refused_event(&refusal_logged, "a load-started announcement");
+                }
                 publish_one_document(&store, &schema, &sink, publish, &refusal_logged, job);
                 continue;
             }
@@ -589,6 +616,19 @@ fn run(
         if stale {
             clear_in_flight(&queue);
             continue;
+        }
+
+        // Emitted only now — after the stale check passed — so a
+        // re-queued already-loaded file (finding 1, 2026-09-19 final
+        // review) never starts the strip: a `Started` with no
+        // `Published`/`Failed` to follow it would leave the status bar
+        // stuck.
+        if !sink(IngestEvent::Started {
+            source: item.source.clone(),
+            path: item.candidate.csv_path.to_string_lossy().into_owned(),
+            queued,
+        }) {
+            log_refused_event(&refusal_logged, "a load-started announcement");
         }
 
         // The dataset is resolved per item (Phase 3 §2.5). An undeclared
@@ -816,6 +856,68 @@ mod tests {
         let found = crate::source::discover(&spec, &cat, std::time::SystemTime::now()).unwrap();
         let plan = crate::ingest::build_plan(&[(spec, found)]);
         (db_dir, src_dir, store, ds, plan)
+    }
+
+    #[test]
+    fn started_precedes_each_publish_and_counts_what_is_still_queued() {
+        // Two files submitted back to back: the first pops with one item
+        // still behind it, the second with none. Every Started precedes
+        // its own Published, and the path is the file's own.
+        let (_db, _src, store, ds, plan) = harness();
+        assert!(plan.items.len() >= 2, "need at least two files");
+        let a = plan.items[0].clone();
+        let b = plan.items[1].clone();
+        let a_path = a.candidate.csv_path.to_string_lossy().to_string();
+        let b_path = b.candidate.csv_path.to_string_lossy().to_string();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        handle.submit(WorkPlan { items: vec![a, b] });
+        let events = drain(&rx, 2);
+        let started: Vec<(String, usize)> = events
+            .iter()
+            .filter_map(|e| match e {
+                IngestEvent::Started { path, queued, .. } => Some((path.clone(), *queued)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, vec![(a_path, 1), (b_path, 0)]);
+        // Ordering: Started(a) < Published(a) < Started(b) < Published(b).
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| match e {
+                IngestEvent::Started { .. } => "started",
+                IngestEvent::Published { .. } => "published",
+                IngestEvent::Failed { .. } => "failed",
+                IngestEvent::PlanComplete => "drained",
+            })
+            .filter(|k| *k != "drained")
+            .collect();
+        assert_eq!(kinds, ["started", "published", "started", "published"]);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_document_job_starts_with_its_synthetic_path() {
+        let (_dir, store) = document_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+        handle.submit_document(job("cvi_params", spx()));
+        let events = drain(&rx, 1);
+        let started = events.iter().find_map(|e| match e {
+            IngestEvent::Started {
+                source,
+                path,
+                queued,
+            } => Some((source.clone(), path.clone(), *queued)),
+            _ => None,
+        });
+        assert_eq!(
+            started,
+            Some((
+                "cvi".to_string(),
+                "document://cvi/cvi_params".to_string(),
+                0
+            ))
+        );
+        handle.shutdown();
     }
 
     /// A sink that forwards into a channel but REFUSES the first event
@@ -1557,6 +1659,23 @@ mod tests {
             ),
             "the fresh file must still load: {events:?}"
         );
+
+        // Finding 1 (2026-09-19 final review): a stale-skipped file must
+        // never even announce a `Started` — one with no `Published`/
+        // `Failed` to follow it would start the status bar's strip and
+        // leave it stuck.
+        let stale_path = stale.candidate.csv_path.to_string_lossy().into_owned();
+        let started_paths: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                IngestEvent::Started { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !started_paths.contains(&stale_path.as_str()),
+            "a stale skip must not start the strip: {started_paths:?}"
+        );
     }
 
     #[test]
@@ -1639,11 +1758,13 @@ mod tests {
     /// The next outcome event, skipping the idle announcements a runner
     /// legitimately emits before and between work — `PlanComplete` fires
     /// once when the runner starts on an empty queue, which races any
-    /// submit, so no test may treat it as positional.
+    /// submit, so no test may treat it as positional — and `Started`,
+    /// which now always precedes the outcome these tests are watching
+    /// for (Task 1).
     fn next_event(rx: &Receiver<IngestEvent>) -> IngestEvent {
         loop {
             match rx.recv_timeout(Duration::from_secs(60)) {
-                Ok(IngestEvent::PlanComplete) => continue,
+                Ok(IngestEvent::PlanComplete) | Ok(IngestEvent::Started { .. }) => continue,
                 Ok(e) => return e,
                 Err(e) => panic!("no outcome event: {e}"),
             }

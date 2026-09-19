@@ -880,7 +880,15 @@ impl Render for ShellView {
         // refcount, never a buffer) rather than the deleted `data_status`
         // field — an empty summary means nothing to report, same
         // "`None` clears it" contract `data_status` had.
-        let diagnostics_summary = self.diagnostics.read(cx).summary();
+        let diagnostics_read = self.diagnostics.read(cx);
+        let diagnostics_summary = diagnostics_read.summary();
+        // The ingest activity, read alongside the summary (spec
+        // 2026-09-19 §5.3) — borrowed straight through to the
+        // `status_bar` call below rather than cloned: `diagnostics_read`
+        // borrows `cx` (not `self`), and nothing between here and that
+        // call needs `cx` mutably, so `status_bar` gets `Option<&
+        // IngestActivity>` with no per-render allocation at all.
+        let ingest = diagnostics_read.ingest.as_ref();
         // Clicking the summary opens the diagnostics tile (Phase 4b Task
         // 5), same `cx.entity()`-captured-into-a-closure shape as
         // `on_chip_close`/`on_chip_open` just below.
@@ -898,6 +906,7 @@ impl Render for ShellView {
             self.restart_required.as_deref(),
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
             on_diagnostics_click,
+            ingest,
             bar_model.as_of.as_deref(),
             bar_model.as_of_full.as_ref(),
             self.services.theme.active_name(),
