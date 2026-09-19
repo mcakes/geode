@@ -76,6 +76,12 @@ mod scopes;
 mod sources;
 mod views;
 
+/// `ShellView::deliver_distinct` routes a `SCOPES_KEY` outcome here — the
+/// one door onto the Values stage's own delivery, kept `pub(in crate::
+/// shell)` rather than fully `pub` like [`render::open`], since nothing
+/// outside this crate's shell needs it.
+pub(in crate::shell) use render::deliver_values;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use geode_core::config::{Config, Diagnostic, Layer, Severity};
@@ -149,6 +155,26 @@ pub enum Stage {
         object: String,
         column: String,
     },
+    /// Ticking one dimension's values for a saved scope (scopes-editing
+    /// spec §4) — a projection over the same [`Draft`] in
+    /// [`Stage::Column`]'s mould: `enter` on a `dimensions` row stashes
+    /// the scope's fields and installs one list of the column's distinct
+    /// values; `escape` restores the scope with the cursor on the column.
+    Values {
+        object: String,
+        column: String,
+    },
+}
+
+/// What `enter` in [`Stage::Naming`] creates (scopes-editing spec §6):
+/// the domain's empty object (`n`), or a verbatim copy of a named one
+/// (`c`). Recorded by NAME when armed — the browse cursor is an index,
+/// and a reload can re-rank the list under it (the same reason
+/// `confirm_target` records one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameSeed {
+    Empty,
+    CopyOf(String),
 }
 
 /// One named object as the browse list shows it.
@@ -336,6 +362,12 @@ impl Domain {
     /// created that is not already listed") and stays beside it.
     pub fn writable(self, stage: &Stage) -> bool {
         !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. })
+    }
+
+    /// May `c` copy an object under a new name? Scopes alone for now
+    /// (scopes-editing spec §6); the mechanism is generic.
+    pub fn duplicable(self) -> bool {
+        self == Domain::Scopes
     }
 
     /// The text painted before an object's name, if this domain groups
@@ -856,6 +888,12 @@ pub struct ListItem {
     /// `[[columns]]` entry — a column already in `Draft::source` keeps
     /// its own table, `kind` included, untouched by this field entirely.
     pub kind: Option<String>,
+    /// Muted text painted after the name, supplied by the domain
+    /// (Scopes: a selection's values on the edit stage, a value's row
+    /// count or `not in data` on the Values stage). `None` paints
+    /// Views' own `column_summary` as before. Display only — never
+    /// written, never filtered on.
+    pub note: Option<String>,
 }
 
 /// The closed vocabulary an object's fields are built from (spec §3.1).
@@ -1273,6 +1311,11 @@ pub struct Draft {
     /// target, and the scope [`Draft::row_for_path`] narrows to. `Some`
     /// exactly when `parent_fields` is; [`Draft::column`] is the read.
     column: Option<String>,
+    /// Which column [`Draft::parent_fields`] was stashed for by the
+    /// VALUES stage (scopes-editing spec §4). `Some` exactly when
+    /// `parent_fields` is and `column` is `None`; the two stages share
+    /// the stash and can never both be open.
+    values: Option<String>,
     /// What the door that opened [`Stage::Column`] knows and the seven
     /// fields do not (dataset-presentation spec §4.1, §5.1): which door
     /// it was, the three layers under the column, and — the Schema door
@@ -1585,6 +1628,11 @@ impl Draft {
         self.column.as_deref()
     }
 
+    /// The column whose values are open, if [`Stage::Values`] is.
+    pub fn values(&self) -> Option<&str> {
+        self.values.as_deref()
+    }
+
     /// Open the column stage over `column` (Part 2c §5.2): stash the
     /// object's fields, install `fields` (the column's seven —
     /// `views::column_fields`), and start the stage clean.
@@ -1618,7 +1666,12 @@ impl Draft {
         // `commit_selected_row` gates on `column().is_none()` besides),
         // so this line is what makes it unrepresentable rather than
         // merely unreached.
-        if self.column.is_some() {
+        //
+        // The Values stage shares this same stash (`Draft::values`'s own
+        // doc), so it is refused here too — entering over an open Values
+        // stage would stash ITS installed fields as `parent_fields` and
+        // drop the object's own list exactly as re-entry would.
+        if self.column.is_some() || self.values.is_some() {
             return false;
         }
         // Membership is what the door lists: the Views door's `columns`
@@ -1791,6 +1844,14 @@ impl Draft {
     /// an index carried across would land wherever that number happens to
     /// point.
     pub fn leave_column(&mut self) {
+        // Checked before anything else touches `parent_fields`: the stash
+        // is shared with the Values stage, and `parent_fields.take()`
+        // alone cannot tell which stage it belongs to. Calling this while
+        // `column` is `None` — the Values stage open, or no stage at all
+        // — must touch nothing.
+        if self.column.is_none() {
+            return;
+        }
         self.fold_column();
         let Some(parent) = self.parent_fields.take() else {
             return;
@@ -1817,6 +1878,52 @@ impl Draft {
         if let Some(column) = column {
             self.select_item_named(&column);
         }
+    }
+
+    /// Open the Values stage (scopes-editing spec §4): stash the object's
+    /// fields, install `fields` (the one values list) as a clean
+    /// baseline. Refused while any projection is already open, for
+    /// `enter_column`'s reason — a second stash would drop the object's
+    /// own fields for good.
+    pub fn enter_values(&mut self, column: &str, fields: Vec<Field>) -> bool {
+        if self.column.is_some() || self.values.is_some() {
+            return false;
+        }
+        self.parent_fields = Some(std::mem::replace(&mut self.fields, fields));
+        self.values = Some(column.to_string());
+        self.baseline = self.fields.clone();
+        self.query.clear();
+        self.selected = 0;
+        self.text_entry = None;
+        true
+    }
+
+    /// Close the Values stage: restore the object's fields and hand the
+    /// stage's own fields back for the adapter's fold
+    /// (`scopes::fold_values` has already run on every tick through
+    /// `render::revalidate`; the return is for the caller's final fold
+    /// and cursor placement). The restored baseline is the restored
+    /// fields, for `leave_column`'s reason. `None` when no Values stage
+    /// was open.
+    pub fn leave_values(&mut self) -> Option<Vec<Field>> {
+        self.values.as_ref()?;
+        // A Values stage always carries its own stash — `enter_values` is
+        // the only writer of `values` and it always sets `parent_fields`
+        // in the same call — so a `Some(values)` with no stash is a bug
+        // (a stray `leave_column`, say) rather than a state this door
+        // should silently accept, exactly the debug check `fold_column`
+        // makes for its own context.
+        debug_assert!(
+            self.parent_fields.is_some(),
+            "a Values stage always carries its own stash"
+        );
+        let parent = self.parent_fields.take()?;
+        self.values = None;
+        let own = std::mem::replace(&mut self.fields, parent);
+        self.baseline = self.fields.clone();
+        self.query.clear();
+        self.text_entry = None;
+        Some(own)
     }
 
     /// Put the cursor on the row named `name` — an ordered-list item, or
@@ -1879,6 +1986,25 @@ impl Draft {
     pub(in crate::shell::objectdialog) fn reseed_fields(&mut self, fields: Vec<Field>) {
         self.fields = fields;
         self.baseline = self.fields.clone();
+    }
+
+    /// Mutate one of the STASHED parent's ordered lists while a projection
+    /// is open — the Values stage's fold writes the scope's `dimensions`
+    /// list through here. A no-op when no stash or no such list exists.
+    pub fn with_parent_list(
+        &mut self,
+        key: &str,
+        f: impl FnOnce(&mut Vec<ListItem>, &mut Option<Vec<ListItem>>),
+    ) {
+        let Some(parent) = self.parent_fields.as_mut() else {
+            return;
+        };
+        let Some(field) = parent.iter_mut().find(|fld| fld.key == key) else {
+            return;
+        };
+        if let FieldKind::OrderedList { items, available } = &mut field.kind {
+            f(items, available);
+        }
     }
 
     /// The field keyed `key` — the installed ones first, then the
@@ -2379,8 +2505,12 @@ impl Draft {
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
                     return Step::Inert;
                 };
+                // The Values stage may empty its list — that is "drop this
+                // dimension" (scopes-editing spec §4), folded by the
+                // adapter; the guard is a Groupings/Views rule.
                 if included
                     && dest == Destination::Doc
+                    && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
                 {
                     return Step::Refused(format!("{label} must keep at least one entry"));
@@ -2619,6 +2749,13 @@ impl Draft {
         }
         let mut entry = items.remove(item);
         entry.included = false;
+        // A note is a property of the SELECTION (Scopes' own values, the
+        // Values stage's counts) — `fold_values`'s demotion arm clears it
+        // the same way when a tick empties a selection, and every other
+        // adapter's note is already `None`, so this is a no-op for them.
+        // Left set, a dropped dimension's available row would keep
+        // painting its old values after `x`.
+        entry.note = None;
         available.push(entry);
         let last = available.len() - 1;
         // The cursor does NOT follow the item to the end of the
@@ -2720,6 +2857,7 @@ impl Draft {
             choice: None,
             parent_fields: None,
             column: None,
+            values: None,
             column_ctx: None,
             // An object nothing defines yet has no columns for a dataset
             // to speak for; `Domain::draft` is where the layer arrives.
@@ -2899,6 +3037,15 @@ impl Domain {
         if matches!(stage, Stage::Column { .. }) {
             return views::column_help(key);
         }
+        // Scopes-editing spec §4: the Values stage's one row is always
+        // keyed `values`, so this answers the same as the general
+        // `Domain::Scopes` arm below would — stated explicitly, ahead of
+        // it, so a future domain that grows a Values-shaped stage of its
+        // own cannot silently fall through to its OWN `help` table
+        // instead.
+        if matches!(stage, Stage::Values { .. }) {
+            return scopes::help("values");
+        }
         match self {
             Domain::Views => views::help(key),
             Domain::Sources => sources::help(key),
@@ -2910,15 +3057,17 @@ impl Domain {
     }
 
     /// May `i` edit the `Text` row keyed `key` on this domain? `false` on
-    /// Groupings, Scopes, Schema and Colours — Groupings' `slot` and
-    /// Scopes' two summaries are display-only `Text`s and must refuse;
-    /// Colours has no `Text` row at all (`hue` is a `Number`,
+    /// Groupings and Colours — Groupings' `slot` is a display-only
+    /// `Text`; Colours has no `Text` row at all (`hue` is a `Number`,
     /// `tone`/`token` are `Choice`), so `i` never reaches this door for
     /// it. Sources (§19.3) was the first `true`, for
     /// `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
     /// (`sources::text_editable`); Views answers `true` for the column
     /// stage's `label` and `width` (Part 2c §5.3, `views::text_editable`)
-    /// and for nothing else it has.
+    /// and for nothing else it has. **Scopes answers `true` for `text`
+    /// and `expression` alone** (2026-09-19, `scopes.rs`'s own module
+    /// doc) — its `dimensions` row is an `OrderedList`, not a `Text`, and
+    /// `i` never reaches this door for it either.
     ///
     /// **Schema shares the Views answer** (dataset-presentation spec
     /// §4.1): its column stage paints the very same seven rows, so `i`
@@ -2928,10 +3077,11 @@ impl Domain {
     /// — so routing here does not make one read-only schema row typeable.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
-            Domain::Groupings | Domain::Scopes | Domain::Colours => {
+            Domain::Groupings | Domain::Colours => {
                 let _ = key;
                 false
             }
+            Domain::Scopes => matches!(key, "text" | "expression"),
             Domain::Views | Domain::Schema => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
         }
@@ -2942,16 +3092,18 @@ impl Domain {
     /// by default; an adapter with a real grammar (a duration, a regex, a
     /// path list) overrides its own keys — Sources was the first
     /// (`sources::parse_text`), Views the second (the column stage's
-    /// `width`, Part 2c §5.3).
+    /// `width`, Part 2c §5.3), Scopes the third (`scopes::parse_text`,
+    /// which also refuses a broken `expression`).
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
             // Colours joins for the same reason `text_editable` gives
             // it no `true` above: no `Text` row for this door to ever
             // be called on.
-            Domain::Groupings | Domain::Scopes | Domain::Colours => {
+            Domain::Groupings | Domain::Colours => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
+            Domain::Scopes => scopes::parse_text(key, text),
             // Schema joins Views for the reason `text_editable` gives:
             // the two column stages are the same seven rows, so `width`
             // must have the same grammar through either door.
@@ -2974,6 +3126,24 @@ impl Domain {
             Domain::Schema => schema::fields(config, object),
             Domain::Sources => sources::fields(config, object),
             Domain::Colours => colours::fields(config, object),
+        }
+    }
+
+    /// The fields a `c`-copied object opens with, built straight from the
+    /// table `create_from_name` just copied rather than from a named
+    /// object `config` has a row for yet — the copy has not been written
+    /// when this runs (§6). Only [`Domain::duplicable`] needs the real
+    /// answer: every other domain falls back to `self.fields(config,
+    /// None)`, its own empty-object shape, since nothing else can reach
+    /// this door.
+    pub fn fields_from_source(self, config: &Config, table: &toml::Table) -> Vec<Field> {
+        match self {
+            Domain::Scopes => scopes::fields_from_table(config, Some(table)),
+            Domain::Views
+            | Domain::Groupings
+            | Domain::Schema
+            | Domain::Sources
+            | Domain::Colours => self.fields(config, None),
         }
     }
 
@@ -3002,6 +3172,7 @@ impl Domain {
             choice: None,
             parent_fields: None,
             column: None,
+            values: None,
             column_ctx: None,
             // §5.1: Views alone. Reloading the views a second time here
             // (`fields` above already did once) is the price of the
@@ -3020,9 +3191,12 @@ impl Domain {
     /// The draft `n` opens after a name is committed (§18.2): the
     /// adapter's empty-object fields — `fields(config, None)`, which every
     /// adapter already answers — over an empty source, validated once.
-    /// Scopes' caller replaces the result with the frame's scope before
-    /// committing (`scopes::overwrite_with`); the empty fields are still
-    /// what this returns, so the pure core never reads a `Frame`.
+    /// `n` creates an EMPTY object (scopes-editing spec §6, reversing the
+    /// earlier "Scopes' `n` saves the frame's scope" behaviour) — `c`'s
+    /// copy is a separate path (`create_from_name`'s `NameSeed::CopyOf`
+    /// arm, over [`Domain::fields_from_source`]) that replaces this
+    /// result's fields and source once the name is committed, so the pure
+    /// core still never reads a `Frame`.
     pub fn new_draft(self, config: &Config, name: &str) -> Draft {
         let mut draft = Draft::new_object(name, self.fields(config, None), toml::Table::new());
         draft.diagnostics = self.validate(&draft, config);
@@ -3234,6 +3408,16 @@ pub struct ObjectDialogState {
     /// [`Self::cancel_naming`] and consumed by
     /// `render::create_from_name`.
     pub naming_dataset: Option<String>,
+    /// What [`Stage::Naming`]'s `enter` creates (scopes-editing spec §6):
+    /// `Empty` for `n`, `CopyOf(source)` for `c`. Read once, by
+    /// `render::create_from_name`, and reset to `Empty` by
+    /// [`Self::cancel_naming`] so a later `n` on the same dialog instance
+    /// cannot inherit a stale `c`'s target.
+    pub naming_seed: NameSeed,
+    /// The tag of the latest distinct request the Values stage submitted
+    /// (`render::enter_values_stage`); an outcome with any other tag is
+    /// stale and dropped (spec §7.3).
+    pub values_tag: u64,
 }
 
 impl ObjectDialogState {
@@ -3254,6 +3438,8 @@ impl ObjectDialogState {
             confirm: None,
             confirm_target: None,
             naming_dataset: None,
+            naming_seed: NameSeed::Empty,
+            values_tag: 0,
         }
     }
 
@@ -3324,13 +3510,14 @@ impl ObjectDialogState {
         self.disarm();
     }
 
-    /// [`Self::enter_edit`]'s twin for a name `n` has just committed
-    /// (§18.2): the same stage transition, over an already-built `draft`
-    /// rather than one derived from `config`. A committed name has
-    /// nothing in `config` to derive from yet — the write is still on its
-    /// way through the debounced flush — and Scopes' caller has already
-    /// replaced the draft's fields with the frame's current scope
-    /// (`scopes::overwrite_with`), which a fresh `domain.draft(config,
+    /// [`Self::enter_edit`]'s twin for a name `n` or `c` has just
+    /// committed (§18.2, scopes-editing spec §6): the same stage
+    /// transition, over an already-built `draft` rather than one derived
+    /// from `config`. A committed name has nothing in `config` to derive
+    /// from yet — the write is still on its way through the debounced
+    /// flush — and `create_from_name` has already built whatever this
+    /// draft should hold (the domain's empty object for `n`, or `c`'s
+    /// copied source and fields), which a fresh `domain.draft(config,
     /// name)` call would throw away.
     ///
     /// Visible only inside this subtree for the same reason
@@ -3397,11 +3584,24 @@ impl ObjectDialogState {
     /// empty-looking filter field, and a `leave_edit` cursor restore that
     /// silently failed to find the object it was looking for.
     pub fn set_query(&mut self, query: String) {
-        // The column stage (Part 2c §5.2) is the edit stage's own filter
+        // The column stage (Part 2c §5.2) and the Values stage
+        // (scopes-editing spec §4) are both the edit stage's own filter
         // row over a different set of rows — one draft, one cursor space
-        // — so it takes the same side of the mirror.
-        if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
-            && let Some(draft) = self.draft.as_mut()
+        // — so they take the same side of the mirror. This arm, the read
+        // half in `effective_query` and the cursor half in
+        // `effective_selected` are the write and read halves of one
+        // mirror (this method's own doc has the full mechanism) and MUST
+        // list the same stages: a stage present in one but not the other
+        // reads back from a different slot than the keystroke was
+        // written to — a review Critical found the Values stage missing
+        // from all three, so `/` there wrote `state.query` (browse's own
+        // slot) while `draft.query` stayed empty, and `ctrl+a`
+        // ("tick every value the filter currently shows") ticked and
+        // wrote every value in the list rather than the filtered ones.
+        if matches!(
+            self.stage,
+            Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
+        ) && let Some(draft) = self.draft.as_mut()
         {
             draft.set_query(query);
         } else {
@@ -3412,25 +3612,33 @@ impl ObjectDialogState {
     }
 
     /// The query the open stage is filtering by — the draft's in
-    /// `Stage::Edit`, the state's own otherwise (spec §16.2). The **read
-    /// half** of [`Self::set_query`]'s one-way mirror: `dialog::
-    /// sync_dialog_text` writes the shared `Input` from this, so a query
-    /// left sitting in the other stage's slot can never reach the screen.
+    /// `Stage::Edit`/`Column`/`Values`, the state's own otherwise (spec
+    /// §16.2). The **read half** of [`Self::set_query`]'s one-way
+    /// mirror: `dialog::sync_dialog_text` writes the shared `Input` from
+    /// this, so a query left sitting in the other stage's slot can never
+    /// reach the screen. See [`Self::set_query`]'s doc for why this
+    /// match must name exactly the same stages that one does.
     pub fn effective_query(&self) -> &str {
         match (&self.stage, self.draft.as_ref()) {
-            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),
+            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
+                draft.query.as_str()
+            }
             _ => self.query.as_str(),
         }
     }
 
     /// The cursor of the open stage, in the same slot rule as
-    /// [`Self::effective_query`]: the draft's in the edit and column
-    /// stages, the state's own otherwise. What the change subscription
-    /// scrolls to after a keystroke — the top for a filter (the reset),
-    /// the edited row for an open plain field, which `set_query` keeps.
+    /// [`Self::effective_query`]: the draft's in the edit, column and
+    /// values stages, the state's own otherwise. What the change
+    /// subscription scrolls to after a keystroke — the top for a filter
+    /// (the reset), the edited row for an open plain field, which
+    /// `set_query` keeps. See [`Self::set_query`]'s doc for why this
+    /// match must name exactly the same stages that one does.
     pub fn effective_selected(&self) -> usize {
         match (&self.stage, self.draft.as_ref()) {
-            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.selected,
+            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
+                draft.selected
+            }
             _ => self.selected,
         }
     }
@@ -3466,6 +3674,7 @@ impl ObjectDialogState {
         self.notice = None;
         self.disarm();
         self.naming_dataset = None;
+        self.naming_seed = NameSeed::Empty;
     }
 
     /// Whether `escape` has a stage to step back into before it closes
@@ -3485,7 +3694,7 @@ impl ObjectDialogState {
     pub fn has_previous_stage(&self) -> bool {
         matches!(
             self.stage,
-            Stage::Edit { .. } | Stage::Naming | Stage::Column { .. }
+            Stage::Edit { .. } | Stage::Naming | Stage::Column { .. } | Stage::Values { .. }
         )
     }
 }
@@ -4283,6 +4492,7 @@ mod tests {
             choice: None,
             parent_fields: None,
             column: None,
+            values: None,
             column_ctx: None,
             dataset_layer: BTreeMap::new(),
         }
@@ -5252,6 +5462,7 @@ mod tests {
             included: false,
             presentation: ColumnPresentation::default(),
             kind: None,
+            note: None,
         }
     }
 
@@ -5896,12 +6107,14 @@ mod tests {
                                 included: true,
                                 presentation: ColumnPresentation::default(),
                                 kind: None,
+                                note: None,
                             },
                             ListItem {
                                 name: "delta".into(),
                                 included: true,
                                 presentation: ColumnPresentation::default(),
                                 kind: None,
+                                note: None,
                             },
                         ],
                         available: Some(vec![ListItem {
@@ -5909,6 +6122,7 @@ mod tests {
                             included: false,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            note: None,
                         }]),
                     },
                     dest: Destination::Doc,
@@ -5997,12 +6211,14 @@ mod tests {
                             included: true,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            note: None,
                         },
                         ListItem {
                             name: "npv".into(),
                             included: true,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            note: None,
                         },
                     ],
                     available: None,
@@ -6304,6 +6520,141 @@ mod tests {
             before,
             "the view's own column list survived the refused re-entry"
         );
+    }
+
+    /// The Values stage is a projection like the column stage: entering
+    /// swaps the fields, leaving restores them and hands the stage's own
+    /// fields back so the adapter can fold them.
+    #[test]
+    fn entering_values_swaps_the_fields_and_leaving_restores_them() {
+        let mut draft = groupings_draft();
+        let before = draft.fields.clone();
+        let values = vec![Field {
+            key: "values".to_string(),
+            label: "Values".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![item("BK001")],
+                available: None,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        }];
+        assert!(draft.enter_values("book", values.clone()));
+        assert_eq!(draft.values(), Some("book"));
+        assert_eq!(draft.fields, values);
+        assert!(!draft.is_dirty(), "freshly installed values are not dirt");
+        // Re-entry is refused, as `enter_column` refuses it.
+        assert!(!draft.enter_values("lhu", Vec::new()));
+        let own = draft.leave_values().expect("the stage's fields");
+        assert_eq!(own, values);
+        assert_eq!(draft.values(), None);
+        assert_eq!(draft.fields, before);
+    }
+
+    /// In the Values stage the last ticked value may be unticked — an
+    /// emptied selection is "drop this dimension", not an invalid object
+    /// — where the same untick on a Groupings chain is refused.
+    #[test]
+    fn the_last_tick_may_be_removed_in_the_values_stage_alone() {
+        let mut draft = groupings_draft();
+        let values = vec![Field {
+            key: "values".to_string(),
+            label: "Values".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![ListItem {
+                    included: true,
+                    ..item("BK001")
+                }],
+                available: None,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        }];
+        assert!(draft.enter_values("book", values));
+        draft.selected = 1; // the one item row under the header
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        assert!(!draft.list_items("values").unwrap()[0].included);
+    }
+
+    /// A stage with a previous rung: `escape` from Values steps back.
+    #[test]
+    fn values_is_a_stage_escape_can_step_back_from() {
+        let mut state = ObjectDialogState::new(Domain::Scopes);
+        state.stage = Stage::Values {
+            object: "mine".into(),
+            column: "book".into(),
+        };
+        assert!(state.has_previous_stage());
+    }
+
+    /// The Column and Values stages share one stash (`Draft::values`'s own
+    /// doc: "the two stages share the stash and can never both be open"),
+    /// so `enter_column` must refuse exactly as re-entry on itself does —
+    /// entering over an open Values stage would stash ITS installed
+    /// fields as `parent_fields` and drop the object's own list for good.
+    #[test]
+    fn enter_column_is_refused_while_the_values_stage_is_open() {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let column_item = draft.list_items("columns").unwrap()[0].clone();
+        let column_fields = views::column_fields(&column_item, &[], Destination::Presentation);
+        let values_fields = vec![Field {
+            key: "values".to_string(),
+            label: "Values".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![item("BK001")],
+                available: None,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        }];
+        assert!(draft.enter_values("book", values_fields.clone()));
+        assert!(
+            !draft.enter_column("npv", column_fields),
+            "the values stage already holds the shared stash"
+        );
+        assert_eq!(
+            draft.fields, values_fields,
+            "the refused enter_column touched nothing"
+        );
+        assert_eq!(draft.values(), Some("book"));
+        assert_eq!(draft.column(), None);
+    }
+
+    /// `leave_column` is the Column stage's own door — called while the
+    /// Values stage holds the shared stash, it must do nothing rather
+    /// than take a stash that belongs to the other stage (the review
+    /// finding this test and `enter_column_is_refused_while_the_values_stage_is_open`
+    /// close): the checked discriminant is `column`, which is `None`
+    /// while Values is open.
+    #[test]
+    fn leave_column_does_nothing_while_the_values_stage_is_open() {
+        let mut draft = groupings_draft();
+        let before = draft.fields.clone();
+        let values = vec![Field {
+            key: "values".to_string(),
+            label: "Values".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![item("BK001")],
+                available: None,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        }];
+        assert!(draft.enter_values("book", values.clone()));
+        draft.leave_column();
+        assert_eq!(
+            draft.values(),
+            Some("book"),
+            "leave_column must not touch the Values stage"
+        );
+        assert_eq!(draft.fields, values, "leave_column touched nothing");
+        let own = draft
+            .leave_values()
+            .expect("the stage's own fields survive leave_column's no-op");
+        assert_eq!(own, values);
+        assert_eq!(draft.values(), None);
+        assert_eq!(draft.fields, before);
     }
 
     /// Part 2c §5.5: a diagnostic path whose index resolves — by name, 2b's

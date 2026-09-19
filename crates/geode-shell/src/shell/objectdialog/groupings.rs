@@ -133,6 +133,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             // `[[columns]]` entry, and a grouping slot's value is a bare
             // array, never a table with a `kind` key.
             kind: None,
+            note: None,
         })
         .collect();
     for column in crate::shell::groupable_columns(config) {
@@ -144,6 +145,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             included: false,
             presentation: ColumnPresentation::default(),
             kind: None,
+            note: None,
         });
     }
 

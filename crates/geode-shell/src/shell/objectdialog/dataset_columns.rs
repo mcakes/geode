@@ -212,6 +212,7 @@ pub fn item_for(
         kind: views::schema_role_kind(&spec.role)
             .or_else(|| kind_for_type(spec.ty))
             .map(str::to_string),
+        note: None,
     })
 }
 
@@ -379,6 +380,7 @@ mod tests {
             included: true,
             presentation: p,
             kind: Some("measure".into()),
+            note: None,
         }
     }
 

@@ -3196,3 +3196,36 @@ the word "column", which the dataset row's sentence also contains, and
 let a wrong-index mutant through); the sweep. **Harness:** three entries
 (the column-stage dispatch, the list row's field index, the notice's
 priority in the slot).
+
+## 23. Scopes editing (2026-09-19)
+
+`docs/superpowers/specs/2026-09-19-geode-scopes-dialog-editing-design.md`
+supersedes §8.4's "A scope's *values* are not edited here" — a scope's
+own criteria are edited here now, not read-only text. `dimensions` is a
+real `OrderedList` (the selected columns, the rest of `pickable_columns`
+available), `text` and `expression` are `i`-editable, and `enter` (or a
+click) on a selected dimension row, or `space`/`enter`/a click on an
+available one, opens a Values stage — a column's distinct values,
+fetched live, ticked to select — rather than the fixed `column ∈ values`
+summary this section originally described; `space` on a selected
+dimension names the door rather than opening it.
+
+Keys: `enter` (or a click) opens a dimension's values from either list,
+`space`/a tick click does too from the available list only (from the
+selected list it names the door instead); inside the Values stage,
+`ctrl+a` ticks every value the filter currently shows and `ctrl+x`
+clears the selection; `i` opens `text` or `expression` for typed entry;
+`n` creates an empty scope (no longer a snapshot of the frame); `c`
+duplicates the selected scope verbatim under a new name; `o` is
+unchanged (still replaces the open scope with the frame's current one).
+
+**Reorder refusal is not a `Domain` method.** There is no
+`Domain::reorderable()` — the ruling that Scopes' two lists have no
+order is implemented as inline, domain-conditioned guards at each site
+that would otherwise act on one: `handle_edit_key`'s `NormalCommand::
+MoveItem` arm refuses under `render::is_scopes(shell)`, the edit
+footer's own `reorders` flag and the row-painting `draggable` flag both
+compare `state.domain != Domain::Scopes`/`domain != Domain::Scopes`
+directly. A future domain that also has no order would need the same
+three sites touched rather than one trait method overridden — a known
+seam, not a defect this plan closes.
