@@ -168,9 +168,15 @@ the current value as the notice.
 the text `InputState` above. It opens a Geode-owned segmented date
 field in the value's place — `YYYY`‑`MM`‑`DD`, one segment active,
 opened on the DAY — whose value is a valid date at every moment, so
-`enter` has nothing to refuse and `parse_attr`'s `Date` arm serves
-`:set` alone. The rest of this section (`F64`/`I64`/`Utf8`, the cell
-rule, the `Behind` and empty-model refusals) is unchanged.
+`parse_attr`'s `Date` arm serves `:set` alone. `enter` has one refusal
+of its own (review ruling, same day): a digit still waiting in a
+segment is finished FIRST — a lone `1` in the month commits as `01`, a
+lone `2` in the day as `02` (the browser rule) — and a pending entry
+that cannot stand (`0` in the month or day, a year of fewer than four
+digits) refuses the commit with `finish the <year|month|day> or
+backspace`, the editor staying open with the digits as typed. The rest
+of this section (`F64`/`I64`/`Utf8`, the cell rule, the `Behind` and
+empty-model refusals) is unchanged.
 
 ### 5.3 One draft
 
@@ -724,8 +730,22 @@ digit `4`–`9` completes at once while `0`–`3` waits (a second making
 `00` or more than the month holds is refused); `backspace` clears what
 was typed into the segment and the previous value shows again;
 `enter` commits and `escape` cancels — the value is always a valid
-date, so there is nothing to refuse; and a chord (`ctrl+k` and the
-rest) passes through to the shell as it does from any editor.
+date, so the only refusal is a digit left waiting that cannot stand
+(below); and a chord (`ctrl+k` and the rest) passes through to the
+shell as it does from any editor.
+
+**`enter` with a pending digit** (review ruling 2026-09-19, I-1): the
+first build committed `value()` — the OLD date — and marked it edited,
+so a trader who typed `1` in the day and pressed `enter` saw the edit
+land with the day they typed gone. `DateField::complete_pending() ->
+Result<(), Segment>` runs first in `commit_edit`'s Date arm (so the
+field's own `enter` and the fragment's `commit` agree): a single
+waiting digit that can stand alone completes as `0d` (month `1` → `01`,
+day `2` → `02`; nothing pending is `Ok`), and a pending entry that
+cannot — `0` in the month or day, a year of fewer than four digits —
+is `Err(segment)` with nothing changed, refused with the notice
+`finish the <year|month|day> or backspace` and the editor left open. A
+following keystroke that changes the field retires the notice.
 
 **As built.** `core::datefield::DateField` is the pure core (`open`,
 `left`/`right`/`select`, `step`, `digit -> bool` (completed), `backspace`,
@@ -754,7 +774,14 @@ nothing. A segment's mouse-down `select`s it and stops propagation,
 because the attribute value's own `attr_clicked` would otherwise
 cancel the editor the click was aimed into; the container's padding
 and the separators still bubble, so a click elsewhere cancels as
-before. `core::nudge::nudge_text` no longer handles a `Date`.
+before. `core::nudge::nudge_text` no longer handles a `Date`. A segment click
+also re-focuses the field's own handle when it has lost the keyboard
+(review M4: the orphaned-editor state after a tile-focus move) — a
+module focusing its OWN handle, never the shell's. `step` saturates
+rather than panics in fact as well as in name (review M3): the day arm
+goes through `Duration::try_days` (`days` panics past its bound) and
+the month count through `checked_add`, both `None` → the bound in the
+step's direction.
 
 **Colours.** The active segment is `primary` under
 `FlooredTones::primary_text`: `primary_foreground` floored by
@@ -775,10 +802,17 @@ header edited with the dot), typing (`1` waits, `12` advances, `39`
 refused, `backspace` restores, `30` then `enter`), `escape` (draft
 empty, painted date back, `Window::focused` `None`), a segment click,
 a chord reaching the host's own key listener past the field, and
-`spot_ref` still opening the text editor. Harness: `mddate: the field
-opens on the day segment`, `mddate: the day rolls over into the next
-month`, `mddate: a month step clamps the day`, `mddate: a first month
-digit 2-9 completes at once`, `mddate: escape restores the painted
-date`; `mdnudge: a date steps whole days` is retired. Display check
+`spot_ref` still opening the text editor, `enter` completing a pending
+digit through both doors, the incompletable-digit refusal, and a
+segment click re-focusing a blurred field. Harness (ten `mddate:`
+entries): `the field opens on the day segment`, `the day rolls over
+into the next month`, `a month step clamps the day`, `a first month
+digit 2-9 completes at once`, `escape restores the painted date`, `a
+second month digit past twelve is refused`, `a day the month lacks is
+refused`, `chords pass through the field to the shell` (the test's
+`ctrl-up` is what catches it — `ctrl-k`'s `k` is not a key the field
+reads), `insert_up steps a date field`, `enter completes an unambiguous
+pending digit, never commits the old date`; `mdnudge: a date steps
+whole days` is retired. Display check
 pending on a real window: the three segments and their highlight in
 the strip beside the other attributes.

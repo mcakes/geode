@@ -1912,20 +1912,46 @@ impl MarketDataTile {
             }
         }
         *paint = DateFieldPaint::of(field);
-        cx.notify();
+        // A keystroke that changed the field retires a standing refusal
+        // (`finish the day or backspace`, say) — the notice is header
+        // chrome, so that one case re-prepares it.
+        if self.notice.take().is_some() {
+            self.changed(cx);
+        } else {
+            cx.notify();
+        }
         true
     }
 
     /// A click on one of the field's segments (`header::render` attaches
-    /// this): the mouse form of `left`/`right`.
-    pub(crate) fn date_segment_clicked(&mut self, segment: Segment, cx: &mut Context<Self>) {
+    /// this): the mouse form of `left`/`right`. It also takes the keyboard
+    /// back for the field when the field has lost it (review M4) — an
+    /// editor orphaned by a tile-focus move (I-3) is still open, and a
+    /// click on its segment is the trader asking to type into it again. A
+    /// module focusing its OWN handle, never the shell's (CLAUDE.md's
+    /// focus rule); the shell's insert-focus rule then withholds its
+    /// restore exactly as it does after `begin_edit`.
+    pub(crate) fn date_segment_clicked(
+        &mut self,
+        segment: Segment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(Editing {
-            state: EditorState::Date { field, paint, .. },
+            state:
+                EditorState::Date {
+                    field,
+                    paint,
+                    focus,
+                },
             ..
         }) = self.editor.as_mut()
         {
             field.select(segment);
             *paint = DateFieldPaint::of(field);
+            if !focus.is_focused(window) {
+                focus.focus(window, cx);
+            }
             cx.notify();
         }
     }
@@ -1933,11 +1959,11 @@ impl MarketDataTile {
     /// `marketdata::commit` (`enter` in insert mode). Answers whether the
     /// header needs re-preparing.
     fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(editing) = self.editor.as_ref() else {
+        let Some(editing) = self.editor.as_mut() else {
             return false;
         };
         let target = editing.target.clone();
-        match (&editing.state, target) {
+        match (&mut editing.state, target) {
             (EditorState::Text(state), EditTarget::Cell { cell, labels }) => {
                 let text = state.read(cx).value().to_string();
                 self.commit_cell_edit(cell, labels, &text, window, cx)
@@ -1946,9 +1972,24 @@ impl MarketDataTile {
                 let text = state.read(cx).value().to_string();
                 self.commit_attr_edit(index, column, AttrInput::Text(&text), window, cx)
             }
-            (EditorState::Date { field, .. }, EditTarget::Attr { index, column }) => {
-                // Always a valid date (the field's own invariant), so
-                // there is nothing to parse and nothing to refuse.
+            (EditorState::Date { field, paint, .. }, EditTarget::Attr { index, column }) => {
+                // A digit still waiting in a segment is finished FIRST
+                // (user ruling 2026-09-19, review I-1): `1` in the day
+                // then `enter` means the 1st, not the day that was there
+                // before with the edit marked as landed. A pending entry
+                // that cannot stand — `0`, a short year — refuses the
+                // commit and names the segment, the editor staying open
+                // with the digits as typed (the cell rule). Both `enter`
+                // doors (the field's own listener, the fragment's
+                // `commit`) come through here, so they cannot disagree.
+                if let Err(segment) = field.complete_pending() {
+                    self.notice =
+                        Some(format!("finish the {} or backspace", segment.name()).into());
+                    return true;
+                }
+                *paint = DateFieldPaint::of(field);
+                // Always a valid date from here (the field's own
+                // invariant): nothing to parse, nothing to refuse.
                 let value = Value::Date(field.value());
                 self.commit_attr_edit(index, column, AttrInput::Value(value), window, cx)
             }
@@ -7469,6 +7510,110 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert!(vcx.update(|window, cx| window.focused(cx).is_none()));
     }
 
+    /// `enter` with a single digit still waiting in a segment completes
+    /// it as `0d` before committing (review I-1): `2` in the day then
+    /// `enter` writes the 2nd, never the 12th that was there. Through
+    /// both doors — the field's own `enter` and the fragment's `commit`.
+    #[gpui::test]
+    fn enter_completes_a_pending_digit_rather_than_committing_the_old_date(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        type_keys(&mut vcx, "2 enter");
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().attrs.get("anchor_date").cloned()),
+            Some(Value::Date(
+                chrono::NaiveDate::from_ymd_opt(2026, 9, 2).unwrap()
+            ))
+        );
+        // The fragment's door, with a waiting month digit.
+        open_date_field(&h, &mut vcx);
+        type_keys(&mut vcx, "left 1");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().attrs.get("anchor_date").cloned()),
+            Some(Value::Date(
+                chrono::NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()
+            ))
+        );
+    }
+
+    /// A pending entry that cannot complete — `0` in the day, a
+    /// two-digit year — refuses the commit with a notice naming the
+    /// segment, and the editor stays open with the digits as typed.
+    #[gpui::test]
+    fn enter_on_an_incompletable_digit_is_refused_naming_the_segment(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        type_keys(&mut vcx, "0 enter");
+        assert_eq!(h.mode(&vcx), "insert", "the editor stays open");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("finish the day or backspace".into())
+        );
+        assert_eq!(date_segments(&h, &vcx).0[2], "0", "the typed digit is kept");
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+        type_keys(&mut vcx, "left left 2 0");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "insert");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("finish the year or backspace".into())
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+        type_keys(&mut vcx, "backspace");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            None,
+            "a keystroke that changes the field retires the refusal"
+        );
+        type_keys(&mut vcx, "enter");
+        assert_eq!(
+            h.mode(&vcx),
+            "normal",
+            "backspace then enter commits the value as it stood"
+        );
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().attrs.get("anchor_date").cloned()),
+            Some(Value::Date(
+                chrono::NaiveDate::from_ymd_opt(2026, 9, 12).unwrap()
+            ))
+        );
+    }
+
+    /// A click on a segment reclaims the keyboard for the field when it
+    /// has lost it (review M4): the orphaned-editor state, where the
+    /// field is still open but window focus is elsewhere.
+    #[gpui::test]
+    fn a_segment_click_refocuses_an_unfocused_field(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        vcx.update(|window, cx| window.blur(cx));
+        assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+        assert_eq!(h.mode(&vcx), "insert", "the editor is still open");
+        let year = centre_of(&mut vcx, &format!("marketdata-date-seg-{TILE}-0"));
+        click_at(&mut vcx, year, 1);
+        assert!(
+            vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "the click gave the field the keyboard back"
+        );
+        assert_eq!(date_segments(&h, &vcx).1, Segment::Year);
+    }
+
     /// A click on a segment selects it — the mouse form of `left`/`right`
     /// — and leaves the editor open: the segment's own mouse-down stops
     /// before the attribute value's `attr_clicked`, which would otherwise
@@ -7510,11 +7655,16 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
         assert_eq!(h.mode(&vcx), "insert");
         assert_eq!(date_segments(&h, &vcx).0, ["2026", "09", "12"]);
-        // And a key the field consumes does NOT reach it.
+        // A chord on a key the field WOULD otherwise handle is still not
+        // its own: `ctrl-up` reaches the host and steps nothing.
+        type_keys(&mut vcx, "ctrl-up");
+        assert_eq!(h.host_keys(), before + 2, "ctrl-up passed through too");
+        assert_eq!(date_segments(&h, &vcx).0, ["2026", "09", "12"]);
+        // And a bare key the field consumes does NOT reach it.
         type_keys(&mut vcx, "up");
         assert_eq!(
             h.host_keys(),
-            before + 1,
+            before + 2,
             "a consumed key stops at the field"
         );
         assert_eq!(date_segments(&h, &vcx).0, ["2026", "09", "13"]);

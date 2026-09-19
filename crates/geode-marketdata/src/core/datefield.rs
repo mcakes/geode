@@ -26,6 +26,15 @@ impl Segment {
         }
     }
 
+    /// The segment's name as a notice spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Segment::Year => "year",
+            Segment::Month => "month",
+            Segment::Day => "day",
+        }
+    }
+
     /// The segment painted at `index`, `None` past the day.
     pub fn at(index: usize) -> Option<Self> {
         match index {
@@ -95,7 +104,10 @@ impl DateField {
         self.select(self.segment.right());
     }
 
-    /// Make `segment` the active one (a click, or the arrows above).
+    /// Make `segment` the active one (a click, or the arrows above). A
+    /// re-select of the segment that is already active — a click on it,
+    /// `left` at the year, `right` at the day — also drops its partial
+    /// digits: every select is "start this segment afresh".
     pub fn select(&mut self, segment: Segment) {
         self.segment = segment;
         self.typed.clear();
@@ -109,16 +121,23 @@ impl DateField {
         self.typed.clear();
         let date = self.date;
         self.date = match self.segment {
-            Segment::Day => date.checked_add_signed(Duration::days(n)),
+            // `try_days`, never `days`: the latter PANICS past its own
+            // bound, and the arm below is what turns an absurd `n` into a
+            // saturated date instead.
+            Segment::Day => Duration::try_days(n).and_then(|d| date.checked_add_signed(d)),
             Segment::Month => {
                 // Counted in whole months from year 0 so a step of any
                 // size crosses year ends in one arithmetic, then clamped
                 // through the same door a year step and a typed month use.
-                let total = i64::from(date.year()) * 12 + i64::from(date.month() - 1) + n;
-                let month = total.rem_euclid(12) as u32 + 1;
-                i32::try_from(total.div_euclid(12))
-                    .ok()
-                    .and_then(|year| clamped_ymd(year, month, date.day()))
+                // `checked_add`: an `n` near `i64::MAX` would otherwise
+                // overflow the count itself.
+                let months = i64::from(date.year()) * 12 + i64::from(date.month() - 1);
+                months.checked_add(n).and_then(|total| {
+                    let month = total.rem_euclid(12) as u32 + 1;
+                    i32::try_from(total.div_euclid(12))
+                        .ok()
+                        .and_then(|year| clamped_ymd(year, month, date.day()))
+                })
             }
             Segment::Year => {
                 let delta = i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX });
@@ -144,6 +163,10 @@ impl DateField {
     ///   `12` is refused (the first digit stays).
     /// - Day: a first digit `4`–`9` completes as `0d`; `0`–`3` waits; a
     ///   second digit making `00` or more than the month holds is refused.
+    ///
+    /// A digit left WAITING is not lost at `enter`: the commit runs
+    /// [`Self::complete_pending`] first, so a lone `1` in the month
+    /// commits as `01` and a lone `2` in the day as `02`.
     pub fn digit(&mut self, d: u8) -> bool {
         let d = d.min(9);
         match self.segment {
@@ -202,6 +225,38 @@ impl DateField {
         }
     }
 
+    /// Finish whatever is still typed into the active segment, as a commit
+    /// must before it reads [`Self::value`] (user ruling 2026-09-19): a
+    /// trader who typed `1` in the day and pressed `enter` meant the 1st,
+    /// not the day that was there before. A single waiting digit that
+    /// can stand alone completes as `0d` (the browser rule: month `1` →
+    /// `01`, day `2` → `02`); `Ok(())` too when nothing is pending. A
+    /// pending entry that cannot complete — `0` in the month or day, a
+    /// year of fewer than four digits — is `Err(segment)` with nothing
+    /// changed, for the caller to refuse the commit and name the segment.
+    pub fn complete_pending(&mut self) -> Result<(), Segment> {
+        if self.typed.is_empty() {
+            return Ok(());
+        }
+        let value = self.typed.parse::<u32>().unwrap_or(0);
+        let completed = match self.segment {
+            Segment::Year => None,
+            Segment::Month if value >= 1 => clamped_ymd(self.date.year(), value, self.date.day()),
+            Segment::Day if value >= 1 => {
+                NaiveDate::from_ymd_opt(self.date.year(), self.date.month(), value)
+            }
+            Segment::Month | Segment::Day => None,
+        };
+        match completed {
+            Some(date) => {
+                self.date = date;
+                self.typed.clear();
+                Ok(())
+            }
+            None => Err(self.segment),
+        }
+    }
+
     /// Clear what was typed into the active segment; the committed value
     /// shows again.
     pub fn backspace(&mut self) {
@@ -233,8 +288,9 @@ impl DateField {
         ]
     }
 
-    /// The value a commit takes — the committed date, partial digits
-    /// ignored.
+    /// The committed date. Partial digits are not in it — which is why a
+    /// commit calls [`Self::complete_pending`] first and reads this only
+    /// on `Ok`; read raw, mid-typing, it is the date before the digit.
     pub fn value(&self) -> NaiveDate {
         self.date
     }
@@ -388,6 +444,68 @@ mod tests {
         f.select(Segment::Day);
         f.step(-1);
         assert_eq!(f.value(), NaiveDate::MIN);
+        // The two arithmetic overflows: the month COUNT itself, and
+        // `Duration::days`' own bound (which panics where `try_days`
+        // answers `None`).
+        let mut f = DateField::open(d(2026, 9, 14));
+        f.select(Segment::Month);
+        f.step(i64::MAX);
+        assert_eq!(f.value(), NaiveDate::MAX);
+        let mut f = DateField::open(d(2026, 9, 14));
+        f.step(i64::MAX);
+        assert_eq!(f.value(), NaiveDate::MAX);
+        f.step(i64::MIN);
+        assert_eq!(f.value(), NaiveDate::MIN);
+    }
+
+    #[test]
+    fn a_reselect_of_the_active_segment_drops_partial_digits() {
+        let mut f = DateField::open(d(2026, 9, 14));
+        assert!(!f.digit(2));
+        f.right();
+        assert_eq!(texts(&f)[2], "14", "right at the day re-selects it");
+        assert!(!f.digit(2));
+        f.select(Segment::Day);
+        assert_eq!(texts(&f)[2], "14", "a click on the active segment too");
+    }
+
+    #[test]
+    fn a_pending_single_digit_completes_at_commit() {
+        let mut f = DateField::open(d(2026, 9, 14));
+        f.select(Segment::Month);
+        assert!(!f.digit(1));
+        assert_eq!(f.complete_pending(), Ok(()));
+        assert_eq!(f.value(), d(2026, 1, 14));
+        assert!(!f.segments()[1].typing);
+        f.select(Segment::Day);
+        assert!(!f.digit(2));
+        assert_eq!(f.complete_pending(), Ok(()));
+        assert_eq!(f.value(), d(2026, 1, 2));
+        assert_eq!(f.complete_pending(), Ok(()), "nothing pending is Ok");
+        assert_eq!(f.value(), d(2026, 1, 2));
+        // `3` waits in the day (30/31 possible) and completes as the 3rd.
+        assert!(!f.digit(3));
+        assert_eq!(f.complete_pending(), Ok(()));
+        assert_eq!(f.value(), d(2026, 1, 3));
+    }
+
+    #[test]
+    fn a_pending_entry_that_cannot_complete_refuses_naming_the_segment() {
+        let mut f = DateField::open(d(2026, 9, 14));
+        assert!(!f.digit(0));
+        assert_eq!(f.complete_pending(), Err(Segment::Day));
+        assert_eq!(texts(&f)[2], "0", "refused, nothing changed");
+        assert_eq!(f.value(), d(2026, 9, 14));
+        f.select(Segment::Month);
+        assert!(!f.digit(0));
+        assert_eq!(f.complete_pending(), Err(Segment::Month));
+        f.select(Segment::Year);
+        assert!(!f.digit(2));
+        assert!(!f.digit(0));
+        assert_eq!(f.complete_pending(), Err(Segment::Year));
+        assert_eq!(texts(&f)[0], "20");
+        assert_eq!(f.value(), d(2026, 9, 14));
+        assert_eq!(Segment::Year.name(), "year");
     }
 
     #[test]

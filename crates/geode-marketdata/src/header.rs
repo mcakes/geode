@@ -137,9 +137,9 @@ fn render_date_field(
                 .debug_selector(move || format!("marketdata-date-seg-{tile_id}-{i}"))
                 .on_mouse_down(gpui::MouseButton::Left, {
                     let tile = tile.clone();
-                    move |_event, _window, cx| {
+                    move |_event, window, cx| {
                         if let Some(segment) = Segment::at(i) {
-                            tile.update(cx, |t, cx| t.date_segment_clicked(segment, cx));
+                            tile.update(cx, |t, cx| t.date_segment_clicked(segment, window, cx));
                         }
                         cx.stop_propagation();
                     }

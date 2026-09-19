@@ -11943,7 +11943,7 @@ run_mutation "mddate: the field opens on the day segment" \
 # segment by hand — and nothing on screen says the step was swallowed.
 run_mutation "mddate: the day rolls over into the next month" \
   crates/geode-marketdata/src/core/datefield.rs \
-  '            Segment::Day => date.checked_add_signed(Duration::days(n)),' \
+  '            Segment::Day => Duration::try_days(n).and_then(|d| date.checked_add_signed(d)),' \
   '            Segment::Day => NaiveDate::from_ymd_opt(date.year(), date.month(), (i64::from(date.day()) + n).clamp(1, i64::from(days_in_month(date))) as u32),' \
   geode-marketdata a_day_step_rolls_over_into_the_next_month
 
@@ -11967,6 +11967,58 @@ run_mutation "mddate: a first month digit 2-9 completes at once" \
   '                    "" if d >= 2 => u32::from(d),' \
   '                    "" if d >= 10 => u32::from(d),' \
   geode-marketdata a_first_month_digit_two_to_nine_completes_at_once
+
+# A second month digit past twelve is refused and the first digit stays
+# for another try. Mutated to accept anything under 100, `1` then `9`
+# asks `clamped_ymd` for month 19 — no date — and the segment is silently
+# left as it was while the field claims a completed month by advancing.
+run_mutation "mddate: a second month digit past twelve is refused" \
+  crates/geode-marketdata/src/core/datefield.rs \
+  '                        if candidate == 0 || candidate > 12 {' \
+  '                        if candidate == 0 || candidate > 99 {' \
+  geode-marketdata a_second_month_digit_past_twelve_or_making_zero_is_refused
+
+# A second day digit past the month's length is refused (`31` in
+# September). Mutated to accept it, the same silent non-date as above.
+run_mutation "mddate: a day the month lacks is refused" \
+  crates/geode-marketdata/src/core/datefield.rs \
+  '                        if candidate == 0 || candidate > days_in_month(self.date) {' \
+  '                        if candidate == 0 || candidate > 99 {' \
+  geode-marketdata day_typing_waits_on_zero_to_three_and_refuses_a_day_the_month_lacks
+
+# A chord is never the field's. Mutated to drop the gate, `ctrl+up` steps
+# the day and stops at the field instead of reaching the shell — and
+# every other shell chord on a key the field reads (`ctrl+k` is safe only
+# because `k` is not one) would be swallowed the same way.
+run_mutation "mddate: chords pass through the field to the shell" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if modifiers.control || modifiers.alt || modifiers.platform {
+            return false;
+        }' \
+  '        if false {
+            return false;
+        }' \
+  geode-marketdata a_chord_passes_through_the_field_to_the_shell
+
+# The shell-dispatched `insert_up`/`insert_down` (the fragment's own
+# bindings, the route when the field's listener did not consume the key)
+# step the date field. Mutated to step by zero, the verbs reach the field
+# and move nothing.
+run_mutation "mddate: insert_up steps a date field" \
+  crates/geode-marketdata/src/tile.rs \
+  '                field.step(steps);' \
+  '                field.step(steps * 0);' \
+  geode-marketdata an_attribute_nudges_by_days_or_by_its_painted_places
+
+# `enter` with a digit still waiting in a segment finishes it first (user
+# ruling 2026-09-19): `2` in the day then `enter` is the 2nd. Mutated to
+# skip the completion, the commit writes the OLD date and marks it edited
+# — the trader sees the edit land with the day they typed gone.
+run_mutation "mddate: enter completes an unambiguous pending digit, never commits the old date" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if let Err(segment) = field.complete_pending() {' \
+  '                if let Err(segment) = Ok::<(), Segment>(()) {' \
+  geode-marketdata enter_completes_a_pending_digit_rather_than_committing_the_old_date
 
 # `escape` in the field CANCELS: the painted date comes back and the draft
 # is untouched. Mutated to commit instead, every abandoned edit is written
