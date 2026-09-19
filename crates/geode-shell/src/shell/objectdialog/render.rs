@@ -342,6 +342,27 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
     }
     let visible = super::visible_rows(state, &rows);
 
+    // A question on screen owns the keys (spec §20.1) — the edit stage's
+    // own armed block, verbatim, since 2026-09-19 the browse list arms
+    // `d`/`r` too. Ahead of the escape ladder on purpose: `escape` is the
+    // question's "no", never a rung.
+    if let Some(confirm) = state.confirm {
+        match dialog::ConfirmAnswer::from_key(ks) {
+            Some(dialog::ConfirmAnswer::Yes) => {
+                disarm_confirm(shell);
+                run_confirmed(shell, confirm, cx);
+            }
+            Some(dialog::ConfirmAnswer::No) => disarm_confirm(shell),
+            // Claimed and dropped: a stray letter must not act on the
+            // object behind the question — nor move the cursor off it,
+            // which is what keeps `target_object` the same row at answer
+            // time as at arming time.
+            None => {}
+        }
+        cx.notify();
+        return true;
+    }
+
     if state.mode == DialogMode::Normal {
         // Modifier-agnostic on `escape`, exactly as `handle_key_down`'s
         // own close is (`event.keystroke.key == "escape"`): a bare-only
@@ -418,6 +439,23 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
             // arm, so the door can take `shell` whole.
             NormalCommand::Verb('n') => {
                 begin_new_object(shell, seed.clone(), seed_taken);
+                cx.notify();
+                return true;
+            }
+            // `d`/`r` on the row under the cursor (2026-09-19): the edit
+            // stage's own arming doors, gated by the same row derivation
+            // (`target_row`) and refused on a read-only domain through
+            // the same one notice every other verb gets (§19.4). A
+            // trader deleting or reverting a source should not have to
+            // open it first to do so.
+            NormalCommand::Verb(verb @ ('d' | 'r')) => {
+                if !state.domain.writable(&state.stage) {
+                    set_notice(shell, READ_ONLY_NOTICE.to_string());
+                } else if verb == 'd' {
+                    arm_delete(shell);
+                } else {
+                    arm_revert(shell);
+                }
                 cx.notify();
                 return true;
             }
@@ -693,6 +731,14 @@ fn on_row_clicked(
     // The dialog's other door — see [`handle_key`]'s own clear.
     if state.notice.take().is_some() {
         cx.notify();
+    }
+    // Spec §20.1: a question owns the mouse as well as the keys. A click
+    // here would both open the row (answering the question with a
+    // shrug — `enter_edit` clears the confirm) and, worse, move the
+    // cursor off the row the question is about, so `enter` would then
+    // act on a different object from the one the prompt names.
+    if state.confirm.is_some() {
+        return;
     }
     let visible = super::visible_rows(state, &rows);
     let Some(ix) = super::filtered_position(&visible, &rows, clicked) else {
@@ -1793,11 +1839,11 @@ fn step_selected_row(
 /// slot's user-layer copy, which is `r` when the desk has one underneath
 /// and `d` when the slot is the user's own. Naming the wrong verb would be
 /// worse than naming none, so the hint is read off the same
-/// [`editing_row`] the action bar builds `d` and `r` from — a row that
+/// [`target_row`] the action bar builds `d` and `r` from — a row that
 /// offers neither (a desk-owned slot the user has not forked) gets the
 /// reason alone rather than an invented verb.
 fn refuse_step(shell: &mut ShellView, reason: String) {
-    let hint = match editing_row(shell) {
+    let hint = match target_row(shell) {
         // `overridden` implies the user layer has it too, so both verbs
         // are live here; `r` is the one that restores what is underneath,
         // which is what an emptied override is asking for.
@@ -2076,6 +2122,33 @@ fn revalidate(shell: &mut ShellView) {
 /// reconciles the field and the focus to the mode that stands, which is
 /// why this needs no `Window` of its own — it clears the query and
 /// nothing else about the keyboard.
+/// Where the dialog lands once a removal has been committed: back in
+/// browse from the edit or column stage ([`leave_edit`], which puts the
+/// cursor on the object by name — still there after a revert, gone after
+/// a delete), and STILL in browse when the verb was pressed there
+/// (2026-09-19) — with the query kept, since a trader who filtered to
+/// find the row is not done with the filter, and the cursor clamped to
+/// the list the removal left (a deleted last row would otherwise leave
+/// `selected` one past the end until the next motion).
+fn after_removal(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let in_browse = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.stage == Stage::Browse);
+    if !in_browse {
+        leave_edit(shell, cx);
+        return;
+    }
+    let rows = derive_rows(shell);
+    if let Some(state) = shell.object_dialog.as_mut() {
+        let visible = super::visible_rows(state, &rows);
+        state.selected = state.selected.min(visible.len().saturating_sub(1));
+        let selected = state.selected;
+        shell.object_dialog_scroll.scroll_to_item(selected);
+    }
+    cx.notify();
+}
+
 fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
         Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
@@ -2098,17 +2171,39 @@ fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     cx.notify();
 }
 
-/// The browse row for the object being edited — where `layer` and
-/// `overridden` come from, so `d` and `r` are gated by the one tested
-/// derivation rather than by a second guess made here.
-fn editing_row(shell: &ShellView) -> Option<ObjectRow> {
-    let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-        // The column stage's verbs act on the OBJECT, not the column
-        // (Part 2c §5.2): `d`, `r` and `o` are the view's, and the row
-        // they are gated by is the view's row.
-        Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
-        _ => return None,
-    };
+/// The object a destructive verb acts on, in whichever stage it is
+/// pressed: the open object in the edit and column stages (the column
+/// stage's verbs act on the OBJECT, not the column — Part 2c §5.2: `d`,
+/// `r` and `o` are the view's), and the row under the cursor in browse,
+/// where `d`/`r` arm from the list too (2026-09-19). `None` while
+/// naming, and in browse when the filter hides every row — not a row the
+/// trader was pointing at.
+///
+/// This is the one place the target is resolved, and it is resolved at
+/// arming AND at answering time rather than stored beside the confirm —
+/// safe because nothing can move it in between: the armed block claims
+/// every other key, and a row click is dropped (`on_row_clicked`).
+fn target_object(shell: &ShellView) -> Option<String> {
+    let state = shell.object_dialog.as_ref()?;
+    match &state.stage {
+        Stage::Edit { object } | Stage::Column { object, .. } => Some(object.clone()),
+        Stage::Browse => {
+            let rows = derive_rows(shell);
+            let visible = super::visible_rows(state, &rows);
+            visible
+                .get(state.selected)
+                .and_then(|m| rows.get(m.row))
+                .map(|row| row.name.clone())
+        }
+        Stage::Naming => None,
+    }
+}
+
+/// The browse row for [`target_object`] — where `layer` and `overridden`
+/// come from, so `d` and `r` are gated by the one tested derivation
+/// rather than by a second guess made here.
+fn target_row(shell: &ShellView) -> Option<ObjectRow> {
+    let name = target_object(shell)?;
     derive_rows(shell).into_iter().find(|row| row.name == name)
 }
 
@@ -2139,11 +2234,11 @@ fn removal_edits(
     shell: &ShellView,
     docs: &[&'static str],
 ) -> Result<Vec<(&'static str, String)>, String> {
-    let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-        // Same rule `editing_row` states: a removal armed from the column
-        // stage removes the OBJECT, which is what `d`/`r` mean there too.
-        Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
-        _ => return Err("nothing is open".to_string()),
+    // Same rule `target_row` states: a removal armed from the column
+    // stage removes the OBJECT, which is what `d`/`r` mean there too —
+    // and from browse, the row under the cursor.
+    let Some(name) = target_object(shell) else {
+        return Err("no object is selected".to_string());
     };
     let touched: Vec<&'static str> = docs
         .iter()
@@ -2216,7 +2311,7 @@ fn arm_delete(shell: &mut ShellView) {
         not_a_column_verb(shell, "d");
         return;
     }
-    match editing_row(shell) {
+    match target_row(shell) {
         Some(row) if row.layer == Some(Layer::User) => {
             arm_confirm(shell, Confirm::Delete);
         }
@@ -2239,7 +2334,7 @@ fn arm_delete(shell: &mut ShellView) {
                 ),
             )
         }
-        None => set_notice(shell, "nothing is open".to_string()),
+        None => set_notice(shell, "no object is selected".to_string()),
     }
 }
 
@@ -2264,7 +2359,7 @@ fn arm_revert(shell: &mut ShellView) {
         not_a_column_verb(shell, "r");
         return;
     }
-    match editing_row(shell) {
+    match target_row(shell) {
         Some(row) if row.overridden => {
             arm_confirm(shell, Confirm::Revert);
         }
@@ -2272,7 +2367,7 @@ fn arm_revert(shell: &mut ShellView) {
             shell,
             format!("{} has no user override to revert", row.name),
         ),
-        None => set_notice(shell, "nothing is open".to_string()),
+        None => set_notice(shell, "no object is selected".to_string()),
     }
 }
 
@@ -2292,7 +2387,7 @@ fn arm_revert(shell: &mut ShellView) {
 /// forks it into the user layer (spec §4.1); by the 2026-09-14 ruling a
 /// fork is announced, not asked about, so that case runs at once
 /// ([`run_overwrite`]) and its notice says both what was replaced and
-/// what was copied. `editing_row` (already `arm_delete`'s and
+/// what was copied. `target_row` (already `arm_delete`'s and
 /// `arm_revert`'s own test for "does the user layer own this") answers
 /// ownership directly; `apply::would_fork` cannot be used here, because
 /// it reads `draft.writes_by_destination()`, which is still empty before
@@ -2310,7 +2405,7 @@ fn overwrite_scope(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         set_notice(shell, "nothing is open".to_string());
         return;
     }
-    let forks = editing_row(shell).is_some_and(|row| row.layer != Some(Layer::User));
+    let forks = target_row(shell).is_some_and(|row| row.layer != Some(Layer::User));
     if !forks {
         arm_confirm(shell, Confirm::Overwrite);
         return;
@@ -2420,12 +2515,11 @@ fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<Shell
                     // order `keys` happens to hold, so a notice naming
                     // both files reads "views and view_presentation" the
                     // way it always has.
-                    let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-                        Some(Stage::Edit { object } | Stage::Column { object, .. }) => {
-                            object.clone()
-                        }
-                        _ => String::new(),
-                    };
+                    // The same target `removal_edits` just resolved —
+                    // `keys` carries it too, but reading it back off a
+                    // doc key would tie the notice to the sidecar's
+                    // spelling.
+                    let name = target_object(shell).unwrap_or_default();
                     let files: Vec<String> = docs
                         .into_iter()
                         .filter(|doc| keys.iter().any(|(d, _)| d == doc))
@@ -2437,7 +2531,7 @@ fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<Shell
                         "reverted"
                     };
                     let outcome = apply::commit_removal(shell, keys, cx);
-                    leave_edit(shell, cx);
+                    after_removal(shell, cx);
                     match outcome {
                         // The removal joined the batch; the flush (no
                         // debounce of its own) is already under way, so
@@ -2485,7 +2579,7 @@ struct Action {
 /// in the notice instead.
 ///
 /// **`d` and `r` are silent for at least one tick right after `n` creates
-/// an object.** Both are gated on [`editing_row`], which derives from
+/// an object.** Both are gated on [`target_row`], which derives from
 /// `services.config` — and `commit_create` queues its write on the same
 /// debounced batch every other edit does, so the object is not yet a row
 /// the config can produce when this stage first paints. That is
@@ -2516,7 +2610,7 @@ fn actions(shell: &ShellView) -> Vec<Action> {
     // §20.3): the stage's `label` and `width` rows are exactly the rows
     // it opens, so it is decided per row below, on either stage.
     let in_column = draft.column().is_some();
-    let row = editing_row(shell);
+    let row = target_row(shell);
     let mut out = Vec::new();
     if !in_column && row.as_ref().is_some_and(|r| r.layer == Some(Layer::User)) {
         out.push(Action {
@@ -2814,7 +2908,15 @@ fn build(
     // edit stage in BOTH modes (the browse rule) and carries the
     // `objectdialog-hint-enter` selector so a test can find it, like the
     // edit footer's `i`.
-    let hints: Vec<Hint> = if naming {
+    let hints: Vec<Hint> = if state.confirm.is_some() {
+        // The edit footer's own three lines: a question on screen is the
+        // whole vocabulary until it is answered.
+        vec![
+            Hint::prose(HintRow::Go, "this needs an answer first"),
+            Hint::new(HintRow::Go, &["enter"], "go ahead"),
+            Hint::new(HintRow::Go, &["escape"], "leave it alone"),
+        ]
+    } else if naming {
         vec![
             Hint::new(HintRow::Go, &["enter"], "create"),
             Hint::new(HintRow::Go, &["escape"], "cancel"),
@@ -2917,10 +3019,18 @@ fn build(
         dialog::filter_row(&shell.dialog_input, frozen_query, cx)
     };
 
-    // Spec §20.3: `n` as a button, between the list and the footer —
-    // the browse stage's own action bar, in the edit stage's place for
-    // it (outside the list, so the rows never shift under it).
-    let action_block = browse_action_bar(state, entity, cx);
+    // Spec §20.3: the verbs as buttons, between the list and the footer
+    // — the browse stage's own action bar, in the edit stage's place for
+    // it (outside the list, so the rows never shift under it) — and,
+    // while a question stands, the confirm row in the bar's place,
+    // exactly as `build_edit` swaps them.
+    let action_block = match state.confirm {
+        Some(confirm) => {
+            let name = target_object(shell).unwrap_or_default();
+            confirm_row(confirm, &name, entity, cx)
+        }
+        None => browse_action_bar(shell, state, entity, cx),
+    };
 
     v_flex()
         .gap_2()
@@ -2965,7 +3075,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
-    let row = editing_row(shell);
+    let row = target_row(shell);
 
     // §6.1: on Colours, the swatch beside the name — resolved from the
     // draft's own live fields (`colours::definition_of`), not from the
@@ -3035,7 +3145,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             }
         }
         // §18.2: `n` this session, and still true for the whole life of
-        // the stage regardless of `row` — `editing_row` derives from
+        // the stage regardless of `row` — `target_row` derives from
         // `services.config`, which stays behind `commit_create`'s own
         // zero-debounce flush for at least one executor tick, so `row` is
         // `None` right after creation even though the object is already
@@ -3916,25 +4026,33 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 /// path — `begin_naming` sets `DialogMode::Filter`, and the sync is what
 /// focuses the name field (§17.1 rule 3).
 fn browse_action_bar(
+    shell: &ShellView,
     state: &ObjectDialogState,
     entity: &Entity<ShellView>,
     cx: &mut App,
 ) -> AnyElement {
-    let offers_n = !matches!(state.stage, Stage::Naming)
-        && state.domain.writable(&state.stage)
-        && state.domain.roster().is_none();
-    if !offers_n {
+    let naming = matches!(state.stage, Stage::Naming);
+    let writable = state.domain.writable(&state.stage);
+    let offers_n = !naming && writable && state.domain.roster().is_none();
+    // `d`/`r` (2026-09-19): the edit bar's own two gates (`actions`),
+    // read off the row under the cursor — the same [`target_row`] the
+    // keys arm from, so the bar and the keys cannot disagree about which
+    // verbs are live. Never while naming, where no row is the target.
+    let row = (!naming && writable).then(|| target_row(shell)).flatten();
+    let offers_d = row.as_ref().is_some_and(|r| r.layer == Some(Layer::User));
+    let offers_r = row.as_ref().is_some_and(|r| r.overridden);
+    if !offers_n && !offers_d && !offers_r {
         return div().into_any_element();
     }
     let theme = cx.theme();
-    let ks = crate::keymap::parse_keystroke("n", Modifiers::NONE).expect("valid");
-    let entity = entity.clone();
-    let label = format!("New {}", object_word(state.domain));
-    h_flex()
-        .w(px(WIDTH))
-        .gap_2()
-        .items_center()
-        .child(
+    let chip_fg = theme.muted_foreground;
+    let chip_bg = theme.muted;
+    let mut bar = h_flex().w(px(WIDTH)).gap_2().items_center();
+    if offers_n {
+        let ks = crate::keymap::parse_keystroke("n", Modifiers::NONE).expect("valid");
+        let entity = entity.clone();
+        let label = format!("New {}", object_word(state.domain));
+        bar = bar.child(
             div()
                 .debug_selector(|| "objectdialog-action-n".to_string())
                 .child(
@@ -3945,7 +4063,7 @@ fn browse_action_bar(
                             h_flex()
                                 .gap_1p5()
                                 .items_center()
-                                .child(key_chip(&ks, theme.muted_foreground, theme.muted))
+                                .child(key_chip(&ks, chip_fg, chip_bg))
                                 .child(label),
                         )
                         .on_click(move |_event, window, cx| {
@@ -3972,8 +4090,48 @@ fn browse_action_bar(
                             });
                         }),
                 ),
-        )
-        .into_any_element()
+        );
+    }
+    // The two destructive buttons take `press_verb`, the edit bar's own
+    // click door, which arms through `arm_delete`/`arm_revert` exactly
+    // as the keys do.
+    let destructive: [(&'static str, String, bool); 2] = [
+        (
+            "d",
+            format!("Delete this {}", object_word(state.domain)),
+            offers_d,
+        ),
+        ("r", "Revert to desk".to_string(), offers_r),
+    ];
+    for (key, label, offered) in destructive {
+        if !offered {
+            continue;
+        }
+        let ks = crate::keymap::parse_keystroke(key, Modifiers::NONE).expect("valid");
+        let entity = entity.clone();
+        let selector = format!("objectdialog-action-{key}");
+        bar = bar.child(
+            div().debug_selector(move || selector.clone()).child(
+                Button::new(gpui::SharedString::from(format!("objectdialog-{key}")))
+                    .small()
+                    .outline()
+                    .danger()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(key_chip(&ks, chip_fg, chip_bg))
+                            .child(label),
+                    )
+                    .on_click(move |_event, window, cx| {
+                        entity.update(cx, |shell, cx| {
+                            press_verb(shell, key, window, cx);
+                        });
+                    }),
+            ),
+        );
+    }
+    bar.into_any_element()
 }
 
 /// The confirm block, which **replaces** the action bar rather than

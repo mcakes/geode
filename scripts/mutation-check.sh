@@ -4070,6 +4070,66 @@ run_mutation "objectdialog: d denies an override it can see" \
   geode-shell \
   revert_undoes_a_presentation_only_override
 
+# ---- d/r from the browse list (2026-09-19)
+#
+# The browse door itself. With the arm matching letters no key produces,
+# `d`/`r` fall back into browse's claim-and-drop catch-all exactly as
+# they did before the door existed — every edit-stage delete/revert test
+# stays green, since those open the object first.
+run_mutation "objectdialog: browse d/r are dropped like any other letter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  "            NormalCommand::Verb(verb @ ('d' | 'r')) => {" \
+  "            NormalCommand::Verb(verb @ ('D' | 'R')) => {" \
+  geode-shell \
+  d_in_the_browse_list_deletes_the_selected_user_source
+
+# The read-only gate on that door (§19.4). Without it `arm_delete` still
+# refuses on Schema's browse rows — none is user-owned — so the confirm
+# never arms and every write assertion holds; what changes is the
+# notice, which stops naming the surface's one rule and starts talking
+# about layers a read-only domain never lets a trader touch.
+run_mutation "objectdialog: browse d/r skip the read-only gate" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                if !state.domain.writable(&state.stage) {' \
+  '                if false {' \
+  geode-shell \
+  browse_d_and_r_are_refused_on_a_read_only_domain
+
+# Spec §20.1 for the browse list: a row click while a question stands is
+# dropped. Letting it through opens the row (whose `enter_edit` clears
+# the confirm — the question answered with a shrug) and moves the cursor
+# off the object the prompt names; every keyboard path stays green
+# because the armed block claims the keys on its own.
+run_mutation "objectdialog: a browse row click answers the question with a shrug" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if state.confirm.is_some() {' \
+  '    if false {' \
+  geode-shell \
+  a_row_click_is_dropped_while_a_browse_confirm_is_armed
+
+# The browse bar's `d` gate is the edit bar's (user-owned row). Offering
+# the button on any row keeps every keyboard test green — the click still
+# runs `arm_delete`, which refuses — but paints a Delete button over a
+# builtin source that can only ever answer "nothing of yours".
+run_mutation "objectdialog: the browse bar offers Delete on every row" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let offers_d = row.as_ref().is_some_and(|r| r.layer == Some(Layer::User));' \
+  '    let offers_d = row.is_some();' \
+  geode-shell \
+  the_browse_bar_offers_delete_and_revert_for_the_selected_row
+
+# Where a browse removal lands. Routing it through `leave_edit` regardless
+# of stage is the tidy-looking version: the stage is already `Browse`,
+# the row is gone, the notice is right — and the filter the trader typed
+# to find the row is silently cleared with it, which only a test that
+# filtered first can see.
+run_mutation "objectdialog: a browse removal walks leave_edit and drops the filter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if !in_browse {' \
+  '    if true {' \
+  geode-shell \
+  a_browse_removal_keeps_the_filter_applied
+
 # The opening mode is one line, and it silently restores the pre-modal
 # model: every filter test still passes with the dialog opening
 # filter-first (`/` is harmless when the field is already focused), and
@@ -6466,15 +6526,11 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
 run_mutation "objectdialog: o overwrites a user-owned scope instead of asking first" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if !forks {
-        if let Some(draft) = draft_mut(shell) {
-            draft.confirm = Some(Confirm::Overwrite);
-        }
+        arm_confirm(shell, Confirm::Overwrite);
         return;
     }' \
   '    if false {
-        if let Some(draft) = draft_mut(shell) {
-            draft.confirm = Some(Confirm::Overwrite);
-        }
+        arm_confirm(shell, Confirm::Overwrite);
         return;
     }' \
   geode-shell o_confirms_before_overwriting
@@ -6511,7 +6567,7 @@ run_mutation "objectdialog: o writes the frame instead of the saved scope" \
 
 run_mutation "objectdialog: o asks before forking a desk-owned scope" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let forks = editing_row(shell).is_some_and(|row| row.layer != Some(Layer::User));' \
+  '    let forks = target_row(shell).is_some_and(|row| row.layer != Some(Layer::User));' \
   '    let forks = false;' \
   geode-shell o_on_a_desk_owned_scope_forks_without_asking_and_says_so
 
@@ -7572,13 +7628,19 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
 # Delete/Revert/Overwrite. Mutated away, the guard never fires.
 run_mutation "objectdialog: a tick click is claimed and dropped while a confirm is armed" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if draft.confirm.is_some() {
+  '    if armed_confirm(shell).is_some() {
         return;
     }
+    let Some(draft) = draft_mut(shell) else {
+        return;
+    };
     if position >= draft.visible_rows().len() {' \
-  '    if false && draft.confirm.is_some() {
+  '    if false && armed_confirm(shell).is_some() {
         return;
     }
+    let Some(draft) = draft_mut(shell) else {
+        return;
+    };
     if position >= draft.visible_rows().len() {' \
   geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
 
@@ -7614,13 +7676,19 @@ run_mutation "objectdialog: a drop resolves its source by name, not the cursor" 
 # Mutated away, it clobbers the pending Delete and writes.
 run_mutation "objectdialog: a drop is claimed and dropped while a confirm is armed" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if draft.confirm.is_some() {
+  '    if armed_confirm(shell).is_some() {
         return;
     }
+    let Some(draft) = draft_mut(shell) else {
+        return;
+    };
     let resolves' \
-  '    if false && draft.confirm.is_some() {
+  '    if false && armed_confirm(shell).is_some() {
         return;
     }
+    let Some(draft) = draft_mut(shell) else {
+        return;
+    };
     let resolves' \
   geode-shell a_row_drop_does_nothing_while_a_confirm_is_armed
 
@@ -10037,9 +10105,9 @@ run_mutation "objectdialog: the refreshed catalogue reads the pending config" \
 run_mutation "objectdialog: a column stage offers no destructive action" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    let in_column = draft.column().is_some();
-    let row = editing_row(shell);' \
+    let row = target_row(shell);' \
   '    let in_column = false;
-    let row = editing_row(shell);' \
+    let row = target_row(shell);' \
   geode-shell \
   a_column_stage_offers_no_destructive_action
 
@@ -11970,7 +12038,7 @@ run_mutation "settings: shift+click on the value chip steps back (spec §20.3)" 
 # stepped value.
 run_mutation "objectdialog: the value chip is inert under an armed confirm (spec §20.3)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let chips_live = writable && draft.confirm.is_none() && draft.text_entry.is_none();' \
+  '    let chips_live = writable && state.confirm.is_none() && draft.text_entry.is_none();' \
   '    let chips_live = writable && draft.text_entry.is_none();' \
   geode-shell \
   the_value_chip_steps_a_number_and_is_inert_under_a_confirm
@@ -11982,14 +12050,16 @@ run_mutation "objectdialog: the value chip is inert under an armed confirm (spec
 # silently clears the confirm.
 run_mutation "objectdialog: an edit-row click is dropped while a confirm is armed (spec §20.6)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        .is_some_and(|d| d.confirm.is_some())
-    {
+  '    if armed_confirm(shell).is_some() {
         return;
-    }' \
-  '        .is_some_and(|d| d.confirm.is_some())
-    {
+    }
+    if let Some(draft) = draft_mut(shell) {
+        // `position` is the FILTERED index' \
+  '    if armed_confirm(shell).is_some() {
         let _ = 0;
-    }' \
+    }
+    if let Some(draft) = draft_mut(shell) {
+        // `position` is the FILTERED index' \
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 
@@ -12042,8 +12112,8 @@ run_mutation "objectdialog: the n button opens the naming stage (spec §20.3)" \
 # with nothing behind it. Mutated away, the button paints there.
 run_mutation "objectdialog: the n button is withheld on a fixed roster (spec §20.3)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        && state.domain.roster().is_none();' \
-  '        && true;' \
+  '    let offers_n = !naming && writable && state.domain.roster().is_none();' \
+  '    let offers_n = !naming && writable;' \
   geode-shell \
   the_i_button_opens_the_chain_field_on_groupings_and_n_is_withheld
 
@@ -12052,10 +12122,8 @@ run_mutation "objectdialog: the n button is withheld on a fixed roster (spec §2
 # paints over a surface whose `n` only ever answers the read-only notice.
 run_mutation "objectdialog: the n button is withheld on a read-only domain (spec §20.3)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        && state.domain.writable(&state.stage)
-        && state.domain.roster().is_none();' \
-  '        && true
-        && state.domain.roster().is_none();' \
+  '    let offers_n = !naming && writable && state.domain.roster().is_none();' \
+  '    let offers_n = !naming && state.domain.roster().is_none();' \
   geode-shell \
   the_schema_domain_offers_no_n_button_and_the_chip_door_refuses
 
@@ -12105,7 +12173,7 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
   '    } else if let Some(state) = shell.object_dialog.as_mut() {
         // Spec §20.1: not over an open question. `build_edit` still paints
         // the frozen row while a confirm is armed, so the guard lives here.
-        if state.draft.as_ref().is_some_and(|d| d.confirm.is_some()) {
+        if state.confirm.is_some() {
             return;
         }' \
   '    } else if let Some(state) = shell.object_dialog.as_mut() {

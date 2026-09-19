@@ -2411,7 +2411,7 @@ fn o_on_a_desk_owned_scope_forks_without_asking_and_says_so(cx: &mut gpui::TestA
     cx.run_until_parked();
 
     assert_eq!(
-        edit_draft(&shell, &cx, |draft| draft.confirm),
+        dialog_state(&shell, &cx, |s| s.confirm),
         None,
         "mine is builtin-owned: nothing is lost, so o must not ask"
     );
@@ -2443,7 +2443,7 @@ fn o_on_a_user_owned_scope_still_asks_first(cx: &mut gpui::TestAppContext) {
     cx.run_until_parked();
 
     assert_eq!(
-        edit_draft(&shell, &cx, |draft| draft.confirm),
+        dialog_state(&shell, &cx, |s| s.confirm),
         Some(objectdialog::Confirm::Overwrite),
         "mine is already user-owned, so o must not claim a fork"
     );
@@ -4213,7 +4213,7 @@ fn clicking_an_available_rows_tick_adds_it(cx: &mut gpui::TestAppContext) {
     });
     assert_eq!(names, ["book", "npv", "delta01"]);
     assert!(
-        edit_draft(&shell, &cx, |d| d.confirm.is_none()),
+        dialog_state(&shell, &cx, |s| s.confirm.is_none()),
         "a desk view forks without asking"
     );
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
@@ -4243,7 +4243,7 @@ fn a_tick_click_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppCont
     cx.simulate_keystrokes("d");
     cx.run_until_parked();
     assert_eq!(
-        edit_draft(&shell, &cx, |d| d.confirm),
+        dialog_state(&shell, &cx, |s| s.confirm),
         Some(objectdialog::Confirm::Delete),
         "d arms delete on an object the user layer itself defines"
     );
@@ -4261,7 +4261,7 @@ fn a_tick_click_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppCont
     cx.run_until_parked();
 
     assert_eq!(
-        edit_draft(&shell, &cx, |d| d.confirm),
+        dialog_state(&shell, &cx, |s| s.confirm),
         Some(objectdialog::Confirm::Delete),
         "the armed delete must not be clobbered by a tick click behind it"
     );
@@ -4378,7 +4378,7 @@ fn a_row_drop_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContex
     cx.simulate_keystrokes("d");
     cx.run_until_parked();
     assert_eq!(
-        edit_draft(&shell, &cx, |d| d.confirm),
+        dialog_state(&shell, &cx, |s| s.confirm),
         Some(objectdialog::Confirm::Delete),
         "d arms delete on an object the user layer itself defines"
     );
@@ -4405,7 +4405,7 @@ fn a_row_drop_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContex
     cx.run_until_parked();
 
     assert_eq!(
-        edit_draft(&shell, &cx, |d| d.confirm),
+        dialog_state(&shell, &cx, |s| s.confirm),
         Some(objectdialog::Confirm::Delete),
         "the armed delete must not be clobbered by a drop behind it"
     );
@@ -5834,7 +5834,7 @@ fn delete_and_revert_are_refused_in_the_column_stage(cx: &mut gpui::TestAppConte
             "{key} answered about the view from inside a column's stage"
         );
         assert_eq!(
-            edit_draft(&shell, &cx, |d| d.confirm),
+            dialog_state(&shell, &cx, |s| s.confirm),
             None,
             "{key} armed a confirm the crumb has navigated away from"
         );
@@ -5850,7 +5850,7 @@ fn delete_and_revert_are_refused_in_the_column_stage(cx: &mut gpui::TestAppConte
     cx.simulate_keystrokes("r");
     cx.run_until_parked();
     assert_eq!(
-        edit_draft(&shell, &cx, |d| d.confirm),
+        dialog_state(&shell, &cx, |s| s.confirm),
         Some(objectdialog::Confirm::Revert),
         "the refusal is the column stage's alone — r still arms on the view"
     );
@@ -6561,5 +6561,331 @@ fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAp
     assert!(
         cx.debug_bounds("objectdialog-hint-change").is_none(),
         "label has nothing tab could step"
+    );
+}
+
+// --- Delete and revert from the browse list (user request 2026-09-19) ---
+
+/// [`services_with_sources`] plus one source the USER layer defines, so a
+/// browse row exists whose `layer` is `Layer::User` and `d` has something
+/// of the trader's own to delete — the case the request was made for.
+fn services_with_a_user_source() -> ShellServices {
+    let mut services = services_with_sources();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "sources".to_string(),
+        file: "<test:user>".into(),
+        table: "[mine]\ndataset = \"risk\"\npaths = [\"/m/*.csv\"]\n"
+            .parse()
+            .unwrap(),
+    };
+    let mut builtin = services.builtin.clone();
+    builtin.push(user);
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin,
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// `d` on the browse list's selected row arms the same delete confirm the
+/// edit stage's `d` does, and confirming it removes the object without
+/// the trader ever having opened it — the dialog stays in browse, the row
+/// is gone, and the notice and file are the edit stage's own.
+#[gpui::test]
+fn d_in_the_browse_list_deletes_the_selected_user_source(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_source(),
+        dir.path(),
+        "config::sources",
+    );
+    // Rows sort `(dataset, name)`: `risk · live`, `risk · mine`, `vol · vols`.
+    cx.simulate_keystrokes("j");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-row-mine").is_some());
+
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "d arms the delete confirm from the browse list"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "without opening the object"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "and the dialog stays in browse after the removal"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-row-mine").is_none(),
+        "the row is gone from the list on the confirming keystroke"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "the question is answered"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("deleted mine in sources.toml")),
+        "the notice names the object and the file, got {notice:?}"
+    );
+    let written =
+        std::fs::read_to_string(dir.path().join("sources.toml")).expect("the delete reaches disk");
+    assert!(!written.contains("mine"), "{written}");
+}
+
+/// `r` on the browse list's selected row reverts a presentation-only
+/// override exactly as the edit stage's `r` does, staying in browse.
+#[gpui::test]
+fn r_in_the_browse_list_reverts_the_selected_override(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[("view_presentation", "[tree]\nhidden = [\"book\"]\n")]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    assert!(cx.debug_bounds("objectdialog-overridden-tree").is_some());
+
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "r arms the revert confirm from the browse list"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-overridden-tree").is_none(),
+        "the override badge is gone: the row is the desk's again"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-row-tree").is_some(),
+        "and the desk's view is still listed"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("reverted tree in view_presentation.toml")),
+        "got {notice:?}"
+    );
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(!written.contains("tree"), "{written}");
+}
+
+/// The browse list's `d`/`r` are gated by the selected row exactly as the
+/// edit stage's are by the open object: on a desk row both refuse, with
+/// the edit stage's own notices, and arm nothing.
+#[gpui::test]
+fn browse_d_and_r_refuse_on_a_desk_row_with_the_edit_stages_notices(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+
+    for (key, expected) in [("d", "nothing of yours"), ("r", "no user override")] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+        assert!(
+            notice.as_deref().is_some_and(|n| n.contains(expected)),
+            "{key} should have explained itself, got {notice:?}"
+        );
+        assert!(
+            cx.debug_bounds("objectdialog-confirm").is_none(),
+            "{key} must not arm a confirm it cannot carry out"
+        );
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.stage.clone()),
+            objectdialog::Stage::Browse
+        );
+    }
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}
+
+/// A read-only domain refuses the browse `d`/`r` through the same gate
+/// every other verb goes through (§19.4), rather than silently dropping
+/// the key as browse used to.
+#[gpui::test]
+fn browse_d_and_r_are_refused_on_a_read_only_domain(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
+    for key in ["d", "r"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+        assert_eq!(
+            notice.as_deref(),
+            Some(objectdialog::READ_ONLY_NOTICE),
+            "{key} in browse on a read-only domain"
+        );
+        assert!(cx.debug_bounds("objectdialog-confirm").is_none());
+    }
+}
+
+/// `escape` answers a browse confirm with "no": nothing is removed, the
+/// dialog stays open in browse, and the row is untouched.
+#[gpui::test]
+fn escape_disarms_a_browse_confirm_and_deletes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_only_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "escape disarms"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.object_dialog.is_some()),
+        "and does not close the dialog — the question owned that escape"
+    );
+    assert!(cx.debug_bounds("objectdialog-row-mine").is_some());
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}
+
+/// While a browse confirm is armed the question owns the keys AND the
+/// mouse (spec §20.1): a row click neither opens the row nor moves the
+/// target out from under the question.
+#[gpui::test]
+fn a_row_click_is_dropped_while_a_browse_confirm_is_armed(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_source(),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("j d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+
+    click_selector(&mut cx, "objectdialog-row-vols");
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "the click must not open the row over an open question"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.selected),
+        1,
+        "nor move the cursor off the object the question is about"
+    );
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+}
+
+/// Spec §20.3: the browse bar offers `d` and `r` as buttons beside `n`,
+/// each only while the SELECTED row makes it live — the edit bar's own
+/// gates — and the button arms exactly as the key does.
+#[gpui::test]
+fn the_browse_bar_offers_delete_and_revert_for_the_selected_row(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_source(),
+        dir.path(),
+        "config::sources",
+    );
+    // `live` (builtin) is selected: nothing of the trader's to delete.
+    assert!(cx.debug_bounds("objectdialog-action-n").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-action-d").is_none(),
+        "no delete button on a builtin row"
+    );
+    assert!(cx.debug_bounds("objectdialog-action-r").is_none());
+
+    cx.simulate_keystrokes("j");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-action-d").is_some(),
+        "the delete button follows the cursor onto the user-owned row"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-action-r").is_none(),
+        "a user-only object has no desk copy to revert to"
+    );
+
+    click_selector(&mut cx, "objectdialog-action-d");
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "the button is the mouse form of d"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-action-n").is_none(),
+        "and the confirm replaces the bar rather than joining it"
+    );
+}
+
+/// The revert button appears on an overridden row.
+#[gpui::test]
+fn the_browse_bar_offers_revert_on_an_overridden_row(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[("view_presentation", "[tree]\nhidden = [\"book\"]\n")]);
+    let (_shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    assert!(cx.debug_bounds("objectdialog-action-r").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-action-d").is_none(),
+        "the view itself is the desk's"
+    );
+    click_selector(&mut cx, "objectdialog-action-r");
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+}
+
+/// A browse removal lands back in browse with the FILTER still applied
+/// — a trader who typed `/ m i n e` to find the row is not done with the
+/// filter because the row is gone — where a removal from the edit stage
+/// walks `leave_edit`, which clears the query with the stage. The one
+/// visible difference between the two landings, and the reason
+/// `after_removal` branches rather than calling `leave_edit` outright.
+#[gpui::test]
+fn a_browse_removal_keeps_the_filter_applied(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_source(),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("/ m i n e escape");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "mine");
+    assert!(cx.debug_bounds("objectdialog-row-vols").is_none());
+
+    cx.simulate_keystrokes("d enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-row-mine").is_none());
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.query.clone()),
+        "mine",
+        "the filter the trader typed survives the removal"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-row-vols").is_none(),
+        "so the list is still narrowed to it"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Normal,
+        "in normal mode, where the verb was pressed"
     );
 }
