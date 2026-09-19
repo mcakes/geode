@@ -375,6 +375,20 @@ pub fn init_reclaimed_keybindings(cx: &mut App) {
         // field on `tab`.
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodePalette")),
         gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodePalette")),
+        // User report 2026-09-18: `shift+up` in a market-data cell editor
+        // moved the GRID's row selection. gpui-base's `Input` binds
+        // `shift-up`/`shift-down` to `SelectUp`/`SelectDown`; a single-line
+        // input returns from `select_up` without stopping propagation, so
+        // the action bubbled to the enclosing `DataTable` — the same action
+        // type, re-exported by gpui-component — which moved its selection
+        // out from under the tile's cursor, and gpui dispatches bindings
+        // before the shell's root key listener ever runs. Reclaimed in the
+        // `Input` context so the keystroke falls through to the shell's own
+        // keymap (a module's insert-mode binding, or nothing). Every input
+        // in Geode is single-line, where the two actions were no-ops, so
+        // nothing is given up; a multi-line input would want these back.
+        gpui::KeyBinding::new("shift-up", gpui::NoAction, Some("Input")),
+        gpui::KeyBinding::new("shift-down", gpui::NoAction, Some("Input")),
     ]);
 }
 
