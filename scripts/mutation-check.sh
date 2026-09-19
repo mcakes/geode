@@ -5711,8 +5711,8 @@ run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
   '        if self.pending_tiles.values().any(|p| p.kind == kind) {
             return;
         }
-        self.add_tile(kind, None, None, window, cx);' \
-  '        self.add_tile(kind, None, None, window, cx);' \
+        self.add_tile(kind, AddPlacement::Split(None), None, window, cx);' \
+  '        self.add_tile(kind, AddPlacement::Split(None), None, window, cx);' \
   geode-shell two_open_module_calls_for_the_same_kind_before_any_render_add_only_once
 
 run_mutation "diagnostics module: MIN-11 — the header never shows the filtered pill" \
@@ -6117,8 +6117,20 @@ run_mutation "add-tile: the pending request is keyed by the id split_active retu
 
 run_mutation "add-tile: duplicate carries the focused tile's serialized state" \
   crates/geode-shell/src/shell/add_tile.rs \
-  '        self.add_tile(&kind, Some(direction), Some(state), window, cx);' \
-  '        let _ = state; self.add_tile(&kind, Some(direction), None, window, cx);' \
+  '        self.add_tile(
+            &kind,
+            AddPlacement::Split(Some(direction)),
+            Some(state),
+            window,
+            cx,
+        );' \
+  '        let _ = state; self.add_tile(
+            &kind,
+            AddPlacement::Split(Some(direction)),
+            None,
+            window,
+            cx,
+        );' \
   geode-shell shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
 
 # Two-line anchor on purpose (final review, Minor 2): the bare
@@ -6184,15 +6196,15 @@ run_mutation "add-tile: filling a placeholder in place drops its unplaced record
 
 run_mutation "add-tile: the _vertical suffix means stacked" \
   crates/geode-shell/src/defaults.rs \
-  '        (k, Some(Orientation::Vertical))' \
-  '        (k, Some(Orientation::Horizontal))' \
+  '        (k, AddPlacement::Split(Some(Orientation::Vertical)))' \
+  '        (k, AddPlacement::Split(Some(Orientation::Horizontal)))' \
   geode-shell parse_add_action_peels_the_direction_suffix_before_the_kind
 
 run_mutation "add-tile: register_add_actions registers the suffixed pair too" \
   crates/geode-shell/src/defaults.rs \
   '            &format!("tile::add_{kind}_vertical"),' \
   '            &format!("tile::add_{kind}_vertical_"),' \
-  geode-shell register_add_actions_registers_three_rows_per_kind_in_the_tiles_category
+  geode-shell register_add_actions_registers_four_rows_per_kind_in_the_tiles_category
 
 # ---- a refused event never stops a producer (Phase 4b follow-up, Task 1)
 
@@ -11161,8 +11173,11 @@ run_mutation "final: a restored draft's dropped edits are named" \
 # into the abandoned cell, count prefix and all.
 run_mutation "final: a keyboard focus move hands the keyboard back to the shell" \
   crates/geode-shell/src/shell/input.rs \
-  '            self.note_keyboard_focus_move(window, cx);' \
-  '' \
+  '            // own, which is exactly the kind of drift the mechanism rule
+            // is against.
+            self.note_keyboard_focus_move(window, cx);' \
+  '            // own, which is exactly the kind of drift the mechanism rule
+            // is against.' \
   geode-shell \
   a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell
 

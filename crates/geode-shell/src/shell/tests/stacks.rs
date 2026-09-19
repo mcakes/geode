@@ -100,10 +100,17 @@ fn mod_bracket_cycles_and_the_ring_follows(cx: &mut gpui::TestAppContext) {
     );
     assert!(shell.read_with(&cx, |s, _| s.session_dirty));
     cx.simulate_keystrokes("alt-[");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
     assert_eq!(
         shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
         Some(top)
     );
+    // A cycle changes which member is ACTIVE, never a member's own
+    // `(index, len)` within the stack — so neither cycle re-delivered
+    // `right`'s stack position.
+    assert_eq!(stack_events(&log, right), vec![None, Some((1, 2))]);
 }
 
 #[gpui::test]

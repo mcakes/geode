@@ -151,6 +151,21 @@ fn node_holds(node: &Node, id: TileId) -> bool {
     }
 }
 
+/// Does `id` appear anywhere under `node` — a leaf of that id, a stack
+/// member, or, recursively, within a split's children? `Tree::contains`'s
+/// non-allocating core (tile-stacks fix round 1): `contains` used to be
+/// `self.tiles().contains(&id)`, a fresh `Vec` per call, and `Workspaces::
+/// stack_position` calls `contains` (via `Workspace::region_of`) once per
+/// workspace's main tree plus every dock, for every tile, every render —
+/// exactly the per-frame heap churn PHILOSOPHY.md forbids, paid even with
+/// no stacks open.
+fn holds_anywhere(node: &Node, id: TileId) -> bool {
+    match node {
+        Node::Leaf(_) | Node::Stack { .. } => node_holds(node, id),
+        Node::Split { children, .. } => children.iter().any(|c| holds_anywhere(c, id)),
+    }
+}
+
 /// The stack node holding `id` as a member, if any.
 fn find_stack_mut(node: &mut Node, id: TileId) -> Option<&mut Node> {
     match node {
@@ -371,7 +386,9 @@ impl Tree {
     }
 
     pub fn contains(&self, id: TileId) -> bool {
-        self.tiles().contains(&id)
+        self.root
+            .as_ref()
+            .is_some_and(|root| holds_anywhere(root, id))
     }
 
     /// Set focus to an existing tile (used by click-focus in 1b-ui).
@@ -2707,6 +2724,28 @@ mod tests {
         tree.split(TileId(1), Orientation::Horizontal);
         assert!(!tree.stack_step(1));
         assert_eq!(tree.focused(), Some(TileId(1)));
+    }
+
+    /// `contains`'s non-allocating core (`holds_anywhere`) must still see
+    /// a stack's HIDDEN member, not just its painted one — `visible_
+    /// tiles()` alone would miss tile 1 here — and must still refuse an
+    /// id nothing holds.
+    #[test]
+    fn contains_finds_a_hidden_stack_member_and_refuses_an_absent_id() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        assert!(tree.stack_after(TileId(1), TileId(2)));
+        assert_eq!(
+            tree.visible_tiles(),
+            vec![TileId(2)],
+            "sanity: 1 is the hidden member"
+        );
+        assert!(
+            tree.contains(TileId(1)),
+            "a hidden stack member still counts"
+        );
+        assert!(tree.contains(TileId(2)));
+        assert!(!tree.contains(TileId(99)), "an absent id is refused");
     }
 
     #[test]

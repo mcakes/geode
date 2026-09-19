@@ -312,25 +312,32 @@ impl ShellView {
         // its `(index, len)` on its first render and on every change,
         // never on an unrelated render — `stack_sent` remembers the last
         // value sent per tile, and a missing entry means "unsent", so a
-        // fresh occupant always hears once, `None` included.
-        let weak = cx.entity().downgrade();
+        // fresh occupant always hears once, `None` included. The record
+        // is written only AFTER the delivery actually reaches an
+        // occupant (fix round 1): a tile with no occupant yet (defensive
+        // — every id in `creation_order` has one by this point) is left
+        // unrecorded so the next render retries it, rather than being
+        // marked "sent" for a delivery that never happened.
         for id in &creation_order {
             let now = self.services.workspaces.stack_position(*id);
             if self.stack_sent.get(id) == Some(&now) {
                 continue;
             }
-            self.stack_sent.insert(*id, now);
             let Some(o) = self.occupants.get(id) else {
                 continue;
             };
+            // The weak handle is only needed to build a member's `open_
+            // list` closure, so it is downgraded here rather than once
+            // per render regardless of whether any tile is stacked.
             let handle = now.map(|(index, len)| {
-                let weak = weak.clone();
+                let weak = cx.entity().downgrade();
                 let tile = *id;
                 crate::module::StackHandle::new(index, len, move |window, cx| {
                     let _ = weak.update(cx, |view, cx| view.open_stack_list(tile, window, cx));
                 })
             });
             o.content.set_stack(handle, cx);
+            self.stack_sent.insert(*id, now);
         }
         self.stack_sent
             .retain(|id, _| self.scratch_all_tiles.contains(id));
