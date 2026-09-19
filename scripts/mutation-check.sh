@@ -10346,15 +10346,17 @@ run_mutation "mdtile: a panel with no catalog requests one" \
 # next launch — work lost silently, with the restored panel looking
 # perfectly healthy.
 #
-# Two lines, not one: `set_key`'s own draft check (the entry below) is the
-# same `if !self.draft.is_empty() {` text, and an ambiguous anchor mutates
-# whichever site comes first.
+# Two lines, not one: `revert`'s own guard is the same
+# `if self.draft.is_empty() {` shape, and an ambiguous anchor mutates
+# whichever site comes first. Re-anchored 2026-09-19 (per-underlying
+# drafts): the current draft is now filed under `drafts.<key>` through a
+# `match` on the key, so the guard's second line changed.
 run_mutation "mdtile: serialize writes the draft" \
   crates/geode-marketdata/src/tile.rs \
   '        if !self.draft.is_empty() {
-            t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));' \
+            match &self.key {' \
   '        if false {
-            t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));' \
+            match &self.key {' \
   geode-marketdata \
   serialize_round_trips_key_and_draft
 
@@ -10369,22 +10371,81 @@ run_mutation "mdtile: a shorter document clamps the cursor" \
   geode-marketdata \
   a_shorter_document_clamps_the_cursor
 
-# Ruling 2026-09-14: a key change with edits pending is REFUSED, never a
-# silent discard. Mutated away, `:key NDX.Z` throws unsent work off the
-# screen and out of the session on a keystroke that reads like navigation
-# — and the draft's cells are grid indices into the OLD document, so the
-# panel would then paint one document's numbers on another's ladder.
-# Re-anchored (Task 3, one draft): the guard's body dropped its own
-# `let n = self.draft.len();` line when the refusal moved onto
-# `Draft::count_phrase` (spec 2026-09-14 §4), same site, same meaning.
-run_mutation "mdtile: a key change with edits pending is refused" \
+# User ruling 2026-09-19 ("keep them per underlying"), replacing the
+# 2026-09-14 refusal this entry used to guard: a key change with edits
+# pending PARKS the current draft under the outgoing key and switches.
+# Mutated so the park branch never fires, the draft is neither parked nor
+# cleared — it travels to the new document as grid indices into the OLD
+# one, painting one underlying's numbers on another's ladder, and the
+# picker and the session know nothing of it.
+run_mutation "mdpark: a key change parks the current draft instead of refusing" \
   crates/geode-marketdata/src/tile.rs \
-  '        if !self.draft.is_empty() {
-            return Err(format!(' \
-  '        if false {
-            return Err(format!(' \
+  '        if let Some(outgoing) = self.key.take()
+            && !self.draft.is_empty()
+        {' \
+  '        if let Some(outgoing) = self.key.take()
+            && false
+        {' \
   geode-marketdata \
-  a_key_change_is_refused_while_the_draft_has_edits
+  a_key_change_parks_the_draft_instead_of_refusing
+
+# A switch back is a RESTORE: the parked draft's edits sit at
+# `UNRESOLVED_COLUMN` until `unresolved_restore` hands them to the first
+# non-empty built model to re-place by label. Mutated so the flag is never
+# set, the parked draft is installed but never resolved — its edits paint
+# nowhere, `:revert` still counts them, and the "first delivery after a
+# restore is hold" rule no longer shields them from `:auto replace`.
+run_mutation "mdpark: returning to an underlying restores its parked draft" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.unresolved_restore = !self.draft.is_empty();
+        self.key = Some(key);' \
+  '        self.unresolved_restore = false;
+        self.key = Some(key);' \
+  geode-marketdata \
+  returning_to_an_underlying_restores_its_parked_draft
+
+# Spec §8.5 (amended 2026-09-19): every parked draft rides the session
+# beside the current one, each under `drafts.<key>`. Mutated so the parked
+# loop writes nothing, a restart keeps only the underlying on screen —
+# every other underlying's unsent work is gone, silently, with the
+# restored panel looking perfectly healthy.
+run_mutation "mdpark: parked drafts ride the session" \
+  crates/geode-marketdata/src/tile.rs \
+  '        for (key, table) in &self.parked {
+            drafts.insert(display_key(key), toml::Value::Table(table.clone()));
+        }' \
+  '        for (key, table) in &self.parked {
+            let _ = (key, table);
+        }' \
+  geode-marketdata \
+  parked_drafts_ride_the_session
+
+# Header spec §7 (amended 2026-09-19): a picker row names its
+# underlying's parked edits, so a trader choosing where to go next can
+# see which underlyings still hold unsent work. Mutated to open the
+# picker with no marks, every row reads bare and the only record of a
+# parked draft is the session file.
+run_mutation "mdpark: a picker row names an underlying's parked edits" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let rows = PickerRows::with_marks(self.catalog_keys(cx), self.parked_marks());' \
+  '        let rows = PickerRows::with_marks(self.catalog_keys(cx), BTreeMap::new());' \
+  geode-marketdata \
+  a_picker_row_names_an_underlyings_parked_edits
+
+# Every draft verb acts on the CURRENT underlying's draft alone. Mutated
+# so `:revert` also empties the parked map, reverting one underlying
+# throws away every other underlying's unsent work — the exact loss
+# parking exists to prevent, reachable from the one verb a trader uses
+# to tidy a single document.
+run_mutation "mdpark: revert touches only the current underlying" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.draft.revert();
+        self.leave_behind();' \
+  '        self.draft.revert();
+        self.parked.clear();
+        self.leave_behind();' \
+  geode-marketdata \
+  revert_touches_only_the_current_underlyings_draft
 
 # Phase 4 §3.10: the panel answers a barrier for a change it will not
 # requery for. Mutated away, every blotter on screen waits out
@@ -11471,28 +11532,28 @@ run_mutation "mdmenu: a command line closes the popup" \
         }' \
   geode-marketdata a_command_line_closes_the_popup
 
-# `open_picker`'s own dirty guard (spec §7): picking a different document
-# out from under unsent edits would throw them away with nothing to
-# revert them against once the draft's own generation is gone. Mutated so
-# the guard can never fire, `u`/`load_underlying` would open the picker
-# anyway, and a pick would run `set_key`'s OWN guard instead — reachable,
-# but only after the trader has already typed and committed a choice, one
-# step later than the door this test means to keep shut.
-run_mutation "mdpicker: the picker is refused while the draft has edits" \
-  crates/geode-marketdata/src/tile.rs \
-  '        if !self.draft.is_empty() {
-            self.notice =
-                Some(format!("{} pending — :revert first", self.draft.count_phrase()).into());
-            self.changed(cx);
-            return;
-        }' \
-  '        if !self.draft.is_empty() && false {
-            self.notice =
-                Some(format!("{} pending — :revert first", self.draft.count_phrase()).into());
-            self.changed(cx);
-            return;
-        }' \
-  geode-marketdata the_picker_is_refused_while_the_draft_has_edits
+# Header spec §7, amended 2026-09-19 (per-underlying drafts): the menu's
+# `Load underlying…` row is live whatever the draft holds, because a pick
+# parks the draft rather than being refused by it. This entry replaces
+# the one that guarded `open_picker`'s dirty refusal (deleted with the
+# refusal). Mutated back to the old greying, the menu tells a trader with
+# edits to `revert or upload first` for a switch that would have kept
+# every one of them — a dead row over a live door.
+run_mutation "mdpark: the menu's load row stays live on a dirty draft" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '        action(
+            "marketdata::load_underlying",
+            "Load underlying…",
+            "u",
+            Ok(()),
+        ),' \
+  '        action(
+            "marketdata::load_underlying",
+            "Load underlying…",
+            "u",
+            if dirty { Err("revert or upload first") } else { Ok(()) },
+        ),' \
+  geode-marketdata a_dirty_draft_leaves_load_live_and_a_built_upload_is_live
 
 # Blur, THEN drop (`close_editor`'s own order, here for the picker):
 # `Root` holds a focused `InputState` strongly and only ever unregisters
@@ -11560,9 +11621,9 @@ run_mutation "mdpicker: enter loads the highlighted row, not the top match" \
 run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its old index" \
   crates/geode-marketdata/src/popup.rs \
   '        let keep = self.highlighted_key().map(str::to_string);
-        self.labels = Self::labels_for(&all);
+        self.labels = Self::labels_for(&all, &self.marks);
         self.all = all;' \
-  '        self.labels = Self::labels_for(&all);
+  '        self.labels = Self::labels_for(&all, &self.marks);
         self.all = all;
         let keep = self.highlighted_key().map(str::to_string);' \
   geode-marketdata a_resorted_catalog_keeps_the_highlighted_key_not_its_old_index
@@ -11574,14 +11635,16 @@ run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its o
 # still-open editor whose eventual `enter` passes the label-identity
 # check on a same-ladder underlying and files the typed number into the
 # NEW document's draft — and until then the editor sits open and deaf
-# with `mode == insert` still claimed.
+# with `mode == insert` still claimed. Re-anchored 2026-09-19: the close
+# now sits ahead of the park (per-underlying drafts) rather than of the
+# key assignment; the comment line is what makes the anchor unique.
 run_mutation "mdattr: a key change cancels an open editor" \
   crates/geode-marketdata/src/tile.rs \
   '        if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        self.key = Some(key);' \
-  '        self.key = Some(key);' \
+        // Park the outgoing draft under its own underlying.' \
+  '        // Park the outgoing draft under its own underlying.' \
   geode-marketdata a_key_change_cancels_an_open_editor
 
 # B4: the attribute value's click was the one mouse door that left a
