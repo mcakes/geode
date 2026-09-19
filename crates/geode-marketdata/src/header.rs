@@ -2,17 +2,18 @@
 //! by [`HeaderModel::prepare`] — the tile's `changed()` door — and painted
 //! by [`render`] with no formatting of its own.
 
+use crate::core::Segment;
 use crate::core::draft::{DraftBadge, local_hhmm};
 use crate::core::matrix::{HeaderCell, MatrixModel};
 use crate::core::spec::PanelSpec;
 use crate::delegate::{CellPaint, cell_paint};
-use crate::tile::{FlooredTones, MarketDataTile, display_key};
+use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
 use geode_shell::fonts;
 use geode_shell::tips;
 use gpui::prelude::*;
-use gpui::{ElementId, Entity, SharedString, div, px};
-use gpui_component::input::{Input, InputState};
+use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div, px};
+use gpui_component::input::Input;
 use gpui_component::{Theme, h_flex};
 
 /// What one prepared header run is painted as. The tone is resolved to a
@@ -48,6 +49,105 @@ pub(crate) fn tone_colour(
         Tone::Warn => floored.warn,
         Tone::Error => floored.error,
     }
+}
+
+/// One date-field segment's colours (header spec §5.2, 2026-09-19): the
+/// active segment on the theme's `primary` (the mockup's cursor-blue
+/// block) in `primary_foreground` FLOORED against that fill
+/// (`FlooredTones::primary_text` — seven bundled themes ship the pair
+/// under 3:1), a segment mid-typing on `accent` in `accent_foreground`
+/// (the mockup's "typing colour"; every bundled theme's pair clears the
+/// floor as shipped), every other segment bare in `foreground`. The sweep
+/// below checks all three rather than assuming them. Read by `render` and
+/// by that test.
+pub(crate) fn date_segment_paint(
+    theme: &Theme,
+    tones: &FlooredTones,
+    active: bool,
+    typing: bool,
+) -> CellPaint {
+    if typing {
+        CellPaint {
+            fill: Some(theme.accent),
+            text: theme.accent_foreground,
+        }
+    } else if active {
+        CellPaint {
+            fill: Some(theme.primary),
+            text: tones.primary_text,
+        }
+    } else {
+        CellPaint {
+            fill: None,
+            text: theme.foreground,
+        }
+    }
+}
+
+/// The segmented date field in an attribute's editor slot: three spans in
+/// the data face separated by `-`, the active segment highlighted, the
+/// container bordered as the cell editor is. The field is the focusable
+/// (`track_focus`) so its `on_key_down` sits on the focused element and
+/// runs before the shell root's: `MarketDataTile::date_field_key` decides,
+/// and a consumed key stops here. A click on a segment selects it and
+/// STOPS propagation — the attribute value's own mouse-down would
+/// otherwise run `attr_clicked` and cancel the editor the click was aimed
+/// into; a click on the container's padding or the separators bubbles as
+/// before, so a click "elsewhere" still cancels.
+fn render_date_field(
+    paint: &DateFieldPaint,
+    focus: &FocusHandle,
+    theme: &Theme,
+    tones: &FlooredTones,
+    tile: &Entity<MarketDataTile>,
+    tile_id: u64,
+) -> impl IntoElement {
+    let separator: Hsla = theme.muted_foreground;
+    let mut field = h_flex()
+        .track_focus(focus)
+        .items_center()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme.table_active_border)
+        .font_family(fonts::MONO)
+        .debug_selector(move || format!("marketdata-date-{tile_id}"))
+        .on_key_down({
+            let tile = tile.clone();
+            move |event: &gpui::KeyDownEvent, window, cx| {
+                let handled = tile.update(cx, |t, cx| t.date_field_key(event, window, cx));
+                if handled {
+                    cx.stop_propagation();
+                }
+            }
+        });
+    for (i, text) in paint.segments.iter().enumerate() {
+        let active = paint.active == i;
+        let CellPaint { fill, text: colour } =
+            date_segment_paint(theme, tones, active, active && paint.typing);
+        if i > 0 {
+            field = field.child(div().text_color(separator).child("-"));
+        }
+        field = field.child(
+            div()
+                .px_0p5()
+                .rounded_sm()
+                .text_color(colour)
+                .when_some(fill, |d, f| d.bg(f))
+                .debug_selector(move || format!("marketdata-date-seg-{tile_id}-{i}"))
+                .on_mouse_down(gpui::MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_event, _window, cx| {
+                        if let Some(segment) = Segment::at(i) {
+                            tile.update(cx, |t, cx| t.date_segment_clicked(segment, cx));
+                        }
+                        cx.stop_propagation();
+                    }
+                })
+                .child(text.clone()),
+        );
+    }
+    field
 }
 
 /// Everything [`HeaderModel::prepare`] needs, gathered so the tile's own
@@ -168,8 +268,9 @@ impl HeaderModel {
 /// dot, inline attribute strip, spacer, state, notice, time, `⋯`.
 ///
 /// `cursor_attr`/`editor` (Task 5, spec §5.1/§5.2): which attribute, if
-/// any, the cursor is on, and the open editor's own `(index, InputState)`
-/// when it is an attribute being edited. `menu_open` (Task 6, spec §6.1)
+/// any, the cursor is on, and the open editor's own index and form
+/// ([`EditorPaint`]: the text `Input`, or the segmented date field) when
+/// it is an attribute being edited. `menu_open` (Task 6, spec §6.1)
 /// is whether the action list is open, painting `⋯`'s own pressed state;
 /// `tile` is this attribute strip's own mouse door (`cursor_to_attr`) and
 /// `⋯`'s (`toggle_menu`).
@@ -177,7 +278,7 @@ impl HeaderModel {
 pub(crate) fn render(
     h: &HeaderModel,
     cursor_attr: Option<usize>,
-    editor: Option<(usize, &Entity<InputState>)>,
+    editor: Option<(usize, EditorPaint<'_>)>,
     menu_open: bool,
     theme: &Theme,
     tones: &FlooredTones,
@@ -268,9 +369,12 @@ pub(crate) fn render(
                     tile.update(cx, |t, cx| t.attr_clicked(i, event.click_count, window, cx))
                 }
             });
-        value = match editor {
-            Some((e, state)) if e == i => {
+        value = match &editor {
+            Some((e, EditorPaint::Text(state))) if *e == i => {
                 value.child(div().min_w(px(80.)).child(Input::new(state)))
+            }
+            Some((e, EditorPaint::Date { paint, focus })) if *e == i => {
+                value.child(render_date_field(paint, focus, theme, tones, tile, tile_id))
             }
             _ => value.child(attr.text.clone()),
         };
@@ -563,6 +667,54 @@ mod tests {
         assert!(
             !h.stale,
             "staleness is the tile's clock reading, applied at paint"
+        );
+    }
+
+    /// The date field's two highlighted segments — the active one on
+    /// `primary`, a mid-typing one on `accent` — must be readable on EVERY
+    /// bundled theme at the same 3:1 floor the cell states hold to. Each is
+    /// the theme's own paired token, but a pair is a promise the author
+    /// made, not one this crate checked: seven bundled themes broke the
+    /// `primary` pair (which is why `FlooredTones::primary_text` exists),
+    /// none the `accent` one. Checked here rather than assumed, with the
+    /// bare segment's `foreground` against the header ground beside them.
+    #[gpui::test]
+    fn date_segment_colours_are_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
+        use crate::delegate::tests::{ground, over};
+        use geode_core::colour::{READABLE_RATIO, contrast_ratio};
+        use geode_shell::shell::colours::to_rgb;
+        use gpui_component::ActiveTheme as _;
+
+        cx.update(gpui_component::init);
+        let (service, _) = geode_shell::theme::load_bundled();
+        let mut failures = Vec::new();
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                let tones = FlooredTones::derive(theme);
+                for (state, active, typing) in [
+                    ("active", true, false),
+                    ("typing", true, true),
+                    ("bare", false, false),
+                ] {
+                    let paint = date_segment_paint(theme, &tones, active, typing);
+                    let under = match paint.fill {
+                        Some(fill) => over(fill, ground(theme)),
+                        None => ground(theme),
+                    };
+                    let ratio = contrast_ratio(to_rgb(paint.text), under);
+                    if ratio < READABLE_RATIO {
+                        failures.push(format!("{name}: {state} segment at {ratio:.2}:1"));
+                    }
+                }
+            });
+        }
+        assert!(
+            failures.is_empty(),
+            "unreadable date segments:\n{}",
+            failures.join("\n")
         );
     }
 }

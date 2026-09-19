@@ -1,12 +1,15 @@
 //! Arrow-key nudging of the text in an open editor (2026-09-17): one
-//! unit of the painted precision per step, whole days for a date. Pure —
-//! text in, text out — so the tile only decides WHICH type and precision
-//! the open target carries and writes the answer back into its `Input`.
-//! Nothing here commits: `enter` still commits and `escape` still cancels.
+//! unit of the painted precision per step. Pure — text in, text out — so
+//! the tile only decides WHICH type and precision the open target carries
+//! and writes the answer back into its `Input`. Nothing here commits:
+//! `enter` still commits and `escape` still cancels. A `Date` attribute
+//! no longer opens a text editor at all (2026-09-19): the segmented
+//! [`crate::core::DateField`] owns dates, and its own `step` is the
+//! arithmetic there.
 
 use geode_core::schema::ColumnType;
 
-/// Step the number (or date) spelled by `text` by `steps` units.
+/// Step the number spelled by `text` by `steps` units.
 ///
 /// - `F64`: one unit is `10^-precision`, where `precision` is the column's
 ///   own painted precision when the caller knows it (a cell's format) and
@@ -16,8 +19,8 @@ use geode_core::schema::ColumnType;
 ///   arithmetic is done on the scaled integer, never on the float, so
 ///   `0.1` + one step at one place is `0.2`, not `0.20000000000000001`.
 /// - `I64`: whole units, spelled plainly.
-/// - `Date`: `steps` whole days, `%Y-%m-%d`.
-/// - anything else, or text that does not parse as its type: `Err`
+/// - anything else (a `Date` included — the date field owns those), or
+///   text that does not parse as its type: `Err`
 ///   naming the text, in `parse_cell`'s own wording — the inline notice
 ///   appears beside a field the trader can no longer see the whole of.
 pub fn nudge_text(
@@ -46,13 +49,6 @@ pub fn nudge_text(
             .parse::<i64>()
             .map(|v| v.saturating_add(steps).to_string())
             .map_err(|_| format!("'{text}' is not a whole number")),
-        ColumnType::Date => chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
-            .map_err(|_| format!("'{text}' is not a date (YYYY-MM-DD)"))
-            .and_then(|d| {
-                d.checked_add_signed(chrono::Duration::days(steps))
-                    .ok_or_else(|| format!("'{text}' cannot be stepped that far"))
-            })
-            .map(|d| d.format("%Y-%m-%d").to_string()),
         other => Err(format!("a {other:?} value cannot be nudged")),
     }
 }
@@ -106,20 +102,10 @@ mod tests {
         );
     }
 
+    /// A date is the segmented field's (2026-09-19), never this function's.
     #[test]
-    fn a_date_steps_whole_days() {
-        assert_eq!(
-            nudge_text("2026-09-14", ColumnType::Date, None, 1).unwrap(),
-            "2026-09-15"
-        );
-        assert_eq!(
-            nudge_text("2026-09-14", ColumnType::Date, None, 10).unwrap(),
-            "2026-09-24"
-        );
-        assert_eq!(
-            nudge_text("2026-09-14", ColumnType::Date, None, -14).unwrap(),
-            "2026-08-31"
-        );
+    fn a_date_is_not_nudged_as_text() {
+        assert!(nudge_text("2026-09-14", ColumnType::Date, None, 1).is_err());
     }
 
     #[test]
@@ -142,8 +128,6 @@ mod tests {
     #[test]
     fn unparseable_text_is_refused_naming_the_text() {
         let err = nudge_text("abc", ColumnType::F64, Some(4), 1).unwrap_err();
-        assert!(err.contains("'abc'"), "{err}");
-        let err = nudge_text("abc", ColumnType::Date, None, 1).unwrap_err();
         assert!(err.contains("'abc'"), "{err}");
         let err = nudge_text("1.5", ColumnType::I64, None, 1).unwrap_err();
         assert!(err.contains("'1.5'"), "{err}");

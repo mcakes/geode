@@ -54,14 +54,16 @@ use crate::core::cursor::{self, Cursor, Grid, Motion};
 use crate::core::draft::local_hhmm;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::{
-    Draft, DraftBadge, MatrixModel, PanelSpec, UpdatePolicy, parse_attr, parse_cell,
+    DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment, UpdatePolicy, parse_attr,
+    parse_cell,
 };
 use crate::delegate::MatrixDelegate;
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{MenuState, PickerRows, PickerState, Popup, render_menu, render_picker};
-use geode_core::colour::readable_on;
-use geode_core::document::split_key;
+use geode_core::colour::{Rgb, contrast_ratio, readable_on};
+use geode_core::document::{Value, split_key};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
+use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
@@ -74,8 +76,8 @@ use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, Entity, Focusable as _, Hsla, IntoElement, SharedString, Window,
-    div, px,
+    App, ClipboardItem, Context, Entity, FocusHandle, Focusable as _, Hsla, IntoElement,
+    KeyDownEvent, SharedString, Window, div, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
@@ -120,43 +122,76 @@ pub struct FindState {
 /// with no fill under them, is the BACKGROUND family (1.00:1 on twenty
 /// themes: an invisible `3 edits`).
 ///
+/// `primary_text` (2026-09-19) is the date field's active-segment text:
+/// `primary_foreground` floored against `primary` itself, the solid fill
+/// it sits on — seven bundled themes (Gruvbox Light at 2.19:1, Ayu Light,
+/// Everforest Light, Catppuccin Latte, Flexoki Light, Asciinema,
+/// Spaceduck) ship the pair under 3:1. The floor moves lightness toward
+/// pure black or pure white, whichever contrasts more with `primary` —
+/// not toward the theme's own `foreground`, which on three light themes
+/// (Everforest Light's grey on its mid green) is itself under 3:1 against
+/// `primary`, leaving `readable_on` no `t` that clears. Every colour
+/// clears 3:1 against one of black and white, so this floor always lands.
+///
 /// Memoised, not derived per frame: `readable_on` is a 16-step bisection
 /// through OKLab, and PHILOSOPHY §6 forbids that per chip per frame.
 /// `key` is EVERY colour `derive` reads and nothing else — the blotter's
-/// theme-signature rule at the scale of four inputs — so a theme switch
+/// theme-signature rule at the scale of six inputs — so a theme switch
 /// recomputes on its first frame and every other frame is one compare.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FlooredTones {
-    key: [Hsla; 4],
+    key: [Hsla; 6],
     pub(crate) warn: Hsla,
     pub(crate) error: Hsla,
+    pub(crate) primary_text: Hsla,
 }
 
 impl FlooredTones {
     pub(crate) fn derive(theme: &Theme) -> Self {
         let (bg, fg) = (to_rgb(theme.background), to_rgb(theme.foreground));
         let floor = |c: Hsla| to_hsla(readable_on(to_rgb(c), bg, fg));
+        let primary = to_rgb(theme.primary);
+        let black = Rgb {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+        };
+        let white = Rgb {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+        };
+        let toward = if contrast_ratio(black, primary) >= contrast_ratio(white, primary) {
+            black
+        } else {
+            white
+        };
         Self {
-            key: [
-                theme.background,
-                theme.foreground,
-                theme.warning,
-                theme.danger,
-            ],
+            key: Self::key(theme),
             warn: floor(theme.warning),
             error: floor(theme.danger),
+            primary_text: to_hsla(readable_on(
+                to_rgb(theme.primary_foreground),
+                primary,
+                toward,
+            )),
         }
     }
 
-    /// Re-derive only when one of the four inputs moved.
-    fn refresh(&mut self, theme: &Theme) {
-        let key = [
+    fn key(theme: &Theme) -> [Hsla; 6] {
+        [
             theme.background,
             theme.foreground,
             theme.warning,
             theme.danger,
-        ];
-        if self.key != key {
+            theme.primary,
+            theme.primary_foreground,
+        ]
+    }
+
+    /// Re-derive only when one of the six inputs moved.
+    fn refresh(&mut self, theme: &Theme) {
+        if self.key != Self::key(theme) {
             *self = Self::derive(theme);
         }
     }
@@ -194,12 +229,72 @@ type BumpCell = ((usize, usize), (String, String), f64);
 /// The open cell or attribute editor (spec §8.6/§5.2): the input the
 /// trader is typing into, and what it was opened on.
 struct Editing {
+    state: EditorState,
+    target: EditTarget,
+}
+
+/// The two forms an editor takes (header spec §5.2, 2026-09-19).
+enum EditorState {
+    /// A text `Input` — every cell, and every attribute but a `Date`.
     /// Tile-owned, and PAINTED in the cell or the strip (see `render`):
     /// gpui installs a text-input handler only for a focused `Input` that
     /// has been drawn, so an editor kept off the element tree would take
     /// no characters at all.
-    state: Entity<InputState>,
-    target: EditTarget,
+    Text(Entity<InputState>),
+    /// The segmented date field a `Date` attribute opens instead: a pure
+    /// [`DateField`] the tile routes keys into
+    /// ([`MarketDataTile::date_field_key`]), its own focus handle (what
+    /// makes the shell's insert branch see a non-shell focus and what
+    /// `holds_focus` answers off), and the three segment strings prepared
+    /// on every key so `render` formats nothing.
+    Date {
+        field: DateField,
+        focus: FocusHandle,
+        paint: DateFieldPaint,
+    },
+}
+
+impl EditorState {
+    /// Whether this editor's own focusable — the `Input`'s handle or the
+    /// date field's — holds window focus.
+    fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        match self {
+            EditorState::Text(state) => state.read(cx).focus_handle(cx).is_focused(window),
+            EditorState::Date { focus, .. } => focus.is_focused(window),
+        }
+    }
+}
+
+/// The date field as painted: one `SharedString` per segment, which one
+/// is active and whether that one is mid-typing — prepared by
+/// [`DateFieldPaint::of`] whenever the field changes, never in `render`.
+pub(crate) struct DateFieldPaint {
+    pub segments: [SharedString; 3],
+    pub active: usize,
+    pub typing: bool,
+}
+
+impl DateFieldPaint {
+    fn of(field: &DateField) -> Self {
+        let [y, m, d] = field.segments();
+        let active = field.segment.index();
+        let typing = y.typing || m.typing || d.typing;
+        Self {
+            segments: [y.text.into(), m.text.into(), d.text.into()],
+            active,
+            typing,
+        }
+    }
+}
+
+/// What `header::render` paints in the editor slot of the attribute being
+/// edited.
+pub(crate) enum EditorPaint<'a> {
+    Text(&'a Entity<InputState>),
+    Date {
+        paint: &'a DateFieldPaint,
+        focus: &'a FocusHandle,
+    },
 }
 
 /// What an open [`Editing`] was opened on.
@@ -232,6 +327,13 @@ enum EditTarget {
         /// are (a header attribute's own "did the grid move" rule).
         column: SharedString,
     },
+}
+
+/// What `commit_attr_edit` is handed: text still to be parsed (the text
+/// editor, `:set`) or a value already known valid (the date field).
+enum AttrInput<'a> {
+    Text(&'a str),
+    Value(Value),
 }
 
 /// Which of the three yanks (spec §8.3) is being taken.
@@ -708,7 +810,7 @@ impl MarketDataTile {
         let editor = self
             .editor
             .as_ref()
-            .is_some_and(|e| e.state.read(cx).focus_handle(cx).is_focused(window));
+            .is_some_and(|e| e.state.is_focused(window, cx));
         let picker = matches!(&self.popup, Some(Popup::Picker(p))
             if p.input.read(cx).focus_handle(cx).is_focused(window));
         editor || picker
@@ -1225,10 +1327,18 @@ impl MarketDataTile {
     /// like the blotter (a highlighted row plus a bordered cursor cell)
     /// rather than painting nothing at all.
     fn sync_cursor(&self, cx: &mut Context<Self>) {
-        let editor = self.editor.as_ref().and_then(|e| match &e.target {
-            EditTarget::Cell { cell, .. } => Some((*cell, e.state.clone())),
-            EditTarget::Attr { .. } => None,
-        });
+        let editor = self
+            .editor
+            .as_ref()
+            .and_then(|e| match (&e.target, &e.state) {
+                (EditTarget::Cell { cell, .. }, EditorState::Text(state)) => {
+                    Some((*cell, state.clone()))
+                }
+                // A cell never opens the date form; the arm exists so the
+                // match says so rather than forgetting it.
+                (EditTarget::Cell { .. }, EditorState::Date { .. })
+                | (EditTarget::Attr { .. }, _) => None,
+            });
         match self.cursor {
             Cursor::Cell { row, col } => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
@@ -1678,7 +1788,7 @@ impl MarketDataTile {
             self.notice = Some(BEHIND_REFUSED.into());
             return;
         }
-        let (text, target) = match self.cursor {
+        let (text, target, ty) = match self.cursor {
             Cursor::Cell { row, col } => {
                 if let Err(e) = self.edit_base() {
                     self.notice = Some(e.into());
@@ -1687,7 +1797,7 @@ impl MarketDataTile {
                 let cell = (row, col);
                 let text = self.model.rows[row].cells[col].text.clone();
                 let labels = self.model.label_of(cell);
-                (text, EditTarget::Cell { cell, labels })
+                (text, EditTarget::Cell { cell, labels }, None)
             }
             Cursor::Attr(i) => {
                 if let Err(e) = self.attr_edit_base() {
@@ -1698,20 +1808,126 @@ impl MarketDataTile {
                     self.notice = Some(NO_DOCUMENT.into());
                     return;
                 };
+                let ty = self
+                    .spec
+                    .header
+                    .iter()
+                    .find(|a| a.column == attr.column.as_ref())
+                    .map(|a| a.ty);
                 (
                     attr.text.clone(),
                     EditTarget::Attr {
                         index: i,
                         column: attr.column.clone(),
                     },
+                    ty,
                 )
             }
         };
-        let state = cx.new(|cx| InputState::new(window, cx));
-        state.update(cx, |s, cx| s.set_value(text, window, cx));
-        state.read(cx).focus_handle(cx).focus(window, cx);
+        let state = if ty == Some(ColumnType::Date) {
+            // A `Date` attribute opens the segmented field (header spec
+            // §5.2, 2026-09-19), seeded with the painted date — or, when
+            // that does not parse (a NULL painted empty, say), today's
+            // local date, so the field always opens on something a step
+            // or a digit can act on.
+            let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
+                .unwrap_or_else(|_| chrono::Local::now().date_naive());
+            let field = DateField::open(date);
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            let paint = DateFieldPaint::of(&field);
+            EditorState::Date {
+                field,
+                focus,
+                paint,
+            }
+        } else {
+            let state = cx.new(|cx| InputState::new(window, cx));
+            state.update(cx, |s, cx| s.set_value(text, window, cx));
+            state.read(cx).focus_handle(cx).focus(window, cx);
+            EditorState::Text(state)
+        };
         self.editor = Some(Editing { state, target });
         self.notice = None;
+    }
+
+    /// The date field's own keys (header spec §5.2, 2026-09-19), run from
+    /// its `on_key_down` in `header::render` — which sits on the focused
+    /// element and so runs BEFORE the shell root's listener. Answers
+    /// whether the key was consumed; the listener stops propagation on
+    /// `true`, so the shell never also resolves it. A chord (ctrl, alt or
+    /// cmd) is never consumed: it reaches the shell exactly as it does
+    /// from any editor (`ctrl+k` still opens the palette). Shift alone is
+    /// the arrows' "ten steps", the number nudge's own rule.
+    ///
+    /// `enter` and `escape` are ALSO bound by the fragment
+    /// (`marketdata::commit`/`cancel`) for the shell's dispatch: both
+    /// doors end in the same `commit_edit`/`close_editor`, so which one a
+    /// keystroke reaches cannot change what it does.
+    pub(crate) fn date_field_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform {
+            return false;
+        }
+        let Some(Editing {
+            state: EditorState::Date { field, paint, .. },
+            ..
+        }) = self.editor.as_mut()
+        else {
+            return false;
+        };
+        let key = event.keystroke.key.as_str();
+        let big = if modifiers.shift { 10 } else { 1 };
+        match key {
+            "left" => field.left(),
+            "right" => field.right(),
+            "up" => field.step(big),
+            "down" => field.step(-big),
+            "backspace" => field.backspace(),
+            "enter" => {
+                self.commit_edit(window, cx);
+                self.sync_cursor(cx);
+                self.changed(cx);
+                return true;
+            }
+            "escape" => {
+                self.close_editor(window, cx);
+                self.sync_cursor(cx);
+                self.changed(cx);
+                return true;
+            }
+            _ => {
+                let mut chars = key.chars();
+                match (chars.next().and_then(|c| c.to_digit(10)), chars.next()) {
+                    (Some(d), None) => {
+                        field.digit(d as u8);
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        *paint = DateFieldPaint::of(field);
+        cx.notify();
+        true
+    }
+
+    /// A click on one of the field's segments (`header::render` attaches
+    /// this): the mouse form of `left`/`right`.
+    pub(crate) fn date_segment_clicked(&mut self, segment: Segment, cx: &mut Context<Self>) {
+        if let Some(Editing {
+            state: EditorState::Date { field, paint, .. },
+            ..
+        }) = self.editor.as_mut()
+        {
+            field.select(segment);
+            *paint = DateFieldPaint::of(field);
+            cx.notify();
+        }
     }
 
     /// `marketdata::commit` (`enter` in insert mode). Answers whether the
@@ -1720,14 +1936,27 @@ impl MarketDataTile {
         let Some(editing) = self.editor.as_ref() else {
             return false;
         };
-        let text = editing.state.read(cx).value().to_string();
         let target = editing.target.clone();
-        match target {
-            EditTarget::Cell { cell, labels } => {
+        match (&editing.state, target) {
+            (EditorState::Text(state), EditTarget::Cell { cell, labels }) => {
+                let text = state.read(cx).value().to_string();
                 self.commit_cell_edit(cell, labels, &text, window, cx)
             }
-            EditTarget::Attr { index, column } => {
-                self.commit_attr_edit(index, column, &text, window, cx)
+            (EditorState::Text(state), EditTarget::Attr { index, column }) => {
+                let text = state.read(cx).value().to_string();
+                self.commit_attr_edit(index, column, AttrInput::Text(&text), window, cx)
+            }
+            (EditorState::Date { field, .. }, EditTarget::Attr { index, column }) => {
+                // Always a valid date (the field's own invariant), so
+                // there is nothing to parse and nothing to refuse.
+                let value = Value::Date(field.value());
+                self.commit_attr_edit(index, column, AttrInput::Value(value), window, cx)
+            }
+            (EditorState::Date { .. }, EditTarget::Cell { .. }) => {
+                // Unreachable: a cell never opens the date form. Closed
+                // rather than guessed at.
+                self.close_editor(window, cx);
+                false
             }
         }
     }
@@ -1749,10 +1978,22 @@ impl MarketDataTile {
     /// Text that does not parse leaves the editor untouched and says so
     /// in the notice. Answers whether the header needs re-preparing.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(editing) = self.editor.as_ref() else {
+        let Some(editing) = self.editor.as_mut() else {
             return false;
         };
-        let text = editing.state.read(cx).value().to_string();
+        let state = match &mut editing.state {
+            EditorState::Text(state) => state.clone(),
+            EditorState::Date { field, paint, .. } => {
+                // The field owns dates (2026-09-19): the shell's
+                // `insert_up`/`insert_down` reach here only when the
+                // field's own listener did not consume the key, and step
+                // the same way it would have.
+                field.step(steps);
+                *paint = DateFieldPaint::of(field);
+                return self.notice.take().is_some();
+            }
+        };
+        let text = state.read(cx).value().to_string();
         let (ty, precision) = match &editing.target {
             EditTarget::Cell { cell: (_, col), .. } => {
                 // A slice column (`fwd` at two places beside `param`'s
@@ -1789,7 +2030,6 @@ impl MarketDataTile {
         };
         match crate::core::nudge_text(&text, ty, precision, steps) {
             Ok(next) => {
-                let state = editing.state.clone();
                 state.update(cx, |s, cx| s.set_value(next, window, cx));
                 // A cleared notice is header paint; an unchanged `None`
                 // is not.
@@ -1860,7 +2100,7 @@ impl MarketDataTile {
         &mut self,
         index: usize,
         column: SharedString,
-        text: &str,
+        input: AttrInput<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1883,16 +2123,19 @@ impl MarketDataTile {
             self.notice = Some(CELL_MOVED.into());
             return true;
         };
-        let value = match parse_attr(text, attr.ty) {
-            Ok(value) => value,
-            Err(e) => {
-                // Refused, staying in insert mode with the typed text
-                // (the cell rule, spec §5.2) — retyping is one keystroke
-                // away where dropping the editor would throw the whole
-                // line back at the trader.
-                self.notice = Some(e.into());
-                return true;
-            }
+        let value = match input {
+            AttrInput::Value(value) => value,
+            AttrInput::Text(text) => match parse_attr(text, attr.ty) {
+                Ok(value) => value,
+                Err(e) => {
+                    // Refused, staying in insert mode with the typed text
+                    // (the cell rule, spec §5.2) — retyping is one
+                    // keystroke away where dropping the editor would
+                    // throw the whole line back at the trader.
+                    self.notice = Some(e.into());
+                    return true;
+                }
+            },
         };
         let base = match self.attr_edit_base() {
             Ok(base) => base,
@@ -1929,7 +2172,7 @@ impl MarketDataTile {
     /// and closed from a `:` line must not blur the command line.
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(e) = &self.editor
-            && e.state.read(cx).focus_handle(cx).is_focused(window)
+            && e.state.is_focused(window, cx)
         {
             window.blur(cx);
         }
@@ -2879,15 +3122,38 @@ impl MarketDataTile {
     /// which is the one thing it cannot do with a key press.
     #[cfg(test)]
     pub(crate) fn editor_state(&self) -> Option<Entity<InputState>> {
-        self.editor.as_ref().map(|e| e.state.clone())
+        self.editor.as_ref().and_then(|e| match &e.state {
+            EditorState::Text(state) => Some(state.clone()),
+            EditorState::Date { .. } => None,
+        })
     }
 
-    /// What the open editor holds, `None` when none is open.
+    /// What the open editor holds, `None` when none is open: the text
+    /// editor's text, or the date field's committed `YYYY-MM-DD`.
     #[cfg(test)]
     pub(crate) fn editor_value(&self, cx: &App) -> Option<String> {
-        self.editor
-            .as_ref()
-            .map(|e| e.state.read(cx).value().to_string())
+        self.editor.as_ref().map(|e| match &e.state {
+            EditorState::Text(state) => state.read(cx).value().to_string(),
+            EditorState::Date { field, .. } => field.text(),
+        })
+    }
+
+    /// The open date field, `None` when the open editor is not one.
+    #[cfg(test)]
+    pub(crate) fn date_field(&self) -> Option<DateField> {
+        self.editor.as_ref().and_then(|e| match &e.state {
+            EditorState::Date { field, .. } => Some(field.clone()),
+            EditorState::Text(_) => None,
+        })
+    }
+
+    /// The open date field's own focus handle.
+    #[cfg(test)]
+    pub(crate) fn date_field_focus(&self) -> Option<FocusHandle> {
+        self.editor.as_ref().and_then(|e| match &e.state {
+            EditorState::Date { focus, .. } => Some(focus.clone()),
+            EditorState::Text(_) => None,
+        })
     }
 
     /// The open picker's own field entity — a test seeds a value through
@@ -3064,7 +3330,13 @@ impl gpui::Render for MarketDataTile {
             Cursor::Cell { .. } => None,
         };
         let editor = self.editor.as_ref().and_then(|e| match &e.target {
-            EditTarget::Attr { index, .. } => Some((*index, &e.state)),
+            EditTarget::Attr { index, .. } => Some((
+                *index,
+                match &e.state {
+                    EditorState::Text(state) => EditorPaint::Text(state),
+                    EditorState::Date { paint, focus, .. } => EditorPaint::Date { paint, focus },
+                },
+            )),
             EditTarget::Cell { .. } => None,
         });
         let menu_open = matches!(self.popup, Some(Popup::Menu(_)));
@@ -3347,6 +3619,10 @@ mod tests {
     struct Host {
         tile: Entity<MarketDataTile>,
         clicks: Rc<StdCell<u32>>,
+        /// Bubble-phase key-downs that reached the host — the stand-in
+        /// for the shell root's own `handle_key_down`: a key the date
+        /// field consumes must not count here, a chord must.
+        keys: Rc<StdCell<u32>>,
         /// Bubble-phase, hover-gated mouse moves that reached the host —
         /// the stand-in for the grid rows beneath a popup: a move over an
         /// OCCLUDING popup must not count here, a move over the grid must.
@@ -3360,10 +3636,14 @@ mod tests {
         ) -> impl gpui::IntoElement {
             let clicks = self.clicks.clone();
             let moves = self.moves.clone();
+            let keys = self.keys.clone();
             gpui::div()
                 .size_full()
                 .on_mouse_down(gpui::MouseButton::Left, move |_, _, _cx| {
                     clicks.set(clicks.get() + 1);
+                })
+                .on_key_down(move |_, _, _cx| {
+                    keys.set(keys.get() + 1);
                 })
                 .on_mouse_move(move |_, _, _cx| {
                     moves.set(moves.get() + 1);
@@ -3381,6 +3661,7 @@ mod tests {
         diagnostics: Entity<Diagnostics>,
         clicks: Rc<StdCell<u32>>,
         moves: Rc<StdCell<u32>>,
+        keys: Rc<StdCell<u32>>,
     }
 
     struct Harness {
@@ -3404,6 +3685,9 @@ mod tests {
         /// [`Host`]'s hover-gated mouse-move counter — what a popup must
         /// occlude.
         moves: Rc<StdCell<u32>>,
+        /// [`Host`]'s bubble-phase key-down counter — the shell root's
+        /// listener stand-in.
+        keys: Rc<StdCell<u32>>,
     }
 
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
@@ -3441,6 +3725,7 @@ mod tests {
                     let tile = occupant.view.clone().downcast::<MarketDataTile>().unwrap();
                     let clicks = Rc::new(StdCell::new(0));
                     let moves = Rc::new(StdCell::new(0));
+                    let keys = Rc::new(StdCell::new(0));
                     *slot.borrow_mut() = Some(Built {
                         content: occupant.content,
                         tile: tile.clone(),
@@ -3448,11 +3733,13 @@ mod tests {
                         diagnostics,
                         clicks: clicks.clone(),
                         moves: moves.clone(),
+                        keys: keys.clone(),
                     });
                     let host = cx.new(|_| Host {
                         tile,
                         clicks,
                         moves,
+                        keys,
                     });
                     // Wrapped in `Root`, exactly as `main.rs` wraps the
                     // shell — and load-bearing here rather than decorative:
@@ -3482,6 +3769,7 @@ mod tests {
                 data,
                 clicks: built.clicks,
                 moves: built.moves,
+                keys: built.keys,
             },
             vcx,
         )
@@ -3563,6 +3851,9 @@ mod tests {
         }
         fn host_moves(&self) -> u32 {
             self.moves.get()
+        }
+        fn host_keys(&self) -> u32 {
+            self.keys.get()
         }
         /// Seed the open editor — the one thing a test cannot do through a
         /// key press. Typing for real is exercised in
@@ -6415,20 +6706,23 @@ edits = [["2099-01-01", "-1", 1.0]]
     }
 
     /// A refused parse stays in insert mode with the typed text intact —
-    /// the cell rule, spec §5.2 — and writes nothing to the draft.
+    /// the cell rule, spec §5.2 — and writes nothing to the draft. On
+    /// `spot_ref` (F64): a `Date` attribute opens the segmented field
+    /// since 2026-09-19, which has nothing to refuse.
     #[gpui::test]
-    fn a_bad_date_stays_in_insert_mode_with_the_notice(cx: &mut gpui::TestAppContext) {
+    fn a_bad_number_stays_in_insert_mode_with_the_notice(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        h.dispatch(&mut vcx, "up", None); // Attr(0) = anchor_date
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "up", None); // Attr(1) = spot_ref
         h.dispatch(&mut vcx, "edit", None);
-        h.set_editor(&mut vcx, "2026-13-45");
+        h.set_editor(&mut vcx, "abc");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.mode(&vcx), "insert");
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("'2026-13-45' is not a date (YYYY-MM-DD)".into())
+            Some("'abc' is not a number".into())
         );
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
     }
@@ -6475,9 +6769,11 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("4499.99"));
     }
 
-    /// A `Date` attribute steps whole days — `shift+down` is ten of them —
-    /// and an `F64` attribute steps at the places its text paints (`5000`
-    /// by one).
+    /// A `Date` attribute's field steps whole days on the shell-dispatched
+    /// `insert_*` verbs too — `shift+down` is ten of them — the same door
+    /// the field's own listener takes, so the two cannot disagree; and an
+    /// `F64` attribute steps at the places its text paints (`5000` by
+    /// one).
     #[gpui::test]
     fn an_attribute_nudges_by_days_or_by_its_painted_places(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6990,6 +7286,252 @@ edits = [["2099-01-01", "-1", 1.0]]
             over_grid,
             "a move over the picker never reaches what is painted beneath it"
         );
+    }
+
+    // ---- the segmented date field (header spec §5.2, 2026-09-19) -------
+
+    /// Opens the field on `anchor_date` (Attr 0) and paints it: the
+    /// field's `on_key_down` is a listener on the painted, focused element,
+    /// so every test that types into it draws first.
+    fn open_date_field(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        h.dispatch(vcx, "up", None); // Attr(0) = anchor_date
+        h.dispatch(vcx, "edit", None);
+        draw(vcx);
+    }
+
+    fn date_segments(h: &Harness, vcx: &gpui::VisualTestContext) -> ([String; 3], Segment) {
+        let field = h
+            .tile
+            .read_with(vcx, |t, _| t.date_field())
+            .expect("an open date field");
+        let [y, m, d] = field.segments();
+        ([y.text, m.text, d.text], field.segment)
+    }
+
+    fn type_keys(vcx: &mut gpui::VisualTestContext, keys: &str) {
+        vcx.simulate_keystrokes(keys);
+        draw(vcx);
+    }
+
+    /// `i` on a `Date` attribute opens the segmented field, not the text
+    /// editor: insert mode, the field's own handle holding the keyboard,
+    /// the fixture's date across the three segments, and the DAY active
+    /// (user ruling 2026-09-19).
+    #[gpui::test]
+    fn i_on_a_date_attribute_opens_the_field_on_the_day_segment(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        assert_eq!(h.mode(&vcx), "insert");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.editor_state()).is_none(),
+            "a date attribute opens no text Input"
+        );
+        assert!(
+            vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "the field's own handle holds the keyboard"
+        );
+        let (texts, active) = date_segments(&h, &vcx);
+        assert_eq!(texts, ["2026", "09", "12"]);
+        assert_eq!(active, Segment::Day);
+        assert!(
+            vcx.debug_bounds(Box::leak(
+                format!("marketdata-date-seg-{TILE}-2").into_boxed_str()
+            ))
+            .is_some(),
+            "the day segment is painted"
+        );
+    }
+
+    /// The arrows through the field's own listener: `up` steps the day,
+    /// `shift-up` ten, `left` moves to the month (the day kept when it
+    /// still fits), `left` again to the year, and `enter` commits the
+    /// composed date into the draft — the header paints it edited, with
+    /// the dirty dot.
+    #[gpui::test]
+    fn arrows_step_each_segment_and_enter_commits_the_date(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        type_keys(&mut vcx, "up up up");
+        assert_eq!(date_segments(&h, &vcx).0, ["2026", "09", "15"]);
+        type_keys(&mut vcx, "shift-up");
+        assert_eq!(date_segments(&h, &vcx).0, ["2026", "09", "25"]);
+        type_keys(&mut vcx, "left down");
+        assert_eq!(
+            date_segments(&h, &vcx),
+            (["2026", "08", "25"].map(String::from), Segment::Month)
+        );
+        type_keys(&mut vcx, "left up");
+        assert_eq!(
+            date_segments(&h, &vcx),
+            (["2027", "08", "25"].map(String::from), Segment::Year)
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "nothing is written until enter"
+        );
+        type_keys(&mut vcx, "enter");
+        assert_eq!(h.mode(&vcx), "normal");
+        let expected = Value::Date(chrono::NaiveDate::from_ymd_opt(2027, 8, 25).unwrap());
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().attrs.get("anchor_date").cloned()),
+            Some(expected)
+        );
+        let (texts, dirty) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.header_texts(), t.header_dirty()));
+        assert!(
+            texts.contains(&"anchor 2027-08-25".to_string()),
+            "{texts:?}"
+        );
+        assert!(dirty);
+        assert!(h.tile.read_with(&vcx, |t, _| t.model().header[0].edited));
+    }
+
+    /// Typing: `1` into the month waits (shown typing), `2` completes 12
+    /// and advances to the day, `3` waits there, `0` completes 30 —
+    /// `enter` commits the typed date.
+    #[gpui::test]
+    fn typed_digits_fill_a_segment_and_advance(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        type_keys(&mut vcx, "left 1");
+        let field = h.tile.read_with(&vcx, |t, _| t.date_field()).unwrap();
+        let month = &field.segments()[1];
+        assert_eq!(
+            (month.text.as_str(), month.typing, month.active),
+            ("1", true, true)
+        );
+        assert_eq!(
+            field.value(),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 12).unwrap()
+        );
+        type_keys(&mut vcx, "2");
+        assert_eq!(
+            date_segments(&h, &vcx),
+            (["2026", "12", "12"].map(String::from), Segment::Day)
+        );
+        type_keys(&mut vcx, "3");
+        assert_eq!(date_segments(&h, &vcx).0[2], "3");
+        type_keys(&mut vcx, "9");
+        assert_eq!(
+            date_segments(&h, &vcx).0[2],
+            "3",
+            "39 is refused; the 3 stays"
+        );
+        type_keys(&mut vcx, "backspace");
+        assert_eq!(
+            date_segments(&h, &vcx).0[2],
+            "12",
+            "backspace shows the value again"
+        );
+        type_keys(&mut vcx, "3 0 enter");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().attrs.get("anchor_date").cloned()),
+            Some(Value::Date(
+                chrono::NaiveDate::from_ymd_opt(2026, 12, 30).unwrap()
+            ))
+        );
+    }
+
+    /// `escape` after changes writes nothing: the draft stays empty and
+    /// the attribute paints the date it had. And the field gives the
+    /// keyboard up on its way out (blur, then drop — `close_editor`'s
+    /// rule), so `Window::focused` is `None` for the shell's own net.
+    #[gpui::test]
+    fn escape_restores_the_painted_date_and_blurs_the_field(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        let focus = h.tile.read_with(&vcx, |t, _| t.date_field_focus()).unwrap();
+        assert!(vcx.update(|window, _| focus.is_focused(window)));
+        type_keys(&mut vcx, "up up left down escape");
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.header_texts())
+                .contains(&"anchor 2026-09-12".to_string())
+        );
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "escape must blur the field before dropping it"
+        );
+        // The fragment's own door (`marketdata::cancel`, the shell's
+        // dispatch) closes it the same way.
+        open_date_field(&h, &mut vcx);
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(vcx.update(|window, cx| window.focused(cx).is_none()));
+    }
+
+    /// A click on a segment selects it — the mouse form of `left`/`right`
+    /// — and leaves the editor open: the segment's own mouse-down stops
+    /// before the attribute value's `attr_clicked`, which would otherwise
+    /// cancel the editor the click was aimed into.
+    #[gpui::test]
+    fn a_click_on_a_segment_selects_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        let year = centre_of(&mut vcx, &format!("marketdata-date-seg-{TILE}-0"));
+        click_at(&mut vcx, year, 1);
+        assert_eq!(
+            h.mode(&vcx),
+            "insert",
+            "the click did not cancel the editor"
+        );
+        assert_eq!(date_segments(&h, &vcx).1, Segment::Year);
+        let month = centre_of(&mut vcx, &format!("marketdata-date-seg-{TILE}-1"));
+        click_at(&mut vcx, month, 1);
+        assert_eq!(date_segments(&h, &vcx).1, Segment::Month);
+        type_keys(&mut vcx, "up");
+        assert_eq!(date_segments(&h, &vcx).0, ["2026", "10", "12"]);
+    }
+
+    /// A chord is never the field's: `ctrl-k` (the palette, in the real
+    /// shell) bubbles past it to the host — the stand-in for the shell
+    /// root's own listener — with the field untouched and still open.
+    #[gpui::test]
+    fn a_chord_passes_through_the_field_to_the_shell(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        open_date_field(&h, &mut vcx);
+        let before = h.host_keys();
+        type_keys(&mut vcx, "ctrl-k");
+        assert_eq!(
+            h.host_keys(),
+            before + 1,
+            "the chord reached the host's own listener"
+        );
+        assert_eq!(h.mode(&vcx), "insert");
+        assert_eq!(date_segments(&h, &vcx).0, ["2026", "09", "12"]);
+        // And a key the field consumes does NOT reach it.
+        type_keys(&mut vcx, "up");
+        assert_eq!(
+            h.host_keys(),
+            before + 1,
+            "a consumed key stops at the field"
+        );
+        assert_eq!(date_segments(&h, &vcx).0, ["2026", "09", "13"]);
+    }
+
+    /// `spot_ref` (F64) still opens the text editor — only a `Date`
+    /// attribute opens the field.
+    #[gpui::test]
+    fn a_number_attribute_still_opens_the_text_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "up", None); // Attr(1) = spot_ref
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.editor_state()).is_some());
+        assert!(h.tile.read_with(&vcx, |t, _| t.date_field()).is_none());
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("5000"));
     }
 
     /// User report 2026-09-18: `shift+up` in an open cell editor moved the
