@@ -416,6 +416,53 @@ local-time resolution across a DST boundary; window tests that a day click
 rewrites the field and that typing moves the calendar's selection; a
 mutation entry for the end-of-day default.
 
+**As built (2026-09-18):** `parse_as_of` (`geode-core::query`) takes
+`YYYY-MM-DD` (→ `END_OF_DAY`, the last MICROSECOND of the local day, not
+the paragraph's `.999` nor a whole-second `23:59:59` — a subscribed
+document's `source_time` is `Utc::now()` at receive (sub-second) and
+as-of compares `source_time <= ?` at microsecond precision, so a whole
+second would exclude a document published at `23:59:59.4`; every
+*displayed* time is still whole-second, so nothing visible changes),
+`YYYY-MM-DD HH:MM` and `YYYY-MM-DD HH:MM:SS` (that local instant), beside
+the existing `HH:MM[:SS]`-today and RFC 3339 forms; a DST gap or overlap
+is still the one `Err`. The dialog's calendar is one gpui-kit
+`CalendarState` entity on `ShellView` (built once, like `dialog_input` —
+gpui focus handles are refcounted, so a fresh one per open would not have
+leaked; it is seeded fresh on every open regardless, the same contract
+every other modal field here holds), painted small beside the presets and
+hidden while the field reads `live`. `AsOfState` gained no `date` field —
+the paragraph above's guess was wrong; `asof_view::calendar_date` derives
+the day from `resolved` (or today) on demand instead. A day click reaches
+the field through `asof_view::on_calendar_selected`, not
+`dialog::sync_dialog_text` — §16.4 already excludes this dialog from that
+door's five seam classes, since the field's own raw text IS the value
+here rather than a filter over something else, and the "Mouse form"
+paragraph above naming `sync_dialog_text` was the error.
+`compose_with_date` keeps a typed time (`14:05` → `2026-09-08 14:05`) and
+otherwise writes the bare date, then re-resolves at once (`set_value`
+emits no `Change`) and refocuses the field, so the calendar never holds
+the keyboard; typing mirrors the parsed day back onto the calendar
+(`calendar_date`) but ONLY on a successful parse — final review finding
+4: mirroring on every keystroke regardless of `resolved` snapped the
+calendar to today on a failed intermediate parse (a trader mid-edit
+backspacing through a date), discarding whatever day it was showing.
+Final review finding 1: the calendar's own chrome (‹/›, the month/year
+toggles, the pane's padding — anything that is not a day cell) is guarded
+with `capture_any_mouse_down` + `window.prevent_default()` so a click
+there cannot take focus away from the field in the first place (gpui
+focuses a `track_focus`ed element's handle on bubble-phase mouse-down
+unless an earlier phase called `prevent_default`; the click itself still
+reaches the button underneath, since the pending-click recorder ignores
+`default_prevented`) — `on_calendar_selected`'s own refocus is
+belt-and-braces on top of that guard, for a day click. Window tests drive
+the calendar entity's own `activate_date`, the call its day cell makes.
+No DST-boundary test exists (nor did one before this slice): `Local`
+cannot be pinned per machine at the pinned `chrono` rev, so a test cannot
+choose a zone with a boundary on a fixed date without depending on the
+machine running it. Display check pending: the calendar's size beside
+the presets and its theme colours on a real window. The dialog widened
+from 480 to 640 px to seat the small calendar beside the presets.
+
 ### 5.3 Ingest progress in the status bar
 
 **Data layer:** the ingest runner emits `IngestEvent::Started { source,

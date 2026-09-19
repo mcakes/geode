@@ -29,10 +29,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Hsla, MouseButton, Window, div, px};
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui::{AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Window, div, px};
+use gpui_component::calendar::Calendar;
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use geode_core::query::{AsOf, parse_as_of};
 
@@ -130,8 +131,9 @@ fn cached_presets(state: &AsOfState, frame: &Frame) -> Rc<Vec<PresetRow>> {
 
 /// Resolve the as-of field's raw text (spec §3.6): `"live"` (any case)
 /// resolves to [`AsOf::Live`]; anything else delegates to
-/// [`parse_as_of`] (`HH:MM`, `HH:MM:SS`, or RFC 3339) — an `Err` carries
-/// that parser's own message, shown verbatim under the field.
+/// [`parse_as_of`] (`HH:MM`, `HH:MM:SS`, `YYYY-MM-DD`, `YYYY-MM-DD
+/// HH:MM[:SS]`, or RFC 3339) — an `Err` carries that parser's own
+/// message, shown verbatim under the field.
 pub fn resolve_input(text: &str, now: DateTime<Utc>) -> Result<AsOf, String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("live") {
@@ -167,13 +169,47 @@ pub fn on_query_changed(state: &mut AsOfState, text: &str, now: DateTime<Utc>) {
     }
 }
 
+/// The field text a calendar day click yields (spec §5.2, §17 mouse
+/// parity): a typed time — `HH:MM` or `HH:MM:SS`, alone or after a date
+/// — is kept and the date part becomes `date`; anything else (blank,
+/// `live`, an RFC 3339 instant, garbage) becomes the bare date, which
+/// [`parse_as_of`] reads as the end of that day.
+pub fn compose_with_date(text: &str, date: NaiveDate) -> String {
+    let trimmed = text.trim();
+    let time_part = trimmed.rsplit_once(' ').map(|(_, t)| t).unwrap_or(trimmed);
+    let keeps_time = NaiveTime::parse_from_str(time_part, "%H:%M").is_ok()
+        || NaiveTime::parse_from_str(time_part, "%H:%M:%S").is_ok();
+    if keeps_time {
+        format!("{} {time_part}", date.format("%Y-%m-%d"))
+    } else {
+        date.format("%Y-%m-%d").to_string()
+    }
+}
+
+/// The day the calendar highlights: the field's resolved instant on the
+/// trader's local clock, else today (local).
+pub fn calendar_date(state: &AsOfState, now: DateTime<Utc>) -> NaiveDate {
+    state
+        .resolved
+        .unwrap_or(now)
+        .with_timezone(&Local)
+        .date_naive()
+}
+
+/// The calendar is hidden while the field reads `live` — there is no
+/// day to pick for "now".
+pub fn shows_calendar(text: &str) -> bool {
+    !text.trim().eq_ignore_ascii_case("live")
+}
+
 // ---------------------------------------------------------------------
 // gpui shell.
 // ---------------------------------------------------------------------
 
-/// Target dialog content width in pixels — the picker's own `WIDTH`
-/// (`shell::picker`): a text field plus a short list is the same shape.
-const WIDTH: f32 = 480.0;
+/// Target dialog content width in pixels — widened from the picker's own
+/// `WIDTH` (`shell::picker`, 480) to fit the preset list beside the
+/// calendar pane (Task 3, spec §5.2) side by side rather than cramped.
+const WIDTH: f32 = 640.0;
 
 /// Open the as-of dialog (`frame::as_of`, `mod+t`). A no-op if a modal is
 /// already open, mirroring every other `open` here.
@@ -182,6 +218,24 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         return;
     }
     view.as_of_dialog = Some(AsOfState::default());
+    // The field opens blank, so seed the calendar to today rather than
+    // leaving it on whatever day the last open (or the default) left it.
+    //
+    // Final review, finding 8: the same case is made for resetting the
+    // calendar's VIEW to the day grid on open (so closing from the month
+    // or year picker doesn't leave the next open showing it too) —
+    // `CalendarState::set_view` is public in `gpui-base`, but its
+    // parameter (`CalendarView`) is not reachable from here:
+    // `gpui-component` re-exports only `CalendarEvent`/`CalendarState`/
+    // `Date`/`Matcher` from `gpui-base::calendar` (`gpui-component-0.6.2/
+    // src/time/calendar.rs:11`), and this crate has no direct dependency
+    // on `gpui-base` to name the type by its own path — only `geode-app`
+    // does, and this workspace's root `Cargo.toml` comments that in as
+    // deliberate ("depended on by `geode-app` for that reason alone").
+    // Not built here; see the fix-wave report.
+    view.as_of_calendar.update(cx, |c, cx| {
+        c.set_date(chrono::Local::now().date_naive(), window, cx)
+    });
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
@@ -219,6 +273,33 @@ fn commit_live(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Shel
         }
     });
     shell.close_modal(window, cx);
+}
+
+/// A calendar day was clicked (the `CalendarEvent::Selected` subscription,
+/// `shell/mod.rs`): rewrite the field's DATE PART through the one door
+/// this dialog has for writing the shared `Input` — [`compose_with_date`]
+/// keeps a typed time — then re-resolve at once, because
+/// `InputState::set_value` emits no `Change` (the trap `sync_dialog_text`
+/// documents), and hand focus back to the field: the calendar is the
+/// mouse form of typing a date, never a focus owner (spec §5.2, §17).
+pub(crate) fn on_calendar_selected(
+    view: &mut ShellView,
+    date: NaiveDate,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if view.as_of_dialog.is_none() {
+        return;
+    }
+    let input = view.dialog_input.clone();
+    let current = input.read(cx).value().to_string();
+    let next = compose_with_date(&current, date);
+    input.update(cx, |i, cx| i.set_value(next.clone(), window, cx));
+    if let Some(state) = view.as_of_dialog.as_mut() {
+        on_query_changed(state, &next, chrono::Utc::now());
+    }
+    input.read(cx).focus_handle(cx).focus(window, cx);
+    cx.notify();
 }
 
 /// The [`dialog::ModalKeyHandler`] for this modal.
@@ -342,7 +423,41 @@ fn build(
         muted,
         selection,
     );
-    column.child(list).into_any_element()
+    // Borrowed, not `.to_string()`'d — `SharedString` derefs to `str`, and
+    // `shows_calendar` takes `&str`, so this costs nothing beyond the
+    // `value()` call itself (the dialog already allocates per paint on a
+    // keystroke: `err.clone()` above, the preview `format!`).
+    let text = shell.dialog_input.read(cx).value();
+    let body = if shows_calendar(&text) {
+        h_flex()
+            .gap_3()
+            .items_start()
+            .child(div().flex_1().min_w_0().child(list))
+            .child(
+                div()
+                    .flex_none()
+                    .debug_selector(|| "as-of-calendar".to_string())
+                    // Final review, finding 1: any click on the calendar's
+                    // own chrome (‹/›, the month/year toggles, the pane's
+                    // padding — everything but a day cell, which
+                    // `on_calendar_selected` already refocuses the field
+                    // after) would otherwise take keyboard focus and never
+                    // give it back. gpui focuses a `track_focus`ed
+                    // element's handle on BUBBLE-phase mouse-down unless
+                    // `window.prevent_default()` was called during an
+                    // earlier phase; calling it here, in the CAPTURE phase,
+                    // stops that focus grab while leaving the click itself
+                    // untouched (the pending-click recorder that resolves
+                    // a chrome button's own `on_click` ignores
+                    // `default_prevented`).
+                    .capture_any_mouse_down(|_, window, _| window.prevent_default())
+                    .child(Calendar::new(&shell.as_of_calendar).small()),
+            )
+            .into_any_element()
+    } else {
+        list.into_any_element()
+    };
+    column.child(body).into_any_element()
 }
 
 /// The preset list: each row `"14:05:12 · risk / EOD · 3 books"`, the
@@ -556,5 +671,59 @@ mod tests {
         on_query_changed(&mut state, "not a time", now);
         assert!(state.error.is_some());
         assert!(state.resolved.is_none(), "error and resolved are exclusive");
+    }
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn compose_keeps_a_typed_time_and_replaces_or_adds_the_date() {
+        let day = d(2026, 9, 8);
+        assert_eq!(compose_with_date("", day), "2026-09-08");
+        assert_eq!(compose_with_date("   ", day), "2026-09-08");
+        assert_eq!(compose_with_date("14:05", day), "2026-09-08 14:05");
+        assert_eq!(compose_with_date("14:05:30", day), "2026-09-08 14:05:30");
+        assert_eq!(
+            compose_with_date("2026-01-01 09:30", day),
+            "2026-09-08 09:30"
+        );
+        assert_eq!(compose_with_date("2026-01-01", day), "2026-09-08");
+    }
+
+    #[test]
+    fn compose_drops_text_that_is_neither_a_time_nor_a_date() {
+        let day = d(2026, 9, 8);
+        // Garbage, `live`, or an RFC 3339 instant: the click means "this
+        // day", so the field becomes the bare date.
+        assert_eq!(compose_with_date("nonsense", day), "2026-09-08");
+        assert_eq!(compose_with_date("live", day), "2026-09-08");
+        assert_eq!(compose_with_date("2026-01-01T09:30:00Z", day), "2026-09-08");
+    }
+
+    #[test]
+    fn calendar_date_follows_the_resolved_instant_else_today() {
+        let now = Utc::now();
+        let mut state = AsOfState::default();
+        assert_eq!(
+            calendar_date(&state, now),
+            now.with_timezone(&Local).date_naive()
+        );
+        on_query_changed(&mut state, "2026-09-08 14:05", now);
+        assert_eq!(calendar_date(&state, now), d(2026, 9, 8));
+        on_query_changed(&mut state, "live", now);
+        assert_eq!(
+            calendar_date(&state, now),
+            now.with_timezone(&Local).date_naive()
+        );
+    }
+
+    #[test]
+    fn the_calendar_hides_only_under_live() {
+        assert!(shows_calendar(""));
+        assert!(shows_calendar("14:05"));
+        assert!(shows_calendar("nonsense"));
+        assert!(!shows_calendar("live"));
+        assert!(!shows_calendar(" LIVE "));
     }
 }
