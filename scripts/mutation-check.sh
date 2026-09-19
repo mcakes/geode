@@ -12672,8 +12672,8 @@ run_mutation "mdedit: a double-click on an attribute opens its editor" \
 # `1`.
 run_mutation "mdnudge: up steps one unit of the painted precision" \
   crates/geode-marketdata/src/tile.rs \
-  '                (ty, Some(usize::from(format.precision)))' \
-  '                (ty, Some(0))' \
+  '                    Some(CellKind::Number(format)) => Some(usize::from(format.precision)),' \
+  '                    Some(CellKind::Number(_)) => Some(0),' \
   geode-marketdata up_steps_a_cell_one_unit_of_its_precision_and_shift_ten
 
 # `shift+up` is ten units. Mutated to one, the two nudges land on
@@ -13445,13 +13445,36 @@ run_mutation "tile: bump skips a non-numeric cell" \
 
 # A cell whose column is not `Number`-kind is refused inline on commit —
 # the other three `CellKind`s' editors are Task 4's. Mutated to treat any
-# kind as numeric, a `status` commit falls through to `parse_cell`'s own
-# (differently worded) refusal instead of this one.
+# kind as numeric (`declared_type`'s own gate, shared with `nudge`), a
+# `status` commit falls through to `parse_cell`'s own (differently
+# worded) refusal instead of this one.
 run_mutation "tile: a commit on a non-numeric cell is refused" \
   crates/geode-marketdata/src/tile.rs \
-  '            Some(CellKind::Number(_)) => match &self.spec.columns {' \
-  '            Some(_) => match &self.spec.columns {' \
+  '        CellKind::Number(_) => Some(match &spec.columns {' \
+  '        _ => Some(match &spec.columns {' \
   geode-marketdata a_flat_panels_non_numeric_commit_is_refused
+
+# `nudge`'s own numeric-kind refusal, reachable through `edit`'s
+# plain-text editor on ANY cell (Task 4 builds the others). Mutated to
+# force `Number` regardless of the cell's real kind, `insert_up` on
+# `status` falls through into `nudge_text`'s own (differently worded)
+# refusal instead of never reaching it.
+run_mutation "tile: a nudge on a non-numeric cell is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '                let Some(ty) = declared_type(self.spec, &self.model, *col) else {' \
+  '                let Some(ty) = Some(ColumnType::F64) else {' \
+  geode-marketdata a_flat_panels_nudge_on_a_non_numeric_cell_is_refused
+
+# The flat `Columns::Values` success arm: a cell's declared type is its
+# OWN `ValueColumn::ty`, not the panel's `value_type` guessed instead.
+# Mutated away, an `I64` column's commit lands as `Value::F64` — still a
+# valid parse of the same text, so only checking the RESULT's variant
+# (not merely that it committed) catches it.
+run_mutation "tile: a flat commit parses by the column's declared type" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Columns::Values(cols) => cols.get(col).map_or(spec.value_type, |vc| vc.ty),' \
+  '            Columns::Values(cols) => cols.get(col).map_or(spec.value_type, |_| spec.value_type),' \
+  geode-marketdata a_flat_panels_commit_on_an_i64_column_parses_by_its_declared_type
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

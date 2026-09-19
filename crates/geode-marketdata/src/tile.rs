@@ -2038,28 +2038,27 @@ impl MarketDataTile {
         let text = state.read(cx).value().to_string();
         let (ty, precision) = match &editing.target {
             EditTarget::Cell { cell: (_, col), .. } => {
-                // The column's own `CellKind` says both how far this cell
-                // steps (its `ColumnFormat`'s own `precision` — a slice
-                // column's own, distinct from the ladder's) and whether
-                // it steps at all: the other three kinds are Task 4's,
-                // so a non-`Number` cell — reachable while its (today,
-                // plain-text) editor is still open — is refused here the
+                // `declared_type` answers `None` for the other three
+                // `CellKind`s (Task 4's), reachable while its (today,
+                // plain-text) editor is still open — refused here the
                 // same way `commit_cell_edit` refuses committing one.
-                let Some(CellKind::Number(format)) = self.model.kind_of(*col) else {
+                // This is the ONE refusal: the precision lookup below
+                // does not repeat it, because `declared_type` already
+                // proved `kind_of` is `Number` here — a second refusal
+                // over the same fact would be a defence the first one
+                // hides from the mutation harness.
+                let Some(ty) = declared_type(self.spec, &self.model, *col) else {
                     self.notice = Some("not a numeric cell".into());
                     return true;
                 };
-                // The declared type, same rule `commit_cell_edit` reads
-                // it by: the panel's one `value_type` under a pivot, the
-                // column's OWN `ValueColumn::ty` under a flat panel,
-                // since a schedule's columns need not agree.
-                let ty = match &self.spec.columns {
-                    Columns::Axis(_) => self.spec.value_type,
-                    Columns::Values(cols) => {
-                        cols.get(*col).map_or(self.spec.value_type, |vc| vc.ty)
-                    }
+                // The precision to step by is the column's own
+                // `CellKind::Number`'s `ColumnFormat` — a slice column's
+                // own, distinct from the ladder's.
+                let precision = match self.model.kind_of(*col) {
+                    Some(CellKind::Number(format)) => Some(usize::from(format.precision)),
+                    _ => None,
                 };
-                (ty, Some(usize::from(format.precision)))
+                (ty, precision)
             }
             EditTarget::Attr { column, .. } => {
                 let Some(attr) = self
@@ -2108,32 +2107,12 @@ impl MarketDataTile {
             self.notice = Some(CELL_MOVED.into());
             return true;
         }
-        // The column's declared type, per its `CellKind` — `Number`
-        // under a pivot is always `self.spec.value_type` (one value
-        // column, one declared type), under a flat panel it is the
-        // column's OWN `ValueColumn::ty`, since a schedule's columns can
-        // each declare a different one. `Date`/`Text`/`Choice` are
-        // Task 4's: refused here rather than guessed at, so this task
-        // stays green while that editor does not exist yet.
-        let ty = match self.model.kind_of(cell.1) {
-            Some(CellKind::Number(_)) => match &self.spec.columns {
-                Columns::Axis(_) => self.spec.value_type,
-                Columns::Values(cols) => match cols.get(cell.1) {
-                    Some(vc) => vc.ty,
-                    // Unreachable given the label check above (the model
-                    // and the spec's flat columns are built in lockstep),
-                    // but refused rather than guessed at.
-                    None => {
-                        self.close_editor(window, cx);
-                        self.notice = Some(CELL_MOVED.into());
-                        return true;
-                    }
-                },
-            },
-            _ => {
-                self.notice = Some("not a numeric cell".into());
-                return true;
-            }
+        // `declared_type` answers `None` for the other three `CellKind`s
+        // (Task 4's): refused here rather than guessed at, so this task
+        // stays green while those editors do not exist yet.
+        let Some(ty) = declared_type(self.spec, &self.model, cell.1) else {
+            self.notice = Some("not a numeric cell".into());
+            return true;
         };
         let parsed = match parse_cell(text, ty) {
             Ok(value) => value,
@@ -3422,6 +3401,34 @@ fn dropped_notice(dropped: &[(String, String)]) -> String {
     format!("dropped {n} edit{plural} whose rows or columns the new document lacks: {list}")
 }
 
+/// The declared [`ColumnType`] a grid cell is parsed and edited through
+/// — `None` for the other three `CellKind`s (`Date`/`Text`/`Choice`;
+/// Task 4's, refused rather than guessed at) — the one place both
+/// [`MarketDataTile::nudge`] and [`MarketDataTile::commit_cell_edit`]
+/// read it, so a mutation to the lookup itself has one site to anchor on
+/// rather than two that could drift apart. The panel's own `value_type`
+/// under a pivot (one value column, one declared type); the column's OWN
+/// `ValueColumn::ty` under a flat panel, since a schedule's columns need
+/// not agree — and need not even be the same NUMBER type: a flat `I64`
+/// column commits `"3"` as `Value::I64(3)`, not `Value::F64(3.0)`,
+/// because this reads the declared type rather than letting `parse_cell`
+/// guess from what the text happens to parse as.
+///
+/// A free function, not a method: `nudge` calls it while a mutable
+/// borrow of `self.editor` is already alive (`self.editor.as_mut()`),
+/// which a `&self` method call would conflict with — passing `spec` and
+/// `model` as their own arguments borrows only those two fields, exactly
+/// as the inlined lookup this replaces already did.
+fn declared_type(spec: &PanelSpec, model: &MatrixModel, col: usize) -> Option<ColumnType> {
+    match model.kind_of(col)? {
+        CellKind::Number(_) => Some(match &spec.columns {
+            Columns::Axis(_) => spec.value_type,
+            Columns::Values(cols) => cols.get(col).map_or(spec.value_type, |vc| vc.ty),
+        }),
+        CellKind::Date | CellKind::Text | CellKind::Choice(_) => None,
+    }
+}
+
 impl gpui::Render for MarketDataTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -3513,6 +3520,7 @@ mod tests {
     use super::*;
     use crate::commands;
     use crate::content::MarketDataFactory;
+    use crate::core::spec::{RowAxis, RowIdentity, ValueColumn};
     use crate::core::test_fixtures;
     use crate::core::{CVI, DraftState};
     use geode_core::attribution::{Attribution, ScopeSemantics};
@@ -3523,6 +3531,7 @@ mod tests {
     };
     use geode_core::scopes::SavedScopes;
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
+    use geode_core::view::ColumnFormat;
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
     use geode_shell::diagnostics::Diagnostics;
@@ -6086,6 +6095,149 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h.mode(&vcx), "insert", "the cell keeps the keyboard");
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("cancelled"));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    }
+
+    /// `nudge`'s own refusal (spec §4.3, `declared_type`'s door): `edit`
+    /// opens a plain text editor on ANY cell today (Task 4 builds the
+    /// other three kinds' own editors), so `insert_up` on `status` is
+    /// reachable and must refuse exactly as a commit does, leaving the
+    /// typed text untouched.
+    #[gpui::test]
+    fn a_flat_panels_nudge_on_a_non_numeric_cell_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2));
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("declared"));
+        h.dispatch(&mut vcx, "insert_up", None);
+
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("not a numeric cell".to_string())
+        );
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("declared"),
+            "the typed text is untouched"
+        );
+        assert_eq!(h.mode(&vcx), "insert");
+    }
+
+    /// The flat `Columns::Values` success arm (spec §4.3): `amount` is
+    /// `F64`, so a commit on it parses and lands as `Value::F64`, and the
+    /// cell paints back through its OWN format (four places).
+    #[gpui::test]
+    fn a_flat_panels_commit_on_amount_parses_as_f64(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(1));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "2.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 1)).cloned()),
+            Some(Value::F64(2.5))
+        );
+        assert_eq!(h.cell(&vcx, 0, 1), ("2.5000".to_string(), true));
+    }
+
+    /// `edit` + `insert_up` on `amount` exercises `nudge`'s own success
+    /// arm for a flat panel: the text steps by one unit of the COLUMN's
+    /// own precision (four places), not the panel's default.
+    #[gpui::test]
+    fn a_flat_panels_nudge_on_amount_steps_by_its_precision(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(1));
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("1.2500"));
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("1.2501"));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "a nudge commits nothing"
+        );
+    }
+
+    /// A one-column flat panel whose value is `I64` — [`SCHEDULE`] has no
+    /// integer column of its own, and this exists only to pin that a flat
+    /// cell's declared type comes from the column's OWN `ValueColumn::ty`
+    /// rather than being guessed from what the text happens to parse as:
+    /// `"3"` is a valid `F64` too, so only checking the RESULT type
+    /// (`Value::I64`, not `Value::F64`) proves which one was used.
+    const SCHEDULE_I64: PanelSpec = PanelSpec {
+        kind: "sched_i64",
+        title: "Dividends (i64)",
+        dataset: "div_schedule_i64",
+        document: "div_schedule_i64",
+        rows: RowAxis {
+            column: "dividend_id",
+            identity: RowIdentity::Minted,
+        },
+        columns: Columns::Values(&[ValueColumn {
+            column: "units",
+            label: "units",
+            ty: ColumnType::I64,
+            format: ColumnFormat::MEASURE,
+            choices: None,
+            required: true,
+        }]),
+        header: &[],
+        slice_values: &[],
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: &[],
+    };
+
+    fn schedule_i64_snapshot() -> Snapshot {
+        Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("SPX.Z".into())]),
+                ),
+                (
+                    meta("dividend_id", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("D1".into())]),
+                ),
+                (
+                    meta("units", Attribution::DeterminedNonAdditive),
+                    TestColumn::I64(vec![1]),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        )
+    }
+
+    /// The flat `Columns::Values` success arm, at an `I64` column: a
+    /// commit of `"3"` lands as `Value::I64(3)`, not `Value::F64(3.0)` —
+    /// the declared-type door, not a parse-and-hope one.
+    #[gpui::test]
+    fn a_flat_panels_commit_on_an_i64_column_parses_by_its_declared_type(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_spec(cx, &SCHEDULE_I64, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(schedule_i64_snapshot()));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "3");
+        h.dispatch(&mut vcx, "commit", None);
+
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 0)).cloned()),
+            Some(Value::I64(3))
+        );
     }
 
     #[gpui::test]
