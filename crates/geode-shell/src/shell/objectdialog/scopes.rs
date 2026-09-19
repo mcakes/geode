@@ -400,6 +400,176 @@ pub fn fold(draft: &mut Draft) {
     }
 }
 
+/// The Values stage's one field before the data answers (spec §4): a
+/// display-only row, so the stage has a shape to paint and `escape` to
+/// leave by. Replaced whole by [`values_fields`] on delivery.
+///
+/// `render::enter_values_stage` (Task 4) is what seeds a fresh Values
+/// stage with this before the `Request::Distinct` round trip lands —
+/// unreached until that door exists, so `#[allow(dead_code)]` for the
+/// same reason [`NO_ORDER_NOTICE`] carries it.
+#[allow(dead_code)]
+pub fn loading_field() -> Vec<Field> {
+    status_field("loading…")
+}
+
+/// The Values stage's one field when the request failed: the failure
+/// text on the row, `escape` the way out.
+pub fn failed_field(message: &str) -> Vec<Field> {
+    status_field(message)
+}
+
+fn status_field(text: &str) -> Vec<Field> {
+    vec![Field {
+        key: "values".to_string(),
+        label: "Values".to_string(),
+        kind: FieldKind::Text(text.to_string()),
+        dest: Destination::Doc,
+        layer: None,
+    }]
+}
+
+/// The Values stage's list (spec §4): one row per delivered `(value,
+/// count)` in the outcome's own order, ticked iff `saved` lists it, the
+/// count as its note; then every saved value the data does NOT hold,
+/// ticked, noted `not in data` (ruling 5) — visible and untickable,
+/// never silently dropped.
+pub fn values_fields(saved: &[String], values: &[(String, u64)]) -> Vec<Field> {
+    let mut items: Vec<ListItem> = values
+        .iter()
+        .map(|(value, count)| ListItem {
+            name: value.clone(),
+            included: saved.iter().any(|s| s == value),
+            presentation: Default::default(),
+            kind: None,
+            note: Some(count.to_string()),
+        })
+        .collect();
+    for value in saved {
+        if !values.iter().any(|(v, _)| v == value) {
+            items.push(ListItem {
+                name: value.clone(),
+                included: true,
+                presentation: Default::default(),
+                kind: None,
+                note: Some("not in data".to_string()),
+            });
+        }
+    }
+    vec![Field {
+        key: "values".to_string(),
+        label: "Values".to_string(),
+        kind: FieldKind::OrderedList {
+            items,
+            available: None,
+        },
+        dest: Destination::Doc,
+        layer: None,
+    }]
+}
+
+/// The Values stage's fold (spec §4): the ticked values become
+/// `source.dimensions.<column>` — the key removed outright when none is
+/// ticked, since an empty array is never written — and the stashed
+/// parent's `dimensions` list follows: a first tick inserts the item
+/// (out of the available block), an emptied selection returns it there,
+/// a changed selection refreshes the note. Called from
+/// `render::revalidate` on every tick while [`Draft::values`] is `Some`;
+/// a no-op while the stage still shows its loading/failed row.
+pub fn fold_values(draft: &mut Draft) {
+    let Some(column) = draft.values().map(str::to_string) else {
+        return;
+    };
+    let Some(items) = draft.list_items("values") else {
+        return;
+    };
+    let ticked: Vec<String> = items
+        .iter()
+        .filter(|i| i.included)
+        .map(|i| i.name.clone())
+        .collect();
+    let dims = draft
+        .source
+        .entry("dimensions".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let Some(dims) = dims.as_table_mut() {
+        if ticked.is_empty() {
+            dims.remove(&column);
+        } else {
+            dims.insert(
+                column.clone(),
+                toml::Value::Array(ticked.iter().cloned().map(toml::Value::String).collect()),
+            );
+        }
+    }
+    draft.with_parent_list("dimensions", |items, available| {
+        let position = items.iter().position(|i| i.name == column);
+        match (position, ticked.is_empty()) {
+            (Some(i), true) => {
+                let mut entry = items.remove(i);
+                entry.included = false;
+                entry.note = None;
+                if let Some(available) = available {
+                    available.push(entry);
+                }
+            }
+            (Some(i), false) => items[i].note = Some(dimension_note(&ticked)),
+            (None, false) => {
+                let mut entry = available
+                    .as_mut()
+                    .and_then(|a| a.iter().position(|i| i.name == column).map(|p| a.remove(p)))
+                    .unwrap_or_else(|| ListItem {
+                        name: column.clone(),
+                        included: true,
+                        presentation: Default::default(),
+                        kind: None,
+                        note: None,
+                    });
+                entry.included = true;
+                entry.note = Some(dimension_note(&ticked));
+                items.push(entry);
+            }
+            (None, true) => {}
+        }
+    });
+}
+
+/// The draft's scope as `saved_scopes_from_doc` would read it, with
+/// `minus`'s own selection removed — what the distinct request carries
+/// (spec §4), so a value's count answers "within the scope I am
+/// authoring". An unreadable draft (the reader warns and drops it)
+/// yields the empty scope: the counts are then dataset-wide, which is
+/// honest for a scope that does not yet parse.
+///
+/// `render::enter_values_stage` (Task 4) is the one caller — the
+/// non-test build has none yet, so `#[allow(dead_code)]` for
+/// [`loading_field`]'s own reason.
+#[allow(dead_code)]
+pub fn draft_scope(draft: &Draft, config: &Config, minus: &str) -> Scope {
+    let table = rendered_doc_table(draft);
+    let doc = merge_docs(
+        DOC,
+        &[LayerDoc {
+            layer: Layer::User,
+            name: DOC.to_string(),
+            file: std::path::PathBuf::from("<draft>"),
+            table,
+        }],
+    );
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+    let (mut saved, _) = saved_scopes_from_doc(&doc, &schema, &dims);
+    let mut scope = saved.remove(&draft.name).unwrap_or_default();
+    scope.dimensions.retain(|d| d.column != minus);
+    scope
+}
+
 /// What each field means, for the edit footer's help line
 /// ([`Domain::help`](super::Domain::help)).
 pub fn help(key: &str) -> &'static str {
@@ -418,7 +588,7 @@ pub fn help(key: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Domain;
+    use super::super::{Domain, Step};
     use super::*;
     use geode_core::config::ConfigSources;
     use geode_core::scope::DimensionSelection;
@@ -462,7 +632,8 @@ mod tests {
         let datasets = LayerDoc::builtin(
             "datasets",
             "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\ncategorical = true\n\
-             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+             [risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n",
         )
         .unwrap();
         let scopes = LayerDoc::builtin("scopes", scopes).unwrap();
@@ -491,9 +662,15 @@ mod tests {
         assert_eq!(items[0].name, "book");
         assert!(items[0].included);
         assert_eq!(items[0].note.as_deref(), Some("BK001, BK003"));
-        // `book` is the fixture's only categorical column; it is selected,
-        // so the available catalogue exists and is empty.
-        assert_eq!(available.as_deref(), Some(&[][..]));
+        // `book` is selected; `lhu` (the fixture's other categorical
+        // column) stays in the available catalogue.
+        let available_names: Vec<&str> = available
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(available_names, ["lhu"]);
         assert_eq!(fields[1].key, "text");
         assert_eq!(fields[1].kind, FieldKind::Text("spx".to_string()));
         assert_eq!(fields[2].key, "expression");
@@ -504,7 +681,13 @@ mod tests {
             panic!("dimensions is a list");
         };
         assert!(items.is_empty());
-        assert_eq!(available.as_ref().unwrap()[0].name, "book");
+        let bare_names: Vec<&str> = available
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(bare_names, ["book", "lhu"]);
         assert_eq!(bare[1].kind, FieldKind::Text(String::new()));
         assert_eq!(bare[2].kind, FieldKind::Text(String::new()));
     }
@@ -779,5 +962,124 @@ mod tests {
         assert!(eu.overridden);
         assert_eq!(us.layer, Some(Layer::Builtin));
         assert!(!us.overridden);
+    }
+
+    /// The values list: every delivered value with its count, ticked iff
+    /// saved; then every saved value the data lacks, ticked and marked.
+    #[test]
+    fn values_fields_tick_the_saved_ones_and_keep_a_stale_one_marked() {
+        let saved = vec!["BK001".to_string(), "BK009".to_string()];
+        let fields = values_fields(&saved, &[("BK000".into(), 5), ("BK001".into(), 7)]);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].key, "values");
+        let FieldKind::OrderedList { items, available } = &fields[0].kind else {
+            panic!("a list");
+        };
+        assert!(available.is_none(), "ticking is membership here");
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["BK000", "BK001", "BK009"]);
+        assert!(!items[0].included);
+        assert_eq!(items[0].note.as_deref(), Some("5"));
+        assert!(items[1].included);
+        assert!(items[2].included);
+        assert_eq!(items[2].note.as_deref(), Some("not in data"));
+    }
+
+    /// `fold_values` writes the ticked values under the column; an
+    /// emptied selection removes the key (never an empty array) and the
+    /// parent's `dimensions` list follows in both directions.
+    #[test]
+    fn fold_values_writes_the_ticks_and_removes_an_emptied_selection() {
+        let config = config_with_scope("[mine]\n[mine.dimensions]\nbook = [\"BK001\"]\n");
+        let mut draft = Domain::Scopes.draft(&config, "mine");
+        assert!(draft.enter_values(
+            "book",
+            values_fields(
+                &["BK001".into()],
+                &[("BK000".into(), 5), ("BK001".into(), 7)]
+            )
+        ));
+        // Tick BK000 too.
+        draft.selected = 1;
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        fold_values(&mut draft);
+        let dims = draft.source["dimensions"].as_table().unwrap();
+        let book: Vec<&str> = dims["book"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(book, ["BK000", "BK001"]);
+        // The parent list (stashed) already carries the new note.
+        let own = draft.leave_values().unwrap();
+        assert_eq!(
+            draft.list_items("dimensions").unwrap()[0].note.as_deref(),
+            Some("BK000, BK001")
+        );
+
+        // Now untick everything: the key goes, the column returns to
+        // the available block.
+        assert!(draft.enter_values("book", own));
+        for row in [1usize, 2] {
+            draft.selected = row;
+            let _ = draft.toggle_selected();
+        }
+        fold_values(&mut draft);
+        assert!(
+            !draft.source["dimensions"]
+                .as_table()
+                .unwrap()
+                .contains_key("book")
+        );
+        draft.leave_values();
+        assert!(draft.list_items("dimensions").unwrap().is_empty());
+        assert!(
+            draft
+                .available_items("dimensions")
+                .unwrap()
+                .iter()
+                .any(|i| i.name == "book")
+        );
+        assert!(draft.is_dirty());
+    }
+
+    /// A first tick on a column that was only available inserts the
+    /// selection — and the item — where none existed.
+    #[test]
+    fn a_first_tick_inserts_a_new_selection() {
+        let config = config_with_scope("[mine]\n[mine.dimensions]\n");
+        let mut draft = Domain::Scopes.draft(&config, "mine");
+        assert!(draft.enter_values("book", values_fields(&[], &[("BK000".into(), 5)])));
+        draft.selected = 1;
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        fold_values(&mut draft);
+        assert_eq!(
+            draft.source["dimensions"]["book"].as_array().unwrap()[0].as_str(),
+            Some("BK000")
+        );
+        draft.leave_values();
+        assert_eq!(draft.list_items("dimensions").unwrap()[0].name, "book");
+        assert!(
+            draft
+                .available_items("dimensions")
+                .unwrap()
+                .iter()
+                .all(|i| i.name != "book")
+        );
+    }
+
+    /// The scope the distinct request carries is the DRAFT's, minus the
+    /// column being asked about.
+    #[test]
+    fn draft_scope_is_the_drafts_own_minus_the_column() {
+        let config = config_with_scope(
+            "[mine]\ntext = \"spx\"\n[mine.dimensions]\nbook = [\"BK001\"]\nlhu = [\"L1\"]\n",
+        );
+        let draft = Domain::Scopes.draft(&config, "mine");
+        let scope = draft_scope(&draft, &config, "book");
+        assert_eq!(scope.text.as_deref(), Some("spx"));
+        assert_eq!(scope.dimensions.len(), 1);
+        assert_eq!(scope.dimensions[0].column, "lhu");
     }
 }

@@ -9,6 +9,9 @@
 use super::*;
 use crate::dialogmode::DialogMode;
 use crate::shell::objectdialog;
+use crate::shell::objectdialog::FieldKind;
+use crate::shell::{PICKER_KEY, SCOPES_KEY};
+use geode_core::query::DistinctOutcome;
 use geode_core::scope::{DimensionSelection, Scope};
 
 /// A `views` doc across two layers: `tree` defined by both (so its row is
@@ -2832,6 +2835,75 @@ fn n_on_a_scope_saves_the_frames_current_scope(cx: &mut gpui::TestAppContext) {
         "{written}"
     );
     assert!(edit_draft(&shell, &cx, |d| d.is_new));
+}
+
+/// A `SCOPES_KEY` outcome reaches the Values stage; a `PICKER_KEY` one
+/// never does, and a stale tag or a different column is dropped.
+#[gpui::test]
+#[ignore = "Task 4 wires the Values stage door"]
+fn deliver_values_routes_by_key_and_drops_stale_outcomes(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter"); // open `mine`
+    cx.simulate_keystrokes("j"); // onto the `book` item row
+    cx.simulate_keystrokes("enter"); // Values stage (Task 4's door)
+    cx.run_until_parked();
+    let tag = dialog_state(&shell, &cx, |s| s.values_tag);
+    let deliver =
+        |shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, key, tag, column: &str| {
+            shell.update(cx, |s, cx| {
+                s.deliver_distinct(
+                    DistinctOutcome {
+                        key,
+                        tag,
+                        column: column.into(),
+                        values: Ok(vec![("BK000".into(), 5), ("BK001".into(), 7)]),
+                    },
+                    cx,
+                )
+            });
+            cx.run_until_parked();
+        };
+    let still_loading = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        edit_draft(
+            shell,
+            cx,
+            |d| matches!(&d.fields[0].kind, FieldKind::Text(t) if t == "loading…"),
+        )
+    };
+    deliver(&shell, &mut cx, PICKER_KEY, tag, "book");
+    assert!(
+        still_loading(&shell, &cx),
+        "the picker's key never reaches the dialog"
+    );
+    deliver(&shell, &mut cx, SCOPES_KEY, tag.wrapping_sub(1), "book");
+    assert!(still_loading(&shell, &cx), "a stale tag is dropped");
+    deliver(&shell, &mut cx, SCOPES_KEY, tag, "lhu");
+    assert!(
+        still_loading(&shell, &cx),
+        "another column's answer is dropped"
+    );
+    deliver(&shell, &mut cx, SCOPES_KEY, tag, "book");
+    let names: Vec<String> = edit_draft(&shell, &cx, |d| {
+        d.list_items("values")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect()
+    });
+    assert_eq!(names, ["BK000", "BK001"]);
+    assert!(edit_draft(&shell, &cx, |d| d.list_items("values").unwrap()
+        [1]
+    .included));
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.is_dirty()),
+        "a delivery is not dirt"
+    );
 }
 
 /// Groupings' nine slots are a fixed keyboard (§18.4) — there is nothing

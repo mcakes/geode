@@ -115,6 +115,7 @@
 use std::rc::Rc;
 
 use geode_core::config::{Layer, Severity, check_object_name};
+use geode_core::query::DistinctOutcome;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Div, Entity, MouseButton, Window, div, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -2092,8 +2093,15 @@ fn revalidate(shell: &mut ShellView) {
     }
     // Scopes: fields → source on every change (scopes-editing spec §3),
     // so the validator and the writer read this keystroke. The Values
-    // stage's own fold is Task 3's `fold_values`, dispatched here too.
+    // stage's own fold (`fold_values`) runs FIRST, ahead of `fold`: it is
+    // what keeps the stashed `dimensions` list's note in step with the
+    // ticked values, and `fold`'s own `kept` guard already knows to
+    // leave that stashed list's `source` entry alone while the stage is
+    // open (its own doc comment).
     if domain == Domain::Scopes {
+        if draft.values().is_some() {
+            scopes::fold_values(draft);
+        }
         scopes::fold(draft);
     }
     // Validated, then stored: `validate` needs the draft immutably and
@@ -4788,5 +4796,55 @@ pub(in crate::shell) fn on_row_dropped(
         Step::Inert => {}
     }
     dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// A `DistinctOutcome` addressed to `SCOPES_KEY`, routed here by
+/// `ShellView::deliver_distinct`. Applied only when a Scopes dialog is
+/// open in the Values stage for `outcome.column` and the tag is the
+/// latest one handed out — the picker's own three guards, so a reply to
+/// a stage the trader has already left, or to a superseded request,
+/// changes nothing. `Ok` installs the ticked list as a CLEAN baseline
+/// (delivered ticks are the saved scope, not dirt); `Err` installs the
+/// failure row.
+pub(in crate::shell) fn deliver_values(
+    shell: &mut ShellView,
+    outcome: DistinctOutcome,
+    cx: &mut Context<ShellView>,
+) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    if state.domain != Domain::Scopes {
+        return;
+    }
+    let Stage::Values { column, .. } = &state.stage else {
+        return;
+    };
+    if *column != outcome.column || outcome.tag != state.values_tag {
+        return;
+    }
+    let Some(draft) = state.draft.as_mut() else {
+        return;
+    };
+    let saved: Vec<String> = draft
+        .source
+        .get("dimensions")
+        .and_then(|v| v.as_table())
+        .and_then(|d| d.get(&outcome.column))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let fields = match &outcome.values {
+        Ok(values) => scopes::values_fields(&saved, values),
+        Err(message) => scopes::failed_field(message),
+    };
+    draft.reseed_fields(fields);
+    draft.selected = 0;
+    shell.object_dialog_scroll.scroll_to_item(0);
     cx.notify();
 }

@@ -272,6 +272,11 @@ pub const PICKER_KEY: QueryKey = QueryKey(u64::MAX - 1);
 /// with a real tile's `TileId`-derived key.
 pub const DIAGNOSTICS_KEY: QueryKey = QueryKey(u64::MAX - 2);
 
+/// The Scopes dialog's Values stage submits its `Request::Distinct` under
+/// this key (scopes-editing spec §4) — one lower than `DIAGNOSTICS_KEY`,
+/// same reservation reasoning. `deliver_distinct` routes on it.
+pub const SCOPES_KEY: QueryKey = QueryKey(u64::MAX - 3);
+
 /// One column a dimension picker can open (spec §3.3): every categorical
 /// column of every dataset, plus every derived dimension. `role` is
 /// `"dimension"` for a real `ColumnRole::Dimension` column, `"attribute"`
@@ -1842,6 +1847,10 @@ impl ShellView {
     /// column, or the query pool simply finished them out of order) is
     /// exactly the stale result §7.3 says must never be rendered.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
+        if outcome.key == SCOPES_KEY {
+            objectdialog::deliver_values(self, outcome, cx);
+            return;
+        }
         let Some(state) = self.picker.as_mut() else {
             return;
         };

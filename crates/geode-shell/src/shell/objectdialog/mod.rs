@@ -76,6 +76,12 @@ mod scopes;
 mod sources;
 mod views;
 
+/// `ShellView::deliver_distinct` routes a `SCOPES_KEY` outcome here — the
+/// one door onto the Values stage's own delivery, kept `pub(in crate::
+/// shell)` rather than fully `pub` like [`render::open`], since nothing
+/// outside this crate's shell needs it.
+pub(in crate::shell) use render::deliver_values;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use geode_core::config::{Config, Diagnostic, Layer, Severity};
@@ -1927,6 +1933,25 @@ impl Draft {
         self.baseline = self.fields.clone();
     }
 
+    /// Mutate one of the STASHED parent's ordered lists while a projection
+    /// is open — the Values stage's fold writes the scope's `dimensions`
+    /// list through here. A no-op when no stash or no such list exists.
+    pub fn with_parent_list(
+        &mut self,
+        key: &str,
+        f: impl FnOnce(&mut Vec<ListItem>, &mut Option<Vec<ListItem>>),
+    ) {
+        let Some(parent) = self.parent_fields.as_mut() else {
+            return;
+        };
+        let Some(field) = parent.iter_mut().find(|fld| fld.key == key) else {
+            return;
+        };
+        if let FieldKind::OrderedList { items, available } = &mut field.kind {
+            f(items, available);
+        }
+    }
+
     /// The field keyed `key` — the installed ones first, then the
     /// object's own if [`Stage::Column`] has them stashed
     /// ([`Draft::parent_fields`]).
@@ -3163,6 +3188,10 @@ pub struct ObjectDialogState {
     /// [`Self::cancel_naming`] and consumed by
     /// `render::create_from_name`.
     pub naming_dataset: Option<String>,
+    /// The tag of the latest distinct request the Values stage submitted
+    /// (`render::enter_values_stage`); an outcome with any other tag is
+    /// stale and dropped (spec §7.3).
+    pub values_tag: u64,
 }
 
 impl ObjectDialogState {
@@ -3182,6 +3211,7 @@ impl ObjectDialogState {
             confirm: None,
             confirm_target: None,
             naming_dataset: None,
+            values_tag: 0,
         }
     }
 
