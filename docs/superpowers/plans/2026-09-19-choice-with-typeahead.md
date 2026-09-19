@@ -1243,3 +1243,323 @@ fn escape_cancels_a_settings_choice_field_untouched(cx: &mut gpui::TestAppContex
 }
 ```
 
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `cargo test -p geode-shell --features test-support settings 2>&1 | tail -8`
+Expected: compile error on `route`'s arity / `choosing`.
+
+- [ ] **Step 3: State and routing**
+
+In `settings_view.rs`:
+
+```rust
+/// A row's typeahead while it is open (spec 2026-09-19 §3.3): which
+/// setting, and the ranked options. The settings dialog has no draft;
+/// every row IS a value list, so this is the whole of its choice state.
+pub struct ChoiceEntry {
+    pub id: SettingId,
+    pub list: crate::choice::ChoiceList,
+}
+```
+
+Add `pub choice: Option<ChoiceEntry>` to `SettingsState` (`choice: None` in `Default`), and:
+
+```rust
+    /// The text the shared `Input` should hold: the choice field's own
+    /// query while one is open, the filter query otherwise — what
+    /// `dialog::sync_dialog_text` mirrors (the object dialog's
+    /// `effective_query`, for the same reason).
+    pub fn effective_query(&self) -> &str {
+        match self.choice.as_ref() {
+            Some(entry) => entry.list.query(),
+            None => self.query.as_str(),
+        }
+    }
+
+    pub fn choosing(&self) -> bool {
+        self.choice.is_some()
+    }
+```
+
+Change `set_query` so a keystroke while choosing feeds the list, not the filter:
+
+```rust
+    pub fn set_query(&mut self, query: String) {
+        if let Some(entry) = self.choice.as_mut() {
+            entry.list.set_query(&query);
+            return;
+        }
+        self.query = query;
+        self.selected = 0;
+    }
+```
+
+`KeyAction` gains `OpenChoice` and `Choice(crate::choice::ChoiceKey)`; derive `Debug, PartialEq, Eq` on it if absent. `route`:
+
+```rust
+pub fn route(mode: DialogMode, query_is_empty: bool, choosing: bool, ks: &Keystroke) -> KeyAction {
+    // Spec 2026-09-19 §3.3: while a row's typeahead is open the field
+    // owns the keys, through the one table every choice field reads.
+    if choosing {
+        return match crate::choice::route(ks) {
+            Some(key) => KeyAction::Choice(key),
+            None => KeyAction::PassThrough,
+        };
+    }
+    if ks.key == "escape" { /* unchanged */ }
+    if let Some(dir) = tab_step(ks) { /* unchanged */ }
+    if let Some(cmd) = listfilter::nav_command(ks) { /* unchanged */ }
+    if ks.mods == Modifiers::NONE && ks.key == "enter" {
+        // §18's "enter inert" is amended (spec 2026-09-19 §7): in
+        // normal mode it opens the row's typeahead beside `i`; in filter
+        // mode it stays claimed and dropped, since there is no row-level
+        // verb the `Input` should lose it to.
+        return match mode {
+            DialogMode::Normal => KeyAction::OpenChoice,
+            DialogMode::Filter => KeyAction::Drop,
+        };
+    }
+    match mode {
+        DialogMode::Filter => KeyAction::PassThrough,
+        DialogMode::Normal => match dialogmode::normal_command(ks) {
+            Some(NormalCommand::Nav(nav)) => KeyAction::Nav(nav),
+            Some(NormalCommand::EnterFilter) => KeyAction::EnterFilter,
+            Some(NormalCommand::Toggle) => KeyAction::Step(StepDirection::Right),
+            Some(NormalCommand::ToggleBack) => KeyAction::Step(StepDirection::Left),
+            Some(NormalCommand::EditText) => KeyAction::OpenChoice,
+            _ => KeyAction::Drop,
+        },
+    }
+}
+```
+
+Update `route`'s doc comment rungs 4 and 6 to say so. Update every existing `route(..)` call and test to the new arity (`state.choosing()` at the call site).
+
+- [ ] **Step 4: `handle_key`'s two new arms**
+
+```rust
+        KeyAction::OpenChoice => {
+            let selected = state.selected;
+            // An empty filtered list has nothing to open: claimed, dropped.
+            if let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row)) {
+                let mut list = crate::choice::ChoiceList::new(row.values.clone(), crate::choice::DEFAULT_CAP);
+                list.place(row.values.get(row.current).map(String::as_str));
+                state.choice = Some(ChoiceEntry { id: row.id, list });
+                state.mode = DialogMode::Filter;
+            }
+        }
+        KeyAction::Choice(key) => match key {
+            crate::choice::ChoiceKey::Cancel => {
+                state.choice = None;
+                state.mode = DialogMode::Normal;
+            }
+            crate::choice::ChoiceKey::Pick => {
+                // The field's live text may never have reached the list
+                // through a `Change` event (`set_value` emits none).
+                let live = shell.dialog_input.read(cx).value().to_string();
+                let Some(state) = shell.settings.as_mut() else { return true };
+                let picked = state.choice.as_mut().and_then(|entry| {
+                    entry.list.set_query(&live);
+                    entry.list.pick().map(|ix| (entry.id, ix))
+                });
+                match picked {
+                    Some((id, ix)) => {
+                        state.choice = None;
+                        state.mode = DialogMode::Normal;
+                        apply_setting(shell, id, ix, cx);
+                    }
+                    // Nothing lit: the field stays open. The settings
+                    // dialog has no notice slot; the empty list says it.
+                    None => {}
+                }
+            }
+            crate::choice::ChoiceKey::Complete => {
+                if let Some(entry) = state.choice.as_mut() {
+                    entry.list.complete();
+                }
+            }
+            crate::choice::ChoiceKey::Nav(cmd) => {
+                if let Some(entry) = state.choice.as_mut() {
+                    entry.list.nav(cmd);
+                }
+            }
+        },
+```
+
+(`state` is a `&mut` borrowed from `shell.settings` at the top of `handle_key`; the `Pick` arm needs `shell.dialog_input` first, so restructure that arm to read the live text before re-borrowing `state`, as shown.)
+
+- [ ] **Step 5: `sync_dialog_text`, painting, footer, pill**
+
+`dialog.rs` `sync_dialog_text`: the settings arm becomes `(state.mode, false, state.effective_query())`.
+
+`settings_view.rs` `build`: when `state.choice` is `Some(entry)`, replace the filter row with `dialog::name_row(&shell.dialog_input, &format!("{} · choose", rows.iter().find(|r| r.id == entry.id).map(|r| r.title).unwrap_or("")), cx)` and the list with
+
+```rust
+        let entity_for_click = entity.clone();
+        dialog::choice_rows(&entry.list, "settings", theme, move |row, window, cx| {
+            entity_for_click.update(cx, |shell, cx| on_choice_row_clicked(shell, row, window, cx));
+        })
+```
+
+with
+
+```rust
+/// A click on a choice-field row is `tab` on it (spec 2026-09-19 §3.3).
+/// Ends in [`dialog::sync_dialog_text`], the row-click seam.
+fn on_choice_row_clicked(shell: &mut ShellView, row: usize, window: &mut Window, cx: &mut Context<ShellView>) {
+    if let Some(entry) = shell.settings.as_mut().and_then(|s| s.choice.as_mut())
+        && entry.list.set_highlighted(row)
+    {
+        entry.list.complete();
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+```
+
+Footer: a third arm ahead of the mode match — `if state.choosing() { vec![Hint::prose(Move, "type to narrow"), Hint::new(Move, &["up","down"], "move"), Hint::new(Go, &["tab"], "complete"), Hint::new(Go, &["enter"], "choose"), Hint::new(Go, &["escape"], "cancel")] }`. Normal mode's hints gain `Hint::new(HintRow::Edit, &["i", "enter"], "choose").selector("settings-hint-choose")`.
+
+Pill: the `set_title_extra` closure — `s.choice.is_some()` → `dialog::choose_pill(cx)`, else `dialog::mode_pill(s.mode, cx)`.
+
+`on_row_clicked` / `on_value_chip_clicked`: a click while choosing does nothing (the object dialog's rule) — add `if state.choosing() { return; }` after the `state` borrow in both.
+
+- [ ] **Step 6: Run the tests**
+
+Run: `cargo test -p geode-shell --features test-support 2>&1 | tail -8`
+Expected: all pass, including the three new ones and every existing settings test (`the_settings_dialog_opens_in_normal_mode_and_letters_do_not_type` still holds — a bare `enter` now opens rather than drops, so if that test presses `enter` expecting nothing, update it to press a letter instead and add the reason).
+
+- [ ] **Step 7: Spec amendment and harness entry**
+
+Append to `docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md` §18 (the settings section), a dated paragraph:
+
+> **Amended 2026-09-19** (choice-with-typeahead design §3.3, §7): `enter` is no longer inert in the settings dialog's normal mode — it and `i` open the selected row's typeahead (the shared `Input` in the filter row's place over the row's values, `ChoiceList`), `enter` there applying the lit value through the same `apply_setting` core a step takes. Filter mode's `enter` stays claimed and dropped.
+
+Harness:
+
+```bash
+# Settings (spec 2026-09-19 §3.3): the pick applies through the one
+# `apply_setting` core. Mutated to close without applying, `gruv d` +
+# `enter` leaves the previous theme active.
+run_mutation "settings choice: enter applies the lit value" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '                        apply_setting(shell, id, ix, cx);' \
+  '                        let _ = (id, ix);' \
+  geode-shell i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme
+```
+
+Run `zsh scripts/mutation-check.sh --anchors-only` then `zsh scripts/mutation-check.sh "settings choice"`.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add crates/geode-shell/src docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md scripts/mutation-check.sh
+git commit -m "settings: i/enter open a typeahead over the row's values (spec §18 amended)"
+```
+
+---
+
+### Task 5: The underlying picker over `ChoiceList`
+
+**Files:**
+- Modify: `crates/geode-marketdata/src/popup.rs` (`PickerRows` internals; `render_picker` reads)
+- Modify: `crates/geode-marketdata/src/tile.rs` (every `rows.ranked` / `rows.highlighted` / `rows.all` read — mechanical)
+- Test: `popup.rs`'s existing tests (unchanged expectations)
+
+**Interfaces:**
+- Consumes: Task 1's `ChoiceList`.
+- Produces: `PickerRows`'s existing method set (`with_marks`, `replace_all`, `refilter`, `place`, `step_highlighted`, `painted_len`, `highlighted_key`) with the same behaviour; its `all`/`ranked`/`highlighted`/`query` fields become methods over the inner list.
+
+- [ ] **Step 1: Re-implement `PickerRows`**
+
+```rust
+pub(crate) struct PickerRows {
+    /// The ranking and the highlight (spec 2026-09-19 §3.1): one core
+    /// with the dialogs' choice fields, so the cap, the identity rule
+    /// and the re-rank guard are spelled once.
+    list: geode_shell::choice::ChoiceList,
+    /// The prepared row text, one per option — see the struct's doc.
+    pub labels: Vec<SharedString>,
+    pub marks: BTreeMap<String, String>,
+}
+
+impl PickerRows {
+    pub(crate) fn with_marks(all: Vec<String>, marks: BTreeMap<String, String>) -> Self {
+        let labels = Self::labels_for(&all, &marks);
+        Self {
+            list: geode_shell::choice::ChoiceList::new(all, PICKER_ROWS),
+            labels,
+            marks,
+        }
+    }
+    pub(crate) fn all(&self) -> &[String] { self.list.options() }
+    pub(crate) fn query(&self) -> &str { self.list.query() }
+    pub(crate) fn highlighted(&self) -> usize { self.list.highlighted() }
+    /// The declared indices of the painted rows, in ranked order.
+    pub(crate) fn painted(&self) -> impl Iterator<Item = usize> + '_ {
+        self.list.painted().iter().map(|r| r.row)
+    }
+    pub(crate) fn painted_len(&self) -> usize { self.list.painted_len() }
+    pub(crate) fn highlighted_key(&self) -> Option<&str> { self.list.highlighted_text() }
+    pub(crate) fn refilter(&mut self, new_query: &str) { self.list.set_query(new_query); }
+    pub(crate) fn replace_all(&mut self, all: Vec<String>) {
+        self.labels = Self::labels_for(&all, &self.marks);
+        self.list.replace_options(all);
+    }
+    pub(crate) fn place(&mut self, key: Option<&str>) { self.list.place(key); }
+    /// Clamped, never wrapping — header spec §7's own rule for the
+    /// picker, kept (`nav_clamped`).
+    pub(crate) fn step_highlighted(&mut self, delta: isize) {
+        self.list.nav_clamped(geode_shell::vimnav::NavCommand::Move(delta as i64));
+    }
+}
+```
+
+Keep `PICKER_ROWS` as the picker's cap constant (its doc now says it is `choice::DEFAULT_CAP`'s value — add `const _: () = assert!(PICKER_ROWS == geode_shell::choice::DEFAULT_CAP);`). Update `render_picker` (`rows.ranked.iter().take(PICKER_ROWS)` → `rows.painted()`, `rows.highlighted` → `rows.highlighted()`) and every `tile.rs` read (`grep -n "rows\.\(ranked\|highlighted\|all\|query\)" crates/geode-marketdata/src/tile.rs`).
+
+- [ ] **Step 2: Run the picker tests**
+
+Run: `cargo test -p geode-marketdata popup 2>&1 | tail -5` and `cargo test -p geode-marketdata picker 2>&1 | tail -5`
+Expected: every existing test passes unchanged — the tests read through the methods (adjust field reads in the tests to the methods; expectations stay).
+
+- [ ] **Step 3: Full check**
+
+Run: `cargo test --workspace 2>&1 | tail -3 && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -3 && cargo fmt --check && zsh scripts/mutation-check.sh --anchors-only`
+Expected: green, no warnings, no stale anchors (the harness entries that anchor on `PickerRows` internals — `grep -n "popup.rs" scripts/mutation-check.sh` — must be re-anchored to the new lines if `--anchors-only` reports them).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/geode-marketdata scripts/mutation-check.sh
+git commit -m "marketdata: PickerRows rides geode_shell::choice::ChoiceList"
+```
+
+---
+
+### Task 6: Docs and hand-off
+
+**Files:**
+- Modify: `CLAUDE.md` (one paragraph after "Footer rows by category")
+- Modify: `docs/superpowers/specs/2026-09-14-geode-market-data-panel-header-design.md` (§7 note: `PickerRows` is `ChoiceList`)
+- Modify: `docs/superpowers/specs/2026-09-19-geode-dividend-schedule-and-choice-design.md` (§3 "As built" line)
+
+- [ ] **Step 1: CLAUDE.md paragraph**
+
+Insert after the "Footer rows by category" paragraph:
+
+> **Choice with typeahead (2026-09-19, spec `2026-09-19-geode-dividend-schedule-and-choice-design.md` §3):** `geode_shell::choice::ChoiceList` is the one "choose one value from a list" core — options, query, a highlight over the first `DEFAULT_CAP` (12) ranked rows, `set_query`/`replace_options` keeping the highlight by TEXT (never index), `complete` (`tab`), `pick` (the declared index of the lit row), `nav` (bare ±1 wraps, §20.5) and `nav_clamped` (the underlying picker's rule) — and `choice::route` is the one key table (`escape` cancel, bare `enter` pick, `tab` complete whatever the modifiers, the `listfilter` nav keys). Three surfaces ride it: the object dialog (`i` on a multi-option `Choice` row, `Completions::Choice` on `TextEntry`, `Draft.choice`, the options painted by `dialog::choice_rows` in the row list's place, pill `choose`), the settings dialog (`i`/`enter` on every row — `enter` is no longer inert there, §18 amended; `SettingsState.choice`, `effective_query`), and the market-data underlying picker (`PickerRows` wraps a `ChoiceList`, behaviour unchanged). **Two things a maintainer must know:** `enter` picks the HIGHLIGHTED option, never the typed text, and every pick path re-feeds the field's live text through `set_query` first because `InputState::set_value` emits no `Change` event (the guard makes an unchanged text a compare); and a row click in a choice list is `tab`, not `enter` — §18.9's rule for the chain field, kept so a mis-click cannot commit.
+
+- [ ] **Step 2: Spec notes**
+
+Header spec §7: add "**2026-09-19:** `PickerRows` is now a thin wrapper over `geode_shell::choice::ChoiceList` (choice-with-typeahead design §3.1/§7); its keys, cap and clamped `up`/`down` are unchanged."
+
+Choice spec §3: add "**As built (2026-09-19):** Tasks 1–5 of `docs/superpowers/plans/2026-09-19-choice-with-typeahead.md`; the object dialog paints the options through `dialog::choice_rows` in place of the row list rather than through `EditRow` rows (no new `EditRow` variant), and the settings dialog's `enter` opens the field in normal mode only."
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add CLAUDE.md docs/superpowers/specs/
+git commit -m "docs: choice with typeahead — CLAUDE.md, header spec and choice spec notes"
+```
+
+Then hand off: `superpowers:finishing-a-development-branch`.
