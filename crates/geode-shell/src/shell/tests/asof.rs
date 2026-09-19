@@ -350,3 +350,118 @@ fn typing_a_date_moves_the_calendars_selection(cx: &mut gpui::TestAppContext) {
     let selected = calendar.read_with(&vcx, |c, _| c.date().start());
     assert_eq!(selected, chrono::NaiveDate::from_ymd_opt(2026, 9, 8));
 }
+
+/// Final review, finding 1: the calendar's chrome (‹/›, the month/year
+/// toggles, the pane's own padding — anything that is not a day cell)
+/// must not steal focus from the field on mouse-down. `asof_view::build`
+/// guards the `as-of-calendar` wrapper with `capture_any_mouse_down` +
+/// `window.prevent_default()` (gpui focuses a `track_focus`ed element's
+/// handle on bubble-phase mouse-down unless the capture phase called
+/// `prevent_default` first — the pending-click recorder ignores
+/// `default_prevented`, so the click itself still reaches the header
+/// button underneath). A click near the pane's top edge lands in the
+/// header row (‹ › and the month/year toggles), never a day cell.
+#[gpui::test]
+fn clicking_the_calendars_chrome_leaves_the_field_focused(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-t");
+    vcx.run_until_parked();
+
+    let bounds = vcx
+        .debug_bounds("as-of-calendar")
+        .expect("calendar pane painted");
+    let header_point = gpui::point(
+        bounds.origin.x + bounds.size.width / 2.0,
+        bounds.origin.y + gpui::px(8.0),
+    );
+    vcx.simulate_mouse_down(header_point, MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_up(header_point, MouseButton::Left, gpui::Modifiers::none());
+    vcx.run_until_parked();
+
+    let focused = vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(
+        focused,
+        "the field must still hold focus after a click on the calendar's chrome"
+    );
+}
+
+/// Final review, finding 3: `on_calendar_selected`'s own refocus, in
+/// isolation from any backstop — the calendar's own focus handle is
+/// given focus first (a click on the pane's DAY grid does briefly
+/// carry keyboard focus at the pinned gpui rev; `chrome`'s guard above
+/// is what stops it for the header, but a day click still resolves
+/// through this function's own hand-back), then a day is activated the
+/// same way the component's own day cell does, and the field must have
+/// focus again.
+#[gpui::test]
+fn a_day_click_returns_focus_to_the_field(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-t");
+    let calendar = shell.read_with(&vcx, |s, _| s.as_of_calendar().clone());
+
+    vcx.update(|window, cx| {
+        let handle = calendar.read(cx).focus_handle.clone();
+        handle.focus(window, cx);
+    });
+    assert!(
+        vcx.update(|window, cx| {
+            let handle = calendar.read(cx).focus_handle.clone();
+            handle.is_focused(window)
+        }),
+        "sanity: the calendar itself holds focus before the click"
+    );
+
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+    calendar.update(&mut vcx, |c, cx| {
+        c.activate_date(day, cx);
+    });
+    vcx.run_until_parked();
+
+    let focused = vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(
+        focused,
+        "a day click must hand focus back to the field even when the \
+         calendar itself held it going in"
+    );
+}
+
+/// Final review, finding 4: an invalid INTERMEDIATE keystroke (a parse
+/// failure mid-edit, `resolved: None`) must not snap the calendar back
+/// to today — only a successful parse moves it. Typing a full date
+/// moves the calendar there; one `backspace` breaks the parse
+/// (`"2026-09-0"`, an `Err`) and the calendar must stay exactly where
+/// it was.
+#[gpui::test]
+fn an_invalid_intermediate_keystroke_leaves_the_calendar_where_it_was(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-t");
+    vcx.simulate_input("2026-10-03");
+    vcx.run_until_parked();
+    let calendar = shell.read_with(&vcx, |s, _| s.as_of_calendar().clone());
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 3).unwrap();
+    assert_eq!(calendar.read_with(&vcx, |c, _| c.date().start()), Some(day));
+
+    vcx.simulate_keystrokes("backspace");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.as_of_dialog.as_ref().unwrap().resolved),
+        None,
+        "sanity: '2026-10-0' does not parse"
+    );
+    assert_eq!(
+        calendar.read_with(&vcx, |c, _| c.date().start()),
+        Some(day),
+        "a failed intermediate parse must not move the calendar off the day it showed"
+    );
+}

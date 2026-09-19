@@ -118,7 +118,11 @@ pub fn parse(line: &str) -> Result<Command, String> {
             }
         }
         "asof" => match rest {
-            "" => Err("asof needs a time: HH:MM, HH:MM:SS or RFC 3339, or `undo`".into()),
+            "" => Err(
+                "asof needs a time: HH:MM, HH:MM:SS, YYYY-MM-DD[ HH:MM[:SS]], RFC 3339 \
+                 or live, or `undo`"
+                    .into(),
+            ),
             "undo" => Ok(Command::AsOfUndo),
             t => Ok(Command::AsOf(t.to_string())),
         },

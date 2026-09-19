@@ -887,10 +887,12 @@ pub struct ShellView {
     /// other three dialogs.
     as_of_dialog: Option<asof_view::AsOfState>,
     /// The as-of dialog's calendar (spec §5.2), built once here like
-    /// `dialog_input` — a `CalendarState` is an entity with its own focus
-    /// handle, and creating one per open would leak a focus handle per
-    /// dialog. It is painted only while the dialog is open and the field
-    /// does not read `live`; its selection mirrors the field.
+    /// `dialog_input` — one entity, seeded on every open (`gpui` focus
+    /// handles are refcounted, so a fresh one per open would not have
+    /// leaked; it is built once regardless, the same contract every
+    /// other modal field on `ShellView` holds). It is painted only while
+    /// the dialog is open and the field does not read `live`; its
+    /// selection mirrors the field.
     as_of_calendar: Entity<gpui_component::calendar::CalendarState>,
     /// The open config-object dialog's own pure state (Phase 4c: the
     /// shared scaffold every config domain's dialog is built on — see
@@ -1123,13 +1125,23 @@ impl ShellView {
                 // `asof_view::on_query_changed`'s own doc comment.
                 asof_view::on_query_changed(state, &query, chrono::Utc::now());
                 // Typing mirrors onto the calendar (spec §5.2): the parsed
-                // day, else today. `set_date` notifies the calendar only.
-                let day = asof_view::calendar_date(state, chrono::Utc::now());
-                view.as_of_calendar.update(cx, |c, cx| {
-                    if c.date().start() != Some(day) {
-                        c.set_date(day, window, cx);
-                    }
-                });
+                // day, and ONLY the parsed day — final review, finding 4.
+                // `calendar_date` falls back to today when `resolved` is
+                // `None`, which is right for a genuinely blank field but
+                // wrong for a failed INTERMEDIATE parse (a trader mid-edit
+                // backspacing through a date): mirroring on every
+                // keystroke regardless of `resolved` snapped the calendar
+                // to today on every invalid partial date, discarding
+                // whatever day it was showing. `set_date` notifies the
+                // calendar only.
+                if state.resolved.is_some() {
+                    let day = asof_view::calendar_date(state, chrono::Utc::now());
+                    view.as_of_calendar.update(cx, |c, cx| {
+                        if c.date().start() != Some(day) {
+                            c.set_date(day, window, cx);
+                        }
+                    });
+                }
             }
             cx.notify();
         })

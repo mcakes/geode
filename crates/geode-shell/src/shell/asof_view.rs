@@ -131,8 +131,9 @@ fn cached_presets(state: &AsOfState, frame: &Frame) -> Rc<Vec<PresetRow>> {
 
 /// Resolve the as-of field's raw text (spec §3.6): `"live"` (any case)
 /// resolves to [`AsOf::Live`]; anything else delegates to
-/// [`parse_as_of`] (`HH:MM`, `HH:MM:SS`, or RFC 3339) — an `Err` carries
-/// that parser's own message, shown verbatim under the field.
+/// [`parse_as_of`] (`HH:MM`, `HH:MM:SS`, `YYYY-MM-DD`, `YYYY-MM-DD
+/// HH:MM[:SS]`, or RFC 3339) — an `Err` carries that parser's own
+/// message, shown verbatim under the field.
 pub fn resolve_input(text: &str, now: DateTime<Utc>) -> Result<AsOf, String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("live") {
@@ -219,6 +220,19 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     view.as_of_dialog = Some(AsOfState::default());
     // The field opens blank, so seed the calendar to today rather than
     // leaving it on whatever day the last open (or the default) left it.
+    //
+    // Final review, finding 8: the same case is made for resetting the
+    // calendar's VIEW to the day grid on open (so closing from the month
+    // or year picker doesn't leave the next open showing it too) —
+    // `CalendarState::set_view` is public in `gpui-base`, but its
+    // parameter (`CalendarView`) is not reachable from here:
+    // `gpui-component` re-exports only `CalendarEvent`/`CalendarState`/
+    // `Date`/`Matcher` from `gpui-base::calendar` (`gpui-component-0.6.2/
+    // src/time/calendar.rs:11`), and this crate has no direct dependency
+    // on `gpui-base` to name the type by its own path — only `geode-app`
+    // does, and this workspace's root `Cargo.toml` comments that in as
+    // deliberate ("depended on by `geode-app` for that reason alone").
+    // Not built here; see the fix-wave report.
     view.as_of_calendar.update(cx, |c, cx| {
         c.set_date(chrono::Local::now().date_naive(), window, cx)
     });
@@ -423,6 +437,20 @@ fn build(
                 div()
                     .flex_none()
                     .debug_selector(|| "as-of-calendar".to_string())
+                    // Final review, finding 1: any click on the calendar's
+                    // own chrome (‹/›, the month/year toggles, the pane's
+                    // padding — everything but a day cell, which
+                    // `on_calendar_selected` already refocuses the field
+                    // after) would otherwise take keyboard focus and never
+                    // give it back. gpui focuses a `track_focus`ed
+                    // element's handle on BUBBLE-phase mouse-down unless
+                    // `window.prevent_default()` was called during an
+                    // earlier phase; calling it here, in the CAPTURE phase,
+                    // stops that focus grab while leaving the click itself
+                    // untouched (the pending-click recorder that resolves
+                    // a chrome button's own `on_click` ignores
+                    // `default_prevented`).
+                    .capture_any_mouse_down(|_, window, _| window.prevent_default())
                     .child(Calendar::new(&shell.as_of_calendar).small()),
             )
             .into_any_element()

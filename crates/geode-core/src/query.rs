@@ -195,11 +195,15 @@ pub struct GenerationInfo {
     pub live: bool,
 }
 
-/// The last whole second of a day — what a bare `YYYY-MM-DD` as-of
-/// means: "the newest generation of that day". Whole seconds, not
-/// `.999`, because every displayed time in the app is whole-second and
-/// generations are stamped to the second.
-pub const END_OF_DAY: NaiveTime = match NaiveTime::from_hms_opt(23, 59, 59) {
+/// The last microsecond of a day — what a bare `YYYY-MM-DD` as-of means:
+/// "the newest generation of that day". The last microsecond, not the
+/// last whole second: a subscribed document's `source_time` is
+/// `Utc::now()` at receive (sub-second), and as-of compares
+/// `source_time <= ?` at microsecond precision, so `23:59:59` would
+/// exclude a document published at `23:59:59.4` — every *displayed*
+/// time in the app truncates to whole seconds, so nothing visible
+/// changes by carrying the extra precision here.
+pub const END_OF_DAY: NaiveTime = match NaiveTime::from_hms_micro_opt(23, 59, 59, 999_999) {
     Some(t) => t,
     None => unreachable!(),
 };
@@ -306,7 +310,10 @@ mod tests {
             parse_as_of("2026-09-08", now).unwrap(),
             expect_local_on(date, END_OF_DAY)
         );
-        assert_eq!(END_OF_DAY, NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+        assert_eq!(
+            END_OF_DAY,
+            NaiveTime::from_hms_micro_opt(23, 59, 59, 999_999).unwrap()
+        );
     }
 
     #[test]
