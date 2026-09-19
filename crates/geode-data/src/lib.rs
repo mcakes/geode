@@ -7,6 +7,7 @@ pub mod documents;
 pub mod handle;
 pub mod health;
 pub mod ingest;
+pub mod pricing;
 pub mod query;
 pub mod service;
 pub mod source;
