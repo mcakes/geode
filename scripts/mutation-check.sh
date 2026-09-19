@@ -7583,9 +7583,14 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 # clicked `d`/`r` arms a confirm over a live, focused value field. The
 # keyboard tests cannot see it (no key reaches those verbs there); only
 # the painted-bar assertion can.
+# Re-anchored (30fcede gave this arm `.min_h_6()` — item 2 of the final
+# review's re-review — so the bare-`div()` text the old anchor matched
+# no longer exists). The three match arms together are still the
+# unique text: `confirm_row(confirm, &draft.name, entity, cx)` and
+# `action_bar(shell, entity, cx)` each occur nowhere else in this file.
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        (true, _) => div().into_any_element(),
+  '        (true, _) => div().min_h_6().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
         (false, None) => action_bar(shell, entity, cx),' \
   '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
