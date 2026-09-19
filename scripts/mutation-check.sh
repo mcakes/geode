@@ -7686,11 +7686,9 @@ run_mutation "objectdialog: a Groupings slot opens in its chain field" \
 run_mutation "objectdialog: a browse row click opens the edit stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if opens {
-        enter_edit_stage(shell, &name, None, cx);
-    }' \
+        enter_edit_stage(shell, &name, None, cx);' \
   '    if opens && false {
-        enter_edit_stage(shell, &name, None, cx);
-    }' \
+        enter_edit_stage(shell, &name, None, cx);' \
   geode-shell clicking_a_browse_row_opens_its_edit_stage
 
 # The naming exception: a stray click must not discard the typed name.
@@ -8075,8 +8073,12 @@ run_mutation "dblclick: a double-click on a value row opens its field" \
 # the flag is never set, the second click opens a field in the new stage.
 run_mutation "dblclick: the click that opened a stage does not also open a field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            state.click_opened_stage = true;' \
-  '            state.click_opened_stage = false;' \
+  '        enter_column_stage(shell, &name, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;' \
+  '        enter_column_stage(shell, &name, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = false;' \
   geode-shell a_double_click_on_a_door_row_opens_the_stage_and_nothing_more
 
 # The browse list is a door too: mutated so the flag is not set there,
