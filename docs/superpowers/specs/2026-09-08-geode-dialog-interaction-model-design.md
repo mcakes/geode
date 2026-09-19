@@ -1004,6 +1004,20 @@ its group is (`settings-hint-change-tab` is how the settings test proves
 its category" and "footer: an empty row is painted anyway". Display check
 pending on a real window, as §16.6's and §18.3's are.
 
+**Amended 2026-09-19 (user report): every row is laid out every time,
+empty or not.** An empty row was dropped, so a footer whose edit row
+came and went with the selected row's vocabulary — a `Choice` names the
+step keys, a read-only `Text` names nothing — grew and shrank by a line
+under the cursor and shifted everything below it. `footer::rows` now
+returns all three rows always, and `dialog::hint_rows` paints an empty
+one as its label plus an unpainted (`invisible`) chip, so it keeps a
+full row's height — the label alone is a `text_xs` line, shorter than a
+chip, and would still have moved the footer by a few pixels. Every
+modal dialog gets it through the one painter; each row carries a
+`hint-row-<label>` selector. Harness: the two entries above were
+replaced by "footer: an empty row is dropped from the layout" and
+"footer: an empty row is shorter than a full one".
+
 ## 20. Amendment — one answer per verb, across every surface (2026-09-14)
 
 User request, 2026-09-14: "review the ui and ensure that verbs and
