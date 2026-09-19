@@ -12420,14 +12420,19 @@ run_mutation "objectdialog: press_verb syncs the dialog text after a verb (spec 
   i_and_n_have_buttons_that_do_what_their_keys_do
 
 # Spec §20.3: `i` is a button only where the selected row is one it
-# opens. Mutated to always offer it, a `Choice` row paints a button that
-# can only answer with a notice.
+# opens. Mutated to always offer it, a read-only `Text` row (Scopes'
+# `Selects` summary, RowVocabulary::Inert) paints a button that can only
+# answer with a notice. NOT a `Choice` row: spec 2026-09-19 §3.2 made a
+# multi-option `Choice` StepsAndTypes, so `i` legitimately paints there
+# now and that row can no longer tell this mutation apart from the real
+# code — `i_and_n_have_buttons_that_do_what_their_keys_do`'s own `Choice`
+# assertion agrees with `|| true` for exactly that reason.
 run_mutation "objectdialog: the i button is offered per row, not per domain (spec §20.3)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    ) || state.domain == Domain::Groupings;' \
   '    ) || true;' \
   geode-shell \
-  i_and_n_have_buttons_that_do_what_their_keys_do
+  the_i_button_is_withheld_on_a_read_only_text_row
 
 # Spec §20.3: the browse `n` button takes the key's own door. Mutated
 # away, the button syncs and notifies but opens nothing.

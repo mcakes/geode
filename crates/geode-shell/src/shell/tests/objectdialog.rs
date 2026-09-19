@@ -6376,6 +6376,47 @@ fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext
     );
 }
 
+/// Harness follow-up (2026-09-19): the test above no longer discriminates
+/// "`i` is offered per row" from "`i` is offered on every row" — Task 2
+/// made a multi-option `Choice` `StepsAndTypes`, so every row that test
+/// looks at (a `Number`, then a `Choice`) is one the button legitimately
+/// paints on. A read-only `Text` row is the one this crate has that
+/// never offers `i` on any writable domain (`RowVocabulary::Inert`,
+/// `Draft::vocabulary_of`'s catch-all `FieldKind::Text` arm) — Scopes'
+/// `Selects` summary is exactly that, on a domain that is otherwise
+/// writable (`actions()` returns early only for Schema), so this is the
+/// row `objectdialog: the i button is offered per row, not per domain`'s
+/// mutation (`types` forced to `true`) actually needs to paint a button
+/// where there should be none.
+#[gpui::test]
+fn the_i_button_is_withheld_on_a_read_only_text_row(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    // Into `mine`'s edit stage — the only saved scope, so already
+    // selected — cursor on `Selects`, field 0.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(0))
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .selected_vocabulary(objectdialog::Domain::Scopes)),
+        objectdialog::RowVocabulary::Inert,
+        "Selects is a read-only summary — nothing here has a verb"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-action-i").is_none(),
+        "no i button on a row i cannot open"
+    );
+}
+
 /// §20.6's fallout: an edit-row click while a confirm is armed is claimed
 /// and dropped, like the tick click — it neither moves the cursor nor
 /// opens a column stage that would silently disarm the question.
