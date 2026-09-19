@@ -7349,12 +7349,12 @@ run_mutation "objectdialog: the edit list sizes itself instead of the header it 
 # ambiguous.
 run_mutation "objectdialog: an edit-stage click takes the keyboard off the filter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if let Some(name) = column_stage_target(shell) {
-        enter_column_stage(shell, &name, cx);
+  '            set_notice(shell, READ_ONLY_NOTICE.to_string());
+        }
     }
     dialog::sync_dialog_text(shell, window, cx);' \
-  '    if let Some(name) = column_stage_target(shell) {
-        enter_column_stage(shell, &name, cx);
+  '            set_notice(shell, READ_ONLY_NOTICE.to_string());
+        }
     }
     shell.focus_handle.focus(window, cx);' \
   geode-shell \
@@ -8059,6 +8059,32 @@ run_mutation "settings choice: enter applies the lit value" \
   '                    apply_setting(shell, id, ix, cx);' \
   '                    let _ = (id, ix);' \
   geode-shell i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme
+
+# ---- Double-click is i (2026-09-19, interaction-model spec §17) ---------
+# The second mouse-down of a double-click opens the selected row's field
+# through open_field, the key's own door. Mutated to ignore the click
+# count, a double-click only selects — the mouse has no route to `i`.
+run_mutation "dblclick: a double-click on a value row opens its field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    } else if click_count >= 2' \
+  '    } else if click_count >= 200' \
+  geode-shell a_double_click_on_a_value_row_is_i
+
+# A double-click on a DOOR row opens the column stage and nothing more:
+# the second click lands on the stage the first one painted. Mutated so
+# the flag is never set, the second click opens a field in the new stage.
+run_mutation "dblclick: the click that opened a stage does not also open a field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            state.click_opened_stage = true;' \
+  '            state.click_opened_stage = false;' \
+  geode-shell a_double_click_on_a_door_row_opens_the_stage_and_nothing_more
+
+# Settings: the same gesture through open_choice_on_selected.
+run_mutation "dblclick: a settings row's double-click opens its typeahead" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '    if click_count >= 2 {' \
+  '    if click_count >= 200 {' \
+  geode-shell a_double_click_on_a_settings_row_opens_its_typeahead
 
 # ---- schema: the document family (market-data spec §3)
 #
@@ -10185,10 +10211,10 @@ run_mutation "objectdialog: a click on a column row opens its stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if let Some(name) = column_stage_target(shell) {
         enter_column_stage(shell, &name, cx);
-    }' \
+        if let Some(state) = shell.object_dialog.as_mut() {' \
   '    if false {
         enter_column_stage(shell, "", cx);
-    }' \
+        if let Some(state) = shell.object_dialog.as_mut() {' \
   geode-shell \
   a_click_on_a_schema_column_row_opens_the_column_stage
 
