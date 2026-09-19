@@ -494,7 +494,7 @@ impl ShellView {
     /// the render pass uses, re-derived once here rather than snapshotted
     /// at mouse-down, so a keyboard split mid-drag can't make the drop
     /// land beside a tile the user isn't seeing — and routes to the
-    /// matching pure `Workspace` drop verb: center → swap, edge → split-
+    /// matching pure `Workspace` drop verb: center → stack, edge → split-
     /// insert, dock background → move-to-dock-convention insert. The
     /// verbs own every focus/region/auto-hide rule and report whether the
     /// layout changed; only a real change dirties the session (no-op
@@ -544,7 +544,7 @@ impl ShellView {
                 Some(DropTarget::Tile {
                     id,
                     zone: DropZone::Center,
-                }) => ws.drop_swap(drag.tile, id),
+                }) => ws.drop_stack(drag.tile, id),
                 Some(DropTarget::Tile {
                     id,
                     zone: DropZone::Edge(edge),

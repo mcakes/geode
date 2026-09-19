@@ -273,12 +273,6 @@ impl Tree {
     /// becomes a two-member stack of the two (spec §6.1). `new` becomes
     /// active and focused. Refuses, untouched, when `anchor` is not a
     /// leaf here, `new` already is, or the two are one id.
-    ///
-    /// Only test code calls this so far (tile-stacks Task 1); the live
-    /// verb wiring it into `Workspace`/`Workspaces` is Task 2, hence the
-    /// not-test `dead_code` allowance rather than `#[cfg(test)]` — it
-    /// stays compiled, documented, and reachable for that caller.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn stack_after(&mut self, anchor: TileId, new: TileId) -> bool {
         if anchor == new || !self.contains(anchor) || self.contains(new) {
             return false;
@@ -874,54 +868,6 @@ impl Tree {
         self.fullscreen = None;
         self.root = Some(insert_beside(root, anchor, new, orientation, after));
         self.set_focus(new);
-        true
-    }
-
-    /// Rename one leaf in place: the leaf holding `old` becomes `new`, with
-    /// structure, ratios, and every other leaf untouched (tile-drag task —
-    /// one half of a cross-tree center-drop swap; the other tree runs the
-    /// mirror-image replace). Focus and fullscreen references *follow the
-    /// position*, not the id: if `old` was focused (or fullscreen), the
-    /// tile now in that spot — `new` — inherits it, so the source tree of a
-    /// swap keeps its focus memory pointing at the same on-screen slot.
-    /// Returns `false`, untouched, when `old` isn't a leaf here or `new`
-    /// already is (the one-place-per-TileId invariant is the caller's to
-    /// uphold across trees; within one tree this check enforces it).
-    pub(crate) fn replace_tile(&mut self, old: TileId, new: TileId) -> bool {
-        if old == new || !self.contains(old) || self.contains(new) {
-            return false;
-        }
-        // `swap_leaves` doubles as the rename walker (post-merge review
-        // cleanup 10 — this method used to carry its own identical
-        // recursion): the guard above just established `new` has no leaf
-        // in this tree, so swapping `old`↔`new` degenerates to exactly
-        // "every `old` leaf becomes `new`" with nothing else touched.
-        if let Some(root) = &mut self.root {
-            swap_leaves(root, old, new);
-        }
-        if self.focused == Some(old) {
-            self.set_focus(new);
-        }
-        if self.fullscreen == Some(old) {
-            self.fullscreen = Some(new);
-        }
-        true
-    }
-
-    /// Swap two leaves of *this* tree in place (tile-drag task — the
-    /// same-tree center-drop; [`Tree::move_direction`] uses the identical
-    /// mechanism for its geometric-neighbor swap). Structure and ratios
-    /// are untouched; focus is deliberately not moved here — both ids are
-    /// still present, and which one the drop focuses is `Workspace`'s
-    /// decision, not the tree's. Returns `false`, untouched, unless both
-    /// ids are distinct leaves of this tree.
-    pub(crate) fn swap_tiles(&mut self, a: TileId, b: TileId) -> bool {
-        if a == b || !self.contains(a) || !self.contains(b) {
-            return false;
-        }
-        if let Some(root) = &mut self.root {
-            swap_leaves(root, a, b);
-        }
         true
     }
 
@@ -2515,7 +2461,7 @@ mod tests {
         assert!(approx(r2.x, 0.5) && approx(r3.x, 0.75));
     }
 
-    // --- insert_at_leaf / replace_tile / swap_tiles (tile-drag task) ----
+    // --- insert_at_leaf (tile-drag task) ---------------------------------
 
     #[test]
     fn insert_at_leaf_before_and_after_join_a_matching_orientation_split() {
@@ -2593,53 +2539,6 @@ mod tests {
             None,
             "an explicit layout operation trumps a stale fullscreen"
         );
-    }
-
-    #[test]
-    fn replace_tile_renames_the_leaf_and_remaps_focus_and_fullscreen() {
-        let mut tree = Tree::default();
-        tree.split(TileId(1), Orientation::Horizontal);
-        tree.split(TileId(2), Orientation::Horizontal);
-        tree.focus(TileId(1));
-        let r1_before = rect_of(&tree, 1);
-        tree.toggle_fullscreen(); // fullscreen on 1
-        assert!(tree.replace_tile(TileId(1), TileId(9)));
-        assert!(!tree.contains(TileId(1)));
-        assert_eq!(
-            tree.fullscreen(),
-            Some(TileId(9)),
-            "a fullscreen reference follows the renamed slot"
-        );
-        // Drop fullscreen to compare the underlying slot geometry.
-        tree.exit_fullscreen();
-        assert_eq!(rect_of(&tree, 9), r1_before, "same slot, new id");
-        assert_eq!(tree.focused(), Some(TileId(9)), "focus follows the slot");
-    }
-
-    #[test]
-    fn replace_tile_refuses_bad_ids_untouched() {
-        let mut tree = Tree::default();
-        tree.split(TileId(1), Orientation::Horizontal);
-        tree.split(TileId(2), Orientation::Horizontal);
-        let before = tree.clone();
-        assert!(!tree.replace_tile(TileId(9), TileId(3)), "old missing");
-        assert!(!tree.replace_tile(TileId(1), TileId(2)), "new present");
-        assert!(!tree.replace_tile(TileId(1), TileId(1)), "old == new");
-        assert_eq!(tree, before);
-    }
-
-    #[test]
-    fn swap_tiles_swaps_positions_without_touching_focus() {
-        let mut tree = grid();
-        let r1 = rect_of(&tree, 1);
-        let r3 = rect_of(&tree, 3);
-        let focused = tree.focused();
-        assert!(tree.swap_tiles(TileId(1), TileId(3)));
-        assert_eq!(rect_of(&tree, 1), r3);
-        assert_eq!(rect_of(&tree, 3), r1);
-        assert_eq!(tree.focused(), focused, "swap alone never moves focus");
-        assert!(!tree.swap_tiles(TileId(1), TileId(1)), "self-swap refused");
-        assert!(!tree.swap_tiles(TileId(1), TileId(99)), "missing id");
     }
 
     // --- stacks (tile-stacks spec §3) ------------------------------------

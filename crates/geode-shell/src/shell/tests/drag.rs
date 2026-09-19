@@ -617,11 +617,11 @@ fn a_below_threshold_mod_click_changes_nothing_at_all(cx: &mut gpui::TestAppCont
     );
 }
 
-/// End-to-end: a center drop swaps the two tiles in place (today's
-/// recorded keyboard-parity semantics), focus following the dragged
-/// tile into its new slot.
+/// End-to-end: a center drop stacks the dragged tile onto the target
+/// (tile-stacks spec §6.2, replacing the swap), focus following the
+/// dragged tile into the stack.
 #[gpui::test]
-fn mod_dragging_onto_a_tiles_center_swaps_the_pair(cx: &mut gpui::TestAppContext) {
+fn mod_dragging_onto_a_tiles_center_stacks_the_pair(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
 
     let grab = main_tile_point(&mut cx, &shell, left, 0.5, 0.5);
@@ -638,7 +638,16 @@ fn mod_dragging_onto_a_tiles_center_swaps_the_pair(cx: &mut gpui::TestAppContext
             .tree()
             .tiles()),
         vec![right, left],
-        "a center drop swaps the two tiles"
+        "a center drop adds the dragged tile after the target"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .workspaces
+            .active()
+            .stack_position(left)),
+        Some((2, 2)),
+        "the dragged tile lands as the stack's second member"
     );
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell
@@ -648,9 +657,13 @@ fn mod_dragging_onto_a_tiles_center_swaps_the_pair(cx: &mut gpui::TestAppContext
             .tree()
             .focused()),
         Some(left),
-        "focus follows the dragged tile to its new slot"
+        "focus follows the dragged tile into the stack"
     );
     assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+        "the finished drag is cleared"
+    );
 }
 
 /// End-to-end: dropping a tile on a visible (empty) dock's background
