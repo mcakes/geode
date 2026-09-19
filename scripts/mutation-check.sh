@@ -6493,6 +6493,7 @@ run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" 
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '                if included
                     && dest == Destination::Doc
+                    && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
                 {' \
   '                if false {' \
@@ -6629,7 +6630,7 @@ run_mutation "objectdialog: o overwrites a user-owned scope instead of asking fi
 run_mutation "objectdialog: o writes the frame instead of the saved scope" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    let changed = draft_mut(shell).is_some_and(|draft| {
-        scopes::overwrite_with(draft, &scope);
+        scopes::overwrite_with(draft, &scope, &config);
         draft.is_dirty()
     });' \
   '    let changed = true;
@@ -7161,6 +7162,72 @@ run_mutation "scopes dialog: c refuses a source that vanished before enter" \
             .or(Some(toml::Table::new()))' \
   geode-shell \
   c_refuses_when_the_source_vanished_before_enter
+
+# Task 6 (scopes-editing spec, mutation entries for Tasks 1-3's pure
+# core and its wiring): `deliver_distinct` must actually route a
+# `SCOPES_KEY`-tagged outcome to the dialog rather than falling through
+# to the picker's own (unrelated) stage check.
+run_mutation "scopes dialog: deliver_distinct routes SCOPES_KEY to the dialog" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if outcome.key == SCOPES_KEY {' \
+  '        if false {' \
+  geode-shell deliver_values_routes_by_key_and_drops_stale_outcomes
+
+# The tag half of the same staleness check: dropping it lets an outcome
+# from a superseded request (the trader left the column and re-entered
+# it before the first query returned) paint over the newer one.
+run_mutation "scopes dialog: a stale values tag is dropped" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if *column != outcome.column || outcome.tag != state.values_tag {' \
+  '    if *column != outcome.column {' \
+  geode-shell deliver_values_routes_by_key_and_drops_stale_outcomes
+
+# A saved value the `DistinctOutcome` no longer lists (the data moved
+# on) must still paint ticked, with a note saying so — dropping this
+# arm would silently un-list it from what the trader sees, though `fold`
+# would still have kept writing it.
+run_mutation "scopes dialog: a saved value the data lacks stays ticked and marked" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '        if !values.iter().any(|(v, _)| v == value) {' \
+  '        if false {' \
+  geode-shell values_fields_tick_the_saved_ones_and_keep_a_stale_one_marked
+
+# `fold_values` must remove the key outright when every value is
+# unticked, never write `source.dimensions.<col> = []` — an empty
+# selection and no selection are different scopes to the compiler.
+run_mutation "scopes dialog: an emptied selection removes the key, never []" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '        if ticked.is_empty() {' \
+  '        if false {' \
+  geode-shell fold_values_writes_the_ticks_and_removes_an_emptied_selection
+
+# `parse_text`'s one real check: a broken `expression` must never reach
+# `source` unparsed — dropping the guard writes whatever the trader
+# typed straight through, however the compiler would later choke on it.
+run_mutation "scopes dialog: a broken expression is refused" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '    if key == "expression" && !text.is_empty() {' \
+  '    if false {' \
+  geode-shell text_and_expression_are_editable_and_the_expression_is_parsed
+
+# Scopes-editing spec §3.2 (ruling 4): `handle_edit_key`'s own `MoveItem`
+# arm — not just the footer's hint — must refuse a reorder on both of
+# this domain's lists; dropping the guard here falls through to the
+# generic arm and actually moves the row.
+run_mutation "scopes dialog: reorder is refused" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        NormalCommand::MoveItem(_) if is_scopes(shell) => {' \
+  '        NormalCommand::MoveItem(_) if false => {' \
+  geode-shell ctrl_a_and_ctrl_x_tick_and_clear_and_reorder_is_refused
+
+# `draft_scope`'s whole point is "minus the column being edited" — the
+# Values stage's own distinct request must not ask the query to filter
+# by the very column it is about to offer values for.
+run_mutation "scopes dialog: the request carries the draft minus the column" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '    scope.dimensions.retain(|d| d.column != minus);' \
+  '    let _ = minus;' \
+  geode-shell entering_the_values_stage_requests_the_columns_distinct_values
 
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
@@ -9991,12 +10058,14 @@ run_mutation "objectdialog: d and r are refused in the column stage" \
 
 run_mutation "objectdialog: enter_column refuses re-entry" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if self.column.is_some() {
+  '        if self.column.is_some() || self.values.is_some() {
             return false;
-        }' \
+        }
+        // Membership is what the door lists: the Views door'"'"'s `columns`' \
   '        if false {
             return false;
-        }' \
+        }
+        // Membership is what the door lists: the Views door'"'"'s `columns`' \
   geode-shell \
   enter_column_refuses_re_entry_and_keeps_the_objects_own_list
 
