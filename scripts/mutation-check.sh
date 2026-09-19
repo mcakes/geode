@@ -4204,8 +4204,8 @@ run_mutation "objectdialog: a list row asks with its own index as a field" \
 # itself) — the displacement test's own two selector checks see it.
 run_mutation "objectdialog: the help line paints under a notice" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let slot = match state.notice.as_ref() {' \
-  '    let slot = match None::<&String> {' \
+  '    let slot = match notice {' \
+  '    let slot = match None::<String> {' \
   geode-shell \
   a_notice_displaces_the_help_line_for_one_keystroke
 
