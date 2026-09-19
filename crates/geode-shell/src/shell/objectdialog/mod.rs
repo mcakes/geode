@@ -1062,7 +1062,9 @@ pub enum RowVocabulary {
     Inert,
     /// A value the step keys cycle and `i` cannot open: `Choice`, `Bool`.
     Steps,
-    /// Both: a `Number`, which steps by one and takes a typed value.
+    /// Both: a `Number` (steps by one, takes a typed value) or a
+    /// multi-option `Choice` (steps, and `i` opens a typeahead over its
+    /// options).
     StepsAndTypes,
     /// `i` alone: a `Text` row the domain marks editable.
     Types,
@@ -1135,11 +1137,27 @@ impl Confirm {
     }
 }
 
+/// What the rows below an open field are (spec 2026-09-19 §3.2). `None`
+/// is a plain value field: the rows stay the edit rows, unfiltered, with
+/// the edited one highlighted (§19.1). `Chain` is Groupings' chain field
+/// (§18.8): the rows are the dimensions that complete the segment being
+/// typed. `Choice` is a `Choice` row's typeahead: the rows are the
+/// field's own options, ranked by the query, painted from
+/// [`Draft::choice`] in the row list's place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completions {
+    None,
+    Chain,
+    Choice,
+}
+
 /// A value field open in the filter row's place (§19.1): the shared
 /// `Input` seeded with a row's value, `enter` applying it down the tick's
 /// own path and `escape` cancelling. The chain field (§18.8) is the case
-/// with `completions: true` — the rows below are then
-/// [`groupings::chain_candidates`] rather than the edit rows.
+/// with `completions: Completions::Chain` — the rows below are then
+/// [`groupings::chain_candidates`] rather than the edit rows. The `Choice`
+/// row's typeahead (§3.2) is `completions: Completions::Choice` — the
+/// rows below are [`Draft::choice`]'s ranked options instead.
 ///
 /// `row` is an [`EditRow`], not a field index, so a future item-level
 /// text (a column's width, Part 2c) is one more arm and not a second
@@ -1148,7 +1166,7 @@ impl Confirm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextEntry {
     pub row: EditRow,
-    pub completions: bool,
+    pub completions: Completions,
 }
 
 /// One object being edited.
@@ -1226,12 +1244,17 @@ pub struct Draft {
     /// A text field is open (§19.1). While it is, `query` holds the text
     /// being typed rather than a filter — the shared `Input` mirrors into
     /// it exactly as a filter does, so there is no second text buffer —
-    /// and, for the chain field's `completions: true`,
+    /// and, for the chain field's `completions: Completions::Chain`,
     /// [`Draft::visible_rows`] is the completion list. A field on the
     /// draft beside `confirm` rather than a `Stage`, because the stage is
     /// what the escape ladder and the browse cursor restore key on, and
     /// both must still read `Edit` here.
     pub text_entry: Option<TextEntry>,
+    /// The typeahead list while a `Choice` row's field is open
+    /// (`text_entry.completions == Completions::Choice`), `None`
+    /// otherwise. Owns the ranking and the highlight; `selected` stays on
+    /// the field's own row throughout, as it does for a plain field.
+    pub choice: Option<crate::choice::ChoiceList>,
     /// The object's OWN fields, while [`Stage::Column`] has swapped
     /// `fields` out for one column's seven (Part 2c §5.2). `None`
     /// everywhere else.
@@ -1417,12 +1440,13 @@ impl Draft {
         // already has (§18.8) — so there is nothing left to apply here
         // even if this branch tried to.
         if let Some(entry) = self.text_entry {
-            return if entry.completions {
-                groupings::chain_candidates(self)
-            } else {
-                let labels: Vec<String> =
-                    self.rows().into_iter().map(|r| self.row_label(r)).collect();
-                crate::listfilter::rank(&labels, "")
+            return match entry.completions {
+                Completions::Chain => groupings::chain_candidates(self),
+                Completions::None | Completions::Choice => {
+                    let labels: Vec<String> =
+                        self.rows().into_iter().map(|r| self.row_label(r)).collect();
+                    crate::listfilter::rank(&labels, "")
+                }
             };
         }
         let labels: Vec<String> = self.rows().into_iter().map(|r| self.row_label(r)).collect();
@@ -1492,7 +1516,8 @@ impl Draft {
                 // direction still moves, and an out-of-range one refuses
                 // out loud rather than doing nothing.
                 FieldKind::Choice { options, .. } if options.len() < 2 => RowVocabulary::Inert,
-                FieldKind::Choice { .. } | FieldKind::Bool(_) => RowVocabulary::Steps,
+                FieldKind::Choice { .. } => RowVocabulary::StepsAndTypes,
+                FieldKind::Bool(_) => RowVocabulary::Steps,
                 FieldKind::Number { .. } => RowVocabulary::StepsAndTypes,
                 FieldKind::Text(_) if domain.text_editable(&self.fields[i].key) => {
                     RowVocabulary::Types
@@ -1922,7 +1947,8 @@ impl Draft {
     /// Is the open text field the chain field — the one with a completion
     /// list below it? `false` when no field is open at all.
     pub fn chain_entry(&self) -> bool {
-        self.text_entry.is_some_and(|entry| entry.completions)
+        self.text_entry
+            .is_some_and(|entry| entry.completions == Completions::Chain)
     }
 
     /// The write half of the query mirror for this draft —
@@ -1939,8 +1965,22 @@ impl Draft {
         match self.text_entry {
             Some(TextEntry {
                 row: field,
-                completions: false,
+                completions: Completions::None,
             }) => self.follow(field),
+            Some(TextEntry {
+                row: field,
+                completions: Completions::Choice,
+            }) => {
+                // The choice list re-ranks against the field's own typed
+                // text — the CURSOR still follows the field's row exactly
+                // as a plain field's does, since typing here narrows the
+                // option list below, not the cursor's position over it.
+                let q = self.query.clone();
+                if let Some(list) = self.choice.as_mut() {
+                    list.set_query(&q);
+                }
+                self.follow(field);
+            }
             _ => self.selected = 0,
         }
     }
@@ -1981,10 +2021,109 @@ impl Draft {
         self.query = seed;
         self.text_entry = Some(TextEntry {
             row,
-            completions: false,
+            completions: Completions::None,
         });
         self.follow(row);
         Step::Changed
+    }
+
+    /// `i` on a `Choice` row (spec 2026-09-19 §3.2): open the shared
+    /// `Input` as a typeahead over the field's options — EMPTY, since the
+    /// current value is already the highlighted row and a seed would
+    /// have to be deleted before typing — with the highlight placed on
+    /// the current option. `Step::Inert` off any other row, and on a
+    /// one-option `Choice` (`step_selected`'s own guard, mirrored: there
+    /// is nothing to choose between).
+    pub fn begin_choice_entry(&mut self) -> Step {
+        let Some(row @ EditRow::Field(index)) = self.selected_row() else {
+            return Step::Inert;
+        };
+        let FieldKind::Choice { options, selected } = &self.fields[index].kind else {
+            return Step::Inert;
+        };
+        if options.len() < 2 {
+            return Step::Inert;
+        }
+        let mut list = crate::choice::ChoiceList::new(options.clone(), crate::choice::DEFAULT_CAP);
+        list.place(options.get(*selected).map(String::as_str));
+        self.choice = Some(list);
+        self.query.clear();
+        self.text_entry = Some(TextEntry {
+            row,
+            completions: Completions::Choice,
+        });
+        self.follow(row);
+        Step::Changed
+    }
+
+    /// Whether the open field is a `Choice` row's typeahead.
+    pub fn choice_entry(&self) -> bool {
+        self.text_entry
+            .is_some_and(|entry| entry.completions == Completions::Choice)
+    }
+
+    /// The nav keys in a choice field move the HIGHLIGHT, never the
+    /// cursor (which stays on the field's row).
+    pub fn choice_nav(&mut self, cmd: crate::vimnav::NavCommand) {
+        if let Some(list) = self.choice.as_mut() {
+            list.nav(cmd);
+        }
+    }
+
+    /// A click on painted row `row` is `tab` on that row (§18.9's rule
+    /// for the chain field's completion click).
+    pub fn choice_click(&mut self, row: usize) -> bool {
+        let Some(list) = self.choice.as_mut() else {
+            return false;
+        };
+        if !list.set_highlighted(row) {
+            return false;
+        }
+        self.complete_choice()
+    }
+
+    /// `tab`: the highlighted option's text becomes the query.
+    pub fn complete_choice(&mut self) -> bool {
+        let Some(list) = self.choice.as_mut() else {
+            return false;
+        };
+        if !list.complete() {
+            return false;
+        }
+        self.query = list.query().to_string();
+        true
+    }
+
+    /// `enter`: the HIGHLIGHTED option becomes the field's value — never
+    /// the typed text (a dropdown commits what is lit) — and the field
+    /// closes. Refused with the field open when nothing is highlighted
+    /// (the query matched no option). `Step::Inert` when the lit option
+    /// is the one already selected: nothing to write, and the field
+    /// still closes — closing is the visible answer.
+    pub fn apply_choice(&mut self) -> Step {
+        let Some(TextEntry {
+            row: row @ EditRow::Field(index),
+            completions: Completions::Choice,
+        }) = self.text_entry
+        else {
+            return Step::Inert;
+        };
+        let Some(picked) = self.choice.as_ref().and_then(|l| l.pick()) else {
+            return Step::Refused("no option matches — keep typing, or escape".to_string());
+        };
+        let outcome = match &mut self.fields[index].kind {
+            FieldKind::Choice { selected, .. } if *selected == picked => Step::Inert,
+            FieldKind::Choice { selected, .. } => {
+                *selected = picked;
+                Step::Changed
+            }
+            _ => Step::Inert,
+        };
+        self.text_entry = None;
+        self.choice = None;
+        self.query.clear();
+        self.follow(row);
+        outcome
     }
 
     /// `escape` in an open text field: drop the text and close it. The
@@ -2001,10 +2140,11 @@ impl Draft {
     /// nothing sensible to "follow" survives.
     pub fn cancel_text_entry(&mut self) {
         let entry = self.text_entry.take();
+        self.choice = None;
         self.query.clear();
         match entry {
             Some(TextEntry {
-                completions: false,
+                completions: Completions::None | Completions::Choice,
                 row,
             }) => self.follow(row),
             _ => self.selected = 0,
@@ -2031,7 +2171,7 @@ impl Draft {
     ) -> Step {
         let Some(TextEntry {
             row: EditRow::Field(index),
-            completions: false,
+            completions: Completions::None,
         }) = self.text_entry
         else {
             return Step::Inert;
@@ -2564,6 +2704,7 @@ impl Draft {
             query: String::new(),
             diagnostics: Vec::new(),
             text_entry: None,
+            choice: None,
             parent_fields: None,
             column: None,
             column_ctx: None,
@@ -2845,6 +2986,7 @@ impl Domain {
             query: String::new(),
             diagnostics: Vec::new(),
             text_entry: None,
+            choice: None,
             parent_fields: None,
             column: None,
             column_ctx: None,
@@ -4113,6 +4255,7 @@ mod tests {
             query: String::new(),
             diagnostics: Vec::new(),
             text_entry: None,
+            choice: None,
             parent_fields: None,
             column: None,
             column_ctx: None,
@@ -4307,6 +4450,138 @@ mod tests {
             draft.choice("value"),
             Some("a"),
             "from last, forward wraps to 0"
+        );
+    }
+
+    /// §3.2: `i` on a `Choice` row opens the field EMPTY (the current
+    /// value is already lit), with the highlight placed on the current
+    /// option; `enter` picks the lit row and closes; the cursor stays on
+    /// the row throughout.
+    #[test]
+    fn i_on_a_choice_row_opens_an_empty_field_placed_on_the_current_option() {
+        let mut draft = single_field_draft(FieldKind::Choice {
+            options: vec!["none".into(), "danger".into(), "accent".into()],
+            selected: 2,
+        });
+        assert_eq!(draft.begin_choice_entry(), Step::Changed);
+        assert!(draft.choice_entry());
+        assert_eq!(draft.query, "", "opens empty");
+        assert_eq!(
+            draft.choice.as_ref().unwrap().highlighted_text(),
+            Some("accent")
+        );
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(0)),
+            "the cursor stays on the row"
+        );
+        draft.set_query("dan".into());
+        assert_eq!(
+            draft.choice.as_ref().unwrap().highlighted_text(),
+            Some("danger")
+        );
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(0)),
+            "typing does not move the cursor"
+        );
+        assert_eq!(draft.apply_choice(), Step::Changed);
+        assert!(!draft.choice_entry());
+        assert!(draft.choice.is_none());
+        assert_eq!(draft.query, "");
+        assert!(matches!(
+            &draft.fields[0].kind,
+            FieldKind::Choice { selected: 1, .. }
+        ));
+        assert_eq!(draft.selected_row(), Some(EditRow::Field(0)));
+    }
+
+    #[test]
+    fn picking_the_option_already_selected_is_inert_and_still_closes() {
+        let mut draft = single_field_draft(FieldKind::Choice {
+            options: vec!["normal".into(), "light".into()],
+            selected: 1,
+        });
+        draft.begin_choice_entry();
+        assert_eq!(draft.apply_choice(), Step::Inert);
+        assert!(!draft.choice_entry(), "closing is the visible answer");
+    }
+
+    #[test]
+    fn a_query_matching_nothing_is_refused_with_the_field_open() {
+        let mut draft = single_field_draft(FieldKind::Choice {
+            options: vec!["normal".into(), "light".into()],
+            selected: 0,
+        });
+        draft.begin_choice_entry();
+        draft.set_query("zzz".into());
+        assert!(
+            matches!(draft.apply_choice(), Step::Refused(r) if r.contains("no option matches"))
+        );
+        assert!(draft.choice_entry(), "the field stays open for a retype");
+    }
+
+    #[test]
+    fn tab_completes_the_lit_option_and_nav_moves_the_highlight() {
+        let mut draft = single_field_draft(FieldKind::Choice {
+            options: vec!["estimated".into(), "declared".into(), "paid".into()],
+            selected: 0,
+        });
+        draft.begin_choice_entry();
+        draft.choice_nav(crate::vimnav::NavCommand::Move(1));
+        assert_eq!(
+            draft.choice.as_ref().unwrap().highlighted_text(),
+            Some("declared")
+        );
+        assert!(draft.complete_choice());
+        assert_eq!(draft.query, "declared");
+        assert!(draft.choice_click(0));
+        assert_eq!(
+            draft.query, "declared",
+            "a click on the only ranked row completes it"
+        );
+    }
+
+    #[test]
+    fn escape_cancels_a_choice_field_with_the_value_untouched() {
+        let mut draft = single_field_draft(FieldKind::Choice {
+            options: vec!["a".into(), "b".into()],
+            selected: 0,
+        });
+        draft.begin_choice_entry();
+        draft.set_query("b".into());
+        draft.cancel_text_entry();
+        assert!(!draft.choice_entry());
+        assert!(draft.choice.is_none());
+        assert!(matches!(
+            &draft.fields[0].kind,
+            FieldKind::Choice { selected: 0, .. }
+        ));
+        assert_eq!(draft.selected_row(), Some(EditRow::Field(0)));
+    }
+
+    #[test]
+    fn a_one_option_choice_does_not_open_and_neither_does_a_text_row() {
+        let mut one = single_field_draft(FieldKind::Choice {
+            options: vec!["only".into()],
+            selected: 0,
+        });
+        assert_eq!(one.begin_choice_entry(), Step::Inert);
+        let mut text = single_field_draft(FieldKind::Text("x".into()));
+        assert_eq!(text.begin_choice_entry(), Step::Inert);
+    }
+
+    /// The footer's `i` chip (§3.2): a two-option `Choice` is
+    /// `StepsAndTypes` now, a one-option one still `Inert`.
+    #[test]
+    fn a_choice_row_steps_and_types() {
+        let draft = single_field_draft(FieldKind::Choice {
+            options: vec!["a".into(), "b".into()],
+            selected: 0,
+        });
+        assert_eq!(
+            draft.selected_vocabulary(Domain::Colours),
+            RowVocabulary::StepsAndTypes
         );
     }
 
@@ -5374,7 +5649,7 @@ mod tests {
             draft.text_entry,
             Some(TextEntry {
                 row: EditRow::Field(0),
-                completions: false
+                completions: Completions::None
             })
         );
         assert!(!draft.chain_entry(), "a plain field has no completion list");
@@ -5819,8 +6094,10 @@ mod tests {
             "a Number steps and takes a typed value on any domain"
         );
 
-        // `Choice` and `Bool` step and nothing more — except a `Choice`
-        // with one option, which steps nowhere in either direction.
+        // `Bool` steps and nothing more; a multi-option `Choice` steps
+        // AND types (§3.2's typeahead) — except a `Choice` with one
+        // option, which steps nowhere in either direction and so has
+        // nothing for `i` to open either.
         let steps = Draft::new_object(
             "live",
             vec![
@@ -5832,7 +6109,7 @@ mod tests {
         );
         assert_eq!(
             steps.selected_vocabulary(Domain::Sources),
-            RowVocabulary::Steps
+            RowVocabulary::StepsAndTypes
         );
         let mut on_bool = steps.clone();
         on_bool.selected = 1;

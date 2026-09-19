@@ -246,7 +246,7 @@ impl Draft {
         };
         self.text_entry = Some(super::TextEntry {
             row: super::EditRow::Field(field),
-            completions: true,
+            completions: super::Completions::Chain,
         });
         self.selected = 0;
     }

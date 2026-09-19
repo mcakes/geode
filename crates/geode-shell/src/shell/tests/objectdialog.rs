@@ -5524,20 +5524,22 @@ fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppConte
 
 /// The edit footer names `i` on the row that can take it and on no
 /// other (user ruling 2026-09-13, narrowing the 2026-09-12 rule from the
-/// object to the row): Sources' `Paths` is an editable `Text`, but the
-/// `Dataset` row the stage opens on is a `Choice` that `i` refuses.
+/// object to the row): Sources' `Paths` is an editable `Text` — `i` alone,
+/// nothing steps — and the `Dataset` row the stage opens on is a
+/// multi-option `Choice`, which both steps and types (spec 2026-09-19
+/// §3.2: `i` opens a typeahead over its options).
 #[gpui::test]
 fn the_edit_footer_offers_i_only_where_a_row_can_take_it(cx: &mut gpui::TestAppContext) {
     let (_shell, mut cx) = dialog_test_shell_with(cx, services_with_sources(), "config::sources");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("objectdialog-hint-i").is_none(),
-        "Sources opens on Dataset, a Choice i cannot open"
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "Sources opens on Dataset, a multi-option Choice i now opens"
     );
     assert!(
         cx.debug_bounds("objectdialog-hint-change").is_some(),
-        "which the step keys do change"
+        "which the step keys also change"
     );
     cx.simulate_keystrokes("j"); // Paths, an editable Text
     cx.run_until_parked();
@@ -6121,11 +6123,11 @@ fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext
         cx.debug_bounds("objectdialog-action-i").is_none(),
         "no verbs while the field is open"
     );
-    cx.simulate_keystrokes("escape j"); // tone, a Choice: steps but never types
+    cx.simulate_keystrokes("escape j"); // tone, a two-option Choice
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("objectdialog-action-i").is_none(),
-        "i is not offered on a row it cannot open"
+        cx.debug_bounds("objectdialog-action-i").is_some(),
+        "a multi-option Choice both steps and types now (spec 2026-09-19 §3.2)"
     );
 }
 
@@ -6490,8 +6492,8 @@ fn tab_steps_the_selected_row_in_both_modes(cx: &mut gpui::TestAppContext) {
 /// The footer names the keys the row under the CURSOR answers to, not
 /// the ones its domain has somewhere (user ruling 2026-09-13). The
 /// column stage is where all three cases sit side by side: `label` is an
-/// editable `Text` (`i` only), `scale` a `Choice` (the step keys only),
-/// `precision` a `Number` (both).
+/// editable `Text` (`i` only), `scale` a multi-option `Choice` (both,
+/// since §3.2's typeahead), `precision` a `Number` (both).
 #[gpui::test]
 fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6533,8 +6535,8 @@ fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAp
         "scale is a Choice: the step keys change it"
     );
     assert!(
-        cx.debug_bounds("objectdialog-hint-i").is_none(),
-        "and i has nothing to open on a Choice"
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "and i opens a typeahead over its options (a multi-option Choice)"
     );
 
     cx.simulate_keystrokes("j"); // precision
@@ -7464,7 +7466,16 @@ fn the_help_line_is_blank_under_an_armed_confirm(cx: &mut gpui::TestAppContext) 
 /// read-only one dropped the footer's edit row, so the dialog shrank by a
 /// line and everything below it shifted. Every hint row is now laid out
 /// every time — an empty one painted blank at the same height — so the
-/// go row sits at one y whichever row is selected.
+/// go row sits a fixed distance below the edit row whichever row is
+/// selected.
+///
+/// The gap is measured from the EDIT row, not from a fixed y (spec
+/// 2026-09-19 §3.2's fallout): `dataset` is a multi-option `Choice`,
+/// which now both steps and types, so its action bar carries the `i`
+/// button that `adapter` (a read-only `Text`, no verb at all) does not —
+/// a real, one-row difference above the footer that this test is not
+/// about. Comparing the edit-to-go distance instead of `go`'s absolute
+/// position keeps the test on the one invariant it guards.
 #[gpui::test]
 fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
     cx: &mut gpui::TestAppContext,
@@ -7478,6 +7489,7 @@ fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
     assert!(cx.debug_bounds("objectdialog-hint-change").is_some());
     let go_before = cx.debug_bounds("hint-row-go").unwrap();
     let edit_before = cx.debug_bounds("hint-row-edit").unwrap();
+    let gap_before = go_before.origin.y - edit_before.origin.y;
 
     // `k` wraps to the last row, `adapter`, a read-only `Text`: nothing
     // to edit, so the edit row is empty — but still there, same height.
@@ -7495,5 +7507,9 @@ fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
         "an empty row keeps a full row's height"
     );
     let go = cx.debug_bounds("hint-row-go").unwrap();
-    assert_eq!(go.origin.y, go_before.origin.y, "so nothing below it moves");
+    assert_eq!(
+        go.origin.y - edit.origin.y,
+        gap_before,
+        "so nothing below the edit row moves relative to it"
+    );
 }

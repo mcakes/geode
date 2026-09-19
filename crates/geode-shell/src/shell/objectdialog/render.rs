@@ -128,9 +128,9 @@ use super::scopes;
 use super::sources;
 use super::views;
 use super::{
-    ColumnContext, ColumnDoor, ColumnLayers, Confirm, Destination, Domain, Draft, EditRow, FellTo,
-    Field, FieldKind, Fold, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag, RowVocabulary,
-    Stage, Step,
+    ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination, Domain, Draft,
+    EditRow, FellTo, Field, FieldKind, Fold, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE,
+    RowDrag, RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -225,10 +225,14 @@ pub fn open(
             // §19.1: a value field runs in `Filter` (that is what gives
             // it the keys), but "filter" is the wrong word for a field
             // whose text is the value it will apply — the pill says
-            // `edit`, or `chain` for the chain field's own case.
+            // `edit`, or `chain` for the chain field's own case. A
+            // `Choice` row's typeahead wants `choose` (Task 3 adds
+            // `dialog::choose_pill`); until then it reads `edit` too.
             .children(
                 state.map(|s| match s.draft.as_ref().and_then(|d| d.text_entry) {
-                    Some(entry) if entry.completions => dialog::chain_pill(cx),
+                    Some(entry) if entry.completions == Completions::Chain => {
+                        dialog::chain_pill(cx)
+                    }
                     Some(_) => dialog::edit_pill(cx),
                     None => dialog::mode_pill(s.mode, cx),
                 }),
@@ -1176,8 +1180,8 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     // Checked before filter mode, which it shares a focused `Input` with:
     // the field is open only in `Filter` (that is what gives it the keys),
     // and every key filter mode would claim means something else here.
-    // The chain field (§18.8) is `handle_text_key`'s `completions: true`
-    // case, not a separate dispatch.
+    // The chain field (§18.8) is `handle_text_key`'s
+    // `Completions::Chain` case, not a separate dispatch.
     let text_entry = shell
         .object_dialog
         .as_ref()
@@ -1670,7 +1674,7 @@ fn open_text_field(shell: &mut ShellView) {
 /// `Input`'s to type (`false`).
 ///
 /// The chain field (§18.8, Groupings' `i`) is this same field with
-/// `completions: true`: `tab` and the nav keys only mean anything there
+/// `Completions::Chain`: `tab` and the nav keys only mean anything there
 /// — a plain field has no completion list below it to move a highlight
 /// through, so those two branches are gated on `completions` and `enter`
 /// dispatches to [`Draft::apply_chain`] instead of
@@ -3625,7 +3629,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // no longer on), so only the chain field's own completion click
         // does anything. `None` (no field open at all) is the ordinary
         // click-to-edit path.
-        let open = draft.text_entry.map(|t| t.completions);
+        let open: Option<Completions> = draft.text_entry.map(|t| t.completions);
         // The glyph and label share ONE child so the row still has
         // exactly two children under `justify_between` — a third direct
         // child splits the row's free space into two gaps and floats the
@@ -3651,8 +3655,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             .debug_selector(move || selector.clone())
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 entity_for_row.update(cx, |shell, cx| match open {
-                    Some(true) => on_completion_clicked(shell, clicked, window, cx),
-                    Some(false) => {}
+                    Some(Completions::Chain) => on_completion_clicked(shell, clicked, window, cx),
+                    Some(_) => {}
                     None => on_edit_row_clicked(shell, clicked, window, cx),
                 });
             });
@@ -3867,11 +3871,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // §19.1: a value field's own vocabulary — never filter mode's,
         // even though the `Input` is focused the same way, because
         // `enter` means "apply this value" here rather than "narrow the
-        // list". The chain field (§18.8) is `completions: true` and
+        // list". The chain field (§18.8) is `Completions::Chain` and
         // additionally has `tab` to complete a segment and the nav keys
         // to move the highlight; a plain field has neither.
         let mut hints = Vec::new();
-        if entry.completions {
+        if entry.completions == Completions::Chain {
             hints.push(Hint::prose(HintRow::Move, "type a chain · book / lhu"));
             hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
             hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
@@ -4061,7 +4065,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // chain field (§18.8) keeps its own slot-and-chain label; a plain
     // field names the object and the row it is editing.
     let filter = if let Some(entry) = draft.text_entry {
-        let label = if entry.completions {
+        let label = if entry.completions == Completions::Chain {
             format!("slot {} · chain", draft.name)
         } else {
             // `TextEntry.row`'s own doc anticipates an item-level field
