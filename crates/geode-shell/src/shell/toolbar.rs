@@ -54,7 +54,7 @@ const FILTER_WIDTH: f32 = 200.0;
 /// one.
 fn chip(
     id: ElementId,
-    label: String,
+    label: impl Into<SharedString>,
     fg: Hsla,
     bg: Hsla,
     radius: Pixels,
@@ -67,7 +67,7 @@ fn chip(
         .rounded(radius)
         .bg(bg)
         .text_color(fg)
-        .child(label)
+        .child(label.into())
         .debug_selector(selector)
 }
 
@@ -76,6 +76,8 @@ pub fn toolbar(
     model: &ScopeBarModel,
     on_chip_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+    on_pick: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -190,6 +192,55 @@ pub fn toolbar(
             )),
         );
     }
+    // The `+` pick chip (scope-save spec's amendment): a mouse door onto
+    // the dimension picker (`mod+p`/`frame::pick`) for a trader who has
+    // not memorised the chord — always painted, empty scope or not,
+    // since picking a dimension is exactly how a scope starts.
+    chips_row = chips_row.child(
+        chip(
+            "scope-pick-chip".into(),
+            SharedString::new_static("+"),
+            chip_fg,
+            chip_bg,
+            chip_radius,
+            || "scope-pick-chip".to_string(),
+        )
+        .tooltip(tips::tip(
+            "tip-scope-pick-chip",
+            "Pick a dimension",
+            Some("frame::pick"),
+            None,
+        ))
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            on_pick(window, cx)
+        }),
+    );
+    if model.savable {
+        // The `save` chip: the mouse form of `scope::save_current`,
+        // withdrawn rather than merely disabled while the frame has
+        // nothing to save (`ScopeBarModel::savable`'s own doc has the
+        // reasoning — a chip that always does nothing is worse than no
+        // chip).
+        chips_row = chips_row.child(
+            chip(
+                "scope-save-chip".into(),
+                SharedString::new_static("save"),
+                chip_fg,
+                chip_bg,
+                chip_radius,
+                || "scope-save-chip".to_string(),
+            )
+            .tooltip(tips::tip(
+                "tip-scope-save-chip",
+                "Save as a named scope",
+                Some("scope::save_current"),
+                None,
+            ))
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                on_save(window, cx)
+            }),
+        );
+    }
     if let Some(named) = &model.impossible {
         // The contradiction chip: `chip::Tone::Danger`, not the muted
         // scheme every other chip uses — a scope that can match nothing
@@ -215,11 +266,9 @@ pub fn toolbar(
             )),
         );
     }
-    let has_chips = !model.chips.is_empty()
-        || model.text.is_some()
-        || model.expr.is_some()
-        || model.impossible.is_some();
-
+    // `chips_row` used to be conditionally omitted when the frame had
+    // nothing to show (`has_chips`, now gone) — the `+` pick chip above
+    // is always painted, so the row is never empty any more.
     TitleBar::new().child(
         h_flex()
             .w_full()
@@ -281,7 +330,7 @@ pub fn toolbar(
                             .text_color(theme.muted_foreground)
                             .child(model.slot_label.clone()),
                     )
-                    .when(has_chips, |el| el.child(chips_row)),
+                    .child(chips_row),
             )
             // A muted search icon in the `prefix` slot rather than a
             // "filter" placeholder (user direction), matching the palette
