@@ -24,9 +24,10 @@
 
 use gpui::prelude::*;
 use gpui::{App, IntoElement, MouseButton, SharedString, Window, div, px};
-use gpui_component::ActiveTheme as _;
 use gpui_component::status_bar::StatusBar;
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, progress::Progress};
 
+use crate::diagnostics::IngestActivity;
 use crate::fonts;
 use crate::keymap::Keystroke;
 
@@ -82,6 +83,11 @@ pub fn status_bar(
     restart_message: Option<&str>,
     diagnostics_summary: Option<&str>,
     on_diagnostics_click: impl Fn(&mut Window, &mut App) + 'static,
+    // What the ingest runner is loading right now, or `None` while idle
+    // (spec 2026-09-19 §5.3) — paints a 2px loading strip on the bar's
+    // top edge plus a `loading <source> · <n> queued` segment, both only
+    // while `Some`.
+    ingest: Option<&IngestActivity>,
     as_of: Option<&str>,
     // The as-of instant's full resolved timestamp (`ScopeBarModel::
     // as_of_full`), `Some` exactly when `as_of` is — the segment's
@@ -155,6 +161,14 @@ pub fn status_bar(
                 }),
         );
     }
+    if let Some(activity) = ingest {
+        bar = bar.left(
+            div()
+                .text_color(theme.muted_foreground)
+                .debug_selector(|| "ingest-loading".to_string())
+                .child(activity.label.clone()),
+        );
+    }
     if let Some((t, full)) = as_of.zip(as_of_full) {
         // The same warning-toned badge treatment the toolbar's own AS OF
         // readout uses (`shell::toolbar`'s "scope-asof" child) — an
@@ -185,11 +199,40 @@ pub fn status_bar(
         );
     }
 
-    bar.right(
+    let bar = bar.right(
         div()
             .text_color(theme.muted_foreground)
             .child(theme_name.to_string()),
-    )
+    );
+
+    // The bar is wrapped rather than grown: the loading strip is an
+    // absolute overlay pinned to the top edge, so its presence never
+    // moves or resizes the bar itself (the window test pins both
+    // `origin.y` and `size.height` across the idle/loading transition).
+    div()
+        .relative()
+        .flex_none()
+        .w_full()
+        .h(px(HEIGHT))
+        .debug_selector(|| "shell-status-bar".to_string())
+        .child(bar)
+        .when(ingest.is_some(), |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.))
+                    .debug_selector(|| "ingest-strip".to_string())
+                    .child(
+                        Progress::new("ingest-strip")
+                            .loading(true)
+                            .with_size(Size::Size(px(2.)))
+                            .w_full(),
+                    ),
+            )
+        })
 }
 
 /// Minimal, status-strip-grade rendering of one keystroke (`ctrl+shift+g`).

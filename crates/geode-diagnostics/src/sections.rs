@@ -121,6 +121,15 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
             .unwrap_or_default();
         text.push_str(&format!(" (since {since}{elapsed})"));
         out.push(row(text, 0, tone));
+        if let Some(a) = &d.ingest
+            && a.source == *name
+        {
+            out.push(row(
+                format!("loading {} since {}", a.path, local_hms(a.since)),
+                1,
+                Tone::Muted,
+            ));
+        }
         push_spec_detail(&mut out, state);
         let mut poll = String::new();
         if let Some(last) = state.last_poll {
@@ -605,6 +614,25 @@ mod tests {
         assert!(risk_text.contains("since"));
         assert!(risk_text.contains("last poll"));
         assert!(risk_text.contains("next poll"));
+    }
+
+    #[test]
+    fn a_loading_source_shows_what_it_is_loading_under_its_health_row() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let t = SystemTime::UNIX_EPOCH;
+        d.note_health("risk", Health::Ok, "".into(), t);
+        let at = SystemTime::now();
+        d.note_loading("risk", "/data/risk/EOD.csv", 1, at);
+        let rows = sources_rows(&d, at);
+        let text: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
+        assert!(
+            text.iter()
+                .any(|t| t.starts_with("loading /data/risk/EOD.csv since ")),
+            "{text:?}"
+        );
+        d.note_load_ended();
+        let rows = sources_rows(&d, at);
+        assert!(!rows.iter().any(|r| r.text.starts_with("loading ")));
     }
 
     #[test]

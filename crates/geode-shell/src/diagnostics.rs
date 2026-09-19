@@ -99,6 +99,19 @@ impl Default for SourceState {
     }
 }
 
+/// What the ingest runner is loading right now (spec 2026-09-17 §5.3),
+/// set by `DataEvent::Loading` and cleared by `DataEvent::LoadEnded`.
+/// `label` is prepared here, once per event, so the status bar clones a
+/// `SharedString` per paint and formats nothing per frame.
+#[derive(Debug, Clone)]
+pub struct IngestActivity {
+    pub source: String,
+    pub path: String,
+    pub queued: usize,
+    pub since: SystemTime,
+    pub label: gpui::SharedString,
+}
+
 /// One dataset's catalog state (Phase 4b §4.5) — `None` until the first
 /// `Request::Catalog` outcome names it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -154,6 +167,11 @@ pub struct DiagVersions {
 pub struct Diagnostics {
     pub sources: BTreeMap<String, SourceState>,
     pub datasets: BTreeMap<String, DatasetState>,
+    /// What the ingest runner is loading right now, or `None` while
+    /// idle — set by [`Self::note_loading`], cleared by
+    /// [`Self::note_load_ended`]. The status bar and the sources
+    /// section both read this.
+    pub ingest: Option<IngestActivity>,
     /// The current CONFIG-LOAD diagnostics — the latest load or reload's
     /// batch, whole (Phase 4b Task 4 fix round 1, MAJ-5: was a capped,
     /// ever-appending log; a reload that changed nothing used to
@@ -230,6 +248,7 @@ impl Diagnostics {
         Diagnostics {
             sources: BTreeMap::new(),
             datasets: BTreeMap::new(),
+            ingest: None,
             config: Vec::new(),
             config_history: VecDeque::new(),
             data_diagnostics: VecDeque::new(),
@@ -315,6 +334,35 @@ impl Diagnostics {
         state.last_ready = ready;
         self.version += 1;
         self.versions.sources += 1;
+    }
+
+    /// A load began (`DataEvent::Loading`). Always bumps: a new `Started`
+    /// is a new record even for the same source (its path or depth moved).
+    pub fn note_loading(&mut self, source: &str, path: &str, queued: usize, at: SystemTime) {
+        let label: gpui::SharedString = if queued == 0 {
+            format!("loading {source}").into()
+        } else {
+            format!("loading {source} · {queued} queued").into()
+        };
+        self.ingest = Some(IngestActivity {
+            source: source.to_string(),
+            path: path.to_string(),
+            queued,
+            since: at,
+            label,
+        });
+        self.version += 1;
+        self.versions.sources += 1;
+    }
+
+    /// The load ended (`DataEvent::LoadEnded`), published or failed. A
+    /// no-op when nothing was recorded — an end with no start bumps
+    /// nothing.
+    pub fn note_load_ended(&mut self) {
+        if self.ingest.take().is_some() {
+            self.version += 1;
+            self.versions.sources += 1;
+        }
     }
 
     /// A file was published for `dataset` (§3.12-style feed, mirrored
@@ -1405,5 +1453,36 @@ mod tests {
             "e259",
             "newest kept at the back"
         );
+    }
+
+    #[test]
+    fn note_loading_records_the_activity_and_bumps_the_sources_version() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let v = d.versions().sources;
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        d.note_loading("risk", "/data/risk/EOD.csv", 3, at);
+        let a = d.ingest.as_ref().expect("recorded");
+        assert_eq!(a.source, "risk");
+        assert_eq!(a.path, "/data/risk/EOD.csv");
+        assert_eq!(a.queued, 3);
+        assert_eq!(a.since, at);
+        assert_eq!(&*a.label, "loading risk · 3 queued");
+        assert_eq!(d.versions().sources, v + 1);
+        d.note_loading("cvi", "document://cvi/cvi_params", 0, at);
+        assert_eq!(&*d.ingest.as_ref().unwrap().label, "loading cvi");
+    }
+
+    #[test]
+    fn note_load_ended_clears_and_is_a_no_op_when_idle() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let v0 = d.versions().sources;
+        d.note_load_ended();
+        assert!(d.ingest.is_none());
+        assert_eq!(d.versions().sources, v0, "nothing to clear, nothing bumps");
+        d.note_loading("risk", "/x.csv", 0, SystemTime::UNIX_EPOCH);
+        let v1 = d.versions().sources;
+        d.note_load_ended();
+        assert!(d.ingest.is_none());
+        assert_eq!(d.versions().sources, v1 + 1);
     }
 }
