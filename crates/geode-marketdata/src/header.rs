@@ -10,6 +10,7 @@ use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
 use geode_shell::fonts;
+use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tips;
 use gpui::prelude::*;
@@ -494,6 +495,10 @@ pub(crate) fn render(
             .border_color(theme.border)
             .when(menu_open, |d| d.bg(theme.secondary))
             .text_color(muted)
+            // A bare control's pointer states (`control::PointerStates`);
+            // the open state above stays its own persistent fill, as the
+            // guide asks of a button that owns a popup.
+            .pointer_states(control::control_paint(theme, control::Rest::Bare, muted))
             .child("⋯")
             .debug_selector(move || format!("marketdata-menu-button-{tile_id}"))
             .capture_any_mouse_down({

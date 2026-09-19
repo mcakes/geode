@@ -12143,6 +12143,55 @@ run_mutation "listrow: every highlight run takes the door's accent" \
   geode-shell \
   every_highlight_run_takes_the_doors_accent
 
+# ---- Clickable controls (`shell::control`, affordance follow-up) --------
+# The design guide owes every control a hover and a pressed state; the
+# door borrows gpui-component's own button tokens and floors the text
+# over each state's fill. `muted_foreground` — the chips' text — over
+# `secondary_hover` is under 3:1 on 16 bundled themes unfloored
+# (Catppuccin Latte 1.93:1); over `secondary_active` on 19; `warning`
+# (the status bar's diagnostics segment) over the pressed fill on 15.
+# Mutated to the raw text, a hovered scope chip is unreadable on those
+# themes and the sweep is the only test that reads a control's COLOUR.
+run_mutation "control: a filled control's hover text is floored over the hover fill" \
+  crates/geode-shell/src/shell/control.rs \
+  '            hover_text: floored(theme, text, theme.secondary_hover),' \
+  '            hover_text: text,' \
+  geode-shell \
+  every_control_state_is_readable_on_every_bundled_theme
+
+run_mutation "control: a filled control's pressed text is floored over the pressed fill" \
+  crates/geode-shell/src/shell/control.rs \
+  '            hover_text: floored(theme, text, theme.secondary_hover),
+            pressed,
+            pressed_text: floored(theme, text, pressed),' \
+  '            hover_text: floored(theme, text, theme.secondary_hover),
+            pressed,
+            pressed_text: text,' \
+  geode-shell \
+  every_control_state_is_readable_on_every_bundled_theme
+
+run_mutation "control: a bare control's pressed text is floored over the pressed fill" \
+  crates/geode-shell/src/shell/control.rs \
+  '            hover_text: floored(theme, theme.accent_foreground, theme.accent),
+            pressed,
+            pressed_text: floored(theme, text, pressed),' \
+  '            hover_text: floored(theme, theme.accent_foreground, theme.accent),
+            pressed,
+            pressed_text: text,' \
+  geode-shell \
+  every_control_state_is_readable_on_every_bundled_theme
+
+# The two rests borrow DIFFERENT button pairs: a filled chip steps its
+# own fill (secondary), a bare glyph lights an accent box (ghost). Mutated
+# so a bare control hovers to `secondary_hover`, a chevron or `×` on the
+# tile surface hovers to a fill tuned for a chip, not a surface.
+run_mutation "control: a bare control hovers to accent, a filled one to secondary_hover" \
+  crates/geode-shell/src/shell/control.rs \
+  '            hover: theme.accent,' \
+  '            hover: theme.secondary_hover,' \
+  geode-shell \
+  rests_resolve_to_their_documented_tokens
+
 # ---- Chrome on the rem scale (`shell::scale`, design-guide audit) -------
 # `FontSize` moves the window rem; every chrome length is authored in
 # pixels at the Medium rem and resolved through `scale::design`, so it

@@ -145,6 +145,7 @@ use super::super::{SCOPES_KEY, ShellEvent, ShellView};
 // theme bridge (§6.1) — a different module, one directory further out,
 // that the adapter itself never touches.
 use super::super::colours as colour_theme;
+use super::super::control::{self, PointerStates as _};
 use super::super::dialog;
 use super::super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
 use super::super::scale;
@@ -3874,6 +3875,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
+    // Pointer states for the two controls a row carries besides itself:
+    // the steppable value chip (a filled chip) and the tick (a bare glyph).
+    let chip_states = control::control_paint(theme, control::Rest::Filled, chip_fg);
+    let tick_states = control::control_paint(theme, control::Rest::Bare, chip_fg);
     let row = target_row(shell);
 
     // §6.1: on Colours, the swatch beside the name — resolved from the
@@ -4096,6 +4101,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         theme.muted_foreground,
                         theme.muted,
                         theme.radius,
+                        chip_states,
                         on_step,
                     );
                     (
@@ -4256,11 +4262,14 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                             .id(gpui::SharedString::from(tick_id.clone()))
                             .font_family(crate::fonts::MONO)
                             .w(scale::design(13.))
+                            .text_center()
+                            .rounded(theme.radius_tokens().sm)
                             .text_color(if entry.included {
                                 theme.success
                             } else {
                                 theme.muted_foreground
                             })
+                            .pointer_states(tick_states)
                             .debug_selector(move || tick_id)
                             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                 cx.stop_propagation();

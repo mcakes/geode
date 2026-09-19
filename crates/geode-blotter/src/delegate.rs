@@ -18,6 +18,7 @@ use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{LineNumbers, gutter_digits, gutter_number};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
+use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, SharedString, Stateful,
@@ -993,7 +994,16 @@ impl TableDelegate for BlotterDelegate {
                 div()
                     .id(("chevron", row_ix))
                     .w(px(14.))
+                    .rounded(theme.radius_tokens().sm)
                     .text_color(theme.muted_foreground)
+                    // The one clickable glyph in a blotter cell takes a
+                    // bare control's pointer states (the design guide's
+                    // hover and pressed rows; cursor stays the arrow).
+                    .pointer_states(control::control_paint(
+                        theme,
+                        control::Rest::Bare,
+                        theme.muted_foreground,
+                    ))
                     .debug_selector(|| format!("blotter-chevron-{row_ix}"))
                     .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
                         cx.stop_propagation();

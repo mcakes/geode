@@ -8,6 +8,7 @@
 
 use crate::core::menu::MenuRow;
 use crate::tile::MarketDataTile;
+use geode_shell::shell::listrow::row_paint;
 use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{
@@ -340,6 +341,14 @@ pub(crate) fn render_menu(
                             theme.popover_foreground
                         })
                     })
+                    // The pointer's row is `list_hover`, the same fill
+                    // every other row list in the shell answers the
+                    // pointer with (`listrow::row_paint`); never on a
+                    // disabled row — a hover promises a click (the
+                    // design guide's "no misleading hover response").
+                    .when(i != m.highlighted && !disabled, |d| {
+                        d.hover(|s| s.bg(row_paint(theme).hover))
+                    })
                     .debug_selector(move || format!("marketdata-menu-row-{tile_id}-{i}"))
                     // `stop_propagation` here is NOT load-bearing for
                     // focus any more (it was, per the final review's B5,
@@ -472,6 +481,7 @@ pub(crate) fn render_picker(
                     })
                     .when(row_i != rows.highlighted(), |d| {
                         d.text_color(theme.popover_foreground)
+                            .hover(|s| s.bg(row_paint(theme).hover))
                     })
                     .debug_selector(move || format!("marketdata-picker-row-{tile_id}-{row_i}"))
                     .on_mouse_down(MouseButton::Left, {

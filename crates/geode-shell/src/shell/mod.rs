@@ -12,6 +12,7 @@ pub mod chip;
 pub mod colours;
 mod commandline_ctl;
 pub mod commandline_view;
+pub mod control;
 pub mod dialog;
 mod drag;
 mod hot_reload;
