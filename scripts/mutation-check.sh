@@ -7121,13 +7121,27 @@ run_mutation "objectdialog: a create ignores a name the presentation overlay hol
   geode-shell \
   a_presentation_only_name_is_taken_even_with_no_row_to_show_for_it
 
-# Scopes' n saves the FRAME's scope, not the empty object.
-run_mutation "objectdialog: n on scopes reads the frame" \
+# `n` creates an EMPTY scope now (scopes-editing spec §6, reversing the
+# earlier "n saves the frame's scope" behaviour). Reintroducing the old
+# read right after the draft is built — exactly what this line used to do
+# before `NameSeed` existed — puts `BK007` back in the written file, which
+# the test's `!written.contains("BK007")` assertion catches.
+run_mutation "scopes dialog: n creates an empty scope, never the frame's" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        scopes::overwrite_with(&mut draft, &scope);' \
-  '        let _ = &scope;' \
+  '    let mut draft = domain.new_draft(&shell.services.config, &name);' \
+  '    let mut draft = domain.new_draft(&shell.services.config, &name); if domain == Domain::Scopes { let scope = shell.frame.read(cx).scope().clone(); scopes::overwrite_with(&mut draft, &scope, &shell.services.config); }' \
   geode-shell \
-  n_on_a_scope_saves_the_frames_current_scope
+  n_on_scopes_creates_an_empty_scope
+
+# `c`'s whole point is that the copy is VERBATIM — dropping the source
+# table copy would leave a blank object under the new name rather than
+# `mine`'s own `book = ["BK001"]` selection.
+run_mutation "scopes dialog: c copies verbatim" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        draft.source = table;' \
+  '        let _ = table;' \
+  geode-shell \
+  c_duplicates_the_selected_scope_under_a_new_name
 
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back

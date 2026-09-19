@@ -2829,12 +2829,11 @@ fn n_refuses_a_name_only_the_presentation_overlay_holds(cx: &mut gpui::TestAppCo
     );
 }
 
-/// Scopes' `n` saves the FRAME's current scope, not an empty object —
-/// the same read `run_confirmed`'s `Confirm::Overwrite` arm makes, made
-/// here instead because there is no existing object's row to read it
-/// from.
+/// `n` creates an EMPTY scope (spec §6) — the frame's scope is no longer
+/// copied — and opens it with the `new` badge; `o` still takes the
+/// frame's.
 #[gpui::test]
-fn n_on_a_scope_saves_the_frames_current_scope(cx: &mut gpui::TestAppContext) {
+fn n_on_scopes_creates_an_empty_scope(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = dialog_test_shell_in_dir(
         cx,
@@ -2858,11 +2857,66 @@ fn n_on_a_scope_saves_the_frames_current_scope(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(written.contains("[today"), "{written}");
     assert!(
-        written.contains("[today") && written.contains("BK007"),
-        "{written}"
+        !written.contains("BK007"),
+        "the frame's scope is not copied: {written}"
     );
     assert!(edit_draft(&shell, &cx, |d| d.is_new));
+    assert!(edit_draft(&shell, &cx, |d| d
+        .list_items("dimensions")
+        .unwrap()
+        .is_empty()));
+}
+
+/// `c` on a browse row copies that scope verbatim under the typed name
+/// and opens the copy.
+#[gpui::test]
+fn c_duplicates_the_selected_scope_under_a_new_name(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("c");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_seed.clone()),
+        objectdialog::NameSeed::CopyOf("mine".to_string())
+    );
+    cx.simulate_input("mine2");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(
+        written.contains("[mine2.dimensions]") && written.contains("BK001"),
+        "{written}"
+    );
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { ref object } if object == "mine2"
+    ));
+    assert!(edit_draft(&shell, &cx, |d| d.is_new));
+}
+
+/// `c` is Scopes-only for now: elsewhere it is an unbound letter.
+#[gpui::test]
+fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    cx.simulate_keystrokes("c");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
 }
 
 /// A `SCOPES_KEY` outcome reaches the Values stage; a `PICKER_KEY` one

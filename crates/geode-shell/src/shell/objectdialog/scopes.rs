@@ -165,7 +165,12 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
 /// (for the dimensions list's available catalogue), one read off
 /// `Config` itself, the other freshly rendered from the frame's own
 /// scope.
-fn fields_from_table(config: &Config, table: Option<&toml::Table>) -> Vec<Field> {
+///
+/// `pub(super)` rather than private: [`super::Domain::fields_from_source`]
+/// (scopes-editing spec §6) is `c`'s other caller, building the copy's
+/// fields straight from the table it just cloned rather than from a
+/// named object `config` has a row for yet.
+pub(super) fn fields_from_table(config: &Config, table: Option<&toml::Table>) -> Vec<Field> {
     let mut items = Vec::new();
     if let Some(dims) = table
         .and_then(|t| t.get("dimensions"))
@@ -239,20 +244,41 @@ fn fields_from_table(config: &Config, table: Option<&toml::Table>) -> Vec<Field>
 pub const NO_ORDER_NOTICE: &str = "selections have no order";
 
 /// The draft rendered as `scopes.toml`'s own value for this object:
-/// `draft.source`, unchanged, wrapped for [`super::Domain::to_table`]'s
-/// sake.
+/// `draft.source`, unchanged but for a new object's three keys defaulted
+/// in (below), wrapped for [`super::Domain::to_table`]'s sake.
 ///
 /// Never derived from `draft.fields` — both fields are
 /// [`FieldKind::Text`], painted summaries with nothing in the field
 /// vocabulary that could reconstruct a `dimensions` sub-table or an
 /// `expression` string from them. `draft.source` is the actual object,
 /// exactly as `Domain::draft` first read it off the merged doc, and the
-/// **only** thing that ever changes it is [`overwrite_with`] — the same
-/// "the field vocabulary does not model this, so render from `source`"
-/// shape `views::doc_table`'s own doc comment describes, taken all the
-/// way to its limit: here, nothing but `source` is ever rendered.
+/// **only** things that ever change it are [`overwrite_with`] and `c`'s
+/// own copy (`render::create_from_name`) — the same "the field vocabulary
+/// does not model this, so render from `source`" shape `views::doc_table`'s
+/// own doc comment describes, taken all the way to its limit: here,
+/// nothing but `source` is ever rendered.
+///
+/// `n`'s freshly named object (spec §6) has an EMPTY `source` —
+/// `Draft::new_object`'s own literal — which would otherwise render `{}`,
+/// giving the file no hint of the object's shape. Cloning `source` and
+/// defaulting the three keys in (never mutating the draft itself, which
+/// stays the single "what did the trader actually change" source of
+/// truth) is what makes a fresh scope's file entry show an empty
+/// `dimensions` table, `text = ""` and `expression = ""` on the very
+/// first write — a no-op for any table that already has them, which is
+/// every table but a brand new one.
 pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
-    toml_edit::Item::Table(super::toml_table_to_edit(&draft.source))
+    let mut source = draft.source.clone();
+    source
+        .entry("dimensions".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    source
+        .entry("text".to_string())
+        .or_insert_with(|| toml::Value::String(String::new()));
+    source
+        .entry("expression".to_string())
+        .or_insert_with(|| toml::Value::String(String::new()));
+    toml_edit::Item::Table(super::toml_table_to_edit(&source))
 }
 
 /// Everything wrong with the draft as it stands (spec §7.2): the
@@ -819,6 +845,28 @@ mod tests {
             saved["mine"].dimensions[0].values,
             vec!["BK001".to_string(), "BK002".to_string()]
         );
+    }
+
+    /// `n`'s brand new object (spec §6): `Domain::new_draft`'s `source` is
+    /// `toml::Table::new()`, empty — `to_table` still renders the three
+    /// keys a saved scope always has, so the very first write shows the
+    /// object's shape rather than a bare `{}`.
+    #[test]
+    fn to_table_defaults_the_three_keys_for_a_brand_new_object() {
+        let config = config_with_scope("");
+        let draft = Domain::Scopes.new_draft(&config, "today");
+        assert!(draft.source.is_empty(), "a fresh draft's source is empty");
+        let item = to_table(&draft, Destination::Doc);
+        let text = super::super::object_text("today", item);
+        // `toml_edit` renders an empty table as its own `[today.
+        // dimensions]` header rather than an inline `{}` — this is the
+        // shape a real write produces, so the test reads that shape
+        // rather than the doc comment's inline shorthand.
+        assert!(text.contains("[today.dimensions]"), "{text}");
+        assert!(text.contains("text = \"\""), "{text}");
+        assert!(text.contains("expression = \"\""), "{text}");
+        // The draft itself is untouched — `to_table` renders a clone.
+        assert!(draft.source.is_empty());
     }
 
     /// [`overwrite_with`]: the frame's scope replaces both the source

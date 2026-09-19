@@ -166,6 +166,17 @@ pub enum Stage {
     },
 }
 
+/// What `enter` in [`Stage::Naming`] creates (scopes-editing spec §6):
+/// the domain's empty object (`n`), or a verbatim copy of a named one
+/// (`c`). Recorded by NAME when armed — the browse cursor is an index,
+/// and a reload can re-rank the list under it (the same reason
+/// `confirm_target` records one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameSeed {
+    Empty,
+    CopyOf(String),
+}
+
 /// One named object as the browse list shows it.
 ///
 /// `layer`, `overridden` and `drifted` are the three provenance markers
@@ -351,6 +362,12 @@ impl Domain {
     /// created that is not already listed") and stays beside it.
     pub fn writable(self, stage: &Stage) -> bool {
         !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. })
+    }
+
+    /// May `c` copy an object under a new name? Scopes alone for now
+    /// (scopes-editing spec §6); the mechanism is generic.
+    pub fn duplicable(self) -> bool {
+        self == Domain::Scopes
     }
 
     /// The text painted before an object's name, if this domain groups
@@ -2958,6 +2975,24 @@ impl Domain {
         }
     }
 
+    /// The fields a `c`-copied object opens with, built straight from the
+    /// table `create_from_name` just copied rather than from a named
+    /// object `config` has a row for yet — the copy has not been written
+    /// when this runs (§6). Only [`Domain::duplicable`] needs the real
+    /// answer: every other domain falls back to `self.fields(config,
+    /// None)`, its own empty-object shape, since nothing else can reach
+    /// this door.
+    pub fn fields_from_source(self, config: &Config, table: &toml::Table) -> Vec<Field> {
+        match self {
+            Domain::Scopes => scopes::fields_from_table(config, Some(table)),
+            Domain::Views
+            | Domain::Groupings
+            | Domain::Schema
+            | Domain::Sources
+            | Domain::Colours => self.fields(config, None),
+        }
+    }
+
     /// A fresh [`Draft`] of `object`, validated once so the edit stage
     /// opens showing whatever is already wrong with it.
     pub fn draft(self, config: &Config, object: &str) -> Draft {
@@ -3001,9 +3036,12 @@ impl Domain {
     /// The draft `n` opens after a name is committed (§18.2): the
     /// adapter's empty-object fields — `fields(config, None)`, which every
     /// adapter already answers — over an empty source, validated once.
-    /// Scopes' caller replaces the result with the frame's scope before
-    /// committing (`scopes::overwrite_with`); the empty fields are still
-    /// what this returns, so the pure core never reads a `Frame`.
+    /// `n` creates an EMPTY object (scopes-editing spec §6, reversing the
+    /// earlier "Scopes' `n` saves the frame's scope" behaviour) — `c`'s
+    /// copy is a separate path (`create_from_name`'s `NameSeed::CopyOf`
+    /// arm, over [`Domain::fields_from_source`]) that replaces this
+    /// result's fields and source once the name is committed, so the pure
+    /// core still never reads a `Frame`.
     pub fn new_draft(self, config: &Config, name: &str) -> Draft {
         let mut draft = Draft::new_object(name, self.fields(config, None), toml::Table::new());
         draft.diagnostics = self.validate(&draft, config);
@@ -3204,6 +3242,12 @@ pub struct ObjectDialogState {
     /// [`Self::cancel_naming`] and consumed by
     /// `render::create_from_name`.
     pub naming_dataset: Option<String>,
+    /// What [`Stage::Naming`]'s `enter` creates (scopes-editing spec §6):
+    /// `Empty` for `n`, `CopyOf(source)` for `c`. Read once, by
+    /// `render::create_from_name`, and reset to `Empty` by
+    /// [`Self::cancel_naming`] so a later `n` on the same dialog instance
+    /// cannot inherit a stale `c`'s target.
+    pub naming_seed: NameSeed,
     /// The tag of the latest distinct request the Values stage submitted
     /// (`render::enter_values_stage`); an outcome with any other tag is
     /// stale and dropped (spec §7.3).
@@ -3227,6 +3271,7 @@ impl ObjectDialogState {
             confirm: None,
             confirm_target: None,
             naming_dataset: None,
+            naming_seed: NameSeed::Empty,
             values_tag: 0,
         }
     }
@@ -3298,13 +3343,14 @@ impl ObjectDialogState {
         self.disarm();
     }
 
-    /// [`Self::enter_edit`]'s twin for a name `n` has just committed
-    /// (§18.2): the same stage transition, over an already-built `draft`
-    /// rather than one derived from `config`. A committed name has
-    /// nothing in `config` to derive from yet — the write is still on its
-    /// way through the debounced flush — and Scopes' caller has already
-    /// replaced the draft's fields with the frame's current scope
-    /// (`scopes::overwrite_with`), which a fresh `domain.draft(config,
+    /// [`Self::enter_edit`]'s twin for a name `n` or `c` has just
+    /// committed (§18.2, scopes-editing spec §6): the same stage
+    /// transition, over an already-built `draft` rather than one derived
+    /// from `config`. A committed name has nothing in `config` to derive
+    /// from yet — the write is still on its way through the debounced
+    /// flush — and `create_from_name` has already built whatever this
+    /// draft should hold (the domain's empty object for `n`, or `c`'s
+    /// copied source and fields), which a fresh `domain.draft(config,
     /// name)` call would throw away.
     ///
     /// Visible only inside this subtree for the same reason
@@ -3440,6 +3486,7 @@ impl ObjectDialogState {
         self.notice = None;
         self.disarm();
         self.naming_dataset = None;
+        self.naming_seed = NameSeed::Empty;
     }
 
     /// Whether `escape` has a stage to step back into before it closes

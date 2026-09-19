@@ -130,8 +130,8 @@ use super::sources;
 use super::views;
 use super::{
     ColumnContext, ColumnDoor, ColumnLayers, Confirm, Destination, Domain, Draft, EditRow, FellTo,
-    Field, FieldKind, Fold, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag, RowVocabulary,
-    Stage, Step,
+    Field, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag,
+    RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -451,6 +451,19 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                 cx.notify();
                 return true;
             }
+            // `c` (scopes-editing spec §6): copy the row under the cursor
+            // under a new name — `Domain::duplicable` alone, so an
+            // unclaimed `c` on every other domain falls through to the
+            // `_` arm below like any other letter with no meaning here.
+            NormalCommand::Verb('c') if state.domain.duplicable() => {
+                let name = selected_row(state, &rows, &visible).map(|r| r.name.clone());
+                match name {
+                    Some(name) => begin_copy(shell, name),
+                    None => set_notice(shell, "nothing selected to copy".to_string()),
+                }
+                cx.notify();
+                return true;
+            }
             // `d`/`r` on the row under the cursor (2026-09-19): the edit
             // stage's own arming doors, gated by the same row derivation
             // (`target_row`) and refused on a read-only domain through
@@ -625,21 +638,35 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         sources::seed_dataset(&mut draft, &dataset);
         draft.diagnostics = domain.validate(&draft, &shell.services.config);
     }
-    if domain == Domain::Scopes {
-        // The frame's current scope IS the new scope (§18.2) — the same
-        // read `run_confirmed`'s `Confirm::Overwrite` arm makes, for the
-        // same reason it is made here and not in the pure core.
-        let scope = shell.frame.read(cx).scope().clone();
-        if scope.is_empty() {
-            set_notice(
-                shell,
-                "the frame's scope is empty — nothing to save".to_string(),
-            );
+    // `c`'s copy (scopes-editing spec §6): `n` leaves `naming_seed` at its
+    // default `Empty`, so `new_draft`'s own empty object stands unchanged
+    // — this block only ever fires behind `begin_copy`'s arm.
+    let seed = shell
+        .object_dialog
+        .as_ref()
+        .map(|s| s.naming_seed.clone())
+        .unwrap_or(NameSeed::Empty);
+    if let NameSeed::CopyOf(source) = seed {
+        // Verbatim, from the pending-aware config: inside the 250 ms write
+        // debounce `services.config` is the source as it stood before its
+        // last edit (`apply::config_with_pending`'s own doc has the
+        // trace) — the same reason `enter_edit_stage` derives from it
+        // rather than from `services.config` alone.
+        let folded = apply::config_with_pending(shell);
+        let config = folded.as_ref().unwrap_or(&shell.services.config);
+        let Some(table) = config
+            .doc(domain.doc())
+            .and_then(|doc| doc.value.get(&source))
+            .and_then(|v| v.as_table())
+            .cloned()
+        else {
+            set_notice(shell, format!("'{source}' is gone — nothing to copy"));
             cx.notify();
             return;
-        }
-        scopes::overwrite_with(&mut draft, &scope, &shell.services.config);
-        draft.diagnostics = domain.validate(&draft, &shell.services.config);
+        };
+        draft.source = table;
+        draft.fields = domain.fields_from_source(config, &draft.source);
+        draft.diagnostics = domain.validate(&draft, config);
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
     if let Some(notice) = apply::commit_create(shell, cx) {
@@ -686,6 +713,13 @@ fn begin_new_object(shell: &mut ShellView, seed: Option<String>, seed_taken: boo
         state.notice = Some("the slots are fixed — open one to fill it".to_string());
     } else {
         state.begin_naming();
+        // `n` always creates the domain's EMPTY object (scopes-editing
+        // spec §6) — `begin_copy`'s own arm is the only place
+        // `naming_seed` becomes `CopyOf`, and this door must set it back
+        // to `Empty` explicitly rather than trust `begin_naming`'s own
+        // reset, since a stale `CopyOf` from an earlier `c` would
+        // otherwise survive an `escape` and land on this door's `n`.
+        state.naming_seed = NameSeed::Empty;
         // §19.3: `n` on Sources seeds the new source's dataset from the
         // browse row under the cursor, and pre-fills the name field with
         // it too when no source already holds that name — one source per
@@ -699,6 +733,22 @@ fn begin_new_object(shell: &mut ShellView, seed: Option<String>, seed_taken: boo
             state.query = dataset;
         }
     }
+}
+
+/// `c` (scopes-editing spec §6): the naming stage seeded to copy
+/// `source` — `begin_new_object`'s twin, without Sources' dataset seed,
+/// since only a duplicable domain (`Domain::duplicable`) ever reaches
+/// this door — `handle_browse_key`'s own guard on the verb.
+fn begin_copy(shell: &mut ShellView, source: String) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    if !state.domain.writable(&state.stage) {
+        state.notice = Some(READ_ONLY_NOTICE.to_string());
+        return;
+    }
+    state.begin_naming();
+    state.naming_seed = NameSeed::CopyOf(source);
 }
 
 /// §19.3: the dataset of the browse row under the cursor, for `n` on
@@ -3397,6 +3447,10 @@ fn build(
                 if state.domain.writable(&state.stage) && state.domain.roster().is_none() {
                     hints.push(Hint::new(HintRow::Edit, &["n"], "new"));
                 }
+                // `c` (scopes-editing spec §6): Scopes alone, beside `n`.
+                if state.domain.duplicable() {
+                    hints.push(Hint::new(HintRow::Edit, &["c"], "copy"));
+                }
                 // §18.8: a digit opens that slot — Groupings only, the
                 // one domain whose objects are numbered.
                 if state.domain == Domain::Groupings {
@@ -3469,11 +3523,14 @@ fn build(
     });
 
     let top_row = if naming {
-        dialog::name_row(
-            &shell.dialog_input,
-            &format!("New {} · name", object_word(state.domain)),
-            cx,
-        )
+        // `c`'s copy names its source (scopes-editing spec §6) rather
+        // than the generic "New <object>" — the trader typed `c` on a
+        // specific row, and the label is what tells them which one.
+        let label = match &state.naming_seed {
+            NameSeed::CopyOf(src) => format!("Copy of {src} · name"),
+            NameSeed::Empty => format!("New {} · name", object_word(state.domain)),
+        };
+        dialog::name_row(&shell.dialog_input, &label, cx)
     } else {
         dialog::filter_row(&shell.dialog_input, frozen_query, cx)
     };
@@ -4637,7 +4694,11 @@ fn browse_action_bar(
         .flatten();
     let offers_d = row.is_some_and(|r| r.layer == Some(Layer::User));
     let offers_r = row.is_some_and(|r| r.overridden);
-    if !offers_n && !offers_d && !offers_r {
+    // `c` (scopes-editing spec §6): the mouse form of the `c` key, offered
+    // under the same three conditions the key checks — not naming, the
+    // domain writable, and a row under the cursor to copy.
+    let offers_c = state.domain.duplicable() && row.is_some();
+    if !offers_n && !offers_c && !offers_d && !offers_r {
         return div().into_any_element();
     }
     let theme = cx.theme();
@@ -4682,6 +4743,41 @@ fn browse_action_bar(
                                     Domain::Sources.name_taken(&shell.services.config, d)
                                 });
                                 begin_new_object(shell, seed, seed_taken);
+                                dialog::sync_dialog_text(shell, window, cx);
+                                cx.notify();
+                            });
+                        }),
+                ),
+        );
+    }
+    if offers_c {
+        let ks = crate::keymap::parse_keystroke("c", Modifiers::NONE).expect("valid");
+        let entity = entity.clone();
+        // Owned, to move into the closure: `row` borrows `rows`, which the
+        // caller derived for this one frame and does not outlive it.
+        let copy_name = row.map(|r| r.name.clone()).unwrap_or_default();
+        bar = bar.child(
+            div()
+                .debug_selector(|| "objectdialog-action-c".to_string())
+                .child(
+                    Button::new("objectdialog-c")
+                        .small()
+                        .outline()
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                                .child("Copy this scope"),
+                        )
+                        .on_click(move |_event, window, cx| {
+                            entity.update(cx, |shell, cx| {
+                                if let Some(state) = shell.object_dialog.as_mut()
+                                    && state.notice.take().is_some()
+                                {
+                                    cx.notify();
+                                }
+                                begin_copy(shell, copy_name.clone());
                                 dialog::sync_dialog_text(shell, window, cx);
                                 cx.notify();
                             });
