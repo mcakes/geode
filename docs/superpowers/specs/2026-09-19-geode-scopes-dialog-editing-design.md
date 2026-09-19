@@ -58,9 +58,9 @@ app's scope is set as."
   there through a Scopes-specific `row_summary`.
 - The **available** block is `pickable_columns(config)` minus the
   selected columns, in the picker's own order, so the two surfaces
-  agree on what is scopeable. `pickable_columns` is already computed
-  by the shell on load and reload; the domain takes it through
-  `ShellServices` as `Domain::draft` takes the config.
+  agree on what is scopeable. `pickable_columns` is a pure function of
+  the `Config` `Domain::fields` already receives, so the domain calls
+  it directly — no new plumbing.
 - `space`, `enter` or a click on an **available** row opens the Values
   stage for that column (§4). It does **not** add an empty selection:
   an empty `values` is "no constraint" and `scope_to_table` skips it,
