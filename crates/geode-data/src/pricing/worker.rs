@@ -184,7 +184,7 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: PricerConfig, sink: PriceSin
             refusal_logged = true;
             tracing::warn!(
                 target: "geode::pricing",
-                "a price outcome for key {} was not delivered; further refusals are counted, not logged",
+                "a price outcome for key {} was not delivered; further refusals are not logged",
                 params.key.0
             );
         }
@@ -290,11 +290,15 @@ pub(crate) mod tests {
     #[test]
     fn a_batch_is_priced_line_by_line_and_answered_under_its_key_and_tag() {
         let (w, _, rx) = worker(Duration::ZERO);
-        assert!(w.request(params(7, 3, &["SPX", "FAIL", "NDX"])));
+        let p = params(7, 3, &["SPX", "FAIL", "NDX"]);
+        let submitted = p.submitted;
+        assert!(w.request(p));
         let o = next(&rx);
         assert_eq!((o.key, o.tag), (QueryKey(7), 3));
+        assert_eq!(o.submitted, submitted);
         assert_eq!(o.results.len(), 3);
         assert_eq!(o.results[0].0, 1);
+        assert_eq!(o.results[0].1, 1);
         assert!(o.results[0].2.is_ok());
         assert_eq!(o.results[1].2.as_ref().unwrap_err(), "refused");
         assert!(o.results[2].2.is_ok());
@@ -345,6 +349,56 @@ pub(crate) mod tests {
             "key 2 never ran"
         );
         assert!(!asked.lock().unwrap().iter().any(|u| u == "Q"));
+        w.shutdown();
+    }
+
+    #[test]
+    fn a_replaced_batch_keeps_its_queue_position() {
+        // Key 2's replacement (tag 2, "NEW2") must not move to the back of
+        // the queue behind key 3 — it keeps key 2's original slot, so the
+        // arrival order is 1, 2, 3, not 1, 3, 2.
+        let (w, asked, rx) = worker(Duration::from_millis(50));
+        assert!(w.request(params(1, 1, &["A"])));
+        assert!(w.request(params(2, 1, &["OLD2"])));
+        assert!(w.request(params(3, 1, &["C"])));
+        assert!(w.request(params(2, 2, &["NEW2"])));
+        let first = next(&rx);
+        assert_eq!(first.key, QueryKey(1));
+        let second = next(&rx);
+        assert_eq!((second.key, second.tag), (QueryKey(2), 2));
+        let third = next(&rx);
+        assert_eq!(third.key, QueryKey(3));
+        assert!(!asked.lock().unwrap().iter().any(|u| u == "OLD2"));
+        w.shutdown();
+    }
+
+    /// Pins that a cancel's effect does not outlive the batch it stopped:
+    /// `cancel_running` is cleared both when a batch is picked up and after
+    /// it finishes, and a later, un-cancelled batch must run to completion
+    /// rather than being stopped by a stale flag left over from key 1's
+    /// cancel.
+    #[test]
+    fn a_cancel_of_a_running_key_does_not_stop_the_next_batch() {
+        let (w, _, rx) = worker(Duration::from_millis(40));
+        assert!(w.request(params(1, 1, &["A", "B", "C", "D", "E"])));
+        std::thread::sleep(Duration::from_millis(60)); // inside line B or C of key 1
+        w.cancel(QueryKey(1));
+        assert!(w.request(params(2, 1, &["X", "Y", "Z"])));
+        let first = next(&rx);
+        assert_eq!(first.key, QueryKey(1));
+        assert!(
+            first.results.len() < 5,
+            "stopped early: {}",
+            first.results.len()
+        );
+        let second = next(&rx);
+        assert_eq!(second.key, QueryKey(2));
+        assert_eq!(
+            second.results.len(),
+            3,
+            "key 2 was not stopped by key 1's cancel"
+        );
+        assert!(second.results.iter().all(|(_, _, r)| r.is_ok()));
         w.shutdown();
     }
 
