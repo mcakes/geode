@@ -667,6 +667,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
+                    // Task 1 (ingest progress, spec 2026-09-17 §5.3): the
+                    // status bar's progress strip is Task 3's wiring, not
+                    // this task's — a placeholder arm keeps the match
+                    // exhaustive in the meantime.
+                    DataEvent::Loading { .. } | DataEvent::LoadEnded { .. } => {}
                 }
             });
             if handled.is_err() {

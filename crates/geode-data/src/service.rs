@@ -78,6 +78,21 @@ pub enum DataEvent {
         gen_id: i64,
         books: Vec<Option<String>>,
     },
+    /// The ingest runner popped a job (spec 2026-09-17 §5.3): the status
+    /// bar's progress strip starts here. Ended by [`DataEvent::LoadEnded`].
+    Loading {
+        source: String,
+        path: String,
+        queued: usize,
+    },
+    /// The job announced by the last `Loading` finished — published or
+    /// failed — sent unconditionally, because a failed load's `Health`
+    /// is deduplicated by the tracker and may never reach the shell,
+    /// and the strip must not stick. One runner on one FIFO channel
+    /// makes loads sequential, so this always ends the current one.
+    LoadEnded {
+        source: String,
+    },
     /// The worst state discovery found for a source on its last poll.
     Health {
         source: String,
@@ -754,6 +769,15 @@ impl DataService {
             let sink = Arc::clone(&sink);
             let health_tracker = Arc::clone(&health_tracker);
             Arc::new(move |e: IngestEvent| match e {
+                IngestEvent::Started {
+                    source,
+                    path,
+                    queued,
+                } => sink(DataEvent::Loading {
+                    source,
+                    path,
+                    queued,
+                }),
                 IngestEvent::Published {
                     source,
                     dataset,
@@ -834,6 +858,13 @@ impl DataService {
                             None => true,
                         },
                     );
+                    // Unconditional, and after the health send: a
+                    // failed load's `Health` may be deduplicated away by
+                    // the tracker and never reach the shell, so
+                    // `LoadEnded` — not `Health` — is what the status
+                    // bar's progress strip relies on to know a load is
+                    // over.
+                    let _ = sink(DataEvent::LoadEnded { source });
                     delivered && health_delivered
                 }
                 IngestEvent::Failed {
@@ -868,7 +899,7 @@ impl DataService {
                     // re-send. NEW-4 (round 3): the LOAD lane — a load
                     // failure is content-aware, the same as any other
                     // publish outcome, never discovery's concern.
-                    health_tracker.report_load_and_emit(
+                    let health_delivered = health_tracker.report_load_and_emit(
                         &source,
                         &batch,
                         Health::Failed {
@@ -883,7 +914,11 @@ impl DataService {
                             }),
                             None => true,
                         },
-                    )
+                    );
+                    // Unconditional, same reasoning as the `Published`
+                    // arm's own `LoadEnded` send above.
+                    let _ = sink(DataEvent::LoadEnded { source });
+                    health_delivered
                 }
                 IngestEvent::PlanComplete => true,
             })
@@ -2568,6 +2603,75 @@ mod tests {
             .unwrap();
         assert!(next(&rx).snapshot.unwrap().rows() > 1, "data is queryable");
         svc.shutdown();
+    }
+
+    #[test]
+    fn a_load_is_bracketed_by_loading_and_load_ended() {
+        // Task 1: the status bar's progress strip starts on `Loading` and
+        // ends on `LoadEnded`, unconditionally — one file, one source
+        // named "risk", so there is nothing queued behind it.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let csv_path = src.path().join("risk_2026-08-24_BK0.csv");
+        std::fs::write(
+            &csv_path,
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK0,L0,P1,C,I1,USD,100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-24_BK0.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(carried_schema());
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory(
+                    "risk",
+                    "risk_snapshot",
+                    vec![format!("{}/*.csv", src.path().display())],
+                )
+            }],
+            adapters: Default::default(),
+            documents: Default::default(),
+        })
+        .unwrap();
+
+        let mut kinds = Vec::new();
+        while let Ok(e) = rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            match e {
+                DataEvent::Loading {
+                    ref source,
+                    ref path,
+                    queued,
+                } => {
+                    assert_eq!(source, "risk");
+                    assert!(path.ends_with(".csv"), "{path}");
+                    assert_eq!(queued, 0);
+                    kinds.push("loading");
+                }
+                DataEvent::Published { .. } => kinds.push("published"),
+                DataEvent::LoadEnded { ref source } => {
+                    assert_eq!(source, "risk");
+                    kinds.push("ended");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(kinds, ["loading", "published", "ended"]);
+        drop(svc);
     }
 
     #[test]

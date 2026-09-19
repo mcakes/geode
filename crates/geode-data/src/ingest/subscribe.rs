@@ -825,12 +825,13 @@ mod tests {
     }
 
     /// The next publish, skipping the `PlanComplete` the runner emits
-    /// whenever its queue empties (one rides behind every document).
+    /// whenever its queue empties (one rides behind every document) and
+    /// the `Started` that now precedes every job it pops (Task 1).
     fn published(rx: &Receiver<IngestEvent>) -> (String, usize) {
         loop {
             match rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(IngestEvent::Published { batch, rows, .. }) => return (batch, rows),
-                Ok(IngestEvent::PlanComplete) => continue,
+                Ok(IngestEvent::PlanComplete) | Ok(IngestEvent::Started { .. }) => continue,
                 Ok(other) => panic!("expected a publish: {other:?}"),
                 Err(e) => panic!("no publish: {e}"),
             }
