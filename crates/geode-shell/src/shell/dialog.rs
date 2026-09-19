@@ -652,7 +652,7 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
     } else if let Some(state) = shell.object_dialog.as_mut() {
         // Spec §20.1: not over an open question. `build_edit` still paints
         // the frozen row while a confirm is armed, so the guard lives here.
-        if state.draft.as_ref().is_some_and(|d| d.confirm.is_some()) {
+        if state.confirm.is_some() {
             return;
         }
         state.mode = DialogMode::Filter;

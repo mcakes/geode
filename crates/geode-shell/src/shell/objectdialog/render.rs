@@ -957,6 +957,13 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     };
     state.mode = DialogMode::Normal;
     state.notice = None;
+    // A confirm armed over the view's rows has nothing to answer for
+    // once the seven column fields replace them; leaving it armed would
+    // hold the new stage's keystrokes hostage to a question about a
+    // stage that has closed. Unreachable today — the armed block claims
+    // every key ahead of `enter` — which is exactly why it is cleared
+    // rather than relied on.
+    state.confirm = None;
     // The row list is now seven fields with the cursor on the first, so
     // the viewport goes with it — `enter_edit_stage`'s own reset.
     shell.object_dialog_scroll.scroll_to_item(0);
@@ -1017,6 +1024,8 @@ fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
     state.stage = Stage::Edit { object };
     state.notice = None;
+    // Symmetric with `enter_column_stage`'s own clear, for its reason.
+    state.confirm = None;
     scroll_to_cursor(shell);
     cx.notify();
 }
@@ -1107,12 +1116,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         cx.notify();
     }
 
-    let armed = shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .and_then(|draft| draft.confirm);
-    if let Some(confirm) = armed {
+    if let Some(confirm) = armed_confirm(shell) {
         match dialog::ConfirmAnswer::from_key(ks) {
             Some(dialog::ConfirmAnswer::Yes) => {
                 disarm_confirm(shell);
@@ -1913,9 +1917,24 @@ fn set_notice(shell: &mut ShellView, notice: String) {
 }
 
 fn disarm_confirm(shell: &mut ShellView) {
-    if let Some(draft) = draft_mut(shell) {
-        draft.confirm = None;
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.confirm = None;
     }
+}
+
+/// Put a destructive question on screen. One door for the three arming
+/// verbs, in either stage — the confirm lives on the dialog state, not
+/// the draft, so the browse list can ask it too (see
+/// `ObjectDialogState::confirm`).
+fn arm_confirm(shell: &mut ShellView, confirm: Confirm) {
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.confirm = Some(confirm);
+    }
+}
+
+/// The question currently on screen, if any.
+fn armed_confirm(shell: &ShellView) -> Option<Confirm> {
+    shell.object_dialog.as_ref().and_then(|state| state.confirm)
 }
 
 /// Record the change the keystroke just made.
@@ -2199,9 +2218,7 @@ fn arm_delete(shell: &mut ShellView) {
     }
     match editing_row(shell) {
         Some(row) if row.layer == Some(Layer::User) => {
-            if let Some(draft) = draft_mut(shell) {
-                draft.confirm = Some(Confirm::Delete);
-            }
+            arm_confirm(shell, Confirm::Delete);
         }
         Some(row) if row.layer.is_none() => set_notice(
             shell,
@@ -2249,9 +2266,7 @@ fn arm_revert(shell: &mut ShellView) {
     }
     match editing_row(shell) {
         Some(row) if row.overridden => {
-            if let Some(draft) = draft_mut(shell) {
-                draft.confirm = Some(Confirm::Revert);
-            }
+            arm_confirm(shell, Confirm::Revert);
         }
         Some(row) => set_notice(
             shell,
@@ -2297,9 +2312,7 @@ fn overwrite_scope(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
     let forks = editing_row(shell).is_some_and(|row| row.layer != Some(Layer::User));
     if !forks {
-        if let Some(draft) = draft_mut(shell) {
-            draft.confirm = Some(Confirm::Overwrite);
-        }
+        arm_confirm(shell, Confirm::Overwrite);
         return;
     }
     let notice = super::apply::fork_notice(shell, Domain::Scopes);
@@ -2944,7 +2957,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // browse. Withdrawing the bar is what makes the mouse agree with
     // the keys. A `confirm` cannot be armed here for the same reason,
     // so that arm is unreachable with the field open.
-    let action_block = match (draft.text_entry.is_some(), draft.confirm) {
+    let action_block = match (draft.text_entry.is_some(), state.confirm) {
         (true, _) => div().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
         (false, None) => action_bar(shell, entity, cx),
@@ -3061,7 +3074,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // Spec §20.3: whether any chip may carry a handler this frame. The
     // four inert cases mirror the keys' own: read-only domain, armed
     // confirm, open text field (and per row, a one-option `Choice`).
-    let chips_live = writable && draft.confirm.is_none() && draft.text_entry.is_none();
+    let chips_live = writable && state.confirm.is_none() && draft.text_entry.is_none();
     let rows = draft.rows();
     let visible = draft.visible_rows();
     // §19.5: which rows a current diagnostic names, computed once per
@@ -3607,7 +3620,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let opens_column = column_stage_target(shell).is_some();
     let open_column =
         || Hint::new(HintRow::Go, &["enter"], "open column").selector("objectdialog-hint-enter");
-    let hints: Vec<Hint> = if draft.confirm.is_some() {
+    let hints: Vec<Hint> = if state.confirm.is_some() {
         vec![
             Hint::prose(HintRow::Go, "this needs an answer first"),
             Hint::new(HintRow::Go, &["enter"], "go ahead"),
@@ -3980,12 +3993,7 @@ fn confirm_row(
         Confirm::Overwrite => "Overwrite",
     };
     let on_yes: dialog::ConfirmHandler = Rc::new(|shell, _window, cx| {
-        let armed = shell
-            .object_dialog
-            .as_ref()
-            .and_then(|state| state.draft.as_ref())
-            .and_then(|draft| draft.confirm);
-        if let Some(confirm) = armed {
+        if let Some(confirm) = armed_confirm(shell) {
             disarm_confirm(shell);
             run_confirmed(shell, confirm, cx);
         }
@@ -4114,12 +4122,7 @@ fn on_edit_row_clicked(
     // `on_tick_clicked`'s own guard. Without it a door row's click would
     // open a column stage whose `Draft::enter_column` silently clears
     // the confirm, answering the question with a shrug.
-    if shell
-        .object_dialog
-        .as_ref()
-        .and_then(|s| s.draft.as_ref())
-        .is_some_and(|d| d.confirm.is_some())
-    {
+    if armed_confirm(shell).is_some() {
         return;
     }
     if let Some(draft) = draft_mut(shell) {
@@ -4173,7 +4176,7 @@ pub(in crate::shell) fn on_value_chip_clicked(
     let Some(draft) = state.draft.as_ref() else {
         return;
     };
-    if draft.confirm.is_some() || draft.text_entry.is_some() {
+    if state.confirm.is_some() || draft.text_entry.is_some() {
         return;
     }
     if position >= draft.visible_rows().len() {
@@ -4237,12 +4240,12 @@ fn on_tick_clicked(
         cx.notify();
         return;
     }
+    if armed_confirm(shell).is_some() {
+        return;
+    }
     let Some(draft) = draft_mut(shell) else {
         return;
     };
-    if draft.confirm.is_some() {
-        return;
-    }
     if position >= draft.visible_rows().len() {
         return;
     }
@@ -4389,12 +4392,12 @@ pub(in crate::shell) fn on_row_dropped(
         cx.notify();
         return;
     }
+    if armed_confirm(shell).is_some() {
+        return;
+    }
     let Some(draft) = draft_mut(shell) else {
         return;
     };
-    if draft.confirm.is_some() {
-        return;
-    }
     let resolves = draft.locate(src).is_some() && draft.locate(dst).is_some();
     match draft.drop_row(src, dst) {
         Step::Changed => {

@@ -1223,10 +1223,6 @@ pub struct Draft {
     /// list (this field, read directly) stays the text of record for
     /// every diagnostic, matched or not.
     pub diagnostics: Vec<Diagnostic>,
-    /// The destructive keystroke waiting on a second one, if any. It
-    /// replaces the action bar while armed, so the row list above it never
-    /// changes length.
-    pub confirm: Option<Confirm>,
     /// A text field is open (§19.1). While it is, `query` holds the text
     /// being typed rather than a filter — the shared `Input` mirrors into
     /// it exactly as a filter does, so there is no second text buffer —
@@ -1599,7 +1595,6 @@ impl Draft {
         self.query.clear();
         self.selected = 0;
         self.text_entry = None;
-        self.confirm = None;
         true
     }
 
@@ -1761,14 +1756,6 @@ impl Draft {
         // cleared anyway because its `EditRow` indexes the fields being
         // replaced, and a stale one would point into the restored list.
         self.text_entry = None;
-        // Symmetric with `enter_column`'s own reset: a confirm armed over
-        // the seven installed fields has nothing to answer for once they
-        // are gone, and leaving it armed would hold the restored list's
-        // keystrokes hostage to a question about a stage that has closed.
-        // Unreachable today — the armed block claims `escape` before this
-        // rung is read — which is exactly why it is cleared rather than
-        // relied on.
-        self.confirm = None;
         self.selected = 0;
         if let Some(column) = column {
             self.select_item_named(&column);
@@ -2557,7 +2544,6 @@ impl Draft {
             selected: 0,
             query: String::new(),
             diagnostics: Vec::new(),
-            confirm: None,
             text_entry: None,
             parent_fields: None,
             column: None,
@@ -2806,7 +2792,6 @@ impl Domain {
             selected: 0,
             query: String::new(),
             diagnostics: Vec::new(),
-            confirm: None,
             text_entry: None,
             parent_fields: None,
             column: None,
@@ -3001,6 +2986,23 @@ pub struct ObjectDialogState {
     /// state this dialog stores rather than derives — deliberately, since
     /// it is also what the edit stage paints; see [`Draft`].
     pub draft: Option<Draft>,
+    /// The destructive keystroke waiting on a second one, if any — the
+    /// dialog's ONE open question, in whichever stage it was asked. It
+    /// replaces the stage's action bar while armed, so the row list above
+    /// it never changes length, and it owns the keys and the mouse until
+    /// answered (spec §20.1).
+    ///
+    /// On the state rather than on [`Draft`] (where it lived until
+    /// 2026-09-19) because the browse stage arms it too — `d`/`r` on the
+    /// selected row, with no draft in existence — and the keybindings
+    /// dialog already keeps its own confirm on its state. What the
+    /// question is ABOUT is not stored beside it: `render::target_object`
+    /// answers the stage's object in `Edit`/`Column` and the selected
+    /// browse row in `Browse`, and neither can move while the question
+    /// is open (every other key is claimed and dropped, and a row click
+    /// is dropped too), so the target at answer time is the target at
+    /// arming time. Every stage transition clears it.
+    pub confirm: Option<Confirm>,
     /// The dataset the row under the cursor fed when `n` was pressed
     /// (§19.3, Sources only): the new source's `dataset` seed. Cleared by
     /// [`Self::cancel_naming`] and consumed by
@@ -3022,6 +3024,7 @@ impl ObjectDialogState {
             mode: DialogMode::Normal,
             notice: None,
             draft: None,
+            confirm: None,
             naming_dataset: None,
         }
     }
@@ -3083,6 +3086,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
+        self.confirm = None;
     }
 
     /// [`Self::enter_edit`]'s twin for a name `n` has just committed
@@ -3110,6 +3114,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
+        self.confirm = None;
     }
 
     /// Back to the browse list, dropping the draft. `selected` is left to
@@ -3133,6 +3138,7 @@ impl ObjectDialogState {
         self.stage = Stage::Browse;
         self.query.clear();
         self.notice = None;
+        self.confirm = None;
     }
 
     /// Replace the query — the **write half** of the one-way mirror
@@ -3210,6 +3216,7 @@ impl ObjectDialogState {
         self.query.clear();
         self.mode = DialogMode::Filter;
         self.notice = None;
+        self.confirm = None;
     }
 
     /// `escape` from [`Stage::Naming`]: back to browse, nothing written.
@@ -3222,6 +3229,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
+        self.confirm = None;
         self.naming_dataset = None;
     }
 
@@ -4036,7 +4044,6 @@ mod tests {
             selected: 0,
             query: String::new(),
             diagnostics: Vec::new(),
-            confirm: None,
             text_entry: None,
             parent_fields: None,
             column: None,
