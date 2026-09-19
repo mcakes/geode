@@ -76,11 +76,32 @@ impl ChoiceList {
         (self.ranked.len() - self.window).min(self.cap)
     }
 
-    /// The highlighted row, WINDOW-relative — what a painter compares
-    /// row positions against (`dialog::choice_rows` and a click's `row`
-    /// argument to `set_highlighted` both live in this same space).
+    /// The highlighted row, WINDOW-relative — what a painter of the
+    /// window alone (the market-data picker) compares row positions
+    /// against; a click's `row` argument to `set_highlighted` lives in
+    /// this same space.
     pub fn highlighted(&self) -> usize {
         self.highlighted - self.window
+    }
+
+    /// The highlighted row as an index into the FULL ranked list — what
+    /// a painter of every ranked row inside a scroll container (the two
+    /// dialogs' `dialog::choice_rows`) compares against and hands to
+    /// `scroll_to_item`, so the keys keep the lit row in the viewport
+    /// while the wheel is free to scroll it (user report 2026-09-19).
+    pub fn ranked_highlighted(&self) -> usize {
+        self.highlighted
+    }
+
+    /// A click on ranked row `row` — [`Self::set_highlighted`]'s twin for
+    /// a painter of every ranked row. Refused (`false`) past the list.
+    pub fn set_ranked_highlighted(&mut self, row: usize) -> bool {
+        if row >= self.ranked.len() {
+            return false;
+        }
+        self.highlighted = row;
+        self.follow();
+        true
     }
 
     /// The highlighted option's index in the DECLARED list — what a pick

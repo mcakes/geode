@@ -837,6 +837,69 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
     assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
 }
 
+/// The choice list is a scroll container, as the palette and every
+/// dialog row list are (user report 2026-09-19: "I'd expect to be able
+/// to scroll them with the mouse wheel"): every ranked option is
+/// painted inside a viewport capped at twelve rows, and the keys keep
+/// the lit row inside it through `scroll_to_item`, so the wheel has a
+/// list to scroll and `j`/`k` past the fold still show what they lit.
+#[gpui::test]
+fn the_choice_list_paints_every_option_in_a_scrolling_viewport(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let names = shell.read_with(&cx, |s, _| s.services.theme.names().to_vec());
+    assert!(names.len() > 12, "the fixture needs more themes than fit");
+    cx.simulate_keystrokes("i"); // Theme
+    cx.run_until_parked();
+    let last = names.last().unwrap().clone();
+    // `debug_bounds` takes a `&'static str`; a test may leak its few
+    // selectors.
+    let sel = |name: &str| -> &'static str {
+        Box::leak(format!("settings-choice-{name}").into_boxed_str())
+    };
+    assert!(
+        cx.debug_bounds(sel(&last)).is_some(),
+        "every option is painted, not only the first twelve"
+    );
+    let list = cx.debug_bounds("settings-choice-list").unwrap();
+    let first = cx.debug_bounds(sel(&names[0])).unwrap();
+    assert!(
+        list.size.height <= first.size.height * 12.5,
+        "the viewport is capped at twelve rows ({:?} tall for {} rows; first row {:?})",
+        list.size.height,
+        names.len(),
+        first
+    );
+    // `down` past the fold: the lit row is scrolled into the viewport.
+    let active = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    let active_ix = names.iter().position(|n| n == &active).unwrap();
+    let target_ix = (active_ix + 20) % names.len();
+    for _ in 0..20 {
+        cx.simulate_keystrokes("down");
+    }
+    cx.run_until_parked();
+    let lit = shell.read_with(&cx, |s, _| {
+        s.settings
+            .as_ref()
+            .unwrap()
+            .choice
+            .as_ref()
+            .unwrap()
+            .list
+            .highlighted_text()
+            .map(str::to_string)
+    });
+    assert_eq!(lit.as_deref(), Some(names[target_ix].as_str()));
+    let list = cx.debug_bounds("settings-choice-list").unwrap();
+    let row = cx.debug_bounds(sel(&names[target_ix])).unwrap();
+    assert!(
+        row.origin.y >= list.origin.y
+            && row.origin.y + row.size.height <= list.origin.y + list.size.height + gpui::px(1.),
+        "the lit row {:?} is inside the viewport {:?}",
+        row,
+        list
+    );
+}
+
 /// A double-click on a settings row is `i` (user ruling 2026-09-19): the
 /// first mouse-down selects the row as a single click does, and the
 /// second opens the row's typeahead through the same door `i`/`enter`

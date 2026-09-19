@@ -2209,13 +2209,20 @@ impl Draft {
         }
     }
 
+    /// The lit option's index into the ranked list while a choice field
+    /// is open — what the dialog's scroll handle is pointed at after
+    /// every key that can move it, so the row stays in the viewport.
+    pub fn choice_ranked_highlighted(&self) -> Option<usize> {
+        self.choice.as_ref().map(|l| l.ranked_highlighted())
+    }
+
     /// A click on painted row `row` is `tab` on that row (§18.9's rule
     /// for the chain field's completion click).
     pub fn choice_click(&mut self, row: usize) -> bool {
         let Some(list) = self.choice.as_mut() else {
             return false;
         };
-        if !list.set_highlighted(row) {
+        if !list.set_ranked_highlighted(row) {
             return false;
         }
         self.complete_choice()

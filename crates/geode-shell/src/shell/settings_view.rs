@@ -853,11 +853,19 @@ fn handle_key(
             crate::choice::ChoiceKey::Complete => {
                 if let Some(entry) = state.choice.as_mut() {
                     entry.list.complete();
+                    shell
+                        .settings_scroll
+                        .scroll_to_item(entry.list.ranked_highlighted());
                 }
             }
             crate::choice::ChoiceKey::Nav(cmd) => {
                 if let Some(entry) = state.choice.as_mut() {
                     entry.list.nav(cmd);
+                    // The list is a scroll container the wheel moves
+                    // freely; the keys point it back at the lit row.
+                    shell
+                        .settings_scroll
+                        .scroll_to_item(entry.list.ranked_highlighted());
                 }
             }
         },
@@ -992,11 +1000,17 @@ fn build(
     // at all, exactly the object dialog's own rule for a `Choice` row.
     let list: AnyElement = if let Some(entry) = state.choice.as_ref() {
         let entity_for_click = entity.clone();
-        dialog::choice_rows(&entry.list, "settings", theme, move |row, window, cx| {
-            entity_for_click.update(cx, |shell, cx| {
-                on_choice_row_clicked(shell, row, window, cx);
-            });
-        })
+        dialog::choice_rows(
+            &entry.list,
+            "settings",
+            &shell.settings_scroll,
+            theme,
+            move |row, window, cx| {
+                entity_for_click.update(cx, |shell, cx| {
+                    on_choice_row_clicked(shell, row, window, cx);
+                });
+            },
+        )
     } else {
         // The list renders ONLY the rows that survive the filter. Safe
         // because row click handlers are keyed by `SettingId`, not
@@ -1248,7 +1262,7 @@ fn on_choice_row_clicked(
     cx: &mut Context<ShellView>,
 ) {
     if let Some(entry) = shell.settings.as_mut().and_then(|s| s.choice.as_mut())
-        && entry.list.set_highlighted(row)
+        && entry.list.set_ranked_highlighted(row)
     {
         entry.list.complete();
     }

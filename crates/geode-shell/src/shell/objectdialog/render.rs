@@ -1895,6 +1895,22 @@ fn edit_commit_notice(shell: &mut ShellView) {
     set_notice(shell, notice.to_string());
 }
 
+/// Keep the lit option of an open choice field inside its viewport — the
+/// list is a scroll container the wheel can move freely, so every key
+/// that can move the highlight (nav, `tab`, a keystroke's re-rank)
+/// points the handle back at it, exactly as the palette's own
+/// `sync_palette_scroll` does.
+pub(crate) fn scroll_to_choice(shell: &ShellView) {
+    if let Some(row) = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|s| s.draft.as_ref())
+        .and_then(Draft::choice_ranked_highlighted)
+    {
+        shell.object_dialog_scroll.scroll_to_item(row);
+    }
+}
+
 /// `i`, from the key and from the action bar's button alike (spec
 /// §20.3 — one door, so the two can never open different things). §19.1:
 /// a value field on a `Number` or an editable `Text` row
@@ -2061,11 +2077,13 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 if !draft_mut(shell).is_some_and(Draft::complete_choice) {
                     set_notice(shell, "nothing to complete here".to_string());
                 }
+                scroll_to_choice(shell);
             }
             crate::choice::ChoiceKey::Nav(cmd) => {
                 if let Some(draft) = draft_mut(shell) {
                     draft.choice_nav(cmd);
                 }
+                scroll_to_choice(shell);
             }
         }
         cx.notify();
@@ -3896,11 +3914,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         draft.choice.as_ref().filter(|_| draft.choice_entry())
     {
         let entity_for_click = entity.clone();
-        dialog::choice_rows(choice, "objectdialog", theme, move |row, window, cx| {
-            entity_for_click.update(cx, |shell, cx| {
-                on_choice_row_clicked(shell, row, window, cx)
-            });
-        })
+        dialog::choice_rows(
+            choice,
+            "objectdialog",
+            &shell.object_dialog_scroll,
+            theme,
+            move |row, window, cx| {
+                entity_for_click.update(cx, |shell, cx| {
+                    on_choice_row_clicked(shell, row, window, cx)
+                });
+            },
+        )
     } else {
         let mut list = v_flex()
             .id("objectdialog-fields")

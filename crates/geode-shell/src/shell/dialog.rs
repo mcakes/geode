@@ -880,39 +880,69 @@ pub(crate) fn choose_pill(cx: &App) -> AnyElement {
 pub(crate) fn choice_rows(
     list: &crate::choice::ChoiceList,
     prefix: &'static str,
+    scroll: &gpui::ScrollHandle,
     theme: &Theme,
     on_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
 ) -> AnyElement {
+    // Every ranked row, inside a viewport `CHOICE_VISIBLE_ROWS` tall at
+    // most, scrolled by the wheel and by `scroll_to_item` from the key
+    // paths — the palette's and every dialog row list's own shape (user
+    // report 2026-09-19: the twelve-row window `ChoiceList` keeps for the
+    // market-data picker gave the wheel nothing to scroll here). The
+    // highlight is compared in RANKED space (`ranked_highlighted`), the
+    // click hands back a ranked index, and the row colours come through
+    // `row_paint`, the one door every list row's state colours take.
+    let paint = super::listrow::row_paint(theme);
+    let rows_len = list.ranked().len();
     let mut rows = v_flex()
         .id(gpui::SharedString::from(format!("{prefix}-choice-list")))
         .w_full()
+        .h(scale::design(
+            (rows_len.clamp(1, CHOICE_VISIBLE_ROWS) as f32) * CHOICE_ROW_HEIGHT,
+        ))
+        .overflow_y_scroll()
+        .track_scroll(scroll)
         .debug_selector(move || format!("{prefix}-choice-list"));
-    for (position, ranked) in list.painted().iter().enumerate() {
-        let text = list.options()[ranked.row].clone();
+    for (position, ranked) in list.ranked().iter().enumerate() {
+        let text = &list.options()[ranked.row];
         let selector = format!("{prefix}-choice-{text}");
         let on_click = on_click.clone();
         let mut row = h_flex()
             .w_full()
-            .h(px(28.))
+            .h(scale::design(CHOICE_ROW_HEIGHT))
+            // The container is a fixed-height column: without this a
+            // flex item with an explicit height shrinks to its text to
+            // fit, and forty rows squeeze into the viewport instead of
+            // scrolling past it.
+            .flex_shrink_0()
             .px_3()
             .items_center()
             .text_sm()
+            .rounded(theme.radius)
             .debug_selector(move || selector.clone())
             .child(super::keybindings_view::highlighted_text(
-                &text,
+                text,
                 &ranked.indices,
-                theme.primary,
+                paint.accent,
             ))
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 on_click(position, window, cx);
             });
-        if position == list.highlighted() {
-            row = row.bg(theme.selection).text_color(theme.primary);
+        if position == list.ranked_highlighted() {
+            row = row.bg(paint.active).text_color(paint.text);
+        } else {
+            row = row.hover(move |s| s.bg(paint.hover));
         }
         rows = rows.child(row);
     }
     rows.into_any_element()
 }
+
+/// A choice row's height at the design rem, and how many the viewport
+/// shows before it scrolls — the same twelve `ChoiceList`'s window holds
+/// for the picker, so the two surfaces agree on how tall a list looks.
+const CHOICE_ROW_HEIGHT: f32 = 28.0;
+const CHOICE_VISIBLE_ROWS: usize = crate::choice::DEFAULT_CAP;
 
 /// The one pill [`mode_pill`], [`chain_pill`] and [`edit_pill`] all
 /// paint: `typing`

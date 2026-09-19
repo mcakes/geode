@@ -1109,14 +1109,26 @@ impl ShellView {
                 // edited row for an open plain field, which `set_query` keeps
                 // the cursor on — scrolling to 0 there would carry the list
                 // away from the row the trader is typing into.
-                let cursor = state.effective_selected();
+                // A choice field's rows are its ranked options, re-ranked
+                // by this keystroke: follow the lit one there instead.
+                let cursor = state
+                    .draft
+                    .as_ref()
+                    .and_then(|d| d.choice_ranked_highlighted())
+                    .unwrap_or_else(|| state.effective_selected());
                 view.object_dialog_scroll.scroll_to_item(cursor);
             } else if let Some(state) = view.keybindings.as_mut() {
                 state.set_query(query);
                 view.keybindings_scroll.scroll_to_item(0);
             } else if let Some(state) = view.settings.as_mut() {
                 state.set_query(query);
-                view.settings_scroll.scroll_to_item(0);
+                // Filtering resets the cursor to the top; a choice field
+                // re-ranks its options and the lit one is followed.
+                let row = state
+                    .choice
+                    .as_ref()
+                    .map_or(0, |entry| entry.list.ranked_highlighted());
+                view.settings_scroll.scroll_to_item(row);
             } else if let Some(state) = view.picker.as_mut() {
                 // No `set_query` method (unlike the two dialogs above) —
                 // `PickerState` has no other side effect to bundle with a
