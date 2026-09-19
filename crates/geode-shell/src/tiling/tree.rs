@@ -312,6 +312,69 @@ impl Tree {
         true
     }
 
+    /// Cycle the focused member by `delta` with wrap (spec §4:
+    /// `stack::next`/`prev`, a count prefix steps N). `false`, untouched,
+    /// when the focused tile is not a member.
+    pub fn stack_step(&mut self, delta: i64) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        let Some(root) = self.root.as_mut() else {
+            return false;
+        };
+        let Some(Node::Stack { children, active }) = find_stack_mut(root, focused) else {
+            return false;
+        };
+        let len = children.len() as i64;
+        let next = (*active as i64 + delta).rem_euclid(len) as usize;
+        let id = children[next];
+        self.set_focus(id);
+        true
+    }
+
+    /// Pop the focused member out of its stack and place it beside the
+    /// stack: `after` on the right/bottom side, else left/top (spec §3
+    /// "Move", §4 `stack::unstack`). The stack collapses to a leaf when
+    /// one member remains. `false`, untouched, on a plain leaf.
+    fn pop_out(&mut self, orientation: Orientation, after: bool) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        let survivor = {
+            let Some(root) = self.root.as_ref() else {
+                return false;
+            };
+            let Some(Node::Stack { children, .. }) = find_stack(root, focused) else {
+                return false;
+            };
+            // Any other member names the stack for `insert_beside`, which
+            // asks `node_holds`; the collapsed-to-leaf case is that one
+            // member itself.
+            *children
+                .iter()
+                .find(|c| **c != focused)
+                .expect("a stack has two members")
+        };
+        let fullscreen = self.fullscreen;
+        let mut done = false;
+        let root = self
+            .root
+            .take()
+            .and_then(|n| remove_leaf(n, focused, &mut done));
+        let root = root.expect("removing one member of a stack never empties the tree");
+        self.root = Some(insert_beside(root, survivor, focused, orientation, after));
+        self.fullscreen = fullscreen.filter(|f| *f == focused);
+        self.set_focus(focused);
+        true
+    }
+
+    /// Pop the focused member out of its stack, placed after the stack in
+    /// `orientation` (spec §4 `stack::unstack`). `false`, untouched, on a
+    /// plain leaf.
+    pub fn unstack_focused(&mut self, orientation: Orientation) -> bool {
+        self.pop_out(orientation, true)
+    }
+
     pub fn contains(&self, id: TileId) -> bool {
         self.tiles().contains(&id)
     }
@@ -405,6 +468,18 @@ impl Tree {
             .position(|&id| id == focused)
             .unwrap_or(0);
 
+        // A stack member other than the one being closed — its own stack
+        // refocus rule (below) takes priority over the tree-order-neighbor
+        // rule once the closed tile leaves a live sibling behind.
+        let sibling = self
+            .root
+            .as_ref()
+            .and_then(|r| find_stack(r, focused))
+            .and_then(|n| match n {
+                Node::Stack { children, .. } => children.iter().copied().find(|c| *c != focused),
+                _ => None,
+            });
+
         // Remove the leaf from the tree (exactly one — see `remove_leaf`).
         let mut done = false;
         self.root = self
@@ -412,11 +487,24 @@ impl Tree {
             .take()
             .and_then(|n| remove_leaf(n, focused, &mut done));
 
-        // Focus the leaf that was immediately after the closed one, or the
-        // previous one if the closed tile was last.
-        let post_close_tiles = self.tiles();
-        let focus_index = std::cmp::min(k, post_close_tiles.len().saturating_sub(1));
-        match post_close_tiles.get(focus_index).copied() {
+        // A closed member refocuses its own stack's new active member
+        // (spec §3 "Close"), never the tile after the stack; every other
+        // close keeps the tree-order-neighbour rule.
+        let next = match sibling {
+            Some(s) if self.contains(s) => {
+                let root = self.root.as_ref().expect("contains(s) implies a root");
+                match find_stack(root, s) {
+                    Some(Node::Stack { children, active }) => Some(children[*active]),
+                    _ => Some(s),
+                }
+            }
+            _ => {
+                let post_close_tiles = self.tiles();
+                let focus_index = std::cmp::min(k, post_close_tiles.len().saturating_sub(1));
+                post_close_tiles.get(focus_index).copied()
+            }
+        };
+        match next {
             Some(id) => self.set_focus(id),
             None => self.focused = None,
         }
@@ -456,13 +544,13 @@ impl Tree {
             return false;
         }
         let prev_focused = self.focused;
-        self.focused = Some(id);
+        self.set_focus(id);
         self.remove_focused();
         if let Some(prev) = prev_focused
             && prev != id
             && self.contains(prev)
         {
-            self.focused = Some(prev);
+            self.set_focus(prev);
         }
         true
     }
@@ -534,11 +622,17 @@ impl Tree {
     }
 
     /// Swap the focused tile with its geometric neighbor. Focus stays on
-    /// the same TileId, which now occupies the neighbor's position.
+    /// the same TileId, which now occupies the neighbor's position. A
+    /// stack member does not swap: it leaves its stack in that direction
+    /// instead (spec §3 "Move" — i3's move-out-of-container).
     pub fn move_direction(&mut self, dir: Direction) -> bool {
         let Some(focused) = self.focused else {
             return false;
         };
+        if self.stack_position(focused).is_some() {
+            let after = matches!(dir, Direction::Right | Direction::Down);
+            return self.pop_out(dir.orientation(), after);
+        }
         let Some(neighbor) = self.neighbor(dir) else {
             return false;
         };
@@ -889,7 +983,7 @@ impl Tree {
             else {
                 return false;
             };
-            let Some(i) = children.iter().position(|c| *c == Node::Leaf(focused)) else {
+            let Some(i) = children.iter().position(|c| node_holds(c, focused)) else {
                 return children.iter_mut().any(|c| toggle_at(c, focused));
             };
             if children.len() == 2 {
@@ -1064,8 +1158,10 @@ fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
 /// focused leaf; the tree used to carry a second, `after`-less copy named
 /// `split_at` restating the same rules): flat sibling insert with
 /// equalized ratios when the anchor's parent split already has
-/// `orientation`, otherwise wrap the anchor leaf into a new 0.5/0.5
-/// split, with `after` picking which side `new` lands on.
+/// `orientation`, otherwise wrap the anchor — or, when `anchor` is a
+/// stack member, the whole stack holding it as one unit (`node_holds`)
+/// — into a new 0.5/0.5 split, with `after` picking which side `new`
+/// lands on.
 fn insert_beside(
     node: Node,
     anchor: TileId,
@@ -2673,6 +2769,179 @@ mod tests {
             tree.tiles(),
             vec![TileId(1)],
             "a stack emptied by healing vanishes and the split collapses"
+        );
+    }
+
+    #[test]
+    fn stack_step_cycles_with_wrap_and_a_count() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        assert!(tree.stack_after(TileId(1), TileId(2)));
+        assert!(tree.stack_after(TileId(2), TileId(3))); // [1, 2, 3], 3 active
+        assert!(tree.stack_step(1));
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(1)),
+            "next past the end wraps to the first"
+        );
+        assert!(tree.stack_step(-1));
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(3)),
+            "prev before the first wraps to the last"
+        );
+        assert!(tree.stack_step(2));
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(2)),
+            "a count steps N with the same wrap"
+        );
+        assert_eq!(tree.visible_tiles(), vec![TileId(2)]);
+    }
+
+    #[test]
+    fn stack_step_is_refused_on_a_plain_leaf() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        assert!(!tree.stack_step(1));
+        assert_eq!(tree.focused(), Some(TileId(1)));
+    }
+
+    #[test]
+    fn fullscreen_follows_a_cycle() {
+        let mut tree = two_tiles_then_stack(); // 3 active + focused
+        assert!(tree.toggle_fullscreen());
+        assert_eq!(tree.fullscreen(), Some(TileId(3)));
+        assert!(tree.stack_step(1));
+        assert_eq!(tree.fullscreen(), Some(TileId(2)));
+        assert_eq!(rects(&tree), vec![(TileId(2), Rect::UNIT)]);
+    }
+
+    #[test]
+    fn closing_the_active_member_activates_and_focuses_the_next_one() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(9), Orientation::Horizontal); // [1 | 9]
+        tree.focus(TileId(1));
+        assert!(tree.stack_after(TileId(1), TileId(2)));
+        assert!(tree.stack_after(TileId(2), TileId(3))); // [stack(1,2,3 active) | 9]
+        tree.focus(TileId(2));
+        tree.close();
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(3), TileId(9)]);
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(3)),
+            "the next member, not the tile after the stack"
+        );
+        assert_eq!(tree.visible_tiles(), vec![TileId(3), TileId(9)]);
+    }
+
+    #[test]
+    fn closing_the_last_member_activates_the_previous_one() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(9), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        assert!(tree.stack_after(TileId(1), TileId(2)));
+        assert!(tree.stack_after(TileId(2), TileId(3))); // 3 active, last
+        tree.close();
+        assert_eq!(tree.focused(), Some(TileId(2)));
+        assert_eq!(tree.visible_tiles(), vec![TileId(2), TileId(9)]);
+    }
+
+    #[test]
+    fn closing_one_of_two_members_collapses_the_stack_to_a_leaf() {
+        let mut tree = two_tiles_then_stack(); // [1 | stack(2, 3 active)]
+        tree.close();
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(2)]);
+        assert_eq!(tree.stack_position(TileId(2)), None);
+        assert_eq!(tree.focused(), Some(TileId(2)));
+    }
+
+    #[test]
+    fn removing_a_hidden_member_leaves_the_active_one_alone() {
+        let mut tree = two_tiles_then_stack(); // 3 active
+        assert!(tree.remove(TileId(2)));
+        assert_eq!(tree.focused(), Some(TileId(3)));
+        assert_eq!(tree.visible_tiles(), vec![TileId(1), TileId(3)]);
+    }
+
+    #[test]
+    fn move_direction_pops_a_member_out_beside_its_stack() {
+        let mut tree = two_tiles_then_stack(); // [1 | stack(2, 3 active)]
+        assert!(tree.move_direction(Direction::Right));
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(2), TileId(3)]);
+        assert_eq!(tree.stack_position(TileId(3)), None, "3 left the stack");
+        assert_eq!(
+            tree.stack_position(TileId(2)),
+            None,
+            "one survivor collapsed to a leaf"
+        );
+        assert_eq!(tree.visible_tiles(), vec![TileId(1), TileId(2), TileId(3)]);
+        assert_eq!(tree.focused(), Some(TileId(3)));
+        let r3 = rect_of(&tree, 3);
+        let r2 = rect_of(&tree, 2);
+        assert!(r3.x > r2.x, "popped out to the right of the stack it left");
+    }
+
+    #[test]
+    fn move_direction_on_a_plain_leaf_still_swaps() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        assert!(tree.move_direction(Direction::Right));
+        assert_eq!(tree.tiles(), vec![TileId(2), TileId(1)]);
+    }
+
+    #[test]
+    fn unstack_focused_pops_out_after_the_stack_in_the_given_orientation() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        assert!(tree.stack_after(TileId(1), TileId(2)));
+        assert!(tree.stack_after(TileId(2), TileId(3))); // [1, 2, 3], 3 active
+        tree.focus(TileId(2));
+        assert!(tree.unstack_focused(Orientation::Vertical));
+        assert_eq!(tree.stack_position(TileId(2)), None, "2 left the stack");
+        // The stack it left behind is [1, 3] with 3 active — remove_leaf's
+        // own "next member takes the popped slot" rule, unchanged by a
+        // pop rather than a close.
+        assert_eq!(tree.stack_position(TileId(1)), Some((1, 2)));
+        assert_eq!(tree.stack_position(TileId(3)), Some((2, 2)));
+        assert_eq!(tree.visible_tiles(), vec![TileId(3), TileId(2)]);
+        assert!(
+            rect_of(&tree, 2).y > rect_of(&tree, 3).y,
+            "below the stack's painted member"
+        );
+        assert_eq!(tree.focused(), Some(TileId(2)));
+        assert!(
+            !tree.unstack_focused(Orientation::Vertical),
+            "refused on a plain leaf"
+        );
+    }
+
+    #[test]
+    fn split_beside_a_member_wraps_the_whole_stack() {
+        let mut tree = two_tiles_then_stack(); // [1 | stack(2,3)]
+        tree.split(TileId(4), Orientation::Vertical);
+        // The stack and 4 share the right half, stacked vertically.
+        assert_eq!(tree.stack_position(TileId(2)), Some((1, 2)));
+        assert_eq!(tree.stack_position(TileId(3)), Some((2, 2)));
+        let r3 = rect_of(&tree, 3);
+        let r4 = rect_of(&tree, 4);
+        assert!(approx(r3.x, 0.5) && approx(r4.x, 0.5) && r4.y > r3.y);
+        assert_eq!(tree.focused(), Some(TileId(4)));
+    }
+
+    #[test]
+    fn toggle_split_orientation_above_a_stack_flips_the_split() {
+        let mut tree = two_tiles_then_stack(); // horizontal [1 | stack]
+        assert!(tree.toggle_split_orientation());
+        assert!(rect_of(&tree, 3).y > rect_of(&tree, 1).y, "now vertical");
+        assert_eq!(
+            tree.stack_position(TileId(3)),
+            Some((2, 2)),
+            "the stack itself is untouched"
         );
     }
 }
