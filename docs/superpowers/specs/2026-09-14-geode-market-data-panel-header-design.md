@@ -246,10 +246,12 @@ In order:
 | Row | Hint | Disabled when (reason) |
 |---|---|---|
 | Load underlying… | `u` | draft has edits (`revert or upload first`) |
-| Upload | `:upload` | not built (`not built yet`, until Part 4); clean (`nothing to upload`); Behind (`rebase or discard first`) |
+| Upload | `:upload` | not built (`not built yet`, until Part 4); clean (`nothing to upload`); Behind (`rebase or revert first`) |
 | Rebase onto HH:MM | `:rebase` | shown only while Behind |
-| Discard edits | `:discard` | shown only while Behind |
 | Revert edits | `:revert` | clean (`nothing to revert`) |
+
+(`Discard edits`/`:discard` was folded into `:revert` by user ruling
+2026-09-18 — they were one act.)
 | — separator, then `Section(spec.title)` — | | only if `kind_actions` is non-empty |
 | each `KindAction.title` | | `!built` (`not built yet`) |
 
@@ -488,7 +490,7 @@ below is fixed, each with a named test and a harness entry.
   behind the shell's focus re-arm.
   `an_attribute_click_cancels_the_editor_then_moves`; `mdattr: an
   attribute click cancels an open editor`.
-- **The menu row's `stop_propagation` is load-bearing** for the row →
+- **The menu row's `stop_propagation` was load-bearing** for the row →
   picker path ("Load underlying…" focuses the picker's field inside the
   row's own handler; a bubble past it would re-arm
   `pending_focus_restore` and take the keyboard back next render) — the
@@ -498,8 +500,17 @@ below is fixed, each with a named test and a harness entry.
   every `dispatch`) stops propagation of its own, so the row's stop is
   hidden while the cursor is in the grid and is the only one with the
   cursor in the strip (`clear_selection`) — the test starts there.
-  `the_menu_rows_stop_propagation_keeps_the_pickers_focus`; `mdmenu:
-  the menu row's stop_propagation keeps the picker's focus`.
+  **Corrected 2026-09-18:** the 2026-09-17 insert-focus rule
+  (`occupant_holds_insert_focus`) makes `render`'s own
+  `pending_focus_restore` consumption skip the restore whenever the
+  focused tile's occupant holds its own input in insert mode, so the
+  stop is no longer load-bearing for focus — it is kept instead so a
+  click meaning "pick a row" does not also run the shell's ordinary
+  tile click handling, the same reason the popup occludes what is
+  painted beneath it. The mutation entry naming this behaviour was
+  deleted (no test can see the difference); the test survives, renamed
+  and re-documented to the property it still proves.
+  `the_menu_row_to_picker_path_leaves_the_pickers_field_focused`.
 - **`is_stale` is reachable**: `header_texts_at(now)` is the test door;
   not stale at `BASE + 1s` nor at exactly `stale_after`, stale one
   second past it. `the_time_chip_says_stale_past_stale_after`;

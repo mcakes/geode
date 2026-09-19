@@ -785,8 +785,8 @@ also move the cursor. `/` finds a row or column label
 through the shared find line. `:` commands: `key <value>` (completions
 from the catalog's keys), `revert`, `bump <delta> [row|col]` (adds
 `delta` to every cell in the cursor's row or column, default row),
-`upload` (Part 4; in Part 3 the command answers "upload is not built yet"), `rebase`, `discard`. `rebase` and `discard` are completions
-only while a newer generation sits under the draft.
+`upload` (Part 4; in Part 3 the command answers "upload is not built yet"), `rebase`. `rebase` is a completion
+only while a newer generation sits under the draft (`:discard` was folded into `:revert` by user ruling 2026-09-18 — they were one act).
 
 The factory registers `marketdata::*` actions and ships its default
 bindings as a keymap fragment (§8.6).
@@ -817,7 +817,7 @@ style and the header reads "3 edits on 14:02's document". States:
   `:rebase`
   re-applies the edits by row and column *label* onto the new
   generation (a label the new document lacks drops that edit and says
-  so), while `:discard` drops the edits and shows the new generation.
+  so), while `:revert` drops the edits and shows the new generation.
 - **Sent** — `:upload` succeeded; edits are kept and painted as sent
   until §9.4 clears them.
 
@@ -1034,11 +1034,13 @@ newer generation restores into `Behind` rather than misaligning), and
     delivery — the latter would need a `Window` the frame observer
     does not have.
 19. **`:revert` while `Behind` goes through the same `leave_behind`
-    door `:discard` uses**, added in review: the first cut called
-    `Draft::revert` directly, leaving `base_snapshot` retained with an
-    empty, `Clean` draft and nothing left on screen to explain why the
-    base generation was still painted, and `:rebase`/`:discard` (both
-    gated on `is_behind()`) refused with nothing to move or drop.
+    door `:discard` used** (`:discard` was folded into `:revert` by
+    user ruling 2026-09-18 — they were one act), added in review: the
+    first cut called `Draft::revert` directly, leaving `base_snapshot`
+    retained with an empty, `Clean` draft and nothing left on screen to
+    explain why the base generation was still painted, and
+    `:rebase`/`:discard` (both gated on `is_behind()`) refused with
+    nothing to move or drop.
 20. **"CVI: Split" is offered whenever a data bridge exists, ungated on
     the `cvi_params` dataset being declared** — the palette row exists
     unconditionally, exactly as the blotter's does, and a panel opened

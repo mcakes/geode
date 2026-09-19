@@ -1994,7 +1994,7 @@ run_mutation "scopebar: a chip's full text lists every value" \
 # Final review (2026-09-18): the Behind-explaining tooltip on the state
 # run must be gated on the badge really being `Behind` — otherwise a
 # tile reading "no document yet" or a plain dirty dot would carry a
-# ":rebase adopts it · :discard drops your edits" tooltip that makes no
+# ":rebase adopts it · :revert drops your edits" tooltip that makes no
 # sense for either state.
 run_mutation "marketdata: the Behind tooltip is gated on the badge" \
   crates/geode-marketdata/src/header.rs \
@@ -10618,7 +10618,7 @@ run_mutation "mdedit: a commit whose cell moved under it is refused" \
 # retention is now what decides which document a `Behind` panel shows, and
 # the old anchor — `painted_snapshot`'s base-first order — SURVIVED behind
 # it: every path that rebuilds the model calls `leave_behind()` first
-# (`:revert`, `:rebase`, `:discard`) and `edit`/`:bump` are refused while
+# (`:revert`, `:rebase`) and `edit`/`:bump` are refused while
 # `Behind`, so nothing reaches that `or_else` with a base still set. It
 # stays as the consistency guarantee for any rebuild a later change adds;
 # the mutation now breaks the site that actually paints. Caught by the
@@ -10658,18 +10658,6 @@ run_mutation "mddraft: rebase resolves labels against the newer document" \
   geode-marketdata \
   rebase_reapplies_edits_by_label_and_reports_dropped_ones
 
-# `:discard` drops the edits outright — a trader saying "show me the new
-# document", not "move my numbers onto it". Mutated away, the edits
-# survive and keep painting over the newer document `discard` just showed,
-# which is `:rebase`'s job silently done half-right: the state answers
-# `Clean` while cells the trader meant to abandon are still marked edited.
-run_mutation "mddraft: discard clears the edits" \
-  crates/geode-marketdata/src/tile.rs \
-  '        self.draft.discard();' \
-  '        // self.draft.discard();' \
-  geode-marketdata \
-  discard_shows_the_newer_document_clean
-
 # Controller ruling 2026-09-14: `edit` refuses outright while the draft is
 # `Behind` — a live or restored one alike — because an edit made now would
 # be keyed against the base generation's grid while `:rebase` is about to
@@ -10694,11 +10682,11 @@ run_mutation "mddraft: editing is refused while the draft is behind" \
 # afterwards (`Draft::revert`'s own doing), and `Clean` means "on the live
 # document" — so `revert` must drop `base_snapshot` too, or the panel
 # keeps painting the base generation with no draft left to explain it, and
-# `:rebase`/`:discard` are both refused (there is no draft to move or
+# `:rebase`/`:revert` are both refused (there is no draft to move or
 # drop): the only way out left would be a `:key` retype or the next
 # delivery. Mutated away, `leave_behind()` is skipped and the stale
 # `base_snapshot` survives the revert. Anchored on the whole three-line
-# body: `self.leave_behind();` alone appears in `rebase`/`discard` too.
+# body: `self.leave_behind();` alone appears in `rebase` too.
 run_mutation "mddraft: revert while Behind drops the base snapshot" \
   crates/geode-marketdata/src/tile.rs \
   '        self.draft.revert();
@@ -10708,6 +10696,24 @@ run_mutation "mddraft: revert while Behind drops the base snapshot" \
         self.rebuild_model(cx);' \
   geode-marketdata \
   revert_while_behind_shows_the_newer_document_clean
+
+# `:revert` is the escape from the BEHIND-refusal notice `edit`/`bump`
+# leave behind while `Behind` — it must clear that specific notice on
+# success (transplanted 2026-09-18 from the now-removed `:discard`,
+# which had the identical guard). Mutated away, a trader who tried `i`
+# while Behind and then ran `:revert` still reads "the draft is behind
+# — :rebase or :revert first" with a Clean draft and nothing left to
+# explain it.
+run_mutation "mdrevert: revert clears the behind-refusal notice it resolves" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.notice.as_deref() == Some(BEHIND_REFUSED) {
+            self.notice = None;
+        }' \
+  '        if false {
+            self.notice = None;
+        }' \
+  geode-marketdata \
+  revert_clears_the_behind_refusal_notice_it_resolves
 
 # ---- Final whole-branch review of Part 3 (2026-09-14): the fix wave ---
 #
@@ -11374,7 +11380,7 @@ run_mutation "mdattr: the strip clears the table selection" \
             }),' \
   geode-marketdata k_from_the_top_row_enters_the_strip_and_i_edits_the_attribute
 
-# `Upload` must read `rebase or discard first` for as long as the draft
+# `Upload` must read `rebase or revert first` for as long as the draft
 # is Behind (spec §6.2's table), never falling through to the plain
 # clean/dirty rule underneath it. Mutated so the `behind` gate can never
 # fire, Upload would read greyed for the wrong reason while Behind (or
@@ -11384,7 +11390,7 @@ run_mutation "mdmenu: upload is greyed while behind" \
   crates/geode-marketdata/src/core/menu.rs \
   '} else if behind {' \
   '} else if false {' \
-  geode-marketdata behind_shows_rebase_and_discard_and_greys_upload
+  geode-marketdata behind_shows_rebase_and_greys_upload
 
 # "Any other dispatched action closes the popup first, then runs" (spec
 # §6.1) is the one rule that keeps the popup from needing the shell's
@@ -11589,23 +11595,6 @@ run_mutation "mdattr: an attribute click cancels an open editor" \
         self.cursor = Cursor::Attr(i.min(attrs - 1));' \
   '        self.cursor = Cursor::Attr(i.min(attrs - 1));' \
   geode-marketdata an_attribute_click_cancels_the_editor_then_moves
-
-# B5: the menu row's `stop_propagation` is load-bearing for the row →
-# picker path (contrast `⋯`, whose stop was REMOVED for the opposite
-# reason). Mutated out, the click bubbles to the tile's own listeners —
-# the harness's `Host` counter, the shell's `pending_focus_restore` for
-# real — and the next render takes the keyboard back from the picker's
-# just-focused field.
-run_mutation "mdmenu: the menu row's stop_propagation keeps the picker's focus" \
-  crates/geode-marketdata/src/popup.rs \
-  '                        move |_, window, cx| {
-                            cx.stop_propagation();
-                            tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
-                        }' \
-  '                        move |_, window, cx| {
-                            tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
-                        }' \
-  geode-marketdata the_menu_rows_stop_propagation_keeps_the_pickers_focus
 
 # B3: `is_stale` is clock-injected and, until the final review, no test
 # could reach its comparison (`header_texts()` fed `Utc::now()`).

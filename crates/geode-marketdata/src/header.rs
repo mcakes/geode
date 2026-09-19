@@ -306,7 +306,7 @@ pub(crate) fn render(
                         text.clone(),
                         None,
                         Some(SharedString::new_static(
-                            ":rebase adopts it · :discard drops your edits",
+                            ":rebase adopts it · :revert drops your edits",
                         )),
                     ))
                 }),

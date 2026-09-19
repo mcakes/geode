@@ -28,7 +28,7 @@ pub enum DraftState {
     /// usually a newer one, but an as-of step back delivers an older one
     /// and is the same situation. The panel keeps painting the base
     /// generation under the edits; `:rebase` moves them onto the
-    /// delivered one and `:discard` drops them. The edits' own base
+    /// delivered one and `:revert` drops them. The edits' own base
     /// generation coming back (an as-of round trip) returns the draft to
     /// `Editing` — see [`Draft::on_delivered`].
     Behind { newer: String },
@@ -320,12 +320,6 @@ impl Draft {
             DraftState::Editing
         };
         (self.len(), dropped)
-    }
-
-    /// Drop the edits and the base outright — `:discard`, which is how a
-    /// trader says "show me the new document".
-    pub fn discard(&mut self) {
-        self.revert();
     }
 
     /// The header's badge, at a glance (Task 4 paints it): [`DraftBadge`]
@@ -769,11 +763,11 @@ mod tests {
     }
 
     #[test]
-    fn discard_clears_everything_including_the_behind_state() {
+    fn revert_clears_everything_including_the_behind_state() {
         let mut draft = Draft::default();
         draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
         draft.on_delivered(NEWER);
-        draft.discard();
+        draft.revert();
         assert!(draft.edits.is_empty());
         assert_eq!(draft.state, DraftState::Clean);
         assert_eq!(draft.base, None);

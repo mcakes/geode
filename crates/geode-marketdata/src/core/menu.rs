@@ -45,7 +45,7 @@ fn action(
 }
 
 /// The action list, in order (spec §6.2's table): `Load underlying…`,
-/// `Upload`, `Rebase`/`Discard` only while `Behind`, `Revert edits`, then
+/// `Upload`, `Rebase` only while `Behind`, `Revert edits`, then
 /// — only while the spec names any — a separator, the kind's own section
 /// header, and one row per [`KindAction`].
 pub fn rows(i: &MenuInputs) -> Vec<MenuRow> {
@@ -69,7 +69,7 @@ pub fn rows(i: &MenuInputs) -> Vec<MenuRow> {
             if !i.upload_built {
                 Err("not built yet")
             } else if behind {
-                Err("rebase or discard first")
+                Err("rebase or revert first")
             } else if !dirty {
                 Err("nothing to upload")
             } else {
@@ -82,12 +82,6 @@ pub fn rows(i: &MenuInputs) -> Vec<MenuRow> {
             "marketdata::rebase",
             format!("Rebase onto {}", local_hhmm(newer)),
             ":rebase",
-            Ok(()),
-        ));
-        out.push(action(
-            "marketdata::discard",
-            "Discard edits",
-            ":discard",
             Ok(()),
         ));
     }
@@ -226,15 +220,14 @@ mod tests {
     }
 
     #[test]
-    fn behind_shows_rebase_and_discard_and_greys_upload() {
+    fn behind_shows_rebase_and_greys_upload() {
         let mut i = inputs(DraftBadge::Behind {
             newer: "2026-09-14T14:09:00Z".into(),
         });
         i.upload_built = true;
         let rows = rows(&i);
         assert!(titles(&rows).iter().any(|t| t.starts_with("Rebase onto ")));
-        assert!(titles(&rows).contains(&"Discard edits".to_string()));
-        assert_eq!(enabled(&rows, "Upload"), Err("rebase or discard first"));
+        assert_eq!(enabled(&rows, "Upload"), Err("rebase or revert first"));
     }
 
     #[test]
