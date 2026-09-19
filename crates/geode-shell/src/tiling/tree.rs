@@ -355,7 +355,6 @@ impl Tree {
                 .find(|c| **c != focused)
                 .expect("a stack has two members")
         };
-        let fullscreen = self.fullscreen;
         let mut done = false;
         let root = self
             .root
@@ -363,7 +362,9 @@ impl Tree {
             .and_then(|n| remove_leaf(n, focused, &mut done));
         let root = root.expect("removing one member of a stack never empties the tree");
         self.root = Some(insert_beside(root, survivor, focused, orientation, after));
-        self.fullscreen = fullscreen.filter(|f| *f == focused);
+        // Same rule as `split`: an explicit layout operation trumps a
+        // stale fullscreen.
+        self.fullscreen = None;
         self.set_focus(focused);
         true
     }
@@ -1158,9 +1159,11 @@ fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
 /// focused leaf; the tree used to carry a second, `after`-less copy named
 /// `split_at` restating the same rules): flat sibling insert with
 /// equalized ratios when the anchor's parent split already has
-/// `orientation`, otherwise wrap the anchor — or, when `anchor` is a
-/// stack member, the whole stack holding it as one unit (`node_holds`)
-/// — into a new 0.5/0.5 split, with `after` picking which side `new`
+/// `orientation` — locating the anchor's slot by `node_holds`, so a
+/// stack the anchor belongs to is one sibling among the others there
+/// too — otherwise wrap the anchor — or, when `anchor` is a stack
+/// member, the whole stack holding it as one unit (`node_holds`) —
+/// into a new 0.5/0.5 split, with `after` picking which side `new`
 /// lands on.
 fn insert_beside(
     node: Node,
@@ -2885,6 +2888,15 @@ mod tests {
     }
 
     #[test]
+    fn popping_a_member_out_exits_fullscreen() {
+        let mut tree = two_tiles_then_stack(); // 3 active + focused
+        assert!(tree.toggle_fullscreen());
+        assert!(tree.move_direction(Direction::Right));
+        assert_eq!(tree.fullscreen(), None);
+        assert_eq!(rects(&tree).len(), 3, "every tile painted again");
+    }
+
+    #[test]
     fn move_direction_on_a_plain_leaf_still_swaps() {
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
@@ -2918,6 +2930,14 @@ mod tests {
             !tree.unstack_focused(Orientation::Vertical),
             "refused on a plain leaf"
         );
+    }
+
+    #[test]
+    fn unstack_focused_exits_fullscreen() {
+        let mut tree = two_tiles_then_stack(); // 3 active + focused
+        assert!(tree.toggle_fullscreen());
+        assert!(tree.unstack_focused(Orientation::Vertical));
+        assert_eq!(tree.fullscreen(), None);
     }
 
     #[test]
