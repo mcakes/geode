@@ -6889,3 +6889,208 @@ fn a_browse_removal_keeps_the_filter_applied(cx: &mut gpui::TestAppContext) {
         "in normal mode, where the verb was pressed"
     );
 }
+
+/// [`services_with_sources`] plus the given USER-layer sources, each
+/// `(name, dataset)` — [`services_with_a_user_source`] generalised for
+/// the tests below, which need a user-owned row in a particular sort
+/// position.
+fn services_with_user_sources(extra: &[(&str, &str)]) -> ShellServices {
+    let mut services = services_with_sources();
+    let text: String = extra
+        .iter()
+        .map(|(name, dataset)| {
+            format!("[{name}]\ndataset = \"{dataset}\"\npaths = [\"/{name}/*.csv\"]\n")
+        })
+        .collect();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "sources".to_string(),
+        file: "<test:user>".into(),
+        table: text.parse().unwrap(),
+    };
+    let mut builtin = services.builtin.clone();
+    builtin.push(user);
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin,
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// Review finding (2026-09-19): the removal is applied to memory by a
+/// spawned task, AFTER `run_confirmed` returns, so a landing that reads
+/// `services.config` clamps against the list as it stood BEFORE the
+/// delete — a no-op. Deleting the LAST row from browse then left
+/// `selected` one past the end: no row highlighted, no bar, `enter`
+/// answering "no object is selected" with rows plainly on screen. The
+/// landing has to read the pending-aware config
+/// (`apply::config_with_pending`), the fold `enter_edit_stage` already
+/// uses for the same reason.
+#[gpui::test]
+fn a_browse_delete_of_the_last_row_lands_the_cursor_on_the_new_last_row(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    // Sorted `(dataset, name)`: risk·live, vol·vols, vol·zz — `zz` last.
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_user_sources(&[("zz", "vol")]),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.selected), 2);
+
+    cx.simulate_keystrokes("d enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-row-zz").is_none());
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.selected),
+        1,
+        "the cursor lands on the new last row, not one past the end"
+    );
+    // And it is a real row: `enter` opens it.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "vols".to_string()
+        }
+    );
+}
+
+/// Review finding (2026-09-19): the browse cursor is an INDEX, and a
+/// config reload landing between `d` and `enter` (a desk push, an
+/// external editor) re-ranks the list under the question — so the
+/// prompt named one object and the answer removed another. The name is
+/// recorded when the question is armed, and an answer whose target no
+/// longer matches it is refused with a notice rather than carried out.
+#[gpui::test]
+fn a_reload_under_an_armed_confirm_refuses_the_answer(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // risk·live, risk·mine, vol·vols — `mine` at index 1.
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_user_sources(&[("mine", "risk")]),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("j d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+
+    // The reload: a second user source sorts into index 1 — risk·live,
+    // risk·mina, risk·mine — so the index now names `mina`.
+    let reloaded = services_with_user_sources(&[("mina", "risk"), ("mine", "risk")]);
+    shell.update(&mut cx, |shell, cx| {
+        shell.services.config = reloaded.config;
+        shell.services.builtin = reloaded.builtin;
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_some_and(|n| n.contains("changed")),
+        "the answer is refused and says why, got {notice:?}"
+    );
+    assert!(cx.debug_bounds("objectdialog-confirm").is_none());
+    assert!(
+        cx.debug_bounds("objectdialog-row-mina").is_some()
+            && cx.debug_bounds("objectdialog-row-mine").is_some(),
+        "nothing was removed"
+    );
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}
+
+/// `escape` while a browse confirm stands is the question's "no", never
+/// the ladder's `ClearQuery` rung: with a query applied the query
+/// survives the escape that disarms.
+#[gpui::test]
+fn escape_under_a_browse_confirm_disarms_and_keeps_the_query(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_source(),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("/ m i n e escape d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_none());
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.query.clone()),
+        "mine",
+        "the escape answered the question and did not clear the filter"
+    );
+    assert!(shell.read_with(&cx, |s, _| s.object_dialog.is_some()));
+}
+
+/// The bar's button is the one way a browse confirm can stand with the
+/// live filter `Input` focused. The armed block claims the keys ahead
+/// of the mode split, so a typed letter neither reaches the field nor
+/// the object, and `enter` still answers.
+#[gpui::test]
+fn a_button_armed_confirm_in_filter_mode_owns_the_keys(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_source(),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("/ down");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    assert_eq!(dialog_state(&shell, &cx, |s| s.selected), 1);
+
+    click_selector(&mut cx, "objectdialog-action-d");
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.query.clone()),
+        "",
+        "a letter under the question is claimed, not typed"
+    );
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-row-mine").is_none());
+    assert!(
+        !std::fs::read_to_string(dir.path().join("sources.toml"))
+            .unwrap()
+            .contains("mine")
+    );
+}
+
+/// Groupings from browse: `d` on an empty slot names the browse remedy
+/// (open it), not the edit stage's (tick a dimension) — there is nothing
+/// to tick on the list.
+#[gpui::test]
+fn d_on_an_empty_slot_from_browse_names_the_browse_remedy(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) =
+        dialog_test_shell_with(cx, services_with_slot_3(&["book"]), "config::groupings");
+    // Slot 1 is empty; the cursor opens on it.
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("is empty") && n.contains("open it")),
+        "got {notice:?}"
+    );
+    assert!(cx.debug_bounds("objectdialog-confirm").is_none());
+}

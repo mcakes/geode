@@ -4102,8 +4102,16 @@ run_mutation "objectdialog: browse d/r skip the read-only gate" \
 # because the armed block claims the keys on its own.
 run_mutation "objectdialog: a browse row click answers the question with a shrug" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if state.confirm.is_some() {' \
-  '    if false {' \
+  '    if state.confirm.is_some() {
+        return;
+    }
+    let visible = super::visible_rows(state, &rows);
+    let Some(ix) = super::filtered_position(&visible, &rows, clicked) else {' \
+  '    if false {
+        return;
+    }
+    let visible = super::visible_rows(state, &rows);
+    let Some(ix) = super::filtered_position(&visible, &rows, clicked) else {' \
   geode-shell \
   a_row_click_is_dropped_while_a_browse_confirm_is_armed
 
@@ -4113,7 +4121,7 @@ run_mutation "objectdialog: a browse row click answers the question with a shrug
 # builtin source that can only ever answer "nothing of yours".
 run_mutation "objectdialog: the browse bar offers Delete on every row" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let offers_d = row.as_ref().is_some_and(|r| r.layer == Some(Layer::User));' \
+  '    let offers_d = row.is_some_and(|r| r.layer == Some(Layer::User));' \
   '    let offers_d = row.is_some();' \
   geode-shell \
   the_browse_bar_offers_delete_and_revert_for_the_selected_row
@@ -4129,6 +4137,43 @@ run_mutation "objectdialog: a browse removal walks leave_edit and drops the filt
   '    if true {' \
   geode-shell \
   a_browse_removal_keeps_the_filter_applied
+
+# The landing reads the PENDING-aware config. `commit_removal` applies to
+# memory from a spawned task after the handler returns, so a clamp
+# against `services.config` sees the row that is about to go and clamps
+# against the old length — a no-op that leaves `selected` one past the
+# end once the flush lands. Every earlier delete test deleted a row that
+# was not last, so only the last-row test can see it (review finding
+# 2026-09-19).
+run_mutation "objectdialog: the removal landing clamps against the pre-flush rows" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        Some(config) => state.domain.objects(&config),' \
+  '        Some(_) => derive_rows(shell),' \
+  geode-shell \
+  a_browse_delete_of_the_last_row_lands_the_cursor_on_the_new_last_row
+
+# The answer is carried out for the object the question was asked about
+# or not at all. The browse cursor is an index; a reload between `d` and
+# `enter` re-ranks the list under it, and without this check the prompt
+# names one object and the answer deletes another. Every other confirm
+# test never moves the list between the two keystrokes, so they all stay
+# green with the check gone.
+run_mutation "objectdialog: a confirm answers for whatever the cursor now names" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if armed_target != target_object(shell) {' \
+  '    if false {' \
+  geode-shell \
+  a_reload_under_an_armed_confirm_refuses_the_answer
+
+# The empty-slot refusal names the stage's own remedy. Both wordings are
+# refusals with no confirm and no write, so only a test reading the text
+# from browse separates them.
+run_mutation "objectdialog: browse d on an empty slot tells the trader to tick" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            let remedy = if in_browse(shell) {' \
+  '            let remedy = if false {' \
+  geode-shell \
+  d_on_an_empty_slot_from_browse_names_the_browse_remedy
 
 # The opening mode is one line, and it silently restores the pre-modal
 # model: every filter test still passes with the dialog opening

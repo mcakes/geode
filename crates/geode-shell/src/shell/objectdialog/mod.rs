@@ -3000,9 +3000,17 @@ pub struct ObjectDialogState {
     /// answers the stage's object in `Edit`/`Column` and the selected
     /// browse row in `Browse`, and neither can move while the question
     /// is open (every other key is claimed and dropped, and a row click
-    /// is dropped too), so the target at answer time is the target at
-    /// arming time. Every stage transition clears it.
+    /// is dropped too) — except a config reload, which is what
+    /// [`Self::confirm_target`] exists for. Every stage transition clears
+    /// both through [`Self::disarm`].
     pub confirm: Option<Confirm>,
+    /// The object [`Self::confirm`] was asked about, as `render::
+    /// target_object` resolved it at arming time. Meaningful only while
+    /// `confirm` is `Some`, and written only beside it (`render::
+    /// arm_confirm`): the answer is carried out only if the target still
+    /// resolves to this name, since a reload can re-rank the browse list
+    /// under an index cursor (review finding, 2026-09-19).
+    pub confirm_target: Option<String>,
     /// The dataset the row under the cursor fed when `n` was pressed
     /// (§19.3, Sources only): the new source's `dataset` seed. Cleared by
     /// [`Self::cancel_naming`] and consumed by
@@ -3025,8 +3033,16 @@ impl ObjectDialogState {
             notice: None,
             draft: None,
             confirm: None,
+            confirm_target: None,
             naming_dataset: None,
         }
+    }
+
+    /// Drop the open question, if any, and the target it recorded — the
+    /// one place both are cleared, so they cannot drift apart.
+    pub fn disarm(&mut self) {
+        self.confirm = None;
+        self.confirm_target = None;
     }
 
     /// The **pure half** of entering the edit stage — call
@@ -3086,7 +3102,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
-        self.confirm = None;
+        self.disarm();
     }
 
     /// [`Self::enter_edit`]'s twin for a name `n` has just committed
@@ -3114,7 +3130,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
-        self.confirm = None;
+        self.disarm();
     }
 
     /// Back to the browse list, dropping the draft. `selected` is left to
@@ -3138,7 +3154,7 @@ impl ObjectDialogState {
         self.stage = Stage::Browse;
         self.query.clear();
         self.notice = None;
-        self.confirm = None;
+        self.disarm();
     }
 
     /// Replace the query — the **write half** of the one-way mirror
@@ -3216,7 +3232,7 @@ impl ObjectDialogState {
         self.query.clear();
         self.mode = DialogMode::Filter;
         self.notice = None;
-        self.confirm = None;
+        self.disarm();
     }
 
     /// `escape` from [`Stage::Naming`]: back to browse, nothing written.
@@ -3229,7 +3245,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
-        self.confirm = None;
+        self.disarm();
         self.naming_dataset = None;
     }
 

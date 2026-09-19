@@ -3082,12 +3082,25 @@ not stored beside it: `render::target_object` answers the stage's object
 in `Edit`/`Column` and the selected visible row in `Browse` (`None`
 while naming, or with the filter hiding every row), and `target_row`
 (formerly `editing_row`) is the browse row for it, which is what `d`,
-`r`, `o`, `actions()` and `build_edit`'s header all read. Resolving the
-target at answer time as well as at arming time is safe because nothing
-can move it in between: the armed block claims every other key, and a
-browse row click is dropped while a question stands (§20.1 — `enter_edit`
-would otherwise clear the confirm, answering it with a shrug, and move
-the cursor off the object the prompt names).
+`r`, `o`, `actions()` and `build_edit`'s header all read. The target is
+resolved at arming time AND at answering time, and the two must agree:
+`arm_confirm` records `target_object` beside the question
+(`ObjectDialogState.confirm_target`, cleared with it through
+`ObjectDialogState::disarm`), and `run_confirmed` refuses an answer
+whose target no longer resolves to that name — "the list changed under
+the question — nothing was removed". The dialog's own doors cannot move
+it (the armed block claims every other key; a browse row click is
+dropped while a question stands, §20.1, since `enter_edit` would clear
+the confirm and move the cursor off the object the prompt names), but a
+config reload landing between `d` and `enter` re-ranks the list under an
+index cursor, and the browse stage is the one place the target is an
+index rather than a name (the review's finding, 2026-09-19). In the edit
+stage the two always agree, so the check costs a compare. `answer_confirm`
+is the one door the three answer sites (either stage's key handler, the
+confirm row's buttons) go through, so the recorded target is read out
+before the disarm at every one of them. `target_row` derives the rows
+once; the browse bar reads `selected_row` over the rows `build` already
+derived for the list rather than deriving again per frame.
 
 **Mouse parity (§20.3).** `browse_action_bar` paints `Delete this
 <object>` and `Revert to desk` danger buttons beside `n`, each only
@@ -3105,7 +3118,16 @@ after a confirmed removal: from the edit or column stage it still walks
 `leave_edit` (cursor back on the object by name — still there after a
 revert, gone after a delete); from browse the dialog STAYS in browse with
 the query kept — a trader who filtered to find the row is not done with
-the filter — and the cursor clamped to the list the removal left.
+the filter — the cursor re-found by name where the object survives (a
+revert; on Sources it may have re-sorted) and clamped to the new length
+where it is gone (a delete). Both landings resolve against
+`landing_rows`, the PENDING-aware config (`apply::config_with_pending`),
+never `services.config`: `commit_removal` applies to memory from a
+spawned task after the handler returns, so a clamp against the live
+config saw the row about to go and was a no-op — deleting the last row
+left `selected` one past the end (the review's finding, 2026-09-19).
+`d` on an empty Groupings slot names the stage's remedy: "open it to fill
+it" from browse, "tick a dimension" in the edit stage.
 
 **Tests** (`shell/tests/objectdialog.rs`): browse `d` deletes a
 user-owned source and stays in browse; browse `r` reverts a
@@ -3113,6 +3135,10 @@ presentation-only override; both refuse on a desk row with the edit
 stage's notices; Schema refuses both through `READ_ONLY_NOTICE`;
 `escape` disarms and closes nothing; a row click is dropped while armed;
 the bar's buttons follow the selected row and arm on click; the filter
-survives a browse removal. **Harness:** five entries (the browse door,
-its read-only gate, the click guard, the bar's `d` gate, the landing)
-and ten re-anchored for the confirm's move.
+survives a browse removal; the fix wave added a last-row delete, a
+reload under an armed confirm, `escape` under a confirm with a query
+applied, the bar's button from filter mode, and the empty-slot wording.
+**Harness:** eight entries (the browse door, its read-only gate, the
+click guard, the bar's `d` gate, the landing's stage branch and its
+pending-config read, the target check, the empty-slot wording) and ten
+re-anchored for the confirm's move.

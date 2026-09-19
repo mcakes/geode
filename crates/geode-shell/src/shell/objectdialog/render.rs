@@ -346,13 +346,10 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
     // own armed block, verbatim, since 2026-09-19 the browse list arms
     // `d`/`r` too. Ahead of the escape ladder on purpose: `escape` is the
     // question's "no", never a rung.
-    if let Some(confirm) = state.confirm {
+    if state.confirm.is_some() {
         match dialog::ConfirmAnswer::from_key(ks) {
-            Some(dialog::ConfirmAnswer::Yes) => {
-                disarm_confirm(shell);
-                run_confirmed(shell, confirm, cx);
-            }
-            Some(dialog::ConfirmAnswer::No) => disarm_confirm(shell),
+            Some(dialog::ConfirmAnswer::Yes) => answer_confirm(shell, true, cx),
+            Some(dialog::ConfirmAnswer::No) => answer_confirm(shell, false, cx),
             // Claimed and dropped: a stray letter must not act on the
             // object behind the question — nor move the cursor off it,
             // which is what keeps `target_object` the same row at answer
@@ -1009,7 +1006,7 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     // stage that has closed. Unreachable today — the armed block claims
     // every key ahead of `enter` — which is exactly why it is cleared
     // rather than relied on.
-    state.confirm = None;
+    state.disarm();
     // The row list is now seven fields with the cursor on the first, so
     // the viewport goes with it — `enter_edit_stage`'s own reset.
     shell.object_dialog_scroll.scroll_to_item(0);
@@ -1071,7 +1068,7 @@ fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     state.stage = Stage::Edit { object };
     state.notice = None;
     // Symmetric with `enter_column_stage`'s own clear, for its reason.
-    state.confirm = None;
+    state.disarm();
     scroll_to_cursor(shell);
     cx.notify();
 }
@@ -1162,13 +1159,10 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         cx.notify();
     }
 
-    if let Some(confirm) = armed_confirm(shell) {
+    if armed_confirm(shell).is_some() {
         match dialog::ConfirmAnswer::from_key(ks) {
-            Some(dialog::ConfirmAnswer::Yes) => {
-                disarm_confirm(shell);
-                run_confirmed(shell, confirm, cx);
-            }
-            Some(dialog::ConfirmAnswer::No) => disarm_confirm(shell),
+            Some(dialog::ConfirmAnswer::Yes) => answer_confirm(shell, true, cx),
+            Some(dialog::ConfirmAnswer::No) => answer_confirm(shell, false, cx),
             // Claimed and dropped: while a destructive question is on
             // screen, a stray letter must not act on the object behind it.
             None => {}
@@ -1962,9 +1956,22 @@ fn set_notice(shell: &mut ShellView, notice: String) {
     }
 }
 
-fn disarm_confirm(shell: &mut ShellView) {
-    if let Some(state) = shell.object_dialog.as_mut() {
-        state.confirm = None;
+/// Answer the question on screen: `yes` carries it out through
+/// [`run_confirmed`] against the target recorded when it was armed; `no`
+/// drops it. The one door the three answer sites (either stage's key
+/// handler, the confirm row's buttons) go through, so the recorded
+/// target is read out before the disarm clears it at every one of them.
+fn answer_confirm(shell: &mut ShellView, yes: bool, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let Some(confirm) = state.confirm else {
+        return;
+    };
+    let target = state.confirm_target.take();
+    state.disarm();
+    if yes {
+        run_confirmed(shell, confirm, target, cx);
     }
 }
 
@@ -1973,8 +1980,13 @@ fn disarm_confirm(shell: &mut ShellView) {
 /// the draft, so the browse list can ask it too (see
 /// `ObjectDialogState::confirm`).
 fn arm_confirm(shell: &mut ShellView, confirm: Confirm) {
+    // Resolved BEFORE the borrow below, and stored beside the question:
+    // `run_confirmed` compares it against the target as it stands when
+    // the answer arrives (see `ObjectDialogState::confirm_target`).
+    let target = target_object(shell);
     if let Some(state) = shell.object_dialog.as_mut() {
         state.confirm = Some(confirm);
+        state.confirm_target = target;
     }
 }
 
@@ -2130,7 +2142,7 @@ fn revalidate(shell: &mut ShellView) {
 /// find the row is not done with the filter, and the cursor clamped to
 /// the list the removal left (a deleted last row would otherwise leave
 /// `selected` one past the end until the next motion).
-fn after_removal(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+fn after_removal(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>) {
     let in_browse = shell
         .object_dialog
         .as_ref()
@@ -2139,14 +2151,37 @@ fn after_removal(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         leave_edit(shell, cx);
         return;
     }
-    let rows = derive_rows(shell);
+    let rows = landing_rows(shell);
     if let Some(state) = shell.object_dialog.as_mut() {
         let visible = super::visible_rows(state, &rows);
-        state.selected = state.selected.min(visible.len().saturating_sub(1));
+        // By name where the object survives (a revert — and on Sources
+        // it may have re-sorted, if the override moved `dataset`), else
+        // the clamp (a delete).
+        state.selected = super::filtered_position(&visible, &rows, name)
+            .unwrap_or_else(|| state.selected.min(visible.len().saturating_sub(1)));
         let selected = state.selected;
         shell.object_dialog_scroll.scroll_to_item(selected);
     }
     cx.notify();
+}
+
+/// The rows a landing after a write resolves the cursor against: the
+/// PENDING-aware config (`apply::config_with_pending`), never
+/// `services.config` alone. `commit_removal` (and `commit_edit`) apply
+/// to memory from a spawned task, AFTER the handler that queued them
+/// returns — so at the moment `after_removal` or `leave_edit` runs,
+/// `services.config` still lists the object just deleted, and a clamp
+/// against it is a no-op that leaves `selected` one past the end once
+/// the flush lands (review finding, 2026-09-19). The same fold
+/// `enter_edit_stage` derives its draft from, for the same reason.
+fn landing_rows(shell: &ShellView) -> Vec<ObjectRow> {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return Vec::new();
+    };
+    match apply::config_with_pending(shell) {
+        Some(config) => state.domain.objects(&config),
+        None => derive_rows(shell),
+    }
 }
 
 fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
@@ -2157,7 +2192,7 @@ fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     if let Some(state) = shell.object_dialog.as_mut() {
         state.leave_edit();
     }
-    let rows = derive_rows(shell);
+    let rows = landing_rows(shell);
     if let Some(state) = shell.object_dialog.as_mut() {
         let visible = super::visible_rows(state, &rows);
         state.selected = super::filtered_position(&visible, &rows, &name).unwrap_or(0);
@@ -2190,10 +2225,7 @@ fn target_object(shell: &ShellView) -> Option<String> {
         Stage::Browse => {
             let rows = derive_rows(shell);
             let visible = super::visible_rows(state, &rows);
-            visible
-                .get(state.selected)
-                .and_then(|m| rows.get(m.row))
-                .map(|row| row.name.clone())
+            selected_row(state, &rows, &visible).map(|row| row.name.clone())
         }
         Stage::Naming => None,
     }
@@ -2201,10 +2233,54 @@ fn target_object(shell: &ShellView) -> Option<String> {
 
 /// The browse row for [`target_object`] — where `layer` and `overridden`
 /// come from, so `d` and `r` are gated by the one tested derivation
-/// rather than by a second guess made here.
+/// rather than by a second guess made here. One `derive_rows` per call,
+/// whichever stage: a paint-path caller that already holds the rows
+/// (`browse_action_bar`) reads [`selected_row`] instead.
 fn target_row(shell: &ShellView) -> Option<ObjectRow> {
-    let name = target_object(shell)?;
-    derive_rows(shell).into_iter().find(|row| row.name == name)
+    let state = shell.object_dialog.as_ref()?;
+    let rows = derive_rows(shell);
+    match &state.stage {
+        Stage::Edit { object } | Stage::Column { object, .. } => {
+            rows.into_iter().find(|row| &row.name == object)
+        }
+        Stage::Browse => {
+            let visible = super::visible_rows(state, &rows);
+            selected_row(state, &rows, &visible).cloned()
+        }
+        Stage::Naming => None,
+    }
+}
+
+/// Whether the dialog is in its browse stage.
+fn in_browse(shell: &ShellView) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.stage == Stage::Browse)
+}
+
+/// What `d`/`r` say when [`target_row`] answers `None`: in browse the
+/// filter is hiding every row; in the edit stage the object is open but
+/// not yet a row `services.config` can produce (the tick after `n`
+/// creates it — see `actions()`).
+fn no_target_notice(shell: &ShellView) -> String {
+    if in_browse(shell) {
+        "no object is selected".to_string()
+    } else {
+        "nothing is open".to_string()
+    }
+}
+
+/// The browse row under the cursor — `state.selected` is an index into
+/// the FILTERED list, resolved back through `rows`. Pure over what the
+/// caller already derived, so `build` can hand its own `rows`/`visible`
+/// to the bar without deriving them a second time per frame.
+fn selected_row<'a>(
+    state: &ObjectDialogState,
+    rows: &'a [ObjectRow],
+    visible: &[crate::listfilter::Ranked],
+) -> Option<&'a ObjectRow> {
+    visible.get(state.selected).and_then(|m| rows.get(m.row))
 }
 
 /// `name`'s removal from each of `docs` whose **user layer** actually
@@ -2315,10 +2391,16 @@ fn arm_delete(shell: &mut ShellView) {
         Some(row) if row.layer == Some(Layer::User) => {
             arm_confirm(shell, Confirm::Delete);
         }
-        Some(row) if row.layer.is_none() => set_notice(
-            shell,
-            format!("{} is empty — tick a dimension to fill it", row.name),
-        ),
+        // The remedy names the stage: from the list there is nothing to
+        // tick, the slot has to be opened first.
+        Some(row) if row.layer.is_none() => {
+            let remedy = if in_browse(shell) {
+                "open it to fill it"
+            } else {
+                "tick a dimension to fill it"
+            };
+            set_notice(shell, format!("{} is empty — {remedy}", row.name))
+        }
         Some(row) => {
             let tail = if row.overridden {
                 " — but r reverts your changes to it"
@@ -2334,7 +2416,7 @@ fn arm_delete(shell: &mut ShellView) {
                 ),
             )
         }
-        None => set_notice(shell, "no object is selected".to_string()),
+        None => set_notice(shell, no_target_notice(shell)),
     }
 }
 
@@ -2367,7 +2449,7 @@ fn arm_revert(shell: &mut ShellView) {
             shell,
             format!("{} has no user override to revert", row.name),
         ),
-        None => set_notice(shell, "no object is selected".to_string()),
+        None => set_notice(shell, no_target_notice(shell)),
     }
 }
 
@@ -2481,11 +2563,31 @@ fn run_overwrite(shell: &mut ShellView, cx: &mut Context<ShellView>) -> bool {
 /// it behind would strand a table naming a view that no longer exists,
 /// which is exactly the stale entry `ViewPresentationSpec::apply` warns
 /// about at startup and nowhere else.
-fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<ShellView>) {
+fn run_confirmed(
+    shell: &mut ShellView,
+    confirm: Confirm,
+    armed_target: Option<String>,
+    cx: &mut Context<ShellView>,
+) {
     let domain = match shell.object_dialog.as_ref() {
         Some(state) => state.domain,
         None => return,
     };
+    // The browse cursor is an INDEX, and a config reload landing between
+    // the arming keystroke and this one (a desk push, an external editor
+    // — never this dialog's own writes, which keep the name) re-ranks
+    // the list under the question: the prompt named one object and the
+    // answer would remove another, irreversibly. So the question is
+    // answered for the object it was asked about or not at all. In the
+    // edit stage the target is the stage's own object and the two
+    // always agree, so the check costs a compare there and nothing else.
+    if armed_target != target_object(shell) {
+        set_notice(
+            shell,
+            "the list changed under the question — nothing was removed".to_string(),
+        );
+        return;
+    }
     match confirm {
         // `o`'s confirmed answer on a user-owned scope — the same act the
         // desk-owned case runs unasked from `overwrite_scope`.
@@ -2531,7 +2633,7 @@ fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<Shell
                         "reverted"
                     };
                     let outcome = apply::commit_removal(shell, keys, cx);
-                    after_removal(shell, cx);
+                    after_removal(shell, &name, cx);
                     match outcome {
                         // The removal joined the batch; the flush (no
                         // debounce of its own) is already under way, so
@@ -3029,7 +3131,7 @@ fn build(
             let name = target_object(shell).unwrap_or_default();
             confirm_row(confirm, &name, entity, cx)
         }
-        None => browse_action_bar(shell, state, entity, cx),
+        None => browse_action_bar(state, &rows, &visible, entity, cx),
     };
 
     v_flex()
@@ -4026,8 +4128,9 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 /// path — `begin_naming` sets `DialogMode::Filter`, and the sync is what
 /// focuses the name field (§17.1 rule 3).
 fn browse_action_bar(
-    shell: &ShellView,
     state: &ObjectDialogState,
+    rows: &[ObjectRow],
+    visible: &[crate::listfilter::Ranked],
     entity: &Entity<ShellView>,
     cx: &mut App,
 ) -> AnyElement {
@@ -4035,12 +4138,16 @@ fn browse_action_bar(
     let writable = state.domain.writable(&state.stage);
     let offers_n = !naming && writable && state.domain.roster().is_none();
     // `d`/`r` (2026-09-19): the edit bar's own two gates (`actions`),
-    // read off the row under the cursor — the same [`target_row`] the
-    // keys arm from, so the bar and the keys cannot disagree about which
-    // verbs are live. Never while naming, where no row is the target.
-    let row = (!naming && writable).then(|| target_row(shell)).flatten();
-    let offers_d = row.as_ref().is_some_and(|r| r.layer == Some(Layer::User));
-    let offers_r = row.as_ref().is_some_and(|r| r.overridden);
+    // read off the row under the cursor — the same cursor resolution
+    // [`target_row`] arms the keys from ([`selected_row`]), over the
+    // rows `build` already derived for the list rather than a second
+    // derivation per frame. Never while naming, where no row is the
+    // target.
+    let row = (!naming && writable)
+        .then(|| selected_row(state, rows, visible))
+        .flatten();
+    let offers_d = row.is_some_and(|r| r.layer == Some(Layer::User));
+    let offers_r = row.is_some_and(|r| r.overridden);
     if !offers_n && !offers_d && !offers_r {
         return div().into_any_element();
     }
@@ -4150,13 +4257,10 @@ fn confirm_row(
         Confirm::Revert => "Revert",
         Confirm::Overwrite => "Overwrite",
     };
-    let on_yes: dialog::ConfirmHandler = Rc::new(|shell, _window, cx| {
-        if let Some(confirm) = armed_confirm(shell) {
-            disarm_confirm(shell);
-            run_confirmed(shell, confirm, cx);
-        }
-    });
-    let on_no: dialog::ConfirmHandler = Rc::new(|shell, _window, _cx| disarm_confirm(shell));
+    let on_yes: dialog::ConfirmHandler =
+        Rc::new(|shell, _window, cx| answer_confirm(shell, true, cx));
+    let on_no: dialog::ConfirmHandler =
+        Rc::new(|shell, _window, cx| answer_confirm(shell, false, cx));
     dialog::confirm_row(
         confirm.prompt(name),
         yes_label,
