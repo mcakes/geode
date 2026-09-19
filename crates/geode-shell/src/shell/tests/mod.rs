@@ -485,6 +485,46 @@ fn dialog_test_shell_in(
     });
     (shell, vcx)
 }
+/// Dispatch a platform-shaped double-click: down/up at `click_count` 1,
+/// then down/up at `click_count` 2, all at one point with the given
+/// modifiers, with a draw between the two clicks (the OS delivers them
+/// across frames). The first click is an ordinary down — on a dialog row
+/// it selects — so the second click, the one carrying `click_count: 2`,
+/// is what a double-click door sees. Shared by the fullscreen and the
+/// dialog double-click tests.
+pub(super) fn double_click(
+    cx: &mut gpui::VisualTestContext,
+    at: gpui::Point<gpui::Pixels>,
+    modifiers: gpui::Modifiers,
+) {
+    for count in 1..=2 {
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers,
+                    click_count: count,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers,
+                    click_count: count,
+                }),
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+}
+
 /// Does the shared dialog filter currently hold focus?
 pub(super) fn dialog_filter_is_focused(
     shell: &Entity<ShellView>,

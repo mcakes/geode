@@ -6037,6 +6037,95 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
     assert!(written.contains("[delta]\nhue = 255"), "{written}");
 }
 
+/// A double-click on a value row is `i` (user ruling 2026-09-19,
+/// interaction-model spec §17 amendment): the first mouse-down selects
+/// the row exactly as a single click does, and the second — the one the
+/// platform stamps `click_count: 2` — opens the row's field through the
+/// same door the key and the action-bar button take, here a `Choice`
+/// row's typeahead. A single click on its own still only selects.
+#[gpui::test]
+fn a_double_click_on_a_value_row_is_i(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    cx.simulate_keystrokes("enter"); // delta
+    cx.run_until_parked();
+    let token = cx
+        .debug_bounds("objectdialog-field-token")
+        .expect("the token row is painted");
+    let at = gpui::point(
+        token.origin.x + gpui::px(40.0),
+        token.origin.y + gpui::px(4.0),
+    );
+    cx.simulate_mouse_down(at, MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(2)),
+        "a single click selects the row"
+    );
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "and opens nothing"
+    );
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "the double-click opened the typeahead, as `i` would"
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "the field has the keys"
+    );
+    assert!(cx.debug_bounds("dialog-mode-pill-choose").is_some());
+}
+
+/// A double-click on a DOOR row (a Views member column) is "open the
+/// column stage" and nothing more: the first mouse-down opens the stage,
+/// and the second — landing one frame later on whatever field the new
+/// stage painted at that point — must not open `i` on a row the trader
+/// never aimed at (`ObjectDialogState::click_opened_stage`).
+#[gpui::test]
+fn a_double_click_on_a_door_row_opens_the_stage_and_nothing_more(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    cx.simulate_keystrokes("enter"); // tree
+    cx.run_until_parked();
+    let member = cx
+        .debug_bounds("objectdialog-item-delta01")
+        .expect("the member row is painted");
+    let at = gpui::point(
+        member.origin.x + gpui::px(40.0),
+        member.origin.y + gpui::px(4.0),
+    );
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the second click opened no field in the freshly opened stage"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    // A fresh double-click INSIDE the stage is `i` again — the guard is
+    // about the click that opened the stage, not the stage itself.
+    let width = cx
+        .debug_bounds("objectdialog-field-width")
+        .expect("the column stage paints its width row");
+    let at = gpui::point(
+        width.origin.x + gpui::px(40.0),
+        width.origin.y + gpui::px(4.0),
+    );
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "a double-click on the width row opens its field"
+    );
+}
+
 // --- Spec §20.3 / §20.6: the value chip, the i/n buttons, the armed guard --
 
 /// Spec §20.3 on the object dialog: the hue chip steps on click and

@@ -837,6 +837,38 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
     assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
 }
 
+/// A double-click on a settings row is `i` (user ruling 2026-09-19): the
+/// first mouse-down selects the row as a single click does, and the
+/// second opens the row's typeahead through the same door `i`/`enter`
+/// take. A single click on its own still only selects.
+#[gpui::test]
+fn a_double_click_on_a_settings_row_opens_its_typeahead(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let row = cx
+        .debug_bounds("settings-row-1")
+        .expect("the Font size row is painted");
+    let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0));
+    cx.simulate_mouse_down(at, MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        1,
+        "a single click selects the row"
+    );
+    assert!(
+        !shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()),
+        "and opens nothing"
+    );
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()),
+        "the double-click opened the typeahead, as `i` would"
+    );
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert!(cx.debug_bounds("settings-choice-list").is_some());
+}
+
 /// `escape` cancels the choice field with the setting untouched.
 #[gpui::test]
 fn escape_cancels_a_settings_choice_field_untouched(cx: &mut gpui::TestAppContext) {

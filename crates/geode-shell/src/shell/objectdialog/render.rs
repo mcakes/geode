@@ -3815,13 +3815,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .child(label_block)
                 .child(value)
                 .debug_selector(move || selector.clone())
-                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     entity_for_row.update(cx, |shell, cx| match open {
                         Some(Completions::Chain) => {
                             on_completion_clicked(shell, clicked, window, cx)
                         }
                         Some(_) => {}
-                        None => on_edit_row_clicked(shell, clicked, window, cx),
+                        None => on_edit_row_clicked(shell, clicked, event.click_count, window, cx),
                     });
                 });
             // §18.9.1: a list row is both a drag source and a drop target;
@@ -4649,6 +4649,7 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
 fn on_edit_row_clicked(
     shell: &mut ShellView,
     position: usize,
+    click_count: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
@@ -4675,11 +4676,43 @@ fn on_edit_row_clicked(
         draft.selected = position;
     }
     shell.object_dialog_scroll.scroll_to_item(position);
+    // A fresh click sequence forgets what the last one opened — see
+    // `ObjectDialogState::click_opened_stage`.
+    if click_count <= 1
+        && let Some(state) = shell.object_dialog.as_mut()
+    {
+        state.click_opened_stage = false;
+    }
     // After the cursor has moved, never before: the target is the row
     // that was just clicked, which is what `enter` would be acting on had
     // the trader pressed it instead.
     if let Some(name) = column_stage_target(shell) {
         enter_column_stage(shell, &name, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;
+        }
+    } else if click_count >= 2
+        && !shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.click_opened_stage)
+    {
+        // A double-click on a value row is `i` (user ruling 2026-09-19,
+        // interaction-model spec §17): the first mouse-down selected the
+        // row above, and this second one opens its field through the one
+        // door the key and the action-bar button share — so a `Choice`
+        // row's typeahead, a `Number`/`Text` row's field, Groupings'
+        // chain, or `i`'s own notice on a row that has none. Gated on
+        // `writable` exactly as `press_verb` and the key path are.
+        let writable = shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.domain.writable(&state.stage));
+        if writable {
+            open_field(shell);
+        } else {
+            set_notice(shell, READ_ONLY_NOTICE.to_string());
+        }
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();

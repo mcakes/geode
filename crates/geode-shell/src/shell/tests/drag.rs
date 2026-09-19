@@ -1582,45 +1582,6 @@ fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAp
 
 // ---- mod+double-click fullscreen (2026-09-19) ---------------------------
 
-/// Dispatch a platform-shaped double-click: down/up at `click_count`
-/// 1, then down/up at `click_count` 2, all at one point with the given
-/// modifiers, with a draw between the two clicks (the OS delivers them
-/// across frames). The first click is an ordinary mod+down — it arms a
-/// pending drag the release cancels — so the second click is what the
-/// fullscreen door sees.
-fn double_click(
-    cx: &mut gpui::VisualTestContext,
-    at: gpui::Point<gpui::Pixels>,
-    modifiers: gpui::Modifiers,
-) {
-    for count in 1..=2 {
-        cx.update(|window, cx| {
-            window.dispatch_event(
-                gpui::PlatformInput::MouseDown(MouseDownEvent {
-                    button: MouseButton::Left,
-                    position: at,
-                    modifiers,
-                    click_count: count,
-                    first_mouse: false,
-                }),
-                cx,
-            );
-            window.dispatch_event(
-                gpui::PlatformInput::MouseUp(MouseUpEvent {
-                    button: MouseButton::Left,
-                    position: at,
-                    modifiers,
-                    click_count: count,
-                }),
-                cx,
-            );
-        });
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-    }
-}
-
 /// mod+double-click on a main-tree tile focuses it and makes it
 /// fullscreen (the mouse form of `mod+f`, TODO "Mod + doubleclick to
 /// maximize/minimize tile"); a second mod+double-click on the now

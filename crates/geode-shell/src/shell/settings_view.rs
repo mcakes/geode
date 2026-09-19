@@ -825,17 +825,7 @@ fn handle_key(
             // on this handler's return, not here (spec §16.1).
             shell.settings_scroll.scroll_to_item(0);
         }
-        KeyAction::OpenChoice => {
-            let selected = state.selected;
-            // An empty filtered list has nothing to open: claimed, dropped.
-            if let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row)) {
-                let mut list =
-                    crate::choice::ChoiceList::new(row.values.clone(), crate::choice::DEFAULT_CAP);
-                list.place(row.values.get(row.current).map(String::as_str));
-                state.choice = Some(ChoiceEntry { id: row.id, list });
-                state.mode = DialogMode::Filter;
-            }
-        }
+        KeyAction::OpenChoice => open_choice_on_selected(state, &rows, &visible),
         KeyAction::Choice(key) => match key {
             crate::choice::ChoiceKey::Cancel => {
                 state.choice = None;
@@ -878,6 +868,22 @@ fn handle_key(
     true
 }
 
+/// `i`/`enter` in normal mode, and a row's double-click (user ruling
+/// 2026-09-19): open the selected row's typeahead over its values, the
+/// highlight placed on the current one. One door for the key and the
+/// mouse, so the two cannot drift. An empty filtered list has nothing to
+/// open: claimed, dropped.
+fn open_choice_on_selected(state: &mut SettingsState, rows: &[SettingRow], visible: &[Ranked]) {
+    let selected = state.selected;
+    if let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row)) {
+        let mut list =
+            crate::choice::ChoiceList::new(row.values.clone(), crate::choice::DEFAULT_CAP);
+        list.place(row.values.get(row.current).map(String::as_str));
+        state.choice = Some(ChoiceEntry { id: row.id, list });
+        state.mode = DialogMode::Filter;
+    }
+}
+
 /// A real mouse click on the row for `clicked`: select it, nothing more
 /// (spec §20.3 — the second-click step is gone; the value chip is the
 /// mouse form of `space`). Ends in [`dialog::sync_dialog_text`], the
@@ -885,6 +891,7 @@ fn handle_key(
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: SettingId,
+    click_count: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
@@ -903,6 +910,12 @@ fn on_row_clicked(
         return;
     };
     state.selected = ix;
+    // A double-click is `i` (user ruling 2026-09-19): the first
+    // mouse-down selected the row above, this second one opens its
+    // typeahead through the key's own door.
+    if click_count >= 2 {
+        open_choice_on_selected(state, &rows, &visible);
+    }
     shell.settings_scroll.scroll_to_item(ix);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
@@ -1061,9 +1074,9 @@ fn build(
                 .child(label)
                 .child(value_el)
                 .debug_selector(move || format!("settings-row-{row_ix}"))
-                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     entity_for_row.update(cx, |shell, cx| {
-                        on_row_clicked(shell, id, window, cx);
+                        on_row_clicked(shell, id, event.click_count, window, cx);
                     });
                 });
 
