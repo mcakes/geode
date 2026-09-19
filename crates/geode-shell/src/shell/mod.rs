@@ -31,6 +31,7 @@ pub mod scale;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;
+pub mod stacklist;
 pub mod status;
 pub mod toolbar;
 pub mod whichkey;
@@ -816,6 +817,14 @@ pub struct ShellView {
     /// the top of the next `dispatch`. Painted by the status bar's
     /// `shell-notice` segment.
     notice: Option<&'static str>,
+    /// The transient stack-member list (tile-stacks spec §5.2), or
+    /// `None` when closed — `open_stack_list`'s own contract, the same
+    /// "nothing survives a close/reopen" shape `palette`/`command_line`
+    /// follow. Owns the keyboard while open (`handle_key_down`'s own
+    /// branch), closed by any dispatch (`dispatch`'s own top, beside
+    /// `notice`), and dropped by `render`'s generic staleness check when
+    /// its tile stops being the focused member.
+    stack_list: Option<stacklist::StackList>,
     /// Scratch storage for `ensure_occupants`'s per-frame tile-set diff
     /// (fix-round finding: `all_tiles`/`active_tiles` used to allocate a
     /// fresh `HashSet` every render). Always cleared and refilled there;
@@ -1566,6 +1575,7 @@ impl ShellView {
             visible_tiles: HashSet::new(),
             stack_sent: HashMap::new(),
             notice: None,
+            stack_list: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
             scratch_visible_keys: Vec::new(),

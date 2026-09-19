@@ -437,6 +437,14 @@ impl Workspace {
         self.tree_for(region).stack_position(id)
     }
 
+    /// Every member of `id`'s stack, in stack order (tile-stacks spec
+    /// §5.2) — the transient member list's source, over whichever of
+    /// this workspace's trees holds `id`.
+    pub fn stack_members(&self, id: TileId) -> Option<Vec<TileId>> {
+        let region = self.region_of(id)?;
+        self.tree_for(region).stack_members(id)
+    }
+
     /// Fullscreen stays main-tree-only, even now that docks are trees:
     /// while a dock is focused this is a no-op (still claimed as handled
     /// by the router — the keystroke must not fall through). A fullscreen

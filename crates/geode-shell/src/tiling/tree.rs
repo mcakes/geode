@@ -257,6 +257,16 @@ impl Tree {
         Some((ix + 1, children.len()))
     }
 
+    /// Every member of `id`'s stack, in stack order, or `None` when `id`
+    /// is not a stack member — the transient member list's (spec §5.2)
+    /// window into the same stack `stack_position` locates.
+    pub fn stack_members(&self, id: TileId) -> Option<Vec<TileId>> {
+        let Node::Stack { children, .. } = find_stack(self.root.as_ref()?, id)? else {
+            return None;
+        };
+        Some(children.clone())
+    }
+
     /// Make `id` the painted member of its stack (a no-op for a plain
     /// leaf). Fullscreen follows: if the stack's outgoing active member
     /// held it, `id` holds it now (spec §3 "Fullscreen").

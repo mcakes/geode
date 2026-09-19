@@ -385,15 +385,80 @@ impl ShellView {
         self.scratch_active_tiles = active;
     }
 
-    /// Open the transient stack-member list on `tile` (spec §5.2) — a
-    /// stub Task 7 replaces; `StackHandle::open_list` and `stack::pick`
-    /// both call this door.
+    /// Open the member list on `tile` (spec §5.2): focus that tile first
+    /// (a marker click on an unfocused tile must open THAT tile's list),
+    /// refuse with the notice if it is not a member, close the palette
+    /// and any command line, and highlight the active member.
+    /// `StackHandle::open_list` and `stack::pick` both call this door.
     pub(super) fn open_stack_list(
         &mut self,
-        _tile: TileId,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        tile: TileId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
+        let ws = self.services.workspaces.active_mut();
+        match ws.region_of(tile) {
+            Some(crate::tiling::FocusRegion::Main) => {
+                ws.focus_main_tile(tile);
+            }
+            Some(crate::tiling::FocusRegion::Dock(side)) => {
+                ws.focus_dock_tile(side, tile);
+            }
+            None => return,
+        }
+        let Some((index, _)) = self.services.workspaces.active().stack_position(tile) else {
+            self.notice = Some(super::input::NOT_IN_A_STACK);
+            cx.notify();
+            return;
+        };
+        let members = self.stack_members_of(tile);
+        self.close_palette(window, cx);
+        self.leave_command_line(window, cx);
+        self.stack_list = Some(super::stacklist::StackList {
+            tile,
+            members,
+            highlighted: index - 1,
+        });
+        self.note_keyboard_focus_move(window, cx);
+        cx.notify();
+    }
+
+    /// The members of `tile`'s stack in stack order (`Tree::stack_members`
+    /// over `Workspace::stack_members`).
+    fn stack_members_of(&self, tile: TileId) -> Vec<TileId> {
+        self.services
+            .workspaces
+            .active()
+            .stack_members(tile)
+            .unwrap_or_default()
+    }
+
+    /// Close the list, if open (spec §5.2's `escape`/click-outside/any-
+    /// dispatch/`ctrl+k` doors, all funnelled here).
+    pub(super) fn close_stack_list(&mut self, cx: &mut Context<Self>) {
+        if self.stack_list.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Make `id` the painted, focused member and close the list.
+    pub(super) fn activate_stack_member(
+        &mut self,
+        id: TileId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ws = self.services.workspaces.active_mut();
+        let moved = match ws.region_of(id) {
+            Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(id),
+            Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, id),
+            None => false,
+        };
+        if moved {
+            self.session_dirty = true;
+            self.note_keyboard_focus_move(window, cx);
+        }
+        self.close_stack_list(cx);
     }
 
     /// A keyboard verb moved which TILE has focus — hand the keyboard

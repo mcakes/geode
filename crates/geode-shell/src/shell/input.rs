@@ -149,8 +149,13 @@ impl ShellView {
 
         // A stack verb's refusal notice (tile-stacks spec §4) says its
         // piece for exactly one dispatch — the next one, whatever it is,
-        // clears it.
+        // clears it. The transient member list (spec §5.2) is likewise
+        // closed by any dispatch — the list's own keys never reach this
+        // function (`handle_key_down`'s own branch, above, claims them
+        // first), so this only ever fires for a keystroke or a mouse
+        // action from OUTSIDE the list.
         self.notice = None;
+        self.stack_list = None;
 
         if action.0 == "stack::next" || action.0 == "stack::prev" {
             // Tile stacks (spec §4): count-aware, so not in the router.
@@ -1001,6 +1006,44 @@ impl ShellView {
 
         if self.palette.is_some() {
             self.handle_palette_key(event, window, cx);
+            cx.notify();
+            return;
+        }
+
+        if let Some(list) = self.stack_list.clone() {
+            // The member list owns the keyboard while open (spec §5.2):
+            // `j`/`k`/arrows step with wrap, a digit activates at once,
+            // `enter` activates the highlighted row, `escape` closes with
+            // no change. Every other key is swallowed here too — the list
+            // is modal in the same sense the palette is, and the matcher
+            // must not see a keystroke behind it.
+            let key = event.keystroke.key.as_str();
+            match key {
+                "escape" => self.close_stack_list(cx),
+                "j" | "down" => {
+                    let mut l = list;
+                    super::stacklist::step(&mut l, 1);
+                    self.stack_list = Some(l);
+                }
+                "k" | "up" => {
+                    let mut l = list;
+                    super::stacklist::step(&mut l, -1);
+                    self.stack_list = Some(l);
+                }
+                "enter" => {
+                    if let Some(id) = list.members.get(list.highlighted).copied() {
+                        self.activate_stack_member(id, window, cx);
+                    }
+                }
+                d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
+                    if let Some(id) =
+                        super::stacklist::jump(&list, u32::from(d.as_bytes()[0] - b'0'))
+                    {
+                        self.activate_stack_member(id, window, cx);
+                    }
+                }
+                _ => {}
+            }
             cx.notify();
             return;
         }

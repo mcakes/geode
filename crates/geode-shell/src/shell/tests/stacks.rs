@@ -239,3 +239,151 @@ fn a_cycle_re_arms_the_focus_restore_while_an_abandoned_editor_holds_the_keyboar
     });
     assert!(pending);
 }
+
+#[gpui::test]
+fn stack_pick_opens_the_list_highlighting_the_active_member(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _log, _left, right, top) = stacked_shell(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+        let _ = window.draw(cx);
+    });
+    let list = shell
+        .read_with(&cx, |s, _| s.stack_list.clone())
+        .expect("open");
+    assert_eq!(list.members, vec![right, top]);
+    assert_eq!(list.highlighted, 1, "the showing member");
+    assert!(cx.debug_bounds("stack-list").is_some());
+    assert!(cx.debug_bounds("stack-list-row-0").is_some());
+}
+
+#[gpui::test]
+fn a_digit_enter_and_escape_do_what_the_spec_says(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _log, _left, right, top) = stacked_shell(cx);
+    let focused = |cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |s, _| s.services.workspaces.active().tree().focused())
+    };
+    cx.simulate_keystrokes("ctrl-k"); // palette, then the pick row by action
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+    });
+    cx.simulate_keystrokes("1");
+    assert_eq!(focused(&cx), Some(right), "a digit activates at once");
+    assert!(
+        shell.read_with(&cx, |s, _| s.stack_list.is_none()),
+        "and closes the list"
+    );
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+    });
+    cx.simulate_keystrokes("j");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        focused(&cx),
+        Some(top),
+        "j then enter activates the highlighted row"
+    );
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+    });
+    cx.simulate_keystrokes("k");
+    cx.simulate_keystrokes("escape");
+    assert_eq!(focused(&cx), Some(top), "escape changes nothing");
+    assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
+}
+
+#[gpui::test]
+fn a_row_click_activates_and_a_click_outside_closes(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _log, _left, right, _top) = stacked_shell(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+        let _ = window.draw(cx);
+    });
+    let row = cx.debug_bounds("stack-list-row-0").unwrap();
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        Some(right)
+    );
+    assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+        let _ = window.draw(cx);
+    });
+    let catcher = cx.debug_bounds("stack-list-click-catcher").unwrap();
+    cx.simulate_click(
+        gpui::point(catcher.right() - px(4.0), catcher.bottom() - px(4.0)),
+        gpui::Modifiers::none(),
+    );
+    assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        Some(right),
+        "an outside click changes nothing"
+    );
+}
+
+#[gpui::test]
+fn the_handle_opens_the_list_on_its_own_tile_and_ctrl_k_closes_it(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _log, left, right, _top) = stacked_shell(cx);
+    // Focus `left`, then open through `right`'s handle: the list must be
+    // about `right`'s stack and `right`'s tile must take focus first.
+    cx.simulate_keystrokes("alt-h");
+    let handle = shell.read_with(&cx, |s, _| {
+        s.occupants
+            .get(&right)
+            .and_then(|o| o.content.stack_handle_for_test())
+    });
+    let handle = handle.expect("right holds a handle");
+    cx.update(|window, cx| handle.open_list(window, cx));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        Some(right)
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.stack_list.as_ref().map(|l| l.tile)),
+        Some(right)
+    );
+    assert_ne!(left, right);
+    cx.simulate_keystrokes("ctrl-k");
+    assert!(
+        shell.read_with(&cx, |s, _| s.stack_list.is_none()),
+        "ctrl+k closes it for the palette"
+    );
+}
+
+#[gpui::test]
+fn pick_on_a_plain_tile_refuses_with_the_notice(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("stack::pick".to_string()), None, window, cx);
+        });
+    });
+    assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.notice),
+        Some("not in a stack")
+    );
+}

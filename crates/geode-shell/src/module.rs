@@ -177,6 +177,16 @@ pub trait TileContent {
     fn holds_focus(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
+    /// The last [`StackHandle`] this occupant was told about (spec
+    /// §5.1's `set_stack`), for a test that has no other path to it —
+    /// `TileOccupant::content` is a `Box<dyn TileContent>`, so a test
+    /// cannot read a module's own field even when the module is a test
+    /// fixture. Default `None`; [`recording::RecordingContent`] is the
+    /// one override, returning its stored handle.
+    #[cfg(any(test, feature = "test-support"))]
+    fn stack_handle_for_test(&self) -> Option<StackHandle> {
+        None
+    }
 }
 
 pub struct TileOccupant {
@@ -684,6 +694,9 @@ pub mod recording {
                 .input
                 .as_ref()
                 .is_some_and(|state| state.read(cx).focus_handle(cx).is_focused(window))
+        }
+        fn stack_handle_for_test(&self) -> Option<StackHandle> {
+            self.stack.borrow().clone()
         }
     }
 
