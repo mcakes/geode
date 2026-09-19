@@ -1338,6 +1338,12 @@ impl ShellView {
         let line_numbers = crate::linenumbers::LineNumbers::from_config(&services.config);
         cx.set_global(crate::linenumbers::UiSettings { line_numbers });
 
+        // The keymap's bindings for module-visible chord lookup
+        // (`tips::Chords`, the workspace's second global — see its doc).
+        cx.set_global(crate::tips::Chords(Arc::new(
+            services.keymap.bindings().to_vec(),
+        )));
+
         // The shared frame (§4): built from whatever `[groupings]`/
         // `[scopes]` (plus the `datasets`/`dimensions` docs they validate
         // against) config resolved to — see `hot_reload::rebuild_slots`/

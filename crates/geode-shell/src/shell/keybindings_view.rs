@@ -172,7 +172,7 @@ use geode_core::config::Layer;
 use crate::actions::{ActionId, ActionRegistry};
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
-use crate::keymap::{Binding, Keymap, Keystroke, Modifiers};
+use crate::keymap::{Keymap, Keystroke, Modifiers, effective_binding};
 use crate::keymap_edit::{Displacement, Rebind, Unbind, apply_rebind, apply_unbind};
 use crate::listfilter::{self, Ranked};
 use crate::palette;
@@ -258,65 +258,6 @@ pub fn derive_rows(registry: &ActionRegistry, keymap: &Keymap) -> Vec<Keybinding
         .collect();
     rows.sort_by(|a, b| (&a.category, &a.title).cmp(&(&b.category, &b.title)));
     rows
-}
-
-/// Resolve `action`'s effective binding within `bindings` (`keymap.
-/// bindings()`'s own layer-then-declaration order), or `None` if unbound.
-///
-/// Scans candidates whose `action` matches, **most recently declared
-/// first**; a candidate only counts as effective if no *later* binding in
-/// the full list — declared after it, any action, including `"none"` —
-/// shares its exact keystroke sequence AND carries a context that would
-/// apply whenever the candidate's own does. A shadowed candidate is
-/// skipped in favor of an earlier one for the same action (which may in
-/// turn be shadowed by something else); if every candidate is shadowed (or
-/// there are none), the action is unbound. This mirrors the real
-/// `Matcher::press`'s own keystroke-keyed last-wins rule (spec §3.4): for
-/// one keystroke, the *last* matching entry across the whole document
-/// stack wins, regardless of which action it names — a plain "last binding
-/// for this action id" search (the pre-review-round version of this
-/// function) missed exactly this: a bare `"mod+h" = "none"` unbind (no
-/// replacement key) never carries the real action id, so an action-id-only
-/// search skips it and reports the old binding as if still live.
-///
-/// **Context approximation, stated honestly**: the real `Matcher` decides
-/// "would this later binding actually apply" by evaluating a compiled
-/// `Predicate` against a live context stack; this free function has no
-/// such stack (there is no notion of "the current UI context" for a
-/// dialog listing every action at once), so it approximates with the
-/// *source spelling* of `context_source` instead: a later same-keystroke
-/// binding shadows the candidate when its `context_source` is `None` (a
-/// no-context entry is always active, so it always shadows) or is
-/// string-equal to the candidate's own (the common real case — a rebind
-/// shadowing its own prior entry within the same context, `keymap_edit`'s
-/// own documented assumption). This is exact for every shape this crate's
-/// own tooling ever writes. It can only drift from the real predicate
-/// evaluation for a hand-written keymap pairing two *different but
-/// overlapping* context strings on the same keystroke (e.g. `"workspace"`
-/// and `"workspace && !modal"`) — string comparison would under-mark that
-/// as not-shadowing even though the predicates do overlap at runtime.
-/// Accepted as a documented approximation for a display-only resolution,
-/// not the authoritative dispatch path (`Matcher::press` remains that).
-fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Option<&'a Binding> {
-    bindings
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, b)| b.action == *action)
-        .find(|(i, b)| !is_shadowed(bindings, *i, b))
-        .map(|(_, b)| b)
-}
-
-/// True if some binding declared AFTER `bindings[index]` (`candidate`)
-/// shares its exact keystroke sequence and carries a context that would
-/// apply whenever `candidate`'s own would — see [`effective_binding`]'s
-/// doc comment for the full reasoning and the stated context-equality
-/// approximation.
-fn is_shadowed(bindings: &[Binding], index: usize, candidate: &Binding) -> bool {
-    bindings[index + 1..].iter().any(|later| {
-        later.keystrokes == candidate.keystrokes
-            && (later.context_source.is_none() || later.context_source == candidate.context_source)
-    })
 }
 
 /// The destructive question `d`/`r` arm (spec §20.1): the same

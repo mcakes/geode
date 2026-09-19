@@ -270,6 +270,61 @@ fn clicking_a_scope_chips_body_opens_the_picker_on_that_column(cx: &mut gpui::Te
     assert_eq!(req.column, "book");
 }
 
+/// Task 3 (tooltips): hovering a scope chip's body shows the full,
+/// un-elided selection (`Chip::full`) — not the elided `summary` painted
+/// on the bar — and names `frame::pick`'s chord. `services_with_pickable`
+/// is used only to keep this fixture identical in shape to the click
+/// test above; the picker action need not fire for a tooltip.
+#[gpui::test]
+fn hovering_a_scope_chip_shows_the_full_selection_and_the_picker_chord(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["A".into(), "B".into(), "C".into()],
+            }],
+            ..Scope::default()
+        });
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.run_until_parked();
+
+    let chip = vcx.debug_bounds("scope-chip-book").expect("chip painted");
+    vcx.simulate_mouse_move(
+        chip.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-scope-chip-book").is_some());
+    assert!(
+        vcx.debug_bounds("tip-scope-chip-book-chord-mod+p")
+            .is_some()
+            || vcx
+                .debug_bounds("tip-scope-chip-book-chord-alt+p")
+                .is_some(),
+        "the tooltip must name frame::pick's chord"
+    );
+    let title = vcx
+        .debug_bounds("tip-scope-chip-book-title")
+        .expect("title painted");
+    assert!(
+        title.size.width > chip.size.width,
+        "the full list is longer than the elided chip"
+    );
+}
+
 #[gpui::test]
 fn a_stale_distinct_outcome_is_dropped(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_pickable());

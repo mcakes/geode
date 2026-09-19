@@ -47,7 +47,7 @@
 //! `secondary` — matching the profile avatar's family visually.
 
 use gpui::prelude::*;
-use gpui::{Context, IntoElement, MouseButton, div, px};
+use gpui::{Context, IntoElement, MouseButton, SharedString, div, px};
 use gpui_component::avatar::Avatar;
 use gpui_component::{ActiveTheme as _, Sizable as _, v_flex};
 
@@ -56,6 +56,57 @@ use crate::shell::ShellView;
 
 /// Fixed width of the sidebar icon rail, in pixels.
 pub const WIDTH: f32 = 40.0;
+
+/// `workspace::switch_{n}` for n = 1..=9, as `&'static str`s so the
+/// tooltip closure captures no allocation per render.
+const WORKSPACE_SWITCH: [&str; 9] = [
+    "workspace::switch_1",
+    "workspace::switch_2",
+    "workspace::switch_3",
+    "workspace::switch_4",
+    "workspace::switch_5",
+    "workspace::switch_6",
+    "workspace::switch_7",
+    "workspace::switch_8",
+    "workspace::switch_9",
+];
+const WORKSPACE_SITE: [&str; 9] = [
+    "sidebar-workspace-1",
+    "sidebar-workspace-2",
+    "sidebar-workspace-3",
+    "sidebar-workspace-4",
+    "sidebar-workspace-5",
+    "sidebar-workspace-6",
+    "sidebar-workspace-7",
+    "sidebar-workspace-8",
+    "sidebar-workspace-9",
+];
+/// The already-prefixed tooltip selectors (fix round 1: `tips::tip` no
+/// longer `format!`s a `"tip-"` prefix onto its `site` argument — see
+/// that function's own doc — so the prefix has to live here instead;
+/// `WORKSPACE_SITE` above stays un-prefixed, it names the disc itself).
+const WORKSPACE_TIP: [&str; 9] = [
+    "tip-sidebar-workspace-1",
+    "tip-sidebar-workspace-2",
+    "tip-sidebar-workspace-3",
+    "tip-sidebar-workspace-4",
+    "tip-sidebar-workspace-5",
+    "tip-sidebar-workspace-6",
+    "tip-sidebar-workspace-7",
+    "tip-sidebar-workspace-8",
+    "tip-sidebar-workspace-9",
+];
+const WORKSPACE_TITLE: [&str; 9] = [
+    "Workspace 1",
+    "Workspace 2",
+    "Workspace 3",
+    "Workspace 4",
+    "Workspace 5",
+    "Workspace 6",
+    "Workspace 7",
+    "Workspace 8",
+    "Workspace 9",
+];
 
 /// Build the sidebar. `active`/`non_empty` mirror the arguments the old
 /// `status_bar` workspace strip took (Task 4 moved that strip here).
@@ -77,6 +128,17 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         }
         indicators = indicators.child(
             div()
+                .id(gpui::ElementId::NamedInteger(
+                    SharedString::new_static("sidebar-workspace"),
+                    n as u64,
+                ))
+                .debug_selector(move || WORKSPACE_SITE[(n - 1) as usize].to_string())
+                .tooltip(crate::tips::tip(
+                    WORKSPACE_TIP[(n - 1) as usize],
+                    WORKSPACE_TITLE[(n - 1) as usize],
+                    Some(WORKSPACE_SWITCH[(n - 1) as usize]),
+                    None,
+                ))
                 .w_full()
                 .flex()
                 .items_center()
@@ -123,6 +185,14 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
     }
 
     let profile = div()
+        .id("sidebar-profile")
+        .debug_selector(|| "sidebar-profile".to_string())
+        .tooltip(crate::tips::tip(
+            "tip-sidebar-profile",
+            "Settings",
+            Some("settings::open"),
+            None,
+        ))
         .w_full()
         .flex()
         .items_center()

@@ -5,6 +5,7 @@
 //! `shell/mod.rs` (Phase 3c Task 0) as the one seam that reacts to a
 //! config change after startup.
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use gpui::Context;
@@ -373,6 +374,9 @@ impl ShellView {
             self.services.config = new_config;
             self.services.mod_alias = mod_alias;
             self.services.keymap = keymap;
+            cx.set_global(crate::tips::Chords(Arc::new(
+                self.services.keymap.bindings().to_vec(),
+            )));
             // Cheap re-derive; `render` applies it only when it changed.
             self.font_size = FontSize::from_config(&self.services.config);
             self.find_style = FindStyle::from_config(&self.services.config);

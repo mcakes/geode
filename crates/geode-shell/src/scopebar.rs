@@ -8,14 +8,37 @@
 
 use crate::frame::Frame;
 use chrono::{Local, NaiveDate};
+use gpui::SharedString;
 
 /// One dimension's chip in the scope bar (Task 4 renders these
 /// individually; Task 3 only needs the summary text, which the toolbar
 /// joins the way `Frame::readout` used to).
+///
+/// `full`/`tip_selector`/`close_selector`/`close_title` are
+/// `SharedString`, not `String` (fix round 1, Task 3 review): every one
+/// of them feeds a `.tooltip(..)` attached inline in `shell::toolbar`'s
+/// render path, so a `String` field would mean a fresh heap clone (or,
+/// for `tip_selector`/`close_selector`, a `format!`) on every paint of
+/// every chip. `build_model` already runs once per frame-version
+/// change, not per render (see the module doc), so building these once
+/// here and cloning a `SharedString` at the paint site (a refcount
+/// bump, or a stack copy for anything under `SmolStr`'s 23-byte inline
+/// cap) is the whole fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chip {
     pub column: String,
     pub summary: String,
+    /// The whole selection, un-elided — `"{column} ∈ {v1}, {v2}, …"`
+    /// with every value — what a hover on the chip shows (Task 3).
+    pub full: SharedString,
+    /// The chip body's own already-prefixed tooltip selector
+    /// (`"tip-scope-chip-{column}"`).
+    pub tip_selector: SharedString,
+    /// The close glyph's own already-prefixed tooltip selector
+    /// (`"tip-scope-chip-close-{column}"`).
+    pub close_selector: SharedString,
+    /// The close glyph's tooltip title (`"Remove {column}"`).
+    pub close_title: SharedString,
 }
 
 /// What the scope bar shows for one frame state — everything already
@@ -35,9 +58,18 @@ pub struct ScopeBarModel {
     /// Task 1 fix round 1, MAJ-2): `Some("text \"{t}\"")` when `text` is
     /// `Some`, built here for the same reason as `slot_label`.
     pub text_chip: Option<String>,
+    /// The raw, un-decorated text (fix round 1) — the text chip's
+    /// tooltip title; `text_chip` above is the painted `"text \"…\""`
+    /// label. `SharedString` for the same reason as `Chip`'s tooltip
+    /// fields: cloned into a `.tooltip(..)` attachment on every render.
+    pub text_tip: Option<SharedString>,
     /// Elided source text (≤ 40 chars + `…`), or `None` when the scope has
     /// no expression.
     pub expr: Option<String>,
+    /// The whole expression source, un-elided — what a hover on the
+    /// elided `expr` chip shows. `SharedString` (fix round 1) for the
+    /// same reason as `text_tip`.
+    pub expr_full: Option<SharedString>,
     /// `Some("∅ {column}")` when the scope is a contradiction (spec
     /// §4.1's `Scope::impossible`) — named, not merely hidden, per
     /// `Scope::columns`'s own doc comment.
@@ -50,8 +82,23 @@ pub struct ScopeBarModel {
     /// Task 1 fix round 1, MAJ-2): `Some("AS OF {as_of}")`, built here
     /// for the same reason as `slot_label`/`text_chip` — distinct from
     /// `as_of` itself, which the status bar reads bare (no "AS OF "
-    /// prefix).
-    pub as_of_badge: Option<String>,
+    /// prefix). `SharedString` (fix round 1, Task 3 review): this used to
+    /// double as the badge's tooltip TITLE too; since the final review
+    /// (spec §5.1) the tooltip title is [`as_of_full`](Self::as_of_full)
+    /// and this string moved to the tooltip's detail line instead — a
+    /// `SharedString` here still means a refcount bump wherever it feeds
+    /// either the painted label or that detail line, never a heap clone.
+    pub as_of_badge: Option<SharedString>,
+    /// The as-of instant's FULL resolved timestamp, `%Y-%m-%d %H:%M:%S`
+    /// in the trader's local clock, whatever `as_of`'s own elision does —
+    /// `as_of` drops the date on today and always drops seconds, which is
+    /// fine for a glance at the badge but not for a hover that exists to
+    /// answer "exactly when". Built alongside `as_of` from the same
+    /// `DateTime<Local>` conversion (final review, spec §5.1): the
+    /// toolbar's AS OF badge and the status bar's as-of segment both use
+    /// this as their tooltip TITLE, with the elided `as_of_badge`/segment
+    /// text moved to the tooltip's detail line instead.
+    pub as_of_full: Option<SharedString>,
 }
 
 /// Build the scope bar model for `frame`, given today's local date (for
@@ -77,29 +124,35 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
             } else {
                 format!("{} ∈ {{{}}}", d.column, d.values.len())
             },
+            full: format!("{} ∈ {}", d.column, d.values.join(", ")).into(),
+            tip_selector: format!("tip-scope-chip-{}", d.column).into(),
+            close_selector: format!("tip-scope-chip-close-{}", d.column).into(),
+            close_title: format!("Remove {}", d.column).into(),
         })
         .collect();
-    let expr = scope.expression.as_ref().map(|e| {
-        let s = e.to_string();
+    let expr_full: Option<SharedString> = scope.expression.as_ref().map(|e| e.to_string().into());
+    let expr = expr_full.as_ref().map(|s| {
         if s.chars().count() > 40 {
             format!("{}…", s.chars().take(40).collect::<String>())
         } else {
-            s
+            s.to_string()
         }
     });
     let impossible = scope.impossible.then(|| {
         let named = scope.columns().into_iter().next().unwrap_or_default();
         format!("∅ {named}")
     });
-    let as_of = match frame.as_of() {
-        geode_core::query::AsOf::Live => None,
+    let (as_of, as_of_full) = match frame.as_of() {
+        geode_core::query::AsOf::Live => (None, None),
         geode_core::query::AsOf::At(t) => {
             let local = t.with_timezone(&Local);
-            Some(if local.date_naive() == today {
+            let elided = if local.date_naive() == today {
                 local.format("%H:%M").to_string()
             } else {
                 local.format("%Y-%m-%d %H:%M").to_string()
-            })
+            };
+            let full: SharedString = local.format("%Y-%m-%d %H:%M:%S").to_string().into();
+            (Some(elided), Some(full))
         }
     };
     let slot_label = match &slot {
@@ -107,17 +160,21 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         None => "view default".to_string(),
     };
     let text_chip = scope.text.as_ref().map(|t| format!("text \"{t}\""));
-    let as_of_badge = as_of.as_ref().map(|t| format!("AS OF {t}"));
+    let text_tip: Option<SharedString> = scope.text.clone().map(Into::into);
+    let as_of_badge: Option<SharedString> = as_of.as_ref().map(|t| format!("AS OF {t}").into());
     ScopeBarModel {
         slot,
         slot_label,
         chips,
         text: scope.text.clone(),
         text_chip,
+        text_tip,
         expr,
+        expr_full,
         impossible,
         as_of,
         as_of_badge,
+        as_of_full,
     }
 }
 
@@ -128,8 +185,45 @@ mod tests {
     use chrono::TimeZone;
     use geode_core::groupings::GroupingSlots;
     use geode_core::query::AsOf;
-    use geode_core::scope::{DimensionSelection, Scope};
+    use geode_core::scope::{DimensionSelection, Scope, parse_expr};
     use geode_core::scopes::SavedScopes;
+
+    /// Task 3 (tooltips): a chip's hover wants the full selection, not
+    /// the elided `summary` a trader sees on the bar itself.
+    #[test]
+    fn a_chip_carries_the_full_selection_beside_its_elided_summary() {
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        f.set_scope(Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["A".into(), "B".into(), "C".into()],
+            }],
+            ..Scope::default()
+        });
+        let m = build_model(&f, chrono::Local::now().date_naive());
+        assert_eq!(m.chips[0].summary, "book ∈ {3}");
+        assert_eq!(m.chips[0].full, "book ∈ A, B, C");
+    }
+
+    /// Task 3 (tooltips): the expr chip elides past 40 chars, but a
+    /// hover wants the whole expression source. `Expr::Display` fully
+    /// parenthesises every `and`/`or` operand (round-trip grammar, not
+    /// brevity — see its own doc comment) so it does not reproduce the
+    /// typed text verbatim; comparing against `expr.to_string()` is the
+    /// brief's own documented fallback for that case.
+    #[test]
+    fn expr_full_is_the_whole_expression_while_expr_is_elided() {
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        let long = "npv > 1000000 and delta < -50000 and book = 'ABCDEFGH'";
+        let expr = parse_expr(long).unwrap();
+        f.set_scope(Scope {
+            expression: Some(expr.clone()),
+            ..Scope::default()
+        });
+        let m = build_model(&f, chrono::Local::now().date_naive());
+        assert!(m.expr.as_deref().unwrap().ends_with('…'));
+        assert_eq!(m.expr_full.as_deref(), Some(expr.to_string().as_str()));
+    }
 
     /// Phase 4b Task 1 fix round 1, MAJ-2: `shell::toolbar` used to
     /// `format!` the text chip, the AS OF badge and the slot readout
@@ -173,6 +267,28 @@ mod tests {
         );
     }
 
+    /// Final review, spec §5.1: the as-of tooltip must show the FULL
+    /// resolved timestamp, not `as_of`'s own elided form (which drops the
+    /// date on today and always drops seconds). Built alongside `as_of`
+    /// from the same local-time conversion, so a seconds-precision
+    /// instant does not silently round to the minute in the one place a
+    /// trader hovers to see exactly when.
+    #[test]
+    fn as_of_full_is_the_unelided_local_timestamp_while_as_of_elides_it() {
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        let at = Local.with_ymd_and_hms(2026, 9, 8, 14, 5, 30).unwrap();
+        f.set_as_of(AsOf::At(at.with_timezone(&chrono::Utc)));
+        let today = at.date_naive();
+
+        let m = build_model(&f, today);
+        assert_eq!(m.as_of.as_deref(), Some("14:05"), "the elided badge form");
+        assert_eq!(
+            m.as_of_full.as_deref(),
+            Some("2026-09-08 14:05:30"),
+            "the full resolved timestamp, seconds included"
+        );
+    }
+
     #[test]
     fn no_active_slot_labels_as_view_default() {
         let f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
@@ -181,5 +297,6 @@ mod tests {
         assert_eq!(m.slot_label, "view default");
         assert_eq!(m.text_chip, None);
         assert_eq!(m.as_of_badge, None);
+        assert_eq!(m.as_of_full, None);
     }
 }

@@ -23,12 +23,16 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{App, Div, Entity, Hsla, IntoElement, MouseButton, Window, div, px};
+use gpui::{
+    App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, SharedString, Stateful, Window,
+    div, px,
+};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
+use crate::tips;
 
 /// Compact width of the filter field (brief: "~200px").
 const FILTER_WIDTH: f32 = 200.0;
@@ -41,9 +45,20 @@ const FILTER_WIDTH: f32 = 200.0;
 /// `String` handed in here would pay full allocation cost every render
 /// for a value release builds never read — matching the `frame-readout`/
 /// `scope-asof` selectors two calls away, which build their (static)
-/// strings the same lazy way.
-fn chip(label: String, fg: Hsla, bg: Hsla, selector: impl Fn() -> String + 'static) -> Div {
+/// strings the same lazy way. Takes an `id` (Task 3) so the caller can
+/// chain `.tooltip(..)` — a tooltip needs a stable `Stateful<Div>`
+/// identity across renders, the same reason every hovered element in
+/// this crate (`sidebar.rs`'s discs and profile icon) already carries
+/// one.
+fn chip(
+    id: ElementId,
+    label: String,
+    fg: Hsla,
+    bg: Hsla,
+    selector: impl Fn() -> String + 'static,
+) -> Stateful<Div> {
     div()
+        .id(id)
         .px_2()
         .py_0p5()
         .rounded(px(4.))
@@ -67,7 +82,7 @@ pub fn toolbar(
     let chip_bg = theme.muted;
 
     let mut chips_row = h_flex().gap_1().items_center();
-    for c in &model.chips {
+    for (i, c) in model.chips.iter().enumerate() {
         // `Rc<str>`, not `String`: the mouse-down handler, the chip-body
         // selector and the close-glyph selector are three separate
         // `'static` closures, each needing its own owned handle to the
@@ -90,18 +105,45 @@ pub fn toolbar(
                     // column (Phase 4a §3.3) — the close glyph below
                     // stays a separate hit target so clicking it drops
                     // the dimension instead of opening the picker.
-                    chip(c.summary.clone(), chip_fg, chip_bg, move || {
-                        format!("scope-chip-{body_column}")
-                    })
+                    // `c.summary`/`c.full`/`c.tip_selector` are all
+                    // `build_model`'s own fields (fix round 1): attaching
+                    // the tooltip here costs a `SharedString` clone (a
+                    // refcount bump, or a stack copy for anything under
+                    // `SmolStr`'s inline cap) per render, never a fresh
+                    // `format!`/heap `String` the way the first cut of
+                    // this task did.
+                    chip(
+                        ElementId::NamedInteger(SharedString::new_static("scope-chip"), i as u64),
+                        c.summary.clone(),
+                        chip_fg,
+                        chip_bg,
+                        move || format!("scope-chip-{body_column}"),
+                    )
                     .cursor_pointer()
+                    .tooltip(tips::tip_with(
+                        c.tip_selector.clone(),
+                        c.full.clone(),
+                        Some("frame::pick"),
+                        Some(SharedString::new_static("click: pick values")),
+                    ))
                     .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                         on_open(&open_column, window, cx)
                     }),
                 )
                 .child(
                     div()
+                        .id(ElementId::NamedInteger(
+                            SharedString::new_static("scope-chip-close"),
+                            i as u64,
+                        ))
                         .child(Icon::new(IconName::Close).text_color(chip_fg))
                         .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                        .tooltip(tips::tip_with(
+                            c.close_selector.clone(),
+                            c.close_title.clone(),
+                            None,
+                            None,
+                        ))
                         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                             on_close(&column, window, cx)
                         }),
@@ -109,25 +151,58 @@ pub fn toolbar(
         );
     }
     if let Some(t) = &model.text_chip {
-        chips_row = chips_row.child(chip(t.clone(), chip_fg, chip_bg, || {
-            "scope-text-chip".to_string()
-        }));
+        chips_row = chips_row.child(
+            chip(
+                "scope-text-chip".into(),
+                t.clone(),
+                chip_fg,
+                chip_bg,
+                || "scope-text-chip".to_string(),
+            )
+            .tooltip(tips::tip_with(
+                SharedString::new_static("tip-scope-text-chip"),
+                model.text_tip.clone().unwrap_or_default(),
+                Some("frame::focus_text"),
+                None,
+            )),
+        );
     }
     if let Some(expr) = &model.expr {
-        chips_row = chips_row.child(chip(expr.clone(), chip_fg, chip_bg, || {
-            "scope-expr-chip".to_string()
-        }));
+        chips_row = chips_row.child(
+            chip(
+                "scope-expr-chip".into(),
+                expr.clone(),
+                chip_fg,
+                chip_bg,
+                || "scope-expr-chip".to_string(),
+            )
+            .tooltip(tips::tip_with(
+                SharedString::new_static("tip-scope-expr-chip"),
+                model.expr_full.clone().unwrap_or_default(),
+                None,
+                Some(SharedString::new_static(":filter <expr> sets it")),
+            )),
+        );
     }
     if let Some(named) = &model.impossible {
         // The contradiction chip: `theme.danger`/`danger_foreground`, not
         // the muted scheme every other chip uses — a scope that can match
         // nothing must read as an error, not routine state.
-        chips_row = chips_row.child(chip(
-            named.clone(),
-            theme.danger_foreground,
-            theme.danger.opacity(0.25),
-            || "scope-impossible-chip".to_string(),
-        ));
+        chips_row = chips_row.child(
+            chip(
+                "scope-impossible-chip".into(),
+                named.clone(),
+                theme.danger_foreground,
+                theme.danger.opacity(0.25),
+                || "scope-impossible-chip".to_string(),
+            )
+            .tooltip(tips::tip(
+                "tip-scope-impossible-chip",
+                "No row can match: two scope layers select disjoint values on this dimension",
+                None,
+                None,
+            )),
+        );
     }
     let has_chips = !model.chips.is_empty()
         || model.text.is_some()
@@ -153,25 +228,42 @@ pub fn toolbar(
                     .font_family(fonts::MONO)
                     .text_sm()
                     .debug_selector(|| "frame-readout".to_string())
-                    .when_some(model.as_of_badge.as_ref(), |el, badge| {
-                        // The existing warning treatment on the whole bar
-                        // (slot + chips + badge) — a stray as-of scope
-                        // must be unmissable, not a small badge easy to
-                        // miss at the edge of the eye. `scope-asof` names
-                        // the badge text itself for tests. `badge` is
-                        // already the finished "AS OF …" string
-                        // (`ScopeBarModel::as_of_badge`, Phase 4b Task 1
-                        // fix round 1 MAJ-2) — this only clones it.
-                        el.bg(theme.warning.opacity(0.25))
-                            .px_2()
-                            .rounded(px(4.))
-                            .child(
-                                div()
-                                    .text_color(theme.warning_foreground)
-                                    .debug_selector(|| "scope-asof".to_string())
-                                    .child(badge.clone()),
-                            )
-                    })
+                    .when_some(
+                        model.as_of_badge.as_ref().zip(model.as_of_full.as_ref()),
+                        |el, (badge, full)| {
+                            // The existing warning treatment on the whole
+                            // bar (slot + chips + badge) — a stray as-of
+                            // scope must be unmissable, not a small badge
+                            // easy to miss at the edge of the eye.
+                            // `scope-asof` names the badge text itself
+                            // for tests. `badge`/`full` are both
+                            // `build_model`'s own finished strings
+                            // (`ScopeBarModel::as_of_badge`/`as_of_full`)
+                            // — the tooltip's TITLE is the full resolved
+                            // timestamp (final review, spec §5.1: a
+                            // trader hovering to see exactly when must
+                            // not get the same elided text the badge
+                            // already shows), and the elided badge text
+                            // moves to the detail line. Both clones below
+                            // are refcount bumps, never a fresh `format!`.
+                            el.bg(theme.warning.opacity(0.25))
+                                .px_2()
+                                .rounded(px(4.))
+                                .child(
+                                    div()
+                                        .id("scope-asof")
+                                        .text_color(theme.warning_foreground)
+                                        .debug_selector(|| "scope-asof".to_string())
+                                        .tooltip(tips::tip_with(
+                                            SharedString::new_static("tip-scope-asof"),
+                                            full.clone(),
+                                            Some("frame::as_of"),
+                                            Some(badge.clone()),
+                                        ))
+                                        .child(badge.clone()),
+                                )
+                        },
+                    )
                     .child(
                         div()
                             .text_color(theme.muted_foreground)

@@ -71,6 +71,42 @@ fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui:
     );
 }
 
+/// Hovering the diagnostics summary segment (Task 4, spec §5.1) says what
+/// a click on it does — the one action this segment has, since it names
+/// no keyboard chord.
+#[gpui::test]
+fn hovering_the_diagnostics_summary_says_it_opens_the_tile(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+
+    diagnostics.update(&mut vcx, |d, cx| {
+        d.note_health(
+            "risk",
+            Health::Degraded { reason: "x".into() },
+            "x".into(),
+            SystemTime::now(),
+        );
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let seg = vcx
+        .debug_bounds("diagnostics-summary")
+        .expect("summary painted");
+    vcx.simulate_mouse_move(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-diagnostics-summary").is_some());
+}
+
 /// Clicking the status bar's diagnostics summary opens the diagnostics
 /// tile via `open_module("diagnostics", ..)` (Phase 4b Task 5) — the one
 /// production caller since `diagnostics::open` was retired (user ruling

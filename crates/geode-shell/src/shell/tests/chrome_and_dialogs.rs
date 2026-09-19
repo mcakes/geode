@@ -2128,3 +2128,97 @@ fn open_shell_dialog_closes_an_open_palette(cx: &mut gpui::TestAppContext) {
         "open_shell_dialog should have set ShellView's own modal state"
     );
 }
+
+// --- Tooltips (Task 2): sidebar discs and the profile icon ----------
+
+/// The hover mechanism end to end: no tooltip before hover, the disc's
+/// own bounds paint a tooltip after the show delay, and the chord chip
+/// names the live binding for `workspace::switch_1` (`mod+1`, which
+/// resolves to `alt+1` under `default_mod()` — deterministic, not
+/// platform-dependent, so only that arm need hold; both are checked for
+/// safety against a future default-mod change).
+#[gpui::test]
+fn hovering_a_workspace_disc_shows_its_name_and_chord(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, _view) = dock_test_shell(cx);
+    // Workspace 1 is always painted (it is the active one at startup).
+    let disc = vcx
+        .debug_bounds("sidebar-workspace-1")
+        .expect("workspace 1's disc is painted");
+    assert!(
+        vcx.debug_bounds("tip-sidebar-workspace-1").is_none(),
+        "no tooltip before hover"
+    );
+    vcx.simulate_mouse_move(
+        disc.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    let tip = vcx
+        .debug_bounds("tip-sidebar-workspace-1")
+        .expect("the tooltip is painted after the show delay");
+    assert!(tip.size.width > gpui::px(0.));
+    // The chord chip carries the builtin binding's text.
+    assert!(
+        vcx.debug_bounds("tip-sidebar-workspace-1-chord-mod+1")
+            .is_some()
+            || vcx
+                .debug_bounds("tip-sidebar-workspace-1-chord-alt+1")
+                .is_some(),
+        "the chord chip names mod+1 (spelled with the configured mod alias)"
+    );
+}
+
+/// The profile icon's tooltip names `settings::open` and its builtin
+/// chord.
+#[gpui::test]
+fn hovering_the_profile_icon_names_settings_and_its_chord(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, _view) = dock_test_shell(cx);
+    let icon = vcx
+        .debug_bounds("sidebar-profile")
+        .expect("profile icon painted");
+    vcx.simulate_mouse_move(
+        icon.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-sidebar-profile").is_some());
+    assert!(
+        vcx.debug_bounds("tip-sidebar-profile-chord-ctrl+,")
+            .is_some(),
+        "ctrl+, is the builtin"
+    );
+}
+
+/// Idle costs nothing: no tooltip without hover, and the tooltip goes
+/// away once the mouse leaves the disc.
+#[gpui::test]
+fn a_tooltip_goes_away_when_the_mouse_leaves(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, _view) = dock_test_shell(cx);
+    let disc = vcx.debug_bounds("sidebar-workspace-1").unwrap();
+    vcx.simulate_mouse_move(
+        disc.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-sidebar-workspace-1").is_some());
+    // Somewhere far from the rail — the window's far corner.
+    vcx.simulate_mouse_move(
+        gpui::point(gpui::px(900.), gpui::px(500.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("tip-sidebar-workspace-1").is_none(),
+        "the tooltip is gone"
+    );
+}

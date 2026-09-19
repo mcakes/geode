@@ -36,6 +36,41 @@ fn typing_a_time_and_enter_sets_as_of_and_paints_the_stripe_and_segment(
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
 }
 
+/// Hovering the status bar's AS OF segment (Task 4, spec §5.1) names the
+/// same `frame::as_of` chord the toolbar's own AS OF badge does — the
+/// keyboard twin to "click it to reopen the as-of selector".
+#[gpui::test]
+fn hovering_the_status_as_of_segment_names_the_selector_chord(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let _frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    vcx.simulate_keystrokes("alt-t");
+    vcx.simulate_input("14:05");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+
+    let seg = vcx.debug_bounds("status-as-of").expect("segment painted");
+    vcx.simulate_mouse_move(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-status-as-of").is_some());
+    assert!(
+        vcx.debug_bounds("tip-status-as-of-chord-mod+t").is_some()
+            || vcx.debug_bounds("tip-status-as-of-chord-alt+t").is_some()
+    );
+    // Final review, spec §5.1: the title is the full resolved timestamp
+    // (`ScopeBarModel::as_of_full`), not the elided `"AS OF … · :live to
+    // return"` segment text — the width comparison lives on the scope-bar
+    // badge's own test below, since the segment's OWN text is longer than
+    // the bare timestamp and so is not the shorter side here.
+    assert!(vcx.debug_bounds("tip-status-as-of-title").is_some());
+}
+
 /// A bad time shows inline (`as-of-error`) and `enter` does nothing: the
 /// modal stays open and the frame stays live — the mutation entry "as-of:
 /// a bad time never sets the frame" pins the failure arm never calling
@@ -184,4 +219,51 @@ fn the_as_of_list_takes_ctrl_n_and_clamps_a_page_step(cx: &mut gpui::TestAppCont
     assert_eq!(selected(&cx), 2, "a bare step wraps");
     cx.simulate_keystrokes("ctrl-u");
     assert_eq!(selected(&cx), 0, "a page step clamps");
+}
+
+/// Task 3 (tooltips): hovering the AS OF badge names its full text
+/// (`ScopeBarModel::as_of_badge`) and `frame::as_of`'s chord — the
+/// selector that reopens the very dialog that set it.
+#[gpui::test]
+fn hovering_the_as_of_badge_names_the_selector_chord(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let at = chrono::Utc::now() - chrono::Duration::hours(1);
+    frame.update(&mut vcx, |f, cx| {
+        if f.set_as_of(AsOf::At(at)) {
+            cx.notify();
+        }
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.run_until_parked();
+
+    let badge = vcx.debug_bounds("scope-asof").expect("badge painted");
+    vcx.simulate_mouse_move(
+        badge.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-scope-asof").is_some());
+    assert!(
+        vcx.debug_bounds("tip-scope-asof-chord-mod+t").is_some()
+            || vcx.debug_bounds("tip-scope-asof-chord-alt+t").is_some(),
+        "the tooltip must name frame::as_of's chord"
+    );
+    // Final review, spec §5.1: the title is the FULL resolved timestamp
+    // (`ScopeBarModel::as_of_full`), not the elided badge text — wider,
+    // since it always carries the date and seconds the badge itself
+    // elides away.
+    let title = vcx
+        .debug_bounds("tip-scope-asof-title")
+        .expect("tooltip title painted");
+    assert!(
+        title.size.width > badge.size.width,
+        "the full timestamp is wider than the elided badge"
+    );
 }

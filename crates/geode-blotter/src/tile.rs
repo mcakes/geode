@@ -25,10 +25,13 @@ use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::FindEvent;
 use geode_shell::tiling::TileId;
+use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
 use geode_shell::vimnav::NavCommand;
 use gpui::prelude::*;
-use gpui::{App, ClipboardItem, Context, Entity, IntoElement, Window, div, px};
+use gpui::{
+    App, ClipboardItem, Context, ElementId, Entity, IntoElement, SharedString, Window, div, px,
+};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
 use std::cell::{Cell, RefCell};
@@ -108,7 +111,20 @@ pub struct BlotterTile {
     view_name: String,
     pin: Pin,
     unscoped: bool,
+    /// The `unscoped` pill's own tooltip selector (`"tip-blotter-
+    /// unscoped-{id}"`), built once here since it depends only on the
+    /// tile id, never per render.
+    unscoped_tip_selector: SharedString,
     tile_scope: Scope,
+    /// [`filter_summary`] of `tile_scope`, cached so the `filtered`
+    /// pill's tooltip clones a `SharedString` at paint time rather than
+    /// rebuilding the summary (a `Vec`/`String` allocation) every
+    /// render — recomputed wherever `tile_scope` is assigned (`new`,
+    /// `:filter`, `:filter clear`).
+    filter_tip: SharedString,
+    /// The `filtered` pill's own tooltip selector (`"tip-blotter-
+    /// filtered-{id}"`), built once alongside `filter_tip`.
+    filter_tip_selector: SharedString,
     /// The frame versions last acted on; `None` until the first query.
     acted: Option<FrameVersions>,
     tag: u64,
@@ -227,6 +243,9 @@ impl BlotterTile {
                 Some(scope)
             })
             .unwrap_or_default();
+        let unscoped_tip_selector: SharedString = format!("tip-blotter-unscoped-{}", tile.0).into();
+        let filter_tip_selector: SharedString = format!("tip-blotter-filtered-{}", tile.0).into();
+        let filter_tip: SharedString = filter_summary(&tile_scope).into();
 
         // `[ui] line_numbers` arrives through the shell's `UiSettings`
         // global (see `geode_shell::linenumbers`'s module doc for why a
@@ -285,7 +304,10 @@ impl BlotterTile {
             view_name,
             pin,
             unscoped,
+            unscoped_tip_selector,
             tile_scope,
+            filter_tip,
+            filter_tip_selector,
             acted: None,
             tag: 0,
             last_grouping: Vec::new(),
@@ -336,6 +358,19 @@ impl BlotterTile {
             Some(d) => Err(d.message),
             None => Ok(()),
         }
+    }
+
+    /// The one place `tile_scope` is assigned (final review, spec §5.1):
+    /// `filter_tip` is the tile's own filter, spelled out in full for a
+    /// hover (`filter_summary`), and it must never drift from
+    /// `tile_scope` itself — three separate assignment pairs (`:filter`,
+    /// `:filter text`, `:filter clear`) each had their own chance to
+    /// update one and forget the other. Building `filter_tip` from
+    /// `scope` before moving it into `self.tile_scope` costs nothing
+    /// extra: `filter_summary` already borrows its argument.
+    fn set_tile_scope(&mut self, scope: Scope) {
+        self.filter_tip = filter_summary(&scope).into();
+        self.tile_scope = scope;
     }
 
     fn grouping(&self, frame: &Frame, view: &ViewSpec) -> Vec<String> {
@@ -892,17 +927,17 @@ impl BlotterTile {
                 let mut scope = self.tile_scope.clone();
                 scope.expression = Some(expr);
                 self.validate_tile_scope(&scope)?;
-                self.tile_scope = scope;
+                self.set_tile_scope(scope);
                 self.requery(cx);
             }
             Command::FilterText(words) => {
                 let mut scope = self.tile_scope.clone();
                 scope.text = (!words.trim().is_empty()).then_some(words);
-                self.tile_scope = scope;
+                self.set_tile_scope(scope);
                 self.requery(cx);
             }
             Command::FilterClear => {
-                self.tile_scope = Scope::default();
+                self.set_tile_scope(Scope::default());
                 self.requery(cx);
             }
             Command::ScopeExpr(text) => {
@@ -1228,6 +1263,27 @@ fn short_time(t: &str) -> &str {
     t.get(11..16.min(t.len())).unwrap_or(t)
 }
 
+/// One line for the `filtered` pill's tooltip: the tile's own filter
+/// layer (`:filter`, spec §3.7), spelled the way the scope bar spells
+/// the frame's — dimensions, then text, then expression, joined by
+/// ` · `; empty for an empty scope. Computed once wherever `tile_scope`
+/// changes (`BlotterTile::new`, and the `:filter`/`:filter clear`
+/// handlers), never per render — see `filter_tip` on `BlotterTile`.
+pub(crate) fn filter_summary(scope: &Scope) -> String {
+    let mut parts: Vec<String> = scope
+        .dimensions
+        .iter()
+        .map(|d| format!("{} \u{2208} {}", d.column, d.values.join(", ")))
+        .collect();
+    if let Some(t) = &scope.text {
+        parts.push(format!("text \"{t}\""));
+    }
+    if let Some(e) = &scope.expression {
+        parts.push(e.to_string());
+    }
+    parts.join(" \u{b7} ")
+}
+
 impl gpui::Render for BlotterTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The paint half of §7.1 (§6.8): the first render after a delivery.
@@ -1275,22 +1331,42 @@ impl gpui::Render for BlotterTile {
         if self.unscoped {
             header = header.child(
                 div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("blotter-unscoped"),
+                        self.tile.0,
+                    ))
                     .text_color(theme.warning_foreground)
                     .bg(theme.warning.opacity(0.25))
                     .px_1()
                     .rounded(px(3.))
-                    .child("unscoped"),
+                    .child("unscoped")
+                    .tooltip(tips::tip_with(
+                        self.unscoped_tip_selector.clone(),
+                        SharedString::new_static("Ignores the shared scope"),
+                        None,
+                        Some(SharedString::new_static(":unscoped re-attaches it")),
+                    )),
             );
         }
         if !self.tile_scope.is_empty() {
             header = header.child(
                 div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("blotter-filtered"),
+                        self.tile.0,
+                    ))
                     .text_color(theme.warning_foreground)
                     .bg(theme.warning.opacity(0.25))
                     .px_1()
                     .rounded(px(3.))
                     .debug_selector(|| format!("blotter-filtered-{}", self.tile.0))
-                    .child("filtered"),
+                    .child("filtered")
+                    .tooltip(tips::tip_with(
+                        self.filter_tip_selector.clone(),
+                        self.filter_tip.clone(),
+                        None,
+                        Some(SharedString::new_static(":filter clear removes it")),
+                    )),
             );
         }
         if let Some(snapshot) = &snapshot {
@@ -1452,6 +1528,24 @@ mod tests {
         s.set(1, vec!["lhu".into()]);
         s.set(2, vec!["underlying_ref".into(), "lhu".into()]);
         s
+    }
+
+    #[test]
+    fn filter_summary_lists_dimensions_text_and_expression_in_order() {
+        use geode_core::scope::DimensionSelection;
+
+        let mut scope = Scope::default();
+        scope.dimensions.push(DimensionSelection {
+            column: "book".into(),
+            values: vec!["A".into(), "B".into()],
+        });
+        scope.text = Some("abc".into());
+        scope.expression = Some(parse_expr("npv > 0").unwrap());
+        assert_eq!(
+            filter_summary(&scope),
+            "book \u{2208} A, B \u{b7} text \"abc\" \u{b7} npv > 0"
+        );
+        assert_eq!(filter_summary(&Scope::default()), "");
     }
 
     /// Root; L1, L2; L1/SPX. Trading PnL is NonAttributable at depth 2.
@@ -2534,6 +2628,87 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert!(vcx.debug_bounds("blotter-filtered-7").is_none());
+    }
+
+    /// Hovering the `filtered` pill shows the tile's own filter layer —
+    /// the whole thing (`filter_summary`), not just the word "filtered".
+    #[gpui::test]
+    fn hovering_the_filtered_pill_shows_the_tiles_filter(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests); // A's initial query
+        let _ = next_query(&h.requests); // B's initial query
+
+        h.a.update(&mut vcx, |t, cx| {
+            t.command("filter model_code = 'EURP'", cx).unwrap()
+        });
+        let _ = next_query(&h.requests);
+
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let pill = vcx
+            .debug_bounds("blotter-filtered-7")
+            .expect("pill painted");
+        vcx.simulate_mouse_move(
+            pill.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("tip-blotter-filtered-7").is_some());
+        let title = vcx
+            .debug_bounds("tip-blotter-filtered-7-title")
+            .expect("tooltip title painted");
+        assert!(
+            title.size.width > pill.size.width,
+            "the filter text is longer than the word 'filtered'"
+        );
+    }
+
+    /// `Command::FilterText` recomputes `filter_tip` exactly as
+    /// `Command::FilterExpr` does (`set_tile_scope`, final review, spec
+    /// §5.1) — a `:filter text` line must show up in the pill's hover
+    /// exactly as a `:filter <expr>` one does above, not the stale
+    /// pre-filter tip a missed recompute would leave painted.
+    #[gpui::test]
+    fn hovering_the_filtered_pill_after_filter_text_shows_the_text(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests); // A's initial query
+        let _ = next_query(&h.requests); // B's initial query
+
+        h.a.update(&mut vcx, |t, cx| {
+            t.command("filter text underlying", cx).unwrap()
+        });
+        let _ = next_query(&h.requests);
+
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let pill = vcx
+            .debug_bounds("blotter-filtered-7")
+            .expect("pill painted");
+        vcx.simulate_mouse_move(
+            pill.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("tip-blotter-filtered-7").is_some());
+        let title = vcx
+            .debug_bounds("tip-blotter-filtered-7-title")
+            .expect("tooltip title painted");
+        assert!(
+            title.size.width > pill.size.width,
+            "the text filter's own summary (`text \"underlying\"`) is longer than the word 'filtered'"
+        );
     }
 
     /// `unscoped` drops the *frame's* layer, not the tile's own — a

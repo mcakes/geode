@@ -1961,6 +1961,60 @@ run_mutation "keybindings: a row click is dropped while a confirm is armed (spec
   geode-shell \
   a_row_click_while_a_confirm_is_armed_is_dropped
 
+# Tooltips (2026-09-18): the chord a tooltip shows must be the EFFECTIVE
+# binding — a user-layer "none" shadow plus a rebind — not the first
+# binding for the action id. Only the shared effective_binding walk sees
+# the shadow; a naive last-for-action search reports the builtin.
+run_mutation "tips: chord_for ignores a none shadow" \
+  crates/geode-shell/src/tips.rs \
+  '    effective_binding(bindings, &id).map(|b| b.keystrokes.clone())' \
+  '    bindings.iter().rev().find(|b| b.action == id).map(|b| b.keystrokes.clone())' \
+  geode-shell \
+  chord_for_follows_a_user_layer_rebind
+
+# A reload must republish the global, or every tooltip shows the
+# startup keymap for the rest of the session.
+run_mutation "tips: a keymap reload republishes Chords" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.services.keymap.bindings().to_vec(),' \
+  '                Vec::new(),' \
+  geode-shell \
+  a_keymap_reload_refreshes_the_chords_global
+
+# The scope chip's tooltip lists EVERY value; the elided summary is what
+# the chip itself shows. Reusing the summary as the tooltip would pass
+# every bounds test and tell the trader nothing new.
+run_mutation "scopebar: a chip's full text lists every value" \
+  crates/geode-shell/src/scopebar.rs \
+  '            full: format!("{} ∈ {}", d.column, d.values.join(", ")).into(),' \
+  '            full: format!("{} ∈ {{{}}}", d.column, d.values.len()).into(),' \
+  geode-shell \
+  a_chip_carries_the_full_selection_beside_its_elided_summary
+
+# Final review (2026-09-18): the Behind-explaining tooltip on the state
+# run must be gated on the badge really being `Behind` — otherwise a
+# tile reading "no document yet" or a plain dirty dot would carry a
+# ":rebase adopts it · :discard drops your edits" tooltip that makes no
+# sense for either state.
+run_mutation "marketdata: the Behind tooltip is gated on the badge" \
+  crates/geode-marketdata/src/header.rs \
+  '                .when(matches!(h.badge, DraftBadge::Behind { .. }), |el| {' \
+  '                .when(true, |el| {' \
+  geode-marketdata \
+  a_tile_that_is_not_behind_has_no_rebase_tooltip
+
+# Final review (2026-09-18): `set_tile_scope` is the one place
+# `filter_tip` is recomputed from `tile_scope` — drop the recompute and
+# a `:filter text` (or any other `:filter` line) leaves the `filtered`
+# pill's tooltip showing whatever the tile's filter used to be, not what
+# it is now.
+run_mutation "blotter: set_tile_scope recomputes filter_tip" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.filter_tip = filter_summary(&scope).into();' \
+  '        let _ = &scope;' \
+  geode-blotter \
+  hovering_the_filtered_pill_after_filter_text_shows_the_text
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \
@@ -2885,13 +2939,17 @@ run_mutation "tile: the configured threshold is the one used" \
 
 # `Command::FilterExpr`, which is the arm the named test drives
 # (`filter model_code = 'EURP'`); `Command::FilterText` right below it
-# assigns and requeries identically.
+# assigns and requeries identically. Final review (2026-09-18) folded the
+# `tile_scope`/`filter_tip` assignment pair into `set_tile_scope` — the
+# anchor now targets THAT call rather than the two lines it replaced, so
+# a build that never actually reassigns `tile_scope` is still exercised.
 run_mutation "blotter: :filter narrows only this tile" \
   crates/geode-blotter/src/tile.rs \
   '                self.validate_tile_scope(&scope)?;
-                self.tile_scope = scope;
+                self.set_tile_scope(scope);
                 self.requery(cx);' \
   '                self.validate_tile_scope(&scope)?;
+                let _ = scope;
                 self.requery(cx);' \
   geode-blotter filter_narrows_only_this_tile_marks_it_and_round_trips_the_session
 
@@ -10825,8 +10883,8 @@ run_mutation "final: a painting delivery clears the previous delivery's notice" 
 # pinned assertions.
 run_mutation "final: the Behind chip does not call an older document newer" \
   crates/geode-marketdata/src/header.rs \
-  'Some((format!("update {}", local_hhmm(&newer)).into(), Tone::Warn)),' \
-  'Some((format!("newer document received {}", local_hhmm(&newer)).into(), Tone::Warn)),' \
+  'Some((format!("update {}", local_hhmm(newer)).into(), Tone::Warn)),' \
+  'Some((format!("newer document received {}", local_hhmm(newer)).into(), Tone::Warn)),' \
   geode-marketdata \
   a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base
 
@@ -11233,8 +11291,8 @@ run_mutation "mddraft: a malformed attribute entry is skipped, not the whole dra
 
 run_mutation "mdheader: behind reads update HH:MM" \
   crates/geode-marketdata/src/header.rs \
-  'format!("update {}", local_hhmm(&newer))' \
-  'format!("different document received {}", local_hhmm(&newer))' \
+  'format!("update {}", local_hhmm(newer))' \
+  'format!("different document received {}", local_hhmm(newer))' \
   geode-marketdata dirty_is_a_dot_and_behind_reads_update_hhmm
 
 run_mutation "mdheader: a dirty draft sets the dot flag" \

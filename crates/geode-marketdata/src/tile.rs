@@ -52,7 +52,7 @@
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
 use crate::core::menu::{self, MenuInputs, MenuRow};
-use crate::core::{Draft, MatrixModel, PanelSpec, parse_attr, parse_cell};
+use crate::core::{Draft, DraftBadge, MatrixModel, PanelSpec, parse_attr, parse_cell};
 use crate::delegate::MatrixDelegate;
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{MenuState, PickerRows, PickerState, Popup, render_menu, render_picker};
@@ -361,6 +361,13 @@ pub struct MarketDataTile {
     /// adds `Picker`. `None` most of the time, so most frames pay nothing
     /// for it beyond the tag check.
     popup: Option<Popup>,
+    /// The `⋯` button's tooltip selector (`"tip-marketdata-menu-button-
+    /// {id}"`), built once here — it depends only on the tile id, never
+    /// per render — and passed into [`header::render`].
+    menu_tip_selector: SharedString,
+    /// The `Behind` state run's tooltip selector (`"tip-marketdata-
+    /// state-{id}"`), built once alongside `menu_tip_selector`.
+    state_tip_selector: SharedString,
 }
 
 impl MarketDataTile {
@@ -560,6 +567,7 @@ impl MarketDataTile {
                 underlying: None,
                 dirty: false,
                 attrs: Vec::new(),
+                badge: DraftBadge::Clean,
                 state: None,
                 notice: None,
                 time: None,
@@ -570,6 +578,8 @@ impl MarketDataTile {
             last_flip: 0,
             tones: FlooredTones::derive(cx.theme()),
             popup: None,
+            menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
+            state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
         };
         this.rebuild_chrome();
         // The delegate starts with the model this tile starts with (review
@@ -2778,6 +2788,8 @@ impl gpui::Render for MarketDataTile {
             &tones,
             &tile,
             self.id.0,
+            self.menu_tip_selector.clone(),
+            self.state_tip_selector.clone(),
         );
         // The popup is anchored off a zero-size, absolutely positioned
         // sibling at the header's own right edge (spec §6.1) — `relative`
@@ -6170,6 +6182,115 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.mode(&vcx), "menu");
         click_at(&mut vcx, button, 1);
         assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    /// Task 5's Chords fixture: the fragment's own bindings, built exactly
+    /// as `content.rs`'s keyboard tests do (a registry from `ACTIONS`,
+    /// `fragment_doc`, then `build_keymap`), installed as the
+    /// `tips::Chords` global — the module-visible keymap read `chord_for`
+    /// resolves a tooltip's chord against.
+    fn install_fragment_chords(vcx: &mut gpui::VisualTestContext) {
+        let mut registry = geode_shell::actions::ActionRegistry::default();
+        for (id, title) in crate::content::ACTIONS {
+            registry
+                .register(geode_shell::actions::ActionDef {
+                    id: ActionId((*id).to_string()),
+                    title: (*title).to_string(),
+                    category: "Market data".to_string(),
+                })
+                .expect("no duplicate ids");
+        }
+        let doc =
+            geode_shell::keymap::fragments::fragment_doc(CVI.kind, crate::content::DEFAULT_KEYMAP)
+                .expect("the fragment parses");
+        let (keymap, diags) = geode_shell::keymap::build_keymap(
+            &[doc],
+            geode_shell::defaults::default_mod(),
+            &registry,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        vcx.update(|_window, cx| {
+            cx.set_global(geode_shell::tips::Chords(Arc::new(
+                keymap.bindings().to_vec(),
+            )));
+        });
+    }
+
+    #[gpui::test]
+    fn hovering_the_menu_button_names_actions_and_its_chord(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        install_fragment_chords(&mut vcx);
+
+        let btn = centre_of(&mut vcx, &format!("marketdata-menu-button-{TILE}"));
+        vcx.simulate_mouse_move(btn, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        let tip_selector: &'static str =
+            Box::leak(format!("tip-marketdata-menu-button-{TILE}").into_boxed_str());
+        assert!(vcx.debug_bounds(tip_selector).is_some());
+        let chord_selector: &'static str =
+            Box::leak(format!("tip-marketdata-menu-button-{TILE}-chord-.").into_boxed_str());
+        assert!(
+            vcx.debug_bounds(chord_selector).is_some(),
+            "the fragment binds `.`"
+        );
+    }
+
+    #[gpui::test]
+    fn hovering_the_behind_state_explains_rebase_and_discard(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+
+        let run_selector: &'static str =
+            Box::leak(format!("marketdata-state-{TILE}").into_boxed_str());
+        let run = centre_of(&mut vcx, run_selector);
+        vcx.simulate_mouse_move(run, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        let tip_selector: &'static str =
+            Box::leak(format!("tip-marketdata-state-{TILE}").into_boxed_str());
+        assert!(vcx.debug_bounds(tip_selector).is_some());
+    }
+
+    /// The state run's `Behind`-explaining tooltip (`header.rs`'s
+    /// `.when(matches!(h.badge, DraftBadge::Behind { .. }))`) must not
+    /// paint for any other state that run shows — "no document yet" here,
+    /// a real painted state run (badge `Clean`) with nothing behind to
+    /// rebase or discard. Without the gate this negative case has no
+    /// failing test to catch it.
+    #[gpui::test]
+    fn a_tile_that_is_not_behind_has_no_rebase_tooltip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+
+        let run_selector: &'static str =
+            Box::leak(format!("marketdata-state-{TILE}").into_boxed_str());
+        let run = centre_of(&mut vcx, run_selector);
+        vcx.simulate_mouse_move(run, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        let tip_selector: &'static str =
+            Box::leak(format!("tip-marketdata-state-{TILE}").into_boxed_str());
+        assert!(vcx.debug_bounds(tip_selector).is_none());
     }
 
     #[gpui::test]

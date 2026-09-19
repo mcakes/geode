@@ -899,6 +899,7 @@ impl Render for ShellView {
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
             on_diagnostics_click,
             bar_model.as_of.as_deref(),
+            bar_model.as_of_full.as_ref(),
             self.services.theme.active_name(),
             cx,
         );

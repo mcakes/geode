@@ -337,6 +337,56 @@ an idle window pays nothing.
 carries the expected title and chord text; a rebinding test showing the
 chip follows the user layer.
 
+**As built (2026-09-18):** `geode_shell::tips` — `TipModel::resolve`
+(pure), `tip(selector, title, action, detail)` for all-literal sites and
+`tip_with(SharedString, SharedString, action, detail)` for owned strings
+(both return the `.tooltip(..)` closure; the chord is resolved on hover
+from the `Chords` global through `try_global`, so a fixture without one
+paints a chord-less tooltip), and `render_tip` (title, one `key_chip` per
+keystroke, muted detail; selectors `tip-<site>`, `-title`,
+`-chord-<ctrl+k>`). Three departures from the paragraph above, each a
+ruling: the chip is Geode's `key_chip`, not gpui-component's `Kbd` (`Kbd`
+hardwires uppercase key names; every chip in the app is lowercase in the
+data face); the module-visible keymap read is a second gpui global,
+`tips::Chords`, republished by `hot_reload` after every keymap rebuild —
+the market-data `⋯` button has no other path to the live keymap; and
+**attaching a tooltip allocates nothing of OURS per render** — the model
+owns every string a tooltip needs as a `SharedString` (`Chip.full`,
+`tip_selector`, `close_selector`, `close_title`; `ScopeBarModel.expr_full`,
+`text_tip`; the blotter's `filter_tip`, recomputed at every `tile_scope`
+assignment; the market-data tile's two selectors and the prepared state
+text), and a literal is always `SharedString::new_static` — `From<&str>`
+inlines ≤ 23 bytes and heap-allocates above, and a site must not depend
+on a title's length. That claim does not extend to gpui's own `.tooltip()`
+plumbing (`Rc::new` of the builder at attach, plus the hover-check
+closures and boxed mouse listeners at paint — roughly eight small objects
+per stateful element per paint): that cost is the same unavoidable cost
+every `on_mouse_down` in the app already pays, ours to reduce no further,
+and an idle window draws no frame and pays none of it. Nor does the helper
+decide the hover delay, despite the "How" paragraph above saying so — it
+inherits gpui's own `DEFAULT_TOOLTIP_SHOW_DELAY` (500 ms) and sets nothing;
+what it decides is the content shape (title, chord, detail) and the chip
+formatting. `render_tip` itself is called once per hover, not once per
+frame, but the element tree it returns is re-rendered by gpui on every
+frame the tooltip stays shown — that re-render formats nothing in release
+builds, since `render_tip`'s own `format!`s live only inside
+`debug_selector` closures, which release's own `debug_selector` never
+calls. Sites: sidebar discs + profile icon; scope-chip bodies (the full
+selection) and close glyphs, text/expr (whole expression)/impossible
+chips, the AS OF badge (whose tooltip title is the as-of instant's full
+`YYYY-MM-DD HH:MM:SS` local form, `ScopeBarModel.as_of_full`, with the
+elided badge/segment text moved to the detail line); the status bar's
+diagnostics summary and as-of segment (the same `as_of_full` title); the
+blotter's `filtered` (the tile's filter, re-read after a text filter same
+as an expression one) and `unscoped` pills; the market-data `⋯` (chord
+`.`) and `Behind` state run — the one title left at minute precision,
+since it already reads "update HH:MM" and a Behind tooltip only widens
+that same run's own text, a known, deliberate limit rather than an
+oversight. Tested by hover in `VisualTestContext` (mouse move → 600 ms →
+`run_until_parked` → `tip-<site>` bounds), including a negative case for
+the `Behind`-gated state tooltip and the filter-text path. Display check
+pending: placement and theme colours on a real window.
+
 ### 5.2 As-of date picker
 
 **Keyboard path (grammar):** `parse_as_of` (`geode-core::query`) accepts
