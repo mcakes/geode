@@ -20,9 +20,15 @@
 //!
 //! What stays `px`: the tile rectangles from the pure tiling layout (they
 //! ARE window pixels), one-device-pixel hairlines and the 2 px divider,
-//! the drag-hit tolerance, the overlay shadow, and the blotter's column
-//! widths — a view's `width = 120` is a pixel contract in the config
-//! (`view_presentation.toml`), not chrome.
+//! the drag-hit tolerance and the drag ghost (a bare outline, no text),
+//! the overlay shadow, gpui-component's own `TITLE_BAR_HEIGHT` (its
+//! constant, not ours), and table column widths: the blotter's because a
+//! view's `width = 120` is a pixel contract in the config
+//! (`view_presentation.toml`), and the market-data panel's
+//! (`LABEL_WIDTH`/`CELL_WIDTH`) because `TableDelegate::column` is
+//! answered with no window in hand — a known gap, so at `Large` a panel
+//! cell's text grows inside a column that did not (the fix is a rem
+//! handed to the delegate on each render plus a `refresh`, deferred).
 
 use gpui::{Pixels, Rems, rems};
 

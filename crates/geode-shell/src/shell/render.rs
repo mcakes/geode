@@ -262,8 +262,15 @@ impl Render for ShellView {
         }
 
         // Apply the UI font size (see the `fontsize` module doc): the rem
-        // size scales every rem-based text size in the shell. Guarded so
-        // the setter only runs on an actual change, not every frame.
+        // size scales every rem-based text size in the shell and, since
+        // `shell::scale`, every chrome length too. The guard is a compare,
+        // not a real skip: gpui-component's `Root::render` sets the rem to
+        // its own `Theme.font_size` (16 px, which Geode never changes) on
+        // EVERY frame before this view renders, so this setter fires every
+        // frame too — harmless, but it means every rem read this render
+        // makes (`content_area`, `sidebar::width`, `status::height`,
+        // `rem_size` below) must sit AFTER this line, and nothing rendered
+        // between `Root`'s set and this one may read the rem.
         let rem = gpui::px(self.font_size.rem_px());
         if window.rem_size() != rem {
             window.set_rem_size(rem);

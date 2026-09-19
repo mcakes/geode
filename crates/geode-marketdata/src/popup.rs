@@ -314,11 +314,14 @@ pub(crate) fn render_menu(
                     .gap_4()
                     // The family's selected treatment (`MenuItemElement`):
                     // `accent` under `accent_foreground`, never a second
-                    // list token.
-                    .when(i == m.highlighted, |d| {
+                    // list token — and, as there, never on a disabled
+                    // row: the highlight still LANDS on one (`step` does
+                    // not skip them, so `enter` can answer with the
+                    // reason), but it paints muted, not enabled.
+                    .when(i == m.highlighted && !disabled, |d| {
                         d.bg(theme.accent).text_color(theme.accent_foreground)
                     })
-                    .when(i != m.highlighted, |d| {
+                    .when(i != m.highlighted || disabled, |d| {
                         d.text_color(if disabled {
                             theme.muted_foreground
                         } else {

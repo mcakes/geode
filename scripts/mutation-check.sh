@@ -11622,6 +11622,30 @@ run_mutation "scale: the tile surface reserves the status bar's scaled height" \
   geode-shell \
   chrome_and_dialog_rows_follow_the_font_size
 
+# The sidebar rail's painted width and the surface's reservation are two
+# declarations of one length (review M1 of this branch: a first cut of
+# the zoom test only re-checked `sidebar::width`'s arithmetic, and this
+# mutation SURVIVED the whole suite). Mutated to the literal, the rail
+# paints 40 px while every tile starts 46.67 px in at Large.
+run_mutation "scale: the painted sidebar rail is the width the surface reserves" \
+  crates/geode-shell/src/shell/sidebar.rs \
+  '        .w(scale::design(WIDTH))
+        .h_full()' \
+  '        .w(gpui::px(WIDTH))
+        .h_full()' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# The command-line strip the same way (review M2): `strip_top` is
+# computed from the scaled height, so a strip painted at the literal
+# floats 4.67 px above the tile's bottom border at Large.
+run_mutation "scale: the command-line strip paints the height its top was computed from" \
+  crates/geode-shell/src/shell/commandline_view.rs \
+  '        .h(px(height))' \
+  '        .h(px(HEIGHT))' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
 # `design` is the identity at Medium: the pixel value it is handed IS the
 # pixel it paints at the design rem, which is what lets every tuned
 # literal move onto the scale without a visual change. Mutated to scale

@@ -97,6 +97,8 @@ const TILE_DRAG_THRESHOLD: f32 = 5.0;
 /// and a fixed size keeps it legible whether the grabbed tile was a
 /// full-height column or a thin dock sliver). Offset down-right so the
 /// cursor tip — the thing doing the zone targeting — stays unobscured.
+/// Window pixels, not `shell::scale`: the ghost is a bare outline with
+/// no text inside it to keep in step with the rem.
 pub(super) const TILE_DRAG_GHOST_SIZE: (f32, f32) = (96.0, 64.0);
 pub(super) const TILE_DRAG_GHOST_OFFSET: f32 = 12.0;
 

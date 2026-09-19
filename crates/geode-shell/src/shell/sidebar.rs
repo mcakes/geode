@@ -223,6 +223,10 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         .h_full()
         .items_center()
         .justify_between()
+        // Test hook: the zoom test measures the PAINTED rail against
+        // `width(window)`, the surface's reservation — two declarations
+        // of one length that nothing else binds (review M1).
+        .debug_selector(|| "shell-sidebar".to_string())
         .bg(theme.sidebar)
         .border_r_1()
         .border_color(theme.sidebar_border)

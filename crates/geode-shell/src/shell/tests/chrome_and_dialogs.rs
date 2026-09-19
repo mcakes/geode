@@ -2317,4 +2317,68 @@ fn chrome_and_dialog_rows_follow_the_font_size(cx: &mut gpui::TestAppContext) {
         at_large.1,
         at_large.3
     );
+
+    // The PAINTED rail is the width the surface reserved (review M1: the
+    // two are separate declarations, and `sidebar::width` alone only
+    // re-checks the arithmetic). Still at Large.
+    let rail = cx
+        .debug_bounds("shell-sidebar")
+        .expect("sidebar rail painted");
+    assert!(
+        close(f32::from(rail.size.width), at_large.4),
+        "the painted rail ({:?}) should be the width the surface reserved ({})",
+        rail.size.width,
+        at_large.4
+    );
+
+    // The command-line strip (review M2): its painted height is the
+    // scaled one, and it still ends exactly on the focused tile's bottom
+    // border — `strip_top` is computed from the scaled height, so a strip
+    // painted at the literal would float above it at Large.
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes(":");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let strip = cx.debug_bounds("command-line").expect("the strip painted");
+    let (strip_height, tile_bottom) = cx.update(|window, app| {
+        let expected = crate::shell::scale::design_px(
+            crate::shell::commandline_view::HEIGHT,
+            window.rem_size(),
+        );
+        let viewport = window.viewport_size();
+        let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: (f32::from(viewport.width) - sidebar::width(window)).max(0.0),
+            h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
+        };
+        let shell = shell.read(app);
+        let workspace = shell.services.workspaces.active();
+        let focused = workspace.tree().focused().expect("a focused tile");
+        let (tree_area, _) = crate::tiling::dock_layout(workspace.docks(), area);
+        let r = workspace
+            .tree()
+            .layout(tree_area)
+            .into_iter()
+            .find(|(t, _)| *t == focused)
+            .expect("focused tile laid out")
+            .1;
+        (expected, toolbar_height + r.y + r.h)
+    });
+    assert!(
+        close(f32::from(strip.size.height), strip_height),
+        "the strip should paint at its scaled height {strip_height}, got {:?}",
+        strip.size.height
+    );
+    assert!(
+        close(
+            f32::from(strip.origin.y + strip.size.height),
+            tile_bottom - 1.0
+        ),
+        "the strip's bottom {:?} should sit on the tile's bottom border ({} - 1)",
+        strip.origin.y + strip.size.height,
+        tile_bottom
+    );
 }
