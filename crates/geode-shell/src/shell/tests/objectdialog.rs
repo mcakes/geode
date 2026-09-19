@@ -3141,6 +3141,156 @@ fn a_broken_expression_is_refused_and_a_good_one_is_written(cx: &mut gpui::TestA
     assert!(written.contains("expression = \"npv > 0\""), "{written}");
 }
 
+/// `d`, `r` and `o` are none of them verbs while the Values stage is open
+/// (scopes-editing spec §4) — each refuses with the same notice and
+/// leaves the stage, the confirm and the draft untouched.
+#[gpui::test]
+fn d_r_and_o_refuse_inside_the_values_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("j");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let tag = dialog_state(&shell, &cx, |s| s.values_tag);
+    shell.update(&mut cx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: SCOPES_KEY,
+                tag,
+                column: "book".into(),
+                values: Ok(vec![("BK000".into(), 5), ("BK001".into(), 7)]),
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    for key in ["d", "r", "o"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+            Some("not a verb while picking values — escape first"),
+            "{key} inside the Values stage"
+        );
+        assert!(
+            matches!(
+                dialog_state(&shell, &cx, |s| s.stage.clone()),
+                objectdialog::Stage::Values { .. }
+            ),
+            "{key} must not leave the stage"
+        );
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.confirm),
+            None,
+            "{key} must not arm a confirm"
+        );
+    }
+}
+
+/// `space` on a SELECTED Scopes dimension row (the edit stage, not the
+/// Values stage) names the door rather than opening it — only `enter`
+/// does that (scopes-editing spec §3) — and asks the data for nothing.
+#[gpui::test]
+fn space_on_a_selected_scopes_dimension_names_the_values_door(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let requested = requested.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            if let ShellEvent::DistinctRequested(p) = e {
+                requested.borrow_mut().push(p.clone());
+            }
+        })
+        .detach();
+    });
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("j"); // the `book` item row
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("enter opens this dimension's values")
+    );
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    assert!(
+        requested.borrow().is_empty(),
+        "space must not ask the data for anything"
+    );
+}
+
+/// `x` on a selected Scopes dimension drops it outright: the saved
+/// selection is removed (never written as `[]`) and the row moves to the
+/// available block with no leftover note (review round 1's Important 1 —
+/// `Draft::remove_selected` used to leave `entry.note` set, so a dropped
+/// dimension's available row kept painting its old values' summary).
+#[gpui::test]
+fn x_on_a_selected_scopes_dimension_removes_it_and_clears_its_note(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("j"); // the `book` item row
+    cx.simulate_keystrokes("x");
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    assert_eq!(
+        saved_scope_books(&shell, &cx),
+        None,
+        "a dropped selection is removed, never written as []"
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| d
+            .available_items("dimensions")
+            .unwrap()
+            .iter()
+            .any(|i| i.name == "book" && i.note.is_none())),
+        "book moved to the available block with no leftover note"
+    );
+}
+
+/// `x` on an AVAILABLE Scopes row — one with nothing selected to drop —
+/// names `enter`, the door that actually picks its values, rather than
+/// `Draft::remove_selected`'s generic "not in the view" wording.
+#[gpui::test]
+fn x_on_an_available_scopes_row_is_refused(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope_and_an_available_dimension(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("j"); // `book`, the item row
+    cx.simulate_keystrokes("j"); // `lhu`, the available row
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("not selected — enter picks its values")
+    );
+}
+
 /// Groupings' nine slots are a fixed keyboard (§18.4) — there is nothing
 /// `n` could create that is not already on the list, so it must say why
 /// rather than silently doing nothing.

@@ -2579,6 +2579,13 @@ impl Draft {
         }
         let mut entry = items.remove(item);
         entry.included = false;
+        // A note is a property of the SELECTION (Scopes' own values, the
+        // Values stage's counts) — `fold_values`'s demotion arm clears it
+        // the same way when a tick empties a selection, and every other
+        // adapter's note is already `None`, so this is a no-op for them.
+        // Left set, a dropped dimension's available row would keep
+        // painting its old values after `x`.
+        entry.note = None;
         available.push(entry);
         let last = available.len() - 1;
         // The cursor does NOT follow the item to the end of the

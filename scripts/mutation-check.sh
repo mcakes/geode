@@ -7777,6 +7777,45 @@ run_mutation "objectdialog: a tick on an available Scopes row opens its values" 
   '    if false {' \
   geode-shell clicking_an_available_dimensions_tick_opens_its_values_stage
 
+# Review round 1, Important 2a: `d`/`r`/`o` inside the Values stage must
+# all answer this exact notice and leave the stage and the draft
+# untouched. Mutated wording, the test's `assert_eq!` on the exact
+# string catches it for all three keys at once.
+run_mutation "objectdialog: d/r/o inside the Values stage name the escape door" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '"not a verb while picking values — escape first".to_string(),' \
+  '"not a verb here".to_string(),' \
+  geode-shell d_r_and_o_refuse_inside_the_values_stage
+
+# Review round 1, Important 2b: `space` on a SELECTED Scopes dimension
+# row must name the door rather than opening it — only `enter` does that
+# (scopes-editing spec §3). Mutated wording, the test's exact-string
+# assertion catches it.
+run_mutation "objectdialog: space on a selected Scopes dimension names the values door" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                set_notice(shell, "enter opens this dimension'"'"'s values".to_string());' \
+  '                set_notice(shell, "nothing on this row changes with space".to_string());' \
+  geode-shell space_on_a_selected_scopes_dimension_names_the_values_door
+
+# Review round 1, Important 1: `Draft::remove_selected` must clear the
+# demoted item's note — left set, a dropped dimension's available row
+# keeps painting its old values' summary after `x`. Mutated to a no-op
+# assignment, the note survives the move.
+run_mutation "objectdialog: x on a Scopes dimension clears its note" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        entry.note = None;' \
+  '        entry.note = entry.note.clone();' \
+  geode-shell x_on_a_selected_scopes_dimension_removes_it_and_clears_its_note
+
+# Review round 1, Important 2c (the other half): `x` on an AVAILABLE
+# Scopes row — nothing selected there to drop — must name `enter` rather
+# than `Draft::remove_selected`'s generic "not in the view" wording.
+run_mutation "objectdialog: x on an available Scopes row names enter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '"not selected — enter picks its values".to_string()' \
+  '"not in the view — space adds it".to_string()' \
+  geode-shell x_on_an_available_scopes_row_is_refused
+
 # Review finding on Task 5: a tick click must be claimed and dropped
 # while a confirm is armed, exactly as `handle_edit_key`'s bare-letter
 # case is — otherwise it can act on the object behind a pending
