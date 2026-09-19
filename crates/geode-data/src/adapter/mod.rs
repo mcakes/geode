@@ -202,11 +202,88 @@ pub trait Egress: Send {
     fn upload(&mut self, target: &str, bytes: Vec<u8>) -> Result<(), AdapterError>;
 }
 
+/// One on-demand history request (timeseries spec §5.2): an identity the
+/// source interprets, over a half-open span `from <= ts < to`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchRequest {
+    pub identity: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
+/// What a fetch returns: struct-of-arrays, equal lengths, strictly
+/// ascending `ts`. Never a row struct (PHILOSOPHY §6): the append path
+/// reads both columns at index `i`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SeriesRows {
+    pub ts: Vec<DateTime<Utc>>,
+    pub value: Vec<f64>,
+}
+
+impl SeriesRows {
+    pub fn len(&self) -> usize {
+        self.ts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ts.is_empty()
+    }
+
+    /// Equal lengths and strictly ascending `ts`. A repeated timestamp is
+    /// refused rather than resolved: which value wins is the source's
+    /// question, not this crate's.
+    pub fn validate(&self) -> Result<(), AdapterError> {
+        if self.ts.len() != self.value.len() {
+            return Err(AdapterError {
+                message: format!(
+                    "{} values for {} timestamps",
+                    self.value.len(),
+                    self.ts.len()
+                ),
+            });
+        }
+        if let Some(i) = (1..self.ts.len()).find(|&i| self.ts[i] <= self.ts[i - 1]) {
+            return Err(AdapterError {
+                message: format!(
+                    "timestamps must be strictly ascending; row {i} ({}) follows {}",
+                    self.ts[i],
+                    self.ts[i - 1]
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Removes rows whose value is NaN or infinite, keeping the two arrays
+    /// aligned. Returns how many were dropped, for the warning line.
+    pub fn drop_non_finite(&mut self) -> usize {
+        let before = self.ts.len();
+        let mut keep = self.value.iter().map(|v| v.is_finite());
+        self.ts.retain(|_| keep.next().unwrap_or(false));
+        self.value.retain(|v| v.is_finite());
+        before - self.ts.len()
+    }
+}
+
+/// The on-demand side (timeseries spec §5.2): history for one identity
+/// over a span, at the source's native grain. `Send` and not `Sync` for
+/// the reason [`Subscription`] is — one fetch worker thread owns it, and
+/// `&mut self` is what lets a vendor client keep a connection inside it
+/// with no lock. Called on that thread, so blocking is fine there.
+pub trait Fetch: Send {
+    fn fetch(&mut self, req: &FetchRequest) -> Result<SeriesRows, AdapterError>;
+
+    /// Identities this source can name, for typeahead. `None` when the
+    /// source cannot enumerate (a REST endpoint). Called once at open and
+    /// on `Request::Identities`.
+    fn catalogue(&mut self) -> Option<Vec<String>>;
+}
+
 /// A named feed transport. `Send + Sync` because one adapter is shared
 /// (behind an `Arc`) by the service thread that hands out subscriptions
 /// and by whatever thread the transport itself runs on.
 ///
-/// Both capability doors return `Option` rather than `Result` because
+/// All three capability doors return `Option` rather than `Result` because
 /// `None` is not the failure of a call: it says this adapter cannot do
 /// that, and the caller's response is to report a source it cannot serve
 /// rather than to treat it as an error to surface verbatim.
@@ -232,6 +309,13 @@ pub trait Adapter: Send + Sync {
 
     /// The upload side, or `None` if this adapter has none.
     fn egress(&self) -> Option<Box<dyn Egress>>;
+
+    /// The on-demand side, or `None` if this adapter has none. Defaulted,
+    /// so the vendor adapters built outside this repository against the
+    /// two-door contract keep compiling.
+    fn fetch(&self) -> Option<Box<dyn Fetch>> {
+        None
+    }
 }
 
 /// The adapters this build has, keyed by [`Adapter::name`].
@@ -330,5 +414,69 @@ mod tests {
             vec!["cvi_bus".to_string(), "repo_bus".to_string()]
         );
         let _ = (cvi_feed, repo_feed, replacement_feed);
+    }
+
+    fn t(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn series_rows_validate_lengths_and_order() {
+        let ok = SeriesRows {
+            ts: vec![t("2026-01-01T00:00:00Z"), t("2026-01-01T00:01:00Z")],
+            value: vec![1.0, 2.0],
+        };
+        assert!(ok.validate().is_ok());
+        let unequal = SeriesRows {
+            ts: vec![t("2026-01-01T00:00:00Z")],
+            value: vec![1.0, 2.0],
+        };
+        assert!(
+            unequal
+                .validate()
+                .unwrap_err()
+                .message
+                .contains("2 values for 1 timestamp")
+        );
+        let unsorted = SeriesRows {
+            ts: vec![t("2026-01-01T00:01:00Z"), t("2026-01-01T00:00:00Z")],
+            value: vec![1.0, 2.0],
+        };
+        assert!(
+            unsorted
+                .validate()
+                .unwrap_err()
+                .message
+                .contains("ascending")
+        );
+        let dup = SeriesRows {
+            ts: vec![t("2026-01-01T00:00:00Z"), t("2026-01-01T00:00:00Z")],
+            value: vec![1.0, 2.0],
+        };
+        assert!(
+            dup.validate().unwrap_err().message.contains("ascending"),
+            "a repeated ts is not strictly ascending"
+        );
+    }
+
+    #[test]
+    fn drop_non_finite_keeps_the_arrays_aligned() {
+        let mut rows = SeriesRows {
+            ts: vec![
+                t("2026-01-01T00:00:00Z"),
+                t("2026-01-01T00:01:00Z"),
+                t("2026-01-01T00:02:00Z"),
+            ],
+            value: vec![1.0, f64::NAN, f64::INFINITY],
+        };
+        assert_eq!(rows.drop_non_finite(), 2);
+        assert_eq!(rows.ts, vec![t("2026-01-01T00:00:00Z")]);
+        assert_eq!(rows.value, vec![1.0]);
+    }
+
+    #[test]
+    fn an_adapter_has_no_fetch_side_by_default() {
+        let (adapter, _feed) = ChannelAdapter::new("demo_bus");
+        assert!(adapter.fetch().is_none());
     }
 }
