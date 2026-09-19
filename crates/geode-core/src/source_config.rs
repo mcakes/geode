@@ -199,6 +199,8 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
         's' => n,
         'm' => n.checked_mul(60)?,
         'h' => n.checked_mul(3600)?,
+        'd' => n.checked_mul(86_400)?,
+        'y' => n.checked_mul(365 * 86_400)?,
         _ => return None,
     };
     Some(Duration::from_secs(secs))
@@ -740,6 +742,14 @@ role = "attribute"
         assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
         assert_eq!(parse_duration("10m"), Some(Duration::from_secs(600)));
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(
+            parse_duration("30d"),
+            Some(Duration::from_secs(30 * 86_400))
+        );
+        assert_eq!(
+            parse_duration("5y"),
+            Some(Duration::from_secs(5 * 365 * 86_400))
+        );
         assert_eq!(parse_duration("0s"), Some(Duration::ZERO));
         assert_eq!(parse_duration("30"), None, "a bare number has no unit");
         assert_eq!(parse_duration("1.5h"), None, "integers only");
