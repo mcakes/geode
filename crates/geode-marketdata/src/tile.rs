@@ -847,9 +847,7 @@ impl MarketDataTile {
         // never painted, and `:rebase` was left pointed at a document that
         // cannot be laid out as a grid.
         let mut draft = self.draft.clone();
-        if let Some(as_of) = &as_of {
-            draft.on_delivered(as_of);
-        }
+        let moved = as_of.as_ref().is_some_and(|t| draft.on_delivered(t));
         // The update policy (spec §8.4, 2026-09-19) is applied HERE and
         // only here: `on_delivered` is the `hold` decision, and `Behind`
         // after it means "today's code would hold" — a draft with edits
@@ -861,6 +859,19 @@ impl MarketDataTile {
         // The notice is decided now and written at the commit point
         // below, ahead of the restore block's own, so it is never wiped
         // by the "clear on the delivery that paints" rule.
+        //
+        // **Gated on `moved` — a real TRANSITION, never a redelivery**
+        // (review I-1): this panel requeries on every `data` bump (any
+        // dataset's publish, every few seconds on the demo bus), and a
+        // draft already `Behind` reads `Behind` again on every one of
+        // those same-generation redeliveries. Gated on the state alone,
+        // `:auto replace` was a `:revert` executed by an unrelated
+        // publish seconds after the switch, and the restore rule below
+        // protected a draft for exactly one data bump. `on_delivered`
+        // answers `true` for `Editing → Behind` and `Behind{a} →
+        // Behind{b}` alone, so a redelivery of the generation the draft
+        // is already behind leaves it there, `:rebase`/`:revert` its
+        // doors, until the next NEW generation.
         //
         // **The first delivery after a restore is always `hold`**
         // (ruling 2026-09-19): the policy governs LIVE deliveries while
@@ -874,7 +885,11 @@ impl MarketDataTile {
         // one resolves through the restore block below as today), and
         // the policy resumes from the next delivery.
         let mut notice: Option<SharedString> = None;
-        if draft.is_behind() && self.policy != UpdatePolicy::Hold && !self.unresolved_restore {
+        if moved
+            && draft.is_behind()
+            && self.policy != UpdatePolicy::Hold
+            && !self.unresolved_restore
+        {
             match self.policy {
                 UpdatePolicy::Hold => unreachable!("guarded above"),
                 UpdatePolicy::Rebase => {
@@ -892,9 +907,19 @@ impl MarketDataTile {
                             return;
                         }
                     };
-                    let (_, dropped) = draft.rebase(&clean);
-                    if !dropped.is_empty() {
-                        notice = Some(dropped_notice(&dropped).into());
+                    // An EMPTY new document (no rows for this key at
+                    // this as-of — `compile_document`'s `and false` arm)
+                    // is not a document to move edits onto: rebasing
+                    // against an empty label map drops every edit in
+                    // silence (review I-2, the restore block's own
+                    // guard below). The draft stays `Behind` — the
+                    // `hold` path, no extra notice — and `:rebase`
+                    // remains the trader's explicit door.
+                    if !clean.rows.is_empty() {
+                        let (_, dropped) = draft.rebase(&clean);
+                        if !dropped.is_empty() {
+                            notice = Some(dropped_notice(&dropped).into());
+                        }
                     }
                 }
                 UpdatePolicy::Replace => {
@@ -7256,10 +7281,12 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// The policy applies ON DELIVERY, never on the switch: a draft left
-    /// `Behind` under `hold` stays exactly there when the trader switches
-    /// to `rebase` — and the NEXT delivery, a further generation, is what
-    /// moves the edits, onto that newest document.
+    /// The policy applies on the next NEW generation, never on the
+    /// switch and never on a redelivery: a draft left `Behind` under
+    /// `hold` stays exactly there when the trader switches to `rebase`,
+    /// stays there again when the SAME newer generation is redelivered
+    /// (a `data` bump from an unrelated publish, review I-1), and only a
+    /// further generation moves the edits — onto that newest document.
     #[gpui::test]
     fn switching_to_auto_rebase_does_not_rebase_a_draft_already_behind(
         cx: &mut gpui::TestAppContext,
@@ -7288,6 +7315,25 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
         assert_eq!(source.as_deref(), Some(BASE), "still painting the base");
         assert_eq!(rows, 2);
+
+        // The SAME newer generation redelivered (any dataset's publish
+        // bumps `data` and this panel requeries): not a transition, so
+        // the policy does nothing — a `replace` here would be a `:revert`
+        // run by an unrelated publish.
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        let (state, source, len) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().source_time.clone(),
+                t.draft().len(),
+            )
+        });
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            "a redelivery never acts, got {state:?}"
+        );
+        assert_eq!(source.as_deref(), Some(BASE));
+        assert_eq!(len, 1, "the edit is intact");
 
         // A further generation under the new policy: onto the NEWEST.
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWEST)));
@@ -7495,7 +7541,7 @@ auto = "discard"
     fn restored_first_delivery(
         cx: &mut gpui::TestAppContext,
         policy: &str,
-    ) -> (Harness, gpui::VisualTestContext) {
+    ) -> (Harness, gpui::VisualTestContext, u64) {
         let restored: toml::Table = format!(
             r#"
 underlying = ["SPX.Z"]
@@ -7511,7 +7557,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.visible(&mut vcx, true);
         let tag = h.document_request().unwrap().tag;
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
-        (h, vcx)
+        (h, vcx, tag)
     }
 
     /// The first delivery after a restore is always `hold` (ruling
@@ -7521,7 +7567,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     /// is written.
     #[gpui::test]
     fn a_restored_drafts_first_delivery_is_hold_under_replace(cx: &mut gpui::TestAppContext) {
-        let (h, vcx) = restored_first_delivery(cx, "replace");
+        let (h, mut vcx, tag) = restored_first_delivery(cx, "replace");
         let (policy, state, len, notice) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.policy(),
@@ -7544,6 +7590,38 @@ edits = [["2026-11-20", "-1", 9.5]]
             notice.as_deref().is_none_or(|n| !n.contains("replaced")),
             "nothing was replaced: {notice:?}"
         );
+
+        // The same generation redelivered (a `data` bump): still not a
+        // transition, so the restore's protection is not one bump long.
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        let (state, len) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().state.clone(), t.draft().len()));
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            "a redelivery never acts, got {state:?}"
+        );
+        assert_eq!(len, 1);
+
+        // A FURTHER generation: the policy resumes and acts.
+        const NEWEST: &str = "2026-09-12T14:15:00Z";
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWEST)));
+        let (draft, source, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().clone(),
+                t.model().source_time.clone(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert!(
+            draft.is_empty(),
+            "replaced on the next new generation: {draft:?}"
+        );
+        assert_eq!(source.as_deref(), Some(NEWEST));
+        assert_eq!(
+            notice,
+            Some(format!("update {} replaced 1 cell", local_hhmm(NEWEST)))
+        );
     }
 
     /// The same rule under `rebase`: the restored draft is not rebased onto
@@ -7551,7 +7629,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     /// `:rebase` (or the policy, from the NEXT delivery) is what moves it.
     #[gpui::test]
     fn a_restored_drafts_first_delivery_is_hold_under_rebase(cx: &mut gpui::TestAppContext) {
-        let (h, vcx) = restored_first_delivery(cx, "rebase");
+        let (h, vcx, _) = restored_first_delivery(cx, "rebase");
         let (policy, state, base, len) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.policy(),
@@ -7567,5 +7645,94 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         assert_eq!(base.as_deref(), Some(BASE), "the base is the restored one");
         assert_eq!(len, 1);
+    }
+
+    /// An EMPTY new generation (no rows, but a source time) under
+    /// `rebase` with a dirty draft: rebasing against an empty label map
+    /// would drop every edit in silence, so the delivery takes the `hold`
+    /// path — `Behind`, edits intact, the base still painted, no extra
+    /// notice (review I-2).
+    #[gpui::test]
+    fn an_empty_new_document_never_auto_rebases_a_draft_away(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        let tag = h.with_document_tagged(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.deliver(&mut vcx, tag, Arc::new(document_of(&[], &NODES, NEWER)));
+
+        let (state, len, source, rows, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.draft().len(),
+                t.model().source_time.clone(),
+                t.model().rows.len(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            "hold's path, got {state:?}"
+        );
+        assert_eq!(len, 1, "the edit is intact");
+        assert_eq!(source.as_deref(), Some(BASE), "still painting the base");
+        assert_eq!(rows, 2);
+        assert_eq!(notice, None, "nothing dropped, nothing said");
+    }
+
+    /// The `replace` sibling of the editor-open-across-a-delivery test:
+    /// the editor stays open through the replacing delivery, the
+    /// `replaced` notice stands until the commit, and the commit lands as
+    /// a fresh single edit on the NEW base.
+    #[gpui::test]
+    fn an_editor_open_across_an_auto_replace_commits_as_a_fresh_edit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto replace").unwrap();
+        let tag = h.with_document_tagged(&mut vcx);
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.6");
+        assert_eq!(h.mode(&vcx), "insert");
+
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("0.6"),
+            "the editor is untouched"
+        );
+        let expected = format!("update {} replaced 1 cell", local_hhmm(NEWER));
+        let (draft, notice) = h.tile.read_with(&vcx, |t, _| {
+            (t.draft().clone(), t.notice().map(str::to_string))
+        });
+        assert!(
+            draft.is_empty(),
+            "the committed edit was replaced: {draft:?}"
+        );
+        assert_eq!(notice.as_deref(), Some(expected.as_str()), "and said so");
+
+        h.dispatch(&mut vcx, "commit", None);
+        let (len, base, cells, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().len(),
+                t.draft().base.clone(),
+                t.model().rows[0].cells[..2].to_vec(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert_eq!(len, 1, "a fresh single edit");
+        assert_eq!(base.as_deref(), Some(NEWER), "on the new base");
+        assert!(!cells[0].edited, "the replaced edit is gone");
+        assert_eq!(cells[1].text.to_string(), "0.6000");
+        assert!(cells[1].edited);
+        assert_eq!(notice, None, "the commit clears the notice");
+        assert!(h.editor_value(&vcx).is_none());
     }
 }

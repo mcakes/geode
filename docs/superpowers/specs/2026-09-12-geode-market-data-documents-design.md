@@ -851,9 +851,17 @@ work survives a restart" with only a notice for company, and under
 while the tile's `unresolved_restore` flag is set the delivery takes
 the `hold` path whatever the policy (a differing base lands `Behind`,
 a matching one resolves as today), and the policy resumes from the next
-delivery. Everything is still decided on copies and committed after a
-successful build; `rebase` builds twice (a clean model for the new
-labels, then the re-placed draft).
+delivery. **The policy acts on the next NEW generation; a redelivery of
+the same one never acts** (review I-1): the tile requeries on every
+`data` bump, so the branch is gated on `Draft::on_delivered` answering
+`true` — a real transition, `Editing → Behind` or `Behind{a} →
+Behind{b}` — and a draft already `Behind` redelivered its own newer
+generation stays exactly there, `:rebase`/`:revert` its doors. An empty
+new generation (no rows, a source time) under `rebase` takes the `hold`
+path too, since rebasing against no labels would drop every edit in
+silence (review I-2). Everything is still decided on copies and
+committed after a successful build; `rebase` builds twice (a clean
+model for the new labels, then the re-placed draft).
 
 ### 8.5 Session
 

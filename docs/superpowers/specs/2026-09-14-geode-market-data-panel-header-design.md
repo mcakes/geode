@@ -649,5 +649,7 @@ table): three always-enabled choice rows, one ticked for the tile's
 same setting `:auto <policy>` and the palette's `Auto: …` actions
 reach; `menu_pick` on one sets it and closes the menu. Under `rebase` or
 `replace` the panel is never `Behind`, so the `update HH:MM` state run
-and the `Rebase onto HH:MM` row are `hold`'s alone. Harness: four
-`mdauto:` entries.
+and the `Rebase onto HH:MM` row are `hold`'s alone. Harness: seven
+`mdauto:` entries (the `rebase` and `replace` steps, the session read,
+the restore rule, the transition gate, the empty-document guard, and
+the menu's single tick).

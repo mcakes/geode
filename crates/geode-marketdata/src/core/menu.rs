@@ -64,7 +64,7 @@ fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = MenuRow> {
         MenuRow::Action {
             id: ActionId(id.to_string()),
             title: title.into(),
-            hint: "".into(),
+            hint: SharedString::default(),
             enabled: Ok(()),
             checked: Some(p == policy),
         }

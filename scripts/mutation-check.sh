@@ -12240,10 +12240,38 @@ run_mutation "mdauto: the policy is read from the session" \
 # moves the restored edits onto a generation the trader never chose.
 run_mutation "mdauto: a restored draft's first delivery is always hold" \
   crates/geode-marketdata/src/tile.rs \
-  '        if draft.is_behind() && self.policy != UpdatePolicy::Hold && !self.unresolved_restore {' \
-  '        if draft.is_behind() && self.policy != UpdatePolicy::Hold {' \
+  '            && self.policy != UpdatePolicy::Hold
+            && !self.unresolved_restore
+        {' \
+  '            && self.policy != UpdatePolicy::Hold
+        {' \
   geode-marketdata \
   a_restored_drafts_first_delivery_is_hold_under_replace
+
+# Review I-1: the policy fires on a real TRANSITION (`on_delivered`
+# answered true) and never on a same-generation redelivery. Mutated out,
+# every `data` bump — any dataset's publish, every few seconds on the
+# demo bus — re-runs the policy on a draft already Behind: `:auto replace`
+# becomes a `:revert` executed by an unrelated publish, and the restore
+# rule's protection lasts exactly one bump.
+run_mutation "mdauto: the policy fires only on a real transition, never a redelivery" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if moved
+            && draft.is_behind()' \
+  '        if draft.is_behind()' \
+  geode-marketdata \
+  switching_to_auto_rebase_does_not_rebase_a_draft_already_behind
+
+# Review I-2: an empty new generation (no rows, a source time) is not a
+# document to move edits onto — `Draft::rebase` against an empty label
+# map drops every edit in silence. Mutated out, a zero-row delivery under
+# `rebase` empties the draft with no notice at all.
+run_mutation "mdauto: an empty new document never auto-rebases a draft away" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if !clean.rows.is_empty() {' \
+  '                    if true {' \
+  geode-marketdata \
+  an_empty_new_document_never_auto_rebases_a_draft_away
 
 # Mutated away, all three `On new document` rows carry the tick, and the
 # menu no longer says which policy is in force.
