@@ -8326,6 +8326,31 @@ run_mutation "dblclick: the browse click that opened a stage does not also open 
 // ---- The edit stage' \
   geode-shell a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more
 
+# ---- The choice list scrolls (2026-09-19) --------------------------------
+# Every ranked option is painted inside a fixed-height scroll container;
+# a row with an explicit height inside a fixed-height column shrinks to
+# its text unless it refuses to. Mutated away, forty rows squeeze into
+# the twelve-row viewport and the wheel has nothing to scroll.
+run_mutation "choice scroll: rows keep their height inside the viewport" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            // scrolling past it.
+            .flex_shrink_0()' \
+  '            // scrolling past it.
+            .flex_shrink_1()' \
+  geode-shell the_choice_list_paints_every_option_in_a_scrolling_viewport
+
+# The keys point the scroll handle at the lit row. Mutated to point it at
+# the top, `down` past the fold lights a row the viewport does not show.
+run_mutation "choice scroll: nav keeps the lit row in the viewport" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '                    // freely; the keys point it back at the lit row.
+                    shell
+                        .settings_scroll
+                        .scroll_to_item(entry.list.ranked_highlighted());' \
+  '                    // freely; the keys point it back at the lit row.
+                    shell.settings_scroll.scroll_to_item(0);' \
+  geode-shell the_choice_list_paints_every_option_in_a_scrolling_viewport
+
 # Settings: the same gesture through open_choice_on_selected.
 run_mutation "dblclick: a settings row's double-click opens its typeahead" \
   crates/geode-shell/src/shell/settings_view.rs \

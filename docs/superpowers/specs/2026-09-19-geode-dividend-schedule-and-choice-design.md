@@ -196,6 +196,28 @@ are not — `crate::choice::route` dispatches nav keys through
 The bullet is corrected in place rather than left to stand beside this
 note.
 
+**Amendment — the dialogs' choice list scrolls (user report 2026-09-19,
+"I'd expect to be able to scroll them with the mouse wheel — the
+command palette already behaves this way"):** in the object dialog and
+the settings dialog, `dialog::choice_rows` no longer paints the
+twelve-row window; it paints EVERY ranked option inside a viewport
+`min(ranked, 12)` rows tall with `overflow_y_scroll` on the dialog's own
+scroll handle (`object_dialog_scroll` / `settings_scroll`, idle while
+the row list is withdrawn), so the wheel scrolls it as the palette and
+every dialog row list scroll. The highlight is compared in ranked space
+(`ChoiceList::ranked_highlighted`; a row click hands back a ranked
+index through `set_ranked_highlighted`), and every key path that can
+move it — nav, `tab`, a keystroke's re-rank in the `Change`
+subscription — calls `scroll_to_item` on it, the palette's
+`sync_palette_scroll` rule. Rows are `flex_shrink_0`: a fixed-height
+row inside a fixed-height column otherwise shrinks to its text, which
+is how the first cut fitted forty rows into the viewport. Row colours
+come through `listrow::row_paint`. `ChoiceList`'s window and §3.1's
+cap semantics are unchanged and still what the market-data picker
+popup paints, so `painted()`/`highlighted()` keep their window-relative
+meaning there. §3.4's "no floating dropdown chrome" stands: the list is
+still in the row list's place.
+
 ## 4. Phase 2 — the document family and the typed flat panel
 
 ### 4.1 `role = "value"` accepts `date` and `utf8`
