@@ -186,9 +186,57 @@ fn append_in_transaction(
         ],
     )
     .map_err(sql_err(&cover))?;
-    // 5. Retention for this pair (Task 6 fills this in; 0 until then).
-    let swept = 0;
+    // 5. Retention for this pair, in the same transaction (§4.7): the
+    // one place growth happens is the one place it is bounded.
+    let swept = sweep_pair(conn, req.dataset, req.source, req.identity, req.received_at)?;
     Ok(SeriesAppended { appended, swept })
+}
+
+/// The series family's retention (timeseries spec §4.7), for ONE pair,
+/// run inside `append_series`'s transaction with `now` = the append's
+/// `received_at`. `retention` deletes rows that are superseded (a later
+/// `received_at` exists for the same ts) and older than the window; the
+/// live row survives whatever its age. `history` deletes rows and
+/// coverage whose `ts`/`to_ts` are older than the window.
+pub fn sweep_pair(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    source: &str,
+    identity: &str,
+    now: DateTime<Utc>,
+) -> Result<usize, StoreError> {
+    let Some(policy) = ds.series_retention else {
+        return Ok(0);
+    };
+    let table = series_table(&ds.name);
+    let mut swept = 0;
+    if let Some(window) = policy.retention {
+        let cutoff = micros(now) - window.as_micros() as i64;
+        let sql = format!(
+            "delete from {table} t where source = ? and series_id = ? \
+             and epoch_us(received_at) < ? \
+             and exists (select 1 from {table} n where n.source = t.source \
+                 and n.series_id = t.series_id and n.ts = t.ts and n.received_at > t.received_at)"
+        );
+        swept += conn
+            .execute(&sql, duckdb::params![source, identity, cutoff])
+            .map_err(sql_err(&sql))?;
+    }
+    if let Some(window) = policy.history {
+        let cutoff = micros(now) - window.as_micros() as i64;
+        let sql =
+            format!("delete from {table} where source = ? and series_id = ? and epoch_us(ts) < ?");
+        swept += conn
+            .execute(&sql, duckdb::params![source, identity, cutoff])
+            .map_err(sql_err(&sql))?;
+        let sql = format!(
+            "delete from {} where source = ? and series_id = ? and epoch_us(to_ts) <= ?",
+            coverage_table(&ds.name)
+        );
+        conn.execute(&sql, duckdb::params![source, identity, cutoff])
+            .map_err(sql_err(&sql))?;
+    }
+    Ok(swept)
 }
 
 /// Sorts `spans` and merges any that overlap or touch, in place.
@@ -548,6 +596,110 @@ mod tests {
             vec![100.0, 101.0, 100.0],
             "in received_at order: {got:?}"
         );
+    }
+
+    #[test]
+    fn retention_deletes_superseded_rows_older_than_the_window_and_keeps_live() {
+        let (_d, store, ds) = fixture(); // retention = 30d, history = 5y
+        let old = series_rows("2026-01-05T14:30:00Z", 1, 100.0);
+        append(
+            &store,
+            &ds,
+            &old,
+            ("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z"),
+            "2026-01-06T09:00:00Z",
+        );
+        let corrected = series_rows("2026-01-05T14:30:00Z", 1, 101.0);
+        // 10 days later: the superseded row is inside the 30d window, kept.
+        let out = append(
+            &store,
+            &ds,
+            &corrected,
+            ("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z"),
+            "2026-01-16T09:00:00Z",
+        );
+        assert_eq!(out.swept, 0);
+        assert_eq!(all_rows(&store).len(), 2);
+        // 40 days after the first: the superseded row is outside it, swept;
+        // the live row (101.0) survives whatever its age.
+        let untouched = series_rows("2026-01-05T14:31:00Z", 1, 5.0);
+        let out = append(
+            &store,
+            &ds,
+            &untouched,
+            ("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z"),
+            "2026-02-20T09:00:00Z",
+        );
+        assert_eq!(out.swept, 1);
+        let got = all_rows(&store);
+        assert_eq!(
+            got.iter().map(|r| r.2).collect::<Vec<_>>(),
+            vec![101.0, 5.0]
+        );
+    }
+
+    #[test]
+    fn history_deletes_rows_and_coverage_whose_ts_is_too_old() {
+        let (_d, store, ds) = fixture(); // history = 5y
+        let ancient = series_rows("2019-01-05T14:30:00Z", 2, 1.0);
+        append(
+            &store,
+            &ds,
+            &ancient,
+            ("2019-01-05T00:00:00Z", "2019-01-06T00:00:00Z"),
+            "2019-01-06T09:00:00Z",
+        );
+        let recent = series_rows("2026-01-05T14:30:00Z", 1, 100.0);
+        let out = append(
+            &store,
+            &ds,
+            &recent,
+            ("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z"),
+            "2026-01-06T09:00:00Z",
+        );
+        assert_eq!(out.swept, 2);
+        assert_eq!(all_rows(&store).len(), 1);
+        let cov = coverage(store.writer(), "series", "demo_kdb", "SPX.close").unwrap();
+        assert_eq!(
+            cov,
+            vec![sp("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z")],
+            "the ancient coverage row went with its rows"
+        );
+    }
+
+    #[test]
+    fn an_unbounded_policy_sweeps_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let text = "[series]\nfamily = \"series\"\n";
+        let doc = geode_core::config::merge_docs(
+            "datasets",
+            &[geode_core::config::LayerDoc::builtin("datasets", text).unwrap()],
+        );
+        let ds = geode_core::schema::SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("series")
+            .unwrap()
+            .clone();
+        store.apply_schema(&ds).unwrap();
+        let a = series_rows("2019-01-05T14:30:00Z", 1, 1.0);
+        append(
+            &store,
+            &ds,
+            &a,
+            ("2019-01-05T00:00:00Z", "2019-01-06T00:00:00Z"),
+            "2019-01-06T09:00:00Z",
+        );
+        let b = series_rows("2019-01-05T14:30:00Z", 1, 2.0);
+        let out = append(
+            &store,
+            &ds,
+            &b,
+            ("2019-01-05T00:00:00Z", "2019-01-06T00:00:00Z"),
+            "2030-01-06T09:00:00Z",
+        );
+        assert_eq!(out.swept, 0);
+        assert_eq!(all_rows(&store).len(), 2);
     }
 
     fn sp(a: &str, b: &str) -> Span {
