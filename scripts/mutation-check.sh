@@ -11634,6 +11634,18 @@ run_mutation "listrow: the match accent is floored against the active row" \
   geode-shell \
   every_row_state_is_readable_on_every_bundled_theme
 
+# A call site can walk past the door: the Sources row's prefix run did
+# (this branch's review, M1) — `primary` over the active fill on 11
+# themes. Only a source scan sees a call site's colour argument.
+run_mutation "listrow: every highlight run takes the door's accent" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                &in_prefix,
+                                row_paint.accent,' \
+  '                                &in_prefix,
+                                theme.primary,' \
+  geode-shell \
+  every_highlight_run_takes_the_doors_accent
+
 # ---- Chrome on the rem scale (`shell::scale`, design-guide audit) -------
 # `FontSize` moves the window rem; every chrome length is authored in
 # pixels at the Medium rem and resolved through `scale::design`, so it

@@ -147,8 +147,10 @@ impl PaletteItem {
 /// rows, since the placement it scored was not the best one available.
 ///
 /// The indices are positions in `candidate.to_lowercase().chars()`. For
-/// every candidate this palette ever renders (plain-ASCII action titles
-/// and `"Theme: {name}"` rows) lowercasing never changes the char count, so
+/// every candidate this palette ever renders (action titles — ASCII plus
+/// a trailing `…` on the ones that open a dialog, which lowercases to
+/// itself — and `"Theme: {name}"` rows) lowercasing never changes the char
+/// count, so
 /// those positions apply equally to the original-case `candidate` — a
 /// property `render` relies on rather than re-deriving.
 ///
@@ -791,8 +793,9 @@ pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::H
 /// (`query_input` — native caret/selection/clipboard, see this module's own
 /// doc comment for the routing story), and every filtered result inside a
 /// fixed-height (~[`VISIBLE_ROWS`] rows), scrollable list with the selected
-/// row highlighted (`cx.theme().selection` background, `cx.theme().primary`
-/// text — plan constraint: no raw colors, `cx.theme()` roles only) and its
+/// row highlighted (`shell::listrow::row_paint`: `list_active` under the
+/// foreground, `list_hover` under the pointer — plan constraint: no raw
+/// colors, `cx.theme()` roles only) and its
 /// binding right-aligned in `cx.theme().muted_foreground`.
 ///
 /// **`Input` styling** (inventoried against `Input`'s own builder methods at

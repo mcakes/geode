@@ -22,6 +22,27 @@
 //! `primary` alone is under the floor on 11 themes over the active fill.
 //! The match glyphs are bold as well, so the colour is never the only
 //! cue.
+//!
+//! Two things this door does NOT claim. A row's SECONDARY line (the
+//! muted category, summary or role) keeps `muted_foreground`, which is
+//! under the floor over the active fill on 16 bundled themes (Solarized
+//! Light 1.91:1) — down from 25 over the old `selection`, and the same
+//! theme-authoring matter as `muted_foreground` on the bare background
+//! (nine themes ship it under 3:1; the market-data header's `Plain` tone
+//! made the same call). And `list_active` and `list_hover` are distinct
+//! `Hsla`s on every theme but composited within 1.01:1 of each other on
+//! seven (Harper, Solarized Dark, Adventure Time among them) — the
+//! library's own `ListItem` wears the same pair, so a keyboard highlight
+//! and a resting pointer can merge there; gpui suppresses hover after a
+//! keystroke until the mouse moves, which narrows it. Both are recorded
+//! rather than papered over with a border every row would have to
+//! reserve.
+//!
+//! Why `list_active` and not `accent`: gpui-component's `ListItem` paints
+//! its rows `list_active`/`list_hover`, while its `MenuItem` (and so the
+//! market-data `⋯` popup, which copies the menu family) paints `accent`.
+//! The shell's nine lists are lists — selectable rows a trader moves
+//! through and commits — not menus, so they wear the list pair.
 
 use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
 use gpui::Hsla;
@@ -90,10 +111,19 @@ mod tests {
                 Theme::global_mut(cx).apply_config(&entry);
                 let theme = cx.theme();
                 let p = row_paint(theme);
+                // At rest a row paints no text colour of its own and
+                // inherits the panel's `popover_foreground`, so that is
+                // what "at rest" measures — not `p.text`, which only
+                // ever lands on the active row.
                 for (state, text, fill) in [
                     ("text on active", p.text, Some(p.active)),
                     ("text on hover", p.text, Some(p.hover)),
-                    ("text at rest", p.text, None),
+                    ("popover_foreground at rest", theme.popover_foreground, None),
+                    (
+                        "popover_foreground on hover",
+                        theme.popover_foreground,
+                        Some(p.hover),
+                    ),
                     ("accent on active", p.accent, Some(p.active)),
                     ("accent at rest", p.accent, None),
                 ] {
@@ -104,7 +134,7 @@ mod tests {
                 }
             });
         }
-        assert!(checked >= 5 * 40, "the sweep saw {checked} checks");
+        assert!(checked >= 6 * 40, "the sweep saw {checked} checks");
         assert!(
             failures.is_empty(),
             "unreadable rows:\n{}",
@@ -132,6 +162,54 @@ mod tests {
         assert!(
             failing >= 10,
             "primary on selection failed on only {failing} themes — the sweep has lost its teeth"
+        );
+    }
+
+    /// Every fuzzy-match run in the crate takes [`RowPaint::accent`], not
+    /// a raw `primary`: the sweep above measures the door, and the one
+    /// way past it is a call site handing `highlighted_text`/`_title` the
+    /// token by hand — which the branch's review found once (the Sources
+    /// row's `<dataset> · ` prefix run). A source scan is the only test
+    /// that can see a call site's colour argument.
+    #[test]
+    fn every_highlight_run_takes_the_doors_accent() {
+        let sources: [(&str, &str); 6] = [
+            ("palette.rs", include_str!("../palette.rs")),
+            ("commandline_view.rs", include_str!("commandline_view.rs")),
+            ("keybindings_view.rs", include_str!("keybindings_view.rs")),
+            (
+                "objectdialog/render.rs",
+                include_str!("objectdialog/render.rs"),
+            ),
+            ("picker.rs", include_str!("picker.rs")),
+            ("settings_view.rs", include_str!("settings_view.rs")),
+        ];
+        let mut offenders = Vec::new();
+        let mut calls = 0;
+        for (name, text) in sources {
+            for needle in ["highlighted_text(", "highlighted_title("] {
+                for (at, _) in text.match_indices(needle) {
+                    // Skip the definitions themselves.
+                    if text[..at].ends_with("fn ") || text[..at].ends_with("pub(crate) fn ") {
+                        continue;
+                    }
+                    calls += 1;
+                    let window = &text[at..(at + 240).min(text.len())];
+                    if window.contains("theme.primary") || window.contains(", primary)") {
+                        let line = text[..at].lines().count();
+                        offenders.push(format!("{name}:{line}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            calls >= 15,
+            "the scan saw only {calls} highlight calls — a file moved?"
+        );
+        assert!(
+            offenders.is_empty(),
+            "highlight runs handed a raw primary instead of RowPaint::accent:\n{}",
+            offenders.join("\n")
         );
     }
 

@@ -2899,7 +2899,7 @@ fn build(
                             .child(highlighted_text(
                                 &format!("{prefix} · "),
                                 &in_prefix,
-                                theme.primary,
+                                row_paint.accent,
                             )),
                     )
                     .child(highlighted_text(&row.name, &in_name, row_paint.accent))

@@ -95,10 +95,11 @@ pub fn render(
                     &r.indices,
                     row_paint.accent,
                 ));
+            // No hover fill here: a completion row is not clickable (`tab`
+            // completes it, and a mouse-down falls through to the tile,
+            // which cancels the `:` line), and a hover promises a click.
             if i == line.highlighted {
                 row = row.bg(row_paint.active).text_color(row_paint.text);
-            } else {
-                row = row.hover(|s| s.bg(row_paint.hover));
             }
             list = list.child(row);
         }

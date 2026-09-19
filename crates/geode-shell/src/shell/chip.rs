@@ -68,7 +68,14 @@ pub enum Tone {
     /// `secondary` surface under `secondary_foreground` — a neutral pill,
     /// so the warning tone stays scarce enough to mean something (design
     /// guide: keep most badges neutral; a row of coloured badges is a
-    /// missing hierarchy decision).
+    /// missing hierarchy decision). `secondary`, not the dialogs' own
+    /// `muted` chip pair, by measurement (2026-09-19): the text clears
+    /// 3:1 on all 44 bundled themes over `secondary` and fails on 15 over
+    /// `muted`, and the fill itself is visible (>1.15:1 against the
+    /// background) on 34 themes for `secondary` against 11 for `muted`.
+    /// The ten where `secondary` is faint (Asciinema 1.06:1, Tokyo Storm
+    /// 1.08:1) read the pill as bare text — a theme-authoring matter, not
+    /// worth a border every chip in the strip would have to reserve.
     Neutral,
 }
 
