@@ -2625,6 +2625,7 @@ dependencies = [
  "geode-core",
  "gpui-base",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "serde_json",
  "tempfile",

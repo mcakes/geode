@@ -71,6 +71,29 @@ fn chip(
         .debug_selector(selector)
 }
 
+/// [`chip`] for a glyph rather than a label: the same box, the icon
+/// coloured as the chip's text would be. Kept separate from `chip` so its
+/// label parameter stays a `SharedString` the selection chips hand in
+/// prepared, rather than every caller paying for an `AnyElement`.
+fn icon_chip(
+    id: ElementId,
+    icon: Icon,
+    fg: Hsla,
+    bg: Hsla,
+    radius: Pixels,
+    selector: impl Fn() -> String + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_2()
+        .py_0p5()
+        .rounded(radius)
+        .bg(bg)
+        .text_color(fg)
+        .child(icon.text_color(fg))
+        .debug_selector(selector)
+}
+
 pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
@@ -216,15 +239,20 @@ pub fn toolbar(
         }),
     );
     if model.savable {
-        // The `save` chip: the mouse form of `scope::save_current`,
+        // The save chip: the mouse form of `scope::save_current`,
         // withdrawn rather than merely disabled while the frame has
         // nothing to save (`ScopeBarModel::savable`'s own doc has the
         // reasoning — a chip that always does nothing is worse than no
-        // chip).
+        // chip). A save icon rather than the word (user ruling
+        // 2026-09-19): `Save` is outside `gpui_component::IconName`'s 101,
+        // so it is named through the shared catalog and its bytes come
+        // from `geode-app`'s `ExtraIcons` source — a shell that paints it
+        // under the plain `Assets` alone gets an empty glyph, not a
+        // panic, which is why the tooltip still says what it does.
         chips_row = chips_row.child(
-            chip(
+            icon_chip(
                 "scope-save-chip".into(),
-                SharedString::new_static("save"),
+                Icon::new(gpui_kit_assets::IconName::Save),
                 chip_fg,
                 chip_bg,
                 chip_radius,
