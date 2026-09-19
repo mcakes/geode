@@ -416,6 +416,26 @@ local-time resolution across a DST boundary; window tests that a day click
 rewrites the field and that typing moves the calendar's selection; a
 mutation entry for the end-of-day default.
 
+**As built (2026-09-18):** `parse_as_of` (`geode-core::query`) takes
+`YYYY-MM-DD` (→ `END_OF_DAY`, 23:59:59 local — whole seconds, not the
+paragraph's `.999`: every displayed time is whole-second and generations
+are stamped to the second), `YYYY-MM-DD HH:MM` and `YYYY-MM-DD HH:MM:SS`
+(that local instant), beside the existing `HH:MM[:SS]`-today and RFC 3339
+forms; a DST gap or overlap is still the one `Err`. The dialog's calendar
+is one gpui-kit `CalendarState` entity on `ShellView` (built once, like
+`dialog_input`; a focus handle per open would leak), painted small beside
+the presets and hidden while the field reads `live`; a day click reaches
+the field through `asof_view::on_calendar_selected` — `compose_with_date`
+keeps a typed time (`14:05` → `2026-09-08 14:05`) and otherwise writes the
+bare date — then re-resolves at once (`set_value` emits no `Change`) and
+refocuses the field, so the calendar never holds the keyboard; typing
+mirrors the parsed day back onto the calendar (`calendar_date`: the
+resolved instant's local day, else today). Window tests drive the
+calendar entity's own `activate_date`, the call its day cell makes. Display
+check pending: the calendar's size beside the presets and its theme
+colours on a real window. The dialog widened from 480 to 640 px to seat
+the small calendar beside the presets.
+
 ### 5.3 Ingest progress in the status bar
 
 **Data layer:** the ingest runner emits `IngestEvent::Started { source,

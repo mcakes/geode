@@ -11822,6 +11822,35 @@ run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
   geode-shell \
   the_as_of_list_takes_ctrl_n_and_clamps_a_page_step
 
+# As-of date picker (2026-09-18): a bare YYYY-MM-DD is the END of that
+# day — the newest generation of the day — not its start. Resolving to
+# midnight would make "2026-09-08" show the previous evening's last
+# publish, and every other assertion on the parse stays green.
+run_mutation "asof: a bare date resolves to the end of the day" \
+  crates/geode-core/src/query.rs \
+  '        return resolve_local(d, END_OF_DAY, text);' \
+  '        return resolve_local(d, NaiveTime::MIN, text);' \
+  geode-core \
+  a_bare_date_resolves_to_the_end_of_that_local_day
+
+# A day click must keep a typed time: dropping it silently turns
+# "14:05 on the 9th" into "end of the 9th".
+run_mutation "asof: a day click keeps the typed time" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '    if keeps_time {' \
+  '    if false {' \
+  geode-shell \
+  compose_keeps_a_typed_time_and_replaces_or_adds_the_date
+
+# The calendar is hidden under `live`: painting it there invites a click
+# that silently turns "now" into a historical day.
+run_mutation "asof: the calendar hides under live" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '    !text.trim().eq_ignore_ascii_case("live")' \
+  '    true' \
+  geode-shell \
+  the_calendar_hides_only_under_live
+
 run_mutation "palette: tab is reclaimed inside the palette (spec §20.5)" \
   crates/geode-shell/src/shell/dialog.rs \
   '        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodePalette")),' \

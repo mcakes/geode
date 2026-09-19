@@ -2240,7 +2240,7 @@ pub fn parse_as_of(text: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, Stri
     }
     DateTime::parse_from_rfc3339(text)
         .map(|t| t.with_timezone(&Utc))
-        .map_err(|_| format!("'{text}' is not HH:MM, YYYY-MM-DD[ HH:MM[:SS]] or an RFC 3339 time"))
+        .map_err(|_| format!("'{text}' is not HH:MM or an RFC 3339 time"))
 }
 ```
 
