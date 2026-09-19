@@ -124,7 +124,6 @@ pub fn toolbar(
                         chip_radius,
                         move || format!("scope-chip-{body_column}"),
                     )
-                    .cursor_pointer()
                     .tooltip(tips::tip_with(
                         c.tip_selector.clone(),
                         c.full.clone(),

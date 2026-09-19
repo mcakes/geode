@@ -4852,7 +4852,7 @@ fn clicking_a_groupings_row_opens_the_chooser(cx: &mut gpui::TestAppContext) {
 ///
 /// The typed text is `wd`, not `mine` and not `wide` itself. The browse
 /// list underneath is deliberately still ranked by the naming text
-/// (CLAUDE.md's Phase 4c Part 2a paragraph — "so a near-collision stays
+/// (`docs/phase-history.md`, Phase 4c Part 2a — "so a near-collision stays
 /// visible before `enter` refuses it"), and the ranker is a *subsequence*
 /// matcher, so `mine` — no fuzzy match against this fixture's `tree` or
 /// `wide` — would leave no row to click at all, exercising the ranking
@@ -5711,6 +5711,52 @@ fn services_with_two_datasets_and_a_view() -> ShellServices {
     services
 }
 
+/// Final review, Critical 1: the typeahead's `Pick` arm is a second door
+/// onto the `dataset` row's `Choice` (`space`/`shift+space`/`tab` are the
+/// first) and must run [`objectdialog::render::maybe_refresh_available`]
+/// exactly as they do — picking `vol` through `i`, type, `enter` has to
+/// rebuild the `columns` catalogue from the NEW dataset, or a trader
+/// keeps ticking columns the dataset they just picked does not have.
+#[gpui::test]
+fn a_picked_dataset_rebuilds_the_available_catalogue(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_two_datasets_and_a_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter"); // tree's edit stage, cursor on `dataset`
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.available_items("columns").map(|rows| {
+            rows.iter().map(|i| i.name.clone()).collect::<Vec<_>>()
+        })),
+        Some(vec!["npv".to_string()]),
+        "sanity: risk's own available block"
+    );
+
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_input("vol");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("dataset").map(str::to_string)),
+        Some("vol".to_string()),
+        "sanity: the pick landed on the other dataset"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.available_items("columns").map(|rows| {
+            rows.iter().map(|i| i.name.clone()).collect::<Vec<_>>()
+        })),
+        Some(vec!["strike".to_string()]),
+        "the available catalogue was rebuilt from the picked dataset, \
+         not left holding risk's own columns"
+    );
+}
+
 /// The final whole-branch review's Minor 4: `maybe_refresh_available`
 /// seeds each catalogue row from `dataset_presentation.toml` (§5.4), so
 /// it must read the config with the PENDING batch folded in. Inside the
@@ -6260,20 +6306,22 @@ fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppConte
 
 /// The edit footer names `i` on the row that can take it and on no
 /// other (user ruling 2026-09-13, narrowing the 2026-09-12 rule from the
-/// object to the row): Sources' `Paths` is an editable `Text`, but the
-/// `Dataset` row the stage opens on is a `Choice` that `i` refuses.
+/// object to the row): Sources' `Paths` is an editable `Text` — `i` alone,
+/// nothing steps — and the `Dataset` row the stage opens on is a
+/// multi-option `Choice`, which both steps and types (spec 2026-09-19
+/// §3.2: `i` opens a typeahead over its options).
 #[gpui::test]
 fn the_edit_footer_offers_i_only_where_a_row_can_take_it(cx: &mut gpui::TestAppContext) {
     let (_shell, mut cx) = dialog_test_shell_with(cx, services_with_sources(), "config::sources");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("objectdialog-hint-i").is_none(),
-        "Sources opens on Dataset, a Choice i cannot open"
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "Sources opens on Dataset, a multi-option Choice i now opens"
     );
     assert!(
         cx.debug_bounds("objectdialog-hint-change").is_some(),
-        "which the step keys do change"
+        "which the step keys also change"
     );
     cx.simulate_keystrokes("j"); // Paths, an editable Text
     cx.run_until_parked();
@@ -6725,6 +6773,128 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
     assert!(written.contains("[delta]\nhue = 255"), "{written}");
 }
 
+/// A double-click on a value row is `i` (user ruling 2026-09-19,
+/// interaction-model spec §17 amendment): the first mouse-down selects
+/// the row exactly as a single click does, and the second — the one the
+/// platform stamps `click_count: 2` — opens the row's field through the
+/// same door the key and the action-bar button take, here a `Choice`
+/// row's typeahead. A single click on its own still only selects.
+#[gpui::test]
+fn a_double_click_on_a_value_row_is_i(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    cx.simulate_keystrokes("enter"); // delta
+    cx.run_until_parked();
+    let token = cx
+        .debug_bounds("objectdialog-field-token")
+        .expect("the token row is painted");
+    let at = gpui::point(
+        token.origin.x + gpui::px(40.0),
+        token.origin.y + gpui::px(4.0),
+    );
+    cx.simulate_mouse_down(at, MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(2)),
+        "a single click selects the row"
+    );
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "and opens nothing"
+    );
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "the double-click opened the typeahead, as `i` would"
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "the field has the keys"
+    );
+    assert!(cx.debug_bounds("dialog-mode-pill-choose").is_some());
+}
+
+/// A double-click on a DOOR row (a Views member column) is "open the
+/// column stage" and nothing more: the first mouse-down opens the stage,
+/// and the second — landing one frame later on whatever field the new
+/// stage painted at that point — must not open `i` on a row the trader
+/// never aimed at (`ObjectDialogState::click_opened_stage`).
+#[gpui::test]
+fn a_double_click_on_a_door_row_opens_the_stage_and_nothing_more(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    cx.simulate_keystrokes("enter"); // tree
+    cx.run_until_parked();
+    let member = cx
+        .debug_bounds("objectdialog-item-delta01")
+        .expect("the member row is painted");
+    let at = gpui::point(
+        member.origin.x + gpui::px(40.0),
+        member.origin.y + gpui::px(4.0),
+    );
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the second click opened no field in the freshly opened stage"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    // A fresh double-click INSIDE the stage is `i` again — the guard is
+    // about the click that opened the stage, not the stage itself.
+    let width = cx
+        .debug_bounds("objectdialog-field-width")
+        .expect("the column stage paints its width row");
+    let at = gpui::point(
+        width.origin.x + gpui::px(40.0),
+        width.origin.y + gpui::px(4.0),
+    );
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "a double-click on the width row opens its field"
+    );
+}
+
+/// The browse list is a door too: a double-click on a browse row opens
+/// its edit stage and nothing more. The second click lands on whatever
+/// the new stage painted at that point — on Groupings, slot 3's chooser
+/// puts a row under the pointer that a click would otherwise open as
+/// the chain field (review finding, 2026-09-19).
+#[gpui::test]
+fn a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    let row = cx
+        .debug_bounds("objectdialog-row-3")
+        .expect("slot 3's browse row is painted");
+    let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0));
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the second click opened no field in the freshly opened stage"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+}
+
 // --- Spec §20.3 / §20.6: the value chip, the i/n buttons, the armed guard --
 
 /// Spec §20.3 on the object dialog: the hue chip steps on click and
@@ -6811,6 +6981,251 @@ fn the_value_chip_steps_a_number_and_is_inert_under_a_confirm(cx: &mut gpui::Tes
     );
 }
 
+/// Spec 2026-09-19 §3.2: `i` on a `Choice` row opens the shared field as
+/// a typeahead over the options, painted in the row list's place;
+/// typing narrows, `enter` picks the LIT row (never the typed text),
+/// the change rides the tick's own commit path (a builtin colour forks
+/// and says so), and the cursor is back on the row.
+#[gpui::test]
+fn i_on_a_choice_row_opens_a_typeahead_and_enter_picks_the_lit_option(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    cx.simulate_keystrokes("enter"); // delta
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j"); // hue → tone → token
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.choice_entry()));
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "the field has the keys"
+    );
+    assert_eq!(dialog_input_text(&shell, &cx), "", "opens empty");
+    assert!(cx.debug_bounds("dialog-name-row").is_some());
+    assert!(cx.debug_bounds("dialog-mode-pill-choose").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-choice-list").is_some(),
+        "options in the list's place"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-hue").is_none(),
+        "no field rows while choosing"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-actions").is_none(),
+        "the action bar is withdrawn"
+    );
+
+    cx.simulate_input("dan");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-choice-danger").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-choice-accent").is_none(),
+        "narrowed away"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.choice_entry()));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
+    assert_eq!(dialog_input_text(&shell, &cx), "");
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        &d.fields[2].kind,
+        objectdialog::FieldKind::Choice { options, selected } if options[*selected] == "danger"
+    )));
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(2)),
+        "the cursor is back on the token row"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-hue").is_some(),
+        "the field rows are back"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "a builtin forks without asking"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("copied 'delta'"), "{notice}");
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    assert!(written.contains("token = \"danger\""), "{written}");
+}
+
+/// `tab` completes the lit option into the field, `up`/`down` move the
+/// highlight, a row click is `tab`, and `escape` cancels with the value
+/// untouched and the cursor on the row.
+#[gpui::test]
+fn tab_completes_and_escape_cancels_a_choice_field(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    cx.simulate_keystrokes("enter j j i");
+    cx.run_until_parked();
+    // A click on a row OTHER than the currently lit one is `tab` on
+    // THAT row — not a no-op replay of whatever the field already
+    // holds. The highlight opens on "none" (the field's current
+    // value); clicking "muted" (a different, unrelated row, still
+    // painted since the query is empty) must narrow the field to
+    // "muted" and stay open.
+    let muted = cx.debug_bounds("objectdialog-choice-muted").unwrap();
+    cx.simulate_mouse_down(
+        muted.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(dialog_input_text(&shell, &cx), "muted");
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "a click completes, it does not pick"
+    );
+    // Cancel and reopen fresh (query cleared, every option painted
+    // again) for the down/tab dance below.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    let lit = edit_draft(&shell, &cx, |d| {
+        d.choice
+            .as_ref()
+            .unwrap()
+            .highlighted_text()
+            .map(str::to_string)
+    });
+    assert_eq!(lit.as_deref(), Some("foreground"), "row 1 of the 16 tokens");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(dialog_input_text(&shell, &cx), "foreground");
+    // A click on the (only) painted row is `tab` too.
+    let bounds = cx.debug_bounds("objectdialog-choice-foreground").unwrap();
+    cx.simulate_mouse_down(
+        bounds.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "a click completes, it does not pick"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.choice_entry()));
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        &d.fields[2].kind,
+        objectdialog::FieldKind::Choice { options, selected } if options[*selected] == "none"
+    )));
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
+        "nothing queued by a cancel"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(2))
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "the footer teaches i on a Choice row"
+    );
+}
+
+/// §19.4: the read-only Schema inspector refuses `i` on its rows
+/// through the same gate every other verb uses — nothing in the choice
+/// path opens a field there.
+#[gpui::test]
+fn i_is_refused_on_the_schema_inspector(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_two_datasets_and_a_view(),
+        dir.path(),
+        "config::schema",
+    );
+    cx.simulate_keystrokes("enter i");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("open a column"), "{notice}");
+}
+
+/// Review finding (2026-09-19): the column stage's `scale`/`negative`/
+/// `colour` rows are multi-option `Choice` fields, so `i` opens a
+/// typeahead there exactly as it does on the object stage's own `Choice`
+/// rows — the footer must say "choose a value", not "type a value", and
+/// `i` must actually open the typeahead rather than the plain text field
+/// the stale comment above this site used to claim it would refuse.
+///
+/// The footer paints no selector on the hint's WORD (only on its key
+/// chip), so the word is read through `render::i_hint_word` directly —
+/// the same pure door the footer itself now calls (`help_line`'s own
+/// pattern for reading painted-but-unselectored text, a few tests
+/// below) — rather than by measuring pixels.
+#[gpui::test]
+fn the_column_stages_choice_rows_teach_choose_and_i_opens_the_typeahead(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // Onto `npv`'s column stage: label(0), width(1), scale(2),
+    // precision(3), thousands(4), negative(5), colour(6).
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    cx.simulate_keystrokes("j j"); // label -> width -> scale
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(2)),
+        "on scale"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .selected_vocabulary(objectdialog::Domain::Views)),
+        objectdialog::RowVocabulary::StepsAndTypes,
+        "a multi-option Choice steps and types"
+    );
+    assert!(cx.debug_bounds("objectdialog-hint-i").is_some());
+    let word = edit_draft(&shell, &cx, |d| {
+        objectdialog::render::i_hint_word(d.selected_row(), d).to_string()
+    });
+    assert_eq!(word, "choose a value", "scale is a Choice row");
+
+    // `i` opens the typeahead here too — not the plain text field the
+    // stale comment above this footer site used to describe.
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "i on scale opens the typeahead, same as any other Choice row"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.choice_entry()));
+
+    cx.simulate_keystrokes("j"); // scale -> precision
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(3)),
+        "on precision"
+    );
+    let word = edit_draft(&shell, &cx, |d| {
+        objectdialog::render::i_hint_word(d.selected_row(), d).to_string()
+    });
+    assert_eq!(word, "type a value", "precision is a Number row");
+}
+
 /// The two keyboard-only verbs gain buttons: `i` on the edit stage's bar
 /// when the selected row is one `i` opens, `n` on the browse stage.
 #[gpui::test]
@@ -6857,11 +7272,52 @@ fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext
         cx.debug_bounds("objectdialog-action-i").is_none(),
         "no verbs while the field is open"
     );
-    cx.simulate_keystrokes("escape j"); // tone, a Choice: steps but never types
+    cx.simulate_keystrokes("escape j"); // tone, a two-option Choice
     cx.run_until_parked();
     assert!(
+        cx.debug_bounds("objectdialog-action-i").is_some(),
+        "a multi-option Choice both steps and types now (spec 2026-09-19 §3.2)"
+    );
+}
+
+/// Harness follow-up (2026-09-19): the test above no longer discriminates
+/// "`i` is offered per row" from "`i` is offered on every row" — Task 2
+/// made a multi-option `Choice` `StepsAndTypes`, so every row that test
+/// looks at (a `Number`, then a `Choice`) is one the button legitimately
+/// paints on. A read-only `Text` row is the one this crate has that
+/// never offers `i` on any writable domain (`RowVocabulary::Inert`,
+/// `Draft::vocabulary_of`'s catch-all `FieldKind::Text` arm) — Scopes'
+/// `Selects` summary is exactly that, on a domain that is otherwise
+/// writable (`actions()` returns early only for Schema), so this is the
+/// row `objectdialog: the i button is offered per row, not per domain`'s
+/// mutation (`types` forced to `true`) actually needs to paint a button
+/// where there should be none.
+#[gpui::test]
+fn the_i_button_is_withheld_on_a_read_only_text_row(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    // Into `mine`'s edit stage — the only saved scope, so already
+    // selected — cursor on `Selects`, field 0.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected_row()),
+        Some(objectdialog::EditRow::Field(0))
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .selected_vocabulary(objectdialog::Domain::Scopes)),
+        objectdialog::RowVocabulary::Inert,
+        "Selects is a read-only summary — nothing here has a verb"
+    );
+    assert!(
         cx.debug_bounds("objectdialog-action-i").is_none(),
-        "i is not offered on a row it cannot open"
+        "no i button on a row i cannot open"
     );
 }
 
@@ -7226,8 +7682,8 @@ fn tab_steps_the_selected_row_in_both_modes(cx: &mut gpui::TestAppContext) {
 /// The footer names the keys the row under the CURSOR answers to, not
 /// the ones its domain has somewhere (user ruling 2026-09-13). The
 /// column stage is where all three cases sit side by side: `label` is an
-/// editable `Text` (`i` only), `scale` a `Choice` (the step keys only),
-/// `precision` a `Number` (both).
+/// editable `Text` (`i` only), `scale` a multi-option `Choice` (both,
+/// since §3.2's typeahead), `precision` a `Number` (both).
 #[gpui::test]
 fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7269,8 +7725,8 @@ fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAp
         "scale is a Choice: the step keys change it"
     );
     assert!(
-        cx.debug_bounds("objectdialog-hint-i").is_none(),
-        "and i has nothing to open on a Choice"
+        cx.debug_bounds("objectdialog-hint-i").is_some(),
+        "and i opens a typeahead over its options (a multi-option Choice)"
     );
 
     cx.simulate_keystrokes("j"); // precision
@@ -8256,6 +8712,18 @@ fn the_help_line_is_blank_under_an_armed_confirm(cx: &mut gpui::TestAppContext) 
 /// line and everything below it shifted. Every hint row is now laid out
 /// every time — an empty one painted blank at the same height — so the
 /// go row sits at one y whichever row is selected.
+///
+/// Final review, Important 2: this used to also catch a second,
+/// unrelated collapse — `action_bar` (§20.3's button row, ABOVE the
+/// footer) shrinks to 0 px on a row `actions()` offers nothing for,
+/// since an `h_flex` with no children has no height of its own. `k`
+/// lands on `adapter`, a read-only `Text` with no verb, so that bar's
+/// own height used to move the footer with it — the exact "everything
+/// below it shifted" bug this test guards, one level up. `action_bar`
+/// now reserves a small button's height whether or not it has any
+/// buttons, which is what lets this assertion go back to the ORIGINAL
+/// absolute one: `go`'s y does not move at all, not merely by a
+/// constant gap from `edit`.
 #[gpui::test]
 fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
     cx: &mut gpui::TestAppContext,

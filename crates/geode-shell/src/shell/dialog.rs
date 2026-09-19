@@ -65,7 +65,9 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, box_shadow, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, Theme, box_shadow, h_flex, v_flex,
+};
 
 use super::ShellView;
 use super::scale;
@@ -558,7 +560,7 @@ pub(crate) fn sync_dialog_text(
     } else if let Some(state) = shell.object_dialog.as_ref() {
         (state.mode, false, state.effective_query())
     } else if let Some(state) = shell.settings.as_ref() {
-        (state.mode, false, state.query.as_str())
+        (state.mode, false, state.effective_query())
     } else {
         return;
     };
@@ -857,6 +859,59 @@ pub(crate) fn chain_pill(cx: &App) -> AnyElement {
 /// misdescribe what `enter` does. Selector `dialog-mode-pill-edit`.
 pub(crate) fn edit_pill(cx: &App) -> AnyElement {
     state_pill("edit", true, cx)
+}
+
+/// The pill while a `Choice` row's typeahead is open (spec 2026-09-19
+/// §3.2): `choose`, the `primary` "you are typing" pair. Selector
+/// `dialog-mode-pill-choose`.
+pub(crate) fn choose_pill(cx: &App) -> AnyElement {
+    state_pill("choose", true, cx)
+}
+
+/// The ranked options of an open choice field, painted in a dialog's
+/// row list's place (spec 2026-09-19 §3.2/§3.3): one row per PAINTED
+/// entry of `list`, the highlighted one in the selection colours every
+/// list in these dialogs uses, matched characters highlighted through
+/// `highlighted_text`. At most `list.painted_len()` rows (12), so no
+/// scroll container: the query narrows the rest. `on_click(row)` is the
+/// mouse form of `tab` on that row — the caller decides what that means.
+/// Selectors: `{prefix}-choice-list` on the list, `{prefix}-choice-{text}`
+/// on each row.
+pub(crate) fn choice_rows(
+    list: &crate::choice::ChoiceList,
+    prefix: &'static str,
+    theme: &Theme,
+    on_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+) -> AnyElement {
+    let mut rows = v_flex()
+        .id(gpui::SharedString::from(format!("{prefix}-choice-list")))
+        .w_full()
+        .debug_selector(move || format!("{prefix}-choice-list"));
+    for (position, ranked) in list.painted().iter().enumerate() {
+        let text = list.options()[ranked.row].clone();
+        let selector = format!("{prefix}-choice-{text}");
+        let on_click = on_click.clone();
+        let mut row = h_flex()
+            .w_full()
+            .h(px(28.))
+            .px_3()
+            .items_center()
+            .text_sm()
+            .debug_selector(move || selector.clone())
+            .child(super::keybindings_view::highlighted_text(
+                &text,
+                &ranked.indices,
+                theme.primary,
+            ))
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                on_click(position, window, cx);
+            });
+        if position == list.highlighted() {
+            row = row.bg(theme.selection).text_color(theme.primary);
+        }
+        rows = rows.child(row);
+    }
+    rows.into_any_element()
 }
 
 /// The one pill [`mode_pill`], [`chain_pill`] and [`edit_pill`] all
@@ -1351,7 +1406,6 @@ pub(crate) fn value_chip(
             .rounded(radius)
             .bg(bg)
             .text_color(fg)
-            .cursor_pointer()
             .child(text)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 cx.stop_propagation();

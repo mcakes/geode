@@ -5720,11 +5720,11 @@ run_mutation "diagnostics module: MIN-11 — the header never shows the filtered
   '        if !self.filter.is_empty() {
             header = header.child(
                 div()
-                    .text_color(warn_chip.text)' \
+                    .text_color(neutral_chip.text)' \
   '        if false {
             header = header.child(
                 div()
-                    .text_color(warn_chip.text)' \
+                    .text_color(neutral_chip.text)' \
   geode-diagnostics a_filtered_tile_shows_the_filtered_pill
 
 # --- Task 5 fix round 2 ----------------------------------------------
@@ -7451,14 +7451,14 @@ run_mutation "dialog: the frozen-row click cancels a capture in progress" \
 # viewport (bottom 658.5px)".
 run_mutation "objectdialog: section headers do not add list children" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        list = list.child(match section_header {
-            Some(header) => v_flex().child(header).child(row_el).into_any_element(),
-            None => row_el,
-        });' \
-  '        if let Some(header) = section_header {
-            list = list.child(header);
-        }
-        list = list.child(row_el);' \
+  '            list = list.child(match section_header {
+                Some(header) => v_flex().child(header).child(row_el).into_any_element(),
+                None => row_el,
+            });' \
+  '            if let Some(header) = section_header {
+                list = list.child(header);
+            }
+            list = list.child(row_el);' \
   geode-shell \
   the_cursor_stays_in_view_past_a_section_header_on_a_long_list
 
@@ -7492,12 +7492,12 @@ run_mutation "objectdialog: the edit list sizes itself instead of the header it 
 # ambiguous.
 run_mutation "objectdialog: an edit-stage click takes the keyboard off the filter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    } else if let Some(column) = values_stage_target(shell) {
-        enter_values_stage(shell, &column, cx);
+  '            set_notice(shell, READ_ONLY_NOTICE.to_string());
+        }
     }
     dialog::sync_dialog_text(shell, window, cx);' \
-  '    } else if let Some(column) = values_stage_target(shell) {
-        enter_values_stage(shell, &column, cx);
+  '            set_notice(shell, READ_ONLY_NOTICE.to_string());
+        }
     }
     shell.focus_handle.focus(window, cx);' \
   geode-shell \
@@ -7730,8 +7730,12 @@ run_mutation "objectdialog: the chain field's keys fall through to filter mode" 
 # every mode assertion stays green.
 run_mutation "objectdialog: the chain field wears the filter pill" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                    Some(entry) if entry.completions => dialog::chain_pill(cx),' \
-  '                    Some(entry) if false && entry.completions => dialog::chain_pill(cx),' \
+  '                    Some(entry) if entry.completions == Completions::Chain => {
+                        dialog::chain_pill(cx)
+                    }' \
+  '                    Some(entry) if false && entry.completions == Completions::Chain => {
+                        dialog::chain_pill(cx)
+                    }' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -7776,9 +7780,14 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 # clicked `d`/`r` arms a confirm over a live, focused value field. The
 # keyboard tests cannot see it (no key reaches those verbs there); only
 # the painted-bar assertion can.
+# Re-anchored (30fcede gave this arm `.min_h_6()` — item 2 of the final
+# review's re-review — so the bare-`div()` text the old anchor matched
+# no longer exists). The three match arms together are still the
+# unique text: `confirm_row(confirm, &draft.name, entity, cx)` and
+# `action_bar(shell, entity, cx)` each occur nowhere else in this file.
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        (true, _) => div().into_any_element(),
+  '        (true, _) => div().min_h_6().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
         (false, None) => action_bar(shell, entity, cx),' \
   '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
@@ -7824,11 +7833,9 @@ run_mutation "objectdialog: a Groupings slot opens in its chain field" \
 run_mutation "objectdialog: a browse row click opens the edit stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if opens {
-        enter_edit_stage(shell, &name, None, cx);
-    }' \
+        enter_edit_stage(shell, &name, None, cx);' \
   '    if opens && false {
-        enter_edit_stage(shell, &name, None, cx);
-    }' \
+        enter_edit_stage(shell, &name, None, cx);' \
   geode-shell clicking_a_browse_row_opens_its_edit_stage
 
 # The naming exception: a stray click must not discard the typed name.
@@ -7995,10 +8002,10 @@ run_mutation "objectdialog: a tick click is claimed and dropped while a confirm 
 run_mutation "objectdialog: the tick's click does not stop propagation" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                            cx.stop_propagation();
-                            entity_for_tick.update(cx, |shell, cx| {' \
+                                cx.stop_propagation();
+                                entity_for_tick.update(cx, |shell, cx| {' \
   '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                            entity_for_tick.update(cx, |shell, cx| {' \
+                                entity_for_tick.update(cx, |shell, cx| {' \
   geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
 
 # ---- Mouse parity Task 6 (§18.9.1, §18.9.3): dragging a row --------------
@@ -8083,6 +8090,76 @@ run_mutation "palette: a row click dispatches the clicked row" \
   '                        view.sync_palette_scroll();
                         cx.notify();' \
   geode-shell click_on_a_result_row_dispatches_it_like_enter
+
+# ---- Choice with typeahead (2026-09-19, spec §3.2) --------------------
+# `enter` picks the LIT option, never the typed text: mutated to pick
+# row 0 of the declared list regardless, `dan`+`enter` writes `none`.
+run_mutation "choice: enter picks the highlighted option" \
+  crates/geode-shell/src/choice.rs \
+  '        self.highlighted_option()
+    }' \
+  '        Some(0)
+    }' \
+  geode-shell i_on_a_choice_row_opens_a_typeahead_and_enter_picks_the_lit_option
+
+# The identity rule: a re-rank keeps the highlight by TEXT. Mutated to
+# keep the ranked INDEX, typing `gruv l` after `down` lands on a row
+# that is no longer the one the trader lit.
+run_mutation "choice: a re-rank keeps the highlight by text" \
+  crates/geode-shell/src/choice.rs \
+  '        let keep = self.highlighted_text().map(str::to_string);
+        self.query = query.to_string();' \
+  '        let keep: Option<String> = None;
+        self.query = query.to_string();' \
+  geode-shell set_query_narrows_and_keeps_the_highlight_by_text
+
+# A one-option Choice has nothing to choose between: mutated to open
+# anyway, the footer test that says a one-option row is inert fails.
+run_mutation "choice: a one-option Choice does not open" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if options.len() < 2 {
+            return Step::Inert;
+        }
+        let mut list = crate::choice::ChoiceList::new' \
+  '        let mut list = crate::choice::ChoiceList::new' \
+  geode-shell a_one_option_choice_does_not_open_and_neither_does_a_text_row
+
+# A row click is `tab` on THAT row: mutated to do nothing, a click on a
+# row other than the currently-lit one leaves the field's text unchanged.
+run_mutation "choice: a row click completes that row" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        draft.choice_click(row);' \
+  '' \
+  geode-shell tab_completes_and_escape_cancels_a_choice_field
+
+# Final review, Critical 1: `ChoiceKey::Pick` is a second door onto a
+# `Choice` row (`space`/`shift+space`/`tab` are the first) and must run
+# `maybe_refresh_available` exactly as those do — picking a new dataset
+# through the typeahead must rebuild the `columns` catalogue too, or a
+# trader keeps ticking columns the picked dataset does not have. Mutated
+# to drop the call, the pick still applies but the catalogue is left
+# holding the OLD dataset's columns.
+run_mutation "choice: a picked dataset rebuilds the available catalogue" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        scroll_to_cursor(shell);
+                        // The cursor is still on the row `apply_choice`'"'"'s
+                        // own `follow(row)` left it on, which is exactly
+                        // what `maybe_refresh_available`'"'"'s dataset-row
+                        // check keys on — the same reason `space` and
+                        // the action bar'"'"'s tick run it ahead of
+                        // `revalidate` (final review, Critical 1).
+                        maybe_refresh_available(shell);
+                        revalidate(shell);' \
+  '                        scroll_to_cursor(shell);
+                        // The cursor is still on the row `apply_choice`'"'"'s
+                        // own `follow(row)` left it on, which is exactly
+                        // what `maybe_refresh_available`'"'"'s dataset-row
+                        // check keys on — the same reason `space` and
+                        // the action bar'"'"'s tick run it ahead of
+                        // `revalidate` (final review, Critical 1).
+                        revalidate(shell);' \
+  geode-shell a_picked_dataset_rebuilds_the_available_catalogue
+
 # ---- Settings dialog goes modal (interaction-model spec §18, 2026-09-12) --
 #
 # The same four silent failures spec §12 lists for the keybinding dialog,
@@ -8102,11 +8179,23 @@ run_mutation "settings: the dialog opens in filter mode" \
 
 # `EscapeStep::LeaveFilter` keeps the query APPLIED. A dialog that
 # cleared it on the way out still walks the same number of rungs.
+# Anchored on the whole `LeaveFilter` arm (2026-09-19: the choice
+# field's own `Cancel`/`Pick` arms below it now write
+# `state.mode = DialogMode::Normal;` too, at different indentation, so
+# the bare line alone stopped being a unique anchor).
 run_mutation "settings: leaving filter mode clears the query" \
   crates/geode-shell/src/shell/settings_view.rs \
-  '            state.mode = DialogMode::Normal;' \
-  '            state.mode = DialogMode::Normal;
-            state.query.clear();' \
+  '        KeyAction::LeaveFilter => {
+            // The query stays applied — leaving a search leaves you on
+            // the match rather than undoing it (`EscapeStep::LeaveFilter`).
+            state.mode = DialogMode::Normal;
+        }' \
+  '        KeyAction::LeaveFilter => {
+            // The query stays applied — leaving a search leaves you on
+            // the match rather than undoing it (`EscapeStep::LeaveFilter`).
+            state.mode = DialogMode::Normal;
+            state.query.clear();
+        }' \
   geode-shell \
   settings_escape_walks_the_ladder_one_rung_at_a_time
 
@@ -8160,6 +8249,70 @@ run_mutation "dialog: enter_filter_by_mouse ignores the settings dialog" \
   '    } else if let Some(state) = shell.settings.as_mut().filter(|_| false) {' \
   geode-shell \
   clicking_the_settings_frozen_filter_row_enters_filter_mode
+
+# Settings (spec 2026-09-19 §3.3): the pick applies through the one
+# `apply_setting` core. Mutated to close without applying, `gruv d` +
+# `enter` leaves the previous theme active.
+run_mutation "settings choice: enter applies the lit value" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '                    apply_setting(shell, id, ix, cx);' \
+  '                    let _ = (id, ix);' \
+  geode-shell i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme
+
+# ---- Double-click is i (2026-09-19, interaction-model spec §17) ---------
+# The second mouse-down of a double-click opens the selected row's field
+# through open_field, the key's own door. Mutated to ignore the click
+# count, a double-click only selects — the mouse has no route to `i`.
+run_mutation "dblclick: a double-click on a value row opens its field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    } else if click_count == 2' \
+  '    } else if click_count == 200' \
+  geode-shell a_double_click_on_a_value_row_is_i
+
+# A double-click on a DOOR row opens the column stage and nothing more:
+# the second click lands on the stage the first one painted. Mutated so
+# the flag is never set, the second click opens a field in the new stage.
+run_mutation "dblclick: the click that opened a stage does not also open a field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        enter_column_stage(shell, &name, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;' \
+  '        enter_column_stage(shell, &name, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = false;' \
+  geode-shell a_double_click_on_a_door_row_opens_the_stage_and_nothing_more
+
+# The browse list is a door too: mutated so the flag is not set there,
+# a double-click on Groupings' slot 3 opens the chain field on the stage
+# the first click painted.
+run_mutation "dblclick: the browse click that opened a stage does not also open a field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;
+        }
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+// ---- The edit stage' \
+  '        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = false;
+        }
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+// ---- The edit stage' \
+  geode-shell a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more
+
+# Settings: the same gesture through open_choice_on_selected.
+run_mutation "dblclick: a settings row's double-click opens its typeahead" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '    if click_count == 2 {' \
+  '    if click_count == 200 {' \
+  geode-shell a_double_click_on_a_settings_row_opens_its_typeahead
 
 # ---- schema: the document family (market-data spec §3)
 #
@@ -10290,12 +10443,10 @@ run_mutation "objectdialog: a click on a column row opens its stage" \
     // the trader pressed it instead.
     if let Some(name) = column_stage_target(shell) {
         enter_column_stage(shell, &name, cx);
-    }' \
-  '    // that was just clicked, which is what `enter` would be acting on had
-    // the trader pressed it instead.
-    if false {
+        if let Some(state) = shell.object_dialog.as_mut() {' \
+  '    if false {
         enter_column_stage(shell, "", cx);
-    }' \
+        if let Some(state) = shell.object_dialog.as_mut() {' \
   geode-shell \
   a_click_on_a_schema_column_row_opens_the_column_stage
 
@@ -11796,6 +11947,75 @@ run_mutation "chip: the readability ground composites the tint at its alpha" \
   geode-shell \
   the_retired_pairing_still_fails_the_sweep
 
+# A neutral chip is the theme's `secondary` pair, not a fourth warning:
+# `pinned` and `filtered` are trader choices. Mutated to the warning
+# tint under the plain foreground — readable, so the sweep alone would
+# pass — the token test is what notices, since it pins the pair.
+run_mutation "chip: a neutral chip is the secondary pair, not a warning tint" \
+  crates/geode-shell/src/shell/chip.rs \
+  '        Tone::Neutral => ChipPaint {
+            fill: Some(theme.secondary),
+            text: theme.secondary_foreground,
+        },' \
+  '        Tone::Neutral => ChipPaint {
+            fill: Some(theme.warning.opacity(FILL_ALPHA)),
+            text: theme.foreground,
+        },' \
+  geode-shell \
+  tones_resolve_to_their_documented_tokens
+
+# ---- List rows (`shell::listrow`, design-guide audit) --------------------
+# The highlighted row's text is the plain foreground, not `primary`:
+# `primary` over the list-active fill is under 3:1 on 11 bundled themes
+# (over the old `selection` fill, 15). Mutated back, every dialog's
+# highlighted row is unreadable on Fahrenheit and the sweep is the only
+# test that reads a row's COLOUR rather than its text.
+run_mutation "listrow: the highlighted row's text is the foreground, not primary" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        text: theme.foreground,' \
+  '        text: theme.primary,' \
+  geode-shell \
+  every_row_state_is_readable_on_every_bundled_theme
+
+# The fills are the LIST tokens, and active and hover differ. Mutated so
+# the highlighted row paints the hover fill, the pointer's row and the
+# highlighted row merge — the state and the pointer become one cue.
+run_mutation "listrow: active and hover are distinct list tokens" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        active: theme.list_active,' \
+  '        active: theme.list_hover,' \
+  geode-shell \
+  active_and_hover_are_the_list_tokens_and_differ
+
+# The match accent is floored against the active row's ground. Mutated
+# to the raw `primary`, a fuzzy-match glyph on the highlighted row is
+# under 3:1 on 11 themes.
+run_mutation "listrow: the match accent is floored against the active row" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        accent: to_hsla(readable_on(
+            to_rgb(theme.primary),
+            ground,
+            to_rgb(theme.foreground),
+        )),' \
+  '        accent: {
+            let _ = ground;
+            theme.primary
+        },' \
+  geode-shell \
+  every_row_state_is_readable_on_every_bundled_theme
+
+# A call site can walk past the door: the Sources row's prefix run did
+# (this branch's review, M1) — `primary` over the active fill on 11
+# themes. Only a source scan sees a call site's colour argument.
+run_mutation "listrow: every highlight run takes the door's accent" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                &in_prefix,
+                                row_paint.accent,' \
+  '                                &in_prefix,
+                                theme.primary,' \
+  geode-shell \
+  every_highlight_run_takes_the_doors_accent
+
 # ---- Chrome on the rem scale (`shell::scale`, design-guide audit) -------
 # `FontSize` moves the window rem; every chrome length is authored in
 # pixels at the Medium rem and resolved through `scale::design`, so it
@@ -11805,12 +12025,12 @@ run_mutation "chip: the readability ground composites the tint at its alpha" \
 # measures the painted list at both sizes, can tell.
 run_mutation "scale: a dialog list's height follows the rem, not the literal" \
   crates/geode-shell/src/shell/settings_view.rs \
-  '        .h(scale::design(
-            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
-        ))' \
-  '        .h(gpui::px(
-            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
-        ))' \
+  '            .h(scale::design(
+                (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+            ))' \
+  '            .h(gpui::px(
+                (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+            ))' \
   geode-shell \
   chrome_and_dialog_rows_follow_the_font_size
 
@@ -12184,30 +12404,30 @@ run_mutation "mdmenu: closing an orphaned picker never blurs a foreign field" \
 # `enter` actually goes through.
 run_mutation "mdpicker: enter loads the highlighted row, not the top match" \
   crates/geode-marketdata/src/tile.rs \
-  '        let index = p.rows.highlighted;' \
+  '        let index = p.rows.highlighted();' \
   '        let index = 0;' \
   geode-marketdata enter_loads_the_highlighted_row_not_the_top_match
 
 # Review fix round 2 (a NEW breakage the round-1 fix itself
 # introduced): the diagnostics observer must capture the highlighted
-# KEY (a string) BEFORE `p.all` is overwritten, never after — capturing
-# it once `all` already holds the reordered catalog reads the OLD
-# ranked position back out of the NEW `all` array, exactly reproducing
+# KEY (a string) BEFORE the option list is overwritten, never after —
+# capturing it once the list already holds the reordered catalog reads
+# the OLD ranked position back out of the NEW list, exactly reproducing
 # the positional-index bug the string identity was built to fix (a
 # catalog reorder shifts every later index, so the "preserved"
 # highlight silently lands on whatever key now sits at that number).
-# Mutated by swapping the capture below the reassignment (the logic
-# lives in `PickerRows::replace_all` since the final review split the
-# picker's pure half out; the window test still reaches it through the
-# diagnostics observer).
+# Mutated by swapping the capture below the reassignment. Re-anchored
+# 2026-09-19: the logic now lives in `ChoiceList::replace_options`
+# (Task 5, `PickerRows::replace_all` is a thin wrapper over it) — the
+# window test still reaches it through the diagnostics observer.
 run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its old index" \
-  crates/geode-marketdata/src/popup.rs \
-  '        let keep = self.highlighted_key().map(str::to_string);
-        self.labels = Self::labels_for(&all, &self.marks);
-        self.all = all;' \
-  '        self.labels = Self::labels_for(&all, &self.marks);
-        self.all = all;
-        let keep = self.highlighted_key().map(str::to_string);' \
+  crates/geode-shell/src/choice.rs \
+  '        let keep = self.highlighted_text().map(str::to_string);
+        self.options = options;
+        self.place(keep.as_deref());' \
+  '        self.options = options;
+        let keep = self.highlighted_text().map(str::to_string);
+        self.place(keep.as_deref());' \
   geode-marketdata a_resorted_catalog_keeps_the_highlighted_key_not_its_old_index
 
 # ---- Panel header: final review fix wave (2026-09-17) -------------------
@@ -12285,37 +12505,56 @@ run_mutation "mdattr: a find cancelled from the strip returns to the strip" \
                 }' \
   geode-marketdata a_find_cancelled_from_the_strip_returns_to_the_strip
 
-# A1: a kept key the query filtered OUT (or one ranked past the painted
-# rows) has no row to land on and falls to row 0. Mutated to keep the
-# stale index, `highlighted` points past `ranked` and `enter` loads
-# nothing — the picker looks open and inert.
+# A1: a kept key the query filtered OUT has no row to land on and falls
+# to row 0. Mutated to keep the stale index, `highlighted` points past
+# `ranked` and `enter` loads nothing — the picker looks open and inert.
+# Re-anchored 2026-09-19: the logic now lives in `ChoiceList::place`
+# (Task 5) — the "or ranked past the painted rows" half of the old
+# comment is gone with it, since the window now follows a value ranked
+# past the cap into view rather than falling back to row 0 for it.
 run_mutation "mdpicker: place falls back to row 0 when the key is gone" \
-  crates/geode-marketdata/src/popup.rs \
-  '            .filter(|&row| row < PICKER_ROWS)
+  crates/geode-shell/src/choice.rs \
+  '            .and_then(|declared| self.ranked.iter().position(|r| r.row == declared))
             .unwrap_or(0);' \
-  '            .filter(|&row| row < PICKER_ROWS)
+  '            .and_then(|declared| self.ranked.iter().position(|r| r.row == declared))
             .unwrap_or(self.highlighted);' \
   geode-marketdata a_key_the_query_filtered_out_falls_to_row_0
 
 # A3: the picker paints at most PICKER_ROWS ranked keys; the query
 # narrows the rest. Mutated to paint them all, a 300-key catalog paints
-# 300 rows off the bottom of the window.
+# 300 rows off the bottom of the window. Re-anchored 2026-09-19: the cap
+# is no longer a `.take(PICKER_ROWS)` in `render_picker`'s own loop —
+# it is `ChoiceList::painted_len` (Task 5), which `render_picker` (and
+# `PickerRows::painted_len`) now defer to entirely.
 run_mutation "mdpicker: the picker paints at most PICKER_ROWS rows" \
-  crates/geode-marketdata/src/popup.rs \
-  '        for (row_i, &i) in rows.ranked.iter().take(PICKER_ROWS).enumerate() {' \
-  '        for (row_i, &i) in rows.ranked.iter().enumerate() {' \
+  crates/geode-shell/src/choice.rs \
+  '    pub fn painted_len(&self) -> usize {
+        (self.ranked.len() - self.window).min(self.cap)
+    }' \
+  '    pub fn painted_len(&self) -> usize {
+        self.ranked.len() - self.window
+    }' \
   geode-marketdata the_picker_paints_at_most_twelve_rows
 
-# A3's other half: the highlight is clamped to the PAINTED rows, so
-# `enter` can never load a row the trader cannot see. Mutated to clamp
-# to the whole ranked list, `down` walks the highlight off the bottom of
-# the painted list into rows that exist only in `ranked`.
-run_mutation "mdpicker: step stops at the last painted row" \
-  crates/geode-marketdata/src/popup.rs \
-  '        let painted = self.painted_len();
-        if painted == 0 {' \
-  '        let painted = self.ranked.len();
-        if painted == 0 {' \
+# A3's other half: the highlight is always painted, so `enter` can
+# never load a row the trader cannot see. Superseded 2026-09-19 by the
+# window-following cap (Task 5, `ChoiceList`/spec §3.1): a step no
+# longer clamps the highlight to a fixed painted range — it clamps over
+# the WHOLE ranked list (`nav_clamped`) and the WINDOW follows
+# (`follow`) so the highlight stays inside it. Mutated to stop the
+# window advancing forward, a step past the cap leaves the highlight
+# ahead of the window — painted past what `render_picker` actually
+# draws, exactly the bug `follow`'s forward branch exists to prevent.
+run_mutation "mdpicker: step is clamped at the last ranked row with the window following" \
+  crates/geode-shell/src/choice.rs \
+  '        if self.highlighted < self.window {
+            self.window = self.highlighted;
+        } else if self.highlighted >= self.window + self.cap {
+            self.window = self.highlighted + 1 - self.cap;
+        }' \
+  '        if self.highlighted < self.window {
+            self.window = self.highlighted;
+        }' \
   geode-marketdata the_highlight_never_leaves_the_painted_rows
 
 # A4: an I64 attribute parses as `i64` directly. Mutated back to the
@@ -12765,14 +13004,19 @@ run_mutation "objectdialog: press_verb syncs the dialog text after a verb (spec 
   i_and_n_have_buttons_that_do_what_their_keys_do
 
 # Spec §20.3: `i` is a button only where the selected row is one it
-# opens. Mutated to always offer it, a `Choice` row paints a button that
-# can only answer with a notice.
+# opens. Mutated to always offer it, a read-only `Text` row (Scopes'
+# `Selects` summary, RowVocabulary::Inert) paints a button that can only
+# answer with a notice. NOT a `Choice` row: spec 2026-09-19 §3.2 made a
+# multi-option `Choice` StepsAndTypes, so `i` legitimately paints there
+# now and that row can no longer tell this mutation apart from the real
+# code — `i_and_n_have_buttons_that_do_what_their_keys_do`'s own `Choice`
+# assertion agrees with `|| true` for exactly that reason.
 run_mutation "objectdialog: the i button is offered per row, not per domain (spec §20.3)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    ) || state.domain == Domain::Groupings;' \
   '    ) || true;' \
   geode-shell \
-  i_and_n_have_buttons_that_do_what_their_keys_do
+  the_i_button_is_withheld_on_a_read_only_text_row
 
 # Spec §20.3: the browse `n` button takes the key's own door. Mutated
 # away, the button syncs and notifies but opens nothing.
@@ -12900,11 +13144,20 @@ run_mutation "mdmenu: hovering a menu row moves the highlight" \
   geode-marketdata \
   hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid
 
+# Re-anchored 2026-09-19 (Task 5): the set moved into the guard itself
+# (`ChoiceList::set_highlighted`, refused past the painted range), so
+# the mutation drops both the set and the notify by narrowing the guard
+# to the change-only compare alone.
 run_mutation "mdpicker: hovering a picker row moves the highlight" \
   crates/geode-marketdata/src/tile.rs \
-  '        p.rows.highlighted = row;
+  '        if p.rows.highlighted() == row || !p.rows.set_highlighted(row) {
+            return;
+        }
         cx.notify();' \
-  '        let _ = row;' \
+  '        if p.rows.highlighted() == row {
+            return;
+        }
+        let _ = row;' \
   geode-marketdata \
   hovering_a_picker_row_moves_the_highlight_and_occludes_the_grid
 

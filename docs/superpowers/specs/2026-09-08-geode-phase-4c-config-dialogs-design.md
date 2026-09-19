@@ -806,7 +806,7 @@ Five palette actions, no default key bindings:
 | `config::sources` | Sources | Config |
 | `config::scopes` | Saved scopes | Config |
 | `config::groupings` | Grouping slots | Config |
-| `config::schema` | Edit schema (retitled from "Schema (read-only)" 2026-09-13 — §19.4) | Config |
+| `config::schema` | Edit schema… (retitled from "Schema (read-only)" 2026-09-13 — §19.4; `…` since 2026-09-19, as every dialog-opening title) | Config |
 
 No defaults, because `keybindings::open` has none either — it is
 palette-only, and the user binds it if they want it (this repo's own

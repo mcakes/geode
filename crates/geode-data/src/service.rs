@@ -1980,7 +1980,7 @@ mod tests {
 
         // The two lanes are independent: a message that arrives anyway
         // still publishes, and its clean LOAD-lane `Ok` does not clear the
-        // connection's `Failed` (CLAUDE.md, Phase 4b's NEW-4).
+        // connection's `Failed` (`docs/phase-history.md`, Phase 4b's NEW-4).
         feed.publish(
             "cvi/SPX.Z",
             FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),

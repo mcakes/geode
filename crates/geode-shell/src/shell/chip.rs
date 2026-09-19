@@ -63,6 +63,20 @@ pub enum Tone {
     /// reporting a failed source, a blotter's query error. `theme.danger`
     /// floored the same way.
     DangerText,
+    /// A state the trader chose and may want reminding of, carrying no
+    /// hazard: a pinned grouping, a tile's own filter. The theme's
+    /// `secondary` surface under `secondary_foreground` — a neutral pill,
+    /// so the warning tone stays scarce enough to mean something (design
+    /// guide: keep most badges neutral; a row of coloured badges is a
+    /// missing hierarchy decision). `secondary`, not the dialogs' own
+    /// `muted` chip pair, by measurement (2026-09-19): the text clears
+    /// 3:1 on all 44 bundled themes over `secondary` and fails on 15 over
+    /// `muted`, and the fill itself is visible (>1.15:1 against the
+    /// background) on 34 themes for `secondary` against 11 for `muted`.
+    /// The ten where `secondary` is faint (Asciinema 1.06:1, Tokyo Storm
+    /// 1.08:1) read the pill as bare text — a theme-authoring matter, not
+    /// worth a border every chip in the strip would have to reserve.
+    Neutral,
 }
 
 /// A chip's colours, resolved: `fill` is `None` for a text-only tone.
@@ -94,6 +108,10 @@ pub fn chip_paint(theme: &Theme, tone: Tone) -> ChipPaint {
         Tone::DangerText => ChipPaint {
             fill: None,
             text: floored_text(theme, theme.danger),
+        },
+        Tone::Neutral => ChipPaint {
+            fill: Some(theme.secondary),
+            text: theme.secondary_foreground,
         },
     }
 }
@@ -132,11 +150,12 @@ mod tests {
     use super::*;
     use gpui_component::ActiveTheme as _;
 
-    const TONES: [Tone; 4] = [
+    const TONES: [Tone; 5] = [
         Tone::Warning,
         Tone::Danger,
         Tone::WarningText,
         Tone::DangerText,
+        Tone::Neutral,
     ];
 
     /// Every tone's text must clear the 3:1 floor over its own ground on
@@ -164,7 +183,7 @@ mod tests {
             });
         }
         assert!(
-            checked >= 4 * 40,
+            checked >= 5 * 40,
             "the sweep saw {checked} checks — bundled themes missing?"
         );
         assert!(
@@ -221,6 +240,9 @@ mod tests {
                 assert_eq!(text.fill, None);
                 assert!(is_readable(theme, &text));
             }
+            let neutral = chip_paint(theme, Tone::Neutral);
+            assert_eq!(neutral.fill, Some(theme.secondary));
+            assert_eq!(neutral.text, theme.secondary_foreground);
         });
     }
 }

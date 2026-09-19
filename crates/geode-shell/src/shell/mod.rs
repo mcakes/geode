@@ -18,6 +18,7 @@ mod hot_reload;
 mod input;
 pub mod keybindings_view;
 pub mod keys;
+pub mod listrow;
 pub mod objectdialog;
 mod occupants;
 mod palette_ctl;

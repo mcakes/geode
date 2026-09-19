@@ -130,9 +130,10 @@ in the filter row's place with `Completions::Choice`:
 - `Draft::visible_rows` answers the field's `ChoiceList::rank` for the
   `Choice` arm (the options as rows, as the chain field's candidates
   are), the highlight placed on the current value at open.
-- `up`/`down`/`j`/`k` and the rest of `listfilter::nav_command` move
-  the highlight; `tab` completes; a completion-row click is `tab`
-  (§18.9's rule for the chain field).
+- `up`/`down` and the rest of `listfilter::nav_command`'s chords
+  (`ctrl+p/n/u/d/b/f`, the page keys) move the highlight — `j`/`k` are
+  letters typed into the field, not bindings; `tab` completes; a
+  completion-row click is `tab` (§18.9's rule for the chain field).
 - **`enter` picks the highlighted option**, not the typed text — a
   dropdown commits what is lit, exactly as the underlying picker does.
   It sets `Choice.current` and rides the same `revalidate` +
@@ -170,6 +171,30 @@ dropdown on these surfaces, and a floating layer inside `GeodeModal`
 would need its own occlusion and click-out rules. The panel's `status`
 cell (Phase 2) opens a `ChoiceList` in the existing `Popup` slot
 anchored at the cell.
+
+**As built (2026-09-19):** Tasks 1–5 of
+`docs/superpowers/plans/2026-09-19-choice-with-typeahead.md`; the
+object dialog paints the options through `dialog::choice_rows` in
+place of the row list rather than through `EditRow` rows (no new
+`EditRow` variant), and the settings dialog's `enter` opens the field
+in normal mode only. The cap is a WINDOW that follows the highlight
+(`ChoiceList::follow`), not a truncation of the ranked list — a
+controller ruling landing after the tasks above were written, fixing a
+trap the first build shipped: `i` then `enter` on the settings Theme
+row, whose active theme usually ranks past row 12, opened lit on the
+first theme and silently switched to it. The first sweep after Task 4
+found one pre-existing harness entry (`objectdialog: the i button is
+offered per row, not per domain`) no longer discriminating once a
+`Choice` row legitimately offers `i`; it now discriminates on a
+read-only `Text` row (794698b).
+
+**As-built correction (final whole-branch review):** §3.2's bullet
+above named `j`/`k` beside `up`/`down` as choice-field motions; they
+are not — `crate::choice::route` dispatches nav keys through
+`listfilter::nav_command`, whose table has no `j`/`k` entry at all
+(they are letters the field types), only `up`/`down` and the chord set.
+The bullet is corrected in place rather than left to stand beside this
+note.
 
 ## 4. Phase 2 — the document family and the typed flat panel
 

@@ -993,7 +993,6 @@ impl TableDelegate for BlotterDelegate {
                 div()
                     .id(("chevron", row_ix))
                     .w(px(14.))
-                    .cursor_pointer()
                     .text_color(theme.muted_foreground)
                     .debug_selector(|| format!("blotter-chevron-{row_ix}"))
                     .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {

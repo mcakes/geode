@@ -331,6 +331,16 @@ decorated label, and `:underlying`'s completions stay bare keys. Tests:
 `a_picker_row_names_an_underlyings_parked_edits`,
 `a_parked_key_is_marked_in_its_label_but_ranked_by_the_bare_key`.
 
+**2026-09-19:** `PickerRows` is now a thin wrapper over
+`geode_shell::choice::ChoiceList` (choice-with-typeahead design
+§3.1/§7); its keys and cap are unchanged, but the clamped `up`/`down`
+above now step past row 12 with the painted window following the
+highlight, rather than stopping at the old truncating cap — the
+highlight is still always painted, the invariant this section's own
+picker doc keeps. `PickerRows::query()`/`highlighted_key()`/`place()`
+are `#[cfg(test)]` accessors now; production reaches `ChoiceList`
+through `refilter`/`replace_all`/`picker_pick`/`step_highlighted`.
+
 ## 8. Session and commands
 
 - `serialize`: `underlying = [..]` (was `key`); `draft.attrs`. Restore

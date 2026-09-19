@@ -705,6 +705,44 @@ joined the modal side in §18 and these rules apply to it as §18.2 says):
   parity, never a private capability — the charter's "every action must
   be keyboard-reachable" is the direction that holds.
 
+### 17.4 Amendment — a double-click is `i` (2026-09-19)
+
+User ruling: "there's no way to enter the `i` edit mode from the mouse
+— double click invokes the same action as `i`." The object dialog's
+action bar did carry an `i` button (§20.3), but the settings dialog had
+no mouse route at all and the button was easy to miss beside a row the
+pointer was already on.
+
+- On the object dialog's edit stage and on the settings dialog, the
+  second mouse-down of a double-click (`MouseDownEvent::click_count ==
+  2`) on a row runs the key's own door: `render::open_field` (a `Choice`
+  row's typeahead, a `Number`/editable `Text` row's field, Groupings'
+  chain, or `i`'s own notice on a row that has none, behind the same
+  `writable` gate `press_verb` and the key path use) and
+  `settings_view::open_choice_on_selected` (shared with `i`/`enter`).
+  The first mouse-down of the pair selects the row exactly as a single
+  click does, so a single click's meaning is unchanged.
+- A double-click on a DOOR row — a browse row (whose single click opens
+  the edit stage) or a Views member / Schema column row (whose single
+  click opens the column stage) — opens that stage and nothing more.
+  The second click lands one frame later on whatever row the new stage
+  painted at that point, so `ObjectDialogState::click_opened_stage` —
+  set by both door clicks, cleared by the next single click — makes it
+  inert; without it the pair opened `i` on a row the trader never aimed
+  at (the review's probe: a double-click on Groupings' slot 3 browse row
+  opened the chain field). A fresh double-click inside the stage is `i`
+  again. Only `click_count == 2` counts: a triple-click's third down is
+  an ordinary click on whatever is painted by then.
+- Untouched: the keybindings dialog (a single click already captures),
+  the value chip (steps), the `i` button (kept), and the market-data
+  panel's own double-click editing.
+- Tests: `a_double_click_on_a_value_row_is_i`,
+  `a_double_click_on_a_door_row_opens_the_stage_and_nothing_more`,
+  `a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more`,
+  `a_double_click_on_a_settings_row_opens_its_typeahead`; harness
+  entries `dblclick:` ×4. The shared `tests::double_click` helper is the
+  fullscreen test's, lifted.
+
 ### 17.3 Tests and harness
 
 Window tests (`shell/tests/keybindings_dialog.rs`,
@@ -955,6 +993,13 @@ the settings state.
 
 The display check on a real window is pending, as it is for every
 dialog change on this branch's lineage.
+
+**Amended 2026-09-19** (choice-with-typeahead design §3.3, §7): `enter`
+is no longer inert in the settings dialog's normal mode — it and `i`
+open the selected row's typeahead (the shared `Input` in the filter
+row's place over the row's values, `ChoiceList`), `enter` there applying
+the lit value through the same `apply_setting` core a step takes.
+Filter mode's `enter` stays claimed and dropped.
 
 ## 19. Amendment — footer rows by category (2026-09-14)
 

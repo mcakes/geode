@@ -147,8 +147,10 @@ impl PaletteItem {
 /// rows, since the placement it scored was not the best one available.
 ///
 /// The indices are positions in `candidate.to_lowercase().chars()`. For
-/// every candidate this palette ever renders (plain-ASCII action titles
-/// and `"Theme: {name}"` rows) lowercasing never changes the char count, so
+/// every candidate this palette ever renders (action titles — ASCII plus
+/// a trailing `…` on the ones that open a dialog, which lowercases to
+/// itself — and `"Theme: {name}"` rows) lowercasing never changes the char
+/// count, so
 /// those positions apply equally to the original-case `candidate` — a
 /// property `render` relies on rather than re-deriving.
 ///
@@ -791,8 +793,9 @@ pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::H
 /// (`query_input` — native caret/selection/clipboard, see this module's own
 /// doc comment for the routing story), and every filtered result inside a
 /// fixed-height (~[`VISIBLE_ROWS`] rows), scrollable list with the selected
-/// row highlighted (`cx.theme().selection` background, `cx.theme().primary`
-/// text — plan constraint: no raw colors, `cx.theme()` roles only) and its
+/// row highlighted (`shell::listrow::row_paint`: `list_active` under the
+/// foreground, `list_hover` under the pointer — plan constraint: no raw
+/// colors, `cx.theme()` roles only) and its
 /// binding right-aligned in `cx.theme().muted_foreground`.
 ///
 /// **`Input` styling** (inventoried against `Input`'s own builder methods at
@@ -861,6 +864,7 @@ pub fn render(
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
+    let row_paint = crate::shell::listrow::row_paint(theme);
     let Viewport {
         width: viewport_width,
         height: viewport_height,
@@ -906,7 +910,7 @@ pub fn render(
                 .px_2()
                 .py_1()
                 .text_color(theme.muted_foreground)
-                .child("No matches"),
+                .child("no matches"),
         );
     } else {
         for (i, (item, indices, title_len)) in state.rows().enumerate() {
@@ -919,8 +923,13 @@ pub fn render(
                 .px_2()
                 .py_1()
                 .rounded(theme.radius);
+            // The list-row tokens through the one door (`shell::listrow`):
+            // the highlighted row is the state, the hovered row is the
+            // pointer, and they are distinct fills.
             if is_selected {
-                row = row.bg(theme.selection).text_color(theme.primary);
+                row = row.bg(row_paint.active).text_color(row_paint.text);
+            } else {
+                row = row.hover(|s| s.bg(row_paint.hover));
             }
             // Test-only, see `list`'s `debug_selector` comment above.
             let row = row.debug_selector(move || format!("palette-row-{i}"));
@@ -949,11 +958,15 @@ pub fn render(
             let label = h_flex()
                 .gap_2()
                 .items_center()
-                .child(div().child(highlighted_title(&item.title(), title_ix, theme.primary)))
+                .child(div().child(highlighted_title(&item.title(), title_ix, row_paint.accent)))
                 .child(
                     div()
                         .text_color(theme.muted_foreground)
-                        .child(highlighted_title(item.category(), &cat_ix, theme.primary)),
+                        .child(highlighted_title(
+                            item.category(),
+                            &cat_ix,
+                            row_paint.accent,
+                        )),
                 );
             let binding = div()
                 .font_family(fonts::MONO)

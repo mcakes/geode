@@ -152,7 +152,6 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_pointer()
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |view, _event, window, cx| {
@@ -207,7 +206,6 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         .items_center()
         .justify_center()
         .pb_2()
-        .cursor_pointer()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|view, _event, window, cx| {

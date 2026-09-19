@@ -1189,7 +1189,7 @@ fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
     cx: &mut gpui::TestAppContext,
 ) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    let before = shell.read_with(&cx, |s, cx| s.services.theme.active_name(cx));
+    let before = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
     cx.simulate_keystrokes("i"); // row 0 is Theme
     cx.run_until_parked();
     assert!(shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
@@ -1209,7 +1209,7 @@ fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
         shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().mode),
         DialogMode::Normal
     );
-    let after = shell.read_with(&cx, |s, cx| s.services.theme.active_name(cx));
+    let after = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
     assert_eq!(after, "Gruvbox Dark");
     assert_ne!(before, after);
     assert!(cx.debug_bounds("settings-list").is_some(), "the rows are back");
@@ -1243,7 +1243,6 @@ fn escape_cancels_a_settings_choice_field_untouched(cx: &mut gpui::TestAppContex
 }
 ```
 
-(Read `ThemeService` for the exact "active theme name" accessor — `services.theme` — and substitute; the existing theme-step tests in this file show how they read it.)
 
 - [ ] **Step 2: Run to verify they fail**
 

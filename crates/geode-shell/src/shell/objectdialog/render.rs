@@ -129,9 +129,9 @@ use super::scopes;
 use super::sources;
 use super::views;
 use super::{
-    ColumnContext, ColumnDoor, ColumnLayers, Confirm, Destination, Domain, Draft, EditRow, FellTo,
-    Field, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag,
-    RowVocabulary, Stage, Step,
+    ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination, Domain, Draft,
+    EditRow, FellTo, Field, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow,
+    READ_ONLY_NOTICE, RowDrag, RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -227,10 +227,17 @@ pub fn open(
             // §19.1: a value field runs in `Filter` (that is what gives
             // it the keys), but "filter" is the wrong word for a field
             // whose text is the value it will apply — the pill says
-            // `edit`, or `chain` for the chain field's own case.
+            // `edit`, or `chain` for the chain field's own case. A
+            // `Choice` row's typeahead reads `choose` (spec 2026-09-19
+            // §3.2).
             .children(
                 state.map(|s| match s.draft.as_ref().and_then(|d| d.text_entry) {
-                    Some(entry) if entry.completions => dialog::chain_pill(cx),
+                    Some(entry) if entry.completions == Completions::Chain => {
+                        dialog::chain_pill(cx)
+                    }
+                    Some(entry) if entry.completions == Completions::Choice => {
+                        dialog::choose_pill(cx)
+                    }
                     Some(_) => dialog::edit_pill(cx),
                     None => dialog::mode_pill(s.mode, cx),
                 }),
@@ -813,6 +820,13 @@ fn on_row_clicked(
     shell.object_dialog_scroll.scroll_to_item(ix);
     if opens {
         enter_edit_stage(shell, &name, None, cx);
+        // The browse list is a door too (`ObjectDialogState::
+        // click_opened_stage`): a double-click's second half lands on
+        // whatever edit row the new stage painted under the pointer, and
+        // must not open it.
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;
+        }
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
@@ -1328,8 +1342,8 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     // Checked before filter mode, which it shares a focused `Input` with:
     // the field is open only in `Filter` (that is what gives it the keys),
     // and every key filter mode would claim means something else here.
-    // The chain field (§18.8) is `handle_text_key`'s `completions: true`
-    // case, not a separate dispatch.
+    // The chain field (§18.8) is `handle_text_key`'s
+    // `Completions::Chain` case, not a separate dispatch.
     let text_entry = shell
         .object_dialog
         .as_ref()
@@ -1914,7 +1928,11 @@ fn open_field(shell: &mut ShellView) {
 /// or say why not. A `Number` is always typeable; a `Text` only where
 /// the domain says so (`Domain::text_editable`) — a display-only `Text`
 /// gets the read-only notice `enter` gives, so the two verbs agree about
-/// the same row. Any other row gets `edit_commit_notice`'s answer.
+/// the same row. A multi-option `Choice` opens the same shared field as
+/// a typeahead over its options instead (spec 2026-09-19 §3.2,
+/// `begin_choice_entry`); a one-option `Choice` has nothing to choose
+/// between and falls through to the notice below, as stepping it would.
+/// Any other row gets `edit_commit_notice`'s answer.
 fn open_text_field(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
@@ -1923,13 +1941,17 @@ fn open_text_field(shell: &mut ShellView) {
     let Some(draft) = state.draft.as_ref() else {
         return;
     };
-    let editable = match draft.selected_row() {
+    let (editable, choice) = match draft.selected_row() {
         Some(EditRow::Field(i)) => match &draft.fields[i].kind {
-            FieldKind::Number { .. } => true,
-            FieldKind::Text(_) => domain.text_editable(&draft.fields[i].key),
-            _ => false,
+            FieldKind::Number { .. } => (true, false),
+            FieldKind::Text(_) => (domain.text_editable(&draft.fields[i].key), false),
+            // Spec 2026-09-19 §3.2: a multi-option `Choice` opens a
+            // typeahead; a one-option one has nothing to choose between
+            // and falls to the notice below, as stepping it would.
+            FieldKind::Choice { options, .. } => (options.len() >= 2, true),
+            _ => (false, false),
         },
-        _ => false,
+        _ => (false, false),
     };
     if !editable {
         edit_commit_notice(shell);
@@ -1937,9 +1959,15 @@ fn open_text_field(shell: &mut ShellView) {
     }
     if let Some(state) = shell.object_dialog.as_mut()
         && let Some(draft) = state.draft.as_mut()
-        && draft.begin_text_entry() == Step::Changed
     {
-        state.mode = DialogMode::Filter;
+        let step = if choice {
+            draft.begin_choice_entry()
+        } else {
+            draft.begin_text_entry()
+        };
+        if step == Step::Changed {
+            state.mode = DialogMode::Filter;
+        }
     }
 }
 
@@ -1952,8 +1980,15 @@ fn open_text_field(shell: &mut ShellView) {
 /// so a desk field forks and says so; everything else is the focused
 /// `Input`'s to type (`false`).
 ///
+/// A `Choice` field (spec 2026-09-19 §3.2, `Completions::Choice`) is
+/// dispatched ahead of both the chain and the plain branch below, in its
+/// own block: `enter` there PICKS the highlighted option rather than
+/// parsing typed text, `tab` completes it into the field, and the nav
+/// keys move the highlight through the shared `choice::route` table —
+/// see that block's own comment for the full key table.
+///
 /// The chain field (§18.8, Groupings' `i`) is this same field with
-/// `completions: true`: `tab` and the nav keys only mean anything there
+/// `Completions::Chain`: `tab` and the nav keys only mean anything there
 /// — a plain field has no completion list below it to move a highlight
 /// through, so those two branches are gated on `completions` and `enter`
 /// dispatches to [`Draft::apply_chain`] instead of
@@ -1965,6 +2000,77 @@ fn open_text_field(shell: &mut ShellView) {
 /// this handler's return (spec §16.1), the same way every other
 /// transition in this dialog is settled.
 fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+    // ---- Choice field (spec 2026-09-19 §3.2) ------------------------
+    //
+    // Dispatched ahead of the chain and plain branches: `enter` here
+    // picks the LIT option rather than applying typed text, `tab`
+    // completes, and the nav keys move the highlight — one key table,
+    // `choice::route`, shared with the settings dialog. Every other key
+    // is the focused `Input`'s to type (`false`).
+    let choosing = draft_mut(shell).is_some_and(|d| d.choice_entry());
+    if choosing {
+        let Some(key) = crate::choice::route(ks) else {
+            return false;
+        };
+        match key {
+            crate::choice::ChoiceKey::Cancel => {
+                if let Some(state) = shell.object_dialog.as_mut()
+                    && let Some(draft) = state.draft.as_mut()
+                {
+                    draft.cancel_text_entry();
+                    state.mode = DialogMode::Normal;
+                }
+                scroll_to_cursor(shell);
+            }
+            crate::choice::ChoiceKey::Pick => {
+                // The field's live text may never have reached the draft
+                // through a `Change` event (`set_value` emits none), so
+                // the ranking is refreshed from it before the pick.
+                let live = shell.dialog_input.read(cx).value().to_string();
+                let step = draft_mut(shell).map(|draft| {
+                    draft.set_query(live);
+                    draft.apply_choice()
+                });
+                match step {
+                    Some(Step::Changed) => {
+                        if let Some(state) = shell.object_dialog.as_mut() {
+                            state.mode = DialogMode::Normal;
+                        }
+                        scroll_to_cursor(shell);
+                        // The cursor is still on the row `apply_choice`'s
+                        // own `follow(row)` left it on, which is exactly
+                        // what `maybe_refresh_available`'s dataset-row
+                        // check keys on — the same reason `space` and
+                        // the action bar's tick run it ahead of
+                        // `revalidate` (final review, Critical 1).
+                        maybe_refresh_available(shell);
+                        revalidate(shell);
+                        commit_change(shell, cx);
+                    }
+                    Some(Step::Inert) => {
+                        if let Some(state) = shell.object_dialog.as_mut() {
+                            state.mode = DialogMode::Normal;
+                        }
+                        scroll_to_cursor(shell);
+                    }
+                    Some(Step::Refused(reason)) => set_notice(shell, reason),
+                    None => {}
+                }
+            }
+            crate::choice::ChoiceKey::Complete => {
+                if !draft_mut(shell).is_some_and(Draft::complete_choice) {
+                    set_notice(shell, "nothing to complete here".to_string());
+                }
+            }
+            crate::choice::ChoiceKey::Nav(cmd) => {
+                if let Some(draft) = draft_mut(shell) {
+                    draft.choice_nav(cmd);
+                }
+            }
+        }
+        cx.notify();
+        return true;
+    }
     let completions = draft_mut(shell).is_some_and(|d| d.chain_entry());
     // The chain field's list changes length on every transition out of
     // it (the completions give way to the full row list) with the
@@ -3210,6 +3316,7 @@ fn build(
     let rows = derive_rows(shell);
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
+    let row_paint = super::super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
@@ -3275,7 +3382,9 @@ fn build(
             .py_1()
             .rounded(theme.radius);
         if is_selected {
-            row_el = row_el.bg(theme.selection).text_color(theme.primary);
+            row_el = row_el.bg(row_paint.active).text_color(row_paint.text);
+        } else {
+            row_el = row_el.hover(|s| s.bg(row_paint.hover));
         }
 
         // §19.3: a prefixed row paints `<prefix> · ` dimmed and the name
@@ -3297,13 +3406,13 @@ fn build(
                             .child(highlighted_text(
                                 &format!("{prefix} · "),
                                 &in_prefix,
-                                theme.primary,
+                                row_paint.accent,
                             )),
                     )
-                    .child(highlighted_text(&row.name, &in_name, theme.primary))
+                    .child(highlighted_text(&row.name, &in_name, row_paint.accent))
                     .into_any_element()
             }
-            None => highlighted_text(&row.name, &name_ix, theme.primary),
+            None => highlighted_text(&row.name, &name_ix, row_paint.accent),
         };
 
         let label = v_flex().gap_0p5().child(head).child(
@@ -3311,7 +3420,11 @@ fn build(
                 .font_family(crate::fonts::MONO)
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(highlighted_text(&row.summary, &summary_ix, theme.primary)),
+                .child(highlighted_text(
+                    &row.summary,
+                    &summary_ix,
+                    row_paint.accent,
+                )),
         );
 
         // Provenance, right-aligned: the layer that won as a muted outlined
@@ -3393,9 +3506,17 @@ fn build(
     if visible.is_empty() {
         // Two different empty states, said differently on purpose: an
         // over-narrow filter is a state the user can back out of, while
-        // a domain with nothing in it is a fact about the config.
+        // a domain with nothing in it is a fact about the config — and
+        // an empty state names the next action (design guide) where
+        // there is one: `n` creates an object on every writable domain,
+        // while the schema's rows come from `datasets.toml` alone.
         let message = if rows.is_empty() {
-            format!("no {} are configured", state.domain.title().to_lowercase())
+            let word = state.domain.title().to_lowercase();
+            if state.domain.writable(&Stage::Browse) {
+                format!("no {word} are configured — n creates one")
+            } else {
+                format!("no {word} are configured")
+            }
         } else {
             "no matches".to_string()
         };
@@ -3572,6 +3693,29 @@ fn build(
         .into_any_element()
 }
 
+/// The `i` chip's word (spec 2026-09-19 §3.2), off a row `types` is true
+/// for. A multi-option `Choice` row's `i` opens the typeahead, not a
+/// plain value field — the chip says "choose a value" there rather than
+/// the generic "type a value" a trader would read as inviting free text
+/// over a fixed vocabulary. One function for both footer sites in
+/// [`build_edit`] below (the object stage's own row and the column
+/// stage's `scale`/`negative`/`colour` rows) so they cannot say
+/// different things about the same row shape — and `pub(crate)` so a
+/// window test can read it directly rather than measuring painted pixel
+/// widths, which the footer's own selector (on the `i` key chip alone,
+/// never the trailing word) cannot do.
+pub(crate) fn i_hint_word(row: Option<EditRow>, draft: &Draft) -> &'static str {
+    let chooses = matches!(
+        row,
+        Some(EditRow::Field(i)) if matches!(draft.fields[i].kind, FieldKind::Choice { .. })
+    );
+    if chooses {
+        "choose a value"
+    } else {
+        "type a value"
+    }
+}
+
 /// The edit stage: the object's header, its diagnostics, the scrolling
 /// row list, and — **outside** that scroll — the action bar.
 ///
@@ -3599,11 +3743,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // the keys. A `confirm` cannot be armed here for the same reason,
     // so that arm is unreachable with the field open.
     let action_block = match (draft.text_entry.is_some(), state.confirm) {
-        (true, _) => div().into_any_element(),
+        // `min_h_6` for the same reason `action_bar` itself carries it
+        // (final review, Important 2): this placeholder sits where that
+        // bar would, and a bare `div()` with no children has no height
+        // of its own, so opening a field (`i`) would shift the footer
+        // up by a button's height and `escape` would shift it back.
+        (true, _) => div().min_h_6().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
         (false, None) => action_bar(shell, entity, cx),
     };
     let theme = cx.theme();
+    let row_paint = super::super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
@@ -3736,461 +3886,484 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .column_ctx
         .as_ref()
         .map(dataset_columns::ProvenanceInputs::new);
-    let mut list = v_flex()
-        .id("objectdialog-fields")
-        .w(scale::design(WIDTH))
-        .max_h(scale::design(VISIBLE_ROWS as f32 * ROW_HEIGHT))
-        .overflow_y_scroll()
-        .track_scroll(&shell.object_dialog_scroll)
-        .debug_selector(|| "objectdialog-fields".to_string());
-
-    // The last list row's `(field, is_own_item)` — the boundary a section
-    // header marks. `None` so the very first list row always opens one.
-    let mut last_item_section: Option<(usize, bool)> = None;
-
-    for (position, m) in visible.iter().enumerate() {
-        let Some(edit_row) = rows.get(m.row).copied() else {
-            continue;
-        };
-        let is_selected = position == draft.selected;
-        // Every row carries the same 2px top border, transparent unless
-        // `drag_over` recolours it — reserving the space up front means a
-        // hover only repaints the colour, never reflows the rows below it.
-        let mut element = h_flex()
-            .w_full()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .px_2()
-            .py_1()
-            .rounded(theme.radius)
-            .border_t_2()
-            .border_color(gpui::transparent_black());
-        if is_selected {
-            element = element.bg(theme.selection).text_color(theme.primary);
-        }
-        // Set only for a list row that opens a new block — see this
-        // loop's own comment on `last_item_section`.
-        let mut section_header: Option<AnyElement> = None;
-        let (selector, label, value) = match edit_row {
-            EditRow::Field(index) => {
-                let field = &draft.fields[index];
-                let dest_label = match field.dest {
-                    Destination::Doc => "doc",
-                    Destination::Presentation => "pres",
-                    Destination::DatasetPresentation => "dataset",
-                };
-                // Spec §20.3: the value is a chip — the mouse form of
-                // `space`/`shift+space` — on exactly the rows the keys
-                // step (`vocabulary_of`, the footer's own answer), and
-                // plain text with no handler everywhere else, including
-                // every row while `chips_live` is off. The handler runs
-                // `on_value_chip_clicked`, whose one step path is
-                // `step_selected_row`'s.
-                let steps = matches!(
-                    draft.vocabulary_of(Some(edit_row), state.domain),
-                    RowVocabulary::Steps | RowVocabulary::StepsAndTypes
-                );
-                let on_step: Option<dialog::StepHandler> = (chips_live && steps).then(|| {
-                    let entity = entity.clone();
-                    Rc::new(move |forward: bool, window: &mut Window, cx: &mut App| {
-                        entity.update(cx, |shell, cx| {
-                            on_value_chip_clicked(shell, position, forward, window, cx);
-                        });
-                    }) as dialog::StepHandler
-                });
-                let value_chip = dialog::value_chip(
-                    field_value(field),
-                    format!("objectdialog-value-{}", field.key),
-                    theme.muted_foreground,
-                    theme.muted,
-                    theme.radius,
-                    on_step,
-                );
-                (
-                    format!("objectdialog-field-{}", field.key),
-                    highlighted_text(&field.label, &m.indices, theme.primary),
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(value_chip)
-                        // dataset-presentation §5.3: the layer in force
-                        // on a column-stage field. The same slot as the
-                        // layer badge below, and the two never both
-                        // appear: Schema fills `layer` on its own rows
-                        // (which are not column-stage rows), the column
-                        // stage fills this.
-                        .children(provenance_chip(
-                            provenance_inputs.as_ref(),
-                            field,
-                            theme,
-                            cx,
-                        ))
-                        // §19.4: the layer a schema row's value came from
-                        // — `None` on every writable domain (`Field::
-                        // layer`'s own doc has the reasoning).
-                        .children(field.layer.map(|layer| {
-                            dialog::badge(
-                                layer.name(),
-                                theme.muted_foreground,
-                                theme.border,
-                                Some(format!("objectdialog-field-layer-{}", field.key)),
-                                cx,
-                            )
-                        }))
-                        // A `doc`/`pres` badge promises a write this row
-                        // can make — painting it on a read-only domain
-                        // would promise one the scaffold refuses outright.
-                        .children(dest_badges.then(|| {
-                            dialog::badge(
-                                dest_label,
-                                theme.muted_foreground,
-                                theme.border,
-                                Some(format!("objectdialog-dest-{}", field.key)),
-                                cx,
-                            )
-                        }))
-                        .into_any_element(),
-                )
-            }
-            // The object's own items and its available catalogue paint
-            // the same row shape, so they share one arm — but which list
-            // the row came from is read off the VARIANT and named here
-            // (`own`), never inferred from the entry itself: an available
-            // row is a different thing to `space`, to `x` and to the grip,
-            // and §18.7.1's whole point is that no consumer gets to treat
-            // one as the other by omission.
-            EditRow::Item { field, item } | EditRow::Available { field, item } => {
-                let own = matches!(edit_row, EditRow::Item { .. });
-                let FieldKind::OrderedList { items, available } = &draft.fields[field].kind else {
-                    continue;
-                };
-                let list = if own {
-                    items.as_slice()
-                } else {
-                    available.as_deref().unwrap_or_default()
-                };
-                let Some(entry) = list.get(item) else {
-                    continue;
-                };
-                let section_key = (field, own);
-                if last_item_section != Some(section_key) {
-                    last_item_section = Some(section_key);
-                    // Scopes-editing spec §4: the Values stage installs
-                    // its own list under the very same field key
-                    // (`"values"`) the ordinary edit stage's `dimensions`
-                    // list would carry, so `own` alone cannot tell the
-                    // two apart — `section_header_text(Domain::Scopes,
-                    // true)` would paint "DIMENSIONS" over a values list.
-                    // `draft.values().is_some()` is the stage-aware
-                    // override every other Values-stage site already
-                    // reads by.
-                    let (text, suffix) = if draft.values().is_some() {
-                        (
-                            "VALUES — space ticks · ctrl+a all shown · ctrl+x none",
-                            "members",
-                        )
-                    } else {
-                        section_header_text(domain, own)
-                    };
-                    let field_key = draft.fields[field].key.clone();
-                    section_header = Some(
-                        div()
-                            .font_family(crate::fonts::MONO)
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .pt_2()
-                            .pb_0p5()
-                            .debug_selector(move || {
-                                format!("objectdialog-section-{suffix}-{field_key}")
-                            })
-                            .child(text)
-                            .into_any_element(),
-                    );
-                }
-                // The grip marks a row as reorderable — every item of the
-                // object's own list, which for Groupings' `dimensions` is
-                // all of them (it has no catalogue); an available row gets
-                // an equal-width spacer instead, so the tick beside it
-                // still lines up. The tick is the inclusion state, and a
-                // hidden item is muted as well as unticked — one signal is
-                // a thing a glance misses on a 30-row list. Neither the
-                // grip nor the tick is part of what the filter ranked
-                // (`Draft::row_label`); only the name itself is
-                // highlighted.
-                //
-                // In the chain field (§18.8) the rows are completions, not
-                // list members: §18.9.2 says such a row carries no tick or
-                // grip at all, so both are withdrawn outright here rather
-                // than painted as an inert placeholder — there is no
-                // second list for a spacer to keep aligned with once the
-                // whole column is gone. This branch only ever reaches an
-                // item row (the tick/grip belong to the object's own
-                // list, per this comment's opening line) — a plain value
-                // field never opens on one (§19.1 only opens it on a
-                // `Field` row) — but the withdrawal still reads "is any
-                // field open" rather than "is the chain field open", so
-                // a future item-level text field (a column's width, Part
-                // 2c) withdraws the same way without a second condition
-                // to remember.
-                // Scopes paints neither list as reorderable (spec §3.2,
-                // ruling 4 — `reorders`'s own doc in the footer below has
-                // the full reasoning): the grip is withdrawn on its own
-                // rows exactly as it already is on an available row,
-                // rather than painted as a promise `shift+j`/`shift+k`
-                // cannot keep.
-                let draggable = domain != Domain::Scopes;
-                let grip_and_tick = if draft.text_entry.is_some() {
-                    None
-                } else {
-                    let grip = if own && draggable {
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .w(scale::design(11.))
-                            .child("⋮")
-                            .into_any_element()
-                    } else {
-                        div().w(scale::design(11.)).into_any_element()
-                    };
-                    // §18.9.2: the tick is the toggle. Its mouse-down
-                    // stops propagation so the row's own select does not
-                    // double-fire; the handler moves the cursor here
-                    // itself and then walks `space`'s path, so the mouse
-                    // and the key cannot disagree.
-                    let entity_for_tick = entity.clone();
-                    let tick_position = position;
-                    let tick_id = format!("objectdialog-tick-{}", entry.name);
-                    let tick = div()
-                        .id(gpui::SharedString::from(tick_id.clone()))
-                        .font_family(crate::fonts::MONO)
-                        .w(scale::design(13.))
-                        .text_color(if entry.included {
-                            theme.success
-                        } else {
-                            theme.muted_foreground
-                        })
-                        .debug_selector(move || tick_id)
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                            cx.stop_propagation();
-                            entity_for_tick.update(cx, |shell, cx| {
-                                on_tick_clicked(shell, tick_position, window, cx);
-                            });
-                        })
-                        .child(if entry.included { "✓" } else { "·" })
-                        .into_any_element();
-                    Some((grip, tick))
-                };
-                let mut name_row = h_flex().pl_4().gap_1().items_center();
-                if let Some((grip, tick)) = grip_and_tick {
-                    name_row = name_row.child(grip).child(tick);
-                }
-                if !entry.included {
-                    name_row = name_row.text_color(theme.muted_foreground);
-                }
-                name_row = name_row.child(highlighted_text(&entry.name, &m.indices, theme.primary));
-                // The note painted after the name, muted: [`ListItem::
-                // note`] itself where the adapter set one (Scopes' own
-                // selections and the Values stage's ticked values, spec
-                // §3/§4) — the field the item carries FOR this purpose —
-                // or, on a member row with none, the compact per-column
-                // summary (Part 2c §5.4). An available row's presentation
-                // is always the empty default (nothing has ever
-                // overridden a column not yet in the view), so
-                // `column_summary` would paint nothing for one anyway,
-                // but `own` says so rather than relying on that
-                // coincidence. It is deliberately part of the NAME
-                // element, not `row_label` — `Draft::row_label` stays the
-                // name alone, so the filter still matches only what it
-                // always matched.
-                let note = entry.note.clone().or_else(|| {
-                    own.then(|| {
-                        views::column_summary(&views::kind_default(entry), &entry.presentation)
-                    })
-                    .filter(|s| !s.is_empty())
-                });
-                if let Some(note) = note {
-                    name_row = name_row.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(note),
-                    );
-                }
-                let name = name_row.into_any_element();
-                (
-                    format!("objectdialog-item-{}", entry.name),
-                    name,
-                    div().into_any_element(),
-                )
-            }
-        };
-        // §19.5: a glyph before the label, painted only when a current
-        // diagnostic names this row — an inert `div` of the same width
-        // otherwise, so every row keeps its height and the label column
-        // stays aligned whether or not anything is flagged. Built after
-        // the match above (rather than folded into each arm) because the
-        // selector string — this row's identity for `debug_selector` —
-        // is computed there, and one glyph rule for both arms is simpler
-        // than two copies of the same match on `flag`.
-        let flag = flagged
-            .iter()
-            .find(|(r, _)| *r == edit_row)
-            .map(|(_, s)| *s);
-        let glyph = match flag {
-            Some(Severity::Error) => {
-                let diag_selector = format!("objectdialog-diag-{selector}");
-                div()
-                    .w(scale::design(12.))
-                    .text_color(theme.danger)
-                    .debug_selector(move || diag_selector.clone())
-                    .child("!")
-                    .into_any_element()
-            }
-            Some(Severity::Warning) => {
-                let diag_selector = format!("objectdialog-diag-{selector}");
-                div()
-                    .w(scale::design(12.))
-                    .text_color(theme.warning)
-                    .debug_selector(move || diag_selector.clone())
-                    .child("!")
-                    .into_any_element()
-            }
-            None => div().w(scale::design(12.)).into_any_element(),
-        };
-        let entity_for_row = entity.clone();
-        let clicked = position;
-        // §19.1: while a field is open, the mouse agrees with the keys —
-        // a plain field owns the row list too (moving the cursor under
-        // it would leave `TextEntry.row` pointing at a row the trader is
-        // no longer on), so only the chain field's own completion click
-        // does anything. `None` (no field open at all) is the ordinary
-        // click-to-edit path.
-        let open = draft.text_entry.map(|t| t.completions);
-        // The glyph and label share ONE child so the row still has
-        // exactly two children under `justify_between` — a third direct
-        // child splits the row's free space into two gaps and floats the
-        // label toward the middle of the row on every row of every
-        // domain, flagged or not (review round 1's Important finding).
-        // Carries its own selector so a window test can compare a
-        // flagged row's label position against an unflagged one's —
-        // there is otherwise no way to address just the label, since the
-        // row's own selector spans the whole row (glyph, label and value
-        // together) and would read the same width whichever child ate
-        // the bug.
-        let label_selector = format!("objectdialog-label-{selector}");
-        let label_block = h_flex()
-            .gap_1()
-            .items_center()
-            .debug_selector(move || label_selector.clone())
-            .child(glyph)
-            .child(label)
-            .into_any_element();
-        let row_el = element
-            .child(label_block)
-            .child(value)
-            .debug_selector(move || selector.clone())
-            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                entity_for_row.update(cx, |shell, cx| match open {
-                    Some(true) => on_completion_clicked(shell, clicked, window, cx),
-                    Some(false) => {}
-                    None => on_edit_row_clicked(shell, clicked, window, cx),
-                });
+    // Spec 2026-09-19 §3.2/§3.3: while a `Choice` row's typeahead is
+    // open, the row list's place paints its ranked options instead of
+    // the object's fields — the field loop below never runs at all,
+    // which is what withdraws every field row while choosing (the
+    // action bar is already withdrawn above, through `text_entry.
+    // is_some()`, since a choice field is a `TextEntry`).
+    let list: AnyElement = if let Some(choice) =
+        draft.choice.as_ref().filter(|_| draft.choice_entry())
+    {
+        let entity_for_click = entity.clone();
+        dialog::choice_rows(choice, "objectdialog", theme, move |row, window, cx| {
+            entity_for_click.update(cx, |shell, cx| {
+                on_choice_row_clicked(shell, row, window, cx)
             });
-        // §18.9.1: a list row is both a drag source and a drop target;
-        // a field row (`Dataset`, `Slot`, Scopes' two `Text` rows) is
-        // neither — which is `Draft::row_drag` returning `None`, not a
-        // second rule stated here — and while any value field is open
-        // (§19.1) the rows carry no drag either, the same withdrawal
-        // the tick and the action bar make there. Scopes is withdrawn
-        // outright here too (`draggable`'s own doc above): unlike a
-        // field row, its dimensions and Values lists ARE `OrderedList`s
-        // `Draft::row_drag` would otherwise answer for, so the domain has
-        // to be excluded at the render site rather than left to that
-        // method alone.
-        //
-        // The branch is built into an `AnyElement` on both sides because
-        // `.id()` turns the `Div` into a `Stateful<Div>`: the two arms
-        // have different types and only the erased form can be one
-        // value. (`list.child(..)` below already takes an `AnyElement`,
-        // so nothing downstream notices.)
-        let row_el = match (draft.text_entry.is_none() && domain != Domain::Scopes)
-            .then(|| draft.row_drag(edit_row))
-            .flatten()
-        {
-            Some(payload) => {
-                let entity_for_drop = entity.clone();
-                // `target` is THIS row — the drop's destination. The
-                // payload that arrives at `on_drop` is the dragged row's
-                // own, built by whichever row started the gesture.
-                let target = payload.clone();
-                row_el
-                    // The id carries everything that identifies the row,
-                    // because gpui keys per-element state (the pending
-                    // mouse-down a drag starts from) on it: the field, so
-                    // two lists in one draft cannot collide; `own`, so a
-                    // name cannot collide with itself across the two
-                    // blocks (a demoted column keeps its name); and the
-                    // name, which is unique within a block.
-                    .id(gpui::SharedString::from(format!(
-                        "objectdialog-drag-{}-{}-{}",
-                        payload.field, payload.own, payload.name
-                    )))
-                    .cursor_grab()
-                    // The ghost's name comes off the dragged value the
-                    // constructor is handed, not a captured copy: a
-                    // capture would clone a `String` per list row per
-                    // frame for a ghost that exists only once a gesture
-                    // actually starts.
-                    .on_drag(payload, move |drag: &RowDrag, _offset, _window, cx| {
-                        let name = gpui::SharedString::from(drag.name.clone());
-                        cx.new(|_| DragGhost { name })
-                    })
-                    // Only this dialog's own payload: a tile drag or any
-                    // other dragged value passing over the modal must not
-                    // land on a column list.
-                    .can_drop(|value, _window, _cx| value.downcast_ref::<RowDrag>().is_some())
-                    // Only the colour changes here — the 2px top border
-                    // itself is reserved on every row unconditionally
-                    // above, so a hover never reflows the rows below it.
-                    .drag_over::<RowDrag>(move |style, _drag, _window, cx| {
-                        style.border_color(cx.theme().primary)
-                    })
-                    .on_drop(move |dropped: &RowDrag, window, cx| {
-                        let dropped = dropped.clone();
-                        entity_for_drop.update(cx, |shell, cx| {
-                            on_row_dropped(shell, &dropped, &target, window, cx);
-                        });
-                    })
-                    .into_any_element()
-            }
-            None => row_el.into_any_element(),
-        };
-        // The header rides on the first item's own element so the list's
-        // child count still equals its row count (`visible.len()`) —
-        // `scroll_to_item` indexes children by that count, and a header
-        // emitted as its own `list.child(header)` before the row would
-        // make every following index off by one.
-        list = list.child(match section_header {
-            Some(header) => v_flex().child(header).child(row_el).into_any_element(),
-            None => row_el,
-        });
-    }
+        })
+    } else {
+        let mut list = v_flex()
+            .id("objectdialog-fields")
+            .w(scale::design(WIDTH))
+            .max_h(scale::design(VISIBLE_ROWS as f32 * ROW_HEIGHT))
+            .overflow_y_scroll()
+            .track_scroll(&shell.object_dialog_scroll)
+            .debug_selector(|| "objectdialog-fields".to_string());
 
-    if visible.is_empty() {
-        // Unlike browse, this can only ever be "no matches" — every draft
-        // this scaffold builds has at least a `Dataset`/`Slot` field row,
-        // so an empty `rows()` never happens here.
-        list = list.child(
-            div()
+        // The last list row's `(field, is_own_item)` — the boundary a section
+        // header marks. `None` so the very first list row always opens one.
+        let mut last_item_section: Option<(usize, bool)> = None;
+
+        for (position, m) in visible.iter().enumerate() {
+            let Some(edit_row) = rows.get(m.row).copied() else {
+                continue;
+            };
+            let is_selected = position == draft.selected;
+            // Every row carries the same 2px top border, transparent unless
+            // `drag_over` recolours it — reserving the space up front means a
+            // hover only repaints the colour, never reflows the rows below it.
+            let mut element = h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_3()
                 .px_2()
                 .py_1()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .debug_selector(|| "objectdialog-empty".to_string())
-                .child("no matches"),
-        );
-    }
+                .rounded(theme.radius)
+                .border_t_2()
+                .border_color(gpui::transparent_black());
+            if is_selected {
+                element = element.bg(row_paint.active).text_color(row_paint.text);
+            } else {
+                element = element.hover(|s| s.bg(row_paint.hover));
+            }
+            // Set only for a list row that opens a new block — see this
+            // loop's own comment on `last_item_section`.
+            let mut section_header: Option<AnyElement> = None;
+            let (selector, label, value) = match edit_row {
+                EditRow::Field(index) => {
+                    let field = &draft.fields[index];
+                    let dest_label = match field.dest {
+                        Destination::Doc => "doc",
+                        Destination::Presentation => "pres",
+                        Destination::DatasetPresentation => "dataset",
+                    };
+                    // Spec §20.3: the value is a chip — the mouse form of
+                    // `space`/`shift+space` — on exactly the rows the keys
+                    // step (`vocabulary_of`, the footer's own answer), and
+                    // plain text with no handler everywhere else, including
+                    // every row while `chips_live` is off. The handler runs
+                    // `on_value_chip_clicked`, whose one step path is
+                    // `step_selected_row`'s.
+                    let steps = matches!(
+                        draft.vocabulary_of(Some(edit_row), state.domain),
+                        RowVocabulary::Steps | RowVocabulary::StepsAndTypes
+                    );
+                    let on_step: Option<dialog::StepHandler> = (chips_live && steps).then(|| {
+                        let entity = entity.clone();
+                        Rc::new(move |forward: bool, window: &mut Window, cx: &mut App| {
+                            entity.update(cx, |shell, cx| {
+                                on_value_chip_clicked(shell, position, forward, window, cx);
+                            });
+                        }) as dialog::StepHandler
+                    });
+                    let value_chip = dialog::value_chip(
+                        field_value(field),
+                        format!("objectdialog-value-{}", field.key),
+                        theme.muted_foreground,
+                        theme.muted,
+                        theme.radius,
+                        on_step,
+                    );
+                    (
+                        format!("objectdialog-field-{}", field.key),
+                        highlighted_text(&field.label, &m.indices, row_paint.accent),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(value_chip)
+                            // dataset-presentation §5.3: the layer in force
+                            // on a column-stage field. The same slot as the
+                            // layer badge below, and the two never both
+                            // appear: Schema fills `layer` on its own rows
+                            // (which are not column-stage rows), the column
+                            // stage fills this.
+                            .children(provenance_chip(
+                                provenance_inputs.as_ref(),
+                                field,
+                                theme,
+                                cx,
+                            ))
+                            // §19.4: the layer a schema row's value came from
+                            // — `None` on every writable domain (`Field::
+                            // layer`'s own doc has the reasoning).
+                            .children(field.layer.map(|layer| {
+                                dialog::badge(
+                                    layer.name(),
+                                    theme.muted_foreground,
+                                    theme.border,
+                                    Some(format!("objectdialog-field-layer-{}", field.key)),
+                                    cx,
+                                )
+                            }))
+                            // A `doc`/`pres` badge promises a write this row
+                            // can make — painting it on a read-only domain
+                            // would promise one the scaffold refuses outright.
+                            .children(dest_badges.then(|| {
+                                dialog::badge(
+                                    dest_label,
+                                    theme.muted_foreground,
+                                    theme.border,
+                                    Some(format!("objectdialog-dest-{}", field.key)),
+                                    cx,
+                                )
+                            }))
+                            .into_any_element(),
+                    )
+                }
+                // The object's own items and its available catalogue paint
+                // the same row shape, so they share one arm — but which list
+                // the row came from is read off the VARIANT and named here
+                // (`own`), never inferred from the entry itself: an available
+                // row is a different thing to `space`, to `x` and to the grip,
+                // and §18.7.1's whole point is that no consumer gets to treat
+                // one as the other by omission.
+                EditRow::Item { field, item } | EditRow::Available { field, item } => {
+                    let own = matches!(edit_row, EditRow::Item { .. });
+                    let FieldKind::OrderedList { items, available } = &draft.fields[field].kind
+                    else {
+                        continue;
+                    };
+                    let list = if own {
+                        items.as_slice()
+                    } else {
+                        available.as_deref().unwrap_or_default()
+                    };
+                    let Some(entry) = list.get(item) else {
+                        continue;
+                    };
+                    let section_key = (field, own);
+                    if last_item_section != Some(section_key) {
+                        last_item_section = Some(section_key);
+                        // Scopes-editing spec §4: the Values stage installs
+                        // its own list under the very same field key
+                        // (`"values"`) the ordinary edit stage's `dimensions`
+                        // list would carry, so `own` alone cannot tell the
+                        // two apart — `section_header_text(Domain::Scopes,
+                        // true)` would paint "DIMENSIONS" over a values list.
+                        // `draft.values().is_some()` is the stage-aware
+                        // override every other Values-stage site already
+                        // reads by.
+                        let (text, suffix) = if draft.values().is_some() {
+                            (
+                                "VALUES — space ticks · ctrl+a all shown · ctrl+x none",
+                                "members",
+                            )
+                        } else {
+                            section_header_text(domain, own)
+                        };
+                        let field_key = draft.fields[field].key.clone();
+                        section_header = Some(
+                            div()
+                                .font_family(crate::fonts::MONO)
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .pt_2()
+                                .pb_0p5()
+                                .debug_selector(move || {
+                                    format!("objectdialog-section-{suffix}-{field_key}")
+                                })
+                                .child(text)
+                                .into_any_element(),
+                        );
+                    }
+                    // The grip marks a row as reorderable — every item of the
+                    // object's own list, which for Groupings' `dimensions` is
+                    // all of them (it has no catalogue); an available row gets
+                    // an equal-width spacer instead, so the tick beside it
+                    // still lines up. The tick is the inclusion state, and a
+                    // hidden item is muted as well as unticked — one signal is
+                    // a thing a glance misses on a 30-row list. Neither the
+                    // grip nor the tick is part of what the filter ranked
+                    // (`Draft::row_label`); only the name itself is
+                    // highlighted.
+                    //
+                    // In the chain field (§18.8) the rows are completions, not
+                    // list members: §18.9.2 says such a row carries no tick or
+                    // grip at all, so both are withdrawn outright here rather
+                    // than painted as an inert placeholder — there is no
+                    // second list for a spacer to keep aligned with once the
+                    // whole column is gone. This branch only ever reaches an
+                    // item row (the tick/grip belong to the object's own
+                    // list, per this comment's opening line) — a plain value
+                    // field never opens on one (§19.1 only opens it on a
+                    // `Field` row) — but the withdrawal still reads "is any
+                    // field open" rather than "is the chain field open", so
+                    // a future item-level text field (a column's width, Part
+                    // 2c) withdraws the same way without a second condition
+                    // to remember.
+                    // Scopes paints neither list as reorderable (spec §3.2,
+                    // ruling 4 — `reorders`'s own doc in the footer below has
+                    // the full reasoning): the grip is withdrawn on its own
+                    // rows exactly as it already is on an available row,
+                    // rather than painted as a promise `shift+j`/`shift+k`
+                    // cannot keep.
+                    let draggable = domain != Domain::Scopes;
+                    let grip_and_tick = if draft.text_entry.is_some() {
+                        None
+                    } else {
+                        let grip = if own && draggable {
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .w(scale::design(11.))
+                                .child("⋮")
+                                .into_any_element()
+                        } else {
+                            div().w(scale::design(11.)).into_any_element()
+                        };
+                        // §18.9.2: the tick is the toggle. Its mouse-down
+                        // stops propagation so the row's own select does not
+                        // double-fire; the handler moves the cursor here
+                        // itself and then walks `space`'s path, so the mouse
+                        // and the key cannot disagree.
+                        let entity_for_tick = entity.clone();
+                        let tick_position = position;
+                        let tick_id = format!("objectdialog-tick-{}", entry.name);
+                        let tick = div()
+                            .id(gpui::SharedString::from(tick_id.clone()))
+                            .font_family(crate::fonts::MONO)
+                            .w(scale::design(13.))
+                            .text_color(if entry.included {
+                                theme.success
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .debug_selector(move || tick_id)
+                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                cx.stop_propagation();
+                                entity_for_tick.update(cx, |shell, cx| {
+                                    on_tick_clicked(shell, tick_position, window, cx);
+                                });
+                            })
+                            .child(if entry.included { "✓" } else { "·" })
+                            .into_any_element();
+                        Some((grip, tick))
+                    };
+                    let mut name_row = h_flex().pl_4().gap_1().items_center();
+                    if let Some((grip, tick)) = grip_and_tick {
+                        name_row = name_row.child(grip).child(tick);
+                    }
+                    if !entry.included {
+                        name_row = name_row.text_color(theme.muted_foreground);
+                    }
+                    name_row =
+                        name_row.child(highlighted_text(&entry.name, &m.indices, row_paint.accent));
+                    // The note painted after the name, muted: [`ListItem::
+                    // note`] itself where the adapter set one (Scopes' own
+                    // selections and the Values stage's ticked values, spec
+                    // §3/§4) — the field the item carries FOR this purpose —
+                    // or, on a member row with none, the compact per-column
+                    // summary (Part 2c §5.4). An available row's presentation
+                    // is always the empty default (nothing has ever
+                    // overridden a column not yet in the view), so
+                    // `column_summary` would paint nothing for one anyway,
+                    // but `own` says so rather than relying on that
+                    // coincidence. It is deliberately part of the NAME
+                    // element, not `row_label` — `Draft::row_label` stays the
+                    // name alone, so the filter still matches only what it
+                    // always matched.
+                    let note = entry.note.clone().or_else(|| {
+                        own.then(|| {
+                            views::column_summary(&views::kind_default(entry), &entry.presentation)
+                        })
+                        .filter(|s| !s.is_empty())
+                    });
+                    if let Some(note) = note {
+                        name_row = name_row.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(note),
+                        );
+                    }
+                    let name = name_row.into_any_element();
+                    (
+                        format!("objectdialog-item-{}", entry.name),
+                        name,
+                        div().into_any_element(),
+                    )
+                }
+            };
+            // §19.5: a glyph before the label, painted only when a current
+            // diagnostic names this row — an inert `div` of the same width
+            // otherwise, so every row keeps its height and the label column
+            // stays aligned whether or not anything is flagged. Built after
+            // the match above (rather than folded into each arm) because the
+            // selector string — this row's identity for `debug_selector` —
+            // is computed there, and one glyph rule for both arms is simpler
+            // than two copies of the same match on `flag`.
+            let flag = flagged
+                .iter()
+                .find(|(r, _)| *r == edit_row)
+                .map(|(_, s)| *s);
+            let glyph = match flag {
+                Some(Severity::Error) => {
+                    let diag_selector = format!("objectdialog-diag-{selector}");
+                    div()
+                        .w(scale::design(12.))
+                        .text_color(theme.danger)
+                        .debug_selector(move || diag_selector.clone())
+                        .child("!")
+                        .into_any_element()
+                }
+                Some(Severity::Warning) => {
+                    let diag_selector = format!("objectdialog-diag-{selector}");
+                    div()
+                        .w(scale::design(12.))
+                        .text_color(theme.warning)
+                        .debug_selector(move || diag_selector.clone())
+                        .child("!")
+                        .into_any_element()
+                }
+                None => div().w(scale::design(12.)).into_any_element(),
+            };
+            let entity_for_row = entity.clone();
+            let clicked = position;
+            // §19.1: while a field is open, the mouse agrees with the keys —
+            // a plain field owns the row list too (moving the cursor under
+            // it would leave `TextEntry.row` pointing at a row the trader is
+            // no longer on), so only the chain field's own completion click
+            // does anything. `None` (no field open at all) is the ordinary
+            // click-to-edit path.
+            let open: Option<Completions> = draft.text_entry.map(|t| t.completions);
+            // The glyph and label share ONE child so the row still has
+            // exactly two children under `justify_between` — a third direct
+            // child splits the row's free space into two gaps and floats the
+            // label toward the middle of the row on every row of every
+            // domain, flagged or not (review round 1's Important finding).
+            // Carries its own selector so a window test can compare a
+            // flagged row's label position against an unflagged one's —
+            // there is otherwise no way to address just the label, since the
+            // row's own selector spans the whole row (glyph, label and value
+            // together) and would read the same width whichever child ate
+            // the bug.
+            let label_selector = format!("objectdialog-label-{selector}");
+            let label_block = h_flex()
+                .gap_1()
+                .items_center()
+                .debug_selector(move || label_selector.clone())
+                .child(glyph)
+                .child(label)
+                .into_any_element();
+            let row_el = element
+                .child(label_block)
+                .child(value)
+                .debug_selector(move || selector.clone())
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    entity_for_row.update(cx, |shell, cx| match open {
+                        Some(Completions::Chain) => {
+                            on_completion_clicked(shell, clicked, window, cx)
+                        }
+                        Some(_) => {}
+                        None => on_edit_row_clicked(shell, clicked, event.click_count, window, cx),
+                    });
+                });
+            // §18.9.1: a list row is both a drag source and a drop target;
+            // a field row (`Dataset`, `Slot`, Scopes' two `Text` rows) is
+            // neither — which is `Draft::row_drag` returning `None`, not a
+            // second rule stated here — and while any value field is open
+            // (§19.1) the rows carry no drag either, the same withdrawal
+            // the tick and the action bar make there. Scopes is withdrawn
+            // outright here too (`draggable`'s own doc above): unlike a
+            // field row, its dimensions and Values lists ARE `OrderedList`s
+            // `Draft::row_drag` would otherwise answer for, so the domain has
+            // to be excluded at the render site rather than left to that
+            // method alone.
+            //
+            // The branch is built into an `AnyElement` on both sides because
+            // `.id()` turns the `Div` into a `Stateful<Div>`: the two arms
+            // have different types and only the erased form can be one
+            // value. (`list.child(..)` below already takes an `AnyElement`,
+            // so nothing downstream notices.)
+            let row_el = match (draft.text_entry.is_none() && domain != Domain::Scopes)
+                .then(|| draft.row_drag(edit_row))
+                .flatten()
+            {
+                Some(payload) => {
+                    let entity_for_drop = entity.clone();
+                    // `target` is THIS row — the drop's destination. The
+                    // payload that arrives at `on_drop` is the dragged row's
+                    // own, built by whichever row started the gesture.
+                    let target = payload.clone();
+                    row_el
+                        // The id carries everything that identifies the row,
+                        // because gpui keys per-element state (the pending
+                        // mouse-down a drag starts from) on it: the field, so
+                        // two lists in one draft cannot collide; `own`, so a
+                        // name cannot collide with itself across the two
+                        // blocks (a demoted column keeps its name); and the
+                        // name, which is unique within a block.
+                        .id(gpui::SharedString::from(format!(
+                            "objectdialog-drag-{}-{}-{}",
+                            payload.field, payload.own, payload.name
+                        )))
+                        .cursor_grab()
+                        // The ghost's name comes off the dragged value the
+                        // constructor is handed, not a captured copy: a
+                        // capture would clone a `String` per list row per
+                        // frame for a ghost that exists only once a gesture
+                        // actually starts.
+                        .on_drag(payload, move |drag: &RowDrag, _offset, _window, cx| {
+                            let name = gpui::SharedString::from(drag.name.clone());
+                            cx.new(|_| DragGhost { name })
+                        })
+                        // Only this dialog's own payload: a tile drag or any
+                        // other dragged value passing over the modal must not
+                        // land on a column list.
+                        .can_drop(|value, _window, _cx| value.downcast_ref::<RowDrag>().is_some())
+                        // Only the colour changes here — the 2px top border
+                        // itself is reserved on every row unconditionally
+                        // above, so a hover never reflows the rows below it.
+                        .drag_over::<RowDrag>(move |style, _drag, _window, cx| {
+                            style.border_color(cx.theme().primary)
+                        })
+                        .on_drop(move |dropped: &RowDrag, window, cx| {
+                            let dropped = dropped.clone();
+                            entity_for_drop.update(cx, |shell, cx| {
+                                on_row_dropped(shell, &dropped, &target, window, cx);
+                            });
+                        })
+                        .into_any_element()
+                }
+                None => row_el.into_any_element(),
+            };
+            // The header rides on the first item's own element so the list's
+            // child count still equals its row count (`visible.len()`) —
+            // `scroll_to_item` indexes children by that count, and a header
+            // emitted as its own `list.child(header)` before the row would
+            // make every following index off by one.
+            list = list.child(match section_header {
+                Some(header) => v_flex().child(header).child(row_el).into_any_element(),
+                None => row_el,
+            });
+        }
+
+        if visible.is_empty() {
+            // Unlike browse, this can only ever be "no matches" — every draft
+            // this scaffold builds has at least a `Dataset`/`Slot` field row,
+            // so an empty `rows()` never happens here.
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .debug_selector(|| "objectdialog-empty".to_string())
+                    .child("no matches"),
+            );
+        }
+        list.into_any_element()
+    };
 
     // Diagnostics for the object as a whole, each prefixed with the row it
     // names when `Diagnostic::path` resolves to one (§19.5, §8.5) — the
@@ -4301,6 +4474,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let opens_column = column_stage_target(shell).is_some();
     let open_column =
         || Hint::new(HintRow::Go, &["enter"], "open column").selector("objectdialog-hint-enter");
+    let i_hint = |row: Option<EditRow>| -> Hint {
+        Hint::new(HintRow::Edit, &["i"], i_hint_word(row, draft)).selector("objectdialog-hint-i")
+    };
     let hints: Vec<Hint> = if state.confirm.is_some() {
         vec![
             Hint::prose(HintRow::Go, "this needs an answer first"),
@@ -4311,18 +4487,31 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // §19.1: a value field's own vocabulary — never filter mode's,
         // even though the `Input` is focused the same way, because
         // `enter` means "apply this value" here rather than "narrow the
-        // list". The chain field (§18.8) is `completions: true` and
+        // list". The chain field (§18.8) is `Completions::Chain` and
         // additionally has `tab` to complete a segment and the nav keys
-        // to move the highlight; a plain field has neither.
+        // to move the highlight; the choice field (spec 2026-09-19 §3.2)
+        // is `Completions::Choice`, with the same two extras but its own
+        // words — `enter` PICKS the lit option rather than applying
+        // typed text — and a plain field has neither.
         let mut hints = Vec::new();
-        if entry.completions {
-            hints.push(Hint::prose(HintRow::Move, "type a chain · book / lhu"));
-            hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
-            hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
-        } else {
-            hints.push(Hint::prose(HintRow::Move, "type a value"));
+        match entry.completions {
+            Completions::Chain => {
+                hints.push(Hint::prose(HintRow::Move, "type a chain · book / lhu"));
+                hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
+                hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
+                hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
+            }
+            Completions::Choice => {
+                hints.push(Hint::prose(HintRow::Move, "type to narrow"));
+                hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
+                hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
+                hints.push(Hint::new(HintRow::Go, &["enter"], "choose"));
+            }
+            Completions::None => {
+                hints.push(Hint::prose(HintRow::Move, "type a value"));
+                hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
+            }
         }
-        hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
         hints.push(Hint::new(HintRow::Go, &["escape"], "cancel"));
         hints
     } else if state.mode == DialogMode::Filter {
@@ -4356,18 +4545,18 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // reorder or demote from, and this footer's standing rule is to
         // name only the keys that act on THESE rows. Its seven rows are
         // exactly where the 2026-09-13 ruling bites: `label` and `width`
-        // take `i` and nothing else, `scale` steps and `i` would only
-        // refuse, `precision` does both — so both groups come from
-        // `vocabulary` rather than being stated unconditionally the way
-        // `i` was here before. `escape` names the object it goes back
-        // to, since "back to the list" would be a lie about a rung that
-        // stops at the view.
+        // take `i` alone (`Text`), `thousands` steps alone (`Bool`),
+        // `precision` does both (`Number`), and — since spec 2026-09-19
+        // §3.2 taught `i` to open a multi-option `Choice` row's
+        // typeahead — so now do `scale`, `negative` and `colour`, all
+        // three `Choice` — so both groups come from `vocabulary` rather
+        // than being stated unconditionally the way `i` was here before.
+        // `escape` names the object it goes back to, since "back to the
+        // list" would be a lie about a rung that stops at the view.
         let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
         hints.extend(change_hint(false));
         if types {
-            hints.push(
-                Hint::new(HintRow::Edit, &["i"], "type a value").selector("objectdialog-hint-i"),
-            );
+            hints.push(i_hint(selected_row));
         }
         hints.extend(leave(format!("back to {}", draft.name)));
         hints
@@ -4412,9 +4601,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             );
             hints.push(Hint::range(HintRow::Go, "1", "9", "jump to slot"));
         } else if types {
-            hints.push(
-                Hint::new(HintRow::Edit, &["i"], "type a value").selector("objectdialog-hint-i"),
-            );
+            hints.push(i_hint(selected_row));
         }
         // Scopes-editing spec §4: the Values stage's own pair, advertised
         // only while it is open; `enter`'s own row opens it, advertised
@@ -4538,7 +4725,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // chain field (§18.8) keeps its own slot-and-chain label; a plain
     // field names the object and the row it is editing.
     let filter = if let Some(entry) = draft.text_entry {
-        let label = if entry.completions {
+        let label = if entry.completions == Completions::Chain {
             format!("slot {} · chain", draft.name)
         } else {
             // `TextEntry.row`'s own doc anticipates an item-level field
@@ -4643,6 +4830,14 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .w(scale::design(WIDTH))
         .gap_2()
         .items_center()
+        // `min_h_6` matches a `.small()` `Button`'s own labelled height
+        // (`Size::Small => h_6()` at the pinned rev) so this row holds
+        // its place on a row `actions()` offers nothing for — an
+        // `h_flex` with zero children otherwise has zero height of its
+        // own, and everything the footer paints below this bar shifted
+        // up by a button's height on such a row (final review,
+        // Important 2).
+        .min_h_6()
         .debug_selector(|| "objectdialog-actions".to_string());
     for action in actions(shell) {
         let ks = crate::keymap::parse_keystroke(action.key, Modifiers::NONE)
@@ -4958,8 +5153,11 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
 /// cursor was the 2c ledger's standing minor — the one row in this dialog
 /// whose `enter` did something a click would not. Both now go through
 /// [`column_stage_target`], so there is no second rule about which rows
-/// are doors. Every other row still only moves the cursor: a verb there
-/// is a second, deliberate keystroke or button press.
+/// are doors. Every other row only moves the cursor on a single click; a
+/// double-click on it is `i` (user ruling 2026-09-19, interaction-model
+/// spec §17.4) — the second mouse-down runs [`open_field`], the key's
+/// own door — unless the FIRST click of the pair opened a stage, in
+/// which case the second is inert (`click_opened_stage`).
 ///
 /// The open runs regardless of mode, because `enter` opens in either mode
 /// too ([`commit_selected_row`] is the one door both spellings take). A
@@ -4981,6 +5179,7 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
 fn on_edit_row_clicked(
     shell: &mut ShellView,
     position: usize,
+    click_count: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
@@ -5007,13 +5206,52 @@ fn on_edit_row_clicked(
         draft.selected = position;
     }
     shell.object_dialog_scroll.scroll_to_item(position);
+    // A fresh click sequence forgets what the last one opened — see
+    // `ObjectDialogState::click_opened_stage`.
+    if click_count <= 1
+        && let Some(state) = shell.object_dialog.as_mut()
+    {
+        state.click_opened_stage = false;
+    }
     // After the cursor has moved, never before: the target is the row
     // that was just clicked, which is what `enter` would be acting on had
     // the trader pressed it instead.
     if let Some(name) = column_stage_target(shell) {
         enter_column_stage(shell, &name, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;
+        }
     } else if let Some(column) = values_stage_target(shell) {
+        // Scopes-editing spec §4: a dimension row is a door row exactly
+        // as a member column is — the click opens the Values stage and
+        // nothing more, so the same guard keeps the pair's second click
+        // from also opening a field there.
         enter_values_stage(shell, &column, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;
+        }
+    } else if click_count == 2
+        && !shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.click_opened_stage)
+    {
+        // A double-click on a value row is `i` (user ruling 2026-09-19,
+        // interaction-model spec §17): the first mouse-down selected the
+        // row above, and this second one opens its field through the one
+        // door the key and the action-bar button share — so a `Choice`
+        // row's typeahead, a `Number`/`Text` row's field, Groupings'
+        // chain, or `i`'s own notice on a row that has none. Gated on
+        // `writable` exactly as `press_verb` and the key path are.
+        let writable = shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.domain.writable(&state.stage));
+        if writable {
+            open_field(shell);
+        } else {
+            set_notice(shell, READ_ONLY_NOTICE.to_string());
+        }
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
@@ -5169,6 +5407,22 @@ fn on_completion_clicked(
         shell.object_dialog_scroll.scroll_to_item(0);
     } else {
         set_notice(shell, "nothing to complete here".to_string());
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// A click on a choice-field row is `tab` on it (spec 2026-09-19 §3.2,
+/// §18.9's rule for the chain field). Ends in
+/// [`dialog::sync_dialog_text`], the row-click seam.
+fn on_choice_row_clicked(
+    shell: &mut ShellView,
+    row: usize,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(draft) = draft_mut(shell) {
+        draft.choice_click(row);
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();

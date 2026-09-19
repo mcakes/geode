@@ -668,7 +668,7 @@ impl gpui::Render for DiagnosticsTile {
         // at the pinned rev, unreadable on a tint (30 of 44 bundled themes)
         // and worse on the bare surface, and `theme.warning` itself is
         // under 3:1 against `background` on ten, so the door floors it.
-        let warn_chip = chip::chip_paint(theme, chip::Tone::Warning);
+        let neutral_chip = chip::chip_paint(theme, chip::Tone::Neutral);
         let warn_text = chip::chip_paint(theme, chip::Tone::WarningText).text;
         let danger_text = chip::chip_paint(theme, chip::Tone::DangerText).text;
         let mut header = h_flex()
@@ -691,8 +691,8 @@ impl gpui::Render for DiagnosticsTile {
         if !self.filter.is_empty() {
             header = header.child(
                 div()
-                    .text_color(warn_chip.text)
-                    .when_some(warn_chip.fill, |el, fill| el.bg(fill))
+                    .text_color(neutral_chip.text)
+                    .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
                     .px_1()
                     .rounded(theme.radius_tokens().sm)
                     .debug_selector(|| format!("diagnostics-filtered-{}", self.tile.0))
