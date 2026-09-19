@@ -327,6 +327,13 @@ impl Tree {
         }
         let root = self.root.as_mut().expect("contains(anchor) implies a root");
         insert(root, anchor, new);
+        // Same rule as `split`/`pop_out`: an explicit layout operation
+        // trumps a stale fullscreen. Without this, `insert`'s own `active`
+        // write already points at `new` by the time `set_focus` calls
+        // `activate`, so `activate`'s outgoing-member check never fires
+        // and a fullscreen held by the stack's old active member survives
+        // hidden — `Tree::layout` paints it (any tile `contains(fs)`).
+        self.fullscreen = None;
         self.set_focus(new);
         true
     }
@@ -2886,6 +2893,22 @@ mod tests {
         assert!(tree.toggle_fullscreen());
         assert!(tree.unstack_focused(Orientation::Vertical));
         assert_eq!(tree.fullscreen(), None);
+    }
+
+    #[test]
+    fn stacking_onto_a_fullscreen_tile_exits_fullscreen() {
+        // A plain fullscreen leaf stacked onto: without the fix, `insert`
+        // sets `active` to the new member's index before `set_focus` ever
+        // calls `activate`, so `activate`'s outgoing-member check never
+        // sees the old active id and `fullscreen` keeps pointing at a now
+        // -hidden member — `Tree::layout` still paints it.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        assert!(tree.toggle_fullscreen());
+        assert_eq!(tree.fullscreen(), Some(TileId(1)));
+        assert!(tree.stack_after(TileId(1), TileId(2)));
+        assert_eq!(tree.fullscreen(), None);
+        assert!(tree.visible_tiles().contains(&TileId(2)));
     }
 
     #[test]

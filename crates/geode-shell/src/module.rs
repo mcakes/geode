@@ -806,16 +806,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stack_handle_prepares_its_text_once_and_runs_its_closure() {
-        use std::cell::Cell;
-        use std::rc::Rc;
-        let ran = Rc::new(Cell::new(0));
-        let r = ran.clone();
-        let h = StackHandle::new(2, 4, move |_w, _cx| r.set(r.get() + 1));
+    fn stack_handle_prepares_its_text_once() {
+        // `open_list` needs a `Window`, so the closure itself is
+        // exercised in `shell/tests/stacks.rs` (whole-branch review,
+        // Minor 6: this test never ran it — the name said it did).
+        let h = StackHandle::new(2, 4, |_w, _cx| {});
         assert_eq!(h.index, 2);
         assert_eq!(h.len, 4);
         assert_eq!(h.text.as_ref(), "2/4");
-        let _ = ran; // `open_list` needs a Window; the closure is exercised in shell/tests/stacks.rs
     }
 
     #[test]

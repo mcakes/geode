@@ -502,6 +502,11 @@ pub struct MarketDataTile {
     /// This tile's place in its stack (tile-stacks spec §5.1), painted in
     /// the header (Task 9); `None` while not a stack member.
     stack: Option<StackHandle>,
+    /// [`Self::title`]'s cache (whole-branch review, Minor 5), same
+    /// shape as the blotter's own `title` field — a pure function of
+    /// `spec.title` and `key`, replaced only in `set_key`, never
+    /// `format!`-ed in `title()` itself.
+    title: SharedString,
 }
 
 impl MarketDataTile {
@@ -720,6 +725,7 @@ impl MarketDataTile {
             diagnostics,
             data,
             model: Rc::new(MatrixModel::empty(spec, key.as_deref().unwrap_or(&[]))),
+            title: Self::compute_title(spec, key.as_deref()),
             unresolved_restore: !draft.is_empty(),
             parked,
             key,
@@ -1250,9 +1256,13 @@ impl MarketDataTile {
     }
 
     pub fn title(&self) -> SharedString {
-        match &self.key {
-            Some(k) => format!("{} · {}", self.spec.title, display_key(k)).into(),
-            None => self.spec.title.into(),
+        self.title.clone()
+    }
+
+    fn compute_title(spec: &PanelSpec, key: Option<&[String]>) -> SharedString {
+        match key {
+            Some(k) => format!("{} · {}", spec.title, display_key(k)).into(),
+            None => spec.title.into(),
         }
     }
 
@@ -2985,6 +2995,7 @@ impl MarketDataTile {
         }
         self.unresolved_restore = !self.draft.is_empty();
         self.key = Some(key);
+        self.title = Self::compute_title(self.spec, self.key.as_deref());
         self.snapshot = None;
         self.base_snapshot = None;
         // Including anything STAGED for the old key: a key change bumps no
@@ -4509,6 +4520,19 @@ mod tests {
             "first in the strip"
         );
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.title()).as_ref(), "CVI");
+    }
+
+    /// Whole-branch review, Minor 7: the title's cache (`Self::title`,
+    /// `compute_title`) must follow a real key change too, not just read
+    /// correctly with no underlying set.
+    #[gpui::test]
+    fn title_follows_the_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "CVI · NKY.Z"
+        );
     }
 
     /// `BASE` plus `secs` seconds — the injected clock `header_texts_at`

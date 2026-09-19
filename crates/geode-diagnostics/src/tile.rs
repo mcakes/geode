@@ -80,6 +80,14 @@ fn header_text_for(section: Section) -> SharedString {
     format!("diagnostics · {} · [ ] to switch", section.name()).into()
 }
 
+/// [`DiagnosticsTile::title`]'s text (whole-branch review, Minor 5) — a
+/// pure function of `section` alone, same shape as `header_text_for`
+/// beside it, cached rather than `format!`-ed on every render the tile
+/// list or stack marker is open.
+fn title_text_for(section: Section) -> SharedString {
+    format!("diagnostics · {}", section.name()).into()
+}
+
 pub struct DiagnosticsTile {
     tile: TileId,
     frame: Entity<Frame>,
@@ -142,6 +150,10 @@ pub struct DiagnosticsTile {
     /// `format!()` this fresh on every single paint, not just this
     /// tile's own rebuilds.
     header_text: SharedString,
+    /// [`Self::title`]'s cache, same reasoning as `header_text` beside
+    /// it — replaced only in `set_section`, never `format!`-ed in
+    /// `title()` itself.
+    title: SharedString,
     visible: bool,
     scroll: UniformListScrollHandle,
     /// This tile's place in its stack (tile-stacks spec §5.1), painted in
@@ -285,6 +297,7 @@ impl DiagnosticsTile {
             last_diag_versions,
             last_frame_versions,
             header_text: header_text_for(section),
+            title: title_text_for(section),
             visible: false,
             scroll: UniformListScrollHandle::new(),
             stack: None,
@@ -485,6 +498,7 @@ impl DiagnosticsTile {
         }
         self.section = section;
         self.header_text = header_text_for(section);
+        self.title = title_text_for(section);
         self.cursor = 0;
         self.rebuild(cx);
     }
@@ -657,7 +671,7 @@ impl DiagnosticsTile {
     }
 
     pub fn title(&self) -> SharedString {
-        format!("diagnostics · {}", self.section.name()).into()
+        self.title.clone()
     }
 
     pub fn serialize(&self) -> toml::Table {
@@ -1353,6 +1367,21 @@ mod tests {
         assert_eq!(
             h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
             "diagnostics · sources"
+        );
+    }
+
+    /// Whole-branch review, Minor 7: the title's cache (`Self::title`,
+    /// `title_text_for`) must follow a real section change, not just
+    /// read correctly on the section a tile opens in.
+    #[gpui::test]
+    fn title_follows_a_section_change(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section perf", cx).unwrap();
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "diagnostics · perf"
         );
     }
 

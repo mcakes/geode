@@ -276,6 +276,14 @@ impl ShellView {
             // set_visible`'s doc comment) for the rest of the process.
             occupant.content.set_visible(active.contains(id), cx);
             self.occupants.insert(*id, occupant);
+            // A fresh occupant under this id must hear its stack position
+            // even when a previous occupant under the SAME id already did
+            // — `add_tile` fills a placeholder in place by removing its
+            // occupant and letting this loop recreate one, and without
+            // this the delivery loop below sees `stack_sent` still
+            // holding the old occupant's last-sent value and skips the
+            // new one as already told.
+            self.stack_sent.remove(id);
         }
         // A request whose tile closed before this render is dropped, not
         // re-aimed (spec 2026-09-08 add-tile §4.3).

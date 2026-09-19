@@ -568,3 +568,37 @@ fn a_placeholder_paints_the_marker_for_the_active_member_only(cx: &mut gpui::Tes
         "the hidden member paints nothing (it isn't even rendered)"
     );
 }
+
+/// Whole-branch review, Important 2: `add_tile` fills a stacked
+/// placeholder in place by removing its occupant and letting
+/// `ensure_occupants` recreate one under the same id — the fresh
+/// occupant must still hear its own stack position, which needs
+/// `stack_sent`'s stale entry from the REPLACED placeholder cleared at
+/// the recreation site, not just at the delivery site.
+#[gpui::test]
+fn a_replaced_occupant_is_re_told_its_position(cx: &mut gpui::TestAppContext) {
+    let (mut services, log) = services_with_recorder();
+    // Built via `Workspaces` directly, no `rec` roster fill — both
+    // members start as plain placeholders (Task 9's own fixture shape).
+    services
+        .workspaces
+        .split_active(crate::tiling::Orientation::Horizontal);
+    let b = services
+        .workspaces
+        .stack_active()
+        .expect("a focused tile to stack onto");
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    // `b` is the focused placeholder; `tile::add_rec` fills it in place.
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("tile::add_rec".to_string()), None, window, cx);
+        });
+        let _ = window.draw(cx);
+    });
+    assert!(
+        stack_events(&log, b).contains(&Some((2, 2))),
+        "the newly-filled occupant should have been told its position: {:?}",
+        log.borrow()
+    );
+}
