@@ -239,6 +239,22 @@ mod tests {
             !list.set_query("gruv l"),
             "an unchanged query moves nothing"
         );
+
+        // The case above never actually distinguishes "kept by text"
+        // from "kept by index" — every re-rank there leaves exactly one
+        // surviving candidate, so falling back to row 0 lands on the
+        // same option either way. Here the re-rank leaves TWO: "am"
+        // ranks "Ambrose" (the prefix match) ahead of "Bamboo" (a
+        // mid-word match), so an index-based — or dropped — identity
+        // would land the highlight on "Ambrose", the wrong row.
+        let mut rivals = ChoiceList::new(opts(&["Ambrose", "Bamboo"]), 12);
+        rivals.place(Some("Bamboo"));
+        assert!(rivals.set_query("am"));
+        assert_eq!(
+            rivals.highlighted_text(),
+            Some("Bamboo"),
+            "kept by text even though it no longer ranks first"
+        );
     }
 
     #[test]

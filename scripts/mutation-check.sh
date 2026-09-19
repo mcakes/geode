@@ -7258,14 +7258,14 @@ run_mutation "dialog: the frozen-row click cancels a capture in progress" \
 # viewport (bottom 658.5px)".
 run_mutation "objectdialog: section headers do not add list children" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        list = list.child(match section_header {
-            Some(header) => v_flex().child(header).child(row_el).into_any_element(),
-            None => row_el,
-        });' \
-  '        if let Some(header) = section_header {
-            list = list.child(header);
-        }
-        list = list.child(row_el);' \
+  '            list = list.child(match section_header {
+                Some(header) => v_flex().child(header).child(row_el).into_any_element(),
+                None => row_el,
+            });' \
+  '            if let Some(header) = section_header {
+                list = list.child(header);
+            }
+            list = list.child(row_el);' \
   geode-shell \
   the_cursor_stays_in_view_past_a_section_header_on_a_long_list
 
@@ -7533,8 +7533,12 @@ run_mutation "objectdialog: the chain field's keys fall through to filter mode" 
 # every mode assertion stays green.
 run_mutation "objectdialog: the chain field wears the filter pill" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                    Some(entry) if entry.completions => dialog::chain_pill(cx),' \
-  '                    Some(entry) if false && entry.completions => dialog::chain_pill(cx),' \
+  '                    Some(entry) if entry.completions == Completions::Chain => {
+                        dialog::chain_pill(cx)
+                    }' \
+  '                    Some(entry) if false && entry.completions == Completions::Chain => {
+                        dialog::chain_pill(cx)
+                    }' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -7744,10 +7748,10 @@ run_mutation "objectdialog: a tick click is claimed and dropped while a confirm 
 run_mutation "objectdialog: the tick's click does not stop propagation" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                            cx.stop_propagation();
-                            entity_for_tick.update(cx, |shell, cx| {' \
+                                cx.stop_propagation();
+                                entity_for_tick.update(cx, |shell, cx| {' \
   '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                            entity_for_tick.update(cx, |shell, cx| {' \
+                                entity_for_tick.update(cx, |shell, cx| {' \
   geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
 
 # ---- Mouse parity Task 6 (§18.9.1, §18.9.3): dragging a row --------------
@@ -7832,6 +7836,40 @@ run_mutation "palette: a row click dispatches the clicked row" \
   '                        view.sync_palette_scroll();
                         cx.notify();' \
   geode-shell click_on_a_result_row_dispatches_it_like_enter
+
+# ---- Choice with typeahead (2026-09-19, spec §3.2) --------------------
+# `enter` picks the LIT option, never the typed text: mutated to pick
+# row 0 of the declared list regardless, `dan`+`enter` writes `none`.
+run_mutation "choice: enter picks the highlighted option" \
+  crates/geode-shell/src/choice.rs \
+  '        self.highlighted_option()
+    }' \
+  '        Some(0)
+    }' \
+  geode-shell i_on_a_choice_row_opens_a_typeahead_and_enter_picks_the_lit_option
+
+# The identity rule: a re-rank keeps the highlight by TEXT. Mutated to
+# keep the ranked INDEX, typing `gruv l` after `down` lands on a row
+# that is no longer the one the trader lit.
+run_mutation "choice: a re-rank keeps the highlight by text" \
+  crates/geode-shell/src/choice.rs \
+  '        let keep = self.highlighted_text().map(str::to_string);
+        self.query = query.to_string();' \
+  '        let keep: Option<String> = None;
+        self.query = query.to_string();' \
+  geode-shell set_query_narrows_and_keeps_the_highlight_by_text
+
+# A one-option Choice has nothing to choose between: mutated to open
+# anyway, the footer test that says a one-option row is inert fails.
+run_mutation "choice: a one-option Choice does not open" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if options.len() < 2 {
+            return Step::Inert;
+        }
+        let mut list = crate::choice::ChoiceList::new' \
+  '        let mut list = crate::choice::ChoiceList::new' \
+  geode-shell a_one_option_choice_does_not_open_and_neither_does_a_text_row
+
 # ---- Settings dialog goes modal (interaction-model spec §18, 2026-09-12) --
 #
 # The same four silent failures spec §12 lists for the keybinding dialog,

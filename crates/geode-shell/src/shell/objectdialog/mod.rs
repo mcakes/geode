@@ -1060,7 +1060,7 @@ pub enum RowVocabulary {
     /// row), an `OrderedList`'s own header row, a `MultiChoice`, or no
     /// row at all under an over-narrow filter.
     Inert,
-    /// A value the step keys cycle and `i` cannot open: `Choice`, `Bool`.
+    /// A value the step keys cycle and `i` cannot open: `Bool`.
     Steps,
     /// Both: a `Number` (steps by one, takes a typed value) or a
     /// multi-option `Choice` (steps, and `i` opens a typeahead over its
