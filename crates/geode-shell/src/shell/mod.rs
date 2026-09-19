@@ -1836,16 +1836,22 @@ impl ShellView {
 
     /// Deliver a `DataEvent::Distinct` outcome (spec §3.4), routed here by
     /// the app bridge from the `ShellEvent::DistinctRequested` it submitted
-    /// on this same picker's behalf. Dropped — no picker mutation, no
-    /// notify — unless every one of these holds: a picker is open, its
-    /// stage is `Values` (a `Columns`-stage picker asked for nothing and
-    /// wants nothing), the outcome names that stage's own column (a picker
-    /// that moved on to a different column between request and reply), and
-    /// the outcome's tag matches the picker's *latest* `request_values`
-    /// call (`PickerState::tag`, bumped once per request) — an outcome
-    /// racing in from a superseded request (the user re-opened the same
-    /// column, or the query pool simply finished them out of order) is
-    /// exactly the stale result §7.3 says must never be rendered.
+    /// on this same picker's behalf (or, since the scopes-editing spec §4,
+    /// the object dialog's own Values stage). An outcome tagged
+    /// `SCOPES_KEY` is diverted to `objectdialog::deliver_values` before
+    /// any of the picker's own guards run — the two callers ask under
+    /// different keys precisely so neither can be mistaken for the
+    /// other's answer. Everything below this is the picker's own path:
+    /// dropped — no picker mutation, no notify — unless every one of
+    /// these holds: a picker is open, its stage is `Values` (a
+    /// `Columns`-stage picker asked for nothing and wants nothing), the
+    /// outcome names that stage's own column (a picker that moved on to a
+    /// different column between request and reply), and the outcome's tag
+    /// matches the picker's *latest* `request_values` call (`PickerState::
+    /// tag`, bumped once per request) — an outcome racing in from a
+    /// superseded request (the user re-opened the same column, or the
+    /// query pool simply finished them out of order) is exactly the stale
+    /// result §7.3 says must never be rendered.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
         if outcome.key == SCOPES_KEY {
             objectdialog::deliver_values(self, outcome, cx);

@@ -3190,8 +3190,18 @@ fn build(
     };
     // The column stage paints the edit stage's own chrome (Part 2c §5.2)
     // — header, filter row, row list, action bar — over the seven fields
-    // it installed; only the crumb tells them apart.
-    if matches!(state.stage, Stage::Edit { .. } | Stage::Column { .. }) {
+    // it installed; only the crumb tells them apart. The Values stage
+    // (scopes-editing spec §4) is the same projection shape again, over
+    // the same draft, so it takes the same chrome — a review Critical:
+    // without this arm the Values stage fell through to the BROWSE
+    // painter below, which reads `derive_rows`/`state.selected` rather
+    // than the draft, so a trader saw the object list under the crumb
+    // `mine › book` while `enter`/space and the tick clicks silently
+    // mutated a draft nothing on screen showed.
+    if matches!(
+        state.stage,
+        Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
+    ) {
         return build_edit(shell, entity, cx);
     }
     // The same one derivation path `handle_key` uses — a second spelling
@@ -4663,16 +4673,22 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     bar.into_any_element()
 }
 
-/// The browse stage's one button (spec §20.3): `n`, where the domain can
-/// create — the same two conditions the footer's `n` hint keys on
-/// (writable, no fixed roster), and never while naming, where the row
-/// it opens is already open. Same button shape as the edit stage's bar;
-/// an empty `div` otherwise, so the stage's child order never changes.
+/// The browse stage's action bar (spec §20.3, extended by §21 and the
+/// scopes-editing spec §6): `n`, where the domain can create — the same
+/// two conditions the footer's `n` hint keys on (writable, no fixed
+/// roster); `c`, where the domain is duplicable (Scopes only) and a row
+/// sits under the cursor; `d`/`r`, gated the same way the edit bar's own
+/// `actions` are, off the *selected* row's layer and override markers.
+/// None of the four while naming, where the row a verb would act on is
+/// already open. Same button shape as the edit stage's bar; an empty
+/// `div` when no button applies, so the stage's child order never
+/// changes.
 ///
-/// The click takes [`begin_new_object`], the key's own door, and ends in
-/// [`dialog::sync_dialog_text`] because it never passes through the key
-/// path — `begin_naming` sets `DialogMode::Filter`, and the sync is what
-/// focuses the name field (§17.1 rule 3).
+/// `n`'s click takes [`begin_new_object`], the key's own door, and ends
+/// in [`dialog::sync_dialog_text`] because it never passes through the
+/// key path — `begin_naming` sets `DialogMode::Filter`, and the sync is
+/// what focuses the name field (§17.1 rule 3). `c`/`d`/`r` take their own
+/// keys' doors the same way.
 fn browse_action_bar(
     state: &ObjectDialogState,
     rows: &[ObjectRow],

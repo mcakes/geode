@@ -384,6 +384,20 @@ pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
 /// selection's VALUES are never rewritten here — the Values stage owns
 /// them (`fold_values`, Task 3). Called from `render::revalidate` on
 /// every Scopes change, ahead of the validator and the writer.
+///
+/// **Known quirk:** `text` and `expression` are always installed fields
+/// while the edit stage (or a projection over it, like the Values stage)
+/// is open, so this runs — and writes `source.text`/`source.expression`
+/// — on the FIRST change of any kind, not only a change to those two
+/// keys. A scope's raw table that has neither key at all (a hand-written
+/// `scopes.toml`, or one from before this plan) therefore reads as
+/// "changed" — and gets rewritten with `text = ""`/`expression = ""` —
+/// after a single tick-then-untick on an unrelated dimension, even
+/// though the object it ends up saving is the same one, semantically,
+/// that it started as. Harmless (`scope_to_table`'s reader and this
+/// writer agree an absent key and an empty string mean the same thing),
+/// but worth knowing before treating "the file changed" as "the trader
+/// changed something they can see".
 pub fn fold(draft: &mut Draft) {
     let mut text = None;
     let mut expression = None;

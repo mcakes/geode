@@ -66,12 +66,17 @@ app's scope is set as."
   an empty `values` is "no constraint" and `scope_to_table` skips it,
   so there is nothing to add until the first tick.
 - `enter` on an **item** row opens the Values stage for that column.
-  `space` on an item is inert (the tick column is not painted for
-  Scopes items — a selected dimension has no "included" flag; it is
-  either selected or not in the list). Handled by
-  `render::column_stage_target`'s Scopes arm answering the column, so
-  `commit_selected_row` and `on_edit_row_clicked` share one rule as
-  they do for Views' member rows.
+  `space` on an item names the door (`enter opens this dimension's
+  values`) rather than opening it. **As built:** the tick IS painted on
+  a Scopes dimension row — an item's `included` is `true`, an
+  available row's `false`, the same flag every other domain's tick
+  reads — and a click on it names the same door `space` does rather
+  than toggling membership on the spot: `step_selected_row`'s Scopes
+  arm sends an available row's tick into the Values stage and a
+  selected row's tick to the same notice `space` gives, so the mouse
+  and the key cannot disagree about which rows are doors
+  (`render::values_stage_target`, read by `commit_selected_row`,
+  `on_edit_row_clicked` and the tick/chip click alike).
 - `x` on an item removes the selection (the dimension returns to the
   available block). A `Doc` write.
 - `shift+j`/`shift+k` on an item are refused with the notice
@@ -171,6 +176,21 @@ the item; an untick that empties the selection removes the item and
 `scope_to_table`'s own rule). It then rides `revalidate` +
 `commit_change`: the 250 ms debounced `Doc` write, the fork notice on
 a desk- or builtin-owned scope, and the diagnostics glyph.
+
+**Known gap (final review, 2026-09-19).** The Values stage's row list —
+like the rest of the edit-stage scaffold — is not virtualised: every
+visible row is a real element built and laid out on every frame,
+whatever the list's length. For a low-cardinality dimension (a book,
+a handful of underlyings) this is unmeasured noise; for a
+high-cardinality one (an instrument ref, a position ref) it pays
+per-frame churn proportional to the dimension's cardinality, on a
+surface whose whole reason to exist is to browse exactly that kind of
+list. The `mod+p` picker's own Values stage already solved this with
+`uniform_list`, precisely because it faces the same cardinality. A
+follow-up should either cap the painted rows here (as the picker's own
+`PICKER_ROWS` cap does for its ranked keys) or move the object dialog's
+edit-stage list onto `uniform_list` outright; either way, `docs/perf.md`
+should carry a measurement once one lands, since none exists today.
 
 ## 5. Text and expression
 

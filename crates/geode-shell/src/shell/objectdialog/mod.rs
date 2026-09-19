@@ -3417,11 +3417,24 @@ impl ObjectDialogState {
     /// empty-looking filter field, and a `leave_edit` cursor restore that
     /// silently failed to find the object it was looking for.
     pub fn set_query(&mut self, query: String) {
-        // The column stage (Part 2c §5.2) is the edit stage's own filter
+        // The column stage (Part 2c §5.2) and the Values stage
+        // (scopes-editing spec §4) are both the edit stage's own filter
         // row over a different set of rows — one draft, one cursor space
-        // — so it takes the same side of the mirror.
-        if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
-            && let Some(draft) = self.draft.as_mut()
+        // — so they take the same side of the mirror. This arm, the read
+        // half in `effective_query` and the cursor half in
+        // `effective_selected` are the write and read halves of one
+        // mirror (this method's own doc has the full mechanism) and MUST
+        // list the same stages: a stage present in one but not the other
+        // reads back from a different slot than the keystroke was
+        // written to — a review Critical found the Values stage missing
+        // from all three, so `/` there wrote `state.query` (browse's own
+        // slot) while `draft.query` stayed empty, and `ctrl+a`
+        // ("tick every value the filter currently shows") ticked and
+        // wrote every value in the list rather than the filtered ones.
+        if matches!(
+            self.stage,
+            Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
+        ) && let Some(draft) = self.draft.as_mut()
         {
             draft.set_query(query);
         } else {
@@ -3432,25 +3445,33 @@ impl ObjectDialogState {
     }
 
     /// The query the open stage is filtering by — the draft's in
-    /// `Stage::Edit`, the state's own otherwise (spec §16.2). The **read
-    /// half** of [`Self::set_query`]'s one-way mirror: `dialog::
-    /// sync_dialog_text` writes the shared `Input` from this, so a query
-    /// left sitting in the other stage's slot can never reach the screen.
+    /// `Stage::Edit`/`Column`/`Values`, the state's own otherwise (spec
+    /// §16.2). The **read half** of [`Self::set_query`]'s one-way
+    /// mirror: `dialog::sync_dialog_text` writes the shared `Input` from
+    /// this, so a query left sitting in the other stage's slot can never
+    /// reach the screen. See [`Self::set_query`]'s doc for why this
+    /// match must name exactly the same stages that one does.
     pub fn effective_query(&self) -> &str {
         match (&self.stage, self.draft.as_ref()) {
-            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),
+            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
+                draft.query.as_str()
+            }
             _ => self.query.as_str(),
         }
     }
 
     /// The cursor of the open stage, in the same slot rule as
-    /// [`Self::effective_query`]: the draft's in the edit and column
-    /// stages, the state's own otherwise. What the change subscription
-    /// scrolls to after a keystroke — the top for a filter (the reset),
-    /// the edited row for an open plain field, which `set_query` keeps.
+    /// [`Self::effective_query`]: the draft's in the edit, column and
+    /// values stages, the state's own otherwise. What the change
+    /// subscription scrolls to after a keystroke — the top for a filter
+    /// (the reset), the edited row for an open plain field, which
+    /// `set_query` keeps. See [`Self::set_query`]'s doc for why this
+    /// match must name exactly the same stages that one does.
     pub fn effective_selected(&self) -> usize {
         match (&self.stage, self.draft.as_ref()) {
-            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.selected,
+            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
+                draft.selected
+            }
             _ => self.selected,
         }
     }

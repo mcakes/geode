@@ -3060,6 +3060,63 @@ fn deliver_values_routes_by_key_and_drops_stale_outcomes(cx: &mut gpui::TestAppC
     );
 }
 
+/// Final review Critical 1: `render::build` fell through to the browse
+/// painter for `Stage::Values` (only `Stage::Edit`/`Stage::Column` took
+/// the `build_edit` branch), so a trader watched the object list under
+/// the crumb `mine › book` while every key and tick click silently
+/// mutated a draft nothing on screen showed. This proves the Values
+/// stage now paints its own rows — an item, its section header, and no
+/// browse row underneath.
+#[gpui::test]
+fn the_values_stage_paints_its_rows(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter"); // open `mine`
+    cx.simulate_keystrokes("j"); // onto the `book` item row
+    cx.simulate_keystrokes("enter"); // Values stage
+    cx.run_until_parked();
+    let tag = dialog_state(&shell, &cx, |s| s.values_tag);
+    shell.update(&mut cx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: SCOPES_KEY,
+                tag,
+                column: "book".into(),
+                values: Ok(vec![("BK000".into(), 5), ("BK001".into(), 7)]),
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert!(
+        matches!(
+            dialog_state(&shell, &cx, |s| s.stage.clone()),
+            objectdialog::Stage::Values { .. }
+        ),
+        "the stage really is Values, not just the state — a mismatch here \
+         would mean the test proves nothing about the paint"
+    );
+    let item_bounds = cx.debug_bounds("objectdialog-item-BK000");
+    assert!(
+        item_bounds.is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+        "the Values stage's own row should paint, got {item_bounds:?}"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-section-members-values")
+            .is_some(),
+        "the Values section header should paint"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-row-mine").is_none(),
+        "no browse row should paint while the Values stage is open"
+    );
+}
+
 /// `enter` on a `dimensions` row opens the Values stage and asks the
 /// data for that column's values, carrying the DRAFT's scope minus the
 /// column; `space` on an available row opens it too; `escape` returns to
@@ -3233,6 +3290,101 @@ fn ctrl_a_and_ctrl_x_tick_and_clear_and_reorder_is_refused(cx: &mut gpui::TestAp
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
         Some("selections have no order")
+    );
+}
+
+/// Final review Critical 2: `ObjectDialogState::set_query`,
+/// `effective_query` and `effective_selected` matched only
+/// `Stage::Edit`/`Stage::Column`, so a `/` filter typed inside the
+/// Values stage wrote `state.query` (browse's own, unread slot) while
+/// `draft.query` stayed empty forever — the rows never narrowed, and
+/// `ctrl+a` ("ticks every value the filter currently shows") ticked and
+/// wrote every value in the list rather than the filtered ones. This
+/// proves the query lands on the draft, the rows narrow, and `ctrl+a`
+/// only ticks what the filter actually shows.
+#[gpui::test]
+fn a_query_in_the_values_stage_narrows_the_rows_and_ctrl_a_ticks_only_them(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter"); // open `mine`
+    cx.simulate_keystrokes("j"); // onto the `book` item row
+    cx.simulate_keystrokes("enter"); // Values stage
+    cx.run_until_parked();
+    let tag = dialog_state(&shell, &cx, |s| s.values_tag);
+    shell.update(&mut cx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: SCOPES_KEY,
+                tag,
+                column: "book".into(),
+                // `BK001` is `mine`'s own saved selection, so it starts
+                // ticked; `BK000` and `ZZ9` do not.
+                values: Ok(vec![
+                    ("BK000".into(), 5),
+                    ("BK001".into(), 7),
+                    ("ZZ9".into(), 1),
+                ]),
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    cx.simulate_input("BK");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "BK",
+        "the keystrokes must land on the draft's own query, not the \
+         browse-stage slot `Stage::Values` has no business writing"
+    );
+
+    // The header row's label is "Values", which shares no letters with
+    // "BK" — narrowed to the two matching item rows, both from the
+    // field's own `rows()`, computed rather than hard-coded so this
+    // assertion states the real filtering behaviour instead of a magic
+    // number.
+    let visible_names: Vec<String> = edit_draft(&shell, &cx, |d| {
+        let rows = d.rows();
+        d.visible_rows()
+            .iter()
+            .filter_map(|m| rows.get(m.row).map(|r| d.row_label(*r)))
+            .collect()
+    });
+    assert_eq!(
+        visible_names,
+        vec!["BK000".to_string(), "BK001".to_string()],
+        "the filter should narrow to the two matching values and drop \
+         `ZZ9` (and the unrelated `Values` header row)"
+    );
+
+    cx.simulate_keystrokes("ctrl-a");
+    cx.run_until_parked();
+    let ticked: Vec<(String, bool)> = edit_draft(&shell, &cx, |d| {
+        d.list_items("values")
+            .unwrap()
+            .iter()
+            .map(|i| (i.name.clone(), i.included))
+            .collect()
+    });
+    assert_eq!(
+        ticked,
+        vec![
+            ("BK000".to_string(), true),
+            ("BK001".to_string(), true),
+            ("ZZ9".to_string(), false),
+        ],
+        "ctrl+a must tick only the values the filter shows — a `ZZ9` \
+         ticked here means it fell back to ticking the whole list"
     );
 }
 

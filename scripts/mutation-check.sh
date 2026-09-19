@@ -7229,6 +7229,47 @@ run_mutation "scopes dialog: the request carries the draft minus the column" \
   '    let _ = minus;' \
   geode-shell entering_the_values_stage_requests_the_columns_distinct_values
 
+# Final review Critical 1: `render::build` must paint the Values stage
+# through `build_edit` (the same chrome the column stage gets) rather
+# than falling through to the browse painter, which reads `derive_rows`/
+# `state.selected` and knows nothing about the draft a Values stage
+# installs. Mutating the `matches!` back to its pre-fix two-stage form
+# recreates exactly that: the trader sees the object list under the
+# crumb `mine › book` while ticks silently mutate a draft nothing on
+# screen shows.
+run_mutation "scopes dialog: the Values stage paints through build_edit" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if matches!(
+        state.stage,
+        Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
+    ) {' \
+  '    if matches!(
+        state.stage,
+        Stage::Edit { .. } | Stage::Column { .. }
+    ) {' \
+  geode-shell the_values_stage_paints_its_rows
+
+# Final review Critical 2: `ObjectDialogState::set_query` must treat
+# `Stage::Values` exactly as it treats `Stage::Edit`/`Stage::Column` —
+# writing the keystroke onto `Draft::query` rather than `state.query`
+# (the browse list's own, unread-in-this-stage slot). Dropping the
+# `Stage::Values` arm here reopens the defect `effective_query`'s and
+# `effective_selected`'s own arms (this same file) would then read
+# around: `/` in the Values stage would narrow nothing, and `ctrl+a`
+# ("ticks every value the filter currently shows") would tick and write
+# every value in the list instead.
+run_mutation "scopes dialog: the Values stage's query is the draft's" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if matches!(
+            self.stage,
+            Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
+        ) && let Some(draft) = self.draft.as_mut()' \
+  '        if matches!(
+            self.stage,
+            Stage::Edit { .. } | Stage::Column { .. }
+        ) && let Some(draft) = self.draft.as_mut()' \
+  geode-shell a_query_in_the_values_stage_narrows_the_rows_and_ctrl_a_ticks_only_them
+
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
 # to normal mode, which keeps the query applied) must still be emptied
@@ -7312,8 +7353,10 @@ run_mutation "objectdialog: reorder skips hidden rows" \
 # not tell the two apart.
 run_mutation "objectdialog: set_query mirrors into the open draft only in the edit stage" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
-            && let Some(draft) = self.draft.as_mut()' \
+  '        if matches!(
+            self.stage,
+            Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
+        ) && let Some(draft) = self.draft.as_mut()' \
   '        if false
             && let Some(draft) = self.draft.as_mut()' \
   geode-shell \
@@ -7548,8 +7591,12 @@ run_mutation "dialogmode: listening overrides the mode for focus" \
 # stage paints (and, after Task 3, WRITES into the Input) the browse query.
 run_mutation "objectdialog: effective_query reads the edit stage's draft" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),' \
-  '            (Stage::Edit { .. } | Stage::Column { .. }, Some(_draft)) => self.query.as_str(),' \
+  '            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
+                draft.query.as_str()
+            }' \
+  '            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(_draft)) => {
+                self.query.as_str()
+            }' \
   geode-shell \
   the_effective_query_is_the_stages_own
 
