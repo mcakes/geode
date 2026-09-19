@@ -7878,6 +7878,34 @@ run_mutation "choice: a row click completes that row" \
   '' \
   geode-shell tab_completes_and_escape_cancels_a_choice_field
 
+# Final review, Critical 1: `ChoiceKey::Pick` is a second door onto a
+# `Choice` row (`space`/`shift+space`/`tab` are the first) and must run
+# `maybe_refresh_available` exactly as those do — picking a new dataset
+# through the typeahead must rebuild the `columns` catalogue too, or a
+# trader keeps ticking columns the picked dataset does not have. Mutated
+# to drop the call, the pick still applies but the catalogue is left
+# holding the OLD dataset's columns.
+run_mutation "choice: a picked dataset rebuilds the available catalogue" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        scroll_to_cursor(shell);
+                        // The cursor is still on the row `apply_choice`'"'"'s
+                        // own `follow(row)` left it on, which is exactly
+                        // what `maybe_refresh_available`'"'"'s dataset-row
+                        // check keys on — the same reason `space` and
+                        // the action bar'"'"'s tick run it ahead of
+                        // `revalidate` (final review, Critical 1).
+                        maybe_refresh_available(shell);
+                        revalidate(shell);' \
+  '                        scroll_to_cursor(shell);
+                        // The cursor is still on the row `apply_choice`'"'"'s
+                        // own `follow(row)` left it on, which is exactly
+                        // what `maybe_refresh_available`'"'"'s dataset-row
+                        // check keys on — the same reason `space` and
+                        // the action bar'"'"'s tick run it ahead of
+                        // `revalidate` (final review, Critical 1).
+                        revalidate(shell);' \
+  geode-shell a_picked_dataset_rebuilds_the_available_catalogue
+
 # ---- Settings dialog goes modal (interaction-model spec §18, 2026-09-12) --
 #
 # The same four silent failures spec §12 lists for the keybinding dialog,
@@ -11980,7 +12008,7 @@ run_mutation "mdpicker: the picker paints at most PICKER_ROWS rows" \
 # window advancing forward, a step past the cap leaves the highlight
 # ahead of the window — painted past what `render_picker` actually
 # draws, exactly the bug `follow`'s forward branch exists to prevent.
-run_mutation "mdpicker: step stops at the last painted row" \
+run_mutation "mdpicker: step is clamped at the last ranked row with the window following" \
   crates/geode-shell/src/choice.rs \
   '        if self.highlighted < self.window {
             self.window = self.highlighted;

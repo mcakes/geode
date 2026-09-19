@@ -4975,6 +4975,52 @@ fn services_with_two_datasets_and_a_view() -> ShellServices {
     services
 }
 
+/// Final review, Critical 1: the typeahead's `Pick` arm is a second door
+/// onto the `dataset` row's `Choice` (`space`/`shift+space`/`tab` are the
+/// first) and must run [`objectdialog::render::maybe_refresh_available`]
+/// exactly as they do — picking `vol` through `i`, type, `enter` has to
+/// rebuild the `columns` catalogue from the NEW dataset, or a trader
+/// keeps ticking columns the dataset they just picked does not have.
+#[gpui::test]
+fn a_picked_dataset_rebuilds_the_available_catalogue(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_two_datasets_and_a_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter"); // tree's edit stage, cursor on `dataset`
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.available_items("columns").map(|rows| {
+            rows.iter().map(|i| i.name.clone()).collect::<Vec<_>>()
+        })),
+        Some(vec!["npv".to_string()]),
+        "sanity: risk's own available block"
+    );
+
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_input("vol");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("dataset").map(str::to_string)),
+        Some("vol".to_string()),
+        "sanity: the pick landed on the other dataset"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.available_items("columns").map(|rows| {
+            rows.iter().map(|i| i.name.clone()).collect::<Vec<_>>()
+        })),
+        Some(vec!["strike".to_string()]),
+        "the available catalogue was rebuilt from the picked dataset, \
+         not left holding risk's own columns"
+    );
+}
+
 /// The final whole-branch review's Minor 4: `maybe_refresh_available`
 /// seeds each catalogue row from `dataset_presentation.toml` (§5.4), so
 /// it must read the config with the PENDING batch folded in. Inside the
@@ -7752,16 +7798,19 @@ fn the_help_line_is_blank_under_an_armed_confirm(cx: &mut gpui::TestAppContext) 
 /// read-only one dropped the footer's edit row, so the dialog shrank by a
 /// line and everything below it shifted. Every hint row is now laid out
 /// every time — an empty one painted blank at the same height — so the
-/// go row sits a fixed distance below the edit row whichever row is
-/// selected.
+/// go row sits at one y whichever row is selected.
 ///
-/// The gap is measured from the EDIT row, not from a fixed y (spec
-/// 2026-09-19 §3.2's fallout): `dataset` is a multi-option `Choice`,
-/// which now both steps and types, so its action bar carries the `i`
-/// button that `adapter` (a read-only `Text`, no verb at all) does not —
-/// a real, one-row difference above the footer that this test is not
-/// about. Comparing the edit-to-go distance instead of `go`'s absolute
-/// position keeps the test on the one invariant it guards.
+/// Final review, Important 2: this used to also catch a second,
+/// unrelated collapse — `action_bar` (§20.3's button row, ABOVE the
+/// footer) shrinks to 0 px on a row `actions()` offers nothing for,
+/// since an `h_flex` with no children has no height of its own. `k`
+/// lands on `adapter`, a read-only `Text` with no verb, so that bar's
+/// own height used to move the footer with it — the exact "everything
+/// below it shifted" bug this test guards, one level up. `action_bar`
+/// now reserves a small button's height whether or not it has any
+/// buttons, which is what lets this assertion go back to the ORIGINAL
+/// absolute one: `go`'s y does not move at all, not merely by a
+/// constant gap from `edit`.
 #[gpui::test]
 fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
     cx: &mut gpui::TestAppContext,
@@ -7775,7 +7824,6 @@ fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
     assert!(cx.debug_bounds("objectdialog-hint-change").is_some());
     let go_before = cx.debug_bounds("hint-row-go").unwrap();
     let edit_before = cx.debug_bounds("hint-row-edit").unwrap();
-    let gap_before = go_before.origin.y - edit_before.origin.y;
 
     // `k` wraps to the last row, `adapter`, a read-only `Text`: nothing
     // to edit, so the edit row is empty — but still there, same height.
@@ -7793,9 +7841,5 @@ fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
         "an empty row keeps a full row's height"
     );
     let go = cx.debug_bounds("hint-row-go").unwrap();
-    assert_eq!(
-        go.origin.y - edit.origin.y,
-        gap_before,
-        "so nothing below the edit row moves relative to it"
-    );
+    assert_eq!(go.origin.y, go_before.origin.y, "so nothing below it moves");
 }

@@ -47,9 +47,12 @@
 //! shared `*_on` cores) — theme stepping is a live preview, and
 //! persistence stays on the existing background paths
 //! (`ShellView::persist_theme` and friends; no I/O lands on the render
-//! thread here). `enter` is deliberately inert and reserved in both modes
-//! (a step already applies the instant it happens, so there is nothing
-//! for enter to confirm) — see [`route`] for the whole vocabulary and
+//! thread here). In normal mode `i` or a bare `enter` opens the selected
+//! row's typeahead (spec 2026-09-19 §3.3) — the settings dialog needed no
+//! code of its own for this, since [`route`] already dispatches every
+//! modal surface's `Choice` rows the same way; filter mode's `enter`
+//! stays claimed and dropped, there being no field open for it to
+//! confirm. See [`route`] for the whole vocabulary and
 //! [`handle_key`] for why `enter` and `tab` are *claimed* rather than
 //! left to the filter.
 //!

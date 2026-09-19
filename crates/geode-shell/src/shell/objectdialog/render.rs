@@ -1638,7 +1638,11 @@ fn open_field(shell: &mut ShellView) {
 /// or say why not. A `Number` is always typeable; a `Text` only where
 /// the domain says so (`Domain::text_editable`) — a display-only `Text`
 /// gets the read-only notice `enter` gives, so the two verbs agree about
-/// the same row. Any other row gets `edit_commit_notice`'s answer.
+/// the same row. A multi-option `Choice` opens the same shared field as
+/// a typeahead over its options instead (spec 2026-09-19 §3.2,
+/// `begin_choice_entry`); a one-option `Choice` has nothing to choose
+/// between and falls through to the notice below, as stepping it would.
+/// Any other row gets `edit_commit_notice`'s answer.
 fn open_text_field(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
@@ -1685,6 +1689,13 @@ fn open_text_field(shell: &mut ShellView) {
 /// exactly the path a tick does, [`revalidate`] and [`commit_change`],
 /// so a desk field forks and says so; everything else is the focused
 /// `Input`'s to type (`false`).
+///
+/// A `Choice` field (spec 2026-09-19 §3.2, `Completions::Choice`) is
+/// dispatched ahead of both the chain and the plain branch below, in its
+/// own block: `enter` there PICKS the highlighted option rather than
+/// parsing typed text, `tab` completes it into the field, and the nav
+/// keys move the highlight through the shared `choice::route` table —
+/// see that block's own comment for the full key table.
 ///
 /// The chain field (§18.8, Groupings' `i`) is this same field with
 /// `Completions::Chain`: `tab` and the nav keys only mean anything there
@@ -1736,6 +1747,13 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                             state.mode = DialogMode::Normal;
                         }
                         scroll_to_cursor(shell);
+                        // The cursor is still on the row `apply_choice`'s
+                        // own `follow(row)` left it on, which is exactly
+                        // what `maybe_refresh_available`'s dataset-row
+                        // check keys on — the same reason `space` and
+                        // the action bar's tick run it ahead of
+                        // `revalidate` (final review, Critical 1).
+                        maybe_refresh_available(shell);
                         revalidate(shell);
                         commit_change(shell, cx);
                     }
@@ -4303,6 +4321,14 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .w(px(WIDTH))
         .gap_2()
         .items_center()
+        // `min_h_6` matches a `.small()` `Button`'s own labelled height
+        // (`Size::Small => h_6()` at the pinned rev) so this row holds
+        // its place on a row `actions()` offers nothing for — an
+        // `h_flex` with zero children otherwise has zero height of its
+        // own, and everything the footer paints below this bar shifted
+        // up by a button's height on such a row (final review,
+        // Important 2).
+        .min_h_6()
         .debug_selector(|| "objectdialog-actions".to_string());
     for action in actions(shell) {
         let ks = crate::keymap::parse_keystroke(action.key, Modifiers::NONE)

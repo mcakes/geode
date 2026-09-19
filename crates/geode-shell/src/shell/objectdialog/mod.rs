@@ -1639,6 +1639,13 @@ impl Draft {
         self.query.clear();
         self.selected = 0;
         self.text_entry = None;
+        // `choice` is `Some` exactly while `text_entry.completions ==
+        // Choice` (plan invariant) — cleared here for the same reason
+        // `text_entry` is: entering the column stage can only happen
+        // with no field open, so this is a no-op in practice, but the
+        // invariant should hold by construction rather than by every
+        // caller happening to have closed the field first.
+        self.choice = None;
         true
     }
 
@@ -1800,6 +1807,12 @@ impl Draft {
         // cleared anyway because its `EditRow` indexes the fields being
         // replaced, and a stale one would point into the restored list.
         self.text_entry = None;
+        // `choice` beside it, same reasoning: it can only be `Some`
+        // while `text_entry` is too (plan invariant, "`choice` is
+        // `Some` exactly while `completions == Choice`"), so this holds
+        // by construction rather than by the invariant never having
+        // been checked here.
+        self.choice = None;
         self.selected = 0;
         if let Some(column) = column {
             self.select_item_named(&column);

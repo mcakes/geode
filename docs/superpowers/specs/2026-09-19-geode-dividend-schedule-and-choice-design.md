@@ -130,9 +130,10 @@ in the filter row's place with `Completions::Choice`:
 - `Draft::visible_rows` answers the field's `ChoiceList::rank` for the
   `Choice` arm (the options as rows, as the chain field's candidates
   are), the highlight placed on the current value at open.
-- `up`/`down`/`j`/`k` and the rest of `listfilter::nav_command` move
-  the highlight; `tab` completes; a completion-row click is `tab`
-  (§18.9's rule for the chain field).
+- `up`/`down` and the rest of `listfilter::nav_command`'s chords
+  (`ctrl+p/n/u/d/b/f`, the page keys) move the highlight — `j`/`k` are
+  letters typed into the field, not bindings; `tab` completes; a
+  completion-row click is `tab` (§18.9's rule for the chain field).
 - **`enter` picks the highlighted option**, not the typed text — a
   dropdown commits what is lit, exactly as the underlying picker does.
   It sets `Choice.current` and rides the same `revalidate` +
@@ -186,6 +187,14 @@ found one pre-existing harness entry (`objectdialog: the i button is
 offered per row, not per domain`) no longer discriminating once a
 `Choice` row legitimately offers `i`; it now discriminates on a
 read-only `Text` row (794698b).
+
+**As-built correction (final whole-branch review):** §3.2's bullet
+above named `j`/`k` beside `up`/`down` as choice-field motions; they
+are not — `crate::choice::route` dispatches nav keys through
+`listfilter::nav_command`, whose table has no `j`/`k` entry at all
+(they are letters the field types), only `up`/`down` and the chord set.
+The bullet is corrected in place rather than left to stand beside this
+note.
 
 ## 4. Phase 2 — the document family and the typed flat panel
 

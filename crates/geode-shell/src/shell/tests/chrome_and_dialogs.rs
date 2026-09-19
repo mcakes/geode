@@ -837,8 +837,7 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
     assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
 }
 
-/// `escape` cancels the choice field with the setting untouched; `enter`
-/// on a filtered-away list is still `Drop` (nothing to open).
+/// `escape` cancels the choice field with the setting untouched.
 #[gpui::test]
 fn escape_cancels_a_settings_choice_field_untouched(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
