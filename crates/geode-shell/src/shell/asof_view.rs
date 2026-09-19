@@ -29,7 +29,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Hsla, MouseButton, Window, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
@@ -165,6 +165,39 @@ pub fn on_query_changed(state: &mut AsOfState, text: &str, now: DateTime<Utc>) {
             state.resolved = None;
         }
     }
+}
+
+/// The field text a calendar day click yields (spec §5.2, §17 mouse
+/// parity): a typed time — `HH:MM` or `HH:MM:SS`, alone or after a date
+/// — is kept and the date part becomes `date`; anything else (blank,
+/// `live`, an RFC 3339 instant, garbage) becomes the bare date, which
+/// [`parse_as_of`] reads as the end of that day.
+pub fn compose_with_date(text: &str, date: NaiveDate) -> String {
+    let trimmed = text.trim();
+    let time_part = trimmed.rsplit_once(' ').map(|(_, t)| t).unwrap_or(trimmed);
+    let keeps_time = NaiveTime::parse_from_str(time_part, "%H:%M").is_ok()
+        || NaiveTime::parse_from_str(time_part, "%H:%M:%S").is_ok();
+    if keeps_time {
+        format!("{} {time_part}", date.format("%Y-%m-%d"))
+    } else {
+        date.format("%Y-%m-%d").to_string()
+    }
+}
+
+/// The day the calendar highlights: the field's resolved instant on the
+/// trader's local clock, else today (local).
+pub fn calendar_date(state: &AsOfState, now: DateTime<Utc>) -> NaiveDate {
+    state
+        .resolved
+        .unwrap_or(now)
+        .with_timezone(&Local)
+        .date_naive()
+}
+
+/// The calendar is hidden while the field reads `live` — there is no
+/// day to pick for "now".
+pub fn shows_calendar(text: &str) -> bool {
+    !text.trim().eq_ignore_ascii_case("live")
 }
 
 // ---------------------------------------------------------------------
@@ -556,5 +589,59 @@ mod tests {
         on_query_changed(&mut state, "not a time", now);
         assert!(state.error.is_some());
         assert!(state.resolved.is_none(), "error and resolved are exclusive");
+    }
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn compose_keeps_a_typed_time_and_replaces_or_adds_the_date() {
+        let day = d(2026, 9, 8);
+        assert_eq!(compose_with_date("", day), "2026-09-08");
+        assert_eq!(compose_with_date("   ", day), "2026-09-08");
+        assert_eq!(compose_with_date("14:05", day), "2026-09-08 14:05");
+        assert_eq!(compose_with_date("14:05:30", day), "2026-09-08 14:05:30");
+        assert_eq!(
+            compose_with_date("2026-01-01 09:30", day),
+            "2026-09-08 09:30"
+        );
+        assert_eq!(compose_with_date("2026-01-01", day), "2026-09-08");
+    }
+
+    #[test]
+    fn compose_drops_text_that_is_neither_a_time_nor_a_date() {
+        let day = d(2026, 9, 8);
+        // Garbage, `live`, or an RFC 3339 instant: the click means "this
+        // day", so the field becomes the bare date.
+        assert_eq!(compose_with_date("nonsense", day), "2026-09-08");
+        assert_eq!(compose_with_date("live", day), "2026-09-08");
+        assert_eq!(compose_with_date("2026-01-01T09:30:00Z", day), "2026-09-08");
+    }
+
+    #[test]
+    fn calendar_date_follows_the_resolved_instant_else_today() {
+        let now = Utc::now();
+        let mut state = AsOfState::default();
+        assert_eq!(
+            calendar_date(&state, now),
+            now.with_timezone(&Local).date_naive()
+        );
+        on_query_changed(&mut state, "2026-09-08 14:05", now);
+        assert_eq!(calendar_date(&state, now), d(2026, 9, 8));
+        on_query_changed(&mut state, "live", now);
+        assert_eq!(
+            calendar_date(&state, now),
+            now.with_timezone(&Local).date_naive()
+        );
+    }
+
+    #[test]
+    fn the_calendar_hides_only_under_live() {
+        assert!(shows_calendar(""));
+        assert!(shows_calendar("14:05"));
+        assert!(shows_calendar("nonsense"));
+        assert!(!shows_calendar("live"));
+        assert!(!shows_calendar(" LIVE "));
     }
 }
