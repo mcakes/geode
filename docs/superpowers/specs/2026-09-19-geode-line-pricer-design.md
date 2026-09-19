@@ -369,7 +369,8 @@ One line, whitespace-separated, case-insensitive:
 [qty] UNDERLYING EXPIRY STRIKES TYPE [BARRIER]
 
 qty      signed integer, default 1; a leading - is sell           -5   10
-EXPIRY   20DEC26 | DEC26 | 3m | 6w | 1y                            (DEC26 is the third Friday; a tenor passes through as Expiry::Tenor)
+EXPIRY   Z26 | DEC26 | 20DEC26 | 3m | 6w | 1y                      (Z26 and DEC26 are the third Friday; a tenor passes through as Expiry::Tenor)
+         IMM month codes: F G H J K M N Q U V X Z = Jan … Dec
 STRIKES  one or more, /-separated; each an absolute or a percent   5000   95%/105%
 TYPE     C  P              one leg: call, put
          CS PS             two strikes: +K1 −K2 calls (puts)
@@ -390,14 +391,18 @@ message }>` where `Parsed` is one `RowSpec` (a line) or a package
 offset: unknown type, wrong strike count for the type, wrong expiry
 count, a barrier on a package, a barrier without a level, an unknown
 barrier kind, an unparseable number, an unparseable expiry, an empty
-line. `DEC26` resolves to a date at parse time by the calendar rule
-"third Friday of the month" — this is a date convention, not a
-financial calculation, and the spec says so; holidays are not
-considered.
+line. A month form — the IMM code `Z26` or the name `DEC26` — resolves to
+a date at parse time by the calendar rule "third Friday of the month"
+— this is a date convention, not a financial calculation, and the spec
+says so; holidays are not considered. The IMM letter table (`F G H J K
+M N Q U V X Z`) is one constant with a test; a two-digit year is
+`20yy`.
 
 `shorthand(row) -> String` renders a line or a package back in the
 same grammar (a package prints its template form when its legs still
-match the template's table, `custom` legs one per line otherwise).
+match the template's table, `custom` legs one per line otherwise). A
+date expiry that falls on a third Friday renders as its IMM code
+(`Z26`), any other date as `20DEC26`, a tenor as typed.
 It is the tree column's label, what `y y` yanks, and it round-trips
 through `parse` for every template and both variants (a test).
 
@@ -655,7 +660,7 @@ the editor with the cell's current text; a non-editable cell says
 `read-only` in the footer. Parsing per column kind: `qty` an integer;
 `strike` and `barrier` a number or a percent where the column allows;
 the shifts a signed number, an empty commit meaning "inherit";
-`expiry` a date or tenor; `underlying` and `type` (and
+`expiry` any of the grammar's expiry forms; `underlying` and `type` (and
 `barrier_type`) open a `geode_shell::choice::ChoiceList` typeahead
 over, respectively, the underlyings already on the sheet plus the
 catalog's known underlyings when the frame has one, and the
@@ -803,7 +808,8 @@ Weight goes seam ≫ core ≫ tile.
 - **`geode-app`**: a local publish leaves `FrameVersions.data`
   unchanged and still reaches diagnostics; a non-local one bumps it.
 - **`geode-pricer` core**: a parse table with every template, both
-  variants and every error offset; `shorthand` round-trips through
+  variants, every expiry form (IMM code, month name, full date,
+  tenor) and every error offset; `shorthand` round-trips through
   `parse`; `apply` then its `Undo` is identity for every `Edit`;
   package sums with signed quantities; a result with an old revision
   is dropped and a current one installed; `Group` refuses a
