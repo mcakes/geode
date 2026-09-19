@@ -2845,15 +2845,17 @@ impl Domain {
     }
 
     /// May `i` edit the `Text` row keyed `key` on this domain? `false` on
-    /// Groupings, Scopes, Schema and Colours — Groupings' `slot` and
-    /// Scopes' two summaries are display-only `Text`s and must refuse;
-    /// Colours has no `Text` row at all (`hue` is a `Number`,
+    /// Groupings and Colours — Groupings' `slot` is a display-only
+    /// `Text`; Colours has no `Text` row at all (`hue` is a `Number`,
     /// `tone`/`token` are `Choice`), so `i` never reaches this door for
     /// it. Sources (§19.3) was the first `true`, for
     /// `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
     /// (`sources::text_editable`); Views answers `true` for the column
     /// stage's `label` and `width` (Part 2c §5.3, `views::text_editable`)
-    /// and for nothing else it has.
+    /// and for nothing else it has. **Scopes answers `true` for `text`
+    /// and `expression` alone** (2026-09-19, `scopes.rs`'s own module
+    /// doc) — its `dimensions` row is an `OrderedList`, not a `Text`, and
+    /// `i` never reaches this door for it either.
     ///
     /// **Schema shares the Views answer** (dataset-presentation spec
     /// §4.1): its column stage paints the very same seven rows, so `i`
@@ -2863,10 +2865,11 @@ impl Domain {
     /// — so routing here does not make one read-only schema row typeable.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
-            Domain::Groupings | Domain::Scopes | Domain::Colours => {
+            Domain::Groupings | Domain::Colours => {
                 let _ = key;
                 false
             }
+            Domain::Scopes => matches!(key, "text" | "expression"),
             Domain::Views | Domain::Schema => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
         }
@@ -2877,16 +2880,18 @@ impl Domain {
     /// by default; an adapter with a real grammar (a duration, a regex, a
     /// path list) overrides its own keys — Sources was the first
     /// (`sources::parse_text`), Views the second (the column stage's
-    /// `width`, Part 2c §5.3).
+    /// `width`, Part 2c §5.3), Scopes the third (`scopes::parse_text`,
+    /// which also refuses a broken `expression`).
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
             // Colours joins for the same reason `text_editable` gives
             // it no `true` above: no `Text` row for this door to ever
             // be called on.
-            Domain::Groupings | Domain::Scopes | Domain::Colours => {
+            Domain::Groupings | Domain::Colours => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
+            Domain::Scopes => scopes::parse_text(key, text),
             // Schema joins Views for the reason `text_editable` gives:
             // the two column stages are the same seven rows, so `width`
             // must have the same grammar through either door.

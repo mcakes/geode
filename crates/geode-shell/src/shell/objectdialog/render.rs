@@ -631,7 +631,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
             cx.notify();
             return;
         }
-        scopes::overwrite_with(&mut draft, &scope);
+        scopes::overwrite_with(&mut draft, &scope, &shell.services.config);
         draft.diagnostics = domain.validate(&draft, &shell.services.config);
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
@@ -2090,6 +2090,12 @@ fn revalidate(shell: &mut ShellView) {
     if draft.column().is_some() {
         fold = draft.fold_column();
     }
+    // Scopes: fields → source on every change (scopes-editing spec §3),
+    // so the validator and the writer read this keystroke. The Values
+    // stage's own fold is Task 3's `fold_values`, dispatched here too.
+    if domain == Domain::Scopes {
+        scopes::fold(draft);
+    }
     // Validated, then stored: `validate` needs the draft immutably and
     // the config from a sibling field, which is exactly the disjoint
     // borrow the compiler allows here and a `&mut self` method would not.
@@ -2557,8 +2563,9 @@ fn run_overwrite(shell: &mut ShellView, cx: &mut Context<ShellView>) -> bool {
         return false;
     }
     let scope = shell.frame.read(cx).scope().clone();
+    let config = shell.services.config.clone();
     let changed = draft_mut(shell).is_some_and(|draft| {
-        scopes::overwrite_with(draft, &scope);
+        scopes::overwrite_with(draft, &scope, &config);
         draft.is_dirty()
     });
     revalidate(shell);
@@ -4123,12 +4130,14 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
             "DIMENSIONS — space includes · shift+j / shift+k reorder",
             "members",
         ),
-        // None of Scopes, Schema, Sources or Colours has an `OrderedList`
-        // field at all (`scopes.rs`'s, `schema.rs`'s, `sources.rs`'s and
-        // `colours.rs`'s own module docs — every field on any of the
-        // four is a plain scalar), so this arm is unreachable for all
-        // four; kept only to stay exhaustive as domains are added.
-        (Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colours, _) => ("", "members"),
+        (Domain::Scopes, true) => ("DIMENSIONS — enter opens values · x drops", "members"),
+        (Domain::Scopes, false) => ("AVAILABLE — enter picks values", "available"),
+        // None of Schema, Sources or Colours has an `OrderedList` field
+        // at all (`schema.rs`'s, `sources.rs`'s and `colours.rs`'s own
+        // module docs — every field on any of the three is a plain
+        // scalar), so this arm is unreachable for all three; kept only
+        // to stay exhaustive as domains are added.
+        (Domain::Schema | Domain::Sources | Domain::Colours, _) => ("", "members"),
     }
 }
 

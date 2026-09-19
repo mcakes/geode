@@ -7352,7 +7352,7 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
             || services_with_slot_3(&["book"]),
             "dimensions",
         ),
-        ("config::scopes", services_with_a_saved_scope, "selects"),
+        ("config::scopes", services_with_a_saved_scope, "dimensions"),
         ("config::colours", services_with_colours, "token"),
         ("config::schema", services_with_schema, "columns.book"),
     ];

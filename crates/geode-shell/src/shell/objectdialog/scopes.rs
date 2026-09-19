@@ -1,30 +1,21 @@
-//! The `Domain::Scopes` adapter (spec §8.4, as amended by a design review
-//! ruling recorded on this branch — see this crate's Part 2a Task 5
-//! report): the scopes a trader saves with `:scope save <name>` and
-//! recalls with `:scope load <name>` or the palette's `scope::<name>`
-//! actions.
+//! The `Domain::Scopes` adapter (spec §8.4, reversed by
+//! `docs/superpowers/specs/2026-09-19-geode-scopes-dialog-editing-design.md`
+//! from a read-only summary to a real editor): the scopes a trader saves
+//! with `:scope save <name>` and recalls with `:scope load <name>` or the
+//! palette's `scope::<name>` actions.
 //!
-//! ## The thinnest adapter on purpose
-//!
-//! A scope's *values* are authored by the dimension picker and
-//! `:scope save`, not here — a `MultiChoice` editor per dimension would
-//! be a second surface that could drift from that one. So every field
-//! this domain has is [`FieldKind::Text`], painted from the saved
-//! scope's own content and never stepped: [`Draft::step_selected`] has
-//! no arm that changes a `Text` value, so `space` on either row is
-//! correctly "nothing changes with space", the same property
-//! `groupings.rs`'s `slot` field leans on for the same reason.
-//!
-//! Two fields: `Selects` (the scope's dimension selections and its
-//! validated expression, in the same "column ∈ values" spelling
-//! `scopebar::build_model` uses for the toolbar's own chips) and
-//! `Text filter` (the scope's plain-text filter, or `(none)`). The
-//! design spec's own sketch (§8.4) has only `name`, a read-only summary
-//! of what the scope selects; splitting the text filter into its own
-//! row is this adapter's one addition, not a departure — it is still
-//! read-only, still derived, and it is what makes the browse row's own
-//! `summary` (which shows only what the scope *selects*) and the edit
-//! stage's text filter row both legible on their own.
+//! The adapter edits all three keys a saved [`Scope`] has: `dimensions`
+//! as a [`FieldKind::OrderedList`] (one item per non-empty selection,
+//! `crate::shell::pickable_columns` as what else may join it — `enter`
+//! opens the Values stage to tick a selection's own values, Task 3), and
+//! `text`/`expression` as `i`-editable [`FieldKind::Text`] rows
+//! ([`parse_text`] refuses a broken expression with `parse_expr`'s own
+//! message rather than writing it for the loader to warn about and
+//! drop). [`to_table`] still renders `draft.source` and nothing else —
+//! [`fold`] (every text or dimensions-list change) and `fold_values`
+//! (the Values stage's own fold, Task 3) are its only writers, so every
+//! keystroke reaches `source` before the validator or the writer ever
+//! sees it.
 //!
 //! **No `as-of` field.** A saved [`Scope`] carries no as-of at all —
 //! `Frame::save_scope` saves `self.scope.clone()` alone
@@ -33,8 +24,10 @@
 //! state, not scope state; showing one here would be inventing a field
 //! nothing writes.
 //!
-//! ## `o`: the one new verb
+//! ## `o`: the one door onto a `Frame`
 //!
+//! Everywhere else in this module is pure — `o` is the one verb that
+//! needs a `Frame`, and it is read in `render.rs`, never here.
 //! `render.rs`'s `Verb('o')` arm (`arm_overwrite`) only *arms* the
 //! confirm — it decides at that moment whether the write will also fork
 //! the object (whether the user layer already owns this name), so the
@@ -44,8 +37,9 @@
 //! for *this dialog* at all (narrower than "the only entity": the shared
 //! filter field's `Entity<InputState>` is read elsewhere same as in every
 //! other dialog). [`overwrite_with`] takes the resulting `Scope` value,
-//! already read out, so this module, like every other adapter, never
-//! touches a `Frame` or `gpui` itself.
+//! already read out, plus the live `Config` for the available block, so
+//! this module, like every other adapter, never touches a `Frame` or
+//! `gpui` itself.
 //!
 //! It replaces both `draft.source` (what [`to_table`] renders) and
 //! `draft.fields` (the read-only summary painted above it) with the
@@ -64,6 +58,7 @@ use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::scopes::{saved_scopes_from_doc, scope_to_table};
 
+use super::ListItem;
 use super::{Destination, Draft, Field, FieldKind};
 
 /// The config doc name (file stem), as `Config::layered_docs` keys it.
@@ -90,9 +85,10 @@ pub fn summary(value: &toml::Value) -> String {
 
 /// What a scope's raw table selects: one "column ∈ values" clause per
 /// non-empty dimension, plus the expression's own source text when it
-/// has one. Shared by [`summary`] (the browse row) and [`fields`] (the
-/// edit stage's own `Selects` row), so the two can never describe the
-/// same object differently.
+/// has one. [`summary`]'s whole body — the browse row's own spelling,
+/// kept collapsed to this one line even though the edit stage now shows
+/// the same selections as a real list, because a browse row has no
+/// spare width for anything past a summary.
 fn selects_summary(table: &toml::Table) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(dims) = table.get("dimensions").and_then(|v| v.as_table()) {
@@ -121,50 +117,130 @@ fn selects_summary(table: &toml::Table) -> String {
     }
 }
 
-/// The two read-only fields of one scope (this module's own doc has the
-/// full reasoning), or of no scope at all when `object` names nothing —
-/// "everything" selected and "(none)" for the text filter, which is what
-/// a `Config` with no `scopes` doc, or a slot nothing defines, has to
-/// produce rather than panicking (spec §4 has `fields` serve the create
-/// path too, though Scopes has no create verb of its own — see this
-/// module's own doc comment).
+/// The values a scope's raw table selects on `column`, in file order.
+fn values_of(table: Option<&toml::Table>, column: &str) -> Vec<String> {
+    table
+        .and_then(|t| t.get("dimensions"))
+        .and_then(|v| v.as_table())
+        .and_then(|d| d.get(column))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What a selection's row says after its column name: the values
+/// themselves up to three, a count past that — the same "show it, then
+/// count it" rule a view's `column_summary` and a grouping slot's chain
+/// both follow, kept short because a values note shares its row with
+/// the column name and the tick.
+pub fn dimension_note(values: &[String]) -> String {
+    if values.len() <= 3 {
+        values.join(", ")
+    } else {
+        format!("{} values", values.len())
+    }
+}
+
+/// The scope's three fields (spec §3): its selected dimensions as a list
+/// (one item per non-empty selection, the other pickable columns
+/// available to join it), then `text` and `expression` as editable
+/// text — or of no scope at all when `object` names nothing, which is
+/// what a `Config` with no `scopes` doc, or a slot nothing defines, has
+/// to produce rather than panicking (spec §4 has `fields` serve the
+/// create path too, though Scopes has no create verb of its own — see
+/// this module's own doc comment).
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
         .and_then(|value| value.as_table());
-    fields_from_table(table)
+    fields_from_table(config, table)
 }
 
 /// The shared body of [`fields`] and [`overwrite_with`]: both need the
-/// same two read-only rows built from a raw scope table, one read off
-/// `Config`, the other freshly rendered from the frame's own scope.
-fn fields_from_table(table: Option<&toml::Table>) -> Vec<Field> {
-    let selects = table
-        .map(selects_summary)
-        .unwrap_or_else(|| "everything".to_string());
-    let text = table
-        .and_then(|t| t.get("text"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("(none)")
-        .to_string();
+/// same three rows built from a raw scope table and the live `Config`
+/// (for the dimensions list's available catalogue), one read off
+/// `Config` itself, the other freshly rendered from the frame's own
+/// scope.
+fn fields_from_table(config: &Config, table: Option<&toml::Table>) -> Vec<Field> {
+    let mut items = Vec::new();
+    if let Some(dims) = table
+        .and_then(|t| t.get("dimensions"))
+        .and_then(|v| v.as_table())
+    {
+        for (column, _) in dims {
+            let values = values_of(table, column);
+            if values.is_empty() {
+                continue;
+            }
+            items.push(ListItem {
+                name: column.clone(),
+                included: true,
+                presentation: Default::default(),
+                kind: None,
+                note: Some(dimension_note(&values)),
+            });
+        }
+    }
+    let available: Vec<ListItem> = crate::shell::pickable_columns(config)
+        .into_iter()
+        .filter(|p| !items.iter().any(|i| i.name == p.column))
+        .map(|p| ListItem {
+            name: p.column,
+            included: false,
+            presentation: Default::default(),
+            kind: None,
+            note: None,
+        })
+        .collect();
+    let text = |key: &str| {
+        table
+            .and_then(|t| t.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     vec![
         Field {
-            key: "selects".to_string(),
-            label: "Selects".to_string(),
-            kind: FieldKind::Text(selects),
+            key: "dimensions".to_string(),
+            label: "Dimensions".to_string(),
+            kind: FieldKind::OrderedList {
+                items,
+                available: Some(available),
+            },
             dest: Destination::Doc,
             layer: None,
         },
         Field {
             key: "text".to_string(),
             label: "Text filter".to_string(),
-            kind: FieldKind::Text(text),
+            kind: FieldKind::Text(text("text")),
+            dest: Destination::Doc,
+            layer: None,
+        },
+        Field {
+            key: "expression".to_string(),
+            label: "Expression".to_string(),
+            kind: FieldKind::Text(text("expression")),
             dest: Destination::Doc,
             layer: None,
         },
     ]
 }
+
+/// The notice `shift+j`/`shift+k` answer on this domain (ruling 4, spec
+/// §3.2): a scope's selections have no meaningful order — the compiler
+/// reads them as a set, and `render.rs`'s reorder key wires this in
+/// (Task 4) — kept here so both the notice's wording and the rule that
+/// produces it live in one place. `render.rs` does not read it yet, so
+/// it is unreached until that wiring lands — this crate's own
+/// `dead_code` lint would otherwise fail `-D warnings` on this task
+/// alone for a constant Task 4 is contracted to consume.
+#[allow(dead_code)]
+pub const NO_ORDER_NOTICE: &str = "selections have no order";
 
 /// The draft rendered as `scopes.toml`'s own value for this object:
 /// `draft.source`, unchanged, wrapped for [`super::Domain::to_table`]'s
@@ -234,16 +310,19 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 /// `run_confirmed` reads `shell.frame.read(cx).scope().clone()` at the
 /// call site and hands the result in here, which is what keeps a gpui
 /// `Entity` out of this module (and out of `Domain`'s whole surface)
-/// entirely. Both `draft.source` (what [`to_table`] renders) and
-/// `draft.fields` (the summary painted above it) are replaced —
+/// entirely; `config` is the same `shell.services.config` the caller
+/// already has in hand, needed here only to rebuild the dimensions
+/// list's available catalogue. Both `draft.source` (what [`to_table`]
+/// renders) and `draft.fields` (the rows painted above it) are
+/// replaced —
 /// `draft.source` is what `Draft::is_dirty` and
 /// [`super::Draft::writes_by_destination`] key the actual write decision
 /// on, so `apply::commit_edit` sees a change regardless of what the
 /// painted summary says, and goes through that same door every other
 /// field edit already does.
-pub fn overwrite_with(draft: &mut Draft, scope: &Scope) {
+pub fn overwrite_with(draft: &mut Draft, scope: &Scope, config: &Config) {
     draft.source = scope_table_as_toml(scope);
-    draft.fields = fields_from_table(Some(&draft.source));
+    draft.fields = fields_from_table(config, Some(&draft.source));
 }
 
 /// `scope_to_table` (geode-core) as the `toml::Table` `Draft::source`
@@ -264,19 +343,82 @@ fn scope_table_as_toml(scope: &Scope) -> toml::Table {
         .unwrap_or_default()
 }
 
+/// `i`'s commit door (spec §5, [`super::Domain::parse_text`]): `text`
+/// trims; `expression` must parse — a broken expression is refused with
+/// the parser's own message rather than written for the loader to warn
+/// about and drop, since `saved_scopes_from_doc` only ever reports an
+/// unparseable expression as a warning and silently drops it, which
+/// would otherwise make a typo in this dialog look like it saved.
+pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if key == "expression" && !text.is_empty() {
+        geode_core::scope::parse_expr(text).map_err(|e| format!("expression: {e}"))?;
+    }
+    Ok(text.to_string())
+}
+
+/// Fields → `source` (spec §3): the two text keys as typed, and
+/// `dimensions` retained to the columns the list still names. A kept
+/// selection's VALUES are never rewritten here — the Values stage owns
+/// them (`fold_values`, Task 3). Called from `render::revalidate` on
+/// every Scopes change, ahead of the validator and the writer.
+pub fn fold(draft: &mut Draft) {
+    let mut text = None;
+    let mut expression = None;
+    // `None` while the `dimensions` field is not installed — the Values
+    // stage has stashed it — so the fold never retains against an empty
+    // list and wipes every selection (the trap CLAUDE.md records).
+    let mut kept: Option<Vec<String>> = None;
+    for field in &draft.fields {
+        match (field.key.as_str(), &field.kind) {
+            ("text", FieldKind::Text(t)) => text = Some(t.clone()),
+            ("expression", FieldKind::Text(e)) => expression = Some(e.clone()),
+            ("dimensions", FieldKind::OrderedList { items, .. }) => {
+                kept = Some(items.iter().map(|i| i.name.clone()).collect());
+            }
+            _ => {}
+        }
+    }
+    if let Some(text) = text {
+        draft
+            .source
+            .insert("text".into(), toml::Value::String(text));
+    }
+    if let Some(expression) = expression {
+        draft
+            .source
+            .insert("expression".into(), toml::Value::String(expression));
+    }
+    if let Some(kept) = kept {
+        let dims = draft
+            .source
+            .entry("dimensions".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let Some(dims) = dims.as_table_mut() {
+            dims.retain(|column, _| kept.iter().any(|k| k == column));
+        }
+    }
+}
+
 /// What each field means, for the edit footer's help line
 /// ([`Domain::help`](super::Domain::help)).
 pub fn help(key: &str) -> &'static str {
     match key {
-        "selects" => "The saved selections, one 'column ∈ values' per dimension",
-        "text" => "The saved text filter, matched against every textual column",
+        "dimensions" => {
+            "The dimensions this scope narrows — open one to tick its values, x drops it"
+        }
+        "text" => "A text filter matched against every textual column; empty for none",
+        "expression" => {
+            "A filter expression over the scope's columns, checked when applied; empty for none"
+        }
+        "values" => "The values this dimension keeps — every row counts what the scope would leave",
         _ => "",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Domain, EditRow};
+    use super::super::Domain;
     use super::*;
     use geode_core::config::ConfigSources;
     use geode_core::scope::DimensionSelection;
@@ -319,7 +461,7 @@ mod tests {
     fn config_with_scope(scopes: &str) -> Config {
         let datasets = LayerDoc::builtin(
             "datasets",
-            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\ncategorical = true\n\
              [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
         )
         .unwrap();
@@ -331,58 +473,139 @@ mod tests {
         })
     }
 
-    /// `fields` reads both rows straight off the raw table: `Selects`
-    /// matches `summary`'s own wording, and `Text filter` shows the
-    /// scope's own text — or `(none)` when it has none, never a blank
-    /// row a trader could mistake for "not loaded yet".
+    /// Three fields: the selected dimensions as a list with the other
+    /// pickable columns available, then the text filter and the
+    /// expression as editable text.
     #[test]
-    fn fields_shows_selects_and_the_text_filter_read_only() {
+    fn fields_are_the_dimensions_list_the_text_filter_and_the_expression() {
         let config = config_with_scope(
-            "[mine]\ntext = \"spx\"\n[mine.dimensions]\nbook = [\"BK001\"]\n\n[bare]\n",
+            "[mine]\ntext = \"spx\"\nexpression = \"npv > 0\"\n[mine.dimensions]\nbook = [\"BK001\", \"BK003\"]\n\n[bare]\n",
         );
         let fields = Domain::Scopes.fields(&config, Some("mine"));
-        assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0].key, "selects");
-        assert_eq!(fields[0].kind, FieldKind::Text("book ∈ BK001".to_string()));
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].key, "dimensions");
+        let FieldKind::OrderedList { items, available } = &fields[0].kind else {
+            panic!("dimensions is a list");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "book");
+        assert!(items[0].included);
+        assert_eq!(items[0].note.as_deref(), Some("BK001, BK003"));
+        // `book` is the fixture's only categorical column; it is selected,
+        // so the available catalogue exists and is empty.
+        assert_eq!(available.as_deref(), Some(&[][..]));
         assert_eq!(fields[1].key, "text");
         assert_eq!(fields[1].kind, FieldKind::Text("spx".to_string()));
+        assert_eq!(fields[2].key, "expression");
+        assert_eq!(fields[2].kind, FieldKind::Text("npv > 0".to_string()));
 
         let bare = Domain::Scopes.fields(&config, Some("bare"));
-        assert_eq!(bare[0].kind, FieldKind::Text("everything".to_string()));
-        assert_eq!(bare[1].kind, FieldKind::Text("(none)".to_string()));
+        let FieldKind::OrderedList { items, available } = &bare[0].kind else {
+            panic!("dimensions is a list");
+        };
+        assert!(items.is_empty());
+        assert_eq!(available.as_ref().unwrap()[0].name, "book");
+        assert_eq!(bare[1].kind, FieldKind::Text(String::new()));
+        assert_eq!(bare[2].kind, FieldKind::Text(String::new()));
     }
 
-    /// `fields` takes `Option<&str>` because `Domain::fields`'s own
-    /// signature does; a scope nothing defines has to come back as
-    /// "everything"/"(none)" rather than a panic.
     #[test]
     fn an_object_that_does_not_exist_has_the_empty_fields_rather_than_panicking() {
         let config = config_with_scope("[mine]\n[mine.dimensions]\nbook = [\"BK001\"]\n");
         for object in [None, Some("nonesuch")] {
             let fields = Domain::Scopes.fields(&config, object);
-            assert_eq!(fields[0].kind, FieldKind::Text("everything".to_string()));
-            assert_eq!(fields[1].kind, FieldKind::Text("(none)".to_string()));
+            assert!(
+                matches!(&fields[0].kind, FieldKind::OrderedList { items, .. } if items.is_empty())
+            );
+            assert_eq!(fields[1].kind, FieldKind::Text(String::new()));
         }
     }
 
-    /// Neither field's value changes with `space` — both are painted,
-    /// never stepped, the same property `groupings.rs`'s `slot` field
-    /// pins for the same reason (this module's own doc comment has the
-    /// full story).
+    /// The note after a selection's name: the values up to three, then a
+    /// count.
     #[test]
-    fn neither_field_steps_with_space() {
+    fn a_dimension_note_lists_up_to_three_values_then_counts() {
+        assert_eq!(dimension_note(&["BK001".into()]), "BK001");
+        assert_eq!(
+            dimension_note(&["A".into(), "B".into(), "C".into()]),
+            "A, B, C"
+        );
+        assert_eq!(
+            dimension_note(&["A".into(), "B".into(), "C".into(), "D".into()]),
+            "4 values"
+        );
+    }
+
+    /// `i` opens `text` and `expression`; a bad expression is refused
+    /// with the parser's own message, an empty one clears the key.
+    #[test]
+    fn text_and_expression_are_editable_and_the_expression_is_parsed() {
+        assert!(Domain::Scopes.text_editable("text"));
+        assert!(Domain::Scopes.text_editable("expression"));
+        assert!(!Domain::Scopes.text_editable("dimensions"));
+        assert_eq!(
+            Domain::Scopes.parse_text("expression", " npv > 0 "),
+            Ok("npv > 0".to_string())
+        );
+        assert_eq!(
+            Domain::Scopes.parse_text("expression", ""),
+            Ok(String::new())
+        );
+        let err = Domain::Scopes
+            .parse_text("expression", "npv >")
+            .unwrap_err();
+        assert!(err.starts_with("expression: "), "{err}");
+        assert_eq!(
+            Domain::Scopes.parse_text("text", " spx "),
+            Ok("spx".to_string())
+        );
+    }
+
+    /// `fold` writes the two text fields into `source` and drops a
+    /// dimension the list no longer names; it never touches a selection's
+    /// values (those belong to the Values stage).
+    #[test]
+    fn fold_writes_text_expression_and_retained_dimensions_into_source() {
+        let config = config_with_scope(
+            "[mine]\ntext = \"spx\"\n[mine.dimensions]\nbook = [\"BK001\"]\nlhu = [\"L1\"]\n",
+        );
+        let mut draft = Domain::Scopes.draft(&config, "mine");
+        // Type a new filter and an expression.
+        draft.fields[1].kind = FieldKind::Text("ndx".to_string());
+        draft.fields[2].kind = FieldKind::Text("npv > 0".to_string());
+        // Drop `lhu` from the list, as `x` does.
+        if let FieldKind::OrderedList { items, .. } = &mut draft.fields[0].kind {
+            items.retain(|i| i.name != "lhu");
+        }
+        fold(&mut draft);
+        assert_eq!(draft.source["text"].as_str(), Some("ndx"));
+        assert_eq!(draft.source["expression"].as_str(), Some("npv > 0"));
+        let dims = draft.source["dimensions"].as_table().unwrap();
+        assert!(dims.contains_key("book"));
+        assert!(!dims.contains_key("lhu"));
+        assert_eq!(
+            dims["book"].as_array().unwrap()[0].as_str(),
+            Some("BK001"),
+            "the fold never rewrites a kept selection's values"
+        );
+        assert!(draft.is_dirty());
+    }
+
+    /// While the Values stage has stashed the `dimensions` field, `fold`
+    /// leaves `source.dimensions` alone rather than retaining it against
+    /// an empty list.
+    #[test]
+    fn fold_leaves_dimensions_alone_while_the_values_stage_is_open() {
         let config = config_with_scope("[mine]\n[mine.dimensions]\nbook = [\"BK001\"]\n");
         let mut draft = Domain::Scopes.draft(&config, "mine");
-        for row in draft.rows() {
-            let EditRow::Field(i) = row else {
-                panic!("Scopes has no ordered-list rows, got {row:?}");
-            };
-            draft.selected = i;
-            assert!(
-                !draft.toggle_selected().changed(),
-                "field {i} must not change with space"
-            );
-        }
+        assert!(draft.enter_values("book", Vec::new()));
+        fold(&mut draft);
+        assert!(
+            draft.source["dimensions"]
+                .as_table()
+                .unwrap()
+                .contains_key("book")
+        );
     }
 
     /// `to_table` renders `draft.source` verbatim — nothing in the field
@@ -441,12 +664,14 @@ mod tests {
             text: Some("spx".to_string()),
             ..Scope::default()
         };
-        overwrite_with(&mut draft, &frame_scope);
+        overwrite_with(&mut draft, &frame_scope, &config);
 
-        assert_eq!(
-            draft.fields[0].kind,
-            FieldKind::Text("book ∈ BK002, BK003".to_string())
-        );
+        let FieldKind::OrderedList { items, .. } = &draft.fields[0].kind else {
+            panic!("dimensions is a list");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "book");
+        assert_eq!(items[0].note.as_deref(), Some("BK002, BK003"));
         assert_eq!(draft.fields[1].kind, FieldKind::Text("spx".to_string()));
 
         let item = to_table(&draft, Destination::Doc);
@@ -475,14 +700,15 @@ mod tests {
     }
 
     /// The review's own named collision (Task 5 review round 1, MINOR):
-    /// `selects_summary` joins a dimension's values with `", "`, so a
+    /// `dimension_note` joins a dimension's values with `", "`, so a
     /// single value that itself contains `", "` paints identically to
     /// two separate values. If dirtiness were judged from the painted
-    /// `Selects` field alone, overwriting `["BK001", "BK002"]` with the
-    /// single value `"BK001, BK002"` would look like no change at all
-    /// and `o` would silently fail to write. Pins that `Draft::is_dirty`
-    /// (and so `apply::commit_edit`) still sees it, because dirtiness is
-    /// judged from `source` — the actual object — not its summary.
+    /// `dimensions` field alone, overwriting `["BK001", "BK002"]` with
+    /// the single value `"BK001, BK002"` would look like no change at
+    /// all and `o` would silently fail to write. Pins that
+    /// `Draft::is_dirty` (and so `apply::commit_edit`) still sees it,
+    /// because dirtiness is judged from `source` — the actual object —
+    /// not its painted note.
     #[test]
     fn overwrite_with_is_seen_even_when_the_painted_summary_collides() {
         let config =
@@ -497,13 +723,16 @@ mod tests {
             }],
             ..Scope::default()
         };
-        overwrite_with(&mut draft, &colliding);
+        overwrite_with(&mut draft, &colliding, &config);
 
-        // The painted summary really does collide — otherwise this test
+        // The painted note really does collide — otherwise this test
         // would not be exercising the branch it claims to.
+        let FieldKind::OrderedList { items, .. } = &draft.fields[0].kind else {
+            panic!("dimensions is a list");
+        };
         assert_eq!(
-            draft.fields[0].kind,
-            FieldKind::Text("book ∈ BK001, BK002".to_string()),
+            items[0].note.as_deref(),
+            Some("BK001, BK002"),
             "the two scopes must paint identically for this test to mean anything"
         );
         // ...but the draft is still dirty, and still queues a write,
