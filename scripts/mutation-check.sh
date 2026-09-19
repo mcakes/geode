@@ -10872,10 +10872,11 @@ run_mutation "final: a notice set while applying a delivery survives it" \
 # delivery that paints (it used to be cleared in `deliver`'s `Ok` arm,
 # where a staged delivery wiped a `:rebase` report on any unrelated
 # publish). Mutated away, a select failure's message outlives the document
-# that replaced it.
+# that replaced it. Re-anchored 2026-09-19: the clear now writes the update
+# policy's own notice (`None` under `hold`) rather than a literal `None`.
 run_mutation "final: a painting delivery clears the previous delivery's notice" \
   crates/geode-marketdata/src/tile.rs \
-  '        self.notice = None;
+  '        self.notice = notice;
         self.draft = draft;' \
   '        self.draft = draft;' \
   geode-marketdata \
