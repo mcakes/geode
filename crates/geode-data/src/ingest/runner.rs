@@ -1,24 +1,28 @@
 //! The ingest runner (spec §5.4–§5.7, Phase 3 §2.5). One thread owning
-//! the writer connection for **every** dataset, working two queues —
-//! parsed documents and a priority-ordered queue of files — never taking
-//! the app down.
+//! the writer connection for **every** dataset, working three queues —
+//! parsed documents, fetched series rows, and a priority-ordered queue
+//! of files — never taking the app down.
 //!
 //! A queued document is taken **ahead of** any file, whatever the file's
 //! priority (market-data spec §5.4, amended in Task 11: the rung wording
-//! there predates this ruling). Two reasons. A document publish is
-//! milliseconds — the rows are already parsed and already coalesced to
-//! the latest per key upstream (`ingest::coalesce`), so there is nothing
-//! to read, split or scan — and so it cannot starve a file load however
-//! many arrive: the file it jumps is delayed by the length of one
-//! appender pass. And a single rule spares the runner a second priority
-//! vocabulary: documents carry no `Priority`, and interleaving them with
-//! files by one would mean inventing and maintaining a comparison between
-//! two things that are never actually competing for the same time.
+//! there predates this ruling), and a queued series job is taken
+//! **after** documents but **ahead of** any file (timeseries spec §5.4,
+//! Task 7): an append was asked for by a trader watching a chart, a file
+//! was found by a poll nobody is waiting on. Two reasons documents lead.
+//! A document publish is milliseconds — the rows are already parsed and
+//! already coalesced to the latest per key upstream (`ingest::coalesce`),
+//! so there is nothing to read, split or scan — and so it cannot starve a
+//! file load however many arrive: the file it jumps is delayed by the
+//! length of one appender pass. And a single rule spares the runner a
+//! second priority vocabulary: documents carry no `Priority`, and
+//! interleaving them with files by one would mean inventing and
+//! maintaining a comparison between two things that are never actually
+//! competing for the same time.
 //!
 //! `Queue::in_flight` belongs to the file arm alone — it is the dedupe
-//! key discovery's own polls are checked against, and a document has no
-//! file, no `stat` and no poll, so nothing on the document path reads or
-//! writes it.
+//! key discovery's own polls are checked against, and neither a document
+//! nor a series job has a file, a `stat` or a poll, so nothing on either
+//! path reads or writes it.
 //!
 //! One thread, not a pool, and one for all datasets rather than one per
 //! dataset: DuckDB is single-writer, so every publish serializes anyway
@@ -38,6 +42,7 @@
 //! submit, so a newly landed current file jumps ahead of remaining backfill
 //! without interrupting a load in flight (spec §5.4).
 
+use crate::adapter::SeriesRows;
 use crate::health::Health;
 use crate::ingest::load::{LoadError, LoadOutcome, LoadRequest, load_file};
 use crate::ingest::plan::{WorkItem, WorkPlan};
@@ -46,6 +51,7 @@ use crate::source::{CandidateState, Priority};
 use crate::store::document::{
     DocumentPublishRequest, DocumentPublished, document_path, publish_document,
 };
+use crate::store::series::{SeriesAppendRequest, SeriesAppended, Span, append_series};
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::document::{DocumentRows, join_key};
@@ -96,6 +102,25 @@ pub enum IngestEvent {
         batch: String,
         reason: String,
     },
+    /// A series job appended (timeseries spec §5.4 step 3). `appended`
+    /// may be 0 — an overlapping refetch — and the event is still sent,
+    /// because coverage was recorded and the asking tile must requery.
+    SeriesAppended {
+        source: String,
+        dataset: String,
+        identity: String,
+        appended: usize,
+        swept: usize,
+    },
+    /// A series job that could not be appended: refused rows, an
+    /// undeclared dataset, or a panic inside the append. Load lane,
+    /// keyed by the pair.
+    SeriesFailed {
+        source: String,
+        dataset: String,
+        identity: String,
+        reason: String,
+    },
     /// The queue drained. Not a terminal state — more work may be submitted.
     PlanComplete,
 }
@@ -132,6 +157,18 @@ pub struct DocumentJob {
     pub bytes: u64,
 }
 
+/// Fetched rows waiting to append (timeseries spec §5.4). Owned, like
+/// `DocumentJob`'s rows, for the same reason.
+#[derive(Debug)]
+pub struct SeriesJob {
+    pub source: String,
+    pub dataset: String,
+    pub identity: String,
+    pub rows: SeriesRows,
+    pub span: Span,
+    pub received_at: DateTime<Utc>,
+}
+
 #[derive(Default)]
 struct Queue {
     /// Parsed documents, taken ahead of `items` (see the module doc for
@@ -141,6 +178,10 @@ struct Queue {
     /// so everything still in here is distinct work, and a LIFO would
     /// reorder unrelated keys for no gain.
     documents: VecDeque<DocumentJob>,
+    /// Fetched series, taken after documents and ahead of files: a
+    /// fetch was asked for by a trader watching a chart, a file was
+    /// found by a poll.
+    series: VecDeque<SeriesJob>,
     items: Vec<WorkItem>,
     shutdown: bool,
     /// The file the runner has popped and is loading (or is about to skip
@@ -265,6 +306,16 @@ impl IngestHandle {
         cvar.notify_all();
     }
 
+    /// Hand fetched rows to the runner. No dedupe and no refusal, as
+    /// `submit_document`: the service subtracted coverage before the
+    /// fetch, and `append_series` drops unchanged rows regardless.
+    pub fn submit_series(&self, job: SeriesJob) {
+        let (lock, cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        q.series.push_back(job);
+        cvar.notify_all();
+    }
+
     pub fn shutdown(&self) {
         {
             let (lock, cvar) = &*self.queue;
@@ -352,21 +403,25 @@ fn clear_in_flight(queue: &(Mutex<Queue>, Condvar)) {
 #[derive(Debug)]
 enum Work {
     Document(DocumentJob),
+    Series(SeriesJob),
     File(WorkItem),
 }
 
-/// Takes the next unit of work, **documents first** (module doc). A free
-/// function for the reason `enqueue` is one: the ordering rule is the
-/// whole point and a test can only state it without a race by driving a
-/// bare `Queue` synchronously — through the runner thread, whether a
-/// document beat a file is a matter of when the submit landed.
+/// Takes the next unit of work, **documents first, then series** (module
+/// doc). A free function for the reason `enqueue` is one: the ordering
+/// rule is the whole point and a test can only state it without a race by
+/// driving a bare `Queue` synchronously — through the runner thread,
+/// whether a document beat a file is a matter of when the submit landed.
 ///
-/// Only the file arm sets `in_flight`: it is the file dedupe's key, and a
-/// document is not a file. `None` means *both* queues are empty, which is
-/// what makes it the `PlanComplete` condition.
+/// Only the file arm sets `in_flight`: it is the file dedupe's key, and
+/// neither a document nor a series job is a file. `None` means *every*
+/// queue is empty, which is what makes it the `PlanComplete` condition.
 fn take_work(q: &mut Queue) -> Option<Work> {
     if let Some(job) = q.documents.pop_front() {
         return Some(Work::Document(job));
+    }
+    if let Some(job) = q.series.pop_front() {
+        return Some(Work::Series(job));
     }
     if q.items.is_empty() {
         return None;
@@ -496,6 +551,77 @@ fn publish_one_document(
     }
 }
 
+/// The series arm of the runner (timeseries spec §5.4 step 3), the
+/// document arm's shape exactly: resolve the dataset by name, append
+/// under `contained`, announce the outcome, count a refused announcement.
+fn append_one_series(
+    store: &Store,
+    schema: &SchemaSpec,
+    sink: &IngestSink,
+    refusal_logged: &AtomicBool,
+    job: SeriesJob,
+) {
+    let pair = format!("{}@{}", job.identity, job.source);
+    let failed = |reason: String| IngestEvent::SeriesFailed {
+        source: job.source.clone(),
+        dataset: job.dataset.clone(),
+        identity: job.identity.clone(),
+        reason,
+    };
+    let Some(dataset) = schema.dataset(&job.dataset) else {
+        let event = failed(format!("dataset '{}' is not declared", job.dataset));
+        if !sink(event) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the undeclared-dataset failure for series {pair}"),
+            );
+        }
+        return;
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| {
+            append_series(
+                store,
+                &SeriesAppendRequest {
+                    dataset,
+                    source: &job.source,
+                    identity: &job.identity,
+                    rows: &job.rows,
+                    span: job.span,
+                    received_at: job.received_at,
+                },
+            )
+            .map_err(|e| e.to_string())
+        })
+    }));
+    let event = match outcome {
+        Ok(Ok(SeriesAppended { appended, swept })) => IngestEvent::SeriesAppended {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            identity: job.identity.clone(),
+            appended,
+            swept,
+        },
+        Ok(Err(reason)) => failed(reason),
+        Err(payload) => {
+            let message = panic_payload_message(payload.as_ref());
+            let path =
+                std::path::PathBuf::from(format!("series://{}/{}", job.source, job.identity));
+            log_ingest_panic(&path, &message);
+            failed(format!(
+                "series append panicked at {}: {message}",
+                path.display()
+            ))
+        }
+    };
+    if !sink(event) {
+        log_refused_event(
+            refusal_logged,
+            &format!("the series append outcome for {pair}"),
+        );
+    }
+}
+
 fn run(
     store: Store,
     schema: SchemaSpec,
@@ -529,7 +655,7 @@ fn run(
                 // which is the only state that announces a drain.
                 if let Some(work) = take_work(&mut q) {
                     announced_idle = false;
-                    break (work, q.items.len() + q.documents.len());
+                    break (work, q.items.len() + q.documents.len() + q.series.len());
                 }
                 if !announced_idle {
                     announced_idle = true;
@@ -572,6 +698,17 @@ fn run(
                     log_refused_event(&refusal_logged, "a load-started announcement");
                 }
                 publish_one_document(&store, &schema, &sink, publish, &refusal_logged, job);
+                continue;
+            }
+            Work::Series(job) => {
+                if !sink(IngestEvent::Started {
+                    source: job.source.clone(),
+                    path: format!("series://{}/{}", job.source, job.identity),
+                    queued,
+                }) {
+                    log_refused_event(&refusal_logged, "a load-started announcement");
+                }
+                append_one_series(&store, &schema, &sink, &refusal_logged, job);
                 continue;
             }
             Work::File(item) => item,
@@ -804,7 +941,7 @@ fn log_ingest_panic(path: &std::path::Path, message: &str) {
 mod tests {
     use super::*;
     use crate::source::Priority;
-    use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc};
+    use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc, series_dataset, series_rows};
     use geode_core::schema::DatasetSpec;
     use std::time::Duration;
 
@@ -887,6 +1024,8 @@ mod tests {
                 IngestEvent::Started { .. } => "started",
                 IngestEvent::Published { .. } => "published",
                 IngestEvent::Failed { .. } => "failed",
+                IngestEvent::SeriesAppended { .. } => "series_appended",
+                IngestEvent::SeriesFailed { .. } => "series_failed",
                 IngestEvent::PlanComplete => "drained",
             })
             .filter(|k| *k != "drained")
@@ -2001,5 +2140,148 @@ mod tests {
         );
         handle.shutdown();
         let _ = dir;
+    }
+
+    // ---- series (timeseries spec §5.4 step 3) ---------------------------
+
+    /// A store that can hold the timeseries spec's own series dataset —
+    /// schema applied, catalog tables created — the way `document_store`
+    /// builds one for the document family.
+    fn series_store() -> (tempfile::TempDir, Store, geode_core::schema::SchemaSpec) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = series_dataset();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(ds);
+        (dir, store, schema)
+    }
+
+    fn series_job(identity: &str, rows: SeriesRows) -> SeriesJob {
+        SeriesJob {
+            source: "demo_kdb".into(),
+            dataset: "series".into(),
+            identity: identity.into(),
+            rows,
+            span: (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+            received_at: ts("2026-01-06T09:00:00Z"),
+        }
+    }
+
+    /// The next event, skipping only `PlanComplete` — it fires once on an
+    /// idle runner and races every submit (see `next_event`'s own doc
+    /// above), so a test asserting `Started` itself, not just the outcome
+    /// behind it, must tolerate one arriving first.
+    fn next_skipping_idle(rx: &Receiver<IngestEvent>) -> IngestEvent {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                IngestEvent::PlanComplete => continue,
+                e => return e,
+            }
+        }
+    }
+
+    #[test]
+    fn a_series_job_is_appended_and_announced() {
+        let (_d, store, schema) = series_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        handle.submit_series(series_job(
+            "SPX.close",
+            series_rows("2026-01-05T14:30:00Z", 3, 100.0),
+        ));
+        let started = next_skipping_idle(&rx);
+        assert!(
+            matches!(&started, IngestEvent::Started { source, path, .. }
+                if source == "demo_kdb" && path == "series://demo_kdb/SPX.close"),
+            "{started:?}"
+        );
+        let done = next_skipping_idle(&rx);
+        assert!(
+            matches!(&done, IngestEvent::SeriesAppended { source, dataset, identity, appended: 3, swept: 0 }
+                if source == "demo_kdb" && dataset == "series" && identity == "SPX.close"),
+            "{done:?}"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_series_job_for_an_undeclared_dataset_fails_by_name() {
+        let (_d, store, schema) = series_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        let mut job = series_job("SPX.close", SeriesRows::default());
+        job.dataset = "nope".into();
+        handle.submit_series(job);
+        let done = loop {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                IngestEvent::SeriesFailed {
+                    reason, identity, ..
+                } => break (reason, identity),
+                _ => continue,
+            }
+        };
+        assert_eq!(done.1, "SPX.close");
+        assert!(
+            done.0.contains("dataset 'nope' is not declared"),
+            "{}",
+            done.0
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn invalid_series_rows_fail_the_job_and_leave_the_runner_working() {
+        let (_d, store, schema) = series_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        let bad = SeriesRows {
+            ts: vec![ts("2026-01-05T14:30:00Z")],
+            value: vec![1.0, 2.0],
+        };
+        handle.submit_series(series_job("SPX.close", bad));
+        handle.submit_series(series_job(
+            "VIX",
+            series_rows("2026-01-05T14:30:00Z", 1, 20.0),
+        ));
+        let mut failed = None;
+        let mut appended = None;
+        for _ in 0..6 {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                IngestEvent::SeriesFailed {
+                    identity, reason, ..
+                } => failed = Some((identity, reason)),
+                IngestEvent::SeriesAppended {
+                    identity,
+                    appended: n,
+                    ..
+                } => appended = Some((identity, n)),
+                _ => {}
+            }
+            if failed.is_some() && appended.is_some() {
+                break;
+            }
+        }
+        let (id, reason) = failed.unwrap();
+        assert_eq!(id, "SPX.close");
+        assert!(reason.contains("2 values for 1 timestamps"), "{reason}");
+        assert_eq!(appended.unwrap(), ("VIX".to_string(), 1));
+        handle.shutdown();
+    }
+
+    #[test]
+    fn take_work_pops_documents_then_series_then_files() {
+        let mut q = Queue::default();
+        q.series
+            .push_back(series_job("SPX.close", SeriesRows::default()));
+        q.items.push(work_item(
+            "a.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::Backfill,
+        ));
+        let first = take_work(&mut q).unwrap();
+        assert!(matches!(first, Work::Series(_)));
+        let second = take_work(&mut q).unwrap();
+        assert!(matches!(second, Work::File(_)));
+        assert!(take_work(&mut q).is_none());
     }
 }

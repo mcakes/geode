@@ -12921,8 +12921,8 @@ run_mutation "asof: open returns the calendar to the day grid" \
 # lone file and never reach 0 while anything loads.
 run_mutation "ingest: queued counts what waits behind the popped job" \
   crates/geode-data/src/ingest/runner.rs \
-  '                    break (work, q.items.len() + q.documents.len());' \
-  '                    break (work, q.items.len() + q.documents.len() + 1);' \
+  '                    break (work, q.items.len() + q.documents.len() + q.series.len());' \
+  '                    break (work, q.items.len() + q.documents.len() + q.series.len() + 1);' \
   geode-data \
   started_precedes_each_publish_and_counts_what_is_still_queued
 

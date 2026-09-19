@@ -928,6 +928,12 @@ impl DataService {
                     let _ = sink(DataEvent::LoadEnded);
                     health_delivered
                 }
+                // Task 8 replaces these: for now the series lane has no
+                // seam into `DataEvent` at all, so both outcomes are
+                // reported as delivered without touching `sink` — there
+                // is nothing yet for a series job's `Started` to precede
+                // that this arm would need to close out.
+                IngestEvent::SeriesAppended { .. } | IngestEvent::SeriesFailed { .. } => true,
                 // Finding 2 (2026-09-19 final review): the queue draining
                 // is also an end signal — a refused `LoadEnded` on the
                 // last load of a burst (a momentarily full channel) would
