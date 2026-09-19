@@ -11187,8 +11187,8 @@ run_mutation "mdtile: a delivery under an open barrier is staged" \
 # asserts the number itself.
 run_mutation "mdedit: a commit parses the typed text before writing it" \
   crates/geode-marketdata/src/tile.rs \
-  '        let parsed = match parse_cell(text, ty) {' \
-  '        let parsed = match Ok::<f64, String>(0.0) {' \
+  '                match parse_cell(text, ty) {' \
+  '                match Ok::<f64, String>(0.0) {' \
   geode-marketdata \
   edit_commit_paints_the_cell_as_edited_and_the_header_counts_it
 
@@ -12784,9 +12784,22 @@ run_mutation "mddate: insert_up steps a date field" \
 # — the trader sees the edit land with the day they typed gone.
 run_mutation "mddate: enter completes an unambiguous pending digit, never commits the old date" \
   crates/geode-marketdata/src/tile.rs \
-  '                if let Err(segment) = field.complete_pending() {' \
-  '                if let Err(segment) = Ok::<(), Segment>(()) {' \
+  '                // `commit`) come through here, so they cannot disagree.
+                if let Err(segment) = field.complete_pending() {' \
+  '                // `commit`) come through here, so they cannot disagree.
+                if let Err(segment) = Ok::<(), Segment>(()) {' \
   geode-marketdata enter_completes_a_pending_digit_rather_than_committing_the_old_date
+
+# Task 4 (spec §4.4): a date CELL's `enter` is the same two steps as the
+# attribute's, in its own arm. Mutated to skip the completion, `2` then
+# `commit` on `ex` writes the 18th the cell had, marked edited.
+run_mutation "mddate: a date cell's enter completes a pending digit too" \
+  crates/geode-marketdata/src/tile.rs \
+  '                // the value door. Both `enter`s land here.
+                if let Err(segment) = field.complete_pending() {' \
+  '                // the value door. Both `enter`s land here.
+                if let Err(segment) = Ok::<(), Segment>(()) {' \
+  geode-marketdata a_date_cell_commits_and_cancels_through_the_fragments_verbs
 
 # `escape` in the field CANCELS: the painted date comes back and the draft
 # is untouched. Mutated to commit instead, every abandoned edit is written
@@ -13443,22 +13456,23 @@ run_mutation "tile: bump skips a non-numeric cell" \
   '                    if false {' \
   geode-marketdata a_flat_panels_row_bump_names_the_kind_skipped_count
 
-# A cell whose column is not `Number`-kind is refused inline on commit —
-# the other three `CellKind`s' editors are Task 4's. Mutated to treat any
-# kind as numeric (`declared_type`'s own gate, shared with `nudge`), a
-# `status` commit falls through to `parse_cell`'s own (differently
-# worded) refusal instead of this one.
-run_mutation "tile: a commit on a non-numeric cell is refused" \
+# `declared_type` answers `None` for a non-`Number` kind — the one gate
+# `nudge` refuses a `Text` cell's arrow through (since Task 4 a `Text`
+# commit is a real commit, so `nudge` is the only reader that can see this
+# answer). Mutated to treat any kind as numeric, `insert_up` on `status`
+# falls through to `nudge_text`'s own (differently worded) refusal
+# instead of this one.
+run_mutation "tile: declared_type answers None off a non-numeric kind" \
   crates/geode-marketdata/src/tile.rs \
   '        CellKind::Number(_) => Some(match &spec.columns {' \
   '        _ => Some(match &spec.columns {' \
-  geode-marketdata a_flat_panels_non_numeric_commit_is_refused
+  geode-marketdata a_flat_panels_nudge_on_a_non_numeric_cell_is_refused
 
-# `nudge`'s own numeric-kind refusal, reachable through `edit`'s
-# plain-text editor on ANY cell (Task 4 builds the others). Mutated to
-# force `Number` regardless of the cell's real kind, `insert_up` on
-# `status` falls through into `nudge_text`'s own (differently worded)
-# refusal instead of never reaching it.
+# `nudge`'s own numeric-kind refusal, at its call site: a `Text` cell's
+# editor is the plain text `Input`, so the arrow is reachable there.
+# Mutated to force `Number` regardless of the cell's real kind,
+# `insert_up` on `status` falls through into `nudge_text`'s own
+# (differently worded) refusal instead of never reaching it.
 run_mutation "tile: a nudge on a non-numeric cell is refused" \
   crates/geode-marketdata/src/tile.rs \
   '                let Some(ty) = declared_type(self.spec, &self.model, *col) else {' \
@@ -13475,6 +13489,70 @@ run_mutation "tile: a flat commit parses by the column's declared type" \
   '            Columns::Values(cols) => cols.get(col).map_or(spec.value_type, |vc| vc.ty),' \
   '            Columns::Values(cols) => cols.get(col).map_or(spec.value_type, |_| spec.value_type),' \
   geode-marketdata a_flat_panels_commit_on_an_i64_column_parses_by_its_declared_type
+
+# Task 4 — editing by cell kind (spec §4.4) and the one-cell patch (§4.5).
+#
+# §4.5: a commit patches the one cell to exactly what a rebuild would
+# paint. Mutated to compute the cell and throw it away, the patched model
+# still holds the document's own value under an edit the draft records —
+# the screen and the draft disagree with nothing to say so.
+run_mutation "matrix: patch_cell re-prepares the cell" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        self.rows[row].cells[col] = cell_of(value, (row, col), kind, draft);' \
+  '        let _ = cell_of(value, (row, col), kind, draft);' \
+  geode-marketdata patch_cell_matches_a_rebuild
+
+# §4.4: a `Text` cell commits its trimmed text verbatim. Mutated back to
+# Task 3's refusal, `paid` on `status` answers a notice, stays in insert
+# mode and drafts nothing.
+run_mutation "tile: a text cell commits verbatim" \
+  crates/geode-marketdata/src/tile.rs \
+  '                Value::Utf8(trimmed.to_string())' \
+  '                {
+                    self.notice = Some("not a numeric cell".into());
+                    return true;
+                }' \
+  geode-marketdata a_text_cell_commits_verbatim_and_a_date_cell_opens_the_date_field
+
+# §4.4: a `Date` cell opens the segmented field, never the text input.
+# Mutated to never want the field, `i` on `ex` opens a text `Input`
+# seeded with the ISO date — typeable, but not the editor the spec names,
+# and `up` then edits nothing.
+run_mutation "tile: a date cell opens the date field" \
+  crates/geode-marketdata/src/tile.rs \
+  '                let wants_date = matches!(self.model.kind_of(col), Some(CellKind::Date));' \
+  '                let wants_date = false;' \
+  geode-marketdata a_text_cell_commits_verbatim_and_a_date_cell_opens_the_date_field
+
+# An empty `Text` commit is refused on a `required` column. Mutated to
+# never refuse, blank `status` lands as an empty string the schedule's
+# writer will one day refuse — a wrong value drafted rather than a
+# notice.
+run_mutation "tile: an empty text commit is refused where the column is required" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if trimmed.is_empty() && self.column_required(cell.1) {' \
+  '                if trimmed.is_empty() && false {' \
+  geode-marketdata an_empty_required_text_commit_is_refused
+
+# And allowed where it is not: an optional note may honestly be cleared.
+# Mutated to refuse every empty, the optional half of the test cannot
+# commit a blank.
+run_mutation "tile: an empty text commit is allowed where the column is optional" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if trimmed.is_empty() && self.column_required(cell.1) {' \
+  '                if trimmed.is_empty() {' \
+  geode-marketdata an_empty_required_text_commit_is_refused
+
+# §4.5: the delegate's `Rc` clone is taken back BEFORE `Rc::make_mut`,
+# so the patch lands in the model the tile already holds. Mutated to
+# leave the clone alive, `make_mut` copies every row to patch one — the
+# result paints the same and the `Rc` is a fresh allocation, which only a
+# pointer comparison sees.
+run_mutation "tile: a commit patches the model in place" \
+  crates/geode-marketdata/src/tile.rs \
+  '            t.delegate_mut().model = Rc::new(MatrixModel::default());' \
+  '            let _ = t.delegate_mut();' \
+  geode-marketdata a_cell_commit_patches_the_model_in_place
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
