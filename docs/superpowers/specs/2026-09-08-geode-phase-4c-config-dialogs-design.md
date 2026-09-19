@@ -3142,3 +3142,57 @@ applied, the bar's button from filter mode, and the empty-slot wording.
 click guard, the bar's `d` gate, the landing's stage branch and its
 pending-config read, the target check, the empty-slot wording) and ten
 re-anchored for the confirm's move.
+
+## 22. Amendment — a help line for the row under the cursor (2026-09-19)
+
+**Request.** "On dialogs like the edit sources details it would be great
+to have some help text explaining what the different options do" —
+either a secondary line per row or a context-sensitive line for the
+highlighted row. User chose the latter.
+
+**Why one line, not one per row.** The gpui-kit design guide asks for
+progressive disclosure on dense surfaces and for text that "answers a
+question the current layout does not already answer". A permanent
+second line under every row roughly doubles the list's height (Sources
+has 9 rows, 13 subscribed; the column stage 7, against an 8-row
+viewport) and makes a trader who knows the fields read the explanations
+on every open. The footer's hint rows are already row-sensitive — a
+`Choice` row names the step keys, a `Text` row names `i` — so a help
+line is the same idea one level up: *what this field means*, beside
+*what keys act on it*. Zero row growth, keyboard-native.
+
+**Rule.** The edit stage's footer has ONE slot above the hint rows,
+shared by two occupants: the notice, for exactly the keystroke that
+produced it (the door clears it on the next), else the help line for the
+row under the cursor, in `muted_foreground`. One slot so the footer
+never grows or shifts as the cursor moves; the slot keeps its height on
+a row with nothing to say. Copy rule: one sentence, the field's MEANING
+and its value grammar (`30s`, `k`/`M`, a hue 0..360, `column ∈ values`),
+never the keys — the hint rows own those.
+
+**Mechanism.** No `Field.help`: the sentence is computed at paint from
+`(domain, stage, key)` by `Domain::help(stage, key) -> &'static str`,
+one `help(key)` table per adapter (`sources`, `views`, `groupings`,
+`scopes`, `colours`, `schema` — the last by key prefix, its rows being
+`columns.<name>` / `derived.<name>`), and the column stage from
+`views::column_help` whatever domain opened it, since Views and Schema
+open the same seven rows (dataset-presentation spec §4.1). A list item
+or an available row asks with its LIST's key (`Draft::selected_field_key`
+resolves `EditRow::{Item, Available}` to their `field`), so a column row
+explains the columns list. Empty for a key no table knows; the footer
+keeps the slot and paints nothing, and
+`every_field_on_every_domain_has_help` sweeps every adapter's rows plus
+the column stage so a new field cannot ship silent.
+
+**Not in scope.** The browse stage (its rows carry a summary line), the
+settings and keybindings dialogs (same footer shape; they can adopt the
+slot later), and mouse hover (the highlighted row is the one rule).
+
+**Tests:** the line follows the cursor with two different sentences and
+paints below the row list; a notice displaces it for one keystroke at
+the same y and it returns; a list item and an available row show the
+`columns` field's own sentence byte for byte (a first draft matched on
+the word "column", which the dataset row's sentence also contains, and
+let a wrong-index mutant through); the sweep. **Harness:** three entries
+(the column-stage dispatch, the list row's field index, the notice's
+priority in the slot).
