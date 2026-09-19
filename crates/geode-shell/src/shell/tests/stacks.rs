@@ -441,3 +441,100 @@ fn a_chord_falls_through_the_list_to_the_matcher(cx: &mut gpui::TestAppContext) 
         "nothing was activated"
     );
 }
+
+/// `{Kind}: Stack` on a placeholder or an empty region does exactly what
+/// `{Kind}: Split` does — a stack of one is meaningless (spec §6.1): a
+/// fresh window has an empty region focused, so the stacked add falls
+/// through `add_tile`'s split path and the tile becomes the root.
+#[gpui::test]
+fn a_stacked_add_on_a_placeholder_or_empty_region_fills_or_roots_like_a_split(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(
+                &ActionId("tile::add_rec_stacked".to_string()),
+                None,
+                window,
+                cx,
+            );
+        });
+        let _ = window.draw(cx);
+    });
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles.len(), 1, "empty region: the tile is the root");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.stack_position(tiles[0])),
+        None
+    );
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Created(t, _) if *t == tiles[0]))
+    );
+}
+
+/// `{Kind}: Stack` on a leaf or a member lands the new tile after the
+/// FOCUSED one in its stack, active and focused (spec §6.1/§4.2).
+#[gpui::test]
+fn a_stacked_add_on_a_member_lands_after_it(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _log, _left, right, top) = stacked_shell(cx);
+    cx.simulate_keystrokes("alt-]"); // right active
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(
+                &ActionId("tile::add_rec_stacked".to_string()),
+                None,
+                window,
+                cx,
+            );
+        });
+        let _ = window.draw(cx);
+    });
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles.len(), 4);
+    let new = tiles[2];
+    assert_eq!(&tiles[1..], &[right, new, top]);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        Some(new)
+    );
+}
+
+/// End-to-end (tile-stacks spec §6.2): a centre drop across regions —
+/// the dragged tile lives in the main tree, the target in the left
+/// dock — stacks into the TARGET's stack (`Workspace::drop_stack`, not
+/// `drop_swap`), region and focus following the dragged tile.
+#[gpui::test]
+fn a_centre_drop_across_regions_stacks_into_the_targets_dock(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell) = dock_test_shell(cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("ctrl-v");
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let (a, b) = (tiles[0], tiles[1]);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        Some(b),
+        "the second add focused the new tile"
+    );
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("dock::move_left".to_string()), None, window, cx);
+        });
+        let _ = window.draw(cx);
+    });
+    // b is in the left dock and focused; drop a onto b's centre.
+    let grab = super::drag::main_tile_point(&mut cx, &shell, a, 0.5, 0.5);
+    let drop = super::drag::dock_tile_point(&mut cx, &shell, DockSide::Left, b, 0.5, 0.5);
+    cx.simulate_mouse_down(grab, gpui::MouseButton::Left, super::drag::alt_held());
+    cx.simulate_mouse_move(drop, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(drop, gpui::MouseButton::Left, gpui::Modifiers::none());
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.stack_position(a)),
+        Some((2, 2))
+    );
+    assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().is_empty()));
+}
