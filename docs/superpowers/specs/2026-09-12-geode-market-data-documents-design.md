@@ -788,6 +788,21 @@ from the catalog's keys), `revert`, `bump <delta> [row|col]` (adds
 `upload` (Part 4; in Part 3 the command answers "upload is not built yet"), `rebase`. `rebase` is a completion
 only while a newer generation sits under the draft (`:discard` was folded into `:revert` by user ruling 2026-09-18 — they were one act).
 
+*Amended 2026-09-19 (user ruling, "keep them per underlying"):* `key
+<value>` with edits pending is never refused (§8.7 item 16 is
+superseded). The current draft is PARKED under the outgoing key as
+`Draft::to_toml`'s label pairs (`MarketDataTile.parked`, one table per
+underlying — the table is the parked form, parsed only when a picker
+open or a session write needs its count), and a parked draft for the
+incoming key is installed through the restore path: `Draft::from_toml`
++ `unresolved_restore`, resolved by label against the first non-empty
+built model, or landing `Behind` when the document moved while the
+trader was away — the "first delivery after a restore is `hold`" rule
+(§8.4) covers it unchanged. Every draft verb (`revert`, `bump`, `set`, a
+cell edit) acts on the current underlying's draft alone; the header's
+dirty dot reads it alone. Part 4's `upload` sends the current
+underlying's draft only.
+
 The factory registers `marketdata::*` actions and ships its default
 bindings as a keymap fragment (§8.6).
 
@@ -868,6 +883,18 @@ model for the new labels, then the re-placed draft).
 `serialize` writes `key`, `edits` (as label pairs, so a restart onto a
 newer generation restores into `Behind` rather than misaligning), and
 `base` (the source time string). Unsent edits are work and survive a restart.
+
+*Amended 2026-09-19 (per-underlying drafts):* the draft is written as
+one `[drafts.<display key>]` table per underlying that carries edits —
+the current underlying's beside every parked one (§8.3's amendment),
+each in the same `base`/`edits`/`attrs` shape (`toml::Table` insertion
+quotes a dotted key such as `"SPX.Z"`). Restore reads `drafts.*` into
+the parked map and installs the restored `underlying`'s own entry as the
+current draft, exactly as the single `draft` key was installed; the
+legacy `draft` is still read (as the restored underlying's draft, when
+no `drafts` entry speaks for it) and written only for a draft with no
+underlying at all. Tests: `parked_drafts_ride_the_session`,
+`a_legacy_draft_key_still_restores_as_the_underlyings_draft`.
 
 ### 8.6 Shell changes
 
@@ -1042,7 +1069,9 @@ newer generation restores into `Behind` rather than misaligning), and
     closing an ambiguity §8.3 leaves unstated, rather than the
     alternative of discarding the draft and reporting it, which would
     misfile a trader's numbers under a document they never chose to
-    move to. The `:` line unconditionally re-requests the catalog on
+    move to. *Superseded 2026-09-19: the draft is parked per underlying
+    instead (§8.3's amendment); the refusal is gone.* The `:` line
+    unconditionally re-requests the catalog on
     every `key` line rather than gating on staleness, because a
     subscribed feed can grow the key list within one completion
     session — `request_catalog()` plus `cx.notify()` in the same
