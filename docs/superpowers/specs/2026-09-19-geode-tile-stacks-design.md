@@ -86,7 +86,12 @@ workspace is a member only ever when that member is active.
 
 **Fullscreen.** `fullscreen` is a `TileId`; when a cycle changes the
 active member of the stack that holds the fullscreen tile, the new
-active member becomes the fullscreen one. Exiting is unchanged.
+active member becomes the fullscreen one. Exiting is unchanged. Every
+other stack mutation that changes the layout — `stack_after` (an add or
+a centre drop onto a fullscreen tile) and `pop_out` (move-out, unstack)
+— exits fullscreen first, the rule `split` already follows: an explicit
+layout operation trumps a stale fullscreen (rulings 4 and the
+whole-branch review, 2026-09-19).
 
 **Split beside.** `Tree::split` on a focused member wraps the *stack*
 in the new split, not the member: adding a tile horizontally beside a
