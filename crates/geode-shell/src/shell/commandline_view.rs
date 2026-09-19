@@ -6,30 +6,40 @@
 
 use crate::commandline::{CommandLine, Prompt};
 use crate::fonts;
+use crate::shell::scale;
 use crate::tiling::Rect;
 use gpui::prelude::*;
-use gpui::{App, Entity, IntoElement, div, px};
+use gpui::{App, Entity, IntoElement, Pixels, div, px};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
+/// Strip height, in pixels at the design rem (`shell::scale`).
 pub const HEIGHT: f32 = 28.0;
+/// Completion row height, in pixels at the design rem.
 const ROW_HEIGHT: f32 = 24.0;
 const MAX_ROWS: usize = 8;
 
+/// `tile` is the focused tile's rect in window pixels; `rem_size` is the
+/// window's rem, which the strip's own height, its completion rows and
+/// the popup's width clamp follow (the 1 px insets are the tile border).
 pub fn render(
     line: &CommandLine,
     input: &Entity<InputState>,
     tile: Rect,
+    rem_size: Pixels,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let strip_top = tile.y + tile.h - HEIGHT - 1.0;
+    let row_paint = crate::shell::listrow::row_paint(theme);
+    let height = scale::design_px(HEIGHT, rem_size);
+    let row_height = scale::design_px(ROW_HEIGHT, rem_size);
+    let strip_top = tile.y + tile.h - height - 1.0;
     let mut strip = h_flex()
         .absolute()
         .left(px(tile.x + 1.0))
         .top(px(strip_top))
         .w(px((tile.w - 2.0).max(0.0)))
-        .h(px(HEIGHT))
+        .h(px(height))
         .items_center()
         .gap_2()
         .px_2()
@@ -60,30 +70,36 @@ pub fn render(
         let mut list = v_flex()
             .absolute()
             .left(px(tile.x + 1.0))
-            .top(px(strip_top - rows as f32 * ROW_HEIGHT - 2.0))
-            .w(px(((tile.w - 2.0) * 0.5).clamp(160.0, 420.0)))
+            .top(px(strip_top - rows as f32 * row_height - 2.0))
+            .w(px(((tile.w - 2.0) * 0.5).clamp(
+                scale::design_px(160.0, rem_size),
+                scale::design_px(420.0, rem_size),
+            )))
             .bg(theme.popover)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(4.))
+            .rounded(theme.radius)
             .p_1();
         for (i, r) in line.candidates.iter().take(MAX_ROWS).enumerate() {
             let text = &line.words[r.row];
             let mut row = div()
-                .h(px(ROW_HEIGHT))
+                .h(px(row_height))
                 .px_2()
                 .flex()
                 .items_center()
-                .rounded(px(4.))
+                .rounded(theme.radius)
                 .font_family(fonts::MONO)
                 .debug_selector(move || format!("completion-row-{i}"))
                 .child(crate::palette::highlighted_title(
                     text,
                     &r.indices,
-                    theme.primary,
+                    row_paint.accent,
                 ));
+            // No hover fill here: a completion row is not clickable (`tab`
+            // completes it, and a mouse-down falls through to the tile,
+            // which cancels the `:` line), and a hover promises a click.
             if i == line.highlighted {
-                row = row.bg(theme.selection);
+                row = row.bg(row_paint.active).text_color(row_paint.text);
             }
             list = list.child(row);
         }

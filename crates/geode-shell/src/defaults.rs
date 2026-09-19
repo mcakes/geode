@@ -248,7 +248,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // "Appearance" — not a standalone "Settings" category — groups it in
     // the palette alongside the theme rows, which share the same category
     // (`palette::THEME_CATEGORY`).
-    action(reg, "settings::open", "Open settings", "Appearance");
+    action(reg, "settings::open", "Open settings…", "Appearance");
     // Step the UI font size (crate::fontsize, clamped small..=large).
     // ctrl+= / ctrl+- — the browser-zoom idiom: the unshifted key next to
     // backspace is `=`, and platforms deliver ctrl+that-key as key "="
@@ -282,7 +282,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // would be a little too cute, and the palette is always reachable
     // regardless. Category "Keyboard", not "Appearance" — this edits
     // behavior (bindings), not how the app looks.
-    action(reg, "keybindings::open", "Keyboard shortcuts", "Keyboard");
+    action(reg, "keybindings::open", "Keyboard shortcuts…", "Keyboard");
     // Phase 4c: the object dialog over `views` (`shell::objectdialog`).
     // Palette-only, with no binding in BUILTIN_KEYMAP, for the same
     // reason `keybindings::open` above has none: it is an occasional,
@@ -291,13 +291,13 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // "Configuration" — its siblings (`config::groupings`,
     // `config::scopes`, `config::schema`, `config::sources`) land beside
     // it, so the palette groups the whole family under one heading.
-    action(reg, "config::views", "Edit views", "Configuration");
+    action(reg, "config::views", "Edit views…", "Configuration");
     // Part 2a Task 4: the object dialog over `groupings` — the nine
     // `ctrl+1`..`ctrl+9` slots. Palette-only for the same reason
     // `config::views` is: the chord that matters day to day is the slot
     // itself (`frame::slot_*`, below), not the occasional edit of what a
     // slot groups by.
-    action(reg, "config::groupings", "Edit groupings", "Configuration");
+    action(reg, "config::groupings", "Edit groupings…", "Configuration");
     // Part 2a Task 5: the object dialog over `scopes` — the saved scopes
     // `:scope load <name>` and the palette's own `scope::<name>` actions
     // recall. Palette-only for the same reason `config::views` and
@@ -307,24 +307,24 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // verb here either — both are design-review departures from spec
     // §8.4, recorded in this crate's Part 2a Task 5 report) this dialog
     // exists for.
-    action(reg, "config::scopes", "Edit scopes", "Configuration");
+    action(reg, "config::scopes", "Edit scopes…", "Configuration");
     // Part 2b Task 2: the read-only schema inspector (spec §9, §19.4)
     // over `datasets` — the vocabulary the other three dialogs build
     // their choices from, made inspectable. Palette-only like its
     // siblings; its title says read-only because the palette row is the
     // only place a trader learns that before opening it.
-    action(reg, "config::schema", "Edit schema", "Configuration");
+    action(reg, "config::schema", "Edit schema…", "Configuration");
     // Part 2b Task 3: the object dialog over `sources` — the ingest
     // feeds, flat-listed dataset first (§19.3). Palette-only like its
     // siblings; there is no chord because a trader reaches for it as
     // rarely as `config::scopes` or `config::groupings` do.
-    action(reg, "config::sources", "Edit sources", "Configuration");
+    action(reg, "config::sources", "Edit sources…", "Configuration");
     // Part 2c Task 5: the object dialog over `colours` — the shared
     // colour vocabulary a column's `colour` field and a chart series can
     // name (spec §6.1). Palette-only like its siblings; there is no
     // chord because naming a colour is an occasional act of desk
     // configuration, not something reached for mid-session.
-    action(reg, "config::colours", "Edit colours", "Configuration");
+    action(reg, "config::colours", "Edit colours…", "Configuration");
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no
@@ -393,7 +393,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // below: this crate cannot register them here because there is no
     // schema to enumerate at `register_builtin_actions`' own call site
     // (before any config is loaded).
-    action(reg, "frame::pick", "Pick a dimension", "Frame");
+    action(reg, "frame::pick", "Pick a dimension…", "Frame");
     // The scope bar's live text field (Phase 4a §3.11): `mod+/` moves
     // focus into it from anywhere in the shell, the one keyboard route
     // in (typing itself, once focused, needs no action — the field's own
@@ -410,7 +410,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // palette-only — occasional deliberate acts, not muscle memory worth
     // a chord of their own, same reasoning as `frame::scope_clear`/
     // `perf::reset` above.
-    action(reg, "frame::as_of", "Jump to a point in time", "Frame");
+    action(reg, "frame::as_of", "Jump to a point in time…", "Frame");
     action(reg, "frame::live", "Return to live", "Frame");
     action(
         reg,

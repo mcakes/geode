@@ -72,12 +72,13 @@ use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::FindEvent;
 use geode_shell::shell::colours::{to_hsla, to_rgb};
+use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable as _, Hsla, IntoElement,
-    KeyDownEvent, SharedString, Window, div, px,
+    KeyDownEvent, SharedString, Window, div,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
@@ -3403,14 +3404,20 @@ impl gpui::Render for MarketDataTile {
                 .child(header)
                 .when_some(self.popup.as_ref(), |el, p| {
                     let popup_el = match p {
-                        Popup::Menu(m) => {
-                            render_menu(m, theme, &tile, self.id.0).into_any_element()
-                        }
+                        Popup::Menu(m) => render_menu(m, &tile, self.id.0, cx).into_any_element(),
                         Popup::Picker(p) => {
-                            render_picker(p, theme, &tile, self.id.0).into_any_element()
+                            render_picker(p, &tile, self.id.0, cx).into_any_element()
                         }
                     };
-                    el.child(div().absolute().right_0().top(px(22.)).child(popup_el))
+                    // Anchored just under the header strip, whose height
+                    // this follows (`header::HEADER_HEIGHT`).
+                    el.child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .top(scale::design(header::HEADER_HEIGHT))
+                            .child(popup_el),
+                    )
                 });
 
         // The body: one `DataTable` over this tile's own delegate, in the

@@ -8,6 +8,7 @@
 
 mod add_tile;
 pub mod asof_view;
+pub mod chip;
 pub mod colours;
 mod commandline_ctl;
 pub mod commandline_view;
@@ -17,6 +18,7 @@ mod hot_reload;
 mod input;
 pub mod keybindings_view;
 pub mod keys;
+pub mod listrow;
 pub mod objectdialog;
 mod occupants;
 mod palette_ctl;
@@ -25,6 +27,7 @@ pub mod picker;
 #[cfg(feature = "profiling")]
 pub mod profiling_hook;
 mod render;
+pub mod scale;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;

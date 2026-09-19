@@ -17,9 +17,10 @@
 //! (popover/border/muted — no raw colors); values in the mono data face.
 
 use gpui::prelude::*;
-use gpui::{App, IntoElement, div, px};
+use gpui::{App, IntoElement, Pixels, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
+use super::scale;
 use crate::fonts;
 use crate::perf::{FrameHistogram, RequeryStats, format_ms};
 
@@ -46,9 +47,11 @@ pub fn render(
     hist: &FrameHistogram,
     requery: &RequeryStats,
     toolbar_height: f32,
+    rem_size: Pixels,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
+    let margin = scale::design_px(MARGIN, rem_size);
 
     let dash = || "—".to_string();
     let p50 = hist.percentile_micros(50.0).map_or_else(dash, format_ms);
@@ -61,9 +64,9 @@ pub fn render(
 
     div()
         .absolute()
-        .right(px(MARGIN))
-        .top(px(toolbar_height + MARGIN))
-        .w(px(WIDTH))
+        .right(px(margin))
+        .top(px(toolbar_height + margin))
+        .w(scale::design(WIDTH))
         .flex()
         .flex_col()
         .gap_1()
@@ -73,7 +76,7 @@ pub fn render(
         .text_color(theme.popover_foreground)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(8.))
+        .rounded(theme.radius_lg)
         // Test-only hook (no-op outside test builds — same pattern as
         // "whichkey-overlay") so a #[gpui::test] can confirm it painted.
         .debug_selector(|| "perf-overlay".to_string())

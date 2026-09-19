@@ -14,6 +14,7 @@
 //! result. No delay timer (YAGNI until it annoys someone): the overlay
 //! appears the same frame the matcher goes pending.
 
+use super::scale;
 use crate::actions::{ActionId, ActionRegistry};
 use crate::keymap::{KeyContext, Keymap, Keystroke, UNBOUND_ACTION};
 use crate::palette::render_keystroke;
@@ -106,7 +107,7 @@ fn title_for(registry: &ActionRegistry, action: &ActionId) -> String {
 // -- render ---------------------------------------------------------------
 
 use gpui::prelude::*;
-use gpui::{App, IntoElement, div, px};
+use gpui::{App, IntoElement, Pixels, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::fonts;
@@ -128,10 +129,14 @@ pub fn render(
     registry: &ActionRegistry,
     viewport_width: f32,
     status_bar_height: f32,
+    rem_size: Pixels,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let width = WIDTH.min((viewport_width - 2.0 * MARGIN).max(120.0));
+    // Width and margin on the rem scale (`shell::scale`); the viewport
+    // clamp stays in window pixels.
+    let margin = scale::design_px(MARGIN, rem_size);
+    let width = scale::design_px(WIDTH, rem_size).min((viewport_width - 2.0 * margin).max(120.0));
 
     let mut list = v_flex().w_full().gap_1();
     if let Some(count) = count {
@@ -165,8 +170,8 @@ pub fn render(
     // a branch this crate's tests can't exercise for real.
     div()
         .absolute()
-        .right(px(MARGIN))
-        .bottom(px(status_bar_height + MARGIN))
+        .right(px(margin))
+        .bottom(px(status_bar_height + margin))
         .w(px(width))
         .flex()
         .flex_col()
@@ -176,7 +181,7 @@ pub fn render(
         .text_color(theme.popover_foreground)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(8.))
+        .rounded(theme.radius_lg)
         // Test-only hook (no-op outside test/test-support builds, same
         // pattern as the empty-workspace hint's "empty-hint" selector) so a
         // `#[gpui::test]` can confirm this overlay actually painted.

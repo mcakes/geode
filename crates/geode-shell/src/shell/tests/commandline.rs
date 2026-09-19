@@ -360,9 +360,9 @@ fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::Test
     let (target_id, click_point) = cx.update(|window, cx| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let rects = shell
             .read(cx)
             .services
@@ -380,7 +380,7 @@ fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::Test
             .find(|(id, _)| Some(*id) != Some(opened_on))
             .expect("a second, non-focused tile exists");
         let point = gpui::point(
-            px(sidebar::WIDTH + r.x + r.w / 2.0),
+            px(sidebar::width(window) + r.x + r.w / 2.0),
             px(toolbar_height + r.y + r.h / 2.0),
         );
         (id, point)
@@ -440,9 +440,9 @@ fn a_mouse_down_on_a_tile_commits_an_open_find_line(cx: &mut gpui::TestAppContex
     let (_target_id, click_point) = cx.update(|window, cx| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let rects = shell
             .read(cx)
             .services
@@ -460,7 +460,7 @@ fn a_mouse_down_on_a_tile_commits_an_open_find_line(cx: &mut gpui::TestAppContex
             .find(|(id, _)| Some(*id) != Some(opened_on))
             .expect("a second, non-focused tile exists");
         let point = gpui::point(
-            px(sidebar::WIDTH + r.x + r.w / 2.0),
+            px(sidebar::width(window) + r.x + r.w / 2.0),
             px(toolbar_height + r.y + r.h / 2.0),
         );
         (id, point)

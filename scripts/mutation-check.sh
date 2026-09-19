@@ -3759,6 +3759,7 @@ run_mutation "picker: the footer hint never paints" \
             theme.muted_foreground,
             theme.muted,
             theme.border,
+            theme.radius,
         ))' \
   '' \
   geode-shell arrowing_to_a_value_and_pressing_enter_commits_it_without_tab
@@ -5719,11 +5720,11 @@ run_mutation "diagnostics module: MIN-11 — the header never shows the filtered
   '        if !self.filter.is_empty() {
             header = header.child(
                 div()
-                    .text_color(theme.warning_foreground)' \
+                    .text_color(neutral_chip.text)' \
   '        if false {
             header = header.child(
                 div()
-                    .text_color(theme.warning_foreground)' \
+                    .text_color(neutral_chip.text)' \
   geode-diagnostics a_filtered_tile_shows_the_filtered_pill
 
 # --- Task 5 fix round 2 ----------------------------------------------
@@ -6922,10 +6923,59 @@ run_mutation "objectdialog: refresh_available empties the old dataset's rows" \
 
 run_mutation "focus: the drag grab re-arms the focus restore" \
   crates/geode-shell/src/shell/drag.rs \
-  '        self.pending_focus_restore = true;
+  '        // as the plain-click path (§3.3).
+        self.pending_focus_restore = true;
         cx.stop_propagation();' \
-  '        cx.stop_propagation();' \
+  '        // as the plain-click path (§3.3).
+        cx.stop_propagation();' \
   geode-shell a_grab_leaves_the_shell_focused_on_the_next_frame
+
+# ---- mod+double-click fullscreen (2026-09-19) --------------------------
+#
+# The mouse form of mod+f: `try_fullscreen_on_double_click` in drag.rs,
+# called by both tile listeners ahead of the drag arm. Each gate below is
+# a silent failure when broken — the app paints, the gesture just does
+# something else.
+
+# The gesture is a double-click. Mutated to a triple, the door never fires
+# and mod+double-click is two drag arms.
+run_mutation "fullscreen: mod+double-click on a tile toggles fullscreen" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        if event.click_count != 2 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
+  '        if event.click_count != 3 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
+  geode-shell mod_double_click_toggles_fullscreen_on_that_tile
+
+# The mod key is the gate. Mutated out, a plain double-click on any tile
+# throws it fullscreen.
+run_mutation "fullscreen: a plain double-click does not fullscreen" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        if event.click_count != 2 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
+  '        if event.click_count != 2 {' \
+  geode-shell a_plain_double_click_does_not_fullscreen
+
+# A docked tile is refused through `focus_main_tile`'s own membership
+# answer. Mutated to pass, the dispatch toggles fullscreen on whichever
+# MAIN tile is focused — a different tile from the one under the mouse.
+run_mutation "fullscreen: a docked tile is refused, not redirected to the main tree" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        if !self.services.workspaces.active_mut().focus_main_tile(id) {
+            return false;
+        }
+        self.session_dirty = true;' \
+  '        let _ = self.services.workspaces.active_mut().focus_main_tile(id);
+        self.session_dirty = true;' \
+  geode-shell mod_double_click_on_a_docked_tile_changes_nothing
+
+# Order in the tree-tile listener: the fullscreen door must run AHEAD of
+# the drag arm, since the pair's second click is a mod+down the arm would
+# otherwise claim. Swapped, the first double-click arms a drag instead.
+run_mutation "fullscreen: the double-click door runs ahead of the drag arm" \
+  crates/geode-shell/src/shell/render.rs \
+  '                                if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                    || view.try_arm_tile_drag(id, event, cx)' \
+  '                                if view.try_arm_tile_drag(id, event, cx)
+                                    || view.try_fullscreen_on_double_click(id, event, window, cx)' \
+  geode-shell mod_double_click_toggles_fullscreen_on_that_tile
 
 # User ruling 2026-09-17 (reversing "editing is keyboard-only"): the
 # restore is withheld while a tile's occupant holds the keyboard in insert
@@ -7279,8 +7329,8 @@ run_mutation "objectdialog: section headers do not add list children" \
 # gone) reproduces the clipping on a filtered single-row list.
 run_mutation "objectdialog: the edit list sizes itself instead of the header it folds in" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        .max_h(px(VISIBLE_ROWS as f32 * ROW_HEIGHT))' \
-  '        .h(px((visible.len().max(1) as f32 * 28.0).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)))' \
+  '        .max_h(scale::design(VISIBLE_ROWS as f32 * ROW_HEIGHT))' \
+  '        .h(scale::design((visible.len().max(1) as f32 * 28.0).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)))' \
   geode-shell \
   a_filtered_single_row_is_not_clipped_by_the_lists_height
 
@@ -11564,6 +11614,218 @@ run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
   '        let _ = Self::key(theme);' \
   geode-marketdata \
   floored_tones_refresh_only_when_an_input_changes
+
+# ---- Shell chip door (`shell::chip`, design-guide audit 2026-09-19) -----
+# The market-data fix above made the rule for every other tinted chip:
+# blotter `pinned`/`unscoped`/`filtered`/`AS OF`, the diagnostics tile's
+# `filtered`, the toolbar and status-bar as-of chips, the scope bar's
+# contradiction chip. One door, one sweep. Mutated back to the pairing it
+# retired, the tint's text is the background family — 30 of 44 bundled
+# themes under 3:1 — and every behavioural test still reads the chip's
+# TEXT, not its colour.
+run_mutation "chip: a tinted warning chip's text is foreground, not warning_foreground" \
+  crates/geode-shell/src/shell/chip.rs \
+  '        Tone::Warning => ChipPaint {
+            fill: Some(theme.warning.opacity(FILL_ALPHA)),
+            text: theme.foreground,
+        },' \
+  '        Tone::Warning => ChipPaint {
+            fill: Some(theme.warning.opacity(FILL_ALPHA)),
+            text: theme.warning_foreground,
+        },' \
+  geode-shell \
+  every_chip_tone_is_readable_on_every_bundled_theme
+
+# The danger chip the same way (31 of 44 with `danger_foreground`).
+run_mutation "chip: a tinted danger chip's text is foreground, not danger_foreground" \
+  crates/geode-shell/src/shell/chip.rs \
+  '        Tone::Danger => ChipPaint {
+            fill: Some(theme.danger.opacity(FILL_ALPHA)),
+            text: theme.foreground,
+        },' \
+  '        Tone::Danger => ChipPaint {
+            fill: Some(theme.danger.opacity(FILL_ALPHA)),
+            text: theme.danger_foreground,
+        },' \
+  geode-shell \
+  every_chip_tone_is_readable_on_every_bundled_theme
+
+# The text-only tones are floored. Mutated to the identity, a stale
+# dataset time or a degraded-source row paints the raw `warning`, which
+# ten bundled themes ship under 3:1 against their own background.
+run_mutation "chip: text-only tones are floored to 3:1 against the background" \
+  crates/geode-shell/src/shell/chip.rs \
+  '    to_hsla(readable_on(
+        to_rgb(colour),
+        to_rgb(theme.background),
+        to_rgb(theme.foreground),
+    ))' \
+  '    let _ = theme;
+    colour' \
+  geode-shell \
+  every_chip_tone_is_readable_on_every_bundled_theme
+
+# The sweep must measure the composited ground, not the tint's opaque
+# value. Mutated to ignore alpha, `foreground` over an OPAQUE warning is
+# what gets checked, and the retired-pairing guard is what notices: over
+# a solid fill `warning_foreground` is the right token and clears the
+# floor, so the guard's "still fails on 20+ themes" assertion trips.
+run_mutation "chip: the readability ground composites the tint at its alpha" \
+  crates/geode-shell/src/shell/colours.rs \
+  '    let (t, a) = (to_rgb(top), top.a);' \
+  '    let (t, a) = (to_rgb(top), 1.0);' \
+  geode-shell \
+  the_retired_pairing_still_fails_the_sweep
+
+# A neutral chip is the theme's `secondary` pair, not a fourth warning:
+# `pinned` and `filtered` are trader choices. Mutated to the warning
+# tint under the plain foreground — readable, so the sweep alone would
+# pass — the token test is what notices, since it pins the pair.
+run_mutation "chip: a neutral chip is the secondary pair, not a warning tint" \
+  crates/geode-shell/src/shell/chip.rs \
+  '        Tone::Neutral => ChipPaint {
+            fill: Some(theme.secondary),
+            text: theme.secondary_foreground,
+        },' \
+  '        Tone::Neutral => ChipPaint {
+            fill: Some(theme.warning.opacity(FILL_ALPHA)),
+            text: theme.foreground,
+        },' \
+  geode-shell \
+  tones_resolve_to_their_documented_tokens
+
+# ---- List rows (`shell::listrow`, design-guide audit) --------------------
+# The highlighted row's text is the plain foreground, not `primary`:
+# `primary` over the list-active fill is under 3:1 on 11 bundled themes
+# (over the old `selection` fill, 15). Mutated back, every dialog's
+# highlighted row is unreadable on Fahrenheit and the sweep is the only
+# test that reads a row's COLOUR rather than its text.
+run_mutation "listrow: the highlighted row's text is the foreground, not primary" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        text: theme.foreground,' \
+  '        text: theme.primary,' \
+  geode-shell \
+  every_row_state_is_readable_on_every_bundled_theme
+
+# The fills are the LIST tokens, and active and hover differ. Mutated so
+# the highlighted row paints the hover fill, the pointer's row and the
+# highlighted row merge — the state and the pointer become one cue.
+run_mutation "listrow: active and hover are distinct list tokens" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        active: theme.list_active,' \
+  '        active: theme.list_hover,' \
+  geode-shell \
+  active_and_hover_are_the_list_tokens_and_differ
+
+# The match accent is floored against the active row's ground. Mutated
+# to the raw `primary`, a fuzzy-match glyph on the highlighted row is
+# under 3:1 on 11 themes.
+run_mutation "listrow: the match accent is floored against the active row" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        accent: to_hsla(readable_on(
+            to_rgb(theme.primary),
+            ground,
+            to_rgb(theme.foreground),
+        )),' \
+  '        accent: {
+            let _ = ground;
+            theme.primary
+        },' \
+  geode-shell \
+  every_row_state_is_readable_on_every_bundled_theme
+
+# A call site can walk past the door: the Sources row's prefix run did
+# (this branch's review, M1) — `primary` over the active fill on 11
+# themes. Only a source scan sees a call site's colour argument.
+run_mutation "listrow: every highlight run takes the door's accent" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                &in_prefix,
+                                row_paint.accent,' \
+  '                                &in_prefix,
+                                theme.primary,' \
+  geode-shell \
+  every_highlight_run_takes_the_doors_accent
+
+# ---- Chrome on the rem scale (`shell::scale`, design-guide audit) -------
+# `FontSize` moves the window rem; every chrome length is authored in
+# pixels at the Medium rem and resolved through `scale::design`, so it
+# scales with the text it holds. Mutated back to the literal, a dialog's
+# row list stays at its Medium height while its rows grow at Large — the
+# clipped-last-row defect the audit named — and only the zoom test, which
+# measures the painted list at both sizes, can tell.
+run_mutation "scale: a dialog list's height follows the rem, not the literal" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '            .h(scale::design(
+                (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+            ))' \
+  '            .h(gpui::px(
+                (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+            ))' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# The status bar's painted height and the height the tile surface gives
+# up are one number. Mutated so the bar paints its literal while the
+# surface is still computed from the scaled height, the bar and the
+# bottom tile disagree by the rem's ratio at Large. The wrapper is the
+# height's ONE owner (the inner `StatusBar` is `h_full`) — a first cut
+# of this entry mutated an inner duplicate and SURVIVED, because the
+# test measures the wrapper; the duplicate was removed rather than the
+# test widened.
+run_mutation "scale: the status bar paints the same height the surface reserves" \
+  crates/geode-shell/src/shell/status.rs \
+  '        .h(scale::design(HEIGHT))
+        .debug_selector(|| "shell-status-bar".to_string())' \
+  '        .h(px(HEIGHT))
+        .debug_selector(|| "shell-status-bar".to_string())' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# The other half: the surface reserves the scaled height. Mutated to the
+# literal, the tile surface runs under a taller status bar at Large.
+run_mutation "scale: the tile surface reserves the status bar's scaled height" \
+  crates/geode-shell/src/shell/status.rs \
+  '    scale::design_px(HEIGHT, window.rem_size())' \
+  '    let _ = window;
+    HEIGHT' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# The sidebar rail's painted width and the surface's reservation are two
+# declarations of one length (review M1 of this branch: a first cut of
+# the zoom test only re-checked `sidebar::width`'s arithmetic, and this
+# mutation SURVIVED the whole suite). Mutated to the literal, the rail
+# paints 40 px while every tile starts 46.67 px in at Large.
+run_mutation "scale: the painted sidebar rail is the width the surface reserves" \
+  crates/geode-shell/src/shell/sidebar.rs \
+  '        .w(scale::design(WIDTH))
+        .h_full()' \
+  '        .w(gpui::px(WIDTH))
+        .h_full()' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# The command-line strip the same way (review M2): `strip_top` is
+# computed from the scaled height, so a strip painted at the literal
+# floats 4.67 px above the tile's bottom border at Large.
+run_mutation "scale: the command-line strip paints the height its top was computed from" \
+  crates/geode-shell/src/shell/commandline_view.rs \
+  '        .h(px(height))' \
+  '        .h(px(HEIGHT))' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# `design` is the identity at Medium: the pixel value it is handed IS the
+# pixel it paints at the design rem, which is what lets every tuned
+# literal move onto the scale without a visual change. Mutated to scale
+# against gpui's own 16 px default, every chrome length shrinks by 12/16
+# at Medium.
+run_mutation "scale: design lengths are the identity at the medium rem" \
+  crates/geode-shell/src/shell/scale.rs \
+  'pub const DESIGN_REM: f32 = 12.0;' \
+  'pub const DESIGN_REM: f32 = 16.0;' \
+  geode-shell \
+  the_design_rem_is_the_medium_font_size
 
 # ---- Panel header: vocabulary (spec 2026-09-14 §3) ----------------------
 run_mutation "mdheader: a session written with key still restores" \

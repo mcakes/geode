@@ -52,8 +52,8 @@ pub(super) fn content_area(window: &Window) -> Rect {
     Rect {
         x: 0.0,
         y: 0.0,
-        w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
-        h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+        w: (f32::from(viewport.width) - sidebar::width(window)).max(0.0),
+        h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
     }
 }
 
@@ -262,8 +262,15 @@ impl Render for ShellView {
         }
 
         // Apply the UI font size (see the `fontsize` module doc): the rem
-        // size scales every rem-based text size in the shell. Guarded so
-        // the setter only runs on an actual change, not every frame.
+        // size scales every rem-based text size in the shell and, since
+        // `shell::scale`, every chrome length too. The guard is a compare,
+        // not a real skip: gpui-component's `Root::render` sets the rem to
+        // its own `Theme.font_size` (16 px, which Geode never changes) on
+        // EVERY frame before this view renders, so this setter fires every
+        // frame too — harmless, but it means every rem read this render
+        // makes (`content_area`, `sidebar::width`, `status::height`,
+        // `rem_size` below) must sit AFTER this line, and nothing rendered
+        // between `Root`'s set and this one may read the rem.
         let rem = gpui::px(self.font_size.rem_px());
         if window.rem_size() != rem {
             window.set_rem_size(rem);
@@ -299,6 +306,11 @@ impl Render for ShellView {
         let surface = content_area(window);
         let tile_width = surface.w;
         let content_height = (surface.h - stripe_height).max(0.0);
+        // The rail's width at this rem, read once: `set_rem_size` above
+        // ran first, so this render and `content_area` agree.
+        let sidebar_width = sidebar::width(window);
+        let status_height = status::height(window);
+        let rem_size = window.rem_size();
 
         // One layout pass for the whole surface (dock-regions task,
         // generalized by dock-trees): the pure `tiling::dock_layout`
@@ -346,7 +358,7 @@ impl Render for ShellView {
         // mouse-down are pre-offset into window space so the per-move math
         // never converts.
         let to_window_space = |r: Rect| Rect {
-            x: r.x + sidebar::WIDTH,
+            x: r.x + sidebar_width,
             y: r.y + toolbar_height,
             w: r.w,
             h: r.h,
@@ -450,7 +462,7 @@ impl Render for ShellView {
             .as_ref()
             .filter(|drag| drag.active)
             .and_then(|drag| {
-                let sx = drag.cursor.0 - sidebar::WIDTH;
+                let sx = drag.cursor.0 - sidebar_width;
                 let sy = drag.cursor.1 - toolbar_height;
                 let dragged = drag.tile;
                 let target = crate::tiling::resolve_drop_target(
@@ -647,7 +659,11 @@ impl Render for ShellView {
                                 // the comment where the strip is painted,
                                 // below.
                                 view.leave_command_line(window, cx);
-                                if view.try_arm_tile_drag(id, event, cx) {
+                                // Ahead of the drag arm on purpose — see
+                                // `try_fullscreen_on_double_click`.
+                                if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                    || view.try_arm_tile_drag(id, event, cx)
+                                {
                                     return;
                                 }
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {
@@ -700,7 +716,13 @@ impl Render for ShellView {
                             // the identical reason (fix round 1, finding
                             // 2, and spec §20.4).
                             view.leave_command_line(window, cx);
-                            if view.try_arm_tile_drag(id, event, cx) {
+                            // The fullscreen door refuses a docked tile
+                            // (fullscreen is main-tree-only), but it is
+                            // called here too so both listeners read the
+                            // same gesture table.
+                            if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                || view.try_arm_tile_drag(id, event, cx)
+                            {
                                 return;
                             }
                             if view
@@ -1305,6 +1327,7 @@ impl Render for ShellView {
                         line,
                         &self.command_input,
                         rect,
+                        rem_size,
                         cx,
                     ))
                 },
@@ -1343,8 +1366,11 @@ impl Render for ShellView {
                     &self.palette_scroll,
                     &self.palette_input,
                     on_row_click,
-                    width,
-                    viewport_height,
+                    palette::Viewport {
+                        width,
+                        height: viewport_height,
+                        rem_size,
+                    },
                     cx,
                 );
                 // Click-outside dismiss: a transparent (no dimming — the
@@ -1412,7 +1438,8 @@ impl Render for ShellView {
                     self.matcher.count(),
                     registry,
                     width,
-                    status::HEIGHT,
+                    status_height,
+                    rem_size,
                     cx,
                 ))
             })
@@ -1429,6 +1456,7 @@ impl Render for ShellView {
                     &self.perf,
                     &self.frame.read(cx).requery,
                     toolbar_height,
+                    rem_size,
                     cx,
                 ))
             })

@@ -47,13 +47,13 @@ fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
     let (grab, drop) = cx.update(|window, _| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let mid_y = toolbar_height + content_height / 2.0;
         (
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.5), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.25), px(mid_y)),
         )
     });
 
@@ -121,13 +121,18 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     });
     shell.update(&mut cx, |shell, _| shell.session_dirty = false);
 
-    let (tile_width, mid_y) = cx.update(|window, _| {
+    let (sidebar_width, tile_width, mid_y) = cx.update(|window, _| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let sidebar_width = sidebar::width(window);
+        let tile_width = (f32::from(viewport.width) - sidebar_width).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
-        (tile_width, toolbar_height + content_height / 2.0)
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
+        (
+            sidebar_width,
+            tile_width,
+            toolbar_height + content_height / 2.0,
+        )
     });
     let dock_size = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
         shell.read_with(cx, |shell, _| {
@@ -145,12 +150,12 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     // Grab the dock's inner edge (at 25% of the content width) and
     // drag it to 40%.
     cx.simulate_mouse_down(
-        gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+        gpui::point(px(sidebar_width + tile_width * 0.25), px(mid_y)),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
     cx.simulate_mouse_move(
-        gpui::point(px(sidebar::WIDTH + tile_width * 0.4), px(mid_y)),
+        gpui::point(px(sidebar_width + tile_width * 0.4), px(mid_y)),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
@@ -162,7 +167,7 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
 
     // Keep dragging far past the maximum: the size pins at the clamp.
     cx.simulate_mouse_move(
-        gpui::point(px(sidebar::WIDTH + tile_width * 0.9), px(mid_y)),
+        gpui::point(px(sidebar_width + tile_width * 0.9), px(mid_y)),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
@@ -173,7 +178,7 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     );
 
     cx.simulate_mouse_up(
-        gpui::point(px(sidebar::WIDTH + tile_width * 0.9), px(mid_y)),
+        gpui::point(px(sidebar_width + tile_width * 0.9), px(mid_y)),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
@@ -252,14 +257,14 @@ fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
     let (grab, drop_a, drop_b) = cx.update(|window, _| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let mid_y = toolbar_height + content_height / 2.0;
         (
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.3), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.5), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.25), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.3), px(mid_y)),
         )
     });
 
@@ -329,13 +334,13 @@ fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
     let (grab, drop) = cx.update(|window, _| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let mid_y = toolbar_height + content_height / 2.0;
         (
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.5), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.25), px(mid_y)),
         )
     });
 
@@ -401,8 +406,8 @@ fn main_tile_point(
         let area = Rect {
             x: 0.0,
             y: 0.0,
-            w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
-            h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+            w: (f32::from(viewport.width) - sidebar::width(window)).max(0.0),
+            h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
         };
         let shell = shell.read(app);
         let workspace = shell.services.workspaces.active();
@@ -415,7 +420,7 @@ fn main_tile_point(
             .expect("tile present in the main layout")
             .1;
         gpui::point(
-            px(sidebar::WIDTH + r.x + r.w * fx),
+            px(sidebar::width(window) + r.x + r.w * fx),
             px(toolbar_height + r.y + r.h * fy),
         )
     })
@@ -436,8 +441,8 @@ fn dock_point(
         let area = Rect {
             x: 0.0,
             y: 0.0,
-            w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
-            h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+            w: (f32::from(viewport.width) - sidebar::width(window)).max(0.0),
+            h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
         };
         let shell = shell.read(app);
         let workspace = shell.services.workspaces.active();
@@ -448,7 +453,7 @@ fn dock_point(
             .expect("dock visible in the layout")
             .1;
         gpui::point(
-            px(sidebar::WIDTH + r.x + r.w * fx),
+            px(sidebar::width(window) + r.x + r.w * fx),
             px(toolbar_height + r.y + r.h * fy),
         )
     })
@@ -1573,4 +1578,161 @@ fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAp
          apply nothing"
     );
     assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()));
+}
+
+// ---- mod+double-click fullscreen (2026-09-19) ---------------------------
+
+/// Dispatch a platform-shaped double-click: down/up at `click_count`
+/// 1, then down/up at `click_count` 2, all at one point with the given
+/// modifiers, with a draw between the two clicks (the OS delivers them
+/// across frames). The first click is an ordinary mod+down — it arms a
+/// pending drag the release cancels — so the second click is what the
+/// fullscreen door sees.
+fn double_click(
+    cx: &mut gpui::VisualTestContext,
+    at: gpui::Point<gpui::Pixels>,
+    modifiers: gpui::Modifiers,
+) {
+    for count in 1..=2 {
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers,
+                    click_count: count,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers,
+                    click_count: count,
+                }),
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+}
+
+/// mod+double-click on a main-tree tile focuses it and makes it
+/// fullscreen (the mouse form of `mod+f`, TODO "Mod + doubleclick to
+/// maximize/minimize tile"); a second mod+double-click on the now
+/// fullscreen tile restores the layout. Neither leaves a drag armed,
+/// and both go dirty like the keyboard verb.
+#[gpui::test]
+fn mod_double_click_toggles_fullscreen_on_that_tile(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .focused()),
+        Some(left),
+        "sanity: focus starts on the left tile"
+    );
+
+    let at = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+    double_click(&mut cx, at, alt_held());
+    shell.read_with(&cx, |shell, _| {
+        let tree = shell.services.workspaces.active().tree();
+        assert_eq!(
+            tree.fullscreen(),
+            Some(right),
+            "the double-clicked tile went fullscreen"
+        );
+        assert_eq!(
+            tree.focused(),
+            Some(right),
+            "and took tile focus on the way"
+        );
+        assert!(shell.tile_drag.is_none(), "no drag is left armed");
+        assert!(
+            shell.session_dirty,
+            "a fullscreen toggle persists like mod+f"
+        );
+    });
+
+    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    // While fullscreen the tile fills the tree area, so the same point
+    // is on it.
+    double_click(&mut cx, at, alt_held());
+    shell.read_with(&cx, |shell, _| {
+        let tree = shell.services.workspaces.active().tree();
+        assert_eq!(
+            tree.fullscreen(),
+            None,
+            "the second double-click restores the layout"
+        );
+        assert_eq!(tree.focused(), Some(right));
+        assert!(shell.tile_drag.is_none());
+        assert!(shell.session_dirty);
+    });
+}
+
+/// An unmodified double-click is two ordinary clicks: it focuses the
+/// tile and nothing more.
+#[gpui::test]
+fn a_plain_double_click_does_not_fullscreen(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);
+    let at = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    shell.read_with(&cx, |shell, _| {
+        let tree = shell.services.workspaces.active().tree();
+        assert_eq!(tree.fullscreen(), None, "no mod, no fullscreen");
+        assert_eq!(tree.focused(), Some(right), "click-to-focus still ran");
+    });
+}
+
+/// Fullscreen is main-tree-only (`Workspace::toggle_fullscreen` is a
+/// claimed no-op while a dock is focused), so mod+double-click on a
+/// docked tile changes nothing — exactly as `mod+f` there.
+#[gpui::test]
+fn mod_double_click_on_a_docked_tile_changes_nothing(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+    cx.simulate_keystrokes("ctrl-{"); // move the focused (left) tile to the left dock
+    cx.simulate_keystrokes("alt-l"); // and put focus back on the main tree
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    shell.read_with(&cx, |shell, _| {
+        let workspace = shell.services.workspaces.active();
+        assert_eq!(
+            workspace.docks().get(DockSide::Left).tree().tiles(),
+            vec![left]
+        );
+        assert_eq!(workspace.region(), crate::tiling::FocusRegion::Main);
+        assert_eq!(workspace.tree().focused(), Some(right));
+    });
+    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+
+    let at = dock_point(&mut cx, &shell, DockSide::Left, 0.5, 0.5);
+    double_click(&mut cx, at, alt_held());
+    shell.read_with(&cx, |shell, _| {
+        let workspace = shell.services.workspaces.active();
+        assert_eq!(
+            workspace.tree().fullscreen(),
+            None,
+            "no fullscreen on the main tree"
+        );
+        assert_eq!(
+            workspace.docks().get(DockSide::Left).tree().fullscreen(),
+            None
+        );
+        assert_eq!(
+            workspace.region(),
+            crate::tiling::FocusRegion::Main,
+            "a mod+down changes no focus, and the door refuses on a dock"
+        );
+        assert!(shell.tile_drag.is_none());
+        assert!(!shell.session_dirty, "nothing changed, nothing persisted");
+    });
 }

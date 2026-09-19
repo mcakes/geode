@@ -24,12 +24,14 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, SharedString, Stateful, Window,
-    div, px,
+    App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, Pixels, SharedString, Stateful,
+    Window, div,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
+use super::chip;
+use super::scale;
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
 use crate::tips;
@@ -55,13 +57,14 @@ fn chip(
     label: String,
     fg: Hsla,
     bg: Hsla,
+    radius: Pixels,
     selector: impl Fn() -> String + 'static,
 ) -> Stateful<Div> {
     div()
         .id(id)
         .px_2()
         .py_0p5()
-        .rounded(px(4.))
+        .rounded(radius)
         .bg(bg)
         .text_color(fg)
         .child(label)
@@ -80,6 +83,7 @@ pub fn toolbar(
     // `keybindings_view::key_chip` uses for its own chips.
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
 
     let mut chips_row = h_flex().gap_1().items_center();
     for (i, c) in model.chips.iter().enumerate() {
@@ -117,9 +121,9 @@ pub fn toolbar(
                         c.summary.clone(),
                         chip_fg,
                         chip_bg,
+                        chip_radius,
                         move || format!("scope-chip-{body_column}"),
                     )
-                    .cursor_pointer()
                     .tooltip(tips::tip_with(
                         c.tip_selector.clone(),
                         c.full.clone(),
@@ -157,6 +161,7 @@ pub fn toolbar(
                 t.clone(),
                 chip_fg,
                 chip_bg,
+                chip_radius,
                 || "scope-text-chip".to_string(),
             )
             .tooltip(tips::tip_with(
@@ -174,6 +179,7 @@ pub fn toolbar(
                 expr.clone(),
                 chip_fg,
                 chip_bg,
+                chip_radius,
                 || "scope-expr-chip".to_string(),
             )
             .tooltip(tips::tip_with(
@@ -185,15 +191,20 @@ pub fn toolbar(
         );
     }
     if let Some(named) = &model.impossible {
-        // The contradiction chip: `theme.danger`/`danger_foreground`, not
-        // the muted scheme every other chip uses — a scope that can match
-        // nothing must read as an error, not routine state.
+        // The contradiction chip: `chip::Tone::Danger`, not the muted
+        // scheme every other chip uses — a scope that can match nothing
+        // must read as an error, not routine state. Through the chip door
+        // rather than `danger_foreground` over the tint by hand: that
+        // token is the background family at the pinned rev, under 3:1 on
+        // 31 of 44 bundled themes over its own 25% tint.
+        let impossible = chip::chip_paint(theme, chip::Tone::Danger);
         chips_row = chips_row.child(
             chip(
                 "scope-impossible-chip".into(),
                 named.clone(),
-                theme.danger_foreground,
-                theme.danger.opacity(0.25),
+                impossible.text,
+                impossible.fill.unwrap_or(theme.danger),
+                chip_radius,
                 || "scope-impossible-chip".to_string(),
             )
             .tooltip(tips::tip(
@@ -246,13 +257,14 @@ pub fn toolbar(
                             // already shows), and the elided badge text
                             // moves to the detail line. Both clones below
                             // are refcount bumps, never a fresh `format!`.
-                            el.bg(theme.warning.opacity(0.25))
+                            let as_of = chip::chip_paint(theme, chip::Tone::Warning);
+                            el.when_some(as_of.fill, |el, fill| el.bg(fill))
                                 .px_2()
-                                .rounded(px(4.))
+                                .rounded(theme.radius)
                                 .child(
                                     div()
                                         .id("scope-asof")
-                                        .text_color(theme.warning_foreground)
+                                        .text_color(as_of.text)
                                         .debug_selector(|| "scope-asof".to_string())
                                         .tooltip(tips::tip_with(
                                             SharedString::new_static("tip-scope-asof"),
@@ -281,7 +293,7 @@ pub fn toolbar(
             .child(
                 Input::new(filter_input)
                     .prefix(Icon::new(IconName::Search).text_color(theme.muted_foreground))
-                    .w(px(FILTER_WIDTH)),
+                    .w(scale::design(FILTER_WIDTH)),
             ),
     )
 }

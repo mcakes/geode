@@ -59,8 +59,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, SharedString, Window, div,
-    hsla, px,
+    AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Pixels, SharedString,
+    Window, div, hsla, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
@@ -70,6 +70,7 @@ use gpui_component::{
 };
 
 use super::ShellView;
+use super::scale;
 use crate::dialogmode::{self, DialogMode, FocusTarget};
 use crate::footer::{self, Hint};
 use crate::keymap::{Keystroke, Modifiers};
@@ -932,7 +933,7 @@ fn state_pill(label: &'static str, typing: bool, cx: &App) -> AnyElement {
         .bg(bg)
         .px_1p5()
         .py_0p5()
-        .rounded(px(4.))
+        .rounded(theme.radius)
         .flex_shrink_0()
         .debug_selector(move || format!("dialog-mode-pill-{label}"))
         .child(label)
@@ -967,7 +968,7 @@ pub(crate) fn badge(
     selector: Option<String>,
     cx: &App,
 ) -> AnyElement {
-    let _ = cx;
+    let radius = cx.theme().radius_tokens().sm;
     let label = label.into();
     let mut el = div()
         .font_family(crate::fonts::MONO)
@@ -976,7 +977,7 @@ pub(crate) fn badge(
         .border_1()
         .border_color(border)
         .px_1()
-        .rounded(px(3.))
+        .rounded(radius)
         .flex_shrink_0()
         .child(label);
     if let Some(selector) = selector {
@@ -997,9 +998,9 @@ pub(crate) fn badge(
 /// fill for its own outline.
 pub(crate) fn swatch(colour: Hsla, selector: String, cx: &App) -> AnyElement {
     div()
-        .w(px(14.))
-        .h(px(14.))
-        .rounded(px(3.))
+        .w(scale::design(14.))
+        .h(scale::design(14.))
+        .rounded(cx.theme().radius_tokens().sm)
         .border_1()
         .border_color(cx.theme().border)
         .bg(colour)
@@ -1207,11 +1208,16 @@ pub(crate) fn render_modal(
 /// The dialogs only decide which hints are live; nothing here lets a
 /// caller pick a row, which is what keeps `space` under `space` on
 /// every surface.
-pub(crate) fn hint_rows(hints: &[Hint], chip_fg: Hsla, chip_bg: Hsla) -> AnyElement {
+pub(crate) fn hint_rows(
+    hints: &[Hint],
+    chip_fg: Hsla,
+    chip_bg: Hsla,
+    chip_radius: Pixels,
+) -> AnyElement {
     let chip = |spec: &str| {
         let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
             .expect("footer hint keystrokes are hardcoded valid");
-        super::keybindings_view::key_chip(&ks, chip_fg, chip_bg)
+        super::keybindings_view::key_chip(&ks, chip_fg, chip_bg, chip_radius)
     };
     let mut lines = v_flex().gap_0p5();
     for (row, members) in footer::rows(hints) {
@@ -1221,7 +1227,13 @@ pub(crate) fn hint_rows(hints: &[Hint], chip_fg: Hsla, chip_bg: Hsla) -> AnyElem
             .items_center()
             .flex_wrap()
             .debug_selector(move || format!("hint-row-{label}"))
-            .child(div().w(px(30.)).flex_shrink_0().text_xs().child(label));
+            .child(
+                div()
+                    .w(scale::design(30.))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .child(label),
+            );
         // An empty row keeps a full row's height, so the footer never
         // grows or shrinks with the selected row's vocabulary: the label
         // alone is a `text_xs` line, shorter than a chip, so an unpainted
@@ -1378,6 +1390,7 @@ pub(crate) fn value_chip(
     selector: String,
     fg: Hsla,
     bg: Hsla,
+    radius: Pixels,
     on_step: Option<StepHandler>,
 ) -> AnyElement {
     let base = div()
@@ -1390,10 +1403,9 @@ pub(crate) fn value_chip(
         Some(on_step) => base
             .px_1p5()
             .py_0p5()
-            .rounded(px(4.))
+            .rounded(radius)
             .bg(bg)
             .text_color(fg)
-            .cursor_pointer()
             .child(text)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 cx.stop_propagation();

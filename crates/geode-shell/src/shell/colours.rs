@@ -47,6 +47,20 @@ pub fn to_hsla(rgb: Rgb) -> Hsla {
     .into()
 }
 
+/// `top` at its own alpha composited over an opaque `under`, in sRGB —
+/// what the GPU paints for a translucent fill over what is beneath it.
+/// The one place that arithmetic lives, so a readability check measures
+/// the colour a tinted chip or cell actually lands on rather than the
+/// tint's own opaque value.
+pub fn over(top: Hsla, under: Rgb) -> Rgb {
+    let (t, a) = (to_rgb(top), top.a);
+    Rgb {
+        r: t.r * a + under.r * (1.0 - a),
+        g: t.g * a + under.g * (1.0 - a),
+        b: t.b * a + under.b * (1.0 - a),
+    }
+}
+
 /// The theme's six base hues, red/yellow/green/cyan/blue/magenta, in
 /// both tones — [`geode_core::colour::ANCHOR_DEGREES`]'s own order,
 /// which every [`Anchors`] this crate builds must agree with, or a

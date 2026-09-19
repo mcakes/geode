@@ -116,7 +116,7 @@ use std::rc::Rc;
 
 use geode_core::config::{Layer, Severity, check_object_name};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Div, Entity, MouseButton, Window, div, px, rems};
+use gpui::{AnyElement, App, Context, Div, Entity, MouseButton, Window, div, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
@@ -146,6 +146,7 @@ use super::super::ShellView;
 use super::super::colours as colour_theme;
 use super::super::dialog;
 use super::super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
+use super::super::scale;
 
 /// Row height estimate (two lines: name plus muted summary) for the
 /// browse list's viewport — non-load-bearing for scroll-FOLLOW, since
@@ -2907,8 +2908,10 @@ fn build(
     let rows = derive_rows(shell);
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
+    let row_paint = super::super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
 
     // §6.1: the merged `colours.toml` AND the theme's own
     // anchors/tokens, read once for the whole list rather than once per
@@ -2942,9 +2945,9 @@ fn build(
 
     let mut list = v_flex()
         .id("objectdialog-list")
-        .w(px(WIDTH))
-        .h(px(
-            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+        .w(scale::design(WIDTH))
+        .h(scale::design(
+            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.object_dialog_scroll)
@@ -2969,9 +2972,11 @@ fn build(
             .gap_3()
             .px_2()
             .py_1()
-            .rounded(px(4.));
+            .rounded(theme.radius);
         if is_selected {
-            row_el = row_el.bg(theme.selection).text_color(theme.primary);
+            row_el = row_el.bg(row_paint.active).text_color(row_paint.text);
+        } else {
+            row_el = row_el.hover(|s| s.bg(row_paint.hover));
         }
 
         // §19.3: a prefixed row paints `<prefix> · ` dimmed and the name
@@ -2993,13 +2998,13 @@ fn build(
                             .child(highlighted_text(
                                 &format!("{prefix} · "),
                                 &in_prefix,
-                                theme.primary,
+                                row_paint.accent,
                             )),
                     )
-                    .child(highlighted_text(&row.name, &in_name, theme.primary))
+                    .child(highlighted_text(&row.name, &in_name, row_paint.accent))
                     .into_any_element()
             }
-            None => highlighted_text(&row.name, &name_ix, theme.primary),
+            None => highlighted_text(&row.name, &name_ix, row_paint.accent),
         };
 
         let label = v_flex().gap_0p5().child(head).child(
@@ -3007,7 +3012,11 @@ fn build(
                 .font_family(crate::fonts::MONO)
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(highlighted_text(&row.summary, &summary_ix, theme.primary)),
+                .child(highlighted_text(
+                    &row.summary,
+                    &summary_ix,
+                    row_paint.accent,
+                )),
         );
 
         // Provenance, right-aligned: the layer that won as a muted outlined
@@ -3089,9 +3098,17 @@ fn build(
     if visible.is_empty() {
         // Two different empty states, said differently on purpose: an
         // over-narrow filter is a state the user can back out of, while
-        // a domain with nothing in it is a fact about the config.
+        // a domain with nothing in it is a fact about the config — and
+        // an empty state names the next action (design guide) where
+        // there is one: `n` creates an object on every writable domain,
+        // while the schema's rows come from `datasets.toml` alone.
         let message = if rows.is_empty() {
-            format!("no {} are configured", state.domain.title().to_lowercase())
+            let word = state.domain.title().to_lowercase();
+            if state.domain.writable(&Stage::Browse) {
+                format!("no {word} are configured — n creates one")
+            } else {
+                format!("no {word} are configured")
+            }
         } else {
             "no matches".to_string()
         };
@@ -3186,9 +3203,9 @@ fn build(
             ],
         }
     };
-    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg);
+    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
     let footer = v_flex()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .gap_1()
         .pt_2()
         .border_t_1()
@@ -3321,8 +3338,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         (false, None) => action_bar(shell, entity, cx),
     };
     let theme = cx.theme();
+    let row_paint = super::super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
     let row = target_row(shell);
 
     // §6.1: on Colours, the swatch beside the name — resolved from the
@@ -3353,7 +3372,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // the browse row carries, so opening an object never loses the
     // context the list gave it.
     let mut header = h_flex()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .items_center()
         .justify_between()
         .gap_3()
@@ -3470,8 +3489,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     } else {
         let mut list = v_flex()
             .id("objectdialog-fields")
-            .w(px(WIDTH))
-            .max_h(px(VISIBLE_ROWS as f32 * ROW_HEIGHT))
+            .w(scale::design(WIDTH))
+            .max_h(scale::design(VISIBLE_ROWS as f32 * ROW_HEIGHT))
             .overflow_y_scroll()
             .track_scroll(&shell.object_dialog_scroll)
             .debug_selector(|| "objectdialog-fields".to_string());
@@ -3495,11 +3514,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .gap_3()
                 .px_2()
                 .py_1()
-                .rounded(px(4.))
+                .rounded(theme.radius)
                 .border_t_2()
                 .border_color(gpui::transparent_black());
             if is_selected {
-                element = element.bg(theme.selection).text_color(theme.primary);
+                element = element.bg(row_paint.active).text_color(row_paint.text);
+            } else {
+                element = element.hover(|s| s.bg(row_paint.hover));
             }
             // Set only for a list row that opens a new block — see this
             // loop's own comment on `last_item_section`.
@@ -3536,11 +3557,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         format!("objectdialog-value-{}", field.key),
                         theme.muted_foreground,
                         theme.muted,
+                        theme.radius,
                         on_step,
                     );
                     (
                         format!("objectdialog-field-{}", field.key),
-                        highlighted_text(&field.label, &m.indices, theme.primary),
+                        highlighted_text(&field.label, &m.indices, row_paint.accent),
                         h_flex()
                             .gap_2()
                             .items_center()
@@ -3655,11 +3677,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         let grip = if own {
                             div()
                                 .text_color(theme.muted_foreground)
-                                .w(px(11.))
+                                .w(scale::design(11.))
                                 .child("⋮")
                                 .into_any_element()
                         } else {
-                            div().w(px(11.)).into_any_element()
+                            div().w(scale::design(11.)).into_any_element()
                         };
                         // §18.9.2: the tick is the toggle. Its mouse-down
                         // stops propagation so the row's own select does not
@@ -3672,14 +3694,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         let tick = div()
                             .id(gpui::SharedString::from(tick_id.clone()))
                             .font_family(crate::fonts::MONO)
-                            .w(px(13.))
+                            .w(scale::design(13.))
                             .text_color(if entry.included {
                                 theme.success
                             } else {
                                 theme.muted_foreground
                             })
                             .debug_selector(move || tick_id)
-                            .cursor_pointer()
                             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                 cx.stop_propagation();
                                 entity_for_tick.update(cx, |shell, cx| {
@@ -3698,7 +3719,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         name_row = name_row.text_color(theme.muted_foreground);
                     }
                     name_row =
-                        name_row.child(highlighted_text(&entry.name, &m.indices, theme.primary));
+                        name_row.child(highlighted_text(&entry.name, &m.indices, row_paint.accent));
                     // The compact per-column summary (Part 2c §5.4) is painted
                     // after the name, muted, on a member row only — an
                     // available row's presentation is always the empty
@@ -3745,7 +3766,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 Some(Severity::Error) => {
                     let diag_selector = format!("objectdialog-diag-{selector}");
                     div()
-                        .w(px(12.))
+                        .w(scale::design(12.))
                         .text_color(theme.danger)
                         .debug_selector(move || diag_selector.clone())
                         .child("!")
@@ -3754,13 +3775,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 Some(Severity::Warning) => {
                     let diag_selector = format!("objectdialog-diag-{selector}");
                     div()
-                        .w(px(12.))
+                        .w(scale::design(12.))
                         .text_color(theme.warning)
                         .debug_selector(move || diag_selector.clone())
                         .child("!")
                         .into_any_element()
                 }
-                None => div().w(px(12.)).into_any_element(),
+                None => div().w(scale::design(12.)).into_any_element(),
             };
             let entity_for_row = entity.clone();
             let clicked = position;
@@ -3904,7 +3925,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // diagnostic (no matching row — `row_for_path` returns `None`, e.g. a
     // cross-dataset check with no single field to blame) prints with no
     // prefix at all, exactly as before this field existed.
-    let diagnostics = v_flex().w(px(WIDTH)).gap_0p5().children(
+    let diagnostics = v_flex().w(scale::design(WIDTH)).gap_0p5().children(
         draft
             .diagnostics
             .iter()
@@ -4137,7 +4158,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         hints.extend(leave("back to the list".to_string()));
         hints
     };
-    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg);
+    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
     // One slot above the hint rows, shared by two occupants (spec §22):
     // the notice, when a keystroke just produced one, else the help line
     // for the row under the cursor — what the field MEANS, beside the
@@ -4196,7 +4217,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         }
     };
     let footer = v_flex()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .gap_1()
         .pt_2()
         .border_t_1()
@@ -4322,8 +4343,9 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
     let mut bar = h_flex()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .gap_2()
         .items_center()
         // `min_h_6` matches a `.small()` `Button`'s own labelled height
@@ -4348,7 +4370,7 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .child(key_chip(&ks, chip_fg, chip_bg))
+                    .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
                     .child(action.label.clone()),
             )
             .on_click(move |_event, window, cx| {
@@ -4401,7 +4423,8 @@ fn browse_action_bar(
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
-    let mut bar = h_flex().w(px(WIDTH)).gap_2().items_center();
+    let chip_radius = theme.radius;
+    let mut bar = h_flex().w(scale::design(WIDTH)).gap_2().items_center();
     if offers_n {
         let ks = crate::keymap::parse_keystroke("n", Modifiers::NONE).expect("valid");
         let entity = entity.clone();
@@ -4417,7 +4440,7 @@ fn browse_action_bar(
                             h_flex()
                                 .gap_1p5()
                                 .items_center()
-                                .child(key_chip(&ks, chip_fg, chip_bg))
+                                .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
                                 .child(label),
                         )
                         .on_click(move |_event, window, cx| {
@@ -4474,7 +4497,7 @@ fn browse_action_bar(
                         h_flex()
                             .gap_1p5()
                             .items_center()
-                            .child(key_chip(&ks, chip_fg, chip_bg))
+                            .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
                             .child(label),
                     )
                     .on_click(move |_event, window, cx| {
@@ -4856,7 +4879,7 @@ impl gpui::Render for DragGhost {
         div()
             .px_2()
             .py_1()
-            .rounded(px(4.))
+            .rounded(theme.radius)
             .bg(theme.popover)
             .text_color(theme.popover_foreground)
             .border_1()

@@ -298,9 +298,9 @@ fn a_visible_left_dock_carves_its_column_out_of_the_tree_area(cx: &mut gpui::Tes
     cx.update(|window, cx| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let area = Rect {
             x: 0.0,
             y: 0.0,

@@ -115,7 +115,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
+use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
@@ -127,6 +127,7 @@ use crate::linenumbers::LineNumbers;
 use crate::listfilter::{self, Ranked};
 use crate::shell::ShellView;
 use crate::shell::dialog;
+use crate::shell::scale;
 use crate::tileadd::AddDirection;
 use crate::vimfind::FindStyle;
 use crate::vimnav;
@@ -965,8 +966,10 @@ fn build(
     };
     let rows = rows_for(shell);
     let theme = cx.theme();
+    let row_paint = super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
 
     // Row list vs. the open choice field's ranked options (spec
     // 2026-09-19 §3.3): while a row's typeahead is open it takes over
@@ -987,9 +990,9 @@ fn build(
 
         let mut list = v_flex()
             .id("settings-list")
-            .w(px(WIDTH))
-            .h(px(
-                (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+            .w(scale::design(WIDTH))
+            .h(scale::design(
+                (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
             ))
             .overflow_y_scroll()
             .track_scroll(&shell.settings_scroll)
@@ -1000,10 +1003,10 @@ fn build(
             let row = &rows[row_ix];
             let is_selected = position == state.selected;
 
-            // `split_label_indices` (shared with `keybindings_view::build`
-            // — see its own doc comment for why this is one function, not
-            // two copies) splits the ranked char offsets back across the
-            // title and category lines they're painted on.
+            // `split_label_indices` (shared with `keybindings_view::build` —
+            // see its own doc comment for why this is one function, not two
+            // copies) splits the ranked char offsets back across the title
+            // and category lines they're painted on.
             let title_len = row.title.chars().count();
             let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
 
@@ -1014,19 +1017,21 @@ fn build(
                 .gap_3()
                 .px_2()
                 .py_1()
-                .rounded(px(4.));
+                .rounded(theme.radius);
             if is_selected {
-                row_el = row_el.bg(theme.selection).text_color(theme.primary);
+                row_el = row_el.bg(row_paint.active).text_color(row_paint.text);
+            } else {
+                row_el = row_el.hover(|s| s.bg(row_paint.hover));
             }
 
             let label = v_flex()
                 .gap_0p5()
-                .child(highlighted_text(row.title, &title_ix, theme.primary))
+                .child(highlighted_text(row.title, &title_ix, row_paint.accent))
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(highlighted_text(row.category, &cat_ix, theme.primary)),
+                        .child(highlighted_text(row.category, &cat_ix, row_paint.accent)),
                 );
 
             // The current value, in the data face — a value readout, not
@@ -1046,6 +1051,7 @@ fn build(
                 format!("settings-value-{row_ix}"),
                 chip_fg,
                 chip_bg,
+                chip_radius,
                 Some(on_step),
             );
 
@@ -1065,10 +1071,9 @@ fn build(
         }
 
         if visible.is_empty() {
-            // Zero matches: one muted line where the rows would be — the
-            // same muted treatment keybindings' empty filter gets, so an
-            // over-narrow filter reads as a state, not a rendering
-            // glitch.
+            // Zero matches: one muted line where the rows would be — the same
+            // muted treatment keybindings' empty filter gets, so an
+            // over-narrow filter reads as a state, not a rendering glitch.
             list = list.child(
                 div()
                     .px_2()
@@ -1150,10 +1155,10 @@ fn build(
             ],
         }
     };
-    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg);
+    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
 
     let footer = v_flex()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .gap_1()
         .pt_2()
         .border_t_1()
