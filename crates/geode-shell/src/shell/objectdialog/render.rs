@@ -115,7 +115,7 @@
 use std::rc::Rc;
 
 use geode_core::config::{Layer, Severity, check_object_name};
-use geode_core::query::DistinctOutcome;
+use geode_core::query::{DistinctOutcome, DistinctParams};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Div, Entity, MouseButton, Window, div, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -139,7 +139,7 @@ use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter;
 use crate::vimnav;
 
-use super::super::ShellView;
+use super::super::{SCOPES_KEY, ShellEvent, ShellView};
 // Aliased: `colours` (unqualified, `use super::colours;` above) is the
 // `Domain::Colours` adapter; this is `shell::colours`, the gpui<->pure
 // theme bridge (§6.1) — a different module, one directory further out,
@@ -284,8 +284,14 @@ fn handle_key(
         // so `space`, `i`, `/`, `d`/`r`/`o` and the escape ladder all mean
         // what they already mean — the only key that behaves differently
         // is `enter`, and it branches inside the `Commit` arm on what the
-        // cursor is on rather than on the stage.
-        Some(Stage::Edit { .. } | Stage::Column { .. }) => handle_edit_key(shell, ks, cx),
+        // cursor is on rather than on the stage. The Values stage (scopes-
+        // editing spec §4) is the same shape again — one more projection
+        // over the same draft — so it joins this arm rather than falling
+        // through to `handle_browse_key` below, which knows nothing about
+        // a draft at all.
+        Some(Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }) => {
+            handle_edit_key(shell, ks, cx)
+        }
         Some(Stage::Naming) => handle_naming_key(shell, ks, cx),
         _ => handle_browse_key(shell, ks, cx),
     }
@@ -1079,6 +1085,96 @@ fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     cx.notify();
 }
 
+/// **The one door into the Values stage** (scopes-editing spec §4):
+/// stash the scope's fields, install the loading row, and ask the data
+/// for `column`'s distinct values under `SCOPES_KEY` with the DRAFT's
+/// scope minus this column. The tag comes from the shell's one monotonic
+/// counter (`next_picker_tag`, Phase 4b M5's reasoning) and is recorded
+/// on the state for `deliver_values`'s staleness check. Opens in normal
+/// mode, for `enter_column_stage`'s reason.
+fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
+    // Through the folded config, `enter_column_stage`'s own reason: a
+    // dimension selection made in this same dialog inside the 250 ms
+    // write debounce must still be reflected in the scope the request
+    // carries.
+    let pending = apply::config_with_pending(shell);
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return;
+    };
+    let Stage::Edit { object } = &state.stage else {
+        return;
+    };
+    let object = object.clone();
+    let Some(draft) = state.draft.as_ref() else {
+        return;
+    };
+    let scope = scopes::draft_scope(draft, config, column);
+    let as_of = shell.frame.read(cx).as_of().clone();
+    shell.next_picker_tag += 1;
+    let tag = shell.next_picker_tag;
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let Some(draft) = state.draft.as_mut() else {
+        return;
+    };
+    if !draft.enter_values(column, scopes::loading_field()) {
+        return;
+    }
+    state.stage = Stage::Values {
+        object,
+        column: column.to_string(),
+    };
+    state.mode = DialogMode::Normal;
+    state.notice = None;
+    state.disarm();
+    state.values_tag = tag;
+    shell.object_dialog_scroll.scroll_to_item(0);
+    cx.emit(ShellEvent::DistinctRequested(DistinctParams {
+        key: SCOPES_KEY,
+        tag,
+        column: column.to_string(),
+        scope,
+        as_of,
+    }));
+    cx.notify();
+}
+
+/// `escape` out of the Values stage: fold one last time, restore the
+/// scope's fields, and put the cursor on the column's own row — its item
+/// row if the selection survived, its available row if it was emptied.
+fn leave_values_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let Stage::Values { object, column } = state.stage.clone() else {
+        return;
+    };
+    if let Some(draft) = state.draft.as_mut() {
+        scopes::fold_values(draft);
+        draft.leave_values();
+        let rows = draft.rows();
+        let target = draft
+            .visible_rows()
+            .iter()
+            .position(|m| {
+                matches!(
+                    rows.get(m.row),
+                    Some(row @ (EditRow::Item { .. } | EditRow::Available { .. }))
+                        if draft.row_label(*row) == column
+                )
+            })
+            .unwrap_or(0);
+        draft.selected = target;
+    }
+    state.stage = Stage::Edit { object };
+    state.notice = None;
+    state.disarm();
+    scroll_to_cursor(shell);
+    cx.notify();
+}
+
 /// A bare `1`–`9` on the Groupings dialog (§18.8): open that slot's edit
 /// stage, from the browse list or from another slot's edit stage alike.
 /// The slot number IS the object's name (`groupings.rs`'s own doc), so
@@ -1191,6 +1287,57 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         .is_some_and(|draft| draft.text_entry.is_some());
     if text_entry {
         return handle_text_key(shell, ks, cx);
+    }
+
+    // ---- Values stage (scopes-editing spec §4) -------------------------
+    //
+    // `ctrl+a` ticks every value the filter currently shows, `ctrl+x`
+    // clears the selection — the dimension picker's own pair, reclaimed
+    // inside `GeodeModal` already (`dialog::init_reclaimed_keybindings`),
+    // which is what lets the chord reach this handler in either mode
+    // rather than being eaten by the shared `Input` in filter mode. Placed
+    // ahead of the filter-mode split below so both modes share it — a
+    // trader mid-filter still wants "tick everything this narrowed to".
+    let in_values = draft_ref(shell).is_some_and(|d| d.values().is_some());
+    if in_values && ks.mods == Modifiers::CTRL && (ks.key == "a" || ks.key == "x") {
+        let tick_all = ks.key == "a";
+        let changed = draft_mut(shell).is_some_and(|draft| {
+            let shown: Vec<usize> = draft
+                .visible_rows()
+                .iter()
+                .filter_map(|m| match draft.rows().get(m.row) {
+                    Some(EditRow::Item { item, .. }) => Some(*item),
+                    _ => None,
+                })
+                .collect();
+            let Some(field) = draft.fields.iter_mut().find(|f| f.key == "values") else {
+                return false;
+            };
+            let FieldKind::OrderedList { items, .. } = &mut field.kind else {
+                return false;
+            };
+            let mut changed = false;
+            for (i, item) in items.iter_mut().enumerate() {
+                let want = if tick_all {
+                    shown.contains(&i) || item.included
+                } else {
+                    false
+                };
+                if item.included != want {
+                    item.included = want;
+                    changed = true;
+                }
+            }
+            changed
+        });
+        if changed {
+            revalidate(shell);
+            commit_change(shell, cx);
+        } else {
+            set_notice(shell, "nothing to change".to_string());
+        }
+        cx.notify();
+        return true;
     }
 
     // ---- Filter mode (§18.3) ------------------------------------------
@@ -1323,6 +1470,20 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 // draft when they declined it. Leaving abandons exactly
                 // nothing.
                 //
+                // Scopes-editing spec §4: from the Values stage this rung
+                // goes back to the scope whose fields `leave_values_stage`
+                // restores, cursor on the dimension just edited — checked
+                // ahead of the column stage's own rung, since the two
+                // stages never overlap but the check has to name one
+                // first.
+                let in_values = shell
+                    .object_dialog
+                    .as_ref()
+                    .is_some_and(|state| matches!(state.stage, Stage::Values { .. }));
+                if in_values {
+                    leave_values_stage(shell, cx);
+                    return true;
+                }
                 // Part 2c §5.2: from the column stage this rung goes back
                 // one stage, not all the way out — to the view whose
                 // fields `leave_column_stage` restores, cursor on the
@@ -1410,6 +1571,13 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             let key = if delta < 0 { "shift+k" } else { "shift+j" };
             not_a_column_verb(shell, key);
         }
+        // Scopes-editing spec §3.2 (ruling 4): a scope's selections have
+        // no meaningful order, on the dimensions list and on the Values
+        // stage's own ticked list alike — `is_scopes` covers both, since
+        // neither list this domain paints is reorderable.
+        NormalCommand::MoveItem(_) if is_scopes(shell) => {
+            set_notice(shell, scopes::NO_ORDER_NOTICE.to_string())
+        }
         NormalCommand::MoveItem(delta) => {
             let skipped = draft_mut(shell).and_then(|draft| draft.move_item(delta));
             match skipped {
@@ -1450,6 +1618,33 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // neither list is on screen here, so the notice names the stage
         // rather than a list the trader cannot see.
         NormalCommand::Verb('x') if in_column_stage(shell) => not_a_column_verb(shell, "x"),
+        // Scopes-editing spec §3.2: `x` drops a selected dimension
+        // outright — the definitional twin of the Values stage's ticks —
+        // but only on the dimensions list itself; on an available row
+        // there is nothing to drop (`enter` picks its values instead),
+        // and inside the Values stage a value's own row answers with
+        // `space`'s own wording rather than this domain's.
+        NormalCommand::Verb('x') if is_scopes(shell) => {
+            match draft_ref(shell).map(Draft::selected_row) {
+                Some(Some(EditRow::Available { .. })) => {
+                    set_notice(shell, "not selected — enter picks its values".to_string())
+                }
+                Some(Some(EditRow::Item { .. })) if !in_values_stage(shell) => {
+                    match draft_mut(shell).map(Draft::remove_selected) {
+                        Some(Step::Changed) => {
+                            revalidate(shell);
+                            commit_change(shell, cx);
+                        }
+                        Some(Step::Refused(reason)) => set_notice(shell, reason),
+                        _ => {}
+                    }
+                }
+                _ => set_notice(
+                    shell,
+                    "x drops a selected dimension — here, space unticks".to_string(),
+                ),
+            }
+        }
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
                 revalidate(shell);
@@ -1505,11 +1700,16 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
 ///
 /// Part 2c §5.2 and dataset-presentation §4.1: on one of the view's OWN
 /// column rows, or on a Schema column row, it opens that column's
-/// presentation; anywhere else it is [`edit_commit_notice`]'s answer.
+/// presentation; scopes-editing spec §4: on a Scopes `dimensions` row (a
+/// selection or an available column alike) it opens that column's Values
+/// stage; anywhere else it is [`edit_commit_notice`]'s answer.
 fn commit_selected_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    match column_stage_target(shell) {
-        Some(name) => enter_column_stage(shell, &name, cx),
-        None => edit_commit_notice(shell),
+    if let Some(name) = column_stage_target(shell) {
+        enter_column_stage(shell, &name, cx);
+    } else if let Some(column) = values_stage_target(shell) {
+        enter_values_stage(shell, &column, cx);
+    } else {
+        edit_commit_notice(shell);
     }
 }
 
@@ -1550,6 +1750,33 @@ fn column_stage_target(shell: &ShellView) -> Option<String> {
             .key
             .strip_prefix("columns.")
             .map(str::to_string),
+        _ => None,
+    }
+}
+
+/// The dimension the row under the cursor would open a Values stage for
+/// (scopes-editing spec §3): a Scopes draft's `dimensions` item OR
+/// available row, outside any projection. Read by [`commit_selected_row`],
+/// [`on_edit_row_clicked`] and the `space` arm alike, so the three doors
+/// cannot disagree about which rows open values.
+fn values_stage_target(shell: &ShellView) -> Option<String> {
+    let state = shell.object_dialog.as_ref()?;
+    if state.domain != Domain::Scopes {
+        return None;
+    }
+    let draft = state.draft.as_ref()?;
+    if draft.column().is_some() || draft.values().is_some() {
+        return None;
+    }
+    match draft.selected_row()? {
+        row @ (EditRow::Item { field, .. } | EditRow::Available { field, .. })
+            if draft
+                .fields
+                .get(field)
+                .is_some_and(|f| f.key == "dimensions") =>
+        {
+            Some(draft.row_label(row))
+        }
         _ => None,
     }
 }
@@ -1802,6 +2029,28 @@ fn step_selected_row(
     filtering: bool,
     cx: &mut Context<ShellView>,
 ) {
+    // Scopes' edit stage (spec §3): `space` on an available dimension
+    // opens its values rather than adding an empty selection — a fresh
+    // selection with nothing ticked is not a state this domain can save
+    // — and on a selected one it names the door, since the values
+    // themselves are the Values stage's to change. Checked ahead of the
+    // ordinary step below and never inside the Values stage itself,
+    // where a tick is exactly what `space` already means.
+    if !in_values_stage(shell) && is_scopes(shell) {
+        match draft_ref(shell).and_then(Draft::selected_row) {
+            Some(EditRow::Available { .. }) => {
+                if let Some(column) = values_stage_target(shell) {
+                    enter_values_stage(shell, &column, cx);
+                }
+                return;
+            }
+            Some(EditRow::Item { .. }) => {
+                set_notice(shell, "enter opens this dimension's values".to_string());
+                return;
+            }
+            _ => {}
+        }
+    }
     let stepped = draft_mut(shell).map(|draft| {
         if forward {
             draft.toggle_selected()
@@ -1860,6 +2109,15 @@ fn draft_mut(shell: &mut ShellView) -> Option<&mut Draft> {
         .object_dialog
         .as_mut()
         .and_then(|state| state.draft.as_mut())
+}
+
+/// [`draft_mut`], immutably — for a caller that only needs to read the
+/// row under the cursor before deciding whether to mutate at all.
+fn draft_ref(shell: &ShellView) -> Option<&Draft> {
+    shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
 }
 
 /// After a `Toggle`/`ToggleBack` step that just changed a Views draft's
@@ -1945,6 +2203,28 @@ fn in_column_stage(shell: &ShellView) -> bool {
         .is_some_and(|draft| draft.column().is_some())
 }
 
+/// Is the Values stage open (scopes-editing spec §4)? [`in_column_stage`]'s
+/// own mirror, off [`Draft::values`] for the same reason: the projection
+/// is what the verbs below actually act on.
+fn in_values_stage(shell: &ShellView) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .is_some_and(|draft| draft.values().is_some())
+}
+
+/// Is this dialog open on `Domain::Scopes`, whichever of its stages is on
+/// screen — the guard `MoveItem`'s and `Verb('x')`'s Scopes arms share,
+/// since both this domain's lists (the dimensions list and the Values
+/// stage's own) are unreorderable.
+fn is_scopes(shell: &ShellView) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain == Domain::Scopes)
+}
+
 /// The one answer for a verb the column stage does not own: `x`,
 /// `shift+j` and `shift+k` all reorder or demote rows of a list this
 /// stage does not install, and `d`/`r` (the final review's I-2) act on
@@ -1953,6 +2233,19 @@ fn in_column_stage(shell: &ShellView) -> bool {
 /// answer about an object or rows that are not on screen.
 fn not_a_column_verb(shell: &mut ShellView, key: &str) {
     set_notice(shell, format!("{key} is not a verb in a column's stage"));
+}
+
+/// The one answer for `d`/`r`/`o` inside the Values stage (scopes-editing
+/// spec §4): the crumb has narrowed the object to one dimension's values,
+/// and none of the three destructive verbs act on those — the same
+/// reasoning [`not_a_column_verb`] gives for the column stage, with its
+/// own wording since the remedy here (`escape`) is a single key rather
+/// than a stage to name.
+fn not_a_values_verb(shell: &mut ShellView) {
+    set_notice(
+        shell,
+        "not a verb while picking values — escape first".to_string(),
+    );
 }
 
 /// Set the footer notice, if a dialog is open at all.
@@ -2425,6 +2718,13 @@ fn arm_delete(shell: &mut ShellView) {
         not_a_column_verb(shell, "d");
         return;
     }
+    // Scopes-editing spec §4: the same reasoning, one stage over — `d`'s
+    // confirmed effect is on the whole SCOPE, not the one dimension's
+    // values the crumb has narrowed to.
+    if in_values_stage(shell) {
+        not_a_values_verb(shell);
+        return;
+    }
     match target_row(shell) {
         Some(row) if row.layer == Some(Layer::User) => {
             arm_confirm(shell, Confirm::Delete);
@@ -2479,6 +2779,12 @@ fn arm_revert(shell: &mut ShellView) {
         not_a_column_verb(shell, "r");
         return;
     }
+    // Scopes-editing spec §4: `arm_delete`'s own values-stage guard, for
+    // the same reason.
+    if in_values_stage(shell) {
+        not_a_values_verb(shell);
+        return;
+    }
     match target_row(shell) {
         Some(row) if row.overridden => {
             arm_confirm(shell, Confirm::Revert);
@@ -2523,6 +2829,12 @@ fn overwrite_scope(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
     if state.draft.is_none() {
         set_notice(shell, "nothing is open".to_string());
+        return;
+    }
+    // `arm_delete`'s own values-stage guard: `o` overwrites the whole
+    // SCOPE, not the one dimension's values the crumb has narrowed to.
+    if in_values_stage(shell) {
+        not_a_values_verb(shell);
         return;
     }
     let forks = target_row(shell).is_some_and(|row| row.layer != Some(Layer::User));
@@ -2750,7 +3062,12 @@ fn actions(shell: &ShellView) -> Vec<Action> {
     // final whole-branch review's Minor 6). `i` is the exception (spec
     // §20.3): the stage's `label` and `width` rows are exactly the rows
     // it opens, so it is decided per row below, on either stage.
-    let in_column = draft.column().is_some();
+    //
+    // Scopes-editing spec §4: the Values stage refuses all three through
+    // the same doors (`arm_delete`/`arm_revert`/`overwrite_scope`'s own
+    // `in_values_stage` guards), so it joins the column stage's gate
+    // here rather than growing a second one.
+    let in_column = draft.column().is_some() || draft.values().is_some();
     let row = target_row(shell);
     let mut out = Vec::new();
     if !in_column && row.as_ref().is_some_and(|r| r.layer == Some(Layer::User)) {
@@ -3492,7 +3809,23 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 let section_key = (field, own);
                 if last_item_section != Some(section_key) {
                     last_item_section = Some(section_key);
-                    let (text, suffix) = section_header_text(domain, own);
+                    // Scopes-editing spec §4: the Values stage installs
+                    // its own list under the very same field key
+                    // (`"values"`) the ordinary edit stage's `dimensions`
+                    // list would carry, so `own` alone cannot tell the
+                    // two apart — `section_header_text(Domain::Scopes,
+                    // true)` would paint "DIMENSIONS" over a values list.
+                    // `draft.values().is_some()` is the stage-aware
+                    // override every other Values-stage site already
+                    // reads by.
+                    let (text, suffix) = if draft.values().is_some() {
+                        (
+                            "VALUES — space ticks · ctrl+a all shown · ctrl+x none",
+                            "members",
+                        )
+                    } else {
+                        section_header_text(domain, own)
+                    };
                     let field_key = draft.fields[field].key.clone();
                     section_header = Some(
                         div()
@@ -3533,10 +3866,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 // a future item-level text field (a column's width, Part
                 // 2c) withdraws the same way without a second condition
                 // to remember.
+                // Scopes paints neither list as reorderable (spec §3.2,
+                // ruling 4 — `reorders`'s own doc in the footer below has
+                // the full reasoning): the grip is withdrawn on its own
+                // rows exactly as it already is on an available row,
+                // rather than painted as a promise `shift+j`/`shift+k`
+                // cannot keep.
+                let draggable = domain != Domain::Scopes;
                 let grip_and_tick = if draft.text_entry.is_some() {
                     None
                 } else {
-                    let grip = if own {
+                    let grip = if own && draggable {
                         div()
                             .text_color(theme.muted_foreground)
                             .w(scale::design(11.))
@@ -3582,27 +3922,33 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     name_row = name_row.text_color(theme.muted_foreground);
                 }
                 name_row = name_row.child(highlighted_text(&entry.name, &m.indices, theme.primary));
-                // The compact per-column summary (Part 2c §5.4) is painted
-                // after the name, muted, on a member row only — an
-                // available row's presentation is always the empty
-                // default (nothing has ever overridden a column not yet
-                // in the view), so `column_summary` would paint nothing
-                // for one anyway, but `own` says so rather than relying
-                // on that coincidence. It is deliberately part of the
-                // NAME element, not `row_label` — `Draft::row_label`
-                // stays the name alone, so the filter still matches only
-                // what it always matched.
-                if own {
-                    let summary =
-                        views::column_summary(&views::kind_default(entry), &entry.presentation);
-                    if !summary.is_empty() {
-                        name_row = name_row.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(summary),
-                        );
-                    }
+                // The note painted after the name, muted: [`ListItem::
+                // note`] itself where the adapter set one (Scopes' own
+                // selections and the Values stage's ticked values, spec
+                // §3/§4) — the field the item carries FOR this purpose —
+                // or, on a member row with none, the compact per-column
+                // summary (Part 2c §5.4). An available row's presentation
+                // is always the empty default (nothing has ever
+                // overridden a column not yet in the view), so
+                // `column_summary` would paint nothing for one anyway,
+                // but `own` says so rather than relying on that
+                // coincidence. It is deliberately part of the NAME
+                // element, not `row_label` — `Draft::row_label` stays the
+                // name alone, so the filter still matches only what it
+                // always matched.
+                let note = entry.note.clone().or_else(|| {
+                    own.then(|| {
+                        views::column_summary(&views::kind_default(entry), &entry.presentation)
+                    })
+                    .filter(|s| !s.is_empty())
+                });
+                if let Some(note) = note {
+                    name_row = name_row.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(note),
+                    );
                 }
                 let name = name_row.into_any_element();
                 (
@@ -3689,16 +4035,19 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // neither — which is `Draft::row_drag` returning `None`, not a
         // second rule stated here — and while any value field is open
         // (§19.1) the rows carry no drag either, the same withdrawal
-        // the tick and the action bar make there.
+        // the tick and the action bar make there. Scopes is withdrawn
+        // outright here too (`draggable`'s own doc above): unlike a
+        // field row, its dimensions and Values lists ARE `OrderedList`s
+        // `Draft::row_drag` would otherwise answer for, so the domain has
+        // to be excluded at the render site rather than left to that
+        // method alone.
         //
         // The branch is built into an `AnyElement` on both sides because
         // `.id()` turns the `Div` into a `Stateful<Div>`: the two arms
         // have different types and only the erased form can be one
         // value. (`list.child(..)` below already takes an `AnyElement`,
         // so nothing downstream notices.)
-        let row_el = match draft
-            .text_entry
-            .is_none()
+        let row_el = match (draft.text_entry.is_none() && domain != Domain::Scopes)
             .then(|| draft.row_drag(edit_row))
             .flatten()
         {
@@ -3966,8 +4315,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // condition on top (§18.2 — see `mod.rs`'s
         // `Draft::remove_selected` doc): every other domain's `x` merely
         // refuses, so a chip there would teach a trader on Groupings or
-        // Scopes a key that does nothing.
-        let reorders = vocabulary == RowVocabulary::Item;
+        // Scopes a key that does nothing. Scopes is excluded outright
+        // (scopes-editing spec §3.2, ruling 4): neither list it paints —
+        // the dimensions list here, the Values stage's own ticked list —
+        // has an order the compiler reads, so the chip would teach a key
+        // that only ever answers with `NO_ORDER_NOTICE`.
+        let reorders = vocabulary == RowVocabulary::Item && state.domain != Domain::Scopes;
         let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
         hints.extend(change_hint(false));
         if reorders {
@@ -3996,10 +4349,39 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 Hint::new(HintRow::Edit, &["i"], "type a value").selector("objectdialog-hint-i"),
             );
         }
+        // Scopes-editing spec §4: the Values stage's own pair, advertised
+        // only while it is open; `enter`'s own row opens it, advertised
+        // only while it is NOT — the two can never both paint, since
+        // `values_stage_target` is `None` the instant the stage is.
+        if state.domain == Domain::Scopes && draft.values().is_some() {
+            hints.push(Hint::new(
+                HintRow::Edit,
+                &["ctrl+a", "ctrl+x"],
+                "all shown / none",
+            ));
+        }
+        if state.domain == Domain::Scopes
+            && draft.values().is_none()
+            && values_stage_target(shell).is_some()
+        {
+            hints.push(
+                Hint::new(HintRow::Go, &["enter"], "open values")
+                    .selector("objectdialog-hint-enter"),
+            );
+        }
         if opens_column {
             hints.push(open_column());
         }
-        hints.extend(leave("back to the list".to_string()));
+        // The Values stage's own escape rung names the scope it returns
+        // to, exactly as the column stage's `leave(format!("back to
+        // {}", draft.name))` does above — `draft.name` is the scope, not
+        // the dimension, since the crumb already narrows to the column.
+        let back = if draft.values().is_some() {
+            format!("back to {}", draft.name)
+        } else {
+            "back to the list".to_string()
+        };
+        hints.extend(leave(back));
         hints
     };
     let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
@@ -4518,6 +4900,8 @@ fn on_edit_row_clicked(
     // the trader pressed it instead.
     if let Some(name) = column_stage_target(shell) {
         enter_column_stage(shell, &name, cx);
+    } else if let Some(column) = values_stage_target(shell) {
+        enter_values_stage(shell, &column, cx);
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
@@ -4575,11 +4959,15 @@ pub(in crate::shell) fn on_value_chip_clicked(
 }
 
 /// §18.9.2: a click on a row's tick. The cursor moves to the row first,
-/// then exactly `space`'s path runs — `Draft::toggle_selected`, the
-/// available-block refresh, revalidation, the scroll and
-/// `commit_change` — so every write and every refusal the key gives,
-/// the tick gives. Ends in [`dialog::sync_dialog_text`] like every mouse
-/// handler that mutates the draft (§17.1 rule 3).
+/// then exactly `space`'s path runs — [`step_selected_row`] itself, not
+/// a second copy of what it does, so every write and every refusal the
+/// key gives, the tick gives, and (scopes-editing spec §3) so does the
+/// door a Scopes available row's tick opens: without going through the
+/// same function, a tick on that row would fall straight to
+/// `Draft::toggle_selected`, which adds an empty selection instead of
+/// opening the Values stage `space` opens from there. Ends in
+/// [`dialog::sync_dialog_text`] like every mouse handler that mutates the
+/// draft (§17.1 rule 3).
 ///
 /// **Claimed and dropped while a confirm is armed**, mirroring
 /// `handle_edit_key`'s own `armed` block: a stray keystroke other than
@@ -4627,16 +5015,7 @@ fn on_tick_clicked(
         return;
     }
     draft.selected = position;
-    match draft.toggle_selected() {
-        Step::Changed => {
-            maybe_refresh_available(shell);
-            revalidate(shell);
-            scroll_to_cursor(shell);
-            commit_change(shell, cx);
-        }
-        Step::Refused(reason) => refuse_step(shell, reason),
-        Step::Inert => set_notice(shell, "nothing on this row changes with a tick".to_string()),
-    }
+    step_selected_row(shell, true, false, cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }

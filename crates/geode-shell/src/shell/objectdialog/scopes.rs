@@ -233,13 +233,9 @@ fn fields_from_table(config: &Config, table: Option<&toml::Table>) -> Vec<Field>
 
 /// The notice `shift+j`/`shift+k` answer on this domain (ruling 4, spec
 /// §3.2): a scope's selections have no meaningful order — the compiler
-/// reads them as a set, and `render.rs`'s reorder key wires this in
-/// (Task 4) — kept here so both the notice's wording and the rule that
-/// produces it live in one place. `render.rs` does not read it yet, so
-/// it is unreached until that wiring lands — this crate's own
-/// `dead_code` lint would otherwise fail `-D warnings` on this task
-/// alone for a constant Task 4 is contracted to consume.
-#[allow(dead_code)]
+/// reads them as a set, and `render.rs`'s `MoveItem` arm (Task 4) reads
+/// this — kept here so both the notice's wording and the rule that
+/// produces it live in one place.
 pub const NO_ORDER_NOTICE: &str = "selections have no order";
 
 /// The draft rendered as `scopes.toml`'s own value for this object:
@@ -404,11 +400,8 @@ pub fn fold(draft: &mut Draft) {
 /// display-only row, so the stage has a shape to paint and `escape` to
 /// leave by. Replaced whole by [`values_fields`] on delivery.
 ///
-/// `render::enter_values_stage` (Task 4) is what seeds a fresh Values
-/// stage with this before the `Request::Distinct` round trip lands —
-/// unreached until that door exists, so `#[allow(dead_code)]` for the
-/// same reason [`NO_ORDER_NOTICE`] carries it.
-#[allow(dead_code)]
+/// `render::enter_values_stage` seeds a fresh Values stage with this
+/// before the `Request::Distinct` round trip lands.
 pub fn loading_field() -> Vec<Field> {
     status_field("loading…")
 }
@@ -541,10 +534,7 @@ pub fn fold_values(draft: &mut Draft) {
 /// yields the empty scope: the counts are then dataset-wide, which is
 /// honest for a scope that does not yet parse.
 ///
-/// `render::enter_values_stage` (Task 4) is the one caller — the
-/// non-test build has none yet, so `#[allow(dead_code)]` for
-/// [`loading_field`]'s own reason.
-#[allow(dead_code)]
+/// `render::enter_values_stage` is the one caller.
 pub fn draft_scope(draft: &Draft, config: &Config, minus: &str) -> Scope {
     let table = rendered_doc_table(draft);
     let doc = merge_docs(

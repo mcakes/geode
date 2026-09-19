@@ -2859,6 +2859,15 @@ impl Domain {
         if matches!(stage, Stage::Column { .. }) {
             return views::column_help(key);
         }
+        // Scopes-editing spec §4: the Values stage's one row is always
+        // keyed `values`, so this answers the same as the general
+        // `Domain::Scopes` arm below would — stated explicitly, ahead of
+        // it, so a future domain that grows a Values-shaped stage of its
+        // own cannot silently fall through to its OWN `help` table
+        // instead.
+        if matches!(stage, Stage::Values { .. }) {
+            return scopes::help("values");
+        }
         match self {
             Domain::Views => views::help(key),
             Domain::Sources => sources::help(key),

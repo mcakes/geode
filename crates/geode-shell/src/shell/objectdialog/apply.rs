@@ -1040,6 +1040,20 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
                 rebuilt.select_item_named(&column);
                 state.stage = Stage::Edit { object };
             }
+            // Scopes-editing spec §4: a rebuilt draft carries no Values
+            // projection either — its one field is the scope's own
+            // `dimensions`/`text`/`expression` set, not a single column's
+            // values — so the stage steps back the same way the column
+            // stage's own arm does. Unlike that arm there is no
+            // `select_item_named`-shaped call that also searches the
+            // AVAILABLE block (a failed write is rare enough that landing
+            // on row 0 rather than the exact dimension is an acceptable
+            // cost here).
+            Stage::Values { object, .. } => {
+                let object = object.clone();
+                rebuilt.selected = 0;
+                state.stage = Stage::Edit { object };
+            }
             _ => rebuilt.selected = selected,
         }
         state.draft = Some(rebuilt);

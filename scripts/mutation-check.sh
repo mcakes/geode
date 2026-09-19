@@ -7349,12 +7349,12 @@ run_mutation "objectdialog: the edit list sizes itself instead of the header it 
 # ambiguous.
 run_mutation "objectdialog: an edit-stage click takes the keyboard off the filter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if let Some(name) = column_stage_target(shell) {
-        enter_column_stage(shell, &name, cx);
+  '    } else if let Some(column) = values_stage_target(shell) {
+        enter_values_stage(shell, &column, cx);
     }
     dialog::sync_dialog_text(shell, window, cx);' \
-  '    if let Some(name) = column_stage_target(shell) {
-        enter_column_stage(shell, &name, cx);
+  '    } else if let Some(column) = values_stage_target(shell) {
+        enter_values_stage(shell, &column, cx);
     }
     shell.focus_handle.focus(window, cx);' \
   geode-shell \
@@ -7753,14 +7753,29 @@ run_mutation "objectdialog: locate resolves a drag payload by name" \
 # ---- Mouse parity Task 5 (§18.9.2): the tick is the toggle -------------
 
 # §18.9.2: the tick toggles. Mutated to a bare select, a tick click moves
-# the cursor and changes nothing.
+# the cursor and changes nothing. Task 4 (scopes-editing spec §3) routed
+# this through `step_selected_row` itself rather than a second copy of
+# its body, so the mutation is on the call, not a `match` this function
+# no longer has.
 run_mutation "objectdialog: a tick click toggles through space's path" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    draft.selected = position;
-    match draft.toggle_selected() {' \
+    step_selected_row(shell, true, false, cx);
+    dialog::sync_dialog_text(shell, window, cx);' \
   '    draft.selected = position;
-    match Step::Inert {' \
+    dialog::sync_dialog_text(shell, window, cx);' \
   geode-shell clicking_a_tick_hides_the_column_and_parks_the_cursor_there
+
+# Scopes-editing spec §3 (Task 4): `step_selected_row` is the ONE path a
+# tick click and `space` both take, so a click on a Scopes available
+# dimension's tick has to open its Values stage exactly as `space` does
+# — without this guard it would fall through to the ordinary
+# `Draft::toggle_selected`, which adds an empty selection instead.
+run_mutation "objectdialog: a tick on an available Scopes row opens its values" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if !in_values_stage(shell) && is_scopes(shell) {' \
+  '    if false {' \
+  geode-shell clicking_an_available_dimensions_tick_opens_its_values_stage
 
 # Review finding on Task 5: a tick click must be claimed and dropped
 # while a confirm is armed, exactly as `handle_edit_key`'s bare-letter
@@ -10083,10 +10098,14 @@ run_mutation "objectdialog: the schema adapter renders the overlay, not the data
 # is the defect the mouse-parity rule exists to remove.
 run_mutation "objectdialog: a click on a column row opens its stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if let Some(name) = column_stage_target(shell) {
+  '    // that was just clicked, which is what `enter` would be acting on had
+    // the trader pressed it instead.
+    if let Some(name) = column_stage_target(shell) {
         enter_column_stage(shell, &name, cx);
     }' \
-  '    if false {
+  '    // that was just clicked, which is what `enter` would be acting on had
+    // the trader pressed it instead.
+    if false {
         enter_column_stage(shell, "", cx);
     }' \
   geode-shell \
@@ -10244,7 +10263,7 @@ run_mutation "objectdialog: the refreshed catalogue reads the pending config" \
 # dataset" over one.
 run_mutation "objectdialog: a column stage offers no destructive action" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let in_column = draft.column().is_some();
+  '    let in_column = draft.column().is_some() || draft.values().is_some();
     let row = target_row(shell);' \
   '    let in_column = false;
     let row = target_row(shell);' \
@@ -11273,10 +11292,22 @@ run_mutation "objectdialog: an inert step in filter mode names space rather than
 # row is the same inert-key class the change group's gate closed.
 run_mutation "objectdialog: the edit footer paints the reorder group on a row with no item" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        let reorders = vocabulary == RowVocabulary::Item;' \
+  '        let reorders = vocabulary == RowVocabulary::Item && state.domain != Domain::Scopes;' \
   '        let reorders = true;' \
   geode-shell \
   the_edit_footer_names_only_what_the_selected_row_offers
+
+# Scopes-editing spec §3.2 (Task 4): a scope's own dimensions list IS an
+# `EditRow::Item` list, so `vocabulary_of` answers `RowVocabulary::Item`
+# for it exactly as Views' own member list does — the domain exclusion is
+# the only thing keeping the reorder chip off a Scopes row. Mutated away,
+# it paints there too.
+run_mutation "objectdialog: the reorder group is withheld on Scopes" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        let reorders = vocabulary == RowVocabulary::Item && state.domain != Domain::Scopes;' \
+  '        let reorders = vocabulary == RowVocabulary::Item;' \
+  geode-shell \
+  the_scopes_dimensions_list_offers_no_reorder_chip
 
 # Review 2026-09-13: `tab` steps in the settings dialog's NORMAL mode and
 # the footer used to withhold it there, on the grounds that it was filter
