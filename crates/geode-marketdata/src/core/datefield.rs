@@ -6,7 +6,7 @@
 //! rolls, clamps or saturates, a digit that would make an impossible
 //! segment is refused, and `enter` therefore has nothing to refuse.
 
-use chrono::{Datelike, Duration, Months, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate};
 
 /// One of the three segments, in painted order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,12 +111,14 @@ impl DateField {
         self.date = match self.segment {
             Segment::Day => date.checked_add_signed(Duration::days(n)),
             Segment::Month => {
-                let months = u32::try_from(n.unsigned_abs()).unwrap_or(u32::MAX);
-                if n >= 0 {
-                    date.checked_add_months(Months::new(months))
-                } else {
-                    date.checked_sub_months(Months::new(months))
-                }
+                // Counted in whole months from year 0 so a step of any
+                // size crosses year ends in one arithmetic, then clamped
+                // through the same door a year step and a typed month use.
+                let total = i64::from(date.year()) * 12 + i64::from(date.month() - 1) + n;
+                let month = total.rem_euclid(12) as u32 + 1;
+                i32::try_from(total.div_euclid(12))
+                    .ok()
+                    .and_then(|year| clamped_ymd(year, month, date.day()))
             }
             Segment::Year => {
                 let delta = i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX });

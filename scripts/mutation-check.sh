@@ -10698,7 +10698,7 @@ run_mutation "mdedit: a commit parses the typed text before writing it" \
 run_mutation "mdedit: the editor gives up focus before it is dropped" \
   crates/geode-marketdata/src/tile.rs \
   '        if let Some(e) = &self.editor
-            && e.state.read(cx).focus_handle(cx).is_focused(window)
+            && e.state.is_focused(window, cx)
         {
             window.blur(cx);
         }
@@ -11401,10 +11401,10 @@ run_mutation "mdpaint: header tones are floored to 3:1 against the background" \
 # session.
 run_mutation "mdpaint: the floored tones re-derive when a theme input moves" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.key != key {
+  '        if self.key != Self::key(theme) {
             *self = Self::derive(theme);
         }' \
-  '        let _ = key;' \
+  '        let _ = Self::key(theme);' \
   geode-marketdata \
   floored_tones_refresh_only_when_an_input_changes
 
@@ -11517,24 +11517,24 @@ run_mutation "mdcursor: j from the strip returns to the remembered column" \
 # typed text along with it.
 run_mutation "mdattr: a refused attribute value stays in insert mode" \
   crates/geode-marketdata/src/tile.rs \
-  '            Err(e) => {
-                // Refused, staying in insert mode with the typed text
-                // (the cell rule, spec §5.2) — retyping is one keystroke
-                // away where dropping the editor would throw the whole
-                // line back at the trader.
-                self.notice = Some(e.into());
-                return true;
-            }' \
-  '            Err(e) => {
-                // Refused, staying in insert mode with the typed text
-                // (the cell rule, spec §5.2) — retyping is one keystroke
-                // away where dropping the editor would throw the whole
-                // line back at the trader.
-                self.close_editor(window, cx);
-                self.notice = Some(e.into());
-                return true;
-            }' \
-  geode-marketdata a_bad_date_stays_in_insert_mode_with_the_notice
+  '                Err(e) => {
+                    // Refused, staying in insert mode with the typed text
+                    // (the cell rule, spec §5.2) — retyping is one
+                    // keystroke away where dropping the editor would
+                    // throw the whole line back at the trader.
+                    self.notice = Some(e.into());
+                    return true;
+                }' \
+  '                Err(e) => {
+                    // Refused, staying in insert mode with the typed text
+                    // (the cell rule, spec §5.2) — retyping is one
+                    // keystroke away where dropping the editor would
+                    // throw the whole line back at the trader.
+                    self.close_editor(window, cx);
+                    self.notice = Some(e.into());
+                    return true;
+                }' \
+  geode-marketdata a_bad_number_stays_in_insert_mode_with_the_notice
 
 # The strip clears the table's own selection (`clear_selection`) so the
 # grid paints no highlighted row behind an attribute edit. Mutated to skip
@@ -11926,13 +11926,60 @@ run_mutation "mdnudge: a slice column steps at its own precision" \
   '                    .filter(|_| false)' \
   geode-marketdata a_slice_column_nudges_at_its_own_precision
 
-# A `Date` attribute steps whole days. Mutated to step none, the text
-# comes back unchanged.
-run_mutation "mdnudge: a date steps whole days" \
-  crates/geode-marketdata/src/core/nudge.rs \
-  '                d.checked_add_signed(chrono::Duration::days(steps))' \
-  '                d.checked_add_signed(chrono::Duration::days(0))' \
-  geode-marketdata an_attribute_nudges_by_days_or_by_its_painted_places
+# ---- The segmented date field (header spec §5.2, 2026-09-19) -----------
+# A `Date` attribute opens the segmented field, not a text editor, and the
+# field opens on the DAY segment (user ruling 2026-09-19). Mutated to open
+# on the year, the first `up` a trader presses steps the year by one — a
+# whole year off, on the segment they change least, with nothing refused.
+run_mutation "mddate: the field opens on the day segment" \
+  crates/geode-marketdata/src/core/datefield.rs \
+  '            segment: Segment::Day,' \
+  '            segment: Segment::Year,' \
+  geode-marketdata i_on_a_date_attribute_opens_the_field_on_the_day_segment
+
+# A day step ROLLS into the next month (Sep 30 + 1 = Oct 1), the mockup's
+# own rule. Mutated to clamp at the month's end instead, `up` on the 30th
+# goes nowhere and a trader who wanted October has to reach the month
+# segment by hand — and nothing on screen says the step was swallowed.
+run_mutation "mddate: the day rolls over into the next month" \
+  crates/geode-marketdata/src/core/datefield.rs \
+  '            Segment::Day => date.checked_add_signed(Duration::days(n)),' \
+  '            Segment::Day => NaiveDate::from_ymd_opt(date.year(), date.month(), (i64::from(date.day()) + n).clamp(1, i64::from(days_in_month(date))) as u32),' \
+  geode-marketdata a_day_step_rolls_over_into_the_next_month
+
+# A month (or year, or typed month) step CLAMPS the day to the new month's
+# length — `clamped_ymd` is the one door. Mutated to keep the day as it
+# was, Jan 31 + 1 month is no date at all, and `step`'s saturation then
+# lands the field on chrono's `NaiveDate::MAX` (year 262142): a valid date,
+# committable, and absurd.
+run_mutation "mddate: a month step clamps the day" \
+  crates/geode-marketdata/src/core/datefield.rs \
+  '    NaiveDate::from_ymd_opt(year, month, day.min(last))' \
+  '    NaiveDate::from_ymd_opt(year, month, day)' \
+  geode-marketdata a_month_step_clamps_the_day_to_the_new_months_length
+
+# A first month digit of 2–9 completes at once as `0d` (only 0/1 can
+# still become a two-digit month). Mutated so no first digit completes,
+# `3` waits for a second digit that can never make a month under 13 with
+# it — the segment sits typing `3` until the trader backspaces.
+run_mutation "mddate: a first month digit 2-9 completes at once" \
+  crates/geode-marketdata/src/core/datefield.rs \
+  '                    "" if d >= 2 => u32::from(d),' \
+  '                    "" if d >= 10 => u32::from(d),' \
+  geode-marketdata a_first_month_digit_two_to_nine_completes_at_once
+
+# `escape` in the field CANCELS: the painted date comes back and the draft
+# is untouched. Mutated to commit instead, every abandoned edit is written
+# — the one key the mockup promises "puts 2026-09-14 back untouched".
+run_mutation "mddate: escape restores the painted date" \
+  crates/geode-marketdata/src/tile.rs \
+  '            "escape" => {
+                self.close_editor(window, cx);
+                self.sync_cursor(cx);' \
+  '            "escape" => {
+                self.commit_edit(window, cx);
+                self.sync_cursor(cx);' \
+  geode-marketdata escape_restores_the_painted_date_and_blurs_the_field
 
 run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
   crates/geode-shell/src/vimnav.rs \
