@@ -3050,3 +3050,69 @@ which is also where §19.2's width ended up (the column stage's `width`
 field). None of §19's own text went stale; what did change is inside the
 2c spec, by user ruling — a readability floor inside the resolver, which
 amended 2c §2.2's identity rule and 2c §7's theme check in place.
+
+## 21. Amendment — `d` and `r` from the browse list (2026-09-19)
+
+**Request.** "On the Edit Sources dialog, I want to be able to delete
+and revert a source from the first screen without having to step into
+the second (though the detail screen should still let me delete/revert
+too)."
+
+**Rule.** In any object dialog's browse stage, in normal mode, `d` on
+the selected row arms the delete confirm and `r` arms the revert
+confirm, exactly as they do in the edit stage: the same per-row gates
+(`d` only on a user-owned row, `r` only on an overridden row, the
+Groupings empty-slot wording, the read-only domain's one
+`READ_ONLY_NOTICE`), the same `dialog::confirm_row` in the action bar's
+place, the same `y`/`enter` and `n`/`escape` answer, the same
+`apply::commit_removal` batch. Every domain, not Sources alone — the
+gates are already per-row, so nothing needed a domain arm, and a browse
+`d` that worked on one domain and not another would be the asymmetry the
+mechanism-vs-instance rule exists to prevent. Scopes' `o` stays
+edit-only: it was not asked for, and it reads the frame rather than the
+row. The edit stage is untouched.
+
+**Where the question lives.** `Draft.confirm` moved to
+`ObjectDialogState.confirm` — the browse stage has no draft, and the
+keybindings dialog already keeps its confirm on its state. Two doors,
+`arm_confirm` and `armed_confirm`; every stage transition (`enter_edit`,
+`enter_edit_with`, `leave_edit`, `begin_naming`, `cancel_naming`, the
+column stage's enter and leave) clears it. What the question is ABOUT is
+not stored beside it: `render::target_object` answers the stage's object
+in `Edit`/`Column` and the selected visible row in `Browse` (`None`
+while naming, or with the filter hiding every row), and `target_row`
+(formerly `editing_row`) is the browse row for it, which is what `d`,
+`r`, `o`, `actions()` and `build_edit`'s header all read. Resolving the
+target at answer time as well as at arming time is safe because nothing
+can move it in between: the armed block claims every other key, and a
+browse row click is dropped while a question stands (§20.1 — `enter_edit`
+would otherwise clear the confirm, answering it with a shrug, and move
+the cursor off the object the prompt names).
+
+**Mouse parity (§20.3).** `browse_action_bar` paints `Delete this
+<object>` and `Revert to desk` danger buttons beside `n`, each only
+while the selected row makes it live — the edit bar's own two gates,
+read off the same `target_row` the keys arm from — routed through
+`press_verb`, the edit bar's click door. No footer chips: the edit
+stage teaches `d`/`r` through the buttons alone, and browse matches.
+While armed, the browse footer reads the edit footer's three lines
+("this needs an answer first", `enter`, `escape`) and the frozen filter
+row's click is dropped (`dialog::enter_filter_by_mouse` already read the
+state's confirm).
+
+**Landing.** `after_removal` replaces the unconditional `leave_edit`
+after a confirmed removal: from the edit or column stage it still walks
+`leave_edit` (cursor back on the object by name — still there after a
+revert, gone after a delete); from browse the dialog STAYS in browse with
+the query kept — a trader who filtered to find the row is not done with
+the filter — and the cursor clamped to the list the removal left.
+
+**Tests** (`shell/tests/objectdialog.rs`): browse `d` deletes a
+user-owned source and stays in browse; browse `r` reverts a
+presentation-only override; both refuse on a desk row with the edit
+stage's notices; Schema refuses both through `READ_ONLY_NOTICE`;
+`escape` disarms and closes nothing; a row click is dropped while armed;
+the bar's buttons follow the selected row and arm on click; the filter
+survives a browse removal. **Harness:** five entries (the browse door,
+its read-only gate, the click guard, the bar's `d` gate, the landing)
+and ten re-anchored for the confirm's move.
