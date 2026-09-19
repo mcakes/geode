@@ -48,10 +48,10 @@
 //! persistence stays on the existing background paths
 //! (`ShellView::persist_theme` and friends; no I/O lands on the render
 //! thread here). In normal mode `i` or a bare `enter` opens the selected
-//! row's typeahead (spec 2026-09-19 §3.3) — the settings dialog needed no
-//! code of its own for this, since [`route`] already dispatches every
-//! modal surface's `Choice` rows the same way; filter mode's `enter`
-//! stays claimed and dropped, there being no field open for it to
+//! row's typeahead (spec 2026-09-19 §3.3) — while a field is open,
+//! [`route`] defers to `crate::choice::route`, the key table the object
+//! dialog's own field reads too; filter mode's `enter` — with no field
+//! open — stays claimed and dropped, there being nothing for it to
 //! confirm. See [`route`] for the whole vocabulary and
 //! [`handle_key`] for why `enter` and `tab` are *claimed* rather than
 //! left to the filter.
@@ -471,7 +471,8 @@ fn tab_step(ks: &Keystroke) -> Option<StepDirection> {
 /// 3. [`listfilter::nav_command`]'s motions move in both modes;
 /// 4. bare `enter` opens the row's typeahead in [`DialogMode::Normal`]
 ///    (amended 2026-09-19 — it used to be inert and reserved here, since
-///    a step used to be the only way to change a value) and stays
+///    a step used to be the only way to change a value) and — with no
+///    field open, since rung 0 above already owns that case — stays
 ///    claimed and dropped in [`DialogMode::Filter`], where there is no
 ///    row-level verb the `Input` should lose it to;
 /// 5. in [`DialogMode::Filter`], everything else passes through to the

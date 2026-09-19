@@ -3311,7 +3311,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // the keys. A `confirm` cannot be armed here for the same reason,
     // so that arm is unreachable with the field open.
     let action_block = match (draft.text_entry.is_some(), state.confirm) {
-        (true, _) => div().into_any_element(),
+        // `min_h_6` for the same reason `action_bar` itself carries it
+        // (final review, Important 2): this placeholder sits where that
+        // bar would, and a bare `div()` with no children has no height
+        // of its own, so opening a field (`i`) would shift the footer
+        // up by a button's height and `escape` would shift it back.
+        (true, _) => div().min_h_6().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
         (false, None) => action_bar(shell, entity, cx),
     };
