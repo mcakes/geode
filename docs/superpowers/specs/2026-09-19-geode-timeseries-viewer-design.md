@@ -38,7 +38,8 @@ crate, the module.
 
 1. `cargo run -p geode-app -- --demo`, add a timeseries tile, `:add
    SPX.close`, and a line paints for the default `1y` at `1d`; `:add
-   VIX`, `y` on its chip moves it to the right axis; `x` and
+   VIX`, `y` on its chip moves it to the right axis and `y` twice
+   more opens a lower pane for it; `x` and
    `SPX.close / VIX` paints a third line; `D` and `p` paint the
    density strip and `p5 p50 p95`; `r` widens the range and only the
    missing span is fetched; `f` steps to `1h` and the query, not a
@@ -71,7 +72,8 @@ Each item names the seam it will use, so none is a redesign:
   ruling 8.
 - **Chart layouts as config objects.** A tile's series list lives in
   the session only. A named layout is an object-dialog domain later.
-- **More than two y-axes.** `Axis` is `Left | Right`.
+- **More than two panes.** `Axis` has four values over two panes
+  (ruling 12); a third pane is a `Vec` where there is a pair.
 - **Launch with context** (the blotter opening a timeseries tile for
   the underlying under its cursor) waits for the roadmap's slice 2
   mechanism; the factory already accepts restored state, which is the
@@ -127,6 +129,11 @@ part:
     range.
 11. **Where one operand of an expression has no bucket, the result has
     none.** A carried-forward value would be an invented one.
+12. **Four y-axes over two panes** (spec review, 2026-09-19): `left`,
+    `right`, `bottomleft`, `bottomright`. While any visible slot uses a
+    bottom axis the plot area splits horizontally into an upper and a
+    lower pane sharing the x-axis; otherwise there is one pane. The
+    fraction the upper pane takes is a tile setting.
 
 ## 3. Amendments to earlier designs
 
@@ -580,11 +587,16 @@ Design-pixel constants, all at the `FontSize::Medium` rem:
 - `LinearScale`: domain `(f64, f64)` to pixel range and back; nice
   ticks by the usual 1-2-5 stepping, count from the axis height.
 - `TimeScale`, two modes (§8.2).
-- `Layout::solve(bounds, options) -> Layout`: plot rect, left axis
-  rect, right axis rect (only when a visible slot uses `Right`),
-  x-axis rect, density strip rect (only when density is on; width
-  `DENSITY_STRIP` design px). Lengths are design pixels resolved
-  through the caller's rem.
+- `Layout::solve(bounds, options) -> Layout`: one or two panes. A
+  pane is a plot rect, a left axis rect and a right axis rect (each
+  only when a visible slot uses that side), and a density strip rect
+  (only when density is on; width `DENSITY_STRIP` design px). The
+  lower pane exists only while a visible slot uses `BottomLeft` or
+  `BottomRight` (ruling 12); the upper pane takes `split` of the
+  height (default 0.7, clamped to 0.2..=0.8) and a `PANE_GAP` = 6
+  design px separates them. One x-axis rect under the lowest pane,
+  shared: both panes use the same `TimeScale` and `View`. Lengths are
+  design pixels resolved through the caller's rem.
 - `decimate(x: &[f32], y: &[f64], columns: usize, out: &mut Vec<Point>)`:
   min-max per pixel column into a reused buffer, breaking at `NaN`, so
   no column's extreme is lost and a 500,000-point series is at most
@@ -624,15 +636,20 @@ buys crosshair and tooltip plumbing (`tooltip_state`, `CrossLine`,
 `Arc<ChartModel>` (buckets, per-slot values, styles, stats, the axis
 mode), the `View`, the rem size and an `ElementId`.
 
-Paint order: `Grid`, then both `PlotAxis`es and the x-axis with ticks
-from the scales, then per visible slot the decimated polyline through
-`PathCache` keyed on `(model version, view, bounds)`, then percentile
-lines as dashed segment paths (gpui's `PathBuilder` has no dash style;
-`DASH` design px on, `GAP` off, one path per line), then density bars
-as `paint_quad` (at most `bins × slots`, a few hundred, under the
-spike's 5,000-quad cliff), then the crosshair and readout from the
-component's tooltip. Labels `p5 p50 p95` are painted at the right end
-of each line in the slot's colour through `prepaint`'s child elements.
+Paint order, per pane: `Grid`, then the pane's `PlotAxis`es with
+ticks from its scales, then per visible slot on that pane the
+decimated polyline through `PathCache` keyed on `(model version, view,
+bounds)`, then that slot's percentile lines as dashed segment paths
+(gpui's `PathBuilder` has no dash style; `DASH` design px on, `GAP`
+off, one path per line), then the pane's density bars as `paint_quad`
+(at most `bins × slots`, a few hundred, under the spike's 5,000-quad
+cliff). Then, once, the shared x-axis under the lowest pane and the
+crosshair, which spans both panes at one x with the readout listing
+every visible slot from either pane, through the component's
+tooltip. Labels `p5 p50 p95` are painted at the right end of each
+line in the slot's colour through `prepaint`'s child elements. A
+slot's percentiles and bins are drawn in its own pane against its
+own axis.
 
 A frame with an unchanged key pushes cached paths and allocates
 nothing; the cache invalidates on model version, view or bounds.
@@ -665,11 +682,13 @@ pub struct Model {
     range: Range,                 // Relative("1y") | Absolute(from, to)
     frequency: Frequency,
     axis_mode: AxisMode,          // Session | Continuous
+    split: f32,                   // upper pane's share of the height when a lower pane exists; default 0.7
     density: Option<u32>,         // bins; None = off; default Some(40)
     percentiles: Vec<f64>,        // default [0.05, 0.5, 0.95]; empty = off
     view: View,
 }
 pub struct Slot { number: u8, kind: SlotKind, colour: Colour, axis: Axis, visible: bool, state: SlotState }
+pub enum Axis { Left, Right, BottomLeft, BottomRight }   // ruling 12; `pane()` answers Upper | Lower, `side()` Left | Right
 pub enum SlotState { Idle, Fetching, Failed(String) }
 ```
 
@@ -682,7 +701,8 @@ over these methods.
 
 In order: the stack marker when the tile is a member (tile-stacks
 design §5), the title `Timeseries`, `1y · 1d` (or `2025-01-01 →
-2026-09-19 · 1h`), then one chip per slot: swatch, label, `L`/`R`.
+2026-09-19 · 1h`), then one chip per slot: swatch, label, and the
+axis as `L`, `R`, `BL` or `BR`.
 The label is the identity (`SPX.close`, with `@source` only when the
 source is not the default), or an expression's text, or its `s3`
 handle when the text is over `LABEL_MAX` = 24 characters. Hidden slots are
@@ -699,7 +719,8 @@ through `tips::Chords`.
 | `x` | open the expression field (§9.7) |
 | `tab` / `shift+tab` | move the chip cursor (a count jumps that many) |
 | `v` | show/hide the cursor's slot |
-| `y` | toggle the cursor's slot between left and right axis |
+| `y` / `Y` | cycle the cursor's slot's axis forward / back through `left → right → bottomleft → bottomright` |
+| `[` / `]` | shrink / grow the upper pane by `SPLIT_STEP` = 0.05 while a lower pane exists |
 | `c` | cycle the cursor's slot through the palette |
 | `b` | cycle the cursor's slot's bucket rule |
 | `d` | remove the cursor's slot (no confirm; dependants removed with a notice) |
@@ -716,7 +737,7 @@ through `tips::Chords`.
 
 The context opts into counts, so digits are count prefixes (which is
 why there is no digit-to-slot jump) and counts apply to `h`, `l`,
-`=`, `-`, `f`, `F`, `tab`. Every key is a fragment binding whose
+`=`, `-`, `f`, `F`, `tab`, `y`, `Y`, `[`, `]`. Every key is a fragment binding whose
 predicate is `timeseries && mode == normal`.
 
 ### 9.5 The series popup
@@ -724,7 +745,7 @@ predicate is `timeseries && mode == normal`.
 `L` opens a popup over the plot painted with the market-data popup's
 geometry (`popover_style`, `PopupMenu` row geometry on the rem scale).
 One row per slot: swatch, label, `source · rule`, axis letter, state.
-`j`/`k` move the same cursor the chips show; `v y c b d e` apply as
+`j`/`k` move the same cursor the chips show; `v y Y c b d e` apply as
 in normal mode; `enter` and `escape` close. `close_popup_with_window`
 is the one closer; any dispatched action outside the popup's verbs
 closes it first; a row click moves the cursor. A chip click in the
@@ -766,6 +787,7 @@ resolved at each query so a restored `1y` tile is a year to today.
 `:rule s<n> last|first|mean|min|max`, `:colour s<n> <name>`,
 `:axis session|time`, `:freq 1m|5m|15m|1h|1d|1w`,
 `:range 1y | <from> <to>`, `:pct 5 50 95 | off`, `:density 40 | off`,
+`:yaxis s<n> left|right|bottomleft|bottomright`, `:split 0.7`,
 `:clear`. Completions per position are the bare word, per the
 `TileContent::completions` contract. `:add` with no suffix and no
 default source refuses with "name a source or set a default".
@@ -791,7 +813,7 @@ default source refuses with "name a source or set a default".
 
 `TileState` in `session.toml`, opaque to the shell: slots (kind,
 colour, axis, visible, rule; expressions by text), range, frequency,
-axis mode, density, percentiles. Not the view: a restored tile shows
+axis mode, split, density, percentiles. Not the view: a restored tile shows
 its whole range. Not slot state. Round-trip tested.
 
 ### 9.12 Config and settings
@@ -837,9 +859,11 @@ Weighted data ≫ core ≫ tile.
   form, ambiguity, cycles, the "arithmetic only" message.
 - **Chart core**: decimation never loses a column's min or max
   (property); session ticks strictly increase and respect `TICK_GAP`;
-  `View` clamps; `Layout` reserves the right axis and strip only when
-  asked; the palette sweep over every bundled theme, no exception
-  list.
+  `View` clamps; `Layout` reserves each side's axis and the strip only
+  when asked, opens the lower pane only while a visible slot uses a
+  bottom axis, honours and clamps `split`, and gives both panes the
+  same x mapping; the palette sweep over every bundled theme, no
+  exception list.
 - **Tile**, `TestAppContext` with the market-data fixture pattern: key
   sequences against the model; a delivery staged and promoted; a
   stale tag dropped; `d` on an operand removes the dependant with a
