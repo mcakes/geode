@@ -114,6 +114,34 @@ pub struct MatrixModel {
     /// lets a row bump skip them and the delegate rule them off.
     pub slice_columns: usize,
     pub rows: Vec<RowModel>,
+    /// Where each pivot cell's value was read from (spec §4.5), so
+    /// [`Self::patch_cell`] can re-prepare one cell without re-indexing
+    /// the document; `None` for the flat shape, where a grid row IS a
+    /// snapshot row and the spec's own column list says the rest.
+    pub pivot_index: Option<PivotIndex>,
+}
+
+/// The pivot's (grid row, ladder column) → snapshot row map, plus the
+/// snapshot columns the ladder and each slice column are read from —
+/// everything [`pivot`] had in hand when it filled the grid, kept so a
+/// patch reads the same cell of the same document the build did. Indices
+/// into the snapshot the model was built from; meaningless against any
+/// other.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PivotIndex {
+    /// The one value column's snapshot index.
+    value_idx: usize,
+    /// Per slice column (in `columns` order), the snapshot column it is
+    /// read from.
+    slice_idx: Vec<usize>,
+    /// Per grid row, the first snapshot row of its slice — where a slice
+    /// value is read.
+    first_row: Vec<usize>,
+    /// The ladder's width — the stride of `at`.
+    ladder: usize,
+    /// Row-major `rows × ladder`: the snapshot row holding the value for
+    /// (grid row, ladder column).
+    at: Vec<usize>,
 }
 
 impl MatrixModel {
@@ -167,11 +195,15 @@ impl MatrixModel {
             .ok_or_else(|| format!("the document has no '{}' column", spec.rows.column))?;
         let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec, draft);
-        let (columns, column_kinds, slice_columns, rows) = match &spec.columns {
-            Columns::Axis(axis) => pivot(snapshot, spec, draft, rows_idx, axis)?,
+        let (columns, column_kinds, slice_columns, rows, pivot_index) = match &spec.columns {
+            Columns::Axis(axis) => {
+                let (columns, column_kinds, slice_columns, rows, index) =
+                    pivot(snapshot, spec, draft, rows_idx, axis)?;
+                (columns, column_kinds, slice_columns, rows, Some(index))
+            }
             Columns::Values(_) => {
                 let (columns, column_kinds, rows) = flatten(snapshot, spec, draft, rows_idx)?;
-                (columns, column_kinds, 0, rows)
+                (columns, column_kinds, 0, rows, None)
             }
         };
         Ok(MatrixModel {
@@ -182,7 +214,78 @@ impl MatrixModel {
             column_kinds,
             slice_columns,
             rows,
+            pivot_index,
         })
+    }
+
+    /// Re-prepare ONE cell from `snapshot` and `draft` — text, value,
+    /// `edited`, `sent` — and answer whether the cell exists (spec §4.5).
+    /// Identical to what [`Self::build`] would paint for that cell (the
+    /// test `patch_cell_matches_a_rebuild` proves it, on both shapes), so
+    /// a committed edit costs one cell's formatting rather than every
+    /// row's: the flat build is the per-commit cost `docs/perf.md`
+    /// records at the edge of the 8 ms pure-UI budget for a 10,000-row
+    /// schedule.
+    ///
+    /// `snapshot` must be the document this model was built from — a
+    /// flat grid row is that snapshot's row of the same index, and
+    /// [`PivotIndex`] holds that snapshot's row numbers. The tile hands
+    /// over `painted_snapshot()`, which is exactly that.
+    ///
+    /// Out of range answers `false` rather than panicking: the caller
+    /// falls back to a rebuild, the one answer that is always right.
+    pub fn patch_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        snapshot: &Snapshot,
+        spec: &PanelSpec,
+        draft: &Draft,
+    ) -> bool {
+        let Some(kind) = self.column_kinds.get(col) else {
+            return false;
+        };
+        if row >= self.rows.len() {
+            return false;
+        }
+        let value = match &self.pivot_index {
+            Some(index) => match col.checked_sub(self.slice_columns) {
+                // A ladder cell: the value column at the snapshot row the
+                // build's own grid map recorded for this pair.
+                Some(ci) => {
+                    let Some(&srow) = index.at.get(row * index.ladder + ci) else {
+                        return false;
+                    };
+                    snapshot.f64_at(index.value_idx, srow).map(Value::F64)
+                }
+                // A slice cell: read off its slice's first row, as
+                // `pivot` reads it (the whole slice was checked to
+                // agree at build time, and nothing since has changed
+                // the document).
+                None => {
+                    let (Some(&idx), Some(&first)) =
+                        (index.slice_idx.get(col), index.first_row.get(row))
+                    else {
+                        return false;
+                    };
+                    snapshot.f64_at(idx, first).map(Value::F64)
+                }
+            },
+            // The flat shape: grid row `row` is snapshot row `row`, and
+            // grid column `col` is the spec's `col`th flat column — the
+            // same resolution `flatten` made, redone for one column.
+            None => {
+                let Some(vc) = spec.flat_columns().get(col) else {
+                    return false;
+                };
+                let Some(idx) = snapshot.column_index(vc.column) else {
+                    return false;
+                };
+                read_flat_value(snapshot, idx, row, vc.ty)
+            }
+        };
+        self.rows[row].cells[col] = cell_of(value, (row, col), kind, draft);
+        true
     }
 
     /// The "no document received" shape: the key the panel asked about
@@ -430,8 +533,18 @@ fn index_grid(
 /// where the values come from.
 /// `pivot`'s own result: the column headers (slice labels then the
 /// ladder), each one's [`CellKind`] in the same order, how many of the
-/// two leading vecs are slice columns, and the built rows.
-type PivotResult = Result<(Vec<SharedString>, Vec<CellKind>, usize, Vec<RowModel>), String>;
+/// two leading vecs are slice columns, the built rows, and the
+/// [`PivotIndex`] a later [`MatrixModel::patch_cell`] reads.
+type PivotResult = Result<
+    (
+        Vec<SharedString>,
+        Vec<CellKind>,
+        usize,
+        Vec<RowModel>,
+        PivotIndex,
+    ),
+    String,
+>;
 
 fn pivot(
     snapshot: &Snapshot,
@@ -544,12 +657,22 @@ fn pivot(
         std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),
     );
 
+    // The index a patch reads back, filled as the grid is: one entry per
+    // cell the loop below visits, in the same order.
+    let mut index = PivotIndex {
+        value_idx,
+        slice_idx: slices.iter().map(|(_, idx)| *idx).collect(),
+        first_row: Vec::with_capacity(grid.rows.len()),
+        ladder: grid.columns.len(),
+        at: Vec::with_capacity(grid.rows.len() * grid.columns.len()),
+    };
     let mut rows = Vec::with_capacity(grid.rows.len());
     for (ri, row_label) in grid.rows.iter().enumerate() {
         let mut cells = Vec::with_capacity(slice_columns + grid.columns.len());
         // Every row label came out of `index_grid`'s pass over the
         // snapshot rows, so each has a first row.
         let first = first_row[ri].unwrap_or_default();
+        index.first_row.push(first);
         for (ci, (_, idx)) in slices.iter().enumerate() {
             let value = snapshot.f64_at(*idx, first).map(Value::F64);
             cells.push(cell_of(value, (ri, ci), &column_kinds[ci], draft));
@@ -557,6 +680,7 @@ fn pivot(
         for (ci, col_label) in grid.columns.iter().enumerate() {
             match grid.at.get(row_label).and_then(|m| m.get(col_label)) {
                 Some(&srow) => {
+                    index.at.push(srow);
                     let value = snapshot.f64_at(value_idx, srow).map(Value::F64);
                     cells.push(cell_of(
                         value,
@@ -587,6 +711,7 @@ fn pivot(
         column_kinds,
         slice_columns,
         rows,
+        index,
     ))
 }
 
@@ -1653,6 +1778,87 @@ mod tests {
         assert_eq!(model.rows[0].cells[2].text.as_ref(), "paid");
         assert!(model.rows[0].cells[2].edited);
         assert_eq!(model.rows[0].cells[0].text.as_ref(), "2026-12-20");
+    }
+
+    /// §4.5: a cell commit patches instead of rebuilding, and the patch
+    /// is exactly what a rebuild would have painted for that cell.
+    #[test]
+    fn patch_cell_matches_a_rebuild() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ]);
+        let mut draft = Draft::default();
+        let mut patched = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        draft.set(
+            (1, 1),
+            ("D2".into(), "amount".into()),
+            Value::F64(0.75),
+            "t0",
+        );
+        assert!(patched.patch_cell(1, 1, &snapshot, &SCHEDULE, &draft));
+        let rebuilt = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(patched.rows[1].cells[1], rebuilt.rows[1].cells[1]);
+        assert_eq!(patched.rows[1].cells[1].text.as_ref(), "0.7500");
+        assert_eq!(
+            patched.rows[0].cells[1], rebuilt.rows[0].cells[1],
+            "untouched cells untouched"
+        );
+        assert_eq!(patched, rebuilt, "and nothing else about the model moved");
+        // A reverted edit patches back to the document's own value: the
+        // patch reads the draft as it stands, not the cell as it was.
+        draft.revert();
+        assert!(patched.patch_cell(1, 1, &snapshot, &SCHEDULE, &draft));
+        assert_eq!(patched.rows[1].cells[1].text.as_ref(), "0.5000");
+        assert!(!patched.rows[1].cells[1].edited);
+        assert!(
+            !patched.patch_cell(9, 0, &snapshot, &SCHEDULE, &draft),
+            "out of range answers false"
+        );
+        assert!(
+            !patched.patch_cell(0, 9, &snapshot, &SCHEDULE, &draft),
+            "on either axis"
+        );
+    }
+
+    /// The pivot's own patch: a ladder cell and a slice cell each find
+    /// their snapshot row through the grid the build indexed — the
+    /// (row, column) → snapshot row map a flat layout does not need,
+    /// since there a grid row IS a snapshot row.
+    #[test]
+    fn patch_cell_matches_a_rebuild_under_a_pivot() {
+        let snapshot = full_grid();
+        let mut draft = Draft::default();
+        let mut patched = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
+        // Node 3.5 of the second term: column 3 + 2 in the grid, snapshot
+        // row 5 — the last of six, so a patch that read "grid row" as
+        // "snapshot row" would land on the wrong term.
+        draft.set(
+            (1, 5),
+            ("2026-11-20".into(), "3.5".into()),
+            Value::F64(9.0),
+            "t0",
+        );
+        // And a slice cell: `fwd` of the first term, read off that
+        // slice's first row.
+        draft.set(
+            (0, 0),
+            ("2026-10-16".into(), "fwd".into()),
+            Value::F64(4600.5),
+            "t0",
+        );
+        assert!(patched.patch_cell(1, 5, &snapshot, &CVI, &draft));
+        assert!(patched.patch_cell(0, 0, &snapshot, &CVI, &draft));
+        let rebuilt = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
+        assert_eq!(patched, rebuilt);
+        assert_eq!(patched.rows[1].cells[5].text.as_ref(), "9.0000");
+        assert_eq!(patched.rows[0].cells[0].text.as_ref(), "4600.50");
+        draft.revert();
+        assert!(patched.patch_cell(1, 5, &snapshot, &CVI, &draft));
+        assert!(patched.patch_cell(0, 0, &snapshot, &CVI, &draft));
+        assert_eq!(patched.rows[1].cells[5].text.as_ref(), "0.6000");
+        assert_eq!(patched.rows[0].cells[0].text.as_ref(), "4512.30");
+        assert!(!patched.patch_cell(2, 0, &snapshot, &CVI, &draft));
     }
 
     proptest! {

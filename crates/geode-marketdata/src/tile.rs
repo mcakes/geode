@@ -57,7 +57,7 @@ use crate::core::{
     Cell, CellKind, Columns, DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment,
     UpdatePolicy, parse_attr, parse_cell,
 };
-use crate::delegate::MatrixDelegate;
+use crate::delegate::{DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{MenuState, PickerRows, PickerState, Popup, render_menu, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
@@ -191,7 +191,7 @@ impl FlooredTones {
     }
 
     /// Re-derive only when one of the six inputs moved.
-    fn refresh(&mut self, theme: &Theme) {
+    pub(crate) fn refresh(&mut self, theme: &Theme) {
         if self.key != Self::key(theme) {
             *self = Self::derive(theme);
         }
@@ -234,16 +234,18 @@ struct Editing {
     target: EditTarget,
 }
 
-/// The two forms an editor takes (header spec §5.2, 2026-09-19).
+/// The two forms an editor takes (header spec §5.2, 2026-09-19; a cell
+/// opens either by its column's [`CellKind`] since spec §4.4).
 enum EditorState {
-    /// A text `Input` — every cell, and every attribute but a `Date`.
-    /// Tile-owned, and PAINTED in the cell or the strip (see `render`):
-    /// gpui installs a text-input handler only for a focused `Input` that
-    /// has been drawn, so an editor kept off the element tree would take
-    /// no characters at all.
+    /// A text `Input` — every `Number`/`Text`/`Choice` cell, and every
+    /// attribute but a `Date`. Tile-owned, and PAINTED in the cell or the
+    /// strip (see `render` and `MatrixDelegate::render_td`): gpui installs
+    /// a text-input handler only for a focused `Input` that has been
+    /// drawn, so an editor kept off the element tree would take no
+    /// characters at all.
     Text(Entity<InputState>),
-    /// The segmented date field a `Date` attribute opens instead: a pure
-    /// [`DateField`] the tile routes keys into
+    /// The segmented date field a `Date` attribute or a `Date` cell opens
+    /// instead: a pure [`DateField`] the tile routes keys into
     /// ([`MarketDataTile::date_field_key`]), its own focus handle (what
     /// makes the shell's insert branch see a non-shell focus and what
     /// `holds_focus` answers off), and the three segment strings prepared
@@ -269,6 +271,9 @@ impl EditorState {
 /// The date field as painted: one `SharedString` per segment, which one
 /// is active and whether that one is mid-typing — prepared by
 /// [`DateFieldPaint::of`] whenever the field changes, never in `render`.
+/// `Clone` (three refcounts and two words) because the delegate mirrors
+/// it into the cell it paints (`crate::delegate::DelegateEditorPaint`).
+#[derive(Clone)]
 pub(crate) struct DateFieldPaint {
     pub segments: [SharedString; 3],
     pub active: usize,
@@ -578,16 +583,26 @@ impl MarketDataTile {
         // `col_resizable(false)` because a dragged width has nowhere to
         // live and every `refresh` would undo it (see `LABEL_WIDTH` in
         // `delegate.rs`, which says it once for both halves).
+        // The delegate holds the tile WEAKLY (the table is the tile's
+        // own field, so a strong handle would be a cycle) for the date
+        // field's key and click routing, and its own copy of the floored
+        // tones for that field's active segment.
+        let tones = FlooredTones::derive(cx.theme());
+        let weak_tile = cx.weak_entity();
         let table = cx.new(|cx| {
-            TableState::new(MatrixDelegate::new(spec), window, cx)
-                .row_selectable(true)
-                .col_selectable(false)
-                .cell_selectable(true)
-                .row_header(false)
-                .loop_selection(false)
-                .col_resizable(false)
-                .col_movable(false)
-                .sortable(false)
+            TableState::new(
+                MatrixDelegate::new(spec, weak_tile, id.0, tones),
+                window,
+                cx,
+            )
+            .row_selectable(true)
+            .col_selectable(false)
+            .cell_selectable(true)
+            .row_header(false)
+            .loop_selection(false)
+            .col_resizable(false)
+            .col_movable(false)
+            .sortable(false)
         });
         // The mouse's part in this panel: a click selects a cell — the
         // cursor moves to it, a click on the row-label column moves the
@@ -748,7 +763,7 @@ impl MarketDataTile {
             source_at: None,
             staged: None,
             last_flip: 0,
-            tones: FlooredTones::derive(cx.theme()),
+            tones,
             popup: None,
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
             state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
@@ -1328,18 +1343,7 @@ impl MarketDataTile {
     /// like the blotter (a highlighted row plus a bordered cursor cell)
     /// rather than painting nothing at all.
     fn sync_cursor(&self, cx: &mut Context<Self>) {
-        let editor = self
-            .editor
-            .as_ref()
-            .and_then(|e| match (&e.target, &e.state) {
-                (EditTarget::Cell { cell, .. }, EditorState::Text(state)) => {
-                    Some((*cell, state.clone()))
-                }
-                // A cell never opens the date form; the arm exists so the
-                // match says so rather than forgetting it.
-                (EditTarget::Cell { .. }, EditorState::Date { .. })
-                | (EditTarget::Attr { .. }, _) => None,
-            });
+        let editor = self.delegate_editor();
         match self.cursor {
             Cursor::Cell { row, col } => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
@@ -1356,6 +1360,45 @@ impl MarketDataTile {
                 t.clear_selection(cx);
             }),
         }
+    }
+
+    /// The open editor as the delegate paints it: a CELL editor in either
+    /// form (the text `Input`, or the date field's prepared segments and
+    /// focus handle), `None` for an attribute editor, which the header
+    /// paints itself (`render`), and `None` with nothing open.
+    fn delegate_editor(&self) -> Option<DelegateEditor> {
+        let e = self.editor.as_ref()?;
+        let EditTarget::Cell { cell, .. } = &e.target else {
+            return None;
+        };
+        let paint = match &e.state {
+            EditorState::Text(state) => DelegateEditorPaint::Text(state.clone()),
+            EditorState::Date { paint, focus, .. } => DelegateEditorPaint::Date {
+                paint: paint.clone(),
+                focus: focus.clone(),
+            },
+        };
+        Some(DelegateEditor {
+            row: cell.0,
+            col: Some(cell.1),
+            paint,
+        })
+    }
+
+    /// Re-mirror the open editor alone — what a date CELL's field needs
+    /// after every keystroke and segment click, since the delegate paints
+    /// its own COPY of the segments (`DelegateEditorPaint::Date`) and the
+    /// field's own key path ends in neither `dispatch` nor
+    /// [`Self::sync_cursor`]. Deliberately not `sync_cursor` itself: that
+    /// door also re-sets the table's selection, and the pinned
+    /// `set_selected_row` stops propagation of the event in flight, which
+    /// a key the field did NOT consume must still reach the shell.
+    fn sync_editor(&self, cx: &mut Context<Self>) {
+        let editor = self.delegate_editor();
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().editor = editor;
+            cx.notify();
+        });
     }
 
     /// Move the cursor to a clicked cell — the mouse's form of §8.3's
@@ -1766,11 +1809,19 @@ impl MarketDataTile {
         Ok(self.model.source_time.clone().unwrap_or_default())
     }
 
-    /// `marketdata::edit` (`i`/`enter`): open an input in the cursor cell
+    /// `marketdata::edit` (`i`/`enter`): open an editor in the cursor cell
     /// or, on `Cursor::Attr`, in the strip — seeded with what is already
     /// painted there (the draft's own value where one has been made,
     /// since that is what `MatrixModel::build`/`header_of` painted) — and
     /// give it the keyboard.
+    ///
+    /// WHICH editor is the column's [`CellKind`] (spec §4.4): a `Date`
+    /// cell opens the segmented date field exactly as a `Date` attribute
+    /// does, a `Number` or `Text` cell the text `Input`; a `Choice` cell
+    /// is edited as `Text` until Task 5 builds its chooser. The two
+    /// decisions — a cell's kind, an attribute's declared type — resolve
+    /// to the one `wants_date` below, so the field opens the same way
+    /// from either.
     ///
     /// Every painted cell is editable, in both pivots: `Columns::Axis`
     /// fills the grid from the document's one value column, and
@@ -1789,7 +1840,7 @@ impl MarketDataTile {
             self.notice = Some(BEHIND_REFUSED.into());
             return;
         }
-        let (text, target, ty) = match self.cursor {
+        let (text, target, wants_date) = match self.cursor {
             Cursor::Cell { row, col } => {
                 if let Err(e) = self.edit_base() {
                     self.notice = Some(e.into());
@@ -1798,7 +1849,8 @@ impl MarketDataTile {
                 let cell = (row, col);
                 let text = self.model.rows[row].cells[col].text.clone();
                 let labels = self.model.label_of(cell);
-                (text, EditTarget::Cell { cell, labels }, None)
+                let wants_date = matches!(self.model.kind_of(col), Some(CellKind::Date));
+                (text, EditTarget::Cell { cell, labels }, wants_date)
             }
             Cursor::Attr(i) => {
                 if let Err(e) = self.attr_edit_base() {
@@ -1809,28 +1861,28 @@ impl MarketDataTile {
                     self.notice = Some(NO_DOCUMENT.into());
                     return;
                 };
-                let ty = self
+                let wants_date = self
                     .spec
                     .header
                     .iter()
                     .find(|a| a.column == attr.column.as_ref())
-                    .map(|a| a.ty);
+                    .is_some_and(|a| a.ty == ColumnType::Date);
                 (
                     attr.text.clone(),
                     EditTarget::Attr {
                         index: i,
                         column: attr.column.clone(),
                     },
-                    ty,
+                    wants_date,
                 )
             }
         };
-        let state = if ty == Some(ColumnType::Date) {
-            // A `Date` attribute opens the segmented field (header spec
-            // §5.2, 2026-09-19), seeded with the painted date — or, when
-            // that does not parse (a NULL painted empty, say), today's
-            // local date, so the field always opens on something a step
-            // or a digit can act on.
+        let state = if wants_date {
+            // A `Date` attribute or cell opens the segmented field (header
+            // spec §5.2, 2026-09-19; spec §4.4), seeded with the painted
+            // date — or, when that does not parse (a NULL painted empty,
+            // say), today's local date, so the field always opens on
+            // something a step or a digit can act on.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
                 .unwrap_or_else(|_| chrono::Local::now().date_naive());
             let field = DateField::open(date);
@@ -1913,6 +1965,8 @@ impl MarketDataTile {
             }
         }
         *paint = DateFieldPaint::of(field);
+        // A date CELL's segments are painted from the delegate's copy.
+        self.sync_editor(cx);
         // A keystroke that changed the field retires a standing refusal
         // (`finish the day or backspace`, say) — the notice is header
         // chrome, so that one case re-prepares it.
@@ -1953,6 +2007,7 @@ impl MarketDataTile {
             if !focus.is_focused(window) {
                 focus.focus(window, cx);
             }
+            self.sync_editor(cx);
             cx.notify();
         }
     }
@@ -1994,11 +2049,19 @@ impl MarketDataTile {
                 let value = Value::Date(field.value());
                 self.commit_attr_edit(index, column, AttrInput::Value(value), window, cx)
             }
-            (EditorState::Date { .. }, EditTarget::Cell { .. }) => {
-                // Unreachable: a cell never opens the date form. Closed
-                // rather than guessed at.
-                self.close_editor(window, cx);
-                false
+            (EditorState::Date { field, paint, .. }, EditTarget::Cell { cell, labels }) => {
+                // A `Date` cell (spec §4.4): the attribute arm's own two
+                // steps — finish a waiting digit or refuse naming the
+                // segment, then hand the field's (always valid) date to
+                // the value door. Both `enter`s land here.
+                if let Err(segment) = field.complete_pending() {
+                    self.notice =
+                        Some(format!("finish the {} or backspace", segment.name()).into());
+                    return true;
+                }
+                *paint = DateFieldPaint::of(field);
+                let value = Value::Date(field.value());
+                self.commit_cell_value(cell, labels, value, window, cx)
             }
         }
     }
@@ -2087,17 +2150,111 @@ impl MarketDataTile {
         }
     }
 
-    /// `commit_edit`'s cell arm: the text is PARSED before anything is
-    /// written, through the column's declared type
-    /// ([`PanelSpec::value_type`]) — a `'wide'` refused inline, with the
-    /// editor left open and focused, because retyping a value is one
-    /// keystroke away where dropping the editor would throw the whole
-    /// line back at the trader.
+    /// `commit_edit`'s text-editor cell arm: the text is PARSED before
+    /// anything is written, by the column's [`CellKind`] (spec §4.4) — a
+    /// `Number` through [`parse_cell`] and the column's declared type
+    /// (`Value::F64`/`I64` by that type, never by what the text happens
+    /// to parse as), a `Text` (and, until Task 5, a `Choice`) trimmed and
+    /// taken verbatim, empty refused only where the column is `required`
+    /// (an optional note may honestly be cleared), a `Date` through the
+    /// ISO spelling its cell paints (unreachable from `begin_edit`, which
+    /// opens the field on a `Date` cell, but parsed rather than declared
+    /// impossible). A refusal is inline, with the editor left open and
+    /// focused, because retyping a value is one keystroke away where
+    /// dropping the editor would throw the whole line back at the
+    /// trader. What is written, and how, is [`Self::commit_cell_value`]'s.
     fn commit_cell_edit(
         &mut self,
         cell: (usize, usize),
         labels: (SharedString, SharedString),
         text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let value = match self.model.kind_of(cell.1) {
+            Some(CellKind::Number(_)) => {
+                // `declared_type` answers `Some` for every `Number` column
+                // (its match is on the same `kind_of` as this one), so
+                // this `else` cannot run — spelled as the moved-grid
+                // refusal rather than an `unwrap`, because a panic on the
+                // render thread is never the answer.
+                let Some(ty) = declared_type(self.spec, &self.model, cell.1) else {
+                    self.close_editor(window, cx);
+                    self.notice = Some(CELL_MOVED.into());
+                    return true;
+                };
+                match parse_cell(text, ty) {
+                    Ok(parsed) => match ty {
+                        ColumnType::I64 => Value::I64(parsed as i64),
+                        _ => Value::F64(parsed),
+                    },
+                    Err(e) => {
+                        // Stay in insert mode, with the text as typed.
+                        self.notice = Some(e.into());
+                        return true;
+                    }
+                }
+            }
+            Some(CellKind::Text | CellKind::Choice(_)) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() && self.column_required(cell.1) {
+                    self.notice = Some("a value is required".into());
+                    return true;
+                }
+                Value::Utf8(trimmed.to_string())
+            }
+            Some(CellKind::Date) => match parse_attr(text, ColumnType::Date) {
+                Ok(value) => value,
+                Err(e) => {
+                    self.notice = Some(e.into());
+                    return true;
+                }
+            },
+            None => {
+                // The column is gone: the grid moved under the editor.
+                self.close_editor(window, cx);
+                self.notice = Some(CELL_MOVED.into());
+                return true;
+            }
+        };
+        self.commit_cell_value(cell, labels, value, window, cx)
+    }
+
+    /// Whether a flat column must hold a value ([`ValueColumn::required`]);
+    /// a pivot's cells are never required — a NULL there is the desk's own
+    /// "no value here" (§6.3), and every cell of it is a number anyway.
+    fn column_required(&self, col: usize) -> bool {
+        self.spec
+            .flat_columns()
+            .get(col)
+            .is_some_and(|vc| vc.required)
+    }
+
+    /// Write one already-valid cell value into the draft and paint it —
+    /// the door both editor forms end at (the text editor after
+    /// [`Self::commit_cell_edit`] parsed, the date field with its own
+    /// date), so the identity check, the base stamp and the repaint are
+    /// spelled once.
+    ///
+    /// The repaint PATCHES the one cell in the model the tile already
+    /// holds (spec §4.5, [`MatrixModel::patch_cell`]) rather than
+    /// rebuilding: the flat build is the per-commit cost `docs/perf.md`
+    /// records at the edge of the 8 ms pure-UI budget for a 10,000-row
+    /// schedule, and a commit changes one cell. The delegate's `Rc` clone
+    /// is taken back FIRST so `Rc::make_mut` finds the model uniquely
+    /// held and patches in place — with the delegate's clone still alive
+    /// it would copy every row to patch one, the cost this exists to
+    /// avoid — and `install_model` then hands the same `Rc` back and
+    /// refreshes the table. Two cases still rebuild, honestly: a patch
+    /// that answers `false` (the cell is out of the model's range, which
+    /// the identity check above makes unreachable, kept as the belt), and
+    /// a draft that was `Sent` — `Draft::set` moves it back to `Editing`,
+    /// which changes EVERY cell's `sent` flag, not this one's.
+    fn commit_cell_value(
+        &mut self,
+        cell: (usize, usize),
+        labels: (SharedString, SharedString),
+        value: Value,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -2107,25 +2264,6 @@ impl MarketDataTile {
             self.notice = Some(CELL_MOVED.into());
             return true;
         }
-        // `declared_type` answers `None` for the other three `CellKind`s
-        // (Task 4's): refused here rather than guessed at, so this task
-        // stays green while those editors do not exist yet.
-        let Some(ty) = declared_type(self.spec, &self.model, cell.1) else {
-            self.notice = Some("not a numeric cell".into());
-            return true;
-        };
-        let parsed = match parse_cell(text, ty) {
-            Ok(value) => value,
-            Err(e) => {
-                // Stay in insert mode, with the text as typed.
-                self.notice = Some(e.into());
-                return true;
-            }
-        };
-        let value = match ty {
-            ColumnType::I64 => Value::I64(parsed as i64),
-            _ => Value::F64(parsed),
-        };
         let base = match self.edit_base() {
             Ok(base) => base,
             Err(e) => {
@@ -2134,6 +2272,7 @@ impl MarketDataTile {
                 return true;
             }
         };
+        let was_sent = self.draft.is_sent();
         self.draft.set(
             cell,
             (labels.0.to_string(), labels.1.to_string()),
@@ -2142,9 +2281,33 @@ impl MarketDataTile {
         );
         self.close_editor(window, cx);
         self.notice = None;
-        // The draft's values are what `MatrixModel::build` paints, so an
-        // edit that does not rebuild is an edit nobody can see.
-        self.rebuild_model(cx);
+        let snapshot = match self.painted_snapshot() {
+            Some(snapshot) if !was_sent => snapshot,
+            // No painted snapshot is unreachable past `edit_base` (a model
+            // with rows came from one); the `Sent` case is the honest
+            // rebuild described above.
+            _ => {
+                self.rebuild_model(cx);
+                return true;
+            }
+        };
+        // Take the delegate's clone back before `make_mut` looks at the
+        // count — see the doc comment.
+        self.table.update(cx, |t, _| {
+            t.delegate_mut().model = Rc::new(MatrixModel::default());
+        });
+        let patched = Rc::make_mut(&mut self.model).patch_cell(
+            cell.0,
+            cell.1,
+            &snapshot,
+            self.spec,
+            &self.draft,
+        );
+        if patched {
+            self.install_model(cx);
+        } else {
+            self.rebuild_model(cx);
+        }
         true
     }
 
@@ -3401,12 +3564,14 @@ fn dropped_notice(dropped: &[(String, String)]) -> String {
     format!("dropped {n} edit{plural} whose rows or columns the new document lacks: {list}")
 }
 
-/// The declared [`ColumnType`] a grid cell is parsed and edited through
-/// — `None` for the other three `CellKind`s (`Date`/`Text`/`Choice`;
-/// Task 4's, refused rather than guessed at) — the one place both
-/// [`MarketDataTile::nudge`] and [`MarketDataTile::commit_cell_edit`]
-/// read it, so a mutation to the lookup itself has one site to anchor on
-/// rather than two that could drift apart. The panel's own `value_type`
+/// The declared [`ColumnType`] a NUMBER cell is parsed and nudged through
+/// — `None` for the other three `CellKind`s (`Date`/`Text`/`Choice`,
+/// which have no number to step or parse: `nudge` refuses on it, and
+/// `commit_cell_edit` reaches it only from its `Number` arm) — the one
+/// place both [`MarketDataTile::nudge`] and
+/// [`MarketDataTile::commit_cell_edit`] read it, so a mutation to the
+/// lookup itself has one site to anchor on rather than two that could
+/// drift apart. The panel's own `value_type`
 /// under a pivot (one value column, one declared type); the column's OWN
 /// `ValueColumn::ty` under a flat panel, since a schedule's columns need
 /// not agree — and need not even be the same NUMBER type: a flat `I64`
@@ -3845,6 +4010,13 @@ mod tests {
         // a component `Input` inside a component table, and which of the
         // two sees a keystroke first is decided by these bindings.
         cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
+        // And this crate's own reclaim (`main.rs` calls it beside the
+        // blotter's): gpui dispatches a keystroke's BINDINGS before any
+        // `on_key_down` listener, so without it the component table's own
+        // `up`/`down` actions would eat an arrow aimed at a date field
+        // painted inside a cell before the field's listener ever saw it
+        // — in the harness only, since the app always has this installed.
+        cx.update(crate::init);
         let (data, rx) = DataHandle::for_tests();
         let factory = MarketDataFactory::new(data.clone(), spec, Duration::from_secs(15 * 60));
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
@@ -4441,7 +4613,7 @@ mod tests {
         let mirror = |vcx: &gpui::VisualTestContext| {
             h.tile.read_with(vcx, |t, cx| {
                 let d = t.table().read(cx).delegate();
-                (d.cursor, d.editor.as_ref().map(|(at, _)| *at))
+                (d.cursor, d.editor.as_ref().map(|e| (e.row, e.col)))
             })
         };
         assert_eq!(mirror(&vcx), (Some((0, 0)), None));
@@ -4457,7 +4629,7 @@ mod tests {
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(
             mirror(&vcx),
-            (Some((1, 2)), Some((1, 2))),
+            (Some((1, 2)), Some((1, Some(2)))),
             "and so does the open editor's own cell"
         );
         h.dispatch(&mut vcx, "cancel", None);
@@ -6073,35 +6245,276 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// A flat panel's `commit_cell_edit` (spec §4.3): committing typed
-    /// text on `status` (a `Choice` column, not yet `Number`) is refused
-    /// inline, the trader keeps the keyboard, and nothing is drafted —
-    /// the other three `CellKind`s' editors are Task 4's.
+    /// §4.4: a Text cell commits its text verbatim (trimmed); a Date cell
+    /// opens the segmented date field IN the cell rather than a text
+    /// input; both land in the draft as typed values and paint by the
+    /// column's kind. `status` is a `Choice` column, edited as plain
+    /// `Text` until Task 5 builds the chooser.
     #[gpui::test]
-    fn a_flat_panels_non_numeric_commit_is_refused(cx: &mut gpui::TestAppContext) {
+    fn a_text_cell_commits_verbatim_and_a_date_cell_opens_the_date_field(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        // status is column 2 in the model: move there and type.
+        h.dispatch(&mut vcx, "right", Some(2));
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.editor_state().is_some()));
+        h.set_editor(&mut vcx, "  paid ");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, 2), ("paid".to_string(), true));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 2)).cloned()),
+            Some(Value::Utf8("paid".into()))
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.notice().is_none()),
+            "a clean commit leaves no notice"
+        );
+
+        // ex date is column 0: `i` opens the date field, not a text input,
+        // seeded with the painted date and — the strip's own rule — on
+        // the day segment.
+        h.dispatch(&mut vcx, "left", Some(2));
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()));
+        assert!(h.tile.read_with(&vcx, |t, _| t.editor_state().is_none()));
+        assert_eq!(h.mode(&vcx), "insert");
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("2026-12-18"));
+        assert!(
+            vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "the field's own handle holds the keyboard"
+        );
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds(Box::leak(
+                format!("marketdata-date-{TILE}").into_boxed_str()
+            ))
+            .is_some(),
+            "the field is painted in the cell"
+        );
+        // One day later, then commit — through the field's OWN listener,
+        // the door the strip's `enter` takes too.
+        type_keys(&mut vcx, "up enter");
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, 0), ("2026-12-19".to_string(), true));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 0)).cloned()),
+            Some(Value::Date(
+                chrono::NaiveDate::from_ymd_opt(2026, 12, 19).unwrap()
+            ))
+        );
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "the field gave the keyboard up before it was dropped"
+        );
+        // The other cells are untouched: a commit patches one cell.
+        assert_eq!(h.cell(&vcx, 0, 1), ("1.2500".to_string(), false));
+        assert_eq!(h.cell(&vcx, 1, 0), ("2027-03-19".to_string(), false));
+    }
+
+    /// The fragment's own `commit` verb reaches a date CELL's field exactly
+    /// as the field's `enter` does — with a pending digit completed first
+    /// (the strip's review I-1 rule) — and `cancel` blurs then drops it.
+    #[gpui::test]
+    fn a_date_cell_commits_and_cancels_through_the_fragments_verbs(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        draw(&mut vcx);
+        type_keys(&mut vcx, "2");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, 0), ("2026-12-02".to_string(), true));
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()));
+        h.dispatch(&mut vcx, "insert_up", Some(1));
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("2026-12-03"),
+            "the neutral arrow pair steps a date cell's field"
+        );
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, 0), ("2026-12-02".to_string(), true));
+        assert!(vcx.update(|window, cx| window.focused(cx).is_none()));
+    }
+
+    /// An empty commit on a required Text cell is refused with the editor
+    /// open, and a non-required one is allowed and paints blank.
+    #[gpui::test]
+    fn an_empty_required_text_commit_is_refused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
         h.dispatch(&mut vcx, "right", Some(2));
-
         h.dispatch(&mut vcx, "edit", None);
-        h.set_editor(&mut vcx, "cancelled");
+        h.set_editor(&mut vcx, "   ");
         h.dispatch(&mut vcx, "commit", None);
-
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("not a numeric cell".to_string())
+            Some("a value is required".to_string())
         );
-        assert_eq!(h.mode(&vcx), "insert", "the cell keeps the keyboard");
-        assert_eq!(h.editor_value(&vcx).as_deref(), Some("cancelled"));
+        assert_eq!(h.mode(&vcx), "insert", "the editor stays open");
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+
+        let (h, mut vcx) = open_spec(cx, &SCHEDULE_OPTIONAL_NOTE, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(schedule_note_snapshot()));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, 0), (String::new(), true));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 0)).cloned()),
+            Some(Value::Utf8(String::new()))
+        );
     }
 
-    /// `nudge`'s own refusal (spec §4.3, `declared_type`'s door): `edit`
-    /// opens a plain text editor on ANY cell today (Task 4 builds the
-    /// other three kinds' own editors), so `insert_up` on `status` is
-    /// reachable and must refuse exactly as a commit does, leaving the
-    /// typed text untouched.
+    /// A one-column flat panel whose value is optional free text — what
+    /// tells "empty is refused" (a required column) from "empty is a
+    /// value" (an optional one).
+    const SCHEDULE_OPTIONAL_NOTE: PanelSpec = PanelSpec {
+        kind: "sched_note",
+        title: "Dividends (note)",
+        dataset: "div_schedule_note",
+        document: "div_schedule_note",
+        rows: RowAxis {
+            column: "dividend_id",
+            identity: RowIdentity::Minted,
+        },
+        columns: Columns::Values(&[ValueColumn {
+            column: "note",
+            label: "note",
+            ty: ColumnType::Utf8,
+            format: ColumnFormat::MEASURE,
+            choices: None,
+            required: false,
+        }]),
+        header: &[],
+        slice_values: &[],
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: &[],
+    };
+
+    fn schedule_note_snapshot() -> Snapshot {
+        Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("SPX.Z".into())]),
+                ),
+                (
+                    meta("dividend_id", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("D1".into())]),
+                ),
+                (
+                    meta("note", Attribution::DeterminedNonAdditive),
+                    TestColumn::Dict(vec![Some("special".into())]),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        )
+    }
+
+    /// §4.5: a cell commit patches the ONE cell in the model the tile
+    /// already holds rather than building a new model — the `Rc` the
+    /// delegate paints from is the same allocation before and after, so
+    /// a 10,000-row schedule pays for one cell per keystroke, not every
+    /// row (the flat build is the per-commit cost `docs/perf.md` records
+    /// at the edge of the 8 ms budget).
+    #[gpui::test]
+    fn a_cell_commit_patches_the_model_in_place(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        let before = h
+            .tile
+            .read_with(&vcx, |t, _| t.model() as *const MatrixModel);
+        h.dispatch(&mut vcx, "right", Some(1));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "2.5");
+        h.dispatch(&mut vcx, "commit", None);
+        let after = h
+            .tile
+            .read_with(&vcx, |t, _| t.model() as *const MatrixModel);
+        assert_eq!(before, after, "the model was patched, not replaced");
+        assert_eq!(h.cell(&vcx, 0, 1), ("2.5000".to_string(), true));
+        // And the delegate paints from the same, patched model.
+        let painted = h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (
+                Rc::as_ptr(&d.model),
+                d.model.rows[0].cells[1].text.to_string(),
+            )
+        });
+        assert_eq!(painted, (after, "2.5000".to_string()));
+    }
+
+    /// The delegate mirrors a date CELL's field exactly as it mirrors the
+    /// text editor: the cell, and the field's own paint and focus handle,
+    /// so `render_td` can paint the segments in the cell.
+    #[gpui::test]
+    fn the_delegate_mirrors_a_date_cells_field(cx: &mut gpui::TestAppContext) {
+        use crate::delegate::DelegateEditorPaint;
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "edit", None);
+        let focus = h.tile.read_with(&vcx, |t, _| t.date_field_focus()).unwrap();
+        let mirrored = h.tile.read_with(&vcx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            d.editor.as_ref().map(|e| {
+                (
+                    e.row,
+                    e.col,
+                    match &e.paint {
+                        DelegateEditorPaint::Date { paint, focus } => {
+                            Some((paint.segments.clone(), focus.clone()))
+                        }
+                        DelegateEditorPaint::Text(_) => None,
+                    },
+                )
+            })
+        });
+        let (row, col, date) = mirrored.expect("the editor is mirrored");
+        assert_eq!((row, col), (1, Some(0)));
+        let (segments, mirrored_focus) = date.expect("as a date field");
+        assert_eq!(segments.map(|s| s.to_string()), ["2027", "03", "19"]);
+        assert_eq!(mirrored_focus, focus);
+        // A keystroke re-prepares the mirror's segments.
+        draw(&mut vcx);
+        type_keys(&mut vcx, "up");
+        let segments = h.tile.read_with(&vcx, |t, cx| {
+            match &t.table().read(cx).delegate().editor.as_ref().unwrap().paint {
+                DelegateEditorPaint::Date { paint, .. } => {
+                    paint.segments.clone().map(|s| s.to_string())
+                }
+                DelegateEditorPaint::Text(_) => unreachable!(),
+            }
+        });
+        assert_eq!(segments, ["2027", "03", "20"]);
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, cx| t.table().read(cx).delegate().editor.is_none()),
+            "cancel clears the mirror"
+        );
+    }
+
+    /// `nudge`'s own refusal (spec §4.3, `declared_type`'s door): a
+    /// `Text` cell's editor is the plain text `Input`, so `insert_up` on
+    /// `status` is reachable and must refuse rather than step, leaving the
+    /// typed text untouched — there is no unit to step a word by.
     #[gpui::test]
     fn a_flat_panels_nudge_on_a_non_numeric_cell_is_refused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);

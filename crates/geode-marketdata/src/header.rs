@@ -91,17 +91,21 @@ pub(crate) fn date_segment_paint(
     }
 }
 
-/// The segmented date field in an attribute's editor slot: three spans in
-/// the data face separated by `-`, the active segment highlighted, the
-/// container bordered as the cell editor is. The field is the focusable
+/// The segmented date field in an attribute's editor slot — or, since
+/// spec §4.4, in a `Date` cell of the grid, painted there by
+/// `MatrixDelegate::render_td` through this same function so the two
+/// cannot paint or route keys differently: three spans in the data face
+/// separated by `-`, the active segment highlighted, the container
+/// bordered as the cell editor is. The field is the focusable
 /// (`track_focus`) so its `on_key_down` sits on the focused element and
 /// runs before the shell root's: `MarketDataTile::date_field_key` decides,
 /// and a consumed key stops here. A click on a segment selects it and
-/// STOPS propagation — the attribute value's own mouse-down would
-/// otherwise run `attr_clicked` and cancel the editor the click was aimed
-/// into; a click on the container's padding or the separators bubbles as
-/// before, so a click "elsewhere" still cancels.
-fn render_date_field(
+/// STOPS propagation — the attribute value's own mouse-down (or the
+/// table's own cell click, which cancels an open editor) would otherwise
+/// cancel the editor the click was aimed into; a click on the container's
+/// padding or the separators bubbles as before, so a click "elsewhere"
+/// still cancels.
+pub(crate) fn render_date_field(
     paint: &DateFieldPaint,
     focus: &FocusHandle,
     theme: &Theme,

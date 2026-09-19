@@ -748,6 +748,7 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
+            pivot_index: None,
         }
     }
 

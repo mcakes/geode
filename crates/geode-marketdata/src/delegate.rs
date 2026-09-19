@@ -18,9 +18,13 @@
 //! column alone.
 
 use crate::core::{MatrixModel, PanelSpec};
+use crate::header;
+use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
 use geode_shell::fonts;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Hsla, SharedString, TextAlign, Window, div, px};
+use gpui::{
+    App, Context, Entity, FocusHandle, Hsla, SharedString, TextAlign, WeakEntity, Window, div, px,
+};
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
@@ -50,6 +54,37 @@ const CELL_WIDTH: f32 = 84.0;
 /// row's identity must stay readable however far right the values scroll.
 pub(crate) const LABEL_COL: usize = 0;
 
+/// What the tile's open editor looks like from the delegate: which cell it
+/// sits in (`col: None` is the row-label column, Task 8's row-label
+/// editor — built into the type and painted by `render_td`'s label arm
+/// now so the two arms cannot drift, though nothing opens it yet) and what
+/// to paint there — the text `Input`, or the segmented date field's
+/// prepared segments plus the focus handle its keys route through.
+///
+/// A paint-time COPY, like the cursor mirror beside it: the tile's
+/// `Editing` is the truth, and `MarketDataTile::sync_cursor`/`sync_editor`
+/// re-mirror it on every change (a date field's segments change on every
+/// keystroke, which is why the field's own key path re-mirrors too).
+#[derive(Clone)]
+pub(crate) struct DelegateEditor {
+    pub row: usize,
+    pub col: Option<usize>,
+    pub paint: DelegateEditorPaint,
+}
+
+/// The two forms an editor paints in a cell — the tile's `EditorState`,
+/// with the date form reduced to what `render_td` needs: the pure
+/// `DateField` itself stays on the tile, since only the tile's key path
+/// ever steps it.
+#[derive(Clone)]
+pub(crate) enum DelegateEditorPaint {
+    Text(Entity<InputState>),
+    Date {
+        paint: DateFieldPaint,
+        focus: FocusHandle,
+    },
+}
+
 /// Every field is `pub(crate)`, never `pub` (review Minor 4): a model swap
 /// is only correct when it is paired with a `TableState::refresh`, and
 /// `MarketDataTile::install_model` is the one place that pairs them. Crate
@@ -69,19 +104,84 @@ pub struct MatrixDelegate {
     /// clears the table's own selection for that case).
     pub(crate) cursor: Option<(usize, usize)>,
     /// The open cell editor, mirrored from the tile: the cell it was
-    /// opened on (again in model coordinates) and its `InputState`.
+    /// opened on (again in model coordinates) and what to paint there.
     /// Painted IN that cell, which is what makes it typeable at all
     /// (`MarketDataTile`'s `Editing::state`).
-    pub(crate) editor: Option<((usize, usize), Entity<InputState>)>,
+    pub(crate) editor: Option<DelegateEditor>,
+    /// The tile, for the date field's key and click routing
+    /// (`header::render_date_field` takes the entity, and the field's
+    /// `on_key_down` runs `MarketDataTile::date_field_key` through it).
+    /// Weak: the table is owned by the tile, and a strong handle here
+    /// would be a cycle neither side could ever drop.
+    pub(crate) tile: WeakEntity<MarketDataTile>,
+    /// The tile's id, for the field's debug selectors — the same
+    /// `marketdata-date-{id}` the strip paints, so a test finds the field
+    /// wherever it is painted.
+    pub(crate) tile_id: u64,
+    /// The floored tones the date field paints its active segment through
+    /// (`FlooredTones::primary_text`). The delegate's own copy, refreshed
+    /// at the one paint that reads it — `render_td`'s date arm, one cell
+    /// per frame at most — exactly as the tile refreshes its own at the
+    /// top of `render`: a compare per painted editor, a derivation only
+    /// when the theme moved.
+    pub(crate) tones: FlooredTones,
 }
 
 impl MatrixDelegate {
-    pub fn new(spec: &'static PanelSpec) -> MatrixDelegate {
+    pub(crate) fn new(
+        spec: &'static PanelSpec,
+        tile: WeakEntity<MarketDataTile>,
+        tile_id: u64,
+        tones: FlooredTones,
+    ) -> MatrixDelegate {
         MatrixDelegate {
             model: Rc::new(MatrixModel::default()),
             row_axis: SharedString::from(spec.rows.column),
             cursor: Some((0, 0)),
             editor: None,
+            tile,
+            tile_id,
+            tones,
+        }
+    }
+
+    /// The editor to paint in table cell (`row_ix`, `col_ix`), if the
+    /// open one sits there — `col: None` is the row-label column (table
+    /// column [`LABEL_COL`]), a model column is every other.
+    fn editor_at(&self, row_ix: usize, col_ix: usize) -> Option<&DelegateEditor> {
+        self.editor
+            .as_ref()
+            .filter(|e| e.row == row_ix && e.col == Self::model_col(col_ix))
+    }
+
+    /// One editor's element, painted in whichever cell it belongs to:
+    /// the text `Input`, or the strip's own segmented date field
+    /// (`header::render_date_field`, shared so a date cell and a date
+    /// attribute cannot paint or route keys differently). A tile that
+    /// has been dropped paints nothing — the caller falls back to the
+    /// cell's own text — since there is nothing left to route a key to.
+    fn render_editor(
+        &mut self,
+        editor: &DelegateEditor,
+        theme: &Theme,
+    ) -> Option<gpui::AnyElement> {
+        match &editor.paint {
+            DelegateEditorPaint::Text(state) => Some(Input::new(state).into_any_element()),
+            DelegateEditorPaint::Date { paint, focus } => {
+                let tile = self.tile.upgrade()?;
+                self.tones.refresh(theme);
+                Some(
+                    header::render_date_field(
+                        paint,
+                        focus,
+                        theme,
+                        &self.tones,
+                        &tile,
+                        self.tile_id,
+                    )
+                    .into_any_element(),
+                )
+            }
         }
     }
 
@@ -207,14 +307,21 @@ impl TableDelegate for MatrixDelegate {
         let theme = cx.theme();
         let Some(model_col) = Self::model_col(col_ix) else {
             // The row-label column: the label in the data face, in the
-            // full foreground — it is what identifies the row.
+            // full foreground — it is what identifies the row. The editor
+            // slot is here too (Task 8's row-label editor opens into it;
+            // nothing does yet), so the label arm and the value arm paint
+            // an editor through the one `render_editor`.
             let label = self
                 .model
                 .rows
                 .get(row_ix)
                 .map(|r| r.label.clone())
                 .unwrap_or_default();
-            return div()
+            let editor = self
+                .editor_at(row_ix, col_ix)
+                .cloned()
+                .and_then(|e| self.render_editor(&e, theme));
+            let el = div()
                 .size_full()
                 .flex()
                 .items_center()
@@ -223,8 +330,16 @@ impl TableDelegate for MatrixDelegate {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_ellipsis()
-                .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"))
-                .child(label);
+                .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"));
+            return match editor {
+                Some(editor) => el.child(
+                    div()
+                        .flex_1()
+                        .debug_selector(|| format!("marketdata-editor-{row_ix}-{col_ix}"))
+                        .child(editor),
+                ),
+                None => el.child(label),
+            };
         };
         let at_cursor = self.cursor == Some((row_ix, model_col));
         let cell = self
@@ -262,14 +377,24 @@ impl TableDelegate for MatrixDelegate {
         };
         let CellPaint { fill, text } = cell_paint(theme, cell.sent, cell.edited);
         el = el.when_some(fill, |el, fill| el.bg(fill)).text_color(text);
-        match &self.editor {
-            Some((at, state)) if *at == (row_ix, model_col) => el.child(
+        // The editor is cloned out (three refcounts at most) because
+        // `render_editor` needs `&mut self` for the tones refresh while
+        // `editor_at` borrows `self.editor`; the cell's own text is what
+        // paints when there is no editor here, or no tile left to route
+        // its keys to.
+        let text = cell.text.clone();
+        let editor = self
+            .editor_at(row_ix, col_ix)
+            .cloned()
+            .and_then(|e| self.render_editor(&e, theme));
+        match editor {
+            Some(editor) => el.child(
                 div()
                     .flex_1()
                     .debug_selector(|| format!("marketdata-editor-{row_ix}-{col_ix}"))
-                    .child(Input::new(state)),
+                    .child(editor),
             ),
-            _ => el.child(cell.text.clone()),
+            None => el.child(text),
         }
     }
 }
@@ -388,12 +513,18 @@ pub(crate) mod tests {
     /// A fresh delegate paints the row axis's name and nothing else: one
     /// column, no rows. The panel's header says why (`no document
     /// received for <key>`), so an empty grid needs no invented row.
-    #[test]
-    fn an_empty_model_still_names_its_row_axis() {
-        let d = MatrixDelegate::new(&CVI);
+    /// A `gpui::test` only for the theme the tones derive from; the tile
+    /// handle is never upgraded here.
+    #[gpui::test]
+    fn an_empty_model_still_names_its_row_axis(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let tones = cx.update(|cx| FlooredTones::derive(cx.theme()));
+        let d = MatrixDelegate::new(&CVI, WeakEntity::new_invalid(), 7, tones);
         assert_eq!(d.row_axis.as_ref(), "term");
         assert!(d.model.rows.is_empty());
         assert!(d.editor.is_none());
         assert_eq!(d.cursor, Some((0, 0)));
+        assert_eq!(d.tile_id, 7);
+        assert!(d.tile.upgrade().is_none());
     }
 }
