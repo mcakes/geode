@@ -13430,6 +13430,29 @@ run_mutation "draft: a date edit is tagged in the session" \
   '        Value::Date(d) => tagged("text", d.format("%Y-%m-%d").to_string()),' \
   geode-marketdata typed_edits_round_trip_through_toml_with_a_type_tag
 
+# §4.3 (review fix, 2026-09-19): `:bump`'s row walk skips a cell whose
+# COLUMN is not `Number`-kind — not merely one whose current value happens
+# not to be a number, which a NULL-amount row shares regardless. Mutated
+# away, the outcome of an ordinary row bump is unchanged (a `Date`/`Choice`
+# cell's own VALUE already fails `numeric_value`'s match), so only a row
+# whose lone `Number` column is itself NULL tells the two skip reasons
+# apart, in the refusal's own wording.
+run_mutation "tile: bump skips a non-numeric cell" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {' \
+  '                    if false {' \
+  geode-marketdata a_flat_panels_row_bump_names_the_kind_skipped_count
+
+# A cell whose column is not `Number`-kind is refused inline on commit —
+# the other three `CellKind`s' editors are Task 4's. Mutated to treat any
+# kind as numeric, a `status` commit falls through to `parse_cell`'s own
+# (differently worded) refusal instead of this one.
+run_mutation "tile: a commit on a non-numeric cell is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Some(CellKind::Number(_)) => match &self.spec.columns {' \
+  '            Some(_) => match &self.spec.columns {' \
+  geode-marketdata a_flat_panels_non_numeric_commit_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

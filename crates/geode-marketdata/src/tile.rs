@@ -2560,12 +2560,18 @@ impl MarketDataTile {
             // has neither, and there is no cell here to name.
             return Err("bump needs a grid cell — the cursor is in the header".to_string());
         };
-        // `F64`/`I64` widened to `f64` — the same reading `Draft::numeric_edit`
-        // does for an already-drafted cell, here for a delivered one.
-        let numeric_value = |cell: &Cell| match &cell.value {
-            Some(Value::F64(v)) => Some(*v),
-            Some(Value::I64(v)) => Some(*v as f64),
-            Some(Value::Utf8(_) | Value::Date(_)) | None => None,
+        // The draft's own edit for this cell, through `Draft::numeric_edit`
+        // — `:bump`'s own door onto it — falling back to the model's own
+        // painted value (the document's, or NULL) when there is no edit
+        // yet to read.
+        let numeric_value = |cell: &Cell| {
+            self.draft
+                .numeric_edit(cell.cell_ref)
+                .or(match &cell.value {
+                    Some(Value::F64(v)) => Some(*v),
+                    Some(Value::I64(v)) => Some(*v as f64),
+                    Some(Value::Utf8(_) | Value::Date(_)) | None => None,
+                })
         };
         let mut skipped = 0usize;
         let values: Vec<((usize, usize), f64)> = match axis {
@@ -3507,6 +3513,7 @@ mod tests {
     use super::*;
     use crate::commands;
     use crate::content::MarketDataFactory;
+    use crate::core::test_fixtures;
     use crate::core::{CVI, DraftState};
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::groupings::GroupingSlots;
@@ -3805,6 +3812,24 @@ mod tests {
         cx: &mut gpui::TestAppContext,
         restored: Option<toml::Table>,
     ) -> (Harness, gpui::VisualTestContext) {
+        open_spec(cx, &CVI, restored)
+    }
+
+    /// A flat, dividend-schedule-shaped panel (spec §4.3, Task 3's typed
+    /// cells) — `open`/`open_with` build over CVI's pivot, where every
+    /// column is `Number`; this is the one both this crate's own
+    /// `:bump`/`edit` refusal tests and Task 4's own tests build over
+    /// instead, so a flat panel mixing `Date`/`Number`/`Choice` columns is
+    /// exercised through the real tile, not just `matrix.rs`'s pure core.
+    fn open_flat(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        open_spec(cx, &test_fixtures::SCHEDULE, None)
+    }
+
+    fn open_spec(
+        cx: &mut gpui::TestAppContext,
+        spec: &'static PanelSpec,
+        restored: Option<toml::Table>,
+    ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         // The shell's own reclaims ride along, exactly as `main.rs`
         // installs them after the component's init: the panel's editor is
@@ -3812,7 +3837,7 @@ mod tests {
         // two sees a keystroke first is decided by these bindings.
         cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
         let (data, rx) = DataHandle::for_tests();
-        let factory = MarketDataFactory::new(data.clone(), &CVI, Duration::from_secs(15 * 60));
+        let factory = MarketDataFactory::new(data.clone(), spec, Duration::from_secs(15 * 60));
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
         let window = cx
             .update(|cx| {
@@ -4026,6 +4051,29 @@ mod tests {
             let tag = self.document_request().expect("one request").tag;
             self.deliver(vcx, tag, Arc::new(cvi(BASE)));
             tag
+        }
+
+        /// [`Self::with_document`]'s flat-panel twin, over [`open_flat`]:
+        /// key, shown, requested, delivered — two `SCHEDULE`-shaped rows
+        /// (`D1`/`D2`), the same key column (`underlying_ref`, `SPX.Z`) a
+        /// pivot's document is asked for by.
+        fn with_flat_document(&self, vcx: &mut gpui::VisualTestContext) {
+            self.with_flat_document_with(
+                vcx,
+                test_fixtures::schedule_snapshot(&[
+                    ("D1", "2026-12-18", 1.25, "declared"),
+                    ("D2", "2027-03-19", 0.5, "estimated"),
+                ]),
+            );
+        }
+        /// [`Self::with_flat_document`], over a caller-supplied snapshot —
+        /// for a fixture with no place in the general one, such as a NULL
+        /// cell.
+        fn with_flat_document_with(&self, vcx: &mut gpui::VisualTestContext, snapshot: Snapshot) {
+            self.command(vcx, "key SPX.Z").expect("a valid key");
+            self.visible(vcx, true);
+            let tag = self.document_request().expect("one request").tag;
+            self.deliver(vcx, tag, Arc::new(snapshot));
         }
         /// How many columns the table carries: the row-label column plus
         /// one per value column.
@@ -5940,6 +5988,104 @@ edits = [["2026-11-20", "-1", 9.5]]
             vec!["0.1800", "0.1900"],
             "the neighbouring slice column is untouched"
         );
+    }
+
+    /// A flat panel's row bump (spec §4.3): `SCHEDULE`'s three columns are
+    /// `ex` (`Date`), `amount` (`Number`) and `status` (`Choice`) — only
+    /// `amount` is `Number`-kind, so a row bump moves it alone and leaves
+    /// the other two with no edit at all, never a coerced one.
+    #[gpui::test]
+    fn a_flat_panels_row_bump_moves_only_the_number_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+
+        h.command(&mut vcx, "bump 1 row").expect("a bump on row 0");
+        assert_eq!(
+            h.cell(&vcx, 0, 1),
+            ("2.2500".to_string(), true),
+            "amount (1.25 + 1) is edited"
+        );
+        assert_eq!(
+            h.cell(&vcx, 0, 0),
+            ("2026-12-18".to_string(), false),
+            "ex is untouched — a date has nothing to add to"
+        );
+        assert_eq!(
+            h.cell(&vcx, 0, 2),
+            ("declared".to_string(), false),
+            "status is untouched — a choice has nothing to add to"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().len()),
+            1,
+            "one edit, not three"
+        );
+    }
+
+    /// A row bump whose only `Number` column is itself NULL (spec §4.3):
+    /// `ex`/`status` are skipped for their KIND, `amount` for being NULL
+    /// — three cells, zero values, either way. What distinguishes this
+    /// from the happy-path row-bump test above is the REFUSAL: it must
+    /// still name two columns skipped for their kind, not fall back to
+    /// the generic "no values to bump" a `CellKind`-blind row walk would
+    /// produce (the outcome — nothing edited — is identical either way,
+    /// so only the message tells the two apart).
+    #[gpui::test]
+    fn a_flat_panels_row_bump_names_the_kind_skipped_count(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot_with_null_amount(),
+        );
+
+        assert_eq!(
+            h.command(&mut vcx, "bump 1 row"),
+            Err("no numeric cells to bump (2 skipped)".to_string())
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    }
+
+    /// A flat panel's column bump (spec §4.3): the cursor on `status` (a
+    /// `Choice` column) refuses the whole column outright rather than
+    /// silently bumping nothing.
+    #[gpui::test]
+    fn a_flat_panels_column_bump_on_a_non_numeric_column_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2));
+
+        assert_eq!(
+            h.command(&mut vcx, "bump 1 col"),
+            Err("not a numeric column".to_string())
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "nothing was written"
+        );
+    }
+
+    /// A flat panel's `commit_cell_edit` (spec §4.3): committing typed
+    /// text on `status` (a `Choice` column, not yet `Number`) is refused
+    /// inline, the trader keeps the keyboard, and nothing is drafted —
+    /// the other three `CellKind`s' editors are Task 4's.
+    #[gpui::test]
+    fn a_flat_panels_non_numeric_commit_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2));
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "cancelled");
+        h.dispatch(&mut vcx, "commit", None);
+
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("not a numeric cell".to_string())
+        );
+        assert_eq!(h.mode(&vcx), "insert", "the cell keeps the keyboard");
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("cancelled"));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
     }
 
     #[gpui::test]

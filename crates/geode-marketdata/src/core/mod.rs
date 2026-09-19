@@ -15,6 +15,8 @@ pub mod matrix;
 pub mod menu;
 pub mod nudge;
 pub mod spec;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 
 pub use cursor::Cursor;
 pub use datefield::{DateField, Segment, SegmentText};

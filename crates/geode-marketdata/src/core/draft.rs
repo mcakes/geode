@@ -197,8 +197,14 @@ impl Draft {
 
     /// A cell edit's numeric reading — `F64`/`I64` widened to `f64`,
     /// `None` for a `Date`/`Utf8` edit or no edit at all. `:bump`'s own
-    /// door: only a `Number` cell is ever bumped, so this is the one
-    /// place that decision is made rather than repeated at each caller.
+    /// door onto an EXISTING edit — `MarketDataTile::bump`'s
+    /// `numeric_value` reads a cell's current value through here first,
+    /// falling back to the model's own painted one when there is no edit
+    /// yet — so a second bump composes with the first rather than reading
+    /// through to the document underneath it. Which COLUMNS are ever
+    /// bumped at all is `CellKind::Number`'s decision, made by the
+    /// caller (this crate has no `MatrixModel` to consult here); this is
+    /// only the "what number is already there" half of that.
     pub fn numeric_edit(&self, cell: (usize, usize)) -> Option<f64> {
         match self.edits.get(&cell)? {
             Value::F64(v) => Some(*v),
@@ -917,11 +923,12 @@ mod tests {
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
     }
 
-    /// `:bump` only ever reaches a `Number` cell (the tile filters by
-    /// `MatrixModel::kind_of` before it ever builds the iterator `bump`
-    /// takes), so `numeric_edit` is the door that check is really made
-    /// through: `F64`/`I64` widen to `f64`, a `Date`/`Utf8` edit (or no
-    /// edit at all) answers `None` rather than being coerced.
+    /// `:bump` only ever reaches a `Number` cell — the tile decides that
+    /// through `MatrixModel::kind_of`, before it ever builds the iterator
+    /// `bump` takes — and `numeric_edit` is the door `MarketDataTile::bump`
+    /// reads an existing edit's CURRENT value through: `F64`/`I64` widen
+    /// to `f64`, a `Date`/`Utf8` edit (or no edit at all) answers `None`
+    /// rather than being coerced.
     #[test]
     fn numeric_edit_reads_f64_and_i64_and_ignores_other_kinds() {
         let mut draft = Draft::default();
