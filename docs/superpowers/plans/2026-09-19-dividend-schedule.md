@@ -1083,7 +1083,7 @@ Entries: `matrix: patch_cell re-prepares the cell` (mutate `patch_cell`'s assign
 **Files:**
 - Modify: `crates/geode-marketdata/benches/matrix.rs` (`patch_cell` at 20×30 and 10,000×5; `build` 10,000×5 with 100 inserted rows; `rebase` with 1,000 cells + 100 rows)
 - Modify: `docs/perf.md` ("Market-data panel" section: the new numbers, and the note that the flat build is no longer a per-commit cost)
-- Modify: `docs/phase-history.md` (one paragraph at the end: the dividend slice, in the CLAUDE.md house voice — what it built, the rulings, the traps: the label-editor deviation, `flex_shrink`/`patch_cell` rules, `click_opened_stage`-style guards if any, the `new-` prefix, the second factory's `without_keymap`)
+- Modify: `docs/phase-history.md` (one paragraph at the end: the dividend slice, in the CLAUDE.md house voice — what it built, the rulings, the traps: the segmented field painted in a table cell through `DelegateEditor`, `flex_shrink`/`patch_cell` rules, `click_opened_stage`-style guards if any, the `new-` prefix, the second factory's `without_keymap`)
 - Modify: `CLAUDE.md` (a status row `Dividend schedule (2026-09-19)`; rule bullets under "Market-data panel": typed cells + `patch_cell`; rows by label, `new-` minted, deleted rows stay painted; the two-producer bus; `without_keymap`)
 - Modify: the choice/dividend spec (§4–§6 "As built" note recording whatever the tasks deviated on), the market-data documents spec (§3/§6 value types, §8.1 `Columns::Values` shape — the amendments §7 lists), the roadmap's §6 status line ("dividends: done 2026-09-19")
 
