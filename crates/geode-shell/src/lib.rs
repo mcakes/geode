@@ -5,6 +5,7 @@
 //! Dependency rule: this crate never depends on geode-data or on modules.
 
 pub mod actions;
+pub mod choice;
 pub mod commandline;
 pub mod config_write;
 pub mod defaults;
