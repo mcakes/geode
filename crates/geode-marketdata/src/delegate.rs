@@ -79,7 +79,7 @@ impl MatrixDelegate {
     pub fn new(spec: &'static PanelSpec) -> MatrixDelegate {
         MatrixDelegate {
             model: Rc::new(MatrixModel::default()),
-            row_axis: SharedString::from(spec.rows),
+            row_axis: SharedString::from(spec.rows.column),
             cursor: Some((0, 0)),
             editor: None,
         }

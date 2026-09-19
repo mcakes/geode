@@ -18,7 +18,9 @@ use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColu
 use geode_core::view::ColumnFormat;
 use geode_marketdata::core::draft::Draft;
 use geode_marketdata::core::matrix::MatrixModel;
-use geode_marketdata::core::spec::{CVI, Columns, HeaderAttr, PanelSpec};
+use geode_marketdata::core::spec::{
+    CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, ValueColumn,
+};
 use std::hint::black_box;
 
 const BASE: &str = "2026-09-12T14:00:00Z";
@@ -112,13 +114,51 @@ fn cvi(terms: usize, nodes: usize) -> Snapshot {
     )
 }
 
+const SCHEDULE_VALUE_COLUMN: ValueColumn = ValueColumn {
+    column: "v0",
+    label: "v0",
+    ty: ColumnType::F64,
+    format: ColumnFormat::MEASURE,
+    choices: None,
+    required: true,
+};
+
 const SCHEDULE: PanelSpec = PanelSpec {
     kind: "sched",
     title: "Dividends",
     dataset: "div_schedule",
     document: "div_schedule",
-    rows: "ex_date",
-    columns: Columns::Values,
+    rows: RowAxis {
+        column: "ex_date",
+        identity: RowIdentity::Typed(ColumnType::Date),
+    },
+    columns: Columns::Values(&[
+        ValueColumn {
+            column: "v0",
+            label: "v0",
+            ..SCHEDULE_VALUE_COLUMN
+        },
+        ValueColumn {
+            column: "v1",
+            label: "v1",
+            ..SCHEDULE_VALUE_COLUMN
+        },
+        ValueColumn {
+            column: "v2",
+            label: "v2",
+            ..SCHEDULE_VALUE_COLUMN
+        },
+        ValueColumn {
+            column: "v3",
+            label: "v3",
+            ..SCHEDULE_VALUE_COLUMN
+        },
+        ValueColumn {
+            column: "v4",
+            label: "v4",
+            ..SCHEDULE_VALUE_COLUMN
+        },
+    ]),
     header: &[HeaderAttr {
         column: "currency",
         label: "currency",

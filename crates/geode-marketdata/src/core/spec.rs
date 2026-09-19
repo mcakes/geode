@@ -55,17 +55,46 @@ pub struct SliceValue {
     pub format: ColumnFormat,
 }
 
-/// How the columns across the top are chosen.
+/// Who names a new row — the trader (`Typed`, the row-label editor opens
+/// on insert, parsed as the given type) or the panel itself (`Minted`,
+/// `new-<n>`, no editor).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowIdentity {
+    Typed(ColumnType),
+    Minted,
+}
+
+/// The axis down the side: the column a row's label comes from, and who
+/// gets to choose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowAxis {
+    pub column: &'static str,
+    pub identity: RowIdentity,
+}
+
+/// One flat column: what it reads, how it paints, how it is edited,
+/// whether an inserted row must fill it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValueColumn {
+    pub column: &'static str,
+    pub label: &'static str,
+    pub ty: ColumnType,
+    pub format: ColumnFormat,
+    pub choices: Option<&'static [&'static str]>,
+    pub required: bool,
+}
+
+/// How the columns across the top are chosen.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Columns {
     /// Pivot: one column per distinct value of this axis, in the order
     /// the document lists them. The grid is then (row axis × this axis)
     /// and every cell is the document's one value column.
     Axis(&'static str),
-    /// Flat: one row per document row, one column per value column the
-    /// document declares. The shape a schedule takes — many rows, a
-    /// handful of values each.
-    Values,
+    /// Flat: one row per document row, one column per listed value
+    /// column. The shape a schedule takes — many rows, a handful of
+    /// values each.
+    Values(&'static [ValueColumn]),
 }
 
 /// One panel: the dataset it reads, how it lays a document out, what its
@@ -79,7 +108,7 @@ pub struct PanelSpec {
     /// The document kind `:upload` writes back through (Part 4).
     pub document: &'static str,
     /// The axis down the side.
-    pub rows: &'static str,
+    pub rows: RowAxis,
     pub columns: Columns,
     /// Document-level attributes shown in the header, in this order.
     pub header: &'static [HeaderAttr],
@@ -116,8 +145,9 @@ impl PanelSpec {
     /// the key first, spec §3.3), and this is how it declines to count a
     /// column the panel is already painting somewhere else.
     pub fn names(&self, column: &str) -> bool {
-        self.rows == column
+        self.rows.column == column
             || matches!(self.columns, Columns::Axis(a) if a == column)
+            || self.value_column(column).is_some()
             || self.header.iter().any(|h| h.column == column)
             || self.slice_value(column).is_some()
     }
@@ -127,6 +157,20 @@ impl PanelSpec {
     /// column it must refuse (both arrive `DeterminedNonAdditive`).
     pub fn slice_value(&self, column: &str) -> Option<&SliceValue> {
         self.slice_values.iter().find(|s| s.column == column)
+    }
+
+    /// The flat column this spec paints from `column`, if the layout is
+    /// flat and lists it.
+    pub fn value_column(&self, column: &str) -> Option<&ValueColumn> {
+        self.flat_columns().iter().find(|c| c.column == column)
+    }
+
+    /// The flat layout's columns in paint order; empty under a pivot.
+    pub fn flat_columns(&self) -> &'static [ValueColumn] {
+        match self.columns {
+            Columns::Values(cols) => cols,
+            Columns::Axis(_) => &[],
+        }
     }
 }
 
@@ -154,7 +198,10 @@ pub const CVI: PanelSpec = PanelSpec {
     title: "CVI",
     dataset: "cvi_params",
     document: "cvi_params",
-    rows: "term",
+    rows: RowAxis {
+        column: "term",
+        identity: RowIdentity::Typed(ColumnType::Date),
+    },
     columns: Columns::Axis("node"),
     header: &[
         HeaderAttr {
@@ -237,5 +284,57 @@ mod tests {
             ["fwd", "atm", "skew"]
         );
         assert!(CVI.slice_value("param").is_none());
+    }
+
+    /// §4.2: a flat panel names its columns; `names` covers them, and
+    /// `value_column` answers each by name so the build can refuse a
+    /// value the spec does not list rather than paint it unlabelled.
+    #[test]
+    fn a_flat_spec_names_its_value_columns() {
+        const FLAT: PanelSpec = PanelSpec {
+            kind: "flat",
+            title: "Flat",
+            dataset: "d",
+            document: "d",
+            rows: RowAxis {
+                column: "id",
+                identity: RowIdentity::Minted,
+            },
+            columns: Columns::Values(&[
+                ValueColumn {
+                    column: "amount",
+                    label: "amount",
+                    ty: ColumnType::F64,
+                    format: CVI_FORMAT,
+                    choices: None,
+                    required: true,
+                },
+                ValueColumn {
+                    column: "status",
+                    label: "status",
+                    ty: ColumnType::Utf8,
+                    format: CVI_FORMAT,
+                    choices: Some(&["a", "b"]),
+                    required: false,
+                },
+            ]),
+            header: &[],
+            slice_values: &[],
+            value_type: ColumnType::F64,
+            format: CVI_FORMAT,
+            actions: &[],
+        };
+        assert!(FLAT.names("id"));
+        assert!(FLAT.names("amount"));
+        assert!(FLAT.names("status"));
+        assert!(!FLAT.names("underlying_ref"));
+        assert_eq!(
+            FLAT.value_column("status").unwrap().choices,
+            Some(&["a", "b"][..])
+        );
+        assert!(FLAT.value_column("nope").is_none());
+        assert_eq!(FLAT.flat_columns().len(), 2);
+        assert!(CVI.flat_columns().is_empty());
+        assert_eq!(CVI.rows.identity, RowIdentity::Typed(ColumnType::Date));
     }
 }

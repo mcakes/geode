@@ -117,13 +117,13 @@ impl MatrixModel {
         }
 
         let rows_idx = snapshot
-            .column_index(spec.rows)
-            .ok_or_else(|| format!("the document has no '{}' column", spec.rows))?;
+            .column_index(spec.rows.column)
+            .ok_or_else(|| format!("the document has no '{}' column", spec.rows.column))?;
         let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec, draft);
-        let (columns, slice_columns, rows) = match spec.columns {
+        let (columns, slice_columns, rows) = match &spec.columns {
             Columns::Axis(axis) => pivot(snapshot, spec, draft, rows_idx, axis)?,
-            Columns::Values => {
+            Columns::Values(_) => {
                 let (columns, rows) = flatten(snapshot, spec, draft, rows_idx)?;
                 (columns, 0, rows)
             }
@@ -332,7 +332,7 @@ fn index_grid(
     let mut seen_rows: HashMap<String, usize> = HashMap::new();
     let mut seen_cols: HashMap<String, ()> = HashMap::new();
     for row in 0..snapshot.rows() {
-        let row_label = required_label(snapshot, rows_idx, row, spec.rows)?;
+        let row_label = required_label(snapshot, rows_idx, row, spec.rows.column)?;
         let col_label = required_label(snapshot, col_idx, row, axis)?;
         let ri = match seen_rows.entry(row_label.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => *e.get(),
@@ -354,7 +354,7 @@ fn index_grid(
             return Err(format!(
                 "the document repeats {}='{row_label}' {axis}='{col_label}' \
                  (rows {previous} and {row}): one of the two values would vanish",
-                spec.rows
+                spec.rows.column
             ));
         }
     }
@@ -453,7 +453,7 @@ fn pivot(
                     if snapshot.f64_at(*idx, first) != snapshot.f64_at(*idx, srow) {
                         return Err(format!(
                             "the document's {}='{}' rows disagree on '{}' ({} on row {first}, {} on row {srow}): a slice value is constant across its slice",
-                            spec.rows,
+                            spec.rows.column,
                             grid.rows[ri],
                             sv.column,
                             label_at(snapshot, *idx, first).unwrap_or_default(),
@@ -488,7 +488,7 @@ fn pivot(
                 None => {
                     return Err(format!(
                         "the document has no cell for {}='{row_label}' {axis}='{col_label}'",
-                        spec.rows
+                        spec.rows.column
                     ));
                 }
             }
@@ -537,12 +537,12 @@ fn flatten(
     let mut seen: HashMap<String, usize> = HashMap::with_capacity(snapshot.rows());
     let mut rows = Vec::with_capacity(snapshot.rows());
     for row in 0..snapshot.rows() {
-        let label = required_label(snapshot, rows_idx, row, spec.rows)?;
+        let label = required_label(snapshot, rows_idx, row, spec.rows.column)?;
         if let Some(previous) = seen.insert(label.clone(), row) {
             return Err(format!(
                 "the document repeats {}='{label}' (rows {previous} and {row}): a row \
                  label identifies an edit, so it must name one row",
-                spec.rows
+                spec.rows.column
             ));
         }
         rows.push(RowModel {
@@ -596,7 +596,9 @@ fn cell_of(
 mod tests {
     use super::*;
     use crate::core::draft::{Draft, DraftState};
-    use crate::core::spec::{CVI, Columns, HeaderAttr, PanelSpec, SliceValue};
+    use crate::core::spec::{
+        CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, SliceValue, ValueColumn,
+    };
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::document::Value;
     use geode_core::schema::ColumnType;
@@ -1122,8 +1124,28 @@ mod tests {
         title: "Dividends",
         dataset: "div_schedule",
         document: "div_schedule",
-        rows: "ex_date",
-        columns: Columns::Values,
+        rows: RowAxis {
+            column: "ex_date",
+            identity: RowIdentity::Typed(ColumnType::Date),
+        },
+        columns: Columns::Values(&[
+            ValueColumn {
+                column: "gross",
+                label: "gross",
+                ty: ColumnType::F64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+            ValueColumn {
+                column: "net",
+                label: "net",
+                ty: ColumnType::F64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+        ]),
         header: &[HeaderAttr {
             column: "currency",
             label: "currency",
@@ -1265,7 +1287,10 @@ mod tests {
             title: "Dividends",
             dataset: "div_schedule",
             document: "div_schedule",
-            rows: "ex_date",
+            rows: RowAxis {
+                column: "ex_date",
+                identity: RowIdentity::Typed(ColumnType::Date),
+            },
             columns: Columns::Axis("currency"),
             header: &[],
             slice_values: &[],
