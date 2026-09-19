@@ -149,6 +149,15 @@ pub enum Stage {
         object: String,
         column: String,
     },
+    /// Ticking one dimension's values for a saved scope (scopes-editing
+    /// spec §4) — a projection over the same [`Draft`] in
+    /// [`Stage::Column`]'s mould: `enter` on a `dimensions` row stashes
+    /// the scope's fields and installs one list of the column's distinct
+    /// values; `escape` restores the scope with the cursor on the column.
+    Values {
+        object: String,
+        column: String,
+    },
 }
 
 /// One named object as the browse list shows it.
@@ -856,6 +865,12 @@ pub struct ListItem {
     /// `[[columns]]` entry — a column already in `Draft::source` keeps
     /// its own table, `kind` included, untouched by this field entirely.
     pub kind: Option<String>,
+    /// Muted text painted after the name, supplied by the domain
+    /// (Scopes: a selection's values on the edit stage, a value's row
+    /// count or `not in data` on the Values stage). `None` paints
+    /// Views' own `column_summary` as before. Display only — never
+    /// written, never filtered on.
+    pub note: Option<String>,
 }
 
 /// The closed vocabulary an object's fields are built from (spec §3.1).
@@ -1250,6 +1265,11 @@ pub struct Draft {
     /// target, and the scope [`Draft::row_for_path`] narrows to. `Some`
     /// exactly when `parent_fields` is; [`Draft::column`] is the read.
     column: Option<String>,
+    /// Which column [`Draft::parent_fields`] was stashed for by the
+    /// VALUES stage (scopes-editing spec §4). `Some` exactly when
+    /// `parent_fields` is and `column` is `None`; the two stages share
+    /// the stash and can never both be open.
+    values: Option<String>,
     /// What the door that opened [`Stage::Column`] knows and the seven
     /// fields do not (dataset-presentation spec §4.1, §5.1): which door
     /// it was, the three layers under the column, and — the Schema door
@@ -1560,6 +1580,11 @@ impl Draft {
         self.column.as_deref()
     }
 
+    /// The column whose values are open, if [`Stage::Values`] is.
+    pub fn values(&self) -> Option<&str> {
+        self.values.as_deref()
+    }
+
     /// Open the column stage over `column` (Part 2c §5.2): stash the
     /// object's fields, install `fields` (the column's seven —
     /// `views::column_fields`), and start the stage clean.
@@ -1779,6 +1804,41 @@ impl Draft {
         if let Some(column) = column {
             self.select_item_named(&column);
         }
+    }
+
+    /// Open the Values stage (scopes-editing spec §4): stash the object's
+    /// fields, install `fields` (the one values list) as a clean
+    /// baseline. Refused while any projection is already open, for
+    /// `enter_column`'s reason — a second stash would drop the object's
+    /// own fields for good.
+    pub fn enter_values(&mut self, column: &str, fields: Vec<Field>) -> bool {
+        if self.column.is_some() || self.values.is_some() {
+            return false;
+        }
+        self.parent_fields = Some(std::mem::replace(&mut self.fields, fields));
+        self.values = Some(column.to_string());
+        self.baseline = self.fields.clone();
+        self.query.clear();
+        self.selected = 0;
+        self.text_entry = None;
+        true
+    }
+
+    /// Close the Values stage: restore the object's fields and hand the
+    /// stage's own fields back for the adapter's fold
+    /// (`scopes::fold_values` has already run on every tick through
+    /// `render::revalidate`; the return is for the caller's final fold
+    /// and cursor placement). The restored baseline is the restored
+    /// fields, for `leave_column`'s reason. `None` when no Values stage
+    /// was open.
+    pub fn leave_values(&mut self) -> Option<Vec<Field>> {
+        self.values.take()?;
+        let parent = self.parent_fields.take()?;
+        let own = std::mem::replace(&mut self.fields, parent);
+        self.baseline = self.fields.clone();
+        self.query.clear();
+        self.text_entry = None;
+        Some(own)
     }
 
     /// Put the cursor on the row named `name` — an ordered-list item, or
@@ -2226,8 +2286,12 @@ impl Draft {
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
                     return Step::Inert;
                 };
+                // The Values stage may empty its list — that is "drop this
+                // dimension" (scopes-editing spec §4), folded by the
+                // adapter; the guard is a Groupings/Views rule.
                 if included
                     && dest == Destination::Doc
+                    && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
                 {
                     return Step::Refused(format!("{label} must keep at least one entry"));
@@ -2566,6 +2630,7 @@ impl Draft {
             text_entry: None,
             parent_fields: None,
             column: None,
+            values: None,
             column_ctx: None,
             // An object nothing defines yet has no columns for a dataset
             // to speak for; `Domain::draft` is where the layer arrives.
@@ -2847,6 +2912,7 @@ impl Domain {
             text_entry: None,
             parent_fields: None,
             column: None,
+            values: None,
             column_ctx: None,
             // §5.1: Views alone. Reloading the views a second time here
             // (`fields` above already did once) is the price of the
@@ -3318,7 +3384,7 @@ impl ObjectDialogState {
     pub fn has_previous_stage(&self) -> bool {
         matches!(
             self.stage,
-            Stage::Edit { .. } | Stage::Naming | Stage::Column { .. }
+            Stage::Edit { .. } | Stage::Naming | Stage::Column { .. } | Stage::Values { .. }
         )
     }
 }
@@ -4115,6 +4181,7 @@ mod tests {
             text_entry: None,
             parent_fields: None,
             column: None,
+            values: None,
             column_ctx: None,
             dataset_layer: BTreeMap::new(),
         }
@@ -4952,6 +5019,7 @@ mod tests {
             included: false,
             presentation: ColumnPresentation::default(),
             kind: None,
+            note: None,
         }
     }
 
@@ -5596,12 +5664,14 @@ mod tests {
                                 included: true,
                                 presentation: ColumnPresentation::default(),
                                 kind: None,
+                                note: None,
                             },
                             ListItem {
                                 name: "delta".into(),
                                 included: true,
                                 presentation: ColumnPresentation::default(),
                                 kind: None,
+                                note: None,
                             },
                         ],
                         available: Some(vec![ListItem {
@@ -5609,6 +5679,7 @@ mod tests {
                             included: false,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            note: None,
                         }]),
                     },
                     dest: Destination::Doc,
@@ -5697,12 +5768,14 @@ mod tests {
                             included: true,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            note: None,
                         },
                         ListItem {
                             name: "npv".into(),
                             included: true,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            note: None,
                         },
                     ],
                     available: None,
@@ -6002,6 +6075,71 @@ mod tests {
             before,
             "the view's own column list survived the refused re-entry"
         );
+    }
+
+    /// The Values stage is a projection like the column stage: entering
+    /// swaps the fields, leaving restores them and hands the stage's own
+    /// fields back so the adapter can fold them.
+    #[test]
+    fn entering_values_swaps_the_fields_and_leaving_restores_them() {
+        let mut draft = groupings_draft();
+        let before = draft.fields.clone();
+        let values = vec![Field {
+            key: "values".to_string(),
+            label: "Values".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![item("BK001")],
+                available: None,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        }];
+        assert!(draft.enter_values("book", values.clone()));
+        assert_eq!(draft.values(), Some("book"));
+        assert_eq!(draft.fields, values);
+        assert!(!draft.is_dirty(), "freshly installed values are not dirt");
+        // Re-entry is refused, as `enter_column` refuses it.
+        assert!(!draft.enter_values("lhu", Vec::new()));
+        let own = draft.leave_values().expect("the stage's fields");
+        assert_eq!(own, values);
+        assert_eq!(draft.values(), None);
+        assert_eq!(draft.fields, before);
+    }
+
+    /// In the Values stage the last ticked value may be unticked — an
+    /// emptied selection is "drop this dimension", not an invalid object
+    /// — where the same untick on a Groupings chain is refused.
+    #[test]
+    fn the_last_tick_may_be_removed_in_the_values_stage_alone() {
+        let mut draft = groupings_draft();
+        let values = vec![Field {
+            key: "values".to_string(),
+            label: "Values".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![ListItem {
+                    included: true,
+                    ..item("BK001")
+                }],
+                available: None,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        }];
+        assert!(draft.enter_values("book", values));
+        draft.selected = 1; // the one item row under the header
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        assert!(!draft.list_items("values").unwrap()[0].included);
+    }
+
+    /// A stage with a previous rung: `escape` from Values steps back.
+    #[test]
+    fn values_is_a_stage_escape_can_step_back_from() {
+        let mut state = ObjectDialogState::new(Domain::Scopes);
+        state.stage = Stage::Values {
+            object: "mine".into(),
+            column: "book".into(),
+        };
+        assert!(state.has_previous_stage());
     }
 
     /// Part 2c §5.5: a diagnostic path whose index resolves — by name, 2b's

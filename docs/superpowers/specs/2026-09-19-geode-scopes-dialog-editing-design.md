@@ -101,10 +101,17 @@ Stage::Values { object: String, column: String }
 
 A projection over the same `Draft`, exactly as `Stage::Column` is:
 `enter_values_stage` stashes the scope's fields as `parent_fields` and
-installs ONE field, `values: FieldKind::MultiChoice { options, ticked }`,
-whose per-option rows this stage gives `MultiChoice` for the first time
-(`EditRow::Option { field, option }`, the fourth `EditRow` variant —
-added so every consumer's match says what an option row means).
+installs ONE field, `values: FieldKind::OrderedList { items, available:
+None }` — Groupings' "ticking IS membership" shape, each distinct value
+one `ListItem` whose `included` is the tick and whose new `note`
+carries the count (or `not in data`). **Amendment (plan, 2026-09-19):**
+the brainstorm named `MultiChoice` plus a fourth `EditRow::Option`
+variant here; the plan uses the list shape instead, because every
+consumer (`rows`, `row_label`, `visible_rows`, the tick click, the
+filter, the `ctrl+a`/`ctrl+x` walk) already exists for it and
+`MultiChoice` has never had a row model. `Draft.values: Option<String>`
+sits beside `Draft.column` so `revalidate` can fold the stage and
+`step_selected`'s "keep at least one entry" guard can stand down there.
 Crumb `<object> › <column>`, pill as the edit stage's.
 
 **Entering** emits `ShellEvent::DistinctRequested(DistinctParams {

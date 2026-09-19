@@ -254,6 +254,10 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
         // without this the stage would say nothing about which column it
         // is editing. Same arrow the blotter's own rollup path uses.
         Stage::Column { object, column } => format!("{object} › {column}"),
+        // Same shape as the column stage's crumb (scopes-editing spec
+        // §4: "Crumb `<object> › <column>`") — the Values stage is a
+        // projection over one column exactly as the column stage is.
+        Stage::Values { object, column } => format!("{object} › {column}"),
         Stage::Browse | Stage::Naming => {
             let n = derive_rows(shell).len();
             format!("{n} {}", state.domain.crumb_noun())
@@ -2242,7 +2246,11 @@ fn target_object(shell: &ShellView) -> Option<String> {
             let visible = super::visible_rows(state, &rows);
             selected_row(state, &rows, &visible).map(|row| row.name.clone())
         }
-        Stage::Naming => None,
+        // `d`/`r` on a value row are not this task's scope (scopes-editing
+        // spec §4 says nothing about them) — `None` rather than guessing
+        // the Values stage means the same "act on the object" the column
+        // stage does.
+        Stage::Naming | Stage::Values { .. } => None,
     }
 }
 
@@ -2262,7 +2270,8 @@ fn target_row(shell: &ShellView) -> Option<ObjectRow> {
             let visible = super::visible_rows(state, &rows);
             selected_row(state, &rows, &visible).cloned()
         }
-        Stage::Naming => None,
+        // Same reasoning as `target_object`'s own `Values` arm.
+        Stage::Naming | Stage::Values { .. } => None,
     }
 }
 
