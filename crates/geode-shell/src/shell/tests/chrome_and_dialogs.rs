@@ -775,6 +775,68 @@ fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
     );
 }
 
+/// Task 4 fix round 1: the Theme row's typeahead used to drop the
+/// highlight to the FIRST theme whenever the active one ranked past the
+/// painted cap (`Default Light` is well past row 12 of ~44 alphabetical
+/// names) — `i` `enter` silently switched the theme. The cap is now a
+/// window that follows the highlight, so `i` always lights the ACTIVE
+/// theme wherever it ranks, and a bare `enter` right after `i` must
+/// leave the theme exactly as it was.
+#[gpui::test]
+fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let before = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+
+    cx.simulate_keystrokes("i"); // row 0 is Theme
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
+    let lit = shell.read_with(&cx, |s, _| {
+        s.settings
+            .as_ref()
+            .unwrap()
+            .choice
+            .as_ref()
+            .unwrap()
+            .list
+            .highlighted_text()
+            .map(str::to_string)
+    });
+    assert_eq!(
+        lit.as_deref(),
+        Some(before.as_str()),
+        "the typeahead opens lit on the ACTIVE theme, wherever it ranks"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let after = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    assert_eq!(
+        after, before,
+        "enter on the row it opened on must leave the theme untouched"
+    );
+    assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
+
+    // Task 4 review Minor 2: enter picks the HIGHLIGHTED row, never the
+    // top match — step the highlight down once and confirm the theme
+    // that lands is the one after `before` in `names()` order.
+    let names = shell.read_with(&cx, |s, _| s.services.theme.names());
+    let before_ix = names.iter().position(|n| n == &before).unwrap();
+    let expected_next = names[before_ix + 1].clone();
+
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let final_theme = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    assert_eq!(
+        final_theme, expected_next,
+        "enter picked the row a step down lit, not the top-ranked match"
+    );
+    assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
+}
+
 /// `escape` cancels the choice field with the setting untouched; `enter`
 /// on a filtered-away list is still `Drop` (nothing to open).
 #[gpui::test]

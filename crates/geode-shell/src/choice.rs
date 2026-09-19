@@ -16,11 +16,13 @@ use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter::{self, Ranked};
 use crate::vimnav::{self, NavCommand};
 
-/// How many ranked rows a choice surface PAINTS: the underlying picker's
-/// `PICKER_ROWS`, now the one number every choice list shares. A cap
-/// rather than a scroll container, because the query narrows the rest
-/// and a cap needs no scroll state; the highlight is clamped to it so
-/// `enter` can never pick a row the trader cannot see.
+/// How many ranked rows a choice surface PAINTS at once: the underlying
+/// picker's `PICKER_ROWS`, now the one number every choice list shares.
+/// This is the size of the painted WINDOW, not a truncation of the
+/// ranked list — the window slides to follow the highlight (`follow`),
+/// so the highlight is always inside it and `enter` can never pick a
+/// row the trader cannot see, even when the current value ranks past
+/// row `cap`.
 pub const DEFAULT_CAP: usize = 12;
 
 /// One list of options, the query it is ranked against, and which
@@ -30,7 +32,12 @@ pub struct ChoiceList {
     options: Vec<String>,
     query: String,
     ranked: Vec<Ranked>,
+    /// Index into `ranked` (the FULL list, not the painted window).
     highlighted: usize,
+    /// The start of the painted slice into `ranked`. Always kept, by
+    /// `follow`, so that `window <= highlighted < window + cap` (or
+    /// `ranked` is empty) — see `follow`'s own doc comment.
+    window: usize,
     cap: usize,
 }
 
@@ -44,6 +51,7 @@ impl ChoiceList {
             query: String::new(),
             ranked,
             highlighted: 0,
+            window: 0,
             cap,
         }
     }
@@ -58,24 +66,27 @@ impl ChoiceList {
         &self.ranked
     }
 
-    /// The rows a surface paints — the first `cap` of `ranked`.
+    /// The rows a surface paints — the `cap`-wide slice of `ranked`
+    /// starting at `window`, which `follow` keeps around the highlight.
     pub fn painted(&self) -> &[Ranked] {
-        &self.ranked[..self.painted_len()]
+        &self.ranked[self.window..self.window + self.painted_len()]
     }
 
     pub fn painted_len(&self) -> usize {
-        self.ranked.len().min(self.cap)
+        (self.ranked.len() - self.window).min(self.cap)
     }
 
-    /// The highlighted PAINTED row.
+    /// The highlighted row, WINDOW-relative — what a painter compares
+    /// row positions against (`dialog::choice_rows` and a click's `row`
+    /// argument to `set_highlighted` both live in this same space).
     pub fn highlighted(&self) -> usize {
-        self.highlighted
+        self.highlighted - self.window
     }
 
     /// The highlighted option's index in the DECLARED list — what a pick
     /// means. `None` only with nothing ranked.
     pub fn highlighted_option(&self) -> Option<usize> {
-        self.painted().get(self.highlighted).map(|r| r.row)
+        self.ranked.get(self.highlighted).map(|r| r.row)
     }
 
     pub fn highlighted_text(&self) -> Option<&str> {
@@ -108,37 +119,63 @@ impl ChoiceList {
     }
 
     /// Rebuild `ranked` against the current options and query, then put
-    /// the highlight on `value`'s row — row 0 when `value` is `None`, not
-    /// an option, or ranked past the painted range.
+    /// the highlight on `value`'s row — row 0 when `value` is `None` or
+    /// not an option — and bring it into view. Unlike the old truncating
+    /// cap, a value that ranks past row `cap` is still found and lit;
+    /// `window` resets to 0 first so `follow` always slides forward from
+    /// the top rather than keeping some earlier scroll position that has
+    /// nothing to do with the newly placed value.
     pub fn place(&mut self, value: Option<&str>) {
         self.ranked = listfilter::rank(&self.options, &self.query);
-        let painted = self.painted_len();
         self.highlighted = value
             .and_then(|v| self.options.iter().position(|o| o == v))
             .and_then(|declared| self.ranked.iter().position(|r| r.row == declared))
-            .filter(|&row| row < painted)
             .unwrap_or(0);
+        self.window = 0;
+        self.follow();
     }
 
-    /// Move the highlight over the painted rows by [`vimnav::apply`]'s
-    /// rule: a bare ±1 wraps, anything larger clamps (§20.5).
+    /// Keep the window around the highlight after a move that can land
+    /// anywhere in `ranked` (a nav past the old cap, or `place` finding a
+    /// value far down the list): slide forward or back just far enough
+    /// that `window <= highlighted < window + cap`, then clamp so the
+    /// window never starts past `ranked.len().saturating_sub(cap)` — the
+    /// last point at which a full `cap`-wide slice still fits, which is
+    /// what keeps a short or just-narrowed list painting a FULL window
+    /// instead of stopping short with blank rows below the highlight.
+    fn follow(&mut self) {
+        if self.highlighted < self.window {
+            self.window = self.highlighted;
+        } else if self.highlighted >= self.window + self.cap {
+            self.window = self.highlighted + 1 - self.cap;
+        }
+        self.window = self.window.min(self.ranked.len().saturating_sub(self.cap));
+    }
+
+    /// Move the highlight over the WHOLE ranked list by [`vimnav::apply`]'s
+    /// rule — a bare ±1 wraps, anything larger clamps (§20.5) — then bring
+    /// it back into view.
     pub fn nav(&mut self, cmd: NavCommand) {
-        self.highlighted = vimnav::apply(self.highlighted, self.painted_len(), cmd);
+        self.highlighted = vimnav::apply(self.highlighted, self.ranked.len(), cmd);
+        self.follow();
     }
 
     /// [`Self::nav`] with every step clamped — the underlying picker's
     /// own rule (header spec §7), kept for it.
     pub fn nav_clamped(&mut self, cmd: NavCommand) {
-        self.highlighted = vimnav::apply_clamped(self.highlighted, self.painted_len(), cmd);
+        self.highlighted = vimnav::apply_clamped(self.highlighted, self.ranked.len(), cmd);
+        self.follow();
     }
 
-    /// A click on painted row `row`. Refused (`false`) past the painted
-    /// range, which a click cannot reach anyway.
+    /// A click on painted row `row` — WINDOW-relative, matching
+    /// [`Self::highlighted`] and `dialog::choice_rows`'s own row
+    /// positions. Refused (`false`) past the painted range, which a
+    /// click cannot reach anyway.
     pub fn set_highlighted(&mut self, row: usize) -> bool {
         if row >= self.painted_len() {
             return false;
         }
-        self.highlighted = row;
+        self.highlighted = self.window + row;
         true
     }
 
@@ -287,17 +324,88 @@ mod tests {
 
     #[test]
     fn the_highlight_never_leaves_the_painted_range() {
+        // 20 options, cap 12 (window < list): a jump to the very bottom
+        // has to drag the window along rather than clamping the
+        // highlight to whatever the window last showed.
         let mut list = ChoiceList::new((0..20).map(|i| format!("o{i}")).collect(), 12);
         list.nav_clamped(NavCommand::Move(100));
-        assert_eq!(list.highlighted(), 11);
+        assert_eq!(
+            list.highlighted_option(),
+            Some(19),
+            "clamped at the last DECLARED row, not the last painted one"
+        );
+        assert_eq!(list.highlighted(), 11, "still the last row OF the window");
+        assert_eq!(
+            list.painted()[0].row,
+            8,
+            "the window followed the highlight into view"
+        );
         assert!(
             !list.set_highlighted(12),
             "a click past the painted rows is refused"
         );
         assert!(list.set_highlighted(3));
-        assert_eq!(list.highlighted(), 3);
+        assert_eq!(
+            list.highlighted_option(),
+            Some(11),
+            "row 3 of a window that starts at 8"
+        );
         list.nav(NavCommand::Bottom);
-        assert_eq!(list.highlighted(), 11, "Bottom is the last PAINTED row");
+        assert_eq!(
+            list.highlighted_option(),
+            Some(19),
+            "Bottom is the last DECLARED row"
+        );
+        list.nav(NavCommand::Top);
+        assert_eq!(list.highlighted_option(), Some(0), "Top is the first row");
+        assert_eq!(
+            list.painted()[0].row,
+            0,
+            "the window followed the highlight back to the start"
+        );
+        list.nav(NavCommand::Move(-1));
+        assert_eq!(
+            list.highlighted_option(),
+            Some(19),
+            "a bare -1 wraps over the WHOLE ranked list, not just the window"
+        );
+        assert!(
+            list.painted().iter().any(|r| r.row == 19),
+            "the window followed the wrap into view"
+        );
+    }
+
+    #[test]
+    fn place_brings_a_value_past_the_cap_into_view() {
+        // 44 options, cap 12: placing a value that ranks well past the
+        // cap must still land the highlight ON it, with the window
+        // dragged along so it is actually visible — not silently
+        // dropped back to row 0 the way a truncating cap once did (the
+        // Theme row trap this fix round closes).
+        let options: Vec<String> = (0..44).map(|i| format!("t{i:02}")).collect();
+        let mut list = ChoiceList::new(options, 12);
+        list.place(Some("t30"));
+        assert_eq!(list.highlighted_text(), Some("t30"));
+        assert_eq!(list.highlighted(), 11, "the last row of its window");
+        let painted: Vec<&str> = list
+            .painted()
+            .iter()
+            .map(|r| list.options()[r.row].as_str())
+            .collect();
+        assert_eq!(
+            painted,
+            (19..=30).map(|i| format!("t{i:02}")).collect::<Vec<_>>()
+        );
+
+        // Narrowing the query re-finds it by text and keeps it in view.
+        assert!(list.set_query("t3"));
+        assert_eq!(list.highlighted_text(), Some("t30"));
+        assert!(
+            list.painted()
+                .iter()
+                .any(|r| list.options()[r.row] == "t30"),
+            "still in view after the re-rank"
+        );
     }
 
     #[test]
