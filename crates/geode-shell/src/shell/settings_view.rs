@@ -832,6 +832,7 @@ fn build(
     };
     let rows = rows_for(shell);
     let theme = cx.theme();
+    let row_paint = super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
@@ -872,17 +873,19 @@ fn build(
             .py_1()
             .rounded(theme.radius);
         if is_selected {
-            row_el = row_el.bg(theme.selection).text_color(theme.primary);
+            row_el = row_el.bg(row_paint.active).text_color(row_paint.text);
+        } else {
+            row_el = row_el.hover(|s| s.bg(row_paint.hover));
         }
 
         let label = v_flex()
             .gap_0p5()
-            .child(highlighted_text(row.title, &title_ix, theme.primary))
+            .child(highlighted_text(row.title, &title_ix, row_paint.accent))
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(highlighted_text(row.category, &cat_ix, theme.primary)),
+                    .child(highlighted_text(row.category, &cat_ix, row_paint.accent)),
             );
 
         // The current value, in the data face — a value readout, not

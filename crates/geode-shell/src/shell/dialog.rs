@@ -1351,7 +1351,6 @@ pub(crate) fn value_chip(
             .rounded(radius)
             .bg(bg)
             .text_color(fg)
-            .cursor_pointer()
             .child(text)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 cx.stop_propagation();

@@ -126,6 +126,7 @@ use crate::palette;
 use crate::{listfilter, vimnav};
 
 use super::dialog;
+use super::listrow::{self, RowPaint};
 use super::scale;
 use super::{PICKER_KEY, Pickable, ShellEvent, ShellView};
 
@@ -732,9 +733,8 @@ fn build_columns(
     shell: &ShellView,
     picker: &PickerState,
     entity: &Entity<ShellView>,
-    primary: Hsla,
+    row_paint: RowPaint,
     muted: Hsla,
-    selection: Hsla,
     radius: Pixels,
 ) -> AnyElement {
     let matches = PickerState::columns(&shell.pickable, &picker.query);
@@ -764,7 +764,9 @@ fn build_columns(
             .py_1()
             .rounded(radius);
         if is_selected {
-            row = row.bg(selection).text_color(primary);
+            row = row.bg(row_paint.active).text_color(row_paint.text);
+        } else {
+            row = row.hover(|s| s.bg(row_paint.hover));
         }
         let datasets = if p.datasets.is_empty() {
             "derived".to_string()
@@ -774,7 +776,11 @@ fn build_columns(
         let label = h_flex()
             .gap_2()
             .items_center()
-            .child(div().child(palette::highlighted_title(&p.column, indices, primary)))
+            .child(div().child(palette::highlighted_title(
+                &p.column,
+                indices,
+                row_paint.accent,
+            )))
             .child(div().text_color(muted).child(p.role.to_string()));
         let meta = div().text_color(muted).child(datasets);
 
@@ -806,9 +812,8 @@ fn build_columns(
 fn build_values(
     picker: &PickerState,
     entity: &Entity<ShellView>,
-    primary: Hsla,
+    row_paint: RowPaint,
     muted: Hsla,
-    selection: Hsla,
     radius: Pixels,
     scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
@@ -842,12 +847,14 @@ fn build_values(
                             .py_1()
                             .rounded(radius);
                         if is_selected {
-                            row = row.bg(selection).text_color(primary);
+                            row = row.bg(row_paint.active).text_color(row_paint.text);
+                        } else {
+                            row = row.hover(|s| s.bg(row_paint.hover));
                         }
                         let value_for_tick = value.clone();
                         let tick_entity = entity.clone();
                         let tick = if is_ticked {
-                            div().text_color(primary).child("✓")
+                            div().text_color(row_paint.accent).child("✓")
                         } else {
                             div().text_color(muted).child("·")
                         }
@@ -868,11 +875,10 @@ fn build_values(
                                 });
                             },
                         );
-                        let label = h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(tick)
-                            .child(palette::highlighted_title(value, indices, primary));
+                        let label =
+                            h_flex().gap_2().items_center().child(tick).child(
+                                palette::highlighted_title(value, indices, row_paint.accent),
+                            );
                         let count_el = div()
                             .font_family(fonts::MONO)
                             .text_color(muted)
@@ -920,20 +926,18 @@ fn build(
         return div().into_any_element();
     };
     let theme = cx.theme();
-    let primary = theme.primary;
+    let row_paint = listrow::row_paint(theme);
     let muted = theme.muted_foreground;
-    let selection = theme.selection;
     let radius = theme.radius;
 
     let filter = dialog::filter_row(&shell.dialog_input, None, cx);
     let body = match &picker.stage {
-        Stage::Columns => build_columns(shell, picker, entity, primary, muted, selection, radius),
+        Stage::Columns => build_columns(shell, picker, entity, row_paint, muted, radius),
         Stage::Values { .. } => build_values(
             picker,
             entity,
-            primary,
+            row_paint,
             muted,
-            selection,
             radius,
             &shell.picker_scroll,
         ),

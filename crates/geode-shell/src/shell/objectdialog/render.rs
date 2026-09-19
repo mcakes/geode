@@ -2809,6 +2809,7 @@ fn build(
     let rows = derive_rows(shell);
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
+    let row_paint = super::super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
@@ -2874,7 +2875,9 @@ fn build(
             .py_1()
             .rounded(theme.radius);
         if is_selected {
-            row_el = row_el.bg(theme.selection).text_color(theme.primary);
+            row_el = row_el.bg(row_paint.active).text_color(row_paint.text);
+        } else {
+            row_el = row_el.hover(|s| s.bg(row_paint.hover));
         }
 
         // §19.3: a prefixed row paints `<prefix> · ` dimmed and the name
@@ -2899,10 +2902,10 @@ fn build(
                                 theme.primary,
                             )),
                     )
-                    .child(highlighted_text(&row.name, &in_name, theme.primary))
+                    .child(highlighted_text(&row.name, &in_name, row_paint.accent))
                     .into_any_element()
             }
-            None => highlighted_text(&row.name, &name_ix, theme.primary),
+            None => highlighted_text(&row.name, &name_ix, row_paint.accent),
         };
 
         let label = v_flex().gap_0p5().child(head).child(
@@ -2910,7 +2913,11 @@ fn build(
                 .font_family(crate::fonts::MONO)
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(highlighted_text(&row.summary, &summary_ix, theme.primary)),
+                .child(highlighted_text(
+                    &row.summary,
+                    &summary_ix,
+                    row_paint.accent,
+                )),
         );
 
         // Provenance, right-aligned: the layer that won as a muted outlined
@@ -2992,9 +2999,17 @@ fn build(
     if visible.is_empty() {
         // Two different empty states, said differently on purpose: an
         // over-narrow filter is a state the user can back out of, while
-        // a domain with nothing in it is a fact about the config.
+        // a domain with nothing in it is a fact about the config — and
+        // an empty state names the next action (design guide) where
+        // there is one: `n` creates an object on every writable domain,
+        // while the schema's rows come from `datasets.toml` alone.
         let message = if rows.is_empty() {
-            format!("no {} are configured", state.domain.title().to_lowercase())
+            let word = state.domain.title().to_lowercase();
+            if state.domain.writable(&Stage::Browse) {
+                format!("no {word} are configured — n creates one")
+            } else {
+                format!("no {word} are configured")
+            }
         } else {
             "no matches".to_string()
         };
@@ -3196,6 +3211,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         (false, None) => action_bar(shell, entity, cx),
     };
     let theme = cx.theme();
+    let row_paint = super::super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
@@ -3359,7 +3375,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             .border_t_2()
             .border_color(gpui::transparent_black());
         if is_selected {
-            element = element.bg(theme.selection).text_color(theme.primary);
+            element = element.bg(row_paint.active).text_color(row_paint.text);
+        } else {
+            element = element.hover(|s| s.bg(row_paint.hover));
         }
         // Set only for a list row that opens a new block — see this
         // loop's own comment on `last_item_section`.
@@ -3401,7 +3419,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 );
                 (
                     format!("objectdialog-field-{}", field.key),
-                    highlighted_text(&field.label, &m.indices, theme.primary),
+                    highlighted_text(&field.label, &m.indices, row_paint.accent),
                     h_flex()
                         .gap_2()
                         .items_center()
@@ -3539,7 +3557,6 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                             theme.muted_foreground
                         })
                         .debug_selector(move || tick_id)
-                        .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                             cx.stop_propagation();
                             entity_for_tick.update(cx, |shell, cx| {
@@ -3557,7 +3574,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 if !entry.included {
                     name_row = name_row.text_color(theme.muted_foreground);
                 }
-                name_row = name_row.child(highlighted_text(&entry.name, &m.indices, theme.primary));
+                name_row =
+                    name_row.child(highlighted_text(&entry.name, &m.indices, row_paint.accent));
                 // The compact per-column summary (Part 2c §5.4) is painted
                 // after the name, muted, on a member row only — an
                 // available row's presentation is always the empty

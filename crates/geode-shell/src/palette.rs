@@ -861,6 +861,7 @@ pub fn render(
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
+    let row_paint = crate::shell::listrow::row_paint(theme);
     let Viewport {
         width: viewport_width,
         height: viewport_height,
@@ -906,7 +907,7 @@ pub fn render(
                 .px_2()
                 .py_1()
                 .text_color(theme.muted_foreground)
-                .child("No matches"),
+                .child("no matches"),
         );
     } else {
         for (i, (item, indices, title_len)) in state.rows().enumerate() {
@@ -919,8 +920,13 @@ pub fn render(
                 .px_2()
                 .py_1()
                 .rounded(theme.radius);
+            // The list-row tokens through the one door (`shell::listrow`):
+            // the highlighted row is the state, the hovered row is the
+            // pointer, and they are distinct fills.
             if is_selected {
-                row = row.bg(theme.selection).text_color(theme.primary);
+                row = row.bg(row_paint.active).text_color(row_paint.text);
+            } else {
+                row = row.hover(|s| s.bg(row_paint.hover));
             }
             // Test-only, see `list`'s `debug_selector` comment above.
             let row = row.debug_selector(move || format!("palette-row-{i}"));
@@ -949,11 +955,15 @@ pub fn render(
             let label = h_flex()
                 .gap_2()
                 .items_center()
-                .child(div().child(highlighted_title(&item.title(), title_ix, theme.primary)))
+                .child(div().child(highlighted_title(&item.title(), title_ix, row_paint.accent)))
                 .child(
                     div()
                         .text_color(theme.muted_foreground)
-                        .child(highlighted_title(item.category(), &cat_ix, theme.primary)),
+                        .child(highlighted_title(
+                            item.category(),
+                            &cat_ix,
+                            row_paint.accent,
+                        )),
                 );
             let binding = div()
                 .font_family(fonts::MONO)

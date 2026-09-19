@@ -1308,6 +1308,10 @@ impl gpui::Render for BlotterTile {
         // background family on a barely-tinted background, under 3:1 on
         // 30 of 44 bundled themes.
         let warn_chip = chip::chip_paint(theme, Tone::Warning);
+        // `pinned` and `filtered` are the trader's own choices, not hazards:
+        // neutral, so `unscoped` and `AS OF` — the two that really warn —
+        // are the only warning-toned things in the strip.
+        let neutral_chip = chip::chip_paint(theme, Tone::Neutral);
         let warn_text = chip::chip_paint(theme, Tone::WarningText).text;
 
         // Header strip: view · grouping · markers · freshness · AS OF · … · error
@@ -1334,8 +1338,8 @@ impl gpui::Render for BlotterTile {
             _ => {
                 header = header.child(
                     div()
-                        .text_color(warn_chip.text)
-                        .when_some(warn_chip.fill, |el, fill| el.bg(fill))
+                        .text_color(neutral_chip.text)
+                        .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
                         .px_1()
                         .rounded(theme.radius_tokens().sm)
                         .child("pinned"),
@@ -1369,8 +1373,8 @@ impl gpui::Render for BlotterTile {
                         SharedString::new_static("blotter-filtered"),
                         self.tile.0,
                     ))
-                    .text_color(warn_chip.text)
-                    .when_some(warn_chip.fill, |el, fill| el.bg(fill))
+                    .text_color(neutral_chip.text)
+                    .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
                     .px_1()
                     .rounded(theme.radius_tokens().sm)
                     .debug_selector(|| format!("blotter-filtered-{}", self.tile.0))

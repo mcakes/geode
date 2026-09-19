@@ -30,6 +30,7 @@ pub fn render(
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
+    let row_paint = crate::shell::listrow::row_paint(theme);
     let height = scale::design_px(HEIGHT, rem_size);
     let row_height = scale::design_px(ROW_HEIGHT, rem_size);
     let strip_top = tile.y + tile.h - height - 1.0;
@@ -92,10 +93,12 @@ pub fn render(
                 .child(crate::palette::highlighted_title(
                     text,
                     &r.indices,
-                    theme.primary,
+                    row_paint.accent,
                 ));
             if i == line.highlighted {
-                row = row.bg(theme.selection);
+                row = row.bg(row_paint.active).text_color(row_paint.text);
+            } else {
+                row = row.hover(|s| s.bg(row_paint.hover));
             }
             list = list.child(row);
         }

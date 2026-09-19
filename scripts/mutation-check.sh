@@ -5720,11 +5720,11 @@ run_mutation "diagnostics module: MIN-11 — the header never shows the filtered
   '        if !self.filter.is_empty() {
             header = header.child(
                 div()
-                    .text_color(warn_chip.text)' \
+                    .text_color(neutral_chip.text)' \
   '        if false {
             header = header.child(
                 div()
-                    .text_color(warn_chip.text)' \
+                    .text_color(neutral_chip.text)' \
   geode-diagnostics a_filtered_tile_shows_the_filtered_pill
 
 # --- Task 5 fix round 2 ----------------------------------------------
@@ -11576,6 +11576,63 @@ run_mutation "chip: the readability ground composites the tint at its alpha" \
   '    let (t, a) = (to_rgb(top), 1.0);' \
   geode-shell \
   the_retired_pairing_still_fails_the_sweep
+
+# A neutral chip is the theme's `secondary` pair, not a fourth warning:
+# `pinned` and `filtered` are trader choices. Mutated to the warning
+# tint under the plain foreground — readable, so the sweep alone would
+# pass — the token test is what notices, since it pins the pair.
+run_mutation "chip: a neutral chip is the secondary pair, not a warning tint" \
+  crates/geode-shell/src/shell/chip.rs \
+  '        Tone::Neutral => ChipPaint {
+            fill: Some(theme.secondary),
+            text: theme.secondary_foreground,
+        },' \
+  '        Tone::Neutral => ChipPaint {
+            fill: Some(theme.warning.opacity(FILL_ALPHA)),
+            text: theme.foreground,
+        },' \
+  geode-shell \
+  tones_resolve_to_their_documented_tokens
+
+# ---- List rows (`shell::listrow`, design-guide audit) --------------------
+# The highlighted row's text is the plain foreground, not `primary`:
+# `primary` over the list-active fill is under 3:1 on 11 bundled themes
+# (over the old `selection` fill, 15). Mutated back, every dialog's
+# highlighted row is unreadable on Fahrenheit and the sweep is the only
+# test that reads a row's COLOUR rather than its text.
+run_mutation "listrow: the highlighted row's text is the foreground, not primary" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        text: theme.foreground,' \
+  '        text: theme.primary,' \
+  geode-shell \
+  every_row_state_is_readable_on_every_bundled_theme
+
+# The fills are the LIST tokens, and active and hover differ. Mutated so
+# the highlighted row paints the hover fill, the pointer's row and the
+# highlighted row merge — the state and the pointer become one cue.
+run_mutation "listrow: active and hover are distinct list tokens" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        active: theme.list_active,' \
+  '        active: theme.list_hover,' \
+  geode-shell \
+  active_and_hover_are_the_list_tokens_and_differ
+
+# The match accent is floored against the active row's ground. Mutated
+# to the raw `primary`, a fuzzy-match glyph on the highlighted row is
+# under 3:1 on 11 themes.
+run_mutation "listrow: the match accent is floored against the active row" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        accent: to_hsla(readable_on(
+            to_rgb(theme.primary),
+            ground,
+            to_rgb(theme.foreground),
+        )),' \
+  '        accent: {
+            let _ = ground;
+            theme.primary
+        },' \
+  geode-shell \
+  every_row_state_is_readable_on_every_bundled_theme
 
 # ---- Chrome on the rem scale (`shell::scale`, design-guide audit) -------
 # `FontSize` moves the window rem; every chrome length is authored in
