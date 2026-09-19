@@ -11851,6 +11851,29 @@ run_mutation "asof: the calendar hides under live" \
   geode-shell \
   the_calendar_hides_only_under_live
 
+# Final whole-branch review, finding 2: END_OF_DAY must be the LAST
+# MICROSECOND of the day, not the last whole second — a subscribed
+# document's source_time is sub-second, and the as-of predicate compares
+# at microsecond precision, so a whole-second bound silently excludes a
+# document published in the last second of the day.
+run_mutation "asof: END_OF_DAY is the last microsecond, not the last whole second" \
+  crates/geode-core/src/query.rs \
+  'pub const END_OF_DAY: NaiveTime = match NaiveTime::from_hms_micro_opt(23, 59, 59, 999_999) {' \
+  'pub const END_OF_DAY: NaiveTime = match NaiveTime::from_hms_micro_opt(23, 59, 59, 0) {' \
+  geode-core \
+  a_bare_date_resolves_to_the_end_of_that_local_day
+
+# Final whole-branch review, finding 4: the field-to-calendar mirror must
+# ignore a failed intermediate parse (a trader mid-edit backspacing
+# through a date) — mirroring unconditionally snaps the calendar to
+# today on every invalid partial date, discarding whatever day it showed.
+run_mutation "asof: the mirror ignores a failed parse" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if state.resolved.is_some() {' \
+  '                if true {' \
+  geode-shell \
+  an_invalid_intermediate_keystroke_leaves_the_calendar_where_it_was
+
 run_mutation "palette: tab is reclaimed inside the palette (spec §20.5)" \
   crates/geode-shell/src/shell/dialog.rs \
   '        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodePalette")),' \
