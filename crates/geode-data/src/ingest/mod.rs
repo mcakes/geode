@@ -2,6 +2,7 @@
 //! ladder (spec §5).
 
 pub mod coalesce;
+pub mod fetch;
 pub mod load;
 pub mod plan;
 pub mod runner;

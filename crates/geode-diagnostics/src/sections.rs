@@ -819,6 +819,7 @@ mod tests {
             }],
             live_rows: 120,
             archive_rows: 100,
+            series: Vec::new(),
         }
     }
 

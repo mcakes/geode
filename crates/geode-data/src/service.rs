@@ -8,9 +8,10 @@
 use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
 use crate::documents::DocumentRegistry;
 use crate::health::{Health, severity_rank};
+use crate::ingest::fetch::{FetchOutcome, FetchOutcomeSink, FetchWork, FetchWorker};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
 use crate::ingest::subscribe::{LoadReportSink, SubscriptionWorker};
-use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
+use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink, SeriesJob};
 use crate::query::as_of::AsOf;
 use crate::query::catalog::build_catalog;
 use crate::query::compile::compile_view;
@@ -33,6 +34,7 @@ use geode_core::query::{
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::snapshot::{Freshness, Provenance};
+use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,6 +79,16 @@ pub enum DataEvent {
         batch: String,
         gen_id: i64,
         books: Vec<Option<String>>,
+    },
+    /// A fetch finished (timeseries spec §5.4), keyed by the PAIR rather
+    /// than the asking tile: two tiles holding `SPX.close@kdb_hist` both
+    /// learn the outcome of the one fetch that answered them. `Ok(appended)`
+    /// may be `Ok(0)` — a covered span, or an overlapping refetch — and
+    /// the tile must requery on it all the same, since coverage changed.
+    SeriesFetched {
+        source: String,
+        identity: String,
+        result: Result<u64, String>,
     },
     /// The ingest runner popped a job (spec 2026-09-17 §5.3): the status
     /// bar's progress strip starts here. Mirrors `IngestEvent::Started`
@@ -162,6 +174,20 @@ pub struct QueryParams {
     pub scope: Scope,
     pub as_of: AsOf,
     pub max_depth: usize,
+}
+
+/// One on-demand history request as a module asks for it (timeseries
+/// spec §5.3). `key` is the asking tile's, carried for symmetry with
+/// every other request — the ANSWER is keyed by the pair, not by it, so
+/// a second tile watching the same pair is not left waiting on a fetch
+/// it did not ask for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchParams {
+    pub key: QueryKey,
+    pub source: String,
+    pub identity: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
 }
 
 /// `SchedulerEvent::Polled` -> `DataEvent::Polled` (Phase 4b §4.4's
@@ -584,6 +610,26 @@ pub struct DataService {
     /// one. It is never contended: only `shutdown` and `Drop` take it,
     /// and `shutdown` is idempotent.
     subscriptions: std::sync::Mutex<Vec<SubscriptionWorker>>,
+    /// One fetch worker per fetch source (timeseries spec §5.4), behind
+    /// a `Mutex` for the same reason `subscriptions` is. Listed BEFORE
+    /// `subscriptions` in stop order (`shutdown` stops these first) and
+    /// here in drop order for the same reason the subscriptions precede
+    /// the runner: a worker's outcome sink submits into `ingest`, so it
+    /// must stop before the runner does.
+    fetchers: std::sync::Mutex<Vec<FetchWorker>>,
+    /// What each fetch source last answered `Fetch::catalogue` with,
+    /// written by the workers' outcome sinks and read by `catalog`.
+    /// Sorted and deduplicated on the way in, so the read is a clone.
+    identities: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>>>,
+    /// Fetch source name -> the series dataset it feeds. The one thing
+    /// `fetch` needs to name a coverage table, and the membership test
+    /// that makes "is this a fetch source" a lookup rather than a
+    /// re-derivation from the schema.
+    fetch_datasets: std::collections::HashMap<String, String>,
+    /// The sink `open` was given, kept so `fetch` can answer the asking
+    /// tile directly — every early exit is a `SeriesFetched`, and the
+    /// ones decided here never reach a worker or the runner.
+    sink: EventSink,
     pool: QueryPool,
     scheduler: Scheduler,
     ingest: Arc<IngestHandle>,
@@ -928,12 +974,84 @@ impl DataService {
                     let _ = sink(DataEvent::LoadEnded);
                     health_delivered
                 }
-                // Task 8 replaces these: for now the series lane has no
-                // seam into `DataEvent` at all, so both outcomes are
-                // reported as delivered without touching `sink` — there
-                // is nothing yet for a series job's `Started` to precede
-                // that this arm would need to close out.
-                IngestEvent::SeriesAppended { .. } | IngestEvent::SeriesFailed { .. } => true,
+                // The series lane (timeseries spec §5.4). Both arms close
+                // out the `Started` this job's pop already sent (which
+                // reached `DataEvent::Loading` through the arm above) with
+                // a `LoadEnded`, exactly as the file and document arms do,
+                // and answer the asking tile with `SeriesFetched`.
+                //
+                // The load-lane key is `"{identity}@{source}"` on every
+                // path — here, and the fetch worker's own `Failed` — which
+                // is what lets a success clear a failure.
+                IngestEvent::SeriesAppended {
+                    source,
+                    dataset,
+                    identity,
+                    appended,
+                    swept,
+                } => {
+                    tracing::info!(
+                        target: "geode::ingest",
+                        "appended {identity}@{source} into {dataset}: {appended} row(s), {swept} swept",
+                    );
+                    let pair = format!("{identity}@{source}");
+                    let health_delivered = health_tracker.report_load_and_emit(
+                        &source,
+                        &pair,
+                        Health::Ok,
+                        String::new(),
+                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        },
+                    );
+                    let delivered = sink(DataEvent::SeriesFetched {
+                        source: source.clone(),
+                        identity,
+                        result: Ok(appended as u64),
+                    });
+                    let _ = sink(DataEvent::LoadEnded);
+                    delivered && health_delivered
+                }
+                IngestEvent::SeriesFailed {
+                    source,
+                    dataset,
+                    identity,
+                    reason,
+                } => {
+                    let pair = format!("{identity}@{source}");
+                    log_ingest_failure(&dataset, &pair, &reason);
+                    let health_delivered = health_tracker.report_load_and_emit(
+                        &source,
+                        &pair,
+                        Health::Failed {
+                            reason: reason.clone(),
+                        },
+                        format!("{pair}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => sink(DataEvent::Health {
+                                source: source.clone(),
+                                worst,
+                                detail,
+                            }),
+                            None => true,
+                        },
+                    );
+                    let delivered = sink(DataEvent::SeriesFetched {
+                        source: source.clone(),
+                        identity,
+                        result: Err(reason),
+                    });
+                    let _ = sink(DataEvent::LoadEnded);
+                    delivered && health_delivered
+                }
                 // Finding 2 (2026-09-19 final review): the queue draining
                 // is also an end signal — a refused `LoadEnded` on the
                 // last load of a burst (a momentarily full channel) would
@@ -977,11 +1095,17 @@ impl DataService {
         // unservable source must not stop the others or the queries.
         let mut subscriptions: Vec<SubscriptionWorker> = Vec::new();
         let mut directory_sources: Vec<SourceSpec> = Vec::new();
+        // The fetch tier (timeseries spec §5.4), resolved in the same
+        // loop and on the same lane: a fetch source is a subscribed
+        // source whose dataset is of the series family
+        // (`SourceSpec::shape`), so the two share every failure shape
+        // and `report_unservable` below is hoisted to serve both.
+        let mut fetchers: Vec<FetchWorker> = Vec::new();
+        let mut fetch_datasets: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let identities: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>>> =
+            Default::default();
         for spec in &config.sources {
-            if !spec.is_subscribed() {
-                directory_sources.push(spec.clone());
-                continue;
-            }
             // The scheduler sink's own emit closure, verbatim (it is the
             // discovery lane's): the deciding slot's pair forwarded as
             // it comes back, logged at the level the outcome deserves.
@@ -1007,6 +1131,147 @@ impl DataService {
                     },
                 );
             };
+            match spec.shape(&config.schema) {
+                SourceShape::Directory => {
+                    directory_sources.push(spec.clone());
+                    continue;
+                }
+                SourceShape::Subscribed => {}
+                SourceShape::Fetch => {
+                    let Some(adapter) = config.adapters.get(&spec.adapter) else {
+                        report_unservable(format!(
+                            "adapter '{}' is not in this build",
+                            spec.adapter
+                        ));
+                        continue;
+                    };
+                    // Asked for per source, never cached, for the reason
+                    // the subscribed arm's `subscription()` call records.
+                    let Some(fetch) = adapter.fetch() else {
+                        report_unservable(format!("adapter '{}' has no fetch side", spec.adapter));
+                        continue;
+                    };
+                    // The subscribed arm's `report_load`, verbatim: a
+                    // fetch that failed is a content-aware outcome, so it
+                    // is the LOAD lane — keyed here by the PAIR, which is
+                    // the same key `ingest_sink`'s two series arms use, so
+                    // a later success clears this failure.
+                    let report_load: LoadReportSink = {
+                        let sink = Arc::clone(&sink);
+                        let health_tracker = Arc::clone(&health_tracker);
+                        let source = spec.name.clone();
+                        let dataset_name = spec.dataset.clone();
+                        Arc::new(move |batch: &str, health: Health, detail: String| {
+                            let failed = match &health {
+                                Health::Degraded { reason } | Health::Failed { reason } => {
+                                    log_ingest_failure(&dataset_name, batch, reason);
+                                    true
+                                }
+                                _ => false,
+                            };
+                            health_tracker.report_load_and_emit(
+                                &source,
+                                batch,
+                                health,
+                                detail,
+                                |reported| match reported {
+                                    Some((worst, detail)) => {
+                                        if !failed {
+                                            log_health_event(&source, &worst, &detail);
+                                        }
+                                        sink(DataEvent::Health {
+                                            source: source.clone(),
+                                            worst,
+                                            detail,
+                                        })
+                                    }
+                                    None => true,
+                                },
+                            );
+                        })
+                    };
+                    // What a fetch worker's outcome becomes: rows go to
+                    // the ingest runner (the one door storage is entered
+                    // by), a failure is the load lane plus the asking
+                    // tile's answer, and a catalogue is remembered for
+                    // the next `catalog` read.
+                    let outcome_sink: FetchOutcomeSink = {
+                        let ingest = Arc::clone(&ingest);
+                        let sink = Arc::clone(&sink);
+                        let identities = Arc::clone(&identities);
+                        let source = spec.name.clone();
+                        let dataset = spec.dataset.clone();
+                        Arc::new(move |outcome| match outcome {
+                            FetchOutcome::Fetched {
+                                identity,
+                                rows,
+                                span,
+                                ..
+                            } => {
+                                ingest.submit_series(SeriesJob {
+                                    source: source.clone(),
+                                    dataset: dataset.clone(),
+                                    identity,
+                                    rows,
+                                    span,
+                                    received_at: Utc::now(),
+                                });
+                            }
+                            FetchOutcome::Failed { identity, reason } => {
+                                let pair = format!("{identity}@{source}");
+                                // The asking tile's answer goes FIRST, the
+                                // source's health after it: the fetch's
+                                // outcome belongs to this pair, and the
+                                // `Health` beside it is the wider fact a
+                                // diagnostics reader follows. Pinned by
+                                // `a_failed_fetch_is_a_load_lane_failure…`,
+                                // which reads the two in that order.
+                                let _ = sink(DataEvent::SeriesFetched {
+                                    source: source.clone(),
+                                    identity,
+                                    result: Err(reason.clone()),
+                                });
+                                report_load(
+                                    &pair,
+                                    Health::Failed {
+                                        reason: reason.clone(),
+                                    },
+                                    format!("{pair}: {reason}"),
+                                );
+                            }
+                            FetchOutcome::Identities(Some(mut ids)) => {
+                                ids.sort();
+                                ids.dedup();
+                                identities
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(source.clone(), ids);
+                            }
+                            // A source that cannot enumerate is not a
+                            // failure (`Fetch::catalogue`'s own doc): the
+                            // picker simply has no typeahead for it.
+                            FetchOutcome::Identities(None) => {}
+                        })
+                    };
+                    match FetchWorker::spawn(&spec.name, fetch, outcome_sink) {
+                        Ok(worker) => {
+                            // Servable: the discovery lane's clean state,
+                            // so a later failure reads as a transition.
+                            health_tracker.report_discovery_and_emit(
+                                &spec.name,
+                                Health::Ok,
+                                String::new(),
+                                |_| true,
+                            );
+                            worker.request(FetchWork::Identities);
+                            fetch_datasets.insert(spec.name.clone(), spec.dataset.clone());
+                            fetchers.push(worker);
+                        }
+                        Err(e) => report_unservable(e.message),
+                    }
+                    continue;
+                }
+            }
             let Some(adapter) = config.adapters.get(&spec.adapter) else {
                 report_unservable(format!("adapter '{}' is not in this build", spec.adapter));
                 continue;
@@ -1235,6 +1500,10 @@ impl DataService {
             config,
             diagnostics,
             subscriptions: std::sync::Mutex::new(subscriptions),
+            fetchers: std::sync::Mutex::new(fetchers),
+            identities,
+            fetch_datasets,
+            sink,
             pool,
             scheduler,
             ingest,
@@ -1487,6 +1756,113 @@ impl DataService {
         self.pool.cancel(key);
     }
 
+    /// The on-demand fetch (timeseries spec §5.4): subtract what the
+    /// coverage table already holds and queue one job per gap on the
+    /// source's fetch worker. Every early exit is a `SeriesFetched`, so
+    /// the asking tile always hears back.
+    ///
+    /// Coverage is read through `self.conn`, the service's own reader:
+    /// `append_series` commits its rows and its coverage row in one
+    /// transaction on the ingest thread, so a span this sees as covered
+    /// is a span whose rows are queryable.
+    pub fn fetch(&self, params: &FetchParams) {
+        let answer = |result: Result<u64, String>| {
+            let _ = (self.sink)(DataEvent::SeriesFetched {
+                source: params.source.clone(),
+                identity: params.identity.clone(),
+                result,
+            });
+        };
+        let Some(dataset) = self.fetch_datasets.get(&params.source) else {
+            answer(Err(format!(
+                "source '{}' is not a fetch source",
+                params.source
+            )));
+            return;
+        };
+        // Clipped to the dataset's `history` window BEFORE coverage is
+        // subtracted (timeseries spec §4.7 as built, the Task 6 ruling):
+        // `sweep_pair` runs inside the append's own transaction, so rows
+        // older than the window would be inserted and deleted again in
+        // one breath — and the coverage row with them, so the next fetch
+        // would ask for the same dead span forever. A request wholly
+        // outside the window is answered here, without asking the source.
+        //
+        // `checked_sub_signed`, and no clip at all when the window does
+        // not convert or the subtraction leaves the representable range:
+        // `history` is user-configured and unbounded in magnitude
+        // (`source::config::parse_duration`), and a pathological value
+        // must not panic the request loop. Not clipping is the safe
+        // direction — the fetch is asked for, and the append's own sweep
+        // still bounds what is kept.
+        let mut from = params.from;
+        if let Some(cutoff) = self
+            .config
+            .schema
+            .dataset(dataset)
+            .and_then(|ds| ds.series_retention)
+            .and_then(|r| r.history)
+            .and_then(|window| chrono::Duration::from_std(window).ok())
+            .and_then(|window| Utc::now().checked_sub_signed(window))
+        {
+            from = from.max(cutoff);
+        }
+        if from >= params.to {
+            answer(Ok(0));
+            return;
+        }
+        let loaded = match crate::store::series::coverage(
+            &self.conn,
+            dataset,
+            &params.source,
+            &params.identity,
+        ) {
+            Ok(spans) => spans,
+            Err(e) => {
+                answer(Err(format!("reading coverage: {e}")));
+                return;
+            }
+        };
+        let gaps = crate::store::series::missing_spans((from, params.to), &loaded);
+        if gaps.is_empty() {
+            answer(Ok(0));
+            return;
+        }
+        let fetchers = self.fetchers.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(worker) = fetchers.iter().find(|w| w.source() == params.source) else {
+            answer(Err(format!(
+                "source '{}' is not a fetch source",
+                params.source
+            )));
+            return;
+        };
+        for (from, to) in gaps {
+            if !worker.request(FetchWork::Span {
+                identity: params.identity.clone(),
+                from,
+                to,
+            }) {
+                answer(Err(format!(
+                    "the fetch queue for '{}' is full",
+                    params.source
+                )));
+                return;
+            }
+        }
+    }
+
+    /// Ask a fetch source for its identities again (timeseries spec
+    /// §5.5). `false` when the source is not a fetch source or its queue
+    /// refused; the answer, when it comes, lands in the next
+    /// `CatalogSnapshot::identities`.
+    pub fn identities(&self, source: &str) -> bool {
+        let fetchers = self.fetchers.lock().unwrap_or_else(|e| e.into_inner());
+        fetchers
+            .iter()
+            .find(|w| w.source() == source)
+            .is_some_and(|w| w.request(FetchWork::Identities))
+    }
+
     /// The diagnostics tile's "what does the database hold" request
     /// (spec §4.5), answered directly here on the service thread rather
     /// than submitted to the query pool — the plan's ruling: every query
@@ -1496,7 +1872,19 @@ impl DataService {
     /// concurrent *data* scans, not to serialize a synchronous,
     /// millisecond-scale read.
     pub fn catalog(&self, params: &CatalogParams) -> CatalogOutcome {
-        let snapshot = build_catalog(&self.conn, &self.config.schema, &params.as_of);
+        let mut snapshot = build_catalog(&self.conn, &self.config.schema, &params.as_of);
+        // Not in the database at all (timeseries spec §5.5): a source's
+        // catalogue is what its fetch worker last answered, so it is
+        // folded in here rather than read by `build_catalog`.
+        if let Ok(snap) = &mut snapshot {
+            snap.identities = self
+                .identities
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(s, ids)| (s.clone(), ids.clone()))
+                .collect();
+        }
         match &snapshot {
             Ok(snap) => {
                 tracing::debug!(
@@ -1587,6 +1975,18 @@ impl DataService {
     }
 
     pub fn shutdown(&self) {
+        // Fetch workers before the subscriptions, for the same reason
+        // the subscriptions come before the runner: a worker's outcome
+        // sink submits series jobs into the ingest runner, so it must
+        // stop delivering before anything downstream of it does.
+        for worker in self
+            .fetchers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+        {
+            worker.shutdown();
+        }
         // Subscriptions first: each one's receiver thread submits
         // documents into the ingest runner, so stopping the runner while
         // a worker is still delivering would leave work queued behind a
@@ -1853,6 +2253,322 @@ mod tests {
                 Err(e) => panic!("channel closed unexpectedly: {e:?}"),
             }
         }
+    }
+
+    /// A fetch adapter for the service tests: `FakeFetch` from
+    /// `ingest::fetch`'s tests, wrapped as an `Adapter` named `fake_kdb`.
+    struct FakeFetchAdapter {
+        calls: Arc<std::sync::Mutex<Vec<crate::adapter::FetchRequest>>>,
+        catalogue: Option<Vec<String>>,
+    }
+
+    impl crate::adapter::Adapter for FakeFetchAdapter {
+        fn name(&self) -> &'static str {
+            "fake_kdb"
+        }
+        fn subscription(&self) -> Option<Box<dyn crate::adapter::Subscription>> {
+            None
+        }
+        fn egress(&self) -> Option<Box<dyn crate::adapter::Egress>> {
+            None
+        }
+        fn fetch(&self) -> Option<Box<dyn crate::adapter::Fetch>> {
+            Some(Box::new(crate::ingest::fetch::tests::FakeFetch {
+                calls: self.calls.clone(),
+                n: 3,
+                catalogue: self.catalogue.clone(),
+            }))
+        }
+    }
+
+    /// A service with one FETCH source (timeseries spec §5.4) over the
+    /// series dataset — the shape `SourceSpec::shape` answers `Fetch`
+    /// for: a subscribed source whose dataset is of the series family.
+    fn fetch_service(
+        catalogue: Option<Vec<String>>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<std::sync::Mutex<Vec<crate::adapter::FetchRequest>>>,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(FakeFetchAdapter {
+            calls: calls.clone(),
+            catalogue,
+        }));
+        let mut schema = SchemaSpec::default();
+        schema
+            .datasets
+            .push(crate::store::ddl::tests_support::series_dataset());
+        let spec = crate::source::SourceSpec {
+            adapter: "fake_kdb".to_string(),
+            ..crate::source::SourceSpec::directory("kdb_hist", "series", Vec::new())
+        };
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: vec![spec],
+            adapters,
+            documents: Default::default(),
+        })
+        .unwrap();
+        (dir, calls, service, rx)
+    }
+
+    fn next_series_fetched(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+    ) -> (String, String, Result<u64, String>) {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::SeriesFetched {
+                    source,
+                    identity,
+                    result,
+                } => return (source, identity, result),
+                _ => continue,
+            }
+        }
+    }
+
+    fn fetch_params(identity: &str, from: &str, to: &str) -> FetchParams {
+        FetchParams {
+            key: QueryKey(7),
+            source: "kdb_hist".into(),
+            identity: identity.into(),
+            from: ts(from),
+            to: ts(to),
+        }
+    }
+
+    #[test]
+    fn a_fetch_lands_rows_and_announces_the_pair() {
+        let (_d, calls, service, rx) = fetch_service(None);
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let (source, identity, result) = next_series_fetched(&rx);
+        assert_eq!(
+            (source.as_str(), identity.as_str()),
+            ("kdb_hist", "SPX.close")
+        );
+        assert_eq!(result, Ok(2), "three bars, one NaN dropped");
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        let n: i64 = service
+            .conn
+            .query_row("select count(*) from series_series", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn a_covered_span_is_answered_without_asking_the_source() {
+        let (_d, calls, service, rx) = fetch_service(None);
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let _ = next_series_fetched(&rx);
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let (_, _, result) = next_series_fetched(&rx);
+        assert_eq!(result, Ok(0));
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "no second call reached the adapter"
+        );
+    }
+
+    #[test]
+    fn widening_the_range_fetches_only_the_gaps() {
+        let (_d, calls, service, rx) = fetch_service(None);
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let _ = next_series_fetched(&rx);
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-04T00:00:00Z",
+            "2026-01-07T00:00:00Z",
+        ));
+        let _ = next_series_fetched(&rx);
+        let _ = next_series_fetched(&rx);
+        let calls = calls.lock().unwrap();
+        let spans: Vec<(DateTime<Utc>, DateTime<Utc>)> =
+            calls.iter().map(|c| (c.from, c.to)).collect();
+        assert_eq!(
+            spans,
+            vec![
+                (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+                (ts("2026-01-04T00:00:00Z"), ts("2026-01-05T00:00:00Z")),
+                (ts("2026-01-06T00:00:00Z"), ts("2026-01-07T00:00:00Z")),
+            ]
+        );
+    }
+
+    /// The Task 6 ruling as built (timeseries spec §4.7): a fetch is
+    /// clipped to the dataset's own `history` window before coverage is
+    /// subtracted, so a span entirely outside it never reaches the
+    /// source — nothing would survive the append's own sweep anyway.
+    #[test]
+    fn a_fetch_older_than_the_history_window_is_answered_without_asking_the_source() {
+        let (_d, calls, service, rx) = fetch_service(None);
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2015-01-01T00:00:00Z",
+            "2015-01-02T00:00:00Z",
+        ));
+        let (_, _, result) = next_series_fetched(&rx);
+        assert_eq!(result, Ok(0));
+        assert_eq!(calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_failed_fetch_is_a_load_lane_failure_keyed_by_the_pair_and_clears_on_success() {
+        let (_d, _calls, service, rx) = fetch_service(None);
+        service.fetch(&fetch_params(
+            "broken",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let (_, identity, result) = next_series_fetched(&rx);
+        assert_eq!(identity, "broken");
+        assert_eq!(result, Err("no such symbol".to_string()));
+        let health = loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                } => break (source, worst, detail),
+                _ => continue,
+            }
+        };
+        assert_eq!(health.0, "kdb_hist");
+        assert!(matches!(health.1, Health::Failed { .. }));
+        assert!(health.2.starts_with("broken@kdb_hist:"), "{}", health.2);
+        drop(rx);
+        // (The clear-on-success half is `HealthTracker`'s own contract,
+        // pinned by `report_load_and_emit`'s tests; the seam here is that
+        // the SAME key is used on both paths — see the `ingest_sink` arm.)
+        drop(service);
+    }
+
+    #[test]
+    fn an_unknown_source_or_a_non_fetch_source_fails_at_once() {
+        let (_d, _calls, service, rx) = fetch_service(None);
+        service.fetch(&FetchParams {
+            source: "nope".into(),
+            ..fetch_params("SPX.close", "2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z")
+        });
+        let (_, _, result) = next_series_fetched(&rx);
+        assert_eq!(
+            result,
+            Err("source 'nope' is not a fetch source".to_string())
+        );
+    }
+
+    #[test]
+    fn a_fetch_source_whose_adapter_has_no_fetch_side_is_failed_on_the_discovery_lane_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bus, _feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(bus);
+        let mut schema = SchemaSpec::default();
+        schema
+            .datasets
+            .push(crate::store::ddl::tests_support::series_dataset());
+        let spec = crate::source::SourceSpec {
+            adapter: "demo_bus".into(),
+            ..crate::source::SourceSpec::directory("kdb_hist", "series", Vec::new())
+        };
+        let (_service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: vec![spec],
+            adapters,
+            documents: Default::default(),
+        })
+        .unwrap();
+        let health = loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                } => break (source, worst, detail),
+                _ => continue,
+            }
+        };
+        assert_eq!(health.0, "kdb_hist");
+        assert_eq!(
+            health.1,
+            Health::Failed {
+                reason: "adapter 'demo_bus' has no fetch side".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_catalog_lists_series_spans_and_source_identities() {
+        let (_d, _calls, service, rx) = fetch_service(Some(vec!["VIX".into(), "SPX.close".into()]));
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let _ = next_series_fetched(&rx);
+        // Identities were requested at open; wait for them to land before
+        // reading.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let snap = loop {
+            let out = service.catalog(&CatalogParams {
+                key: QueryKey(1),
+                tag: 1,
+                as_of: AsOf::Live,
+            });
+            let snap = out.snapshot.unwrap();
+            if !snap.identities.is_empty() || std::time::Instant::now() > deadline {
+                break snap;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            snap.identities,
+            vec![(
+                "kdb_hist".to_string(),
+                vec!["SPX.close".to_string(), "VIX".to_string()]
+            )],
+            "sorted"
+        );
+        let ds = snap.datasets.iter().find(|d| d.name == "series").unwrap();
+        assert_eq!(ds.series.len(), 1);
+        let s = &ds.series[0];
+        assert_eq!(
+            (s.source.as_str(), s.identity.as_str(), s.fetches),
+            ("kdb_hist", "SPX.close", 1)
+        );
+        assert_eq!(
+            (s.from, s.to),
+            (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z"))
+        );
     }
 
     #[test]

@@ -689,6 +689,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     // when nothing is — including the extra copy the
                     // queue drain now sends after every `Published`/
                     // `Failed`'s own.
+                    // Timeseries spec §5.4: routed to the timeseries tiles in
+                    // Part 2 (`Delivery::SeriesFetched`). Until then the data
+                    // crate's own log line at `info` is the record; nothing
+                    // here logs, per the UI-thread level constraint.
+                    DataEvent::SeriesFetched { .. } => {}
                     DataEvent::LoadEnded => {
                         diagnostics.update(cx, |d, cx| {
                             let before = d.version();

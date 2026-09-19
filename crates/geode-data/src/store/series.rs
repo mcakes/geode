@@ -324,6 +324,40 @@ pub fn coverage(
     Ok(spans)
 }
 
+/// One row per pair from the coverage table (timeseries spec §4.6):
+/// the hull of its fetched spans, how many fetches, and the newest
+/// `received_at`. Coverage is one row per fetch, so this is
+/// catalog-sized and never scans the series table — the rule
+/// `query::catalog::build_catalog` states.
+pub fn series_catalog(
+    conn: &Connection,
+    dataset: &str,
+) -> Result<Vec<geode_core::query::SeriesCatalog>, StoreError> {
+    let sql = format!(
+        "select source, series_id, epoch_us(min(from_ts)), epoch_us(max(to_ts)), count(*), \
+         epoch_us(max(received_at)) from {} group by source, series_id order by series_id, source",
+        coverage_table(dataset)
+    );
+    let mut stmt = conn.prepare(&sql).map_err(sql_err(&sql))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(geode_core::query::SeriesCatalog {
+                source: r.get(0)?,
+                identity: r.get(1)?,
+                from: from_micros(r.get::<_, i64>(2)?),
+                to: from_micros(r.get::<_, i64>(3)?),
+                fetches: r.get::<_, i64>(4)? as u64,
+                latest_received_at: from_micros(r.get::<_, i64>(5)?),
+            })
+        })
+        .map_err(sql_err(&sql))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(sql_err(&sql))?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
