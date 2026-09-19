@@ -6922,10 +6922,59 @@ run_mutation "objectdialog: refresh_available empties the old dataset's rows" \
 
 run_mutation "focus: the drag grab re-arms the focus restore" \
   crates/geode-shell/src/shell/drag.rs \
-  '        self.pending_focus_restore = true;
+  '        // as the plain-click path (§3.3).
+        self.pending_focus_restore = true;
         cx.stop_propagation();' \
-  '        cx.stop_propagation();' \
+  '        // as the plain-click path (§3.3).
+        cx.stop_propagation();' \
   geode-shell a_grab_leaves_the_shell_focused_on_the_next_frame
+
+# ---- mod+double-click fullscreen (2026-09-19) --------------------------
+#
+# The mouse form of mod+f: `try_fullscreen_on_double_click` in drag.rs,
+# called by both tile listeners ahead of the drag arm. Each gate below is
+# a silent failure when broken — the app paints, the gesture just does
+# something else.
+
+# The gesture is a double-click. Mutated to a triple, the door never fires
+# and mod+double-click is two drag arms.
+run_mutation "fullscreen: mod+double-click on a tile toggles fullscreen" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        if event.click_count != 2 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
+  '        if event.click_count != 3 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
+  geode-shell mod_double_click_toggles_fullscreen_on_that_tile
+
+# The mod key is the gate. Mutated out, a plain double-click on any tile
+# throws it fullscreen.
+run_mutation "fullscreen: a plain double-click does not fullscreen" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        if event.click_count != 2 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
+  '        if event.click_count != 2 {' \
+  geode-shell a_plain_double_click_does_not_fullscreen
+
+# A docked tile is refused through `focus_main_tile`'s own membership
+# answer. Mutated to pass, the dispatch toggles fullscreen on whichever
+# MAIN tile is focused — a different tile from the one under the mouse.
+run_mutation "fullscreen: a docked tile is refused, not redirected to the main tree" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        if !self.services.workspaces.active_mut().focus_main_tile(id) {
+            return false;
+        }
+        self.session_dirty = true;' \
+  '        let _ = self.services.workspaces.active_mut().focus_main_tile(id);
+        self.session_dirty = true;' \
+  geode-shell mod_double_click_on_a_docked_tile_changes_nothing
+
+# Order in the tree-tile listener: the fullscreen door must run AHEAD of
+# the drag arm, since the pair's second click is a mod+down the arm would
+# otherwise claim. Swapped, the first double-click arms a drag instead.
+run_mutation "fullscreen: the double-click door runs ahead of the drag arm" \
+  crates/geode-shell/src/shell/render.rs \
+  '                                if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                    || view.try_arm_tile_drag(id, event, cx)' \
+  '                                if view.try_arm_tile_drag(id, event, cx)
+                                    || view.try_fullscreen_on_double_click(id, event, window, cx)' \
+  geode-shell mod_double_click_toggles_fullscreen_on_that_tile
 
 # User ruling 2026-09-17 (reversing "editing is keyboard-only"): the
 # restore is withheld while a tile's occupant holds the keyboard in insert

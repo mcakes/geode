@@ -647,7 +647,11 @@ impl Render for ShellView {
                                 // the comment where the strip is painted,
                                 // below.
                                 view.leave_command_line(window, cx);
-                                if view.try_arm_tile_drag(id, event, cx) {
+                                // Ahead of the drag arm on purpose — see
+                                // `try_fullscreen_on_double_click`.
+                                if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                    || view.try_arm_tile_drag(id, event, cx)
+                                {
                                     return;
                                 }
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {
@@ -700,7 +704,13 @@ impl Render for ShellView {
                             // the identical reason (fix round 1, finding
                             // 2, and spec §20.4).
                             view.leave_command_line(window, cx);
-                            if view.try_arm_tile_drag(id, event, cx) {
+                            // The fullscreen door refuses a docked tile
+                            // (fullscreen is main-tree-only), but it is
+                            // called here too so both listeners read the
+                            // same gesture table.
+                            if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                || view.try_arm_tile_drag(id, event, cx)
+                            {
                                 return;
                             }
                             if view

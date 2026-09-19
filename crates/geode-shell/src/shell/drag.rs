@@ -239,6 +239,70 @@ impl ShellView {
         }
     }
 
+    /// The mouse form of `mod+f` (2026-09-19): a mod+double-click on a
+    /// main-tree tile focuses it and toggles fullscreen on it. Returns
+    /// true when it acted — the caller's drag-arm and click-to-focus
+    /// branches must then NOT run. Both tile listeners call this AHEAD
+    /// of `try_arm_tile_drag`: the second click of the pair carries the
+    /// same mod+down the drag arm claims, and the arm refuses while a
+    /// tile is fullscreen, which is exactly when the toggle has to run
+    /// to restore the layout. The pair's FIRST click is an ordinary
+    /// mod+down — it arms a pending drag its own release cancels with
+    /// nothing applied (a drag applies only after `TILE_DRAG_THRESHOLD`
+    /// of movement), so the two gestures never contend.
+    ///
+    /// `click_count == 2` rather than `>= 2`, so a triple-click toggles
+    /// once rather than toggling and toggling back. Refused on a dock
+    /// tile: fullscreen is main-tree-only (`Workspace::toggle_fullscreen`
+    /// is a claimed no-op while a dock is focused), and a mod+down
+    /// changes no focus (the `TileDrag` decision), so nothing happens at
+    /// all — the same answer `mod+f` gives there. The overlay and
+    /// in-flight-drag gates mirror `try_arm_tile_drag`'s, defence in
+    /// depth for the same reasons.
+    ///
+    /// The toggle itself goes through `dispatch` with the keyboard verb's
+    /// own id, so the action tail, the log line, session dirt and the
+    /// focus-move re-arm all come from the one dispatch chain (spec: "one
+    /// keymap, ours") rather than a second path that would drift from it.
+    pub(super) fn try_fullscreen_on_double_click(
+        &mut self,
+        id: TileId,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.click_count != 2 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {
+            return false;
+        }
+        if self.palette.is_some()
+            || self.modal.is_some()
+            || !self.matcher.pending().is_empty()
+            || self.divider_drag.is_some()
+            || self.tile_drag.is_some()
+        {
+            return false;
+        }
+        // `focus_main_tile` answers false for a tile the main tree does
+        // not hold — a docked one — which is the dock refusal.
+        if !self.services.workspaces.active_mut().focus_main_tile(id) {
+            return false;
+        }
+        self.session_dirty = true;
+        self.dispatch(
+            &crate::actions::ActionId("workspace::fullscreen_tile".into()),
+            None,
+            window,
+            cx,
+        );
+        // A tile mouse-down like any other: re-arm the restore the
+        // plain-click tail arms, for the same focus-tracking-occupant
+        // reason (§3.3).
+        self.pending_focus_restore = true;
+        cx.stop_propagation();
+        cx.notify();
+        true
+    }
+
     /// Arm a pending tile drag from a tile body's mouse-down, if the
     /// gesture and the shell's state allow it (tile-drag task). Returns
     /// true when armed — the caller's plain click-to-focus branch must
