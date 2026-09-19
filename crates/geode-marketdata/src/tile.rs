@@ -70,7 +70,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::FindEvent;
+use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -499,6 +499,9 @@ pub struct MarketDataTile {
     /// The `Behind` state run's tooltip selector (`"tip-marketdata-
     /// state-{id}"`), built once alongside `menu_tip_selector`.
     state_tip_selector: SharedString,
+    /// This tile's place in its stack (tile-stacks spec §5.1), painted in
+    /// the header (Task 9); `None` while not a stack member.
+    stack: Option<StackHandle>,
 }
 
 impl MarketDataTile {
@@ -752,6 +755,7 @@ impl MarketDataTile {
             popup: None,
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
             state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
+            stack: None,
         };
         this.rebuild_chrome();
         // The delegate starts with the model this tile starts with (review
@@ -1238,6 +1242,18 @@ impl MarketDataTile {
             self.acted = None;
         }
         self.changed(cx);
+    }
+
+    pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
+        self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn title(&self) -> SharedString {
+        match &self.key {
+            Some(k) => format!("{} · {}", self.spec.title, display_key(k)).into(),
+            None => self.spec.title.into(),
+        }
     }
 
     // ---- the model ---------------------------------------------------

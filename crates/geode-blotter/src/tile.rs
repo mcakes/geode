@@ -23,7 +23,7 @@ use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
-use geode_shell::module::FindEvent;
+use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::chip::{self, Tone};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -136,6 +136,9 @@ pub struct BlotterTile {
     acted: Option<FrameVersions>,
     tag: u64,
     last_grouping: Vec<String>,
+    /// This tile's place in its stack (tile-stacks spec §5.1), painted in
+    /// the header (Task 9); `None` while not a stack member.
+    stack: Option<StackHandle>,
     in_flight: Option<Instant>,
     delivered_at: Option<Instant>,
     visible: bool,
@@ -318,6 +321,7 @@ impl BlotterTile {
             acted: None,
             tag: 0,
             last_grouping: Vec::new(),
+            stack: None,
             in_flight: None,
             delivered_at: None,
             visible: false,
@@ -661,6 +665,20 @@ impl BlotterTile {
                 self.requery(cx);
             }
         }
+    }
+
+    pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
+        self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn title(&self) -> SharedString {
+        format!(
+            "{} · {}",
+            self.view_name,
+            GroupingSlots::label_of(&self.last_grouping)
+        )
+        .into()
     }
 
     pub fn key_context(&self, cx: &App) -> KeyContext {

@@ -16,7 +16,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::FindEvent;
+use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::chip;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -144,6 +144,9 @@ pub struct DiagnosticsTile {
     header_text: SharedString,
     visible: bool,
     scroll: UniformListScrollHandle,
+    /// This tile's place in its stack (tile-stacks spec §5.1), painted in
+    /// the header (Task 9); `None` while not a stack member.
+    stack: Option<StackHandle>,
     #[cfg(test)]
     rebuild_count: u32,
 }
@@ -284,6 +287,7 @@ impl DiagnosticsTile {
             header_text: header_text_for(section),
             visible: false,
             scroll: UniformListScrollHandle::new(),
+            stack: None,
             #[cfg(test)]
             rebuild_count: 0,
         };
@@ -645,6 +649,15 @@ impl DiagnosticsTile {
                 cx.notify();
             });
         }
+    }
+
+    pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
+        self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn title(&self) -> SharedString {
+        format!("diagnostics · {}", self.section.name()).into()
     }
 
     pub fn serialize(&self) -> toml::Table {
@@ -1311,6 +1324,15 @@ mod tests {
         assert!(
             notified.get(),
             "set_visible(false) must notify the entity itself"
+        );
+    }
+
+    #[gpui::test]
+    fn title_names_the_section(cx: &mut gpui::TestAppContext) {
+        let (h, vcx) = open(cx);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "diagnostics · sources"
         );
     }
 
