@@ -173,6 +173,7 @@ pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> 
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
     let chord_row = model.chord.as_ref().map(|keys| {
         let mut row = h_flex().gap_1().items_center();
         for ks in keys {
@@ -184,7 +185,10 @@ pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> 
                         move || format!("{selector}-chord-{text}")
                     })
                     .child(crate::shell::keybindings_view::key_chip(
-                        ks, chip_fg, chip_bg,
+                        ks,
+                        chip_fg,
+                        chip_bg,
+                        chip_radius,
                     )),
             );
         }

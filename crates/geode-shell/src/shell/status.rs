@@ -28,12 +28,21 @@ use gpui_component::status_bar::StatusBar;
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, progress::Progress};
 
 use super::chip;
+use super::scale;
 use crate::diagnostics::IngestActivity;
 use crate::fonts;
 use crate::keymap::Keystroke;
 
-/// Fixed height of the status bar, in pixels (spec target: ~26px).
+/// Height of the status bar, in pixels at the design rem (spec target:
+/// ~26px; `shell::scale`). Layout arithmetic reads it through
+/// [`height`] so the bar follows the font size with its own text.
 pub const HEIGHT: f32 = 26.0;
+
+/// [`HEIGHT`] at the window's current rem, for the tile-surface
+/// arithmetic in `render` and the tests that mirror it.
+pub fn height(window: &Window) -> f32 {
+    scale::design_px(HEIGHT, window.rem_size())
+}
 
 /// Build the status bar: left — the count prefix (§3.3, in the mono face)
 /// when one is in flight, then the pending keystrokes as space-separated
@@ -106,7 +115,11 @@ pub fn status_bar(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let mut bar = StatusBar::new().flex_none().w_full().h(px(HEIGHT));
+    // `h_full`, not a height of its own: the wrapper below is the one
+    // owner of the bar's height (the design guide's "fix the common
+    // owner" — two declarations of one length drift, and a window test
+    // measuring the wrapper cannot see the inner one disagree).
+    let mut bar = StatusBar::new().flex_none().w_full().h_full();
     if let Some(count) = count {
         bar = bar.left(
             div()
@@ -192,7 +205,7 @@ pub fn status_bar(
                 .when_some(as_of.fill, |el, fill| el.bg(fill))
                 .text_color(as_of.text)
                 .px_2()
-                .rounded(px(4.))
+                .rounded(theme.radius)
                 .debug_selector(|| "status-as-of".to_string())
                 .tooltip(crate::tips::tip_with(
                     SharedString::new_static("tip-status-as-of"),
@@ -218,7 +231,7 @@ pub fn status_bar(
         .relative()
         .flex_none()
         .w_full()
-        .h(px(HEIGHT))
+        .h(scale::design(HEIGHT))
         .debug_selector(|| "shell-status-bar".to_string())
         .child(bar)
         .when(ingest.is_some(), |el| {

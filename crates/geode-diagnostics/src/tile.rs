@@ -18,11 +18,12 @@ use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::FindEvent;
 use geode_shell::shell::chip;
+use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{
     App, Context, Entity, IntoElement, ScrollStrategy, SharedString, UniformListScrollHandle,
-    Window, div, px, uniform_list,
+    Window, div, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -33,6 +34,9 @@ use crate::sections::{self, Row, Tone};
 /// "the ring tail" — a per-tile copy, not the whole ring's own
 /// capacity), oldest dropped first once full.
 const LOG_CAP: usize = 4_096;
+/// Header strip height, in pixels at the design rem
+/// (`geode_shell::shell::scale`) — the blotter's own.
+const HEADER_HEIGHT: f32 = 22.0;
 
 /// Which `FrameVersions` counters matter at all to this tile — `as_of`
 /// (`sections::data_rows`) and `config` (the config section's explainer)
@@ -669,7 +673,7 @@ impl gpui::Render for DiagnosticsTile {
         let danger_text = chip::chip_paint(theme, chip::Tone::DangerText).text;
         let mut header = h_flex()
             .w_full()
-            .h(px(22.))
+            .h(scale::design(HEADER_HEIGHT))
             .items_center()
             .gap_2()
             .px_2()
@@ -690,7 +694,7 @@ impl gpui::Render for DiagnosticsTile {
                     .text_color(warn_chip.text)
                     .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                     .px_1()
-                    .rounded(px(3.))
+                    .rounded(theme.radius_tokens().sm)
                     .debug_selector(|| format!("diagnostics-filtered-{}", self.tile.0))
                     .child("filtered"),
             );
@@ -721,7 +725,7 @@ impl gpui::Render for DiagnosticsTile {
                     // builders keep rows short; this is the backstop.
                     let mut cell = div()
                         .w_full()
-                        .pl(px(8.0 + r.depth as f32 * 12.0))
+                        .pl(scale::design(8.0 + r.depth as f32 * 12.0))
                         .font_family(fonts::MONO)
                         .text_color(color)
                         .whitespace_nowrap()

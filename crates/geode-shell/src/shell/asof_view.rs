@@ -31,7 +31,9 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Window, div, px};
+use gpui::{
+    AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Pixels, Window, div,
+};
 use gpui_component::calendar::Calendar;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
@@ -43,6 +45,7 @@ use crate::{listfilter, vimnav};
 
 use super::ShellView;
 use super::dialog;
+use super::scale;
 
 // ---------------------------------------------------------------------
 // Pure core — no gpui.
@@ -377,12 +380,12 @@ fn build(
     let muted = theme.muted_foreground;
     let selection = theme.selection;
     let danger = theme.danger;
+    let radius = theme.radius;
 
-    let mut column =
-        v_flex()
-            .gap_2()
-            .w(px(WIDTH))
-            .child(dialog::filter_row(&shell.dialog_input, None, cx));
+    let mut column = v_flex()
+        .gap_2()
+        .w(scale::design(WIDTH))
+        .child(dialog::filter_row(&shell.dialog_input, None, cx));
 
     if let Some(t) = state.resolved {
         column = column.child(
@@ -414,6 +417,7 @@ fn build(
         primary,
         muted,
         selection,
+        radius,
     );
     // Borrowed, not `.to_string()`'d — `SharedString` derefs to `str`, and
     // `shows_calendar` takes `&str`, so this costs nothing beyond the
@@ -472,6 +476,7 @@ fn build_presets(
     primary: Hsla,
     muted: Hsla,
     selection: Hsla,
+    radius: Pixels,
 ) -> AnyElement {
     if presets.is_empty() {
         return div()
@@ -493,7 +498,7 @@ fn build_presets(
         .debug_selector(|| "as-of-presets".to_string());
     for (position, (at, label)) in presets.iter().enumerate() {
         let is_selected = position == selected;
-        let mut row = h_flex().w_full().px_2().py_1().rounded(px(4.));
+        let mut row = h_flex().w_full().px_2().py_1().rounded(radius);
         if is_selected {
             row = row.bg(selection).text_color(primary);
         }

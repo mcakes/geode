@@ -112,7 +112,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
+use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
@@ -124,6 +124,7 @@ use crate::linenumbers::LineNumbers;
 use crate::listfilter::{self, Ranked};
 use crate::shell::ShellView;
 use crate::shell::dialog;
+use crate::shell::scale;
 use crate::tileadd::AddDirection;
 use crate::vimfind::FindStyle;
 use crate::vimnav;
@@ -833,6 +834,7 @@ fn build(
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
 
     // The list renders ONLY the rows that survive the filter. Safe
     // because row click handlers are keyed by `SettingId`, not position
@@ -841,9 +843,9 @@ fn build(
 
     let mut list = v_flex()
         .id("settings-list")
-        .w(px(WIDTH))
-        .h(px(
-            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+        .w(scale::design(WIDTH))
+        .h(scale::design(
+            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.settings_scroll)
@@ -868,7 +870,7 @@ fn build(
             .gap_3()
             .px_2()
             .py_1()
-            .rounded(px(4.));
+            .rounded(theme.radius);
         if is_selected {
             row_el = row_el.bg(theme.selection).text_color(theme.primary);
         }
@@ -900,6 +902,7 @@ fn build(
             format!("settings-value-{row_ix}"),
             chip_fg,
             chip_bg,
+            chip_radius,
             Some(on_step),
         );
 
@@ -985,10 +988,10 @@ fn build(
             Hint::new(HintRow::Go, &["escape"], "back to normal"),
         ],
     };
-    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg);
+    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
 
     let footer = v_flex()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .gap_1()
         .pt_2()
         .border_t_1()

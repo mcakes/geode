@@ -534,7 +534,7 @@ impl ShellView {
             // Mouse events arrive in window coordinates; the tile surface
             // starts below the toolbar, right of the sidebar (same
             // conversion `render` bakes into its drag rects).
-            let sx = x - sidebar::WIDTH;
+            let sx = x - sidebar::width(window);
             let sy = y - toolbar_height;
             let target = locate_drop_target(self.services.workspaces.active(), area, sx, sy);
             let ws = self.services.workspaces.active_mut();

@@ -26,6 +26,7 @@ pub mod picker;
 #[cfg(feature = "profiling")]
 pub mod profiling_hook;
 mod render;
+pub mod scale;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;

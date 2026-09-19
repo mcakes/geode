@@ -112,8 +112,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, Hsla, ScrollStrategy, UniformListScrollHandle, Window, div,
-    px, uniform_list,
+    AnyElement, App, Context, Entity, Hsla, Pixels, ScrollStrategy, UniformListScrollHandle,
+    Window, div, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -126,6 +126,7 @@ use crate::palette;
 use crate::{listfilter, vimnav};
 
 use super::dialog;
+use super::scale;
 use super::{PICKER_KEY, Pickable, ShellEvent, ShellView};
 
 // ---------------------------------------------------------------------
@@ -734,6 +735,7 @@ fn build_columns(
     primary: Hsla,
     muted: Hsla,
     selection: Hsla,
+    radius: Pixels,
 ) -> AnyElement {
     let matches = PickerState::columns(&shell.pickable, &picker.query);
     if matches.is_empty() {
@@ -747,7 +749,7 @@ fn build_columns(
     }
     let mut list = v_flex()
         .id("picker-columns")
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .gap_1()
         .debug_selector(|| "picker-columns".to_string());
     for (position, (row_ix, indices)) in matches.iter().enumerate() {
@@ -760,7 +762,7 @@ fn build_columns(
             .gap_3()
             .px_2()
             .py_1()
-            .rounded(px(4.));
+            .rounded(radius);
         if is_selected {
             row = row.bg(selection).text_color(primary);
         }
@@ -807,6 +809,7 @@ fn build_values(
     primary: Hsla,
     muted: Hsla,
     selection: Hsla,
+    radius: Pixels,
     scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
     match &picker.values {
@@ -837,7 +840,7 @@ fn build_values(
                             .gap_3()
                             .px_2()
                             .py_1()
-                            .rounded(px(4.));
+                            .rounded(radius);
                         if is_selected {
                             row = row.bg(selection).text_color(primary);
                         }
@@ -893,10 +896,10 @@ fn build_values(
                     })
                     .collect::<Vec<_>>()
             })
-            .h(px(
-                (count.min(palette::VISIBLE_ROWS) as f32) * palette::ROW_HEIGHT
+            .h(scale::design(
+                (count.min(palette::VISIBLE_ROWS) as f32) * palette::ROW_HEIGHT,
             ))
-            .w(px(WIDTH))
+            .w(scale::design(WIDTH))
             .track_scroll(scroll_handle)
             .debug_selector(|| "picker-values-list".to_string());
             list.into_any_element()
@@ -920,23 +923,25 @@ fn build(
     let primary = theme.primary;
     let muted = theme.muted_foreground;
     let selection = theme.selection;
+    let radius = theme.radius;
 
     let filter = dialog::filter_row(&shell.dialog_input, None, cx);
     let body = match &picker.stage {
-        Stage::Columns => build_columns(shell, picker, entity, primary, muted, selection),
+        Stage::Columns => build_columns(shell, picker, entity, primary, muted, selection, radius),
         Stage::Values { .. } => build_values(
             picker,
             entity,
             primary,
             muted,
             selection,
+            radius,
             &shell.picker_scroll,
         ),
     };
 
     v_flex()
         .gap_2()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .child(filter)
         .child(body)
         .child(hint_row(
@@ -944,6 +949,7 @@ fn build(
             theme.muted_foreground,
             theme.muted,
             theme.border,
+            theme.radius,
         ))
         .into_any_element()
 }
@@ -952,21 +958,21 @@ fn build(
 /// to one row: a top border, then [`hints`] rendered as key chips
 /// (`keybindings_view::key_chip`, so a key's spelling looks identical
 /// across every dialog here) interleaved with muted prose.
-fn hint_row(stage: &Stage, fg: Hsla, chip_bg: Hsla, border: Hsla) -> AnyElement {
+fn hint_row(stage: &Stage, fg: Hsla, chip_bg: Hsla, border: Hsla, radius: Pixels) -> AnyElement {
     let children: Vec<AnyElement> = hints(stage)
         .iter()
         .map(|hint| match hint {
             Hint::Key(spec) => {
                 let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
                     .expect("footer hint keystrokes are hardcoded valid");
-                super::keybindings_view::key_chip(&ks, fg, chip_bg)
+                super::keybindings_view::key_chip(&ks, fg, chip_bg, radius)
             }
             Hint::Text(text) => div().child(*text).into_any_element(),
         })
         .collect();
     div()
         .id("picker-hints")
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .pt_2()
         .border_t_1()
         .border_color(border)

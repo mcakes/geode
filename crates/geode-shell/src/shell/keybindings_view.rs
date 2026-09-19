@@ -161,8 +161,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, SharedString,
-    StyledText, Window, div, px,
+    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, Pixels,
+    SharedString, StyledText, Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -184,6 +184,7 @@ use crate::vimnav;
 
 use super::ShellView;
 use super::dialog;
+use super::scale;
 
 // ---------------------------------------------------------------------
 // Pure core — no gpui. Row derivation and capture-state transitions.
@@ -519,7 +520,8 @@ pub fn is_same_key_recapture(row: &KeybindingRow, new_keystrokes: &[Keystroke]) 
 const ROW_HEIGHT: f32 = 44.0;
 /// Rows visible before the list scrolls — see `palette::VISIBLE_ROWS`.
 const VISIBLE_ROWS: usize = 10;
-/// Target dialog content width in pixels.
+/// Target dialog content width, in pixels at the design rem
+/// (`shell::scale`).
 const WIDTH: f32 = 640.0;
 
 /// Open the keybinding dialog (`keybindings::open`, palette-only today —
@@ -572,7 +574,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
 /// dialog stopped routing through it). `pub(crate)` since the
 /// settings-dialog rewrite: `settings_view`'s footer hints reuse the exact
 /// same chip rather than growing a second, drifting copy.
-pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
+pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla, radius: Pixels) -> AnyElement {
     div()
         .font_family(crate::fonts::MONO)
         .text_xs()
@@ -582,7 +584,7 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
         .py_0p5()
         .min_w_5()
         .text_center()
-        .rounded(px(4.))
+        .rounded(radius)
         .flex_shrink_0()
         .child(palette::render_keystroke(ks))
         .into_any_element()
@@ -1368,6 +1370,7 @@ fn action_block(
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
     let mut verbs: Vec<(&'static str, &'static str)> = Vec::new();
     if state.listening.is_none() {
         if can_unbind(row) {
@@ -1378,7 +1381,7 @@ fn action_block(
         }
     }
     let mut bar = h_flex()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .gap_2()
         .items_center()
         .debug_selector(|| "keybindings-actions".to_string());
@@ -1394,7 +1397,7 @@ fn action_block(
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .child(key_chip(&ks, chip_fg, chip_bg))
+                    .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
                     .child(label),
             )
             .on_click(move |_event, window, cx| {
@@ -1428,6 +1431,7 @@ fn build(
     // to hold the `theme` borrow.
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    let chip_radius = theme.radius;
 
     // The list renders ONLY the rows that survive the filter. Safe
     // because row click handlers are keyed by `ActionId`, not position
@@ -1438,9 +1442,9 @@ fn build(
 
     let mut list = v_flex()
         .id("keybindings-list")
-        .w(px(WIDTH))
-        .h(px(
-            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+        .w(scale::design(WIDTH))
+        .h(scale::design(
+            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.keybindings_scroll)
@@ -1462,7 +1466,7 @@ fn build(
             .gap_3()
             .px_2()
             .py_1()
-            .rounded(px(4.));
+            .rounded(theme.radius);
         if is_selected {
             row_el = row_el.bg(theme.selection).text_color(theme.primary);
         }
@@ -1488,7 +1492,11 @@ fn build(
             } else {
                 h_flex()
                     .gap_1()
-                    .children(pending.iter().map(|ks| key_chip(ks, chip_fg, chip_bg)))
+                    .children(
+                        pending
+                            .iter()
+                            .map(|ks| key_chip(ks, chip_fg, chip_bg, chip_radius)),
+                    )
                     .into_any_element()
             }
         } else {
@@ -1499,7 +1507,7 @@ fn build(
                         bound
                             .keystrokes
                             .iter()
-                            .map(|ks| key_chip(ks, chip_fg, chip_bg)),
+                            .map(|ks| key_chip(ks, chip_fg, chip_bg, chip_radius)),
                     )
                     .into_any_element(),
                 None => div()
@@ -1547,7 +1555,7 @@ fn build(
     let chip = move |spec: &str| {
         let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
             .expect("footer hint keystrokes are hardcoded valid");
-        key_chip(&ks, chip_fg, chip_bg)
+        key_chip(&ks, chip_fg, chip_bg, chip_radius)
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
@@ -1607,9 +1615,9 @@ fn build(
             ],
         }
     };
-    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg);
+    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
     let footer = v_flex()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .gap_1()
         .pt_2()
         .border_t_1()

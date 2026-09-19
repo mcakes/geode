@@ -50,6 +50,7 @@ use std::collections::BTreeMap;
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::keymap::{Keymap, Keystroke};
+use crate::shell::scale;
 use crate::theme::ThemeService;
 
 /// Palette-facing category for theme rows (brief: themes appear as
@@ -706,8 +707,8 @@ pub(crate) fn split_label_indices(indices: &[usize], title_len: usize) -> (Vec<u
 
 use gpui::prelude::*;
 use gpui::{
-    App, Entity, FontWeight, HighlightStyle, IntoElement, MouseButton, ScrollHandle, StyledText,
-    Window, div, px,
+    App, Entity, FontWeight, HighlightStyle, IntoElement, MouseButton, Pixels, ScrollHandle,
+    StyledText, Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
@@ -741,6 +742,16 @@ pub(crate) const VISIBLE_ROWS: usize = 12;
 ///
 /// `pub(crate)` — see [`VISIBLE_ROWS`]'s own doc comment.
 pub(crate) const ROW_HEIGHT: f32 = 28.0;
+
+/// What [`render`] needs to know about the window it paints into: the
+/// drawable size in pixels, and the rem its own chrome lengths resolve
+/// against (`shell::scale`).
+#[derive(Clone, Copy, Debug)]
+pub struct Viewport {
+    pub width: f32,
+    pub height: f32,
+    pub rem_size: Pixels,
+}
 
 /// Render one row title with its [`fuzzy_match`]ed characters styled —
 /// `cx.theme().primary` plus a bold weight (plan constraint: no raw
@@ -836,22 +847,29 @@ pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::H
 /// this function only wires the handle into the container, it never calls
 /// `scroll_to_item` itself.
 ///
-/// `viewport_width`/`viewport_height` are the window's own drawable size
-/// (`Window::viewport_size`, same source `ShellView::render` already reads
-/// for the tile surface) — passed in rather than read from `cx` so this
-/// stays a pure function of its arguments, the same shape as
+/// `viewport` is the window's own drawable size and rem
+/// (`Window::viewport_size`/`rem_size`, the same source `ShellView::render`
+/// already reads for the tile surface) — passed in rather than read from
+/// `cx` so this stays a pure function of its arguments, the same shape as
 /// `shell::status::status_bar`.
 pub fn render(
     state: &PaletteState,
     scroll_handle: &ScrollHandle,
     query_input: &Entity<InputState>,
     on_row_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
-    viewport_width: f32,
-    viewport_height: f32,
+    viewport: Viewport,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let width = WIDTH.min((viewport_width - 32.0).max(160.0));
+    let Viewport {
+        width: viewport_width,
+        height: viewport_height,
+        rem_size,
+    } = viewport;
+    // The panel's own width and row heights are chrome lengths on the rem
+    // scale (`shell::scale`); the viewport clamps stay in window pixels.
+    let width = scale::design_px(WIDTH, rem_size).min((viewport_width - 32.0).max(160.0));
+    let row_height = scale::design_px(ROW_HEIGHT, rem_size);
     let left = ((viewport_width - width) / 2.0).max(0.0);
     // Same top edge as every shell dialog (`dialog::MODAL_TOP_RATIO`, user
     // direction — the palette is dialog-like, and one shared line beats a
@@ -872,7 +890,7 @@ pub fn render(
         .id("palette-results")
         .w_full()
         .h(px(
-            (row_count.max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+            (row_count.max(1) as f32 * row_height).min(VISIBLE_ROWS as f32 * row_height)
         ))
         .overflow_y_scroll()
         .track_scroll(scroll_handle)
@@ -900,7 +918,7 @@ pub fn render(
                 .gap_3()
                 .px_2()
                 .py_1()
-                .rounded(px(4.));
+                .rounded(theme.radius);
             if is_selected {
                 row = row.bg(theme.selection).text_color(theme.primary);
             }

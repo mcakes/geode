@@ -52,8 +52,8 @@ pub(super) fn content_area(window: &Window) -> Rect {
     Rect {
         x: 0.0,
         y: 0.0,
-        w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
-        h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+        w: (f32::from(viewport.width) - sidebar::width(window)).max(0.0),
+        h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
     }
 }
 
@@ -299,6 +299,11 @@ impl Render for ShellView {
         let surface = content_area(window);
         let tile_width = surface.w;
         let content_height = (surface.h - stripe_height).max(0.0);
+        // The rail's width at this rem, read once: `set_rem_size` above
+        // ran first, so this render and `content_area` agree.
+        let sidebar_width = sidebar::width(window);
+        let status_height = status::height(window);
+        let rem_size = window.rem_size();
 
         // One layout pass for the whole surface (dock-regions task,
         // generalized by dock-trees): the pure `tiling::dock_layout`
@@ -346,7 +351,7 @@ impl Render for ShellView {
         // mouse-down are pre-offset into window space so the per-move math
         // never converts.
         let to_window_space = |r: Rect| Rect {
-            x: r.x + sidebar::WIDTH,
+            x: r.x + sidebar_width,
             y: r.y + toolbar_height,
             w: r.w,
             h: r.h,
@@ -450,7 +455,7 @@ impl Render for ShellView {
             .as_ref()
             .filter(|drag| drag.active)
             .and_then(|drag| {
-                let sx = drag.cursor.0 - sidebar::WIDTH;
+                let sx = drag.cursor.0 - sidebar_width;
                 let sy = drag.cursor.1 - toolbar_height;
                 let dragged = drag.tile;
                 let target = crate::tiling::resolve_drop_target(
@@ -1315,6 +1320,7 @@ impl Render for ShellView {
                         line,
                         &self.command_input,
                         rect,
+                        rem_size,
                         cx,
                     ))
                 },
@@ -1353,8 +1359,11 @@ impl Render for ShellView {
                     &self.palette_scroll,
                     &self.palette_input,
                     on_row_click,
-                    width,
-                    viewport_height,
+                    palette::Viewport {
+                        width,
+                        height: viewport_height,
+                        rem_size,
+                    },
                     cx,
                 );
                 // Click-outside dismiss: a transparent (no dimming — the
@@ -1422,7 +1431,8 @@ impl Render for ShellView {
                     self.matcher.count(),
                     registry,
                     width,
-                    status::HEIGHT,
+                    status_height,
+                    rem_size,
                     cx,
                 ))
             })
@@ -1439,6 +1449,7 @@ impl Render for ShellView {
                     &self.perf,
                     &self.frame.read(cx).requery,
                     toolbar_height,
+                    rem_size,
                     cx,
                 ))
             })

@@ -25,13 +25,14 @@ use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::FindEvent;
 use geode_shell::shell::chip::{self, Tone};
+use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
 use geode_shell::vimnav::NavCommand;
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, ElementId, Entity, IntoElement, SharedString, Window, div, px,
+    App, ClipboardItem, Context, ElementId, Entity, IntoElement, SharedString, Window, div,
 };
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
@@ -43,6 +44,11 @@ use std::time::{Duration, Instant};
 /// After this long without a result the header shows an in-flight glyph
 /// (foundation §7.1's 50–200 ms affordance).
 const IN_FLIGHT_AFTER: Duration = Duration::from_millis(50);
+/// Header and footer strip heights, in pixels at the design rem
+/// (`geode_shell::shell::scale`): the strips follow the font size with
+/// the text they hold. The market-data panel's header shares the 22.
+const HEADER_HEIGHT: f32 = 22.0;
+const FOOTER_HEIGHT: f32 = 20.0;
 
 /// Spec §6.5's default for `[app] blotter.stale_after`, until Task 8
 /// reads the real config value. Exposed so `BlotterFactory::new`'s
@@ -1307,7 +1313,7 @@ impl gpui::Render for BlotterTile {
         // Header strip: view · grouping · markers · freshness · AS OF · … · error
         let mut header = h_flex()
             .w_full()
-            .h(px(22.))
+            .h(scale::design(HEADER_HEIGHT))
             .items_center()
             .gap_3()
             .px_2()
@@ -1331,7 +1337,7 @@ impl gpui::Render for BlotterTile {
                         .text_color(warn_chip.text)
                         .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                         .px_1()
-                        .rounded(px(3.))
+                        .rounded(theme.radius_tokens().sm)
                         .child("pinned"),
                 )
             }
@@ -1346,7 +1352,7 @@ impl gpui::Render for BlotterTile {
                     .text_color(warn_chip.text)
                     .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                     .px_1()
-                    .rounded(px(3.))
+                    .rounded(theme.radius_tokens().sm)
                     .child("unscoped")
                     .tooltip(tips::tip_with(
                         self.unscoped_tip_selector.clone(),
@@ -1366,7 +1372,7 @@ impl gpui::Render for BlotterTile {
                     .text_color(warn_chip.text)
                     .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                     .px_1()
-                    .rounded(px(3.))
+                    .rounded(theme.radius_tokens().sm)
                     .debug_selector(|| format!("blotter-filtered-{}", self.tile.0))
                     .child("filtered")
                     .tooltip(tips::tip_with(
@@ -1396,7 +1402,7 @@ impl gpui::Render for BlotterTile {
                         .text_color(warn_chip.text)
                         .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                         .px_1()
-                        .rounded(px(3.))
+                        .rounded(theme.radius_tokens().sm)
                         .child(format!("AS OF {}", &req[..16.min(req.len())])),
                 );
             }
@@ -1418,7 +1424,7 @@ impl gpui::Render for BlotterTile {
         // Footer: counts and legends.
         let mut footer = h_flex()
             .w_full()
-            .h(px(20.))
+            .h(scale::design(FOOTER_HEIGHT))
             .items_center()
             .gap_4()
             .px_2()
@@ -1487,6 +1493,7 @@ mod tests {
     use geode_shell::module::FindEvent;
     use geode_shell::tiling::TileId;
     use geode_shell::vimfind::FindStyle;
+    use gpui::px;
     use std::sync::Arc;
     use std::sync::mpsc::Receiver;
     use std::time::{Duration, Instant};

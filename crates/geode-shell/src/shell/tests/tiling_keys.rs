@@ -315,7 +315,7 @@ fn shift_left_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
 /// off the freshly-split (right) tile so the click has something to
 /// change. The click point is derived from the same layout `render`
 /// itself uses — `Tree::layout` over the tile area, offset by the
-/// sidebar/toolbar chrome (`sidebar::WIDTH`, `TITLE_BAR_HEIGHT`; see
+/// sidebar/toolbar chrome (`sidebar::width(window)`, `TITLE_BAR_HEIGHT`; see
 /// CLAUDE.md's chrome-offset note) — rather than a hand-guessed pixel,
 /// so the test tracks the real geometry instead of duplicating it.
 #[gpui::test]
@@ -359,9 +359,9 @@ fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
     let (target_id, click_point) = cx.update(|window, cx| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
 
         let rects = shell
             .read(cx)
@@ -380,7 +380,7 @@ fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
             .find(|(id, _)| Some(*id) != before_focus)
             .expect("a second, non-focused tile exists");
         let point = gpui::point(
-            px(sidebar::WIDTH + r.x + r.w / 2.0),
+            px(sidebar::width(window) + r.x + r.w / 2.0),
             px(toolbar_height + r.y + r.h / 2.0),
         );
         (id, point)

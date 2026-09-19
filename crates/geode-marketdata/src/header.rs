@@ -10,11 +10,18 @@ use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
 use geode_shell::fonts;
+use geode_shell::shell::scale;
 use geode_shell::tips;
 use gpui::prelude::*;
-use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div, px};
+use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div};
 use gpui_component::input::Input;
 use gpui_component::{Theme, h_flex};
+
+/// The header strip's height, in pixels at the design rem
+/// (`geode_shell::shell::scale`) — the blotter's own header height, so
+/// the two tiles' strips line up side by side; the tile anchors its
+/// popup under it by the same constant.
+pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 
 /// What one prepared header run is painted as. The tone is resolved to a
 /// theme colour at paint (never a stored colour, so a theme switch needs
@@ -107,7 +114,7 @@ fn render_date_field(
         .track_focus(focus)
         .items_center()
         .px_1()
-        .rounded_sm()
+        .rounded(theme.radius_tokens().sm)
         .border_1()
         .border_color(theme.table_active_border)
         .font_family(fonts::MONO)
@@ -131,7 +138,7 @@ fn render_date_field(
         field = field.child(
             div()
                 .px_0p5()
-                .rounded_sm()
+                .rounded(theme.radius_tokens().sm)
                 .text_color(colour)
                 .when_some(fill, |d, f| d.bg(f))
                 .debug_selector(move || format!("marketdata-date-seg-{tile_id}-{i}"))
@@ -290,7 +297,7 @@ pub(crate) fn render(
     let muted = theme.muted_foreground;
     let mut row = h_flex()
         .w_full()
-        .h(px(22.))
+        .h(scale::design(HEADER_HEIGHT))
         .items_center()
         .gap_3()
         .px_2()
@@ -304,7 +311,7 @@ pub(crate) fn render(
     row = row.child(
         div()
             .px_1p5()
-            .rounded_sm()
+            .rounded(theme.radius_tokens().sm)
             .bg(theme.secondary)
             .text_color(theme.secondary_foreground)
             .text_xs()
@@ -323,7 +330,7 @@ pub(crate) fn render(
             if h.dirty {
                 row = row.child(
                     div()
-                        .size(px(8.))
+                        .size(scale::design(8.))
                         .rounded_full()
                         .bg(tones.warn)
                         .debug_selector(move || format!("marketdata-dirty-{tile_id}")),
@@ -341,7 +348,7 @@ pub(crate) fn render(
         let at_cursor = cursor_attr == Some(i);
         let mut value = div()
             .px_1()
-            .rounded_sm()
+            .rounded(theme.radius_tokens().sm)
             .font_family(fonts::MONO)
             .text_color(text)
             .when_some(fill, |d, f| d.bg(f))
@@ -371,7 +378,7 @@ pub(crate) fn render(
             });
         value = match &editor {
             Some((e, EditorPaint::Text(state))) if *e == i => {
-                value.child(div().min_w(px(80.)).child(Input::new(state)))
+                value.child(div().min_w(scale::design(80.)).child(Input::new(state)))
             }
             Some((e, EditorPaint::Date { paint, focus })) if *e == i => {
                 value.child(render_date_field(paint, focus, theme, tones, tile, tile_id))
@@ -482,7 +489,7 @@ pub(crate) fn render(
                 tile_id,
             ))
             .px_1p5()
-            .rounded_sm()
+            .rounded(theme.radius_tokens().sm)
             .border_1()
             .border_color(theme.border)
             .when(menu_open, |d| d.bg(theme.secondary))

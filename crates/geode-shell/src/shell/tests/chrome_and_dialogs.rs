@@ -2222,3 +2222,99 @@ fn a_tooltip_goes_away_when_the_mouse_leaves(cx: &mut gpui::TestAppContext) {
         "the tooltip is gone"
     );
 }
+
+/// Zoom is a system, not a text-size knob (design-guide audit 2026-09-19,
+/// `shell::scale`): stepping the font size to `Large` must scale the
+/// chrome that holds the text with it — the status bar, the sidebar rail
+/// and a dialog's row list all grow by the same 14/12 the rem does — and
+/// the tile surface must give up exactly that much, so the status bar
+/// never paints over the bottom tile. Before `scale`, every one of those
+/// was a `px` literal that stayed put while the text inside it grew.
+#[gpui::test]
+fn chrome_and_dialog_rows_follow_the_font_size(cx: &mut gpui::TestAppContext) {
+    use crate::fontsize::FontSize;
+    use crate::shell::{sidebar, status};
+
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+
+    let measure = |cx: &mut gpui::VisualTestContext| {
+        cx.simulate_keystrokes("ctrl-,");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let list = cx
+            .debug_bounds("settings-list")
+            .expect("settings list painted");
+        let bar = cx
+            .debug_bounds("shell-status-bar")
+            .expect("status bar painted");
+        let (viewport_h, sidebar_w, status_h) = cx.update(|window, _| {
+            (
+                f32::from(window.viewport_size().height),
+                sidebar::width(window),
+                status::height(window),
+            )
+        });
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (
+            f32::from(list.size.height),
+            f32::from(bar.size.height),
+            f32::from(bar.origin.y),
+            viewport_h,
+            sidebar_w,
+            status_h,
+        )
+    };
+
+    let at_medium = measure(&mut cx);
+    assert_eq!(
+        at_medium.1,
+        status::HEIGHT,
+        "medium IS the design rem: the bar is its literal"
+    );
+    assert_eq!(at_medium.4, sidebar::WIDTH);
+
+    cx.update(|_, cx| crate::shell::settings_view::set_font_size(&shell, FontSize::Large, cx));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let at_large = measure(&mut cx);
+
+    let ratio = FontSize::Large.rem_px() / FontSize::Medium.rem_px();
+    let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+    assert!(
+        close(at_large.0, at_medium.0 * ratio),
+        "the dialog list should scale with the rem: {} → {} (expected ×{ratio})",
+        at_medium.0,
+        at_large.0
+    );
+    assert!(
+        close(at_large.1, at_medium.1 * ratio),
+        "the status bar should scale with the rem: {} → {}",
+        at_medium.1,
+        at_large.1
+    );
+    assert!(
+        close(at_large.4, at_medium.4 * ratio),
+        "sidebar {} → {}",
+        at_medium.4,
+        at_large.4
+    );
+    assert!(
+        close(at_large.5, at_large.1),
+        "status::height agrees with the painted bar"
+    );
+    // The bar still sits flush at the bottom, and the tile surface has
+    // given up its extra height rather than being painted over.
+    assert!(
+        close(at_large.2 + at_large.1, at_large.3),
+        "status bar bottom {} + {} should meet the viewport bottom {}",
+        at_large.2,
+        at_large.1,
+        at_large.3
+    );
+}

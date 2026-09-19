@@ -3759,6 +3759,7 @@ run_mutation "picker: the footer hint never paints" \
             theme.muted_foreground,
             theme.muted,
             theme.border,
+            theme.radius,
         ))' \
   '' \
   geode-shell arrowing_to_a_value_and_pressing_enter_commits_it_without_tab
@@ -7328,8 +7329,8 @@ run_mutation "objectdialog: section headers do not add list children" \
 # gone) reproduces the clipping on a filtered single-row list.
 run_mutation "objectdialog: the edit list sizes itself instead of the header it folds in" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        .max_h(px(VISIBLE_ROWS as f32 * ROW_HEIGHT))' \
-  '        .h(px((visible.len().max(1) as f32 * 28.0).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)))' \
+  '        .max_h(scale::design(VISIBLE_ROWS as f32 * ROW_HEIGHT))' \
+  '        .h(scale::design((visible.len().max(1) as f32 * 28.0).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)))' \
   geode-shell \
   a_filtered_single_row_is_not_clipped_by_the_lists_height
 
@@ -11575,6 +11576,63 @@ run_mutation "chip: the readability ground composites the tint at its alpha" \
   '    let (t, a) = (to_rgb(top), 1.0);' \
   geode-shell \
   the_retired_pairing_still_fails_the_sweep
+
+# ---- Chrome on the rem scale (`shell::scale`, design-guide audit) -------
+# `FontSize` moves the window rem; every chrome length is authored in
+# pixels at the Medium rem and resolved through `scale::design`, so it
+# scales with the text it holds. Mutated back to the literal, a dialog's
+# row list stays at its Medium height while its rows grow at Large — the
+# clipped-last-row defect the audit named — and only the zoom test, which
+# measures the painted list at both sizes, can tell.
+run_mutation "scale: a dialog list's height follows the rem, not the literal" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '        .h(scale::design(
+            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+        ))' \
+  '        .h(gpui::px(
+            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+        ))' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# The status bar's painted height and the height the tile surface gives
+# up are one number. Mutated so the bar paints its literal while the
+# surface is still computed from the scaled height, the bar and the
+# bottom tile disagree by the rem's ratio at Large. The wrapper is the
+# height's ONE owner (the inner `StatusBar` is `h_full`) — a first cut
+# of this entry mutated an inner duplicate and SURVIVED, because the
+# test measures the wrapper; the duplicate was removed rather than the
+# test widened.
+run_mutation "scale: the status bar paints the same height the surface reserves" \
+  crates/geode-shell/src/shell/status.rs \
+  '        .h(scale::design(HEIGHT))
+        .debug_selector(|| "shell-status-bar".to_string())' \
+  '        .h(px(HEIGHT))
+        .debug_selector(|| "shell-status-bar".to_string())' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# The other half: the surface reserves the scaled height. Mutated to the
+# literal, the tile surface runs under a taller status bar at Large.
+run_mutation "scale: the tile surface reserves the status bar's scaled height" \
+  crates/geode-shell/src/shell/status.rs \
+  '    scale::design_px(HEIGHT, window.rem_size())' \
+  '    let _ = window;
+    HEIGHT' \
+  geode-shell \
+  chrome_and_dialog_rows_follow_the_font_size
+
+# `design` is the identity at Medium: the pixel value it is handed IS the
+# pixel it paints at the design rem, which is what lets every tuned
+# literal move onto the scale without a visual change. Mutated to scale
+# against gpui's own 16 px default, every chrome length shrinks by 12/16
+# at Medium.
+run_mutation "scale: design lengths are the identity at the medium rem" \
+  crates/geode-shell/src/shell/scale.rs \
+  'pub const DESIGN_REM: f32 = 12.0;' \
+  'pub const DESIGN_REM: f32 = 16.0;' \
+  geode-shell \
+  the_design_rem_is_the_medium_font_size
 
 # ---- Panel header: vocabulary (spec 2026-09-14 §3) ----------------------
 run_mutation "mdheader: a session written with key still restores" \

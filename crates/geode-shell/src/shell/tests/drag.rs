@@ -47,13 +47,13 @@ fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
     let (grab, drop) = cx.update(|window, _| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let mid_y = toolbar_height + content_height / 2.0;
         (
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.5), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.25), px(mid_y)),
         )
     });
 
@@ -121,13 +121,18 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     });
     shell.update(&mut cx, |shell, _| shell.session_dirty = false);
 
-    let (tile_width, mid_y) = cx.update(|window, _| {
+    let (sidebar_width, tile_width, mid_y) = cx.update(|window, _| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let sidebar_width = sidebar::width(window);
+        let tile_width = (f32::from(viewport.width) - sidebar_width).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
-        (tile_width, toolbar_height + content_height / 2.0)
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
+        (
+            sidebar_width,
+            tile_width,
+            toolbar_height + content_height / 2.0,
+        )
     });
     let dock_size = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
         shell.read_with(cx, |shell, _| {
@@ -145,12 +150,12 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     // Grab the dock's inner edge (at 25% of the content width) and
     // drag it to 40%.
     cx.simulate_mouse_down(
-        gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+        gpui::point(px(sidebar_width + tile_width * 0.25), px(mid_y)),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
     cx.simulate_mouse_move(
-        gpui::point(px(sidebar::WIDTH + tile_width * 0.4), px(mid_y)),
+        gpui::point(px(sidebar_width + tile_width * 0.4), px(mid_y)),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
@@ -162,7 +167,7 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
 
     // Keep dragging far past the maximum: the size pins at the clamp.
     cx.simulate_mouse_move(
-        gpui::point(px(sidebar::WIDTH + tile_width * 0.9), px(mid_y)),
+        gpui::point(px(sidebar_width + tile_width * 0.9), px(mid_y)),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
@@ -173,7 +178,7 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     );
 
     cx.simulate_mouse_up(
-        gpui::point(px(sidebar::WIDTH + tile_width * 0.9), px(mid_y)),
+        gpui::point(px(sidebar_width + tile_width * 0.9), px(mid_y)),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
@@ -252,14 +257,14 @@ fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
     let (grab, drop_a, drop_b) = cx.update(|window, _| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let mid_y = toolbar_height + content_height / 2.0;
         (
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.3), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.5), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.25), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.3), px(mid_y)),
         )
     });
 
@@ -329,13 +334,13 @@ fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
     let (grab, drop) = cx.update(|window, _| {
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
         let mid_y = toolbar_height + content_height / 2.0;
         (
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
-            gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.5), px(mid_y)),
+            gpui::point(px(sidebar::width(window) + tile_width * 0.25), px(mid_y)),
         )
     });
 
@@ -401,8 +406,8 @@ fn main_tile_point(
         let area = Rect {
             x: 0.0,
             y: 0.0,
-            w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
-            h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+            w: (f32::from(viewport.width) - sidebar::width(window)).max(0.0),
+            h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
         };
         let shell = shell.read(app);
         let workspace = shell.services.workspaces.active();
@@ -415,7 +420,7 @@ fn main_tile_point(
             .expect("tile present in the main layout")
             .1;
         gpui::point(
-            px(sidebar::WIDTH + r.x + r.w * fx),
+            px(sidebar::width(window) + r.x + r.w * fx),
             px(toolbar_height + r.y + r.h * fy),
         )
     })
@@ -436,8 +441,8 @@ fn dock_point(
         let area = Rect {
             x: 0.0,
             y: 0.0,
-            w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
-            h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+            w: (f32::from(viewport.width) - sidebar::width(window)).max(0.0),
+            h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
         };
         let shell = shell.read(app);
         let workspace = shell.services.workspaces.active();
@@ -448,7 +453,7 @@ fn dock_point(
             .expect("dock visible in the layout")
             .1;
         gpui::point(
-            px(sidebar::WIDTH + r.x + r.w * fx),
+            px(sidebar::width(window) + r.x + r.w * fx),
             px(toolbar_height + r.y + r.h * fy),
         )
     })

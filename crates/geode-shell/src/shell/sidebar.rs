@@ -47,15 +47,24 @@
 //! `secondary` — matching the profile avatar's family visually.
 
 use gpui::prelude::*;
-use gpui::{Context, IntoElement, MouseButton, SharedString, div, px};
+use gpui::{Context, IntoElement, MouseButton, SharedString, Window, div};
 use gpui_component::avatar::Avatar;
 use gpui_component::{ActiveTheme as _, Sizable as _, v_flex};
 
 use crate::actions::ActionId;
 use crate::shell::ShellView;
+use crate::shell::scale;
 
-/// Fixed width of the sidebar icon rail, in pixels.
+/// Width of the sidebar icon rail, in pixels at the design rem
+/// (`shell::scale`): the rail follows the font size with the icons it
+/// holds. Layout arithmetic reads it through [`width`].
 pub const WIDTH: f32 = 40.0;
+
+/// [`WIDTH`] at the window's current rem, for the tile-surface arithmetic
+/// in `render`/`drag` and the tests that mirror it.
+pub fn width(window: &Window) -> f32 {
+    scale::design_px(WIDTH, window.rem_size())
+}
 
 /// `workspace::switch_{n}` for n = 1..=9, as `&'static str`s so the
 /// tooltip closure captures no allocation per render.
@@ -161,7 +170,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                     // 1px `theme.border` ring, `text_xs` label) — see the
                     // module docs for why this is not a real `Avatar`.
                     div()
-                        .size(px(24.))
+                        .size(scale::design(24.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -210,7 +219,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
 
     v_flex()
         .flex_none()
-        .w(px(WIDTH))
+        .w(scale::design(WIDTH))
         .h_full()
         .items_center()
         .justify_between()

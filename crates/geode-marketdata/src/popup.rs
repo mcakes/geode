@@ -8,13 +8,39 @@
 
 use crate::core::menu::MenuRow;
 use crate::tile::MarketDataTile;
+use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{
-    Anchor, AnchoredPositionMode, Entity, IntoElement, MouseButton, SharedString, anchored,
-    deferred, div, px,
+    Anchor, AnchoredPositionMode, App, Div, Entity, IntoElement, MouseButton, SharedString,
+    anchored, deferred, div, px,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::{Theme, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
+
+/// A menu row's height, in pixels at the design rem — gpui-component's
+/// own `PopupMenu` item height at its default size, so this popup keeps
+/// the menu family's geometry (design guide: "preserve the component
+/// family's geometry… do not imitate one menu with a custom popup whose
+/// spacing only approximates the system") while following Geode's rem.
+const ROW_HEIGHT: f32 = 26.0;
+/// A menu row's horizontal inset — `PopupMenu`'s `INNER_PADDING`.
+const ROW_INSET: f32 = 8.0;
+/// The popup's minimum width at the design rem.
+const MIN_WIDTH: f32 = 240.0;
+
+/// The popup surface both the menu and the picker paint on: gpui-
+/// component's own popover treatment (`popover_style` — `popover`
+/// background and foreground, the ring-in-shadow edge, `theme.radius`),
+/// so this surface and the crate's own `PopupMenu`/`Select`/`DatePicker`
+/// popovers cannot drift apart; then the item container's `p_1` inset.
+fn popover_surface(cx: &App) -> Div {
+    v_flex()
+        .min_w(scale::design(MIN_WIDTH))
+        .p_1()
+        .gap_y_0p5()
+        .text_sm()
+        .popover_style(cx)
+}
 use std::collections::BTreeMap;
 
 /// What the tile currently has open. `Menu` is the action list (spec
@@ -229,20 +255,12 @@ impl PickerRows {
 /// click anywhere outside closes it.
 pub(crate) fn render_menu(
     m: &MenuState,
-    theme: &Theme,
     tile: &Entity<MarketDataTile>,
     tile_id: u64,
+    cx: &App,
 ) -> impl IntoElement {
-    let mut list = v_flex()
-        .min_w(px(240.))
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.popover)
-        .text_color(theme.popover_foreground)
-        .text_sm()
-        .shadow_md()
+    let theme = cx.theme();
+    let mut list = popover_surface(cx)
         .debug_selector(move || format!("marketdata-menu-{tile_id}"))
         // The popup OCCLUDES (user report 2026-09-17): without this, gpui
         // keeps hit-testing the grid painted beneath it, so hovering a
@@ -255,9 +273,16 @@ pub(crate) fn render_menu(
         });
     for (i, row) in m.rows.iter().enumerate() {
         list = list.child(match row {
-            MenuRow::Separator => div().h(px(1.)).my_1().bg(theme.border).into_any_element(),
+            // `PopupMenu`'s own separator: a hairline-class rule bleeding
+            // into the container's inset, half a step of air either side.
+            MenuRow::Separator => div()
+                .my_0p5()
+                .mx_neg_1()
+                .border_b(px(2.))
+                .border_color(theme.border)
+                .into_any_element(),
             MenuRow::Section(s) => div()
-                .px_3()
+                .px(scale::design(ROW_INSET))
                 .pt_1()
                 .text_xs()
                 .text_color(theme.muted_foreground)
@@ -281,15 +306,24 @@ pub(crate) fn render_menu(
                 // frame formats nothing here.
                 let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
                 h_flex()
-                    .px_3()
-                    .py_0p5()
+                    .h(scale::design(ROW_HEIGHT))
+                    .px(scale::design(ROW_INSET))
+                    .rounded(theme.radius)
+                    .items_center()
                     .justify_between()
                     .gap_4()
-                    .when(i == m.highlighted, |d| d.bg(theme.list_active))
-                    .text_color(if disabled {
-                        theme.muted_foreground
-                    } else {
-                        theme.popover_foreground
+                    // The family's selected treatment (`MenuItemElement`):
+                    // `accent` under `accent_foreground`, never a second
+                    // list token.
+                    .when(i == m.highlighted, |d| {
+                        d.bg(theme.accent).text_color(theme.accent_foreground)
+                    })
+                    .when(i != m.highlighted, |d| {
+                        d.text_color(if disabled {
+                            theme.muted_foreground
+                        } else {
+                            theme.popover_foreground
+                        })
                     })
                     .debug_selector(move || format!("marketdata-menu-row-{tile_id}-{i}"))
                     // `stop_propagation` here is NOT load-bearing for
@@ -339,13 +373,7 @@ pub(crate) fn render_menu(
                         h_flex()
                             .gap_1()
                             .when_some(tick, |d, tick| {
-                                d.child(
-                                    div()
-                                        .w(px(14.))
-                                        .flex_shrink_0()
-                                        .text_color(theme.foreground)
-                                        .child(tick),
-                                )
+                                d.child(div().w(scale::design(14.)).flex_shrink_0().child(tick))
                             })
                             .child(title.clone()),
                     )
@@ -372,20 +400,12 @@ pub(crate) fn render_menu(
 /// still reads as "asked and answered" instead of a blank rectangle.
 pub(crate) fn render_picker(
     p: &PickerState,
-    theme: &Theme,
     tile: &Entity<MarketDataTile>,
     tile_id: u64,
+    cx: &App,
 ) -> impl IntoElement {
-    let mut list = v_flex()
-        .min_w(px(240.))
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.popover)
-        .text_color(theme.popover_foreground)
-        .text_sm()
-        .shadow_md()
+    let theme = cx.theme();
+    let mut list = popover_surface(cx)
         .debug_selector(move || format!("marketdata-picker-{tile_id}"))
         // Occludes for the same reason the menu does (see `render_menu`).
         .occlude()
@@ -410,8 +430,10 @@ pub(crate) fn render_picker(
     if rows.ranked.is_empty() {
         list = list.child(
             div()
-                .px_3()
-                .py_0p5()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .flex()
+                .items_center()
                 .text_color(theme.muted_foreground)
                 .child("no underlyings known"),
         );
@@ -425,10 +447,16 @@ pub(crate) fn render_picker(
             let text = rows.labels[i].clone();
             list = list.child(
                 h_flex()
-                    .px_3()
-                    .py_0p5()
-                    .when(row_i == rows.highlighted, |d| d.bg(theme.list_active))
-                    .text_color(theme.popover_foreground)
+                    .h(scale::design(ROW_HEIGHT))
+                    .px(scale::design(ROW_INSET))
+                    .rounded(theme.radius)
+                    .items_center()
+                    .when(row_i == rows.highlighted, |d| {
+                        d.bg(theme.accent).text_color(theme.accent_foreground)
+                    })
+                    .when(row_i != rows.highlighted, |d| {
+                        d.text_color(theme.popover_foreground)
+                    })
                     .debug_selector(move || format!("marketdata-picker-row-{tile_id}-{row_i}"))
                     .on_mouse_down(MouseButton::Left, {
                         let tile = tile.clone();
