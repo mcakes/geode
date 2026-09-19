@@ -10858,8 +10858,8 @@ run_mutation "matrix: the pivot keeps the document's own axis order" \
 # and the work disagree with nothing to say so.
 run_mutation "matrix: an edited cell paints the draft's value" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '    if let Some(&edited) = draft.edits.get(&cell_ref) {' \
-  '    if let Some(&edited) = None::<&f64> {' \
+  '    if let Some(edited) = draft.edits.get(&cell_ref) {' \
+  '    if let Some(edited) = None::<&Value> {' \
   geode-marketdata \
   an_edited_cell_paints_the_drafts_value_not_the_documents
 
@@ -11187,8 +11187,8 @@ run_mutation "mdtile: a delivery under an open barrier is staged" \
 # asserts the number itself.
 run_mutation "mdedit: a commit parses the typed text before writing it" \
   crates/geode-marketdata/src/tile.rs \
-  '        let value = match parse_cell(text, self.spec.value_type) {' \
-  '        let value = match Ok::<f64, String>(0.0) {' \
+  '        let parsed = match parse_cell(text, ty) {' \
+  '        let parsed = match Ok::<f64, String>(0.0) {' \
   geode-marketdata \
   edit_commit_paints_the_cell_as_edited_and_the_header_counts_it
 
@@ -11250,7 +11250,13 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                 .iter()
                 .enumerate()
                 .skip(self.model.slice_columns)
-                .filter_map(|(ci, cell)| cell.value.map(|v| ((row, ci), v)))
+                .filter_map(|(ci, cell)| {
+                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
+                        skipped += 1;
+                        return None;
+                    }
+                    numeric_value(cell).map(|v| ((row, ci), v))
+                })
                 .collect(),' \
   '            BumpAxis::Row => self
                 .model
@@ -11260,7 +11266,7 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                 .filter_map(|(ri, r)| {
                     r.cells
                         .get(col)
-                        .and_then(|cell| cell.value)
+                        .and_then(numeric_value)
                         .map(|v| ((ri, col), v))
                 })
                 .collect(),' \
@@ -12666,8 +12672,8 @@ run_mutation "mdedit: a double-click on an attribute opens its editor" \
 # `1`.
 run_mutation "mdnudge: up steps one unit of the painted precision" \
   crates/geode-marketdata/src/tile.rs \
-  '                    .map_or(self.spec.format.precision, |s| s.format.precision);' \
-  '                    .map_or(0, |s| s.format.precision);' \
+  '                (ty, Some(usize::from(format.precision)))' \
+  '                (ty, Some(0))' \
   geode-marketdata up_steps_a_cell_one_unit_of_its_precision_and_shift_ten
 
 # `shift+up` is ten units. Mutated to one, the two nudges land on
@@ -12678,12 +12684,14 @@ run_mutation "mdnudge: shift is ten steps" \
   '                        let magnitude = if verb.ends_with("_big") { 1 } else { 1 };' \
   geode-marketdata up_steps_a_cell_one_unit_of_its_precision_and_shift_ten
 
-# A slice column (`fwd`, two places) carries its own precision. Mutated
-# to never look one up, `fwd` steps at the panel's four places.
+# A slice column (`fwd`, two places) carries its own precision, baked
+# into its own `CellKind::Number` at model-build time. Mutated to give
+# every slice column the panel's own format instead of its own, `fwd`
+# steps (and paints) at the panel's four places rather than its own two.
 run_mutation "mdnudge: a slice column steps at its own precision" \
-  crates/geode-marketdata/src/tile.rs \
-  '                    .filter(|_| *col < self.model.slice_columns)' \
-  '                    .filter(|_| false)' \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        .map(|(sv, _)| CellKind::Number(sv.format.clone()))' \
+  '        .map(|_| CellKind::Number(spec.format.clone()))' \
   geode-marketdata a_slice_column_nudges_at_its_own_precision
 
 # ---- The segmented date field (header spec §5.2, 2026-09-19) -----------
@@ -13404,6 +13412,23 @@ run_mutation "mdpark: the picker opens while the draft has edits" \
         }' \
   geode-marketdata \
   the_picker_opens_while_the_draft_has_edits
+
+# Task 3 — typed cells.
+#
+# §4.2: an undeclared flat value column is refused, never painted.
+run_mutation "matrix: an undeclared flat value column is refused" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        if is_value(snapshot, idx) && spec.value_column(&name).is_none() {' \
+  '        if is_value(snapshot, idx) && spec.value_column(&name).is_none() && false {' \
+  geode-marketdata a_flat_model_refuses_a_value_column_the_spec_does_not_list
+
+# §4.3: a cell edit round-trips typed; mutated to tag a date as text, the
+# restored edit reads back as text.
+run_mutation "draft: a date edit is tagged in the session" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        Value::Date(d) => tagged("date", d.format("%Y-%m-%d").to_string()),' \
+  '        Value::Date(d) => tagged("text", d.format("%Y-%m-%d").to_string()),' \
+  geode-marketdata typed_edits_round_trip_through_toml_with_a_type_tag
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
