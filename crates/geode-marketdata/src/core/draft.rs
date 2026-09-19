@@ -49,6 +49,53 @@ pub enum DraftBadge {
     Sent,
 }
 
+/// What a panel does when a DIFFERENT generation is delivered while its
+/// draft has edits — a per-tile choice (user ruling 2026-09-19), applied
+/// by the tile at the one point today's code enters `Behind`
+/// ([`Draft::on_delivered`] IS the `hold` decision and reads no policy;
+/// the tile branches after it). A clean panel follows every document
+/// regardless, and the edits' own base coming back (an as-of round trip)
+/// is not a different document, so neither is touched by this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UpdatePolicy {
+    /// Today's behaviour: the draft goes `Behind`, the base generation
+    /// stays painted, `:rebase`/`:revert` are the ways out.
+    #[default]
+    Hold,
+    /// Re-place the edits onto the new document at once, by label —
+    /// exactly `:rebase`, dropped pairs named in the notice.
+    Rebase,
+    /// Drop the edits and paint the new document; the notice says how
+    /// much unsent work went.
+    Replace,
+}
+
+impl UpdatePolicy {
+    /// Every policy, in the order the `:auto` completions and the menu
+    /// section offer them.
+    pub const ALL: [UpdatePolicy; 3] = [
+        UpdatePolicy::Hold,
+        UpdatePolicy::Rebase,
+        UpdatePolicy::Replace,
+    ];
+
+    /// The typed and serialised spelling — one lowercase word.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdatePolicy::Hold => "hold",
+            UpdatePolicy::Rebase => "rebase",
+            UpdatePolicy::Replace => "replace",
+        }
+    }
+
+    /// The inverse of [`Self::as_str`]; `None` for anything else, so a
+    /// session file carrying an unknown word restores as the default
+    /// rather than refusing the tile.
+    pub fn parse(word: &str) -> Option<UpdatePolicy> {
+        Self::ALL.into_iter().find(|p| p.as_str() == word)
+    }
+}
+
 /// Edits keyed by grid cell, with the labels that make them portable, plus
 /// document-level attribute edits keyed by column name.
 ///
@@ -820,6 +867,19 @@ mod tests {
             "M-4: an as-of step back delivers an OLDER document, so the \
              badge can only say the delivered one is DIFFERENT, never newer"
         );
+    }
+
+    #[test]
+    fn update_policy_round_trips_its_three_names_and_refuses_the_rest() {
+        for p in UpdatePolicy::ALL {
+            assert_eq!(UpdatePolicy::parse(p.as_str()), Some(p));
+        }
+        assert_eq!(UpdatePolicy::parse("hold"), Some(UpdatePolicy::Hold));
+        assert_eq!(UpdatePolicy::parse("rebase"), Some(UpdatePolicy::Rebase));
+        assert_eq!(UpdatePolicy::parse("replace"), Some(UpdatePolicy::Replace));
+        assert_eq!(UpdatePolicy::parse("Hold"), None, "lowercase only");
+        assert_eq!(UpdatePolicy::parse("discard"), None);
+        assert_eq!(UpdatePolicy::default(), UpdatePolicy::Hold);
     }
 
     #[test]

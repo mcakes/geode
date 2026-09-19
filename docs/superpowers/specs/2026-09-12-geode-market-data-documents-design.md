@@ -824,6 +824,45 @@ style and the header reads "3 edits on 14:02's document". States:
 Only value cells are editable. Axes and attributes are read-only in
 slice 1; editing `spotRef` is a plausible later verb and is not built.
 
+**Update policy (2026-09-19).** `Behind` is one of three per-tile
+answers to "a different generation arrived under my edits", chosen by
+`:auto hold|rebase|replace` (`UpdatePolicy`, default `hold`), the
+menu's `On new document` section (header spec §6.2) or the palette's
+`Auto: …` rows, and carried in the session as `auto = "<policy>"` when
+not the default. `hold` is the `Behind` state above. `rebase` does at
+delivery exactly what `:rebase` does — the edits are re-placed onto
+the new document by label, dropped pairs named in the notice, the new
+document painted, the draft dirty on the new base, never `Behind`.
+`replace` drops the edits and paints the new document, with the notice
+`update HH:MM replaced <count phrase>` (`update 14:09 replaced 2 cells,
+spot_ref`) as the whole disclosure of unsent work gone by the trader's
+own standing choice. The policy is applied at the one point today's
+code would enter `Behind` — `Draft::on_delivered` decides, the tile
+branches after it — so a clean panel and the base's own as-of round
+trip are untouched, a switch never acts retroactively on a draft
+already `Behind` (that draft moves onto the NEWEST generation on its
+next delivery under `rebase`/`replace`). **The first delivery after a
+restore is always `hold`** (ruling, same day): the policy governs live
+deliveries while the trader is working, and a draft restored from the
+session has not been seen this session at all — under `replace` it
+would go on a delivery nobody was watching, breaking §8.5's "unsent
+work survives a restart" with only a notice for company, and under
+`rebase` it would move onto a generation the trader never chose. So
+while the tile's `unresolved_restore` flag is set the delivery takes
+the `hold` path whatever the policy (a differing base lands `Behind`,
+a matching one resolves as today), and the policy resumes from the next
+delivery. **The policy acts on the next NEW generation; a redelivery of
+the same one never acts** (review I-1): the tile requeries on every
+`data` bump, so the branch is gated on `Draft::on_delivered` answering
+`true` — a real transition, `Editing → Behind` or `Behind{a} →
+Behind{b}` — and a draft already `Behind` redelivered its own newer
+generation stays exactly there, `:rebase`/`:revert` its doors. An empty
+new generation (no rows, a source time) under `rebase` takes the `hold`
+path too, since rebasing against no labels would drop every edit in
+silence (review I-2). Everything is still decided on copies and
+committed after a successful build; `rebase` builds twice (a clean
+model for the new labels, then the re-placed draft).
+
 ### 8.5 Session
 
 `serialize` writes `key`, `edits` (as label pairs, so a restart onto a

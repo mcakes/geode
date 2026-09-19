@@ -10872,10 +10872,11 @@ run_mutation "final: a notice set while applying a delivery survives it" \
 # delivery that paints (it used to be cleared in `deliver`'s `Ok` arm,
 # where a staged delivery wiped a `:rebase` report on any unrelated
 # publish). Mutated away, a select failure's message outlives the document
-# that replaced it.
+# that replaced it. Re-anchored 2026-09-19: the clear now writes the update
+# policy's own notice (`None` under `hold`) rather than a literal `None`.
 run_mutation "final: a painting delivery clears the previous delivery's notice" \
   crates/geode-marketdata/src/tile.rs \
-  '        self.notice = None;
+  '        self.notice = notice;
         self.draft = draft;' \
   '        self.draft = draft;' \
   geode-marketdata \
@@ -12240,6 +12241,95 @@ run_mutation "reclaim: shift-up in an Input falls through to the keymap" \
   '' \
   geode-marketdata \
   shift_up_in_the_editor_no_longer_moves_the_tables_selection
+
+# ---- Market-data update policy (spec §8.4, 2026-09-19) -------------------
+#
+# `hold`/`rebase`/`replace` is applied in `MarketDataTile::apply` at the
+# one point `on_delivered` decides `Behind`. Each entry breaks one policy's
+# own step; the `hold` path is the existing Behind entries' business.
+
+# Mutated away, the `rebase` arm builds the clean model and then never
+# re-places the edits: the draft stays `Behind`, `retained` pins the base,
+# and a `rebase` panel silently behaves as `hold` — the policy a trader set
+# does nothing, with no notice saying so.
+run_mutation "mdauto: rebase policy re-places edits instead of holding" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    let (_, dropped) = draft.rebase(&clean);' \
+  '                    let dropped: Vec<(String, String)> = Vec::new();
+                    let _ = &clean;' \
+  geode-marketdata \
+  auto_rebase_re_places_the_edits_onto_a_newer_document
+
+# The count is taken BEFORE the revert. Swapped, the notice reads
+# `update HH:MM replaced ` with nothing after it — the one disclosure of
+# unsent work gone by a standing choice, saying nothing about what went.
+run_mutation "mdauto: replace policy drops the edits and says how many" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    let phrase = draft.count_phrase();
+                    draft.revert();' \
+  '                    draft.revert();
+                    let phrase = draft.count_phrase();' \
+  geode-marketdata \
+  auto_replace_drops_the_edits_and_says_how_many
+
+# Mutated away, every restored tile opens as `hold` whatever the session
+# says — the policy is written and never read back, so a restart quietly
+# reverts a trader's choice.
+run_mutation "mdauto: the policy is read from the session" \
+  crates/geode-marketdata/src/tile.rs \
+  '            .and_then(UpdatePolicy::parse)' \
+  '            .and_then(|_| None::<UpdatePolicy>)' \
+  geode-marketdata \
+  the_policy_round_trips_through_the_session
+
+# Ruling 2026-09-19: the first delivery after a restore is always `hold`.
+# Mutated away, a `replace` panel drops a draft restored from the session
+# on a delivery the trader was not watching — §8.5's "unsent work survives
+# a restart" broken with only a notice for company — and a `rebase` panel
+# moves the restored edits onto a generation the trader never chose.
+run_mutation "mdauto: a restored draft's first delivery is always hold" \
+  crates/geode-marketdata/src/tile.rs \
+  '            && self.policy != UpdatePolicy::Hold
+            && !self.unresolved_restore
+        {' \
+  '            && self.policy != UpdatePolicy::Hold
+        {' \
+  geode-marketdata \
+  a_restored_drafts_first_delivery_is_hold_under_replace
+
+# Review I-1: the policy fires on a real TRANSITION (`on_delivered`
+# answered true) and never on a same-generation redelivery. Mutated out,
+# every `data` bump — any dataset's publish, every few seconds on the
+# demo bus — re-runs the policy on a draft already Behind: `:auto replace`
+# becomes a `:revert` executed by an unrelated publish, and the restore
+# rule's protection lasts exactly one bump.
+run_mutation "mdauto: the policy fires only on a real transition, never a redelivery" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if moved
+            && draft.is_behind()' \
+  '        if draft.is_behind()' \
+  geode-marketdata \
+  switching_to_auto_rebase_does_not_rebase_a_draft_already_behind
+
+# Review I-2: an empty new generation (no rows, a source time) is not a
+# document to move edits onto — `Draft::rebase` against an empty label
+# map drops every edit in silence. Mutated out, a zero-row delivery under
+# `rebase` empties the draft with no notice at all.
+run_mutation "mdauto: an empty new document never auto-rebases a draft away" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if !clean.rows.is_empty() {' \
+  '                    if true {' \
+  geode-marketdata \
+  an_empty_new_document_never_auto_rebases_a_draft_away
+
+# Mutated away, all three `On new document` rows carry the tick, and the
+# menu no longer says which policy is in force.
+run_mutation "mdauto: exactly one policy row is checked" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '            checked: Some(p == policy),' \
+  '            checked: Some(true),' \
+  geode-marketdata \
+  exactly_one_policy_row_is_checked_and_it_follows_the_policy
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -252,8 +252,21 @@ In order:
 
 (`Discard edits`/`:discard` was folded into `:revert` by user ruling
 2026-09-18 — they were one act.)
+| — separator, then `Section("On new document")` — | | always (2026-09-19) |
+| hold edits | | never; `checked: Some(policy == Hold)` |
+| rebase edits | | never; `checked: Some(policy == Rebase)` |
+| replace edits | | never; `checked: Some(policy == Replace)` |
 | — separator, then `Section(spec.title)` — | | only if `kind_actions` is non-empty |
 | each `KindAction.title` | | `!built` (`not built yet`) |
+
+The three `On new document` rows (2026-09-19, market-data spec §8.4's
+update policy) are CHOICE rows, not verbs: `MenuRow::Action` gained
+`checked: Option<bool>` (`None` on a verb row), `MenuInputs` gained
+`policy: UpdatePolicy`, and the paint puts a `✓` or a same-width blank
+ahead of a choice row's title. Their ids are
+`marketdata::auto_hold|auto_rebase|auto_replace`, hints empty, always
+enabled; picking one sets the policy and closes the menu through the
+ordinary `menu_pick` path. `first_enabled`/`step` are unchanged.
 
 `enter` on a disabled row sets the reason as the notice and leaves the
 popup open. The highlighted row starts at the first enabled one.
@@ -627,3 +640,16 @@ cancels exactly as before, and unparseable text is left alone with the
 usual inline notice. `menu_up`/`menu_down` stay the menu block's verbs
 (`j`/`k`/`up`/`down` in `mode == menu`). Harness: `mdedit: a
 double-click on an attribute opens its editor`, four `mdnudge:` entries.
+
+### 11.z Update policy rows (2026-09-19)
+
+The action list gained the `On new document` section (§6.2's amended
+table): three always-enabled choice rows, one ticked for the tile's
+`UpdatePolicy` (`hold`/`rebase`/`replace`, market-data spec §8.4), the
+same setting `:auto <policy>` and the palette's `Auto: …` actions
+reach; `menu_pick` on one sets it and closes the menu. Under `rebase` or
+`replace` the panel is never `Behind`, so the `update HH:MM` state run
+and the `Rebase onto HH:MM` row are `hold`'s alone. Harness: seven
+`mdauto:` entries (the `rebase` and `replace` steps, the session read,
+the restore rule, the transition gate, the empty-document guard, and
+the menu's single tick).

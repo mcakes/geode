@@ -59,6 +59,12 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::upload", "Upload"),
     ("marketdata::revert", "Revert edits"),
     ("marketdata::rebase", "Rebase"),
+    // The update policy (spec §8.4, 2026-09-19): palette rows and the
+    // menu's `On new document` section, no default key — a setting a
+    // trader changes a few times a day is not worth a chord.
+    ("marketdata::auto_hold", "Auto: hold edits"),
+    ("marketdata::auto_rebase", "Auto: rebase edits"),
+    ("marketdata::auto_replace", "Auto: replace edits"),
 ];
 
 /// This module's default bindings (market-data spec §8.3/§8.6), handed to
@@ -360,6 +366,9 @@ mod tests {
         "marketdata::upload",
         "marketdata::revert",
         "marketdata::rebase",
+        "marketdata::auto_hold",
+        "marketdata::auto_rebase",
+        "marketdata::auto_replace",
         "marketdata::cvi_reanchor",
         "marketdata::cvi_recalc_forward",
     ];
