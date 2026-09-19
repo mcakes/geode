@@ -1618,7 +1618,12 @@ impl Draft {
         // `commit_selected_row` gates on `column().is_none()` besides),
         // so this line is what makes it unrepresentable rather than
         // merely unreached.
-        if self.column.is_some() {
+        //
+        // The Values stage shares this same stash (`Draft::values`'s own
+        // doc), so it is refused here too — entering over an open Values
+        // stage would stash ITS installed fields as `parent_fields` and
+        // drop the object's own list exactly as re-entry would.
+        if self.column.is_some() || self.values.is_some() {
             return false;
         }
         // Membership is what the door lists: the Views door's `columns`
@@ -1784,6 +1789,14 @@ impl Draft {
     /// an index carried across would land wherever that number happens to
     /// point.
     pub fn leave_column(&mut self) {
+        // Checked before anything else touches `parent_fields`: the stash
+        // is shared with the Values stage, and `parent_fields.take()`
+        // alone cannot tell which stage it belongs to. Calling this while
+        // `column` is `None` — the Values stage open, or no stage at all
+        // — must touch nothing.
+        if self.column.is_none() {
+            return;
+        }
         self.fold_column();
         let Some(parent) = self.parent_fields.take() else {
             return;
@@ -1832,8 +1845,19 @@ impl Draft {
     /// fields, for `leave_column`'s reason. `None` when no Values stage
     /// was open.
     pub fn leave_values(&mut self) -> Option<Vec<Field>> {
-        self.values.take()?;
+        self.values.as_ref()?;
+        // A Values stage always carries its own stash — `enter_values` is
+        // the only writer of `values` and it always sets `parent_fields`
+        // in the same call — so a `Some(values)` with no stash is a bug
+        // (a stray `leave_column`, say) rather than a state this door
+        // should silently accept, exactly the debug check `fold_column`
+        // makes for its own context.
+        debug_assert!(
+            self.parent_fields.is_some(),
+            "a Values stage always carries its own stash"
+        );
         let parent = self.parent_fields.take()?;
+        self.values = None;
         let own = std::mem::replace(&mut self.fields, parent);
         self.baseline = self.fields.clone();
         self.query.clear();
@@ -6140,6 +6164,76 @@ mod tests {
             column: "book".into(),
         };
         assert!(state.has_previous_stage());
+    }
+
+    /// The Column and Values stages share one stash (`Draft::values`'s own
+    /// doc: "the two stages share the stash and can never both be open"),
+    /// so `enter_column` must refuse exactly as re-entry on itself does —
+    /// entering over an open Values stage would stash ITS installed
+    /// fields as `parent_fields` and drop the object's own list for good.
+    #[test]
+    fn enter_column_is_refused_while_the_values_stage_is_open() {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let column_item = draft.list_items("columns").unwrap()[0].clone();
+        let column_fields = views::column_fields(&column_item, &[], Destination::Presentation);
+        let values_fields = vec![Field {
+            key: "values".to_string(),
+            label: "Values".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![item("BK001")],
+                available: None,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        }];
+        assert!(draft.enter_values("book", values_fields.clone()));
+        assert!(
+            !draft.enter_column("npv", column_fields),
+            "the values stage already holds the shared stash"
+        );
+        assert_eq!(
+            draft.fields, values_fields,
+            "the refused enter_column touched nothing"
+        );
+        assert_eq!(draft.values(), Some("book"));
+        assert_eq!(draft.column(), None);
+    }
+
+    /// `leave_column` is the Column stage's own door — called while the
+    /// Values stage holds the shared stash, it must do nothing rather
+    /// than take a stash that belongs to the other stage (the review
+    /// finding this test and `enter_column_is_refused_while_the_values_stage_is_open`
+    /// close): the checked discriminant is `column`, which is `None`
+    /// while Values is open.
+    #[test]
+    fn leave_column_does_nothing_while_the_values_stage_is_open() {
+        let mut draft = groupings_draft();
+        let before = draft.fields.clone();
+        let values = vec![Field {
+            key: "values".to_string(),
+            label: "Values".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![item("BK001")],
+                available: None,
+            },
+            dest: Destination::Doc,
+            layer: None,
+        }];
+        assert!(draft.enter_values("book", values.clone()));
+        draft.leave_column();
+        assert_eq!(
+            draft.values(),
+            Some("book"),
+            "leave_column must not touch the Values stage"
+        );
+        assert_eq!(draft.fields, values, "leave_column touched nothing");
+        let own = draft
+            .leave_values()
+            .expect("the stage's own fields survive leave_column's no-op");
+        assert_eq!(own, values);
+        assert_eq!(draft.values(), None);
+        assert_eq!(draft.fields, before);
     }
 
     /// Part 2c §5.5: a diagnostic path whose index resolves — by name, 2b's
