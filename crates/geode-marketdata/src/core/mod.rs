@@ -9,6 +9,7 @@
 //! *label*, because an index means nothing once a new document arrives.
 
 pub mod cursor;
+pub mod datefield;
 pub mod draft;
 pub mod matrix;
 pub mod menu;
@@ -16,6 +17,7 @@ pub mod nudge;
 pub mod spec;
 
 pub use cursor::Cursor;
+pub use datefield::{DateField, Segment, SegmentText};
 pub use draft::{Draft, DraftBadge, DraftState, UpdatePolicy, attr_text, parse_attr, parse_cell};
 pub use matrix::{Cell, MatrixModel, RowModel};
 pub use nudge::nudge_text;
