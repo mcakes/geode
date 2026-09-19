@@ -78,6 +78,19 @@ pub enum SourceTime {
     Document(String),
 }
 
+/// Which of the three pipelines a source rides (timeseries spec §5.1):
+/// the directory poller, a subscription receiver, or a fetch worker. The
+/// dataset's family decides between the last two — a non-directory
+/// adapter over a series dataset is fetched, over a document dataset
+/// subscribed — so this takes the schema rather than storing a fourth
+/// copy of the answer on the spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceShape {
+    Directory,
+    Subscribed,
+    Fetch,
+}
+
 #[derive(Debug, Clone)]
 pub struct SourceSpec {
     pub name: String,
@@ -141,6 +154,16 @@ impl SourceSpec {
     /// default.
     pub fn is_subscribed(&self) -> bool {
         self.adapter != CSV_DIR_ADAPTER
+    }
+
+    pub fn shape(&self, schema: &SchemaSpec) -> SourceShape {
+        if !self.is_subscribed() {
+            SourceShape::Directory
+        } else if schema.dataset(&self.dataset).is_some_and(|d| d.is_series()) {
+            SourceShape::Fetch
+        } else {
+            SourceShape::Subscribed
+        }
     }
 
     /// A directory-of-CSVs source with every optional field at its
@@ -379,11 +402,27 @@ impl SourceSpec {
                 .unwrap_or(CSV_DIR_ADAPTER)
                 .to_string();
             let subscribed = adapter != CSV_DIR_ADAPTER;
+            let family = schema.dataset(&dataset).map(|d| d.family);
+            let fetch = subscribed && family == Some(crate::schema::Family::Series);
 
+            // A directory source reads CSV rows into grain tables; it can
+            // never fill a series table (timeseries spec §5.1).
+            if !subscribed && family == Some(crate::schema::Family::Series) {
+                diags.push(diag(
+                    Severity::Error,
+                    name,
+                    Some("dataset"),
+                    format!(
+                        "a directory source cannot fill the series dataset '{dataset}'; \
+                         name a fetch adapter"
+                    ),
+                ));
+                continue;
+            }
             // A subscribed source has no CSV row to infer a shape from —
             // it publishes `DocumentRows` straight into a document-family
             // table, never a measures one (market-data-documents plan).
-            if subscribed && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {
+            if subscribed && !fetch && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {
                 diags.push(diag(
                     Severity::Error,
                     name,
@@ -398,37 +437,44 @@ impl SourceSpec {
 
             // Directory-only keys, meaningful for `csv_dir` alone: warned
             // (and never read for their value below) on a subscribed
-            // source rather than silently half-applied.
+            // source rather than silently half-applied. A fetch source
+            // wears its own wording for the same reason, on both lists —
+            // it is neither a directory nor a subscription.
+            let ignored = |key: &str, diags: &mut Vec<Diagnostic>| {
+                if !table.contains_key(key) {
+                    return;
+                }
+                let m = if fetch {
+                    format!("'{key}' is ignored by a fetch source (a series dataset)")
+                } else if subscribed {
+                    format!(
+                        "'{key}' is ignored by a subscribed source \
+                         (adapter != \"{CSV_DIR_ADAPTER}\")"
+                    )
+                } else {
+                    format!(
+                        "'{key}' is ignored by a directory source \
+                         (adapter == \"{CSV_DIR_ADAPTER}\")"
+                    )
+                };
+                diags.push(diag(Severity::Warning, name, Some(key), m));
+            };
             for key in [
                 "readiness",
                 "poll_interval",
                 "pending_timeout",
                 "batch_pattern",
             ] {
-                if subscribed && table.contains_key(key) {
-                    diags.push(diag(
-                        Severity::Warning,
-                        name,
-                        Some(key),
-                        format!(
-                            "'{key}' is ignored by a subscribed source \
-                             (adapter != \"{CSV_DIR_ADAPTER}\")"
-                        ),
-                    ));
+                if subscribed {
+                    ignored(key, &mut diags);
                 }
             }
-            // The subscribed-only keys, the same rule the other way.
+            // The subscribed-only keys, the same rule the other way — and
+            // a fetch source ignores these too (a fetch worker has no
+            // topic or document kind of its own).
             for key in ["document", "topics", "coalesce", "source_time"] {
-                if !subscribed && table.contains_key(key) {
-                    diags.push(diag(
-                        Severity::Warning,
-                        name,
-                        Some(key),
-                        format!(
-                            "'{key}' is ignored by a directory source \
-                             (adapter == \"{CSV_DIR_ADAPTER}\")"
-                        ),
-                    ));
+                if !subscribed || fetch {
+                    ignored(key, &mut diags);
                 }
             }
 
@@ -444,15 +490,15 @@ impl SourceSpec {
                 .unwrap_or_default();
             if subscribed {
                 if !paths.is_empty() {
-                    diags.push(diag(
-                        Severity::Warning,
-                        name,
-                        Some("paths"),
+                    let m = if fetch {
+                        "'paths' is ignored by a fetch source (a series dataset)".to_string()
+                    } else {
                         format!(
                             "'paths' is ignored by a subscribed source \
                              (adapter != \"{CSV_DIR_ADAPTER}\")"
-                        ),
-                    ));
+                        )
+                    };
+                    diags.push(diag(Severity::Warning, name, Some("paths"), m));
                     // Dropped, not merely left unread: a reader must not
                     // STORE what it has just said it ignores. A surface
                     // reading `paths` back — the diagnostics tile's
@@ -544,7 +590,7 @@ impl SourceSpec {
                 (poll_interval, pending_timeout, batch_pattern)
             };
 
-            let (document, topics, coalesce, source_time) = if subscribed {
+            let (document, topics, coalesce, source_time) = if subscribed && !fetch {
                 let document = match table.get("document").and_then(|v| v.as_str()) {
                     Some(d) => Some(d.to_string()),
                     None => {
@@ -727,6 +773,9 @@ role = "attribute"
 [cvi_params.columns.spot_ref]
 type = "f64"
 role = "attribute"
+
+[series]
+family = "series"
 "#;
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
         SchemaSpec::from_doc(&doc).0
@@ -1291,6 +1340,95 @@ paths = ["/tmp/*.csv"]
                 .iter()
                 .any(|d| d.path.as_deref() == Some("sources.x.dataset")
                     && d.message.contains("document family"))
+        );
+    }
+
+    #[test]
+    fn a_source_over_a_series_dataset_is_a_fetch_source() {
+        let (specs, diags) = from(
+            r#"
+[kdb_hist]
+adapter = "kdb"
+dataset = "series"
+"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let s = &specs[0];
+        assert_eq!(s.shape(&schema()), SourceShape::Fetch);
+        assert!(s.is_subscribed(), "a fetch source is not a directory");
+        assert_eq!(s.document, None);
+        assert!(s.topics.is_empty());
+        assert!(s.paths.is_empty());
+    }
+
+    #[test]
+    fn subscribed_and_directory_keys_are_warned_on_a_fetch_source() {
+        let (specs, diags) = from(
+            r#"
+[kdb_hist]
+adapter = "kdb"
+dataset = "series"
+topics = ["a/>"]
+document = "cvi_params"
+paths = ["/x/*.csv"]
+poll_interval = "2s"
+"#,
+        );
+        assert_eq!(specs.len(), 1);
+        assert!(specs[0].paths.is_empty(), "paths are dropped, not stored");
+        for key in ["topics", "document", "paths", "poll_interval"] {
+            assert!(
+                diags.iter().any(|d| d.severity == Severity::Warning
+                    && d.path.as_deref() == Some(&format!("sources.kdb_hist.{key}"))
+                    && d.message.contains("fetch source")),
+                "missing warning for {key}: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_csv_dir_source_over_a_series_dataset_is_refused() {
+        let (specs, diags) = from(
+            r#"
+[files]
+dataset = "series"
+paths = ["/x/*.csv"]
+"#,
+        );
+        assert!(specs.is_empty());
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Error
+                && d.path.as_deref() == Some("sources.files.dataset")
+                && d.message.contains("series")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn shape_names_all_three() {
+        let (specs, _) = from(
+            r#"
+[a]
+dataset = "risk_snapshot"
+paths = ["/x/*.csv"]
+[b]
+adapter = "solace"
+dataset = "cvi_params"
+document = "cvi_params"
+topics = ["t/>"]
+[c]
+adapter = "kdb"
+dataset = "series"
+"#,
+        );
+        let shapes: Vec<SourceShape> = specs.iter().map(|s| s.shape(&schema())).collect();
+        assert_eq!(
+            shapes,
+            vec![
+                SourceShape::Directory,
+                SourceShape::Subscribed,
+                SourceShape::Fetch
+            ]
         );
     }
 }
