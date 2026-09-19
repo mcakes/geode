@@ -7270,9 +7270,16 @@ fn a_notice_displaces_the_help_line_for_one_keystroke(cx: &mut gpui::TestAppCont
 fn a_list_row_shows_its_lists_help(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
-    // The cursor is on the first column item.
+    // The cursor is on the first column item: the COLUMNS field's own
+    // sentence, byte for byte — not the dataset row's, which also
+    // happens to mention columns (the first draft of this test matched
+    // on the word and let a wrong-index mutant through).
+    let columns_help = shell.read_with(&cx, |shell, _| {
+        let state = shell.object_dialog.as_ref().unwrap();
+        state.domain.help(&state.stage, "columns").to_string()
+    });
     let item_help = help_line(&shell, &cx).expect("a column item has help");
-    assert!(item_help.to_lowercase().contains("column"), "{item_help}");
+    assert_eq!(item_help, columns_help);
     // Past the second item onto the available block's `delta01`.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
