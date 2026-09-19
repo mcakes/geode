@@ -244,6 +244,7 @@ pub(crate) fn render_menu(
                 title,
                 hint,
                 enabled,
+                checked,
                 ..
             } => {
                 let disabled = enabled.is_err();
@@ -251,6 +252,11 @@ pub(crate) fn render_menu(
                     Err(r) => (*r).into(),
                     Ok(()) => hint.clone(),
                 };
+                // A choice row carries a tick or a same-width blank
+                // ahead of its title, so the group's titles align
+                // whichever one is in force. Two static strings — a
+                // frame formats nothing here.
+                let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
                 h_flex()
                     .px_3()
                     .py_0p5()
@@ -306,7 +312,20 @@ pub(crate) fn render_menu(
                         let tile = tile.clone();
                         move |_, _, cx| tile.update(cx, |t, cx| t.menu_hover(i, cx))
                     })
-                    .child(title.clone())
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .when_some(tick, |d, tick| {
+                                d.child(
+                                    div()
+                                        .w(px(14.))
+                                        .flex_shrink_0()
+                                        .text_color(theme.foreground)
+                                        .child(tick),
+                                )
+                            })
+                            .child(title.clone()),
+                    )
                     .child(div().text_color(theme.muted_foreground).child(reason))
                     .into_any_element()
             }

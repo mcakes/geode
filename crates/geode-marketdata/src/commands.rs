@@ -5,12 +5,14 @@
 //!
 //! The vocabulary is `underlying <value>` (trader-facing; `key` is a silent
 //! alias), `revert`, `bump <delta> [row|col]`, `rebase`,
-//! `upload`, `set <attr> [value...]`, `menu`. Every verb is built and
+//! `upload`, `set <attr> [value...]`, `auto [hold|rebase|replace]`,
+//! `menu`. Every verb is built and
 //! executed by the tile (`MarketDataTile::command`) — `upload` alone
 //! parses here and answers "upload is not built yet" until Part 4
 //! (egress) lands it, so the grammar a trader types today is the grammar
 //! that will send.
 
+use crate::core::UpdatePolicy;
 use geode_core::document::KEY_SEPARATOR;
 
 /// The separator a multi-part document key is typed and displayed with.
@@ -57,6 +59,12 @@ pub enum Command {
         attr: String,
         value: Option<String>,
     },
+    /// `auto <policy>` sets what the panel does with a newer document
+    /// under its edits (spec §8.4, 2026-09-19); `None` is a bare `auto`,
+    /// which the tile answers by naming the current policy — this core
+    /// has no tile to read it off, the same reason `Set { value: None }`
+    /// is a variant and not a parse error.
+    Auto(Option<UpdatePolicy>),
 }
 
 /// Every verb, in the order completions offer them. `key` is a silent
@@ -65,15 +73,25 @@ pub enum Command {
 /// caller's `behind` flag (spec §8.3: it is offered only while a newer
 /// generation sits under the draft) — listed here so one table is the
 /// vocabulary and the filter is one line.
-const VERBS: [&str; 7] = [
+const VERBS: [&str; 8] = [
     "underlying",
     "revert",
     "bump",
     "rebase",
     "upload",
     "set",
+    "auto",
     "menu",
 ];
+
+/// `auto`'s second word: the three policies, as [`UpdatePolicy::as_str`]
+/// spells them, in [`UpdatePolicy::ALL`]'s order.
+fn policy_words() -> Vec<String> {
+    UpdatePolicy::ALL
+        .iter()
+        .map(|p| p.as_str().to_string())
+        .collect()
+}
 
 fn behind_only(verb: &str) -> bool {
     verb == "rebase"
@@ -149,6 +167,18 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 value,
             })
         }
+        Some("auto") => {
+            let policy = match words.next() {
+                None => None,
+                Some(word) => Some(UpdatePolicy::parse(word).ok_or_else(|| {
+                    format!("unknown policy '{word}' ({})", policy_words().join(", "))
+                })?),
+            };
+            if words.next().is_some() {
+                return Err("usage: auto [hold|rebase|replace]".to_string());
+            }
+            Ok(Command::Auto(policy))
+        }
         Some("menu") => Ok(Command::Menu),
         Some(other) => Err(format!("unknown command '{other}'")),
         None => Err("empty command".to_string()),
@@ -202,6 +232,7 @@ pub fn completions(
             .collect(),
         ["underlying"] | ["key"] => keys.to_vec(),
         ["set"] => attrs.to_vec(),
+        ["auto"] => policy_words(),
         // `bump`'s delta is a number nothing can complete; its axis is a
         // two-word vocabulary.
         ["bump", _] => vec!["row".to_string(), "col".to_string()],
@@ -267,7 +298,15 @@ mod tests {
         let keys = vec!["NDX.Z".to_string(), "SPX.Z".to_string()];
         assert_eq!(
             completions("", 0, &keys, false, &[]),
-            vec!["underlying", "revert", "bump", "upload", "set", "menu"],
+            vec![
+                "underlying",
+                "revert",
+                "bump",
+                "upload",
+                "set",
+                "auto",
+                "menu"
+            ],
             "rebase is offered only while behind"
         );
         assert_eq!(
@@ -279,6 +318,7 @@ mod tests {
                 "rebase",
                 "upload",
                 "set",
+                "auto",
                 "menu"
             ]
         );
@@ -357,6 +397,46 @@ mod tests {
                 attr: "note".into(),
                 value: Some("front month".into())
             })
+        );
+    }
+
+    #[test]
+    fn auto_parses_a_policy_and_a_bare_auto_asks_the_tile() {
+        assert_eq!(
+            parse("auto rebase"),
+            Ok(Command::Auto(Some(UpdatePolicy::Rebase)))
+        );
+        assert_eq!(
+            parse("auto hold"),
+            Ok(Command::Auto(Some(UpdatePolicy::Hold)))
+        );
+        assert_eq!(
+            parse("auto replace"),
+            Ok(Command::Auto(Some(UpdatePolicy::Replace)))
+        );
+        // A bare `auto` is a question the tile answers with the current
+        // policy — parsed, not refused, exactly as `set <attr>` is.
+        assert_eq!(parse("auto"), Ok(Command::Auto(None)));
+        assert_eq!(
+            parse("auto discard"),
+            Err("unknown policy 'discard' (hold, rebase, replace)".into())
+        );
+        assert_eq!(
+            parse("auto rebase now"),
+            Err("usage: auto [hold|rebase|replace]".into())
+        );
+    }
+
+    #[test]
+    fn auto_completes_the_three_policies() {
+        assert_eq!(
+            completions("auto ", 5, &[], false, &[]),
+            vec!["hold", "rebase", "replace"]
+        );
+        assert_eq!(
+            completions("auto re", 7, &[], false, &[]),
+            vec!["hold", "rebase", "replace"],
+            "the whole vocabulary — the shell ranks it"
         );
     }
 

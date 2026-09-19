@@ -51,8 +51,11 @@
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
+use crate::core::draft::local_hhmm;
 use crate::core::menu::{self, MenuInputs, MenuRow};
-use crate::core::{Draft, DraftBadge, MatrixModel, PanelSpec, parse_attr, parse_cell};
+use crate::core::{
+    Draft, DraftBadge, MatrixModel, PanelSpec, UpdatePolicy, parse_attr, parse_cell,
+};
 use crate::delegate::MatrixDelegate;
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{MenuState, PickerRows, PickerState, Popup, render_menu, render_picker};
@@ -286,6 +289,14 @@ pub struct MarketDataTile {
     /// what hands the new `Rc` to the delegate.
     model: Rc<MatrixModel>,
     draft: Draft,
+    /// What a different generation does to a draft with edits (spec
+    /// §8.4, 2026-09-19): `Hold` is today's `Behind`; `Rebase` and
+    /// `Replace` are applied by [`Self::apply`] at the moment `Behind`
+    /// would otherwise be entered, so a switch never acts retroactively
+    /// on a draft already `Behind`. Set by `:auto`, the menu's `On new
+    /// document` rows and the three `marketdata::auto_*` actions; carried
+    /// in the session as `auto` when not the default.
+    policy: UpdatePolicy,
     /// A restored draft's edits are parked out of every grid's range
     /// (`Draft::from_toml`, which stores label pairs and not indices), so
     /// they paint nowhere until a model resolves them. Set at
@@ -396,6 +407,15 @@ impl MarketDataTile {
             .and_then(|t| t.get("draft"))
             .and_then(|v| v.as_table())
             .map(Draft::from_toml)
+            .unwrap_or_default();
+        // An unknown or missing `auto` is the default, never a refusal:
+        // a session file is the trader's own layout and a tile that
+        // fails to open over one word in it is worse than one that
+        // holds.
+        let policy = restored
+            .and_then(|t| t.get("auto"))
+            .and_then(|v| v.as_str())
+            .and_then(UpdatePolicy::parse)
             .unwrap_or_default();
 
         // The body. `row_selectable` so the cursor's row reads as the
@@ -555,6 +575,7 @@ impl MarketDataTile {
             snapshot: None,
             base_snapshot: None,
             draft,
+            policy,
             cursor: Cursor::Cell { row: 0, col: 0 },
             last_grid_col: 0,
             table,
@@ -829,13 +850,62 @@ impl MarketDataTile {
         if let Some(as_of) = &as_of {
             draft.on_delivered(as_of);
         }
+        // The update policy (spec §8.4, 2026-09-19) is applied HERE and
+        // only here: `on_delivered` is the `hold` decision, and `Behind`
+        // after it means "today's code would hold" — a draft with edits
+        // met a different generation (a further one under an
+        // already-`Behind` draft included, so a `rebase`/`replace` panel
+        // that was left `Behind` under `hold` moves onto the NEWEST on
+        // the next delivery, never retroactively on the switch). A clean
+        // draft and the base's own round trip never reach this branch.
+        // The notice is decided now and written at the commit point
+        // below, ahead of the restore block's own, so it is never wiped
+        // by the "clear on the delivery that paints" rule.
+        let mut notice: Option<SharedString> = None;
+        if draft.is_behind() && self.policy != UpdatePolicy::Hold {
+            match self.policy {
+                UpdatePolicy::Hold => unreachable!("guarded above"),
+                UpdatePolicy::Rebase => {
+                    // Two builds, on purpose: `Draft::rebase` re-places
+                    // the edits by the NEW document's row and column
+                    // labels, which only a model of that document
+                    // carries — so the first build is against a clean
+                    // draft for its labels alone (what `:rebase` does),
+                    // and the second, below, paints the re-placed edits.
+                    // A refusal of either changes nothing but the notice.
+                    let clean = match MatrixModel::build(&snapshot, self.spec, &Draft::default()) {
+                        Ok(model) => model,
+                        Err(e) => {
+                            self.notice = Some(e.into());
+                            return;
+                        }
+                    };
+                    let (_, dropped) = draft.rebase(&clean);
+                    if !dropped.is_empty() {
+                        notice = Some(dropped_notice(&dropped).into());
+                    }
+                }
+                UpdatePolicy::Replace => {
+                    // Counted BEFORE the revert — the notice is the whole
+                    // disclosure of unsent work gone by the trader's own
+                    // standing choice, and it must say what went.
+                    let phrase = draft.count_phrase();
+                    draft.revert();
+                    // `Behind` implies `on_delivered` ran with `Some`.
+                    let when = as_of.as_deref().map(local_hhmm).unwrap_or_default();
+                    notice = Some(format!("update {when} replaced {phrase}").into());
+                }
+            }
+        }
         // While `Behind`, keep painting the generation the edits were made
         // against; `snapshot` below still records the delivered one for
         // `:rebase` (Task 8). Retained only when the OUTGOING snapshot
         // really IS that base (M-1): a restored draft lands `Behind` with
         // its base never delivered at all, and pinning whatever happened
         // to be painted froze the panel on a generation that was neither
-        // the base nor the newest, with the header naming a third.
+        // the base nor the newest, with the header naming a third. Under
+        // `rebase`/`replace` the draft is no longer `Behind` by here, so
+        // nothing is retained and the new document is painted.
         let retained = if draft.is_behind() {
             match &self.base_snapshot {
                 Some(base) => Some(Arc::clone(base)),
@@ -874,8 +944,10 @@ impl MarketDataTile {
 
         // Committed from here down. The notice is cleared here rather than
         // in `deliver`'s `Ok` arm (M-5) — on the delivery that paints, and
-        // ahead of every notice this method itself writes below.
-        self.notice = None;
+        // ahead of every notice this method itself writes below; the
+        // policy's own notice (`None` under `hold`) is what it is cleared
+        // TO, so a `replace` disclosure is never lost to the clear.
+        self.notice = notice;
         self.draft = draft;
         self.base_snapshot = retained;
         self.snapshot = Some(snapshot);
@@ -1421,6 +1493,21 @@ impl MarketDataTile {
                 self.open_picker(window, cx);
                 false
             }
+            // The menu's `On new document` rows and the palette's
+            // `Auto: …` actions. Nothing the header paints reads the
+            // policy, so no chrome rebuild.
+            "auto_hold" => {
+                self.set_policy(UpdatePolicy::Hold, cx);
+                false
+            }
+            "auto_rebase" => {
+                self.set_policy(UpdatePolicy::Rebase, cx);
+                false
+            }
+            "auto_replace" => {
+                self.set_policy(UpdatePolicy::Replace, cx);
+                false
+            }
             // `upload` is Part 4 — parsed and registered today so the
             // palette and a keymap already reach it (spec §6.2), so
             // dispatching it answers honestly rather than pretending it
@@ -1802,6 +1889,7 @@ impl MarketDataTile {
             // `not built yet` (spec §6.2's table) rather than pretending
             // the panel can send anything anywhere.
             upload_built: false,
+            policy: self.policy,
             kind_title: self.spec.title,
             kind_actions: self.spec.actions,
         });
@@ -2370,11 +2458,40 @@ impl MarketDataTile {
             // Part 4 wires up.
             Command::Upload => Err("upload is not built yet".into()),
             Command::Set { attr, value } => self.set_attr_command(&attr, value, cx),
+            // A bare `auto` answers with the current policy through the
+            // command line's own inline slot, `:set <attr>`'s contract:
+            // `Err` because nothing was written.
+            Command::Auto(None) => Err(format!(
+                "auto is {} (hold, rebase, replace)",
+                self.policy.as_str()
+            )),
+            Command::Auto(Some(policy)) => {
+                self.set_policy(policy, cx);
+                Ok(())
+            }
             Command::Menu => {
                 self.toggle_menu(window, cx);
                 Ok(())
             }
         }
+    }
+
+    /// The one setter for the update policy (spec §8.4, 2026-09-19) —
+    /// `:auto`, the menu rows and the palette actions all land here. It
+    /// changes what the NEXT delivery does and nothing on screen now: a
+    /// draft already `Behind` stays `Behind` (`:rebase`/`:revert` are
+    /// still its doors), so no model or chrome is rebuilt. The menu's
+    /// tick cannot be stale either — every door here closes an open
+    /// popup first — and the session flush compares `serialize()` on its
+    /// own tick, so the notify is the ordinary "state moved" one.
+    fn set_policy(&mut self, policy: UpdatePolicy, cx: &mut Context<Self>) {
+        self.policy = policy;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn policy(&self) -> UpdatePolicy {
+        self.policy
     }
 
     /// `:set <attr> [value]` (spec §5.2): the typed door onto the same
@@ -2589,6 +2706,14 @@ impl MarketDataTile {
         if !self.draft.is_empty() {
             t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));
         }
+        // Only a non-default policy is worth a key: a `hold` tile reads
+        // exactly as one written before the key existed.
+        if self.policy != UpdatePolicy::Hold {
+            t.insert(
+                "auto".into(),
+                toml::Value::String(self.policy.as_str().to_string()),
+            );
+        }
         t
     }
 
@@ -2653,6 +2778,23 @@ impl MarketDataTile {
         match &self.popup {
             Some(Popup::Menu(m)) => Some(m.highlighted),
             _ => None,
+        }
+    }
+
+    /// The open menu's action rows as `(title, checked)`, in order — what
+    /// a policy test reads to say which row carries the tick.
+    #[cfg(test)]
+    pub(crate) fn menu_checks(&self) -> Vec<(String, Option<bool>)> {
+        match &self.popup {
+            Some(Popup::Menu(m)) => m
+                .rows
+                .iter()
+                .filter_map(|r| match r {
+                    MenuRow::Action { title, checked, .. } => Some((title.to_string(), *checked)),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -3307,10 +3449,16 @@ mod tests {
         /// Key, shown, requested, delivered — the four lines every editing
         /// test starts with.
         fn with_document(&self, vcx: &mut gpui::VisualTestContext) {
+            self.with_document_tagged(vcx);
+        }
+        /// [`Self::with_document`], answering the request's tag so a
+        /// test can deliver a further generation for the same question.
+        fn with_document_tagged(&self, vcx: &mut gpui::VisualTestContext) -> u64 {
             self.command(vcx, "key SPX.Z").expect("a valid key");
             self.visible(vcx, true);
             let tag = self.document_request().expect("one request").tag;
             self.deliver(vcx, tag, Arc::new(cvi(BASE)));
+            tag
         }
         /// How many columns the table carries: the row-label column plus
         /// one per value column.
@@ -6929,6 +7077,403 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert!(
             vcx.update(|window, cx| foreign.read(cx).focus_handle(cx).is_focused(window)),
             "the foreign field still holds the keyboard — nothing blurred it"
+        );
+    }
+
+    // ---- the update policy (spec §8.4, 2026-09-19) ----------------------
+
+    /// One committed edit, then a newer generation with the SAME labels
+    /// under `:auto rebase`: no `Behind`, the newer document is painted,
+    /// the edit is re-placed on it (still `edited`, value kept, base moved)
+    /// and nothing is reported since nothing was dropped.
+    #[gpui::test]
+    fn auto_rebase_re_places_the_edits_onto_a_newer_document(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.policy()),
+            UpdatePolicy::Rebase
+        );
+        let tag = h.with_document_tagged(&mut vcx);
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+
+        let (state, base, source, rows, cell, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.draft().base.clone(),
+                t.model().source_time.clone(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert_eq!(state, DraftState::Editing, "never Behind under rebase");
+        assert_eq!(
+            base.as_deref(),
+            Some(NEWER),
+            "the draft now stands on the new base"
+        );
+        assert_eq!(
+            source.as_deref(),
+            Some(NEWER),
+            "and the new document is painted"
+        );
+        assert_eq!(rows, 2);
+        assert_eq!(
+            cell.text.to_string(),
+            "0.50",
+            "the edit is re-placed, value kept"
+        );
+        assert!(cell.edited);
+        assert_eq!(notice, None, "nothing dropped, nothing to say");
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
+        assert!(
+            !chips.iter().any(|c| c.starts_with("update ")),
+            "no Behind state run: {chips:?}"
+        );
+    }
+
+    /// Under `:auto rebase`, a newer document lacking one of the edited
+    /// terms drops that edit and names it — the same disclosure `:rebase`
+    /// makes — while the edit whose labels survive is re-placed at its
+    /// NEW index.
+    #[gpui::test]
+    fn auto_rebase_names_the_edits_the_new_document_cannot_carry(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        let tag = h.with_document_tagged(&mut vcx);
+
+        // Term 0's `fwd` (dropped by the newer document) and term 1's
+        // `fwd` (kept — the newer document's only row).
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.7");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 2);
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+
+        let (state, len, rows, cell, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.draft().len(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert_eq!(state, DraftState::Editing);
+        assert_eq!(len, 1, "one edit survived");
+        assert_eq!(rows, 1, "painting the newer document");
+        assert_eq!(
+            cell.text.to_string(),
+            "0.70",
+            "the kept edit, at its new index"
+        );
+        assert!(cell.edited);
+        assert_eq!(
+            notice.as_deref(),
+            Some("dropped 1 edit whose rows or columns the new document lacks: 2026-10-16/fwd")
+        );
+    }
+
+    /// Under `:auto replace`, a newer generation drops every edit — cells
+    /// and attributes — paints the new document, and the notice says
+    /// exactly what went, in `count_phrase`'s own spelling.
+    #[gpui::test]
+    fn auto_replace_drops_the_edits_and_says_how_many(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto replace").unwrap();
+        let tag = h.with_document_tagged(&mut vcx);
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.6");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 3);
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+        );
+
+        let (draft, source, rows, cell, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().clone(),
+                t.model().source_time.clone(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert!(draft.is_empty(), "every edit is gone: {draft:?}");
+        assert_eq!(draft.state, DraftState::Clean);
+        assert_eq!(source.as_deref(), Some(NEWER));
+        assert_eq!(rows, 1, "the newer document is painted");
+        assert!(!cell.edited);
+        assert_eq!(
+            notice,
+            Some(format!(
+                "update {} replaced 2 cells, spot_ref",
+                local_hhmm(NEWER)
+            ))
+        );
+        let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
+        assert!(
+            !chips
+                .iter()
+                .any(|c| c.starts_with("update ") && !c.contains("replaced")),
+            "no Behind state run: {chips:?}"
+        );
+    }
+
+    /// The policy applies ON DELIVERY, never on the switch: a draft left
+    /// `Behind` under `hold` stays exactly there when the trader switches
+    /// to `rebase` — and the NEXT delivery, a further generation, is what
+    /// moves the edits, onto that newest document.
+    #[gpui::test]
+    fn switching_to_auto_rebase_does_not_rebase_a_draft_already_behind(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        const NEWEST: &str = "2026-09-12T14:15:00Z";
+        let (h, mut vcx) = open(cx);
+        let tag = h.with_document_tagged(&mut vcx);
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+
+        h.command(&mut vcx, "auto rebase").unwrap();
+        let (state, source, rows) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().source_time.clone(),
+                t.model().rows.len(),
+            )
+        });
+        assert!(
+            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            "still Behind after the switch, got {state:?}"
+        );
+        assert_eq!(source.as_deref(), Some(BASE), "still painting the base");
+        assert_eq!(rows, 2);
+
+        // A further generation under the new policy: onto the NEWEST.
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWEST)));
+        let (state, base, source, cell) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.draft().base.clone(),
+                t.model().source_time.clone(),
+                t.model().rows[0].cells[0].clone(),
+            )
+        });
+        assert_eq!(state, DraftState::Editing, "got {state:?}");
+        assert_eq!(base.as_deref(), Some(NEWEST));
+        assert_eq!(source.as_deref(), Some(NEWEST));
+        assert_eq!(cell.text.to_string(), "0.50");
+        assert!(cell.edited);
+    }
+
+    /// `auto` rides the session only when it is not the default, and an
+    /// unknown word restores as `hold` rather than refusing the tile.
+    #[gpui::test]
+    fn the_policy_round_trips_through_the_session(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = r#"
+underlying = ["SPX.Z"]
+auto = "replace"
+"#
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored.clone()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.policy()),
+            UpdatePolicy::Replace,
+            "read from the session"
+        );
+        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        assert_eq!(written, restored);
+
+        h.command(&mut vcx, "auto hold").unwrap();
+        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        assert!(
+            !written.contains_key("auto"),
+            "the default writes no key: {written:?}"
+        );
+
+        let unknown: toml::Table = r#"
+underlying = ["SPX.Z"]
+auto = "discard"
+"#
+        .parse()
+        .unwrap();
+        let (h, vcx) = open_with(cx, Some(unknown));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.policy()),
+            UpdatePolicy::Hold,
+            "an unknown word is the default, not a refusal"
+        );
+    }
+
+    /// A bare `:auto` names the current policy through the command line's
+    /// inline slot, and a typo is refused with the vocabulary.
+    #[gpui::test]
+    fn a_bare_auto_names_the_current_policy(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert_eq!(
+            h.command(&mut vcx, "auto"),
+            Err("auto is hold (hold, rebase, replace)".into())
+        );
+        h.command(&mut vcx, "auto rebase").unwrap();
+        assert_eq!(
+            h.command(&mut vcx, "auto"),
+            Err("auto is rebase (hold, rebase, replace)".into())
+        );
+        assert!(h.command(&mut vcx, "auto discard").is_err());
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.policy()),
+            UpdatePolicy::Rebase,
+            "a refused word changes nothing"
+        );
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, cx| t.completions("auto ", 5, cx)),
+            vec!["hold", "rebase", "replace"]
+        );
+    }
+
+    /// The menu's `On new document` section ticks the policy in force,
+    /// and picking another row sets it and closes the menu — through the
+    /// ordinary `menu_pick` path, four `j`s down from the first row on a
+    /// clean draft (`Load`, `Upload`, `Revert`, `hold edits`, `rebase
+    /// edits`).
+    #[gpui::test]
+    fn the_menu_ticks_the_policy_and_a_pick_sets_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "menu", None);
+        let checks = h.tile.read_with(&vcx, |t, _| t.menu_checks());
+        let ticked: Vec<&str> = checks
+            .iter()
+            .filter(|(_, c)| *c == Some(true))
+            .map(|(t, _)| t.as_str())
+            .collect();
+        assert_eq!(ticked, vec!["hold edits"]);
+        assert_eq!(
+            checks.iter().filter(|(_, c)| c.is_some()).count(),
+            3,
+            "{checks:?}"
+        );
+
+        for _ in 0..4 {
+            h.dispatch(&mut vcx, "menu_down", None);
+        }
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.menu_highlighted()),
+            Some(6),
+            "on `rebase edits`"
+        );
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert_eq!(h.mode(&vcx), "normal", "the pick closed the menu");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.policy()),
+            UpdatePolicy::Rebase
+        );
+
+        h.dispatch(&mut vcx, "menu", None);
+        let checks = h.tile.read_with(&vcx, |t, _| t.menu_checks());
+        let ticked: Vec<&str> = checks
+            .iter()
+            .filter(|(_, c)| *c == Some(true))
+            .map(|(t, _)| t.as_str())
+            .collect();
+        assert_eq!(ticked, vec!["rebase edits"], "the tick followed");
+        // The palette door lands in the same place.
+        h.dispatch(&mut vcx, "auto_replace", None);
+        assert_eq!(
+            h.mode(&vcx),
+            "normal",
+            "an unrelated action closes the menu"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.policy()),
+            UpdatePolicy::Replace
+        );
+    }
+
+    /// An editor open when the newer document lands under `rebase`: the
+    /// editor stays open (a delivery never disturbs typing), and its
+    /// commit files against the re-placed cell because the labels still
+    /// match — `a_commit_whose_cell_moved_under_it_is_refused`'s shape,
+    /// expecting success.
+    #[gpui::test]
+    fn an_editor_open_across_an_auto_rebase_commits_onto_the_new_document(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        let tag = h.with_document_tagged(&mut vcx);
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.6");
+        assert_eq!(h.mode(&vcx), "insert");
+
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("0.6"),
+            "the editor is untouched"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing
+        );
+
+        h.dispatch(&mut vcx, "commit", None);
+        let (len, base, cells, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().len(),
+                t.draft().base.clone(),
+                t.model().rows[0].cells[..2].to_vec(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert_eq!(notice, None);
+        assert_eq!(len, 2, "the typed value landed beside the re-placed edit");
+        assert_eq!(base.as_deref(), Some(NEWER), "both against the new base");
+        assert_eq!(cells[0].text.to_string(), "0.50");
+        assert_eq!(
+            cells[1].text.to_string(),
+            "0.6000",
+            "an `atm` cell, four places"
+        );
+        assert!(cells[0].edited && cells[1].edited);
+        assert!(
+            h.editor_value(&vcx).is_none(),
+            "and the editor closed on commit"
         );
     }
 }
