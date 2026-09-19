@@ -17,7 +17,8 @@ use crate::keymap::fragments;
 use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
 use geode_core::query::{QueryKey, QueryOutcome};
-use gpui::{AnyView, App, Entity, Window};
+use gpui::{AnyView, App, Entity, SharedString, Window};
+use std::rc::Rc;
 
 /// What the `/` line tells the occupant (§3.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,51 @@ impl Delivery {
         match self {
             Delivery::Query(outcome) => outcome.key,
         }
+    }
+}
+
+/// The shape of [`StackHandle`]'s own `open` closure, named for the same
+/// reason `shell::dialog::StepHandler` and its siblings are: a bare
+/// `Rc<dyn Fn(&mut Window, &mut App)>` field trips `clippy::type_
+/// complexity`.
+type OpenStackList = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// What the shell hands a stack member (tile-stacks spec §5.1): its
+/// one-based `index` and the stack's `len`, `text` prepared once
+/// (`"2/4"`) so no module formats it per frame, and `open_list`, a
+/// closure over the shell's own weak entity, so a module opens the
+/// shell's list without a path to `ShellView`.
+#[derive(Clone)]
+pub struct StackHandle {
+    pub index: usize,
+    pub len: usize,
+    pub text: SharedString,
+    open: OpenStackList,
+}
+
+impl StackHandle {
+    pub fn new(
+        index: usize,
+        len: usize,
+        open: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> StackHandle {
+        StackHandle {
+            index,
+            len,
+            text: format!("{index}/{len}").into(),
+            open: Rc::new(open),
+        }
+    }
+
+    /// Open the shell's transient member list on this tile (spec §5.2).
+    pub fn open_list(&self, window: &mut Window, cx: &mut App) {
+        (self.open)(window, cx)
+    }
+}
+
+impl std::fmt::Debug for StackHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StackHandle({}/{})", self.index, self.len)
     }
 }
 
@@ -99,6 +145,18 @@ pub trait TileContent {
     /// live subscriptions for all of them until the shell speaks would be
     /// exactly the resource leak this method exists to prevent.
     fn set_visible(&self, visible: bool, cx: &mut App);
+    /// This tile's place in its stack, or `None` when it is not a member
+    /// (tile-stacks spec §5.1). Delivered by `ShellView::ensure_occupants`
+    /// on the first render after creation and on every change of
+    /// `(index, len)` thereafter, never on an unrelated render. The
+    /// module paints `stack.text` first in its header while `len > 1` and
+    /// calls `open_list` from the chip's click. Required, not defaulted:
+    /// a module that forgot would ship a stack a trader cannot see.
+    fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App);
+    /// The row this tile paints as in the stack list (spec §5.2): the
+    /// same words its own header leads with (`risk · book, lhu`,
+    /// `CVI · SPX.Z`, `diagnostics · log`).
+    fn title(&self, cx: &App) -> SharedString;
     /// State for `session.toml` (§3.5); stored opaquely by the shell.
     fn serialize(&self, cx: &App) -> toml::Table;
     /// Does one of THIS occupant's own text inputs hold window focus right
@@ -118,6 +176,16 @@ pub trait TileContent {
     /// the occupant owns.
     fn holds_focus(&self, _window: &Window, _cx: &App) -> bool {
         false
+    }
+    /// The last [`StackHandle`] this occupant was told about (spec
+    /// §5.1's `set_stack`), for a test that has no other path to it —
+    /// `TileOccupant::content` is a `Box<dyn TileContent>`, so a test
+    /// cannot read a module's own field even when the module is a test
+    /// fixture. Default `None`; [`recording::RecordingContent`] is the
+    /// one override, returning its stored handle.
+    #[cfg(any(test, feature = "test-support"))]
+    fn stack_handle_for_test(&self) -> Option<StackHandle> {
+        None
     }
 }
 
@@ -261,9 +329,11 @@ impl ModuleRoster {
 /// the palette; never a blank, never a panic.
 pub mod placeholder {
     use super::*;
+    use crate::fonts;
+    use crate::shell::chip;
     use gpui::prelude::*;
-    use gpui::{Context, Render, div};
-    use gpui_component::ActiveTheme as _;
+    use gpui::{Context, ElementId, MouseButton, Render, div};
+    use gpui_component::{ActiveTheme as _, v_flex};
 
     /// The kind string a placeholder occupant's `TileOccupant::kind`
     /// carries (Phase 4b Task 1 fix round 1, MIN-7) — named here, next
@@ -280,22 +350,50 @@ pub mod placeholder {
 
     struct PlaceholderView {
         tile: TileId,
+        stack: Option<StackHandle>,
     }
 
     impl Render for PlaceholderView {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = cx.theme();
+            let mut content = v_flex().items_center().justify_center().gap_1();
+            if let Some(stack) = self.stack.as_ref().filter(|s| s.len > 1) {
+                let neutral_chip = chip::chip_paint(theme, chip::Tone::Neutral);
+                let open = stack.clone();
+                content = content.child(
+                    div()
+                        .id(ElementId::NamedInteger(
+                            SharedString::new_static("stack-marker"),
+                            self.tile.0,
+                        ))
+                        .text_color(neutral_chip.text)
+                        .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
+                        .px_1()
+                        .rounded(theme.radius_tokens().sm)
+                        .font_family(fonts::MONO)
+                        .debug_selector(|| format!("stack-marker-{}", self.tile.0))
+                        .child(stack.text.clone())
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            cx.stop_propagation();
+                            open.open_list(window, cx);
+                        }),
+                );
+            }
+            content = content.child("ctrl+k → Add a tile");
             div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(theme.muted_foreground)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
-                .child("ctrl+k → Add a tile")
+                .child(content)
         }
     }
 
-    struct PlaceholderContent;
+    struct PlaceholderContent {
+        view: Entity<PlaceholderView>,
+    }
 
     impl TileContent for PlaceholderContent {
         fn key_context(&self, _cx: &App) -> KeyContext {
@@ -317,6 +415,15 @@ pub mod placeholder {
             }
         }
         fn set_visible(&self, _: bool, _: &mut App) {}
+        fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
+            self.view.update(cx, |v, cx| {
+                v.stack = stack;
+                cx.notify();
+            });
+        }
+        fn title(&self, _: &App) -> SharedString {
+            SharedString::new_static("empty")
+        }
         fn serialize(&self, _: &App) -> toml::Table {
             toml::Table::new()
         }
@@ -336,11 +443,11 @@ pub mod placeholder {
             _: &mut Window,
             cx: &mut App,
         ) -> TileOccupant {
-            let view = cx.new(|_| PlaceholderView { tile });
+            let view = cx.new(|_| PlaceholderView { tile, stack: None });
             TileOccupant {
                 kind: PLACEHOLDER_KIND,
-                view: view.into(),
-                content: Box::new(PlaceholderContent),
+                view: view.clone().into(),
+                content: Box::new(PlaceholderContent { view }),
             }
         }
     }
@@ -365,6 +472,7 @@ pub mod recording {
         Find(TileId, FindEvent),
         Visible(TileId, bool),
         Delivered(TileId, u64),
+        Stack(TileId, Option<(usize, usize)>),
     }
 
     pub struct RecordingFactory {
@@ -480,6 +588,10 @@ pub mod recording {
         /// Shared with [`RecordingFactory::input`]; see it for what a test
         /// reads it for.
         input: Rc<RefCell<Option<Entity<InputState>>>>,
+        /// What the shell last told this tile about its stack membership
+        /// — a test's window into `set_stack`, since the field itself is
+        /// only ever written by the trait method.
+        pub stack: RefCell<Option<StackHandle>>,
     }
 
     impl TileContent for RecordingContent {
@@ -586,6 +698,16 @@ pub mod recording {
                 .borrow_mut()
                 .push(Recorded::Visible(self.tile, visible));
         }
+        fn set_stack(&self, stack: Option<StackHandle>, _: &mut App) {
+            self.log.borrow_mut().push(Recorded::Stack(
+                self.tile,
+                stack.as_ref().map(|s| (s.index, s.len)),
+            ));
+            *self.stack.borrow_mut() = stack;
+        }
+        fn title(&self, _: &App) -> SharedString {
+            format!("rec {}", self.tile.0).into()
+        }
         fn serialize(&self, _: &App) -> toml::Table {
             self.state.borrow().clone()
         }
@@ -599,6 +721,9 @@ pub mod recording {
                 .input
                 .as_ref()
                 .is_some_and(|state| state.read(cx).focus_handle(cx).is_focused(window))
+        }
+        fn stack_handle_for_test(&self) -> Option<StackHandle> {
+            self.stack.borrow().clone()
         }
     }
 
@@ -669,6 +794,7 @@ pub mod recording {
                     view,
                     insert: Cell::new(false),
                     input: self.input.clone(),
+                    stack: RefCell::new(None),
                 }),
             }
         }
@@ -678,6 +804,17 @@ pub mod recording {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_handle_prepares_its_text_once() {
+        // `open_list` needs a `Window`, so the closure itself is
+        // exercised in `shell/tests/stacks.rs` (whole-branch review,
+        // Minor 6: this test never ran it — the name said it did).
+        let h = StackHandle::new(2, 4, |_w, _cx| {});
+        assert_eq!(h.index, 2);
+        assert_eq!(h.len, 4);
+        assert_eq!(h.text.as_ref(), "2/4");
+    }
 
     #[test]
     fn a_roster_finds_factories_by_kind_and_lists_them() {

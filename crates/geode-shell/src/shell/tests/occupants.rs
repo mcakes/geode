@@ -17,8 +17,10 @@ use crate::tiling::Orientation;
 mod watching {
     use super::*;
     use crate::keymap::KeyContext;
-    use crate::module::{Delivery, FindEvent, ModuleFactory, TileContent, TileOccupant};
-    use gpui::{App, Context, FocusHandle, Render, div};
+    use crate::module::{
+        Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+    };
+    use gpui::{App, Context, FocusHandle, Render, SharedString, div};
 
     pub const WATCHING_KIND: &str = "watching";
 
@@ -78,6 +80,10 @@ mod watching {
                 }
                 cx.notify();
             });
+        }
+        fn set_stack(&self, _: Option<StackHandle>, _: &mut App) {}
+        fn title(&self, _: &App) -> SharedString {
+            "watching".into()
         }
         fn serialize(&self, _: &App) -> toml::Table {
             toml::Table::new()

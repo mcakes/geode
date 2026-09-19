@@ -23,7 +23,7 @@ use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
-use geode_shell::module::FindEvent;
+use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::chip::{self, Tone};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -136,6 +136,16 @@ pub struct BlotterTile {
     acted: Option<FrameVersions>,
     tag: u64,
     last_grouping: Vec<String>,
+    /// [`Self::title`]'s answer, cached so a stack-list row (which reads
+    /// it every frame the list is open) never formats a `String`: kept
+    /// in step with `view_name`/`last_grouping` at their one assignment
+    /// site each (`requery`, right after `last_grouping` is set — a
+    /// `view_name` change always runs through `requery` immediately
+    /// after, so that one site covers both).
+    title: SharedString,
+    /// This tile's place in its stack (tile-stacks spec §5.1), painted in
+    /// the header (Task 9); `None` while not a stack member.
+    stack: Option<StackHandle>,
     in_flight: Option<Instant>,
     delivered_at: Option<Instant>,
     visible: bool,
@@ -297,6 +307,8 @@ impl BlotterTile {
         cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
 
+        let title = Self::compute_title(&view_name, &[]);
+
         BlotterTile {
             tile,
             frame,
@@ -318,6 +330,8 @@ impl BlotterTile {
             acted: None,
             tag: 0,
             last_grouping: Vec::new(),
+            title,
+            stack: None,
             in_flight: None,
             delivered_at: None,
             visible: false,
@@ -554,6 +568,7 @@ impl BlotterTile {
         self.in_flight = Some(submitted);
         self.acted = Some(versions);
         self.last_grouping = grouping.clone();
+        self.title = Self::compute_title(&self.view_name, &self.last_grouping);
         let queued = self.data.query(QueryParams {
             key: QueryKey(self.tile.0),
             tag: self.tag,
@@ -661,6 +676,19 @@ impl BlotterTile {
                 self.requery(cx);
             }
         }
+    }
+
+    pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
+        self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn compute_title(view_name: &str, grouping: &[String]) -> SharedString {
+        format!("{} · {}", view_name, GroupingSlots::label_of(grouping)).into()
     }
 
     pub fn key_context(&self, cx: &App) -> KeyContext {
@@ -1326,7 +1354,28 @@ impl gpui::Render for BlotterTile {
             .text_color(theme.muted_foreground)
             .border_b_1()
             .border_color(theme.border)
-            .debug_selector(|| format!("blotter-header-{}", self.tile.0))
+            .debug_selector(|| format!("blotter-header-{}", self.tile.0));
+        if let Some(stack) = self.stack.as_ref().filter(|s| s.len > 1) {
+            let open = stack.clone();
+            header = header.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("stack-marker"),
+                        self.tile.0,
+                    ))
+                    .text_color(neutral_chip.text)
+                    .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .debug_selector(|| format!("stack-marker-{}", self.tile.0))
+                    .child(stack.text.clone())
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        open.open_list(window, cx);
+                    }),
+            );
+        }
+        header = header
             .child(
                 div()
                     .text_color(theme.foreground)
@@ -2803,6 +2852,50 @@ mod tests {
             h.tile
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().cursor.row),
             2
+        );
+    }
+
+    /// The stack marker (tile-stacks spec §5.1) paints only while the
+    /// tile is a stack member with more than one member, first in the
+    /// header strip, and `title()` reads from the same cache the header
+    /// text itself paints.
+    #[gpui::test]
+    fn the_stack_marker_paints_only_while_a_member(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        assert!(vcx.debug_bounds("stack-marker-7").is_none());
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_stack(Some(StackHandle::new(2, 4, |_, _| {})), cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let marker = vcx.debug_bounds("stack-marker-7").expect("painted");
+        let header = vcx.debug_bounds("blotter-header-7").unwrap();
+        assert!(
+            marker.left() - header.left() < px(20.0),
+            "first in the strip"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "tree · lhu / underlying_ref"
+        );
+
+        // A one-member "stack" (defensive only — a live tree never keeps
+        // one) is gated off exactly like no stack at all: `len > 1` is
+        // the filter, not merely `is_some()`.
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_stack(Some(StackHandle::new(1, 1, |_, _| {})), cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            vcx.debug_bounds("stack-marker-7").is_none(),
+            "a stack of one paints no marker"
         );
     }
 

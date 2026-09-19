@@ -415,6 +415,36 @@ impl Workspace {
         }
     }
 
+    /// `stack::next`/`prev` (tile-stacks spec §4): cycle the focused
+    /// member in whichever tree holds focus. `false` when it is not a
+    /// member.
+    pub fn stack_step(&mut self, delta: i64) -> bool {
+        let region = self.region;
+        self.tree_for_mut(region).stack_step(delta)
+    }
+
+    /// `stack::unstack` (spec §4): pop the focused member out beside its
+    /// stack. `false` when it is not a member.
+    pub fn unstack_focused(&mut self, orientation: Orientation) -> bool {
+        let region = self.region;
+        self.tree_for_mut(region).unstack_focused(orientation)
+    }
+
+    /// `id`'s `(index, len)` in whichever of this workspace's trees holds
+    /// it as a member (spec §5.1's marker).
+    pub fn stack_position(&self, id: TileId) -> Option<(usize, usize)> {
+        let region = self.region_of(id)?;
+        self.tree_for(region).stack_position(id)
+    }
+
+    /// Every member of `id`'s stack, in stack order (tile-stacks spec
+    /// §5.2) — the transient member list's source, over whichever of
+    /// this workspace's trees holds `id`.
+    pub fn stack_members(&self, id: TileId) -> Option<Vec<TileId>> {
+        let region = self.region_of(id)?;
+        self.tree_for(region).stack_members(id)
+    }
+
     /// Fullscreen stays main-tree-only, even now that docks are trees:
     /// while a dock is focused this is a no-op (still claimed as handled
     /// by the router — the keystroke must not fall through). A fullscreen
@@ -637,7 +667,7 @@ impl Workspace {
         let Some(destination) = self.region_of(target) else {
             return false;
         };
-        // Same one-place-per-TileId pre-check as `drop_swap`'s cross-tree
+        // Same one-place-per-TileId pre-check as `drop_stack`'s cross-region
         // arm (post-merge review BUG 5 — the defense was asymmetric): if
         // the invariant is already broken and the DESTINATION tree holds
         // a duplicate of `dragged`, `insert_at_leaf` below would refuse
@@ -683,19 +713,15 @@ impl Workspace {
         true
     }
 
-    /// Center-zone drop (tile-drag task): swap `dragged` and `target` in
-    /// place — including across regions (a leaf-for-leaf rename in each of
-    /// the two trees; both structures and every ratio stay untouched).
-    /// Focus and region follow the dragged tile to its new home; the tile
-    /// it displaced inherits the dragged tile's old slot (and, in the
-    /// source tree, its focus memory — see [`Tree::replace_tile`]).
-    ///
-    /// Today this is a swap for deliberate keyboard parity with the
-    /// `workspace::move_*` verbs; see `dropzones`' module doc for the
-    /// recorded plan to re-mean center-drop as "add to stack" when spec
-    /// §3.1's stacked containers land. Returns `true` iff the layout
-    /// changed: a self-drop or an unknown id is `false`, nothing touched.
-    pub fn drop_swap(&mut self, dragged: TileId, target: TileId) -> bool {
+    /// Centre-zone drop (tile-stacks spec §6.2, replacing the swap):
+    /// move `dragged` out of whichever tree holds it and add it to
+    /// `target`'s stack, after `target` — a leaf target becomes a
+    /// two-member stack — in whichever region the target lives. Dropping
+    /// a member onto another member of its own stack reorders it. Focus
+    /// and region follow the dragged tile; an emptied source dock
+    /// auto-hides; a destination dock auto-shows. Returns `true` iff the
+    /// layout changed: a self-drop or an unknown id is `false`.
+    pub fn drop_stack(&mut self, dragged: TileId, target: TileId) -> bool {
         if dragged == target {
             return false;
         }
@@ -705,48 +731,25 @@ impl Workspace {
         let Some(destination) = self.region_of(target) else {
             return false;
         };
-        if source == destination {
-            let tree = self.tree_for_mut(source);
-            tree.swap_tiles(dragged, target);
-            tree.focus(dragged);
-        } else {
-            // Cross-tree: rename each end in place. With the one-place-
-            // per-TileId invariant intact both renames are infallible and
-            // order-free (the two trees are disjoint) — but the pair must
-            // be *atomic* even against an invariant already broken by a
-            // healing miss, so both preconditions are checked BEFORE the
-            // first rename mutates anything (review fix): `replace_tile`
-            // refuses when its `new` id is already a leaf of that tree,
-            // and checking only the first rename's *result* would not be
-            // enough — the source rename could succeed and the
-            // destination rename then refuse (a duplicate `dragged`
-            // already there), leaving `dragged` renamed away from every
-            // tree, the one outcome a drop verb must never produce.
-            // Unreachable through live verbs and healed restores; the
-            // debug_assert makes a future regression loud while release
-            // builds get an honest untouched no-op.
-            if self.tree_for(source).contains(target)
-                || self.tree_for(destination).contains(dragged)
-            {
-                debug_assert!(
-                    false,
-                    "one-place-per-TileId invariant pre-broken \
-                     (dragged {dragged:?} / target {target:?} duplicated across trees); \
-                     refusing the cross-tree swap untouched"
-                );
-                return false;
-            }
-            self.tree_for_mut(source).replace_tile(dragged, target);
-            let destination_tree = self.tree_for_mut(destination);
-            destination_tree.replace_tile(target, dragged);
-            destination_tree.focus(dragged);
+        if destination != source && self.tree_for(destination).contains(dragged) {
+            debug_assert!(
+                false,
+                "one-place-per-TileId invariant pre-broken \
+                 (dragged {dragged:?} duplicated into the destination tree); \
+                 refusing the stack drop untouched"
+            );
+            return false;
         }
-        // Focus/region follow the dragged tile; a destination dock
-        // auto-shows (`enter_region`) — both trees stay occupied in the
-        // cross-tree arm so no auto-hide can apply, and the auto-show
-        // enforces the region invariant if a caller ever aims at a
-        // hidden dock's tile (not reachable from the visible-layout drop
-        // path).
+        self.remove_tile_anywhere(dragged);
+        if destination == FocusRegion::Main {
+            self.tree.exit_fullscreen();
+        }
+        let tree = self.tree_for_mut(destination);
+        if !tree.stack_after(target, dragged) {
+            // Unreachable given the pre-checks; the never-lose-a-tile
+            // invariant outranks trusting them.
+            tree.split(dragged, Orientation::Horizontal);
+        }
         self.enter_region(destination);
         true
     }
@@ -773,7 +776,7 @@ impl Workspace {
         if source == FocusRegion::Dock(side) {
             return false;
         }
-        // Same one-place-per-TileId pre-check as `drop_swap`/`drop_split`
+        // Same one-place-per-TileId pre-check as `drop_stack`/`drop_split`
         // (post-merge review BUG 5): the unconditional `split()` below
         // never refuses, so a duplicate of `dragged` already parked in
         // the target dock's tree (a pre-broken invariant — `source` is
@@ -1005,6 +1008,29 @@ impl Workspaces {
             FocusRegion::Dock(side) => ws.docks.get_mut(side).tree_mut().split(id, orientation),
         }
         id
+    }
+
+    /// `{Kind}: Stack` (tile-stacks spec §6.1): allocate a tile and add it
+    /// after the focused tile in that tile's stack, in whichever region
+    /// holds focus. `None` when nothing is focused — the caller then
+    /// falls back to the split path, since a stack of one is meaningless.
+    pub fn stack_active(&mut self) -> Option<TileId> {
+        let focused = self.active().focused_tile()?;
+        let id = self.alloc_tile();
+        let ws = self.active_mut();
+        let region = ws.region;
+        if !ws.tree_for_mut(region).stack_after(focused, id) {
+            // Unreachable: `focused_tile` is a leaf of that tree and `id`
+            // is fresh. Never lose the id.
+            ws.tree_for_mut(region).split(id, Orientation::Horizontal);
+        }
+        Some(id)
+    }
+
+    /// `id`'s stack position in whichever workspace holds it (the shell
+    /// delivers markers for every tile, not only the active workspace's).
+    pub fn stack_position(&self, id: TileId) -> Option<(usize, usize)> {
+        self.spaces.values().find_map(|ws| ws.stack_position(id))
     }
 
     /// Workspace indices that currently hold at least one tile (in the
@@ -3211,118 +3237,14 @@ mod tests {
         assert_tile_invariants(&ws);
     }
 
-    #[test]
-    fn drop_swap_within_the_main_tree_swaps_slots_and_focuses_the_dragged_tile() {
-        let mut ws = three_row();
-        // Focus 1 so we can see focus *follow the dragged tile*, not stay.
-        assert!(ws.active_mut().focus_main_tile(TileId(1)));
-        assert!(ws.active_mut().drop_swap(TileId(3), TileId(1)));
-        assert_eq!(
-            ws.active().tree().tiles(),
-            vec![TileId(3), TileId(2), TileId(1)],
-            "the two tiles trade slots; the middle is untouched"
-        );
-        assert_eq!(ws.active().tree().focused(), Some(TileId(3)));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        assert_tile_invariants(&ws);
-    }
-
-    #[test]
-    fn drop_swap_across_regions_trades_leaves_without_reshaping_either_tree() {
-        let mut ws = three_row();
-        apply_workspace_action(&mut ws, &act("dock::move_bottom")); // 3 → bottom dock
-        let main_before: Vec<TileId> = ws.active().tree().tiles();
-        assert_eq!(main_before, vec![TileId(1), TileId(2)]);
-        // Drag main tile 1 onto the docked tile 3's center.
-        assert!(ws.active_mut().drop_swap(TileId(1), TileId(3)));
-        assert_eq!(
-            ws.active().tree().tiles(),
-            vec![TileId(3), TileId(2)],
-            "3 takes 1's old slot; the main tree keeps its shape"
-        );
-        let dock_tree = ws.active().docks().get(DockSide::Bottom).tree();
-        assert_eq!(dock_tree.tiles(), vec![TileId(1)]);
-        assert_eq!(dock_tree.focused(), Some(TileId(1)));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
-        assert_tile_invariants(&ws);
-
-        // And back: drag 1 (now docked) onto main tile 2's center.
-        assert!(ws.active_mut().drop_swap(TileId(1), TileId(2)));
-        assert_eq!(ws.active().tree().tiles(), vec![TileId(3), TileId(1)]);
-        assert_eq!(ws.active().tree().focused(), Some(TileId(1)));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        assert_eq!(
-            ws.active().docks().get(DockSide::Bottom).tree().tiles(),
-            vec![TileId(2)]
-        );
-        assert!(
-            ws.active().docks().get(DockSide::Bottom).visible(),
-            "a swap never empties a dock, so it never hides one"
-        );
-        assert_tile_invariants(&ws);
-    }
-
-    #[test]
-    fn drop_swap_within_one_dock_tree_swaps_and_focuses_the_dragged_tile() {
-        let mut ws = three_row();
-        // Park 3 and 2 in the left dock (two-tile dock tree [3 | 2]).
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        assert!(ws.active_mut().focus_main_tile(TileId(2)));
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
-        assert_eq!(dock_tree.tiles(), vec![TileId(3), TileId(2)]);
-        assert!(ws.active_mut().drop_swap(TileId(3), TileId(2)));
-        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
-        assert_eq!(dock_tree.tiles(), vec![TileId(2), TileId(3)]);
-        assert_eq!(dock_tree.focused(), Some(TileId(3)));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-        assert_tile_invariants(&ws);
-    }
-
-    #[test]
-    fn drop_swap_self_and_unknown_ids_are_noops() {
-        let mut ws = two_tiles();
-        let before = ws.active().tree().clone();
-        assert!(!ws.active_mut().drop_swap(TileId(2), TileId(2)));
-        assert!(!ws.active_mut().drop_swap(TileId(2), TileId(9)));
-        assert!(!ws.active_mut().drop_swap(TileId(9), TileId(2)));
-        assert_eq!(ws.active().tree(), &before);
-        assert_tile_invariants(&ws);
-    }
-
-    /// Review fix: the cross-tree swap must be atomic even against a
-    /// one-place-per-TileId invariant already broken by a healing miss —
-    /// refused loudly (debug_assert) BEFORE the first rename mutates
-    /// anything, because a source rename followed by a refused
-    /// destination rename would lose the dragged id from every tree.
-    /// The broken state is not constructible through any live verb or
-    /// healed restore, so it is built directly through the
-    /// module-private fields here.
-    #[test]
-    #[should_panic(expected = "one-place-per-TileId")]
-    fn drop_swap_refuses_a_pre_broken_duplicate_id_before_mutating() {
-        let mut w = Workspace::default();
-        w.tree.split(TileId(1), Orientation::Horizontal);
-        w.tree.split(TileId(2), Orientation::Horizontal);
-        let dock = w.docks.get_mut(DockSide::Left);
-        dock.tree_mut().split(TileId(3), Orientation::Horizontal);
-        // The invariant break: tile 1 claimed by BOTH the main tree and
-        // the dock tree.
-        dock.tree_mut().split(TileId(1), Orientation::Horizontal);
-        dock.set_visible(true);
-        // dragged 1 resolves to Main (region_of checks the tree first);
-        // target 3 lives in the dock, whose tree also holds a duplicate
-        // of the dragged id — the pre-check must fire, not the renames.
-        w.drop_swap(TileId(1), TileId(3));
-    }
-
     /// Post-merge review BUG 5: `drop_split` had no counterpart to
-    /// `drop_swap`'s pre-broken-duplicate defense — its
+    /// `drop_stack`'s pre-broken-duplicate defense — its
     /// insert_at_leaf-refused fallback `split()` would insert a SECOND
     /// copy of an id already duplicated into the destination tree. The
     /// same pre-check must refuse (debug_assert loud) BEFORE
     /// `remove_tile_anywhere` mutates anything. Broken state built via
-    /// module-private fields, same as the drop_swap test above.
+    /// module-private fields, the same technique the `drop_to_dock`
+    /// pre-broken-duplicate test below uses.
     #[test]
     #[should_panic(expected = "one-place-per-TileId")]
     fn drop_split_refuses_a_pre_broken_duplicate_id_before_mutating() {
@@ -3340,6 +3262,89 @@ mod tests {
         // of the dragged id — the pre-check must fire, not the
         // remove-then-fallback-split.
         w.drop_split(TileId(1), TileId(3), Direction::Right);
+    }
+
+    #[test]
+    fn stack_active_stacks_onto_the_focused_tile_in_whichever_region_holds_focus() {
+        let mut ws = Workspaces::new();
+        let a = ws.split_active(Orientation::Horizontal);
+        let b = ws.stack_active().expect("a focused tile to stack onto");
+        assert_eq!(ws.active().tree().visible_tiles(), vec![b]);
+        assert_eq!(ws.active().stack_position(a), Some((1, 2)));
+        assert_eq!(ws.active().focused_tile(), Some(b));
+        assert!(
+            Workspaces::new().stack_active().is_none(),
+            "nothing focused, nothing stacked"
+        );
+    }
+
+    #[test]
+    fn stack_step_and_unstack_go_to_the_focused_region() {
+        let mut ws = Workspaces::new();
+        let a = ws.split_active(Orientation::Horizontal);
+        let b = ws.stack_active().unwrap();
+        assert!(ws.active_mut().stack_step(1));
+        assert_eq!(ws.active().focused_tile(), Some(a));
+        assert!(ws.active_mut().unstack_focused(Orientation::Horizontal));
+        assert_eq!(ws.active().stack_position(a), None);
+        assert_eq!(ws.active().stack_position(b), None);
+        assert_eq!(ws.active().tree().visible_tiles().len(), 2);
+        assert!(!ws.active_mut().stack_step(1), "no longer a member");
+    }
+
+    #[test]
+    fn drop_stack_adds_the_dragged_tile_after_the_target_and_focuses_it() {
+        let mut ws = Workspaces::new();
+        let a = ws.split_active(Orientation::Horizontal);
+        let b = ws.split_active(Orientation::Horizontal);
+        assert!(ws.active_mut().drop_stack(a, b));
+        assert_eq!(ws.active().tree().tiles(), vec![b, a]);
+        assert_eq!(ws.active().stack_position(a), Some((2, 2)));
+        assert_eq!(ws.active().focused_tile(), Some(a));
+        assert!(!ws.active_mut().drop_stack(a, a), "self-drop is refused");
+    }
+
+    #[test]
+    fn drop_stack_within_one_stack_reorders() {
+        let mut ws = Workspaces::new();
+        let a = ws.split_active(Orientation::Horizontal);
+        let b = ws.stack_active().unwrap();
+        let c = ws.stack_active().unwrap(); // [a, b, c]
+        assert!(ws.active_mut().drop_stack(a, c));
+        assert_eq!(ws.active().tree().tiles(), vec![b, c, a]);
+        assert_eq!(ws.active().stack_position(a), Some((3, 3)));
+        assert_eq!(ws.active().focused_tile(), Some(a));
+    }
+
+    #[test]
+    fn drop_stack_across_regions_lands_in_the_targets_dock() {
+        let mut ws = Workspaces::new();
+        let a = ws.split_active(Orientation::Horizontal);
+        let b = ws.split_active(Orientation::Horizontal);
+        ws.active_mut().move_to_dock(DockSide::Left); // b into the left dock
+        assert_eq!(
+            ws.active().region_of(b),
+            Some(FocusRegion::Dock(DockSide::Left))
+        );
+        assert!(ws.active_mut().drop_stack(a, b));
+        assert!(ws.active().tree().is_empty(), "a left the main tree");
+        assert_eq!(
+            ws.active().region_of(a),
+            Some(FocusRegion::Dock(DockSide::Left))
+        );
+        assert_eq!(ws.active().stack_position(a), Some((2, 2)));
+        assert_eq!(ws.active().focused_tile(), Some(a));
+    }
+
+    #[test]
+    fn workspaces_stack_position_searches_every_workspace_and_dock() {
+        let mut ws = Workspaces::new();
+        let a = ws.split_active(Orientation::Horizontal);
+        let b = ws.stack_active().unwrap();
+        ws.switch(2);
+        assert_eq!(ws.stack_position(a), Some((1, 2)));
+        assert_eq!(ws.stack_position(b), Some((2, 2)));
+        assert_eq!(ws.stack_position(TileId(99)), None);
     }
 
     /// Post-merge review BUG 5, `drop_to_dock` arm: its unconditional

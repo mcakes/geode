@@ -43,6 +43,12 @@ impl ShellView {
             self.close_palette(window, cx);
             return;
         }
+        // `ctrl+k` is resolved by `is_palette_toggle` ahead of
+        // `handle_key_down`'s stack-list branch, so it reaches here even
+        // while the list is open — close it too (tile-stacks spec §5.2),
+        // the same reason the line above cancels an open command line:
+        // the palette opening over stale chrome nothing can reach.
+        self.close_stack_list(cx);
         // Opening the palette cancels any pending keymap sequence (spec:
         // palette-open cancels pending — supersedes the 1b-ui deferred
         // note that pending state would survive a palette session). The
