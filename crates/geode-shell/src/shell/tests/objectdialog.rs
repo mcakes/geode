@@ -6895,6 +6895,106 @@ fn a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more(
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
+/// A Scopes `dimensions` row is a door too (scopes-editing spec §4): a
+/// double-click on it opens the column's Values stage and nothing more.
+/// The pair's first click opens the stage; by the time its second
+/// arrives the distinct outcome has usually landed (a distinct query is
+/// milliseconds, a double-click a few hundred), so that click lands on
+/// a VALUE row — which `open_field` would answer with
+/// `edit_commit_notice`'s "nothing to type here" — and the guard the
+/// column-stage door arms (`click_opened_stage`) must be armed by this
+/// door as well. The test delivers the outcome between the two clicks
+/// for exactly that reason, and proves a value row really is under the
+/// pointer before the second one; the notice is what tells the two
+/// doors apart, since neither opens a text field on a list row.
+#[gpui::test]
+fn a_double_click_on_a_scopes_dimension_row_opens_its_values_and_not_a_field(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter"); // mine
+    cx.run_until_parked();
+    let row = cx
+        .debug_bounds("objectdialog-item-book")
+        .expect("the book dimension row is painted");
+    let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0));
+    // The pair's first click: an ordinary down, which opens the stage.
+    cx.simulate_mouse_down(at, MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    let tag = dialog_state(&shell, &cx, |s| s.values_tag);
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Values { ref column, .. } if column == "book"
+    ));
+    shell.update(&mut cx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: SCOPES_KEY,
+                tag,
+                column: "book".into(),
+                values: Ok(vec![("BK000".into(), 5), ("BK001".into(), 7)]),
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let under_pointer = cx
+        .debug_bounds("objectdialog-item-BK000")
+        .expect("the first value row is painted");
+    assert!(
+        under_pointer.contains(&at),
+        "the pair's second click must land on a value row, got {under_pointer:?} for {at:?}"
+    );
+    // The pair's second click, the one the platform stamps `click_count: 2`.
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 2,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 2,
+            }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Values { ref column, .. } if column == "book"
+    ));
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_none()),
+        "the second click opened no field on the Values list"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.fields[0].key.clone()),
+        "values",
+        "the Values stage's own list is installed"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        None,
+        "and the second click was not answered as `i` on a value row"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+}
+
 // --- Spec §20.3 / §20.6: the value chip, the i/n buttons, the armed guard --
 
 /// Spec §20.3 on the object dialog: the hue chip steps on click and

@@ -7270,6 +7270,25 @@ run_mutation "scopes dialog: the Values stage's query is the draft's" \
         ) && let Some(draft) = self.draft.as_mut()' \
   geode-shell a_query_in_the_values_stage_narrows_the_rows_and_ctrl_a_ticks_only_them
 
+# Interaction-model §17.4 on the Scopes door: a dimension row's click
+# opens the Values stage and must arm `click_opened_stage` exactly as the
+# column-stage door does, or the pair's second click (`click_count: 2`)
+# lands on whatever value row the delivered list painted under the
+# pointer and runs `open_field` there — a notice about a row the trader
+# never aimed at. The anchor carries `enter_values_stage` because the
+# column arm sets the very same flag three lines up.
+run_mutation "scopes dialog: a dimension row's click arms the double-click guard" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        enter_values_stage(shell, &column, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = true;
+        }' \
+  '        enter_values_stage(shell, &column, cx);
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.click_opened_stage = false;
+        }' \
+  geode-shell a_double_click_on_a_scopes_dimension_row_opens_its_values_and_not_a_field
+
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
 # to normal mode, which keeps the query applied) must still be emptied
