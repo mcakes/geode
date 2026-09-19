@@ -7897,11 +7897,23 @@ run_mutation "settings: the dialog opens in filter mode" \
 
 # `EscapeStep::LeaveFilter` keeps the query APPLIED. A dialog that
 # cleared it on the way out still walks the same number of rungs.
+# Anchored on the whole `LeaveFilter` arm (2026-09-19: the choice
+# field's own `Cancel`/`Pick` arms below it now write
+# `state.mode = DialogMode::Normal;` too, at different indentation, so
+# the bare line alone stopped being a unique anchor).
 run_mutation "settings: leaving filter mode clears the query" \
   crates/geode-shell/src/shell/settings_view.rs \
-  '            state.mode = DialogMode::Normal;' \
-  '            state.mode = DialogMode::Normal;
-            state.query.clear();' \
+  '        KeyAction::LeaveFilter => {
+            // The query stays applied — leaving a search leaves you on
+            // the match rather than undoing it (`EscapeStep::LeaveFilter`).
+            state.mode = DialogMode::Normal;
+        }' \
+  '        KeyAction::LeaveFilter => {
+            // The query stays applied — leaving a search leaves you on
+            // the match rather than undoing it (`EscapeStep::LeaveFilter`).
+            state.mode = DialogMode::Normal;
+            state.query.clear();
+        }' \
   geode-shell \
   settings_escape_walks_the_ladder_one_rung_at_a_time
 
