@@ -106,6 +106,18 @@ pub fn summary(value: &toml::Value) -> String {
 /// blind to the very content a trader opened it to fix (the same reason
 /// `views::fields` keeps a view's own dataset in its `Choice` even when
 /// the schema no longer has it).
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)).
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "slot" => "The slot's number — ctrl+<slot> regroups the focused blotter by this chain",
+        "dimensions" => {
+            "The group-by chain, outermost first: every column the dataset can group by is offered"
+        }
+        _ => "",
+    }
+}
+
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let current: Vec<String> = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))

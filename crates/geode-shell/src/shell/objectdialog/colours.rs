@@ -81,6 +81,21 @@ pub fn summary(value: &toml::Value) -> String {
 /// reader accepts both (`h.as_float().or_else(|| h.as_integer()...)`)
 /// — so this does too, rather than silently defaulting to `0` for a
 /// hand-edited `hue = 210` some other tool wrote as an integer.
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)).
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "hue" => {
+            "Position on a 0–360 wheel — red 0, yellow 60, green 120, cyan 180, blue 240, magenta 300 — rendered in each theme's own palette"
+        }
+        "tone" => "normal, or light for the theme's tint of the same hue",
+        "token" => {
+            "A theme colour by role instead of a hue — none keeps the hue; a token overrides it"
+        }
+        _ => "",
+    }
+}
+
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))

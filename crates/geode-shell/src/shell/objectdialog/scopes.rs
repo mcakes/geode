@@ -128,6 +128,18 @@ fn selects_summary(table: &toml::Table) -> String {
 /// produce rather than panicking (spec §4 has `fields` serve the create
 /// path too, though Scopes has no create verb of its own — see this
 /// module's own doc comment).
+/// What each field means, for the edit footer's help line
+/// ([`Domain::help`](super::Domain::help)).
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "selects" => {
+            "The saved dimension selections, one 'column ∈ values' per dimension — o replaces them with the frame's current scope"
+        }
+        "text" => "The saved text filter, matched against every textual column",
+        _ => "",
+    }
+}
+
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))

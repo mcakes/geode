@@ -3969,19 +3969,41 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         hints
     };
     let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg);
+    // One slot above the hint rows, shared by two occupants (spec §22):
+    // the notice, when a keystroke just produced one, else the help line
+    // for the row under the cursor — what the field MEANS, beside the
+    // hint rows that say what keys act on it. One slot rather than two
+    // so the footer never grows or shifts as the cursor moves; the
+    // notice wins for exactly the keystroke it reports on, since the
+    // door clears it on the next. The slot keeps its height on a row
+    // with nothing to say (`min_h`), for the same reason.
+    let help = draft
+        .selected_field_key()
+        .map(|key| domain.help(&state.stage, key))
+        .unwrap_or("");
+    let slot = match state.notice.as_ref() {
+        Some(notice) => div()
+            .text_sm()
+            .text_color(theme.warning)
+            .debug_selector(|| "objectdialog-notice".to_string())
+            .child(notice.clone()),
+        None => {
+            let line = div().text_sm().min_h_5().text_color(theme.muted_foreground);
+            if help.is_empty() {
+                line
+            } else {
+                line.debug_selector(|| "objectdialog-help".to_string())
+                    .child(help)
+            }
+        }
+    };
     let footer = v_flex()
         .w(px(WIDTH))
         .gap_1()
         .pt_2()
         .border_t_1()
         .border_color(theme.border)
-        .children(state.notice.as_ref().map(|notice| {
-            div()
-                .text_sm()
-                .text_color(theme.warning)
-                .debug_selector(|| "objectdialog-notice".to_string())
-                .child(notice.clone())
-        }))
+        .child(slot)
         .child(
             div()
                 .text_sm()

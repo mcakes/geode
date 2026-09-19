@@ -7180,3 +7180,165 @@ fn the_armed_prompt_names_the_recorded_target(cx: &mut gpui::TestAppContext) {
             .is_none()
     );
 }
+
+// --- Field help: one context-sensitive line per selected row (2026-09-19) ---
+
+/// The help line painted in the edit footer for the row under the cursor.
+fn help_line(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |shell, _| {
+        let state = shell.object_dialog.as_ref()?;
+        let draft = state.draft.as_ref()?;
+        let key = draft.selected_field_key()?;
+        let help = state.domain.help(&state.stage, key);
+        (!help.is_empty()).then(|| help.to_string())
+    })
+}
+
+/// The help line follows the cursor: two rows, two different sentences,
+/// painted in the footer's own slot (`objectdialog-help`), never inside
+/// the row list.
+#[gpui::test]
+fn the_help_line_follows_the_selected_row(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-help").is_some(),
+        "the footer paints a help slot"
+    );
+    let dataset_help = help_line(&shell, &cx).expect("the dataset row has help");
+    assert!(
+        dataset_help.to_lowercase().contains("dataset"),
+        "{dataset_help}"
+    );
+
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    let readiness_help = help_line(&shell, &cx).expect("the readiness row has help");
+    assert_ne!(dataset_help, readiness_help, "each row explains itself");
+    assert!(
+        readiness_help.contains("sentinel"),
+        "readiness names the sentinel convention, got {readiness_help}"
+    );
+    // The line sits in the footer, below the action bar, not in the list.
+    let help = cx.debug_bounds("objectdialog-help").unwrap();
+    let list = cx.debug_bounds("objectdialog-fields").unwrap();
+    assert!(
+        help.origin.y >= list.origin.y + list.size.height,
+        "help paints below the row list"
+    );
+}
+
+/// A notice takes the help line's slot for the keystroke it reports on,
+/// and the help returns on the next one — one slot, so nothing shifts.
+#[gpui::test]
+fn a_notice_displaces_the_help_line_for_one_keystroke(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let before = cx.debug_bounds("objectdialog-help").unwrap();
+
+    // `q` is no verb here: a notice.
+    cx.simulate_keystrokes("q");
+    cx.run_until_parked();
+    assert!(dialog_state(&shell, &cx, |s| s.notice.is_some()));
+    assert!(
+        cx.debug_bounds("objectdialog-help").is_none(),
+        "the notice owns the slot while it stands"
+    );
+    let notice = cx.debug_bounds("objectdialog-notice").unwrap();
+    assert_eq!(
+        notice.origin.y, before.origin.y,
+        "the same slot, so nothing moves"
+    );
+
+    cx.simulate_keystrokes("j");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-help").is_some(),
+        "and help returns"
+    );
+}
+
+/// A list item and an available row explain the list they belong to:
+/// the columns list's own sentence, on every row of it.
+#[gpui::test]
+fn a_list_row_shows_its_lists_help(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // The cursor is on the first column item.
+    let item_help = help_line(&shell, &cx).expect("a column item has help");
+    assert!(item_help.to_lowercase().contains("column"), "{item_help}");
+    // Past the second item onto the available block's `delta01`.
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    let row = edit_draft(&shell, &cx, |d| d.selected_row());
+    assert!(
+        matches!(row, Some(objectdialog::EditRow::Available { .. })),
+        "the fixture's available block starts here, got {row:?}"
+    );
+    assert_eq!(help_line(&shell, &cx).as_deref(), Some(item_help.as_str()));
+}
+
+/// Every field on every domain — and every column-stage field — carries
+/// a non-empty sentence, so a new field cannot ship silent. The sweep
+/// opens each dialog's first object and walks its rows.
+#[gpui::test]
+fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
+    type Fixture = fn() -> ShellServices;
+    let cases: [(&str, Fixture); 6] = [
+        ("config::views", services_with_a_desk_view),
+        ("config::sources", services_with_sources),
+        ("config::groupings", || services_with_slot_3(&["book"])),
+        ("config::scopes", services_with_a_saved_scope),
+        ("config::colours", services_with_colours),
+        ("config::schema", services_with_schema),
+    ];
+    for (action, services) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, mut cx) = dialog_test_shell_in_dir(cx, services(), dir.path(), action);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let missing: Vec<String> = shell.read_with(&cx, |shell, _| {
+            let state = shell.object_dialog.as_ref().unwrap();
+            let draft = state.draft.as_ref().unwrap();
+            draft
+                .fields
+                .iter()
+                .filter(|f| state.domain.help(&state.stage, &f.key).is_empty())
+                .map(|f| f.key.clone())
+                .collect()
+        });
+        assert!(
+            missing.is_empty(),
+            "{action}: fields without help: {missing:?}"
+        );
+        cx.simulate_keystrokes("escape escape");
+        cx.run_until_parked();
+    }
+
+    // The column stage (Views' door; Schema's opens the same seven).
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let missing: Vec<String> = shell.read_with(&cx, |shell, _| {
+        let state = shell.object_dialog.as_ref().unwrap();
+        assert!(matches!(state.stage, objectdialog::Stage::Column { .. }));
+        let draft = state.draft.as_ref().unwrap();
+        draft
+            .fields
+            .iter()
+            .filter(|f| state.domain.help(&state.stage, &f.key).is_empty())
+            .map(|f| f.key.clone())
+            .collect()
+    });
+    assert!(
+        missing.is_empty(),
+        "column stage: fields without help: {missing:?}"
+    );
+}

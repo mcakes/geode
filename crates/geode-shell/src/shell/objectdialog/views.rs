@@ -1327,6 +1327,36 @@ pub fn fold_into(
 /// `Types` only where this does.
 ///
 /// [`Draft::selected_vocabulary`]: super::Draft::selected_vocabulary
+pub fn help(key: &str) -> &'static str {
+    match key {
+        "dataset" => {
+            "The dataset the view reads; changing it changes which columns are available below"
+        }
+        "columns" => {
+            "The view's columns in display order — rows below the rule are the dataset's other columns, not yet on the view"
+        }
+        _ => "",
+    }
+}
+
+/// The column stage's seven presentation fields, explained — one table
+/// for both doors (Views and Schema open the same rows, dataset-
+/// presentation spec §4.1). See [`help`].
+pub fn column_help(key: &str) -> &'static str {
+    match key {
+        "label" => "The header text — empty follows the desk's label",
+        "width" => "Column width in pixels, or auto to size to the content",
+        "scale" => "Divide values for display: none, k (thousands), M (millions)",
+        "precision" => "Decimal places shown, 0 to 12",
+        "thousands" => "Group digits with thousands separators",
+        "negative" => "How a negative paints: a leading minus, or parentheses",
+        "colour" => {
+            "none paints in the foreground, sign colours by sign, or a named colour from colours.toml"
+        }
+        _ => "",
+    }
+}
+
 pub fn text_editable(key: &str) -> bool {
     matches!(key, "label" | "width")
 }
