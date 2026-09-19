@@ -886,6 +886,12 @@ pub struct ShellView {
     /// and cleared by [`close_modal`](Self::close_modal), same as the
     /// other three dialogs.
     as_of_dialog: Option<asof_view::AsOfState>,
+    /// The as-of dialog's calendar (spec §5.2), built once here like
+    /// `dialog_input` — a `CalendarState` is an entity with its own focus
+    /// handle, and creating one per open would leak a focus handle per
+    /// dialog. It is painted only while the dialog is open and the field
+    /// does not read `live`; its selection mirrors the field.
+    as_of_calendar: Entity<gpui_component::calendar::CalendarState>,
     /// The open config-object dialog's own pure state (Phase 4c: the
     /// shared scaffold every config domain's dialog is built on — see
     /// `objectdialog`'s module doc), or `None` when closed/never opened.
@@ -1075,7 +1081,7 @@ impl ShellView {
         // same no-placeholder rule: `dialog::filter_row` puts a search
         // icon in the `Input`'s prefix slot instead.
         let dialog_input = cx.new(|cx| InputState::new(window, cx));
-        cx.subscribe_in(&dialog_input, window, |view, input, event, _window, cx| {
+        cx.subscribe_in(&dialog_input, window, |view, input, event, window, cx| {
             if !matches!(event, InputEvent::Change) {
                 return;
             }
@@ -1116,8 +1122,25 @@ impl ShellView {
                 // (`resolved`/`error`) for `build` to show; see
                 // `asof_view::on_query_changed`'s own doc comment.
                 asof_view::on_query_changed(state, &query, chrono::Utc::now());
+                // Typing mirrors onto the calendar (spec §5.2): the parsed
+                // day, else today. `set_date` notifies the calendar only.
+                let day = asof_view::calendar_date(state, chrono::Utc::now());
+                view.as_of_calendar.update(cx, |c, cx| {
+                    if c.date().start() != Some(day) {
+                        c.set_date(day, window, cx);
+                    }
+                });
             }
             cx.notify();
+        })
+        .detach();
+
+        let as_of_calendar = cx.new(|cx| gpui_component::calendar::CalendarState::new(window, cx));
+        cx.subscribe_in(&as_of_calendar, window, |view, _, event, window, cx| {
+            let gpui_component::calendar::CalendarEvent::Selected(date) = event;
+            if let Some(day) = date.start() {
+                asof_view::on_calendar_selected(view, day, window, cx);
+            }
         })
         .detach();
 
@@ -1524,6 +1547,7 @@ impl ShellView {
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
+            as_of_calendar,
             object_dialog: None,
             object_dialog_scroll: ScrollHandle::new(),
             pending_config_write: None,
@@ -1773,6 +1797,22 @@ impl ShellView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn picker(&self) -> Option<&picker::PickerState> {
         self.picker.as_ref()
+    }
+
+    /// The dialogs' shared filter field (Task 3, `asof_view`'s calendar
+    /// tests) — cross-module test reach the same as `picker()` above.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn dialog_input(&self) -> &Entity<InputState> {
+        &self.dialog_input
+    }
+
+    /// The as-of dialog's calendar entity (Task 3) — cross-module test
+    /// reach the same as `picker()` above, so a test can drive
+    /// `CalendarState::activate_date` exactly as the component's own day
+    /// cell does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn as_of_calendar(&self) -> &Entity<gpui_component::calendar::CalendarState> {
+        &self.as_of_calendar
     }
 
     /// Deliver a `DataEvent::Distinct` outcome (spec §3.4), routed here by

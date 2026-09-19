@@ -31,8 +31,9 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Hsla, MouseButton, Window, div, px};
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui::{AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Window, div, px};
+use gpui_component::calendar::Calendar;
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use geode_core::query::{AsOf, parse_as_of};
 
@@ -204,9 +205,10 @@ pub fn shows_calendar(text: &str) -> bool {
 // gpui shell.
 // ---------------------------------------------------------------------
 
-/// Target dialog content width in pixels — the picker's own `WIDTH`
-/// (`shell::picker`): a text field plus a short list is the same shape.
-const WIDTH: f32 = 480.0;
+/// Target dialog content width in pixels — widened from the picker's own
+/// `WIDTH` (`shell::picker`, 480) to fit the preset list beside the
+/// calendar pane (Task 3, spec §5.2) side by side rather than cramped.
+const WIDTH: f32 = 640.0;
 
 /// Open the as-of dialog (`frame::as_of`, `mod+t`). A no-op if a modal is
 /// already open, mirroring every other `open` here.
@@ -215,6 +217,11 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         return;
     }
     view.as_of_dialog = Some(AsOfState::default());
+    // The field opens blank, so seed the calendar to today rather than
+    // leaving it on whatever day the last open (or the default) left it.
+    view.as_of_calendar.update(cx, |c, cx| {
+        c.set_date(chrono::Local::now().date_naive(), window, cx)
+    });
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
@@ -252,6 +259,33 @@ fn commit_live(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Shel
         }
     });
     shell.close_modal(window, cx);
+}
+
+/// A calendar day was clicked (the `CalendarEvent::Selected` subscription,
+/// `shell/mod.rs`): rewrite the field's DATE PART through the one door
+/// this dialog has for writing the shared `Input` — [`compose_with_date`]
+/// keeps a typed time — then re-resolve at once, because
+/// `InputState::set_value` emits no `Change` (the trap `sync_dialog_text`
+/// documents), and hand focus back to the field: the calendar is the
+/// mouse form of typing a date, never a focus owner (spec §5.2, §17).
+pub(crate) fn on_calendar_selected(
+    view: &mut ShellView,
+    date: NaiveDate,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if view.as_of_dialog.is_none() {
+        return;
+    }
+    let input = view.dialog_input.clone();
+    let current = input.read(cx).value().to_string();
+    let next = compose_with_date(&current, date);
+    input.update(cx, |i, cx| i.set_value(next.clone(), window, cx));
+    if let Some(state) = view.as_of_dialog.as_mut() {
+        on_query_changed(state, &next, chrono::Utc::now());
+    }
+    input.read(cx).focus_handle(cx).focus(window, cx);
+    cx.notify();
 }
 
 /// The [`dialog::ModalKeyHandler`] for this modal.
@@ -375,7 +409,27 @@ fn build(
         muted,
         selection,
     );
-    column.child(list).into_any_element()
+    // Borrowed, not `.to_string()`'d — `SharedString` derefs to `str`, and
+    // `shows_calendar` takes `&str`, so this costs nothing beyond the
+    // `value()` call itself (the dialog already allocates per paint on a
+    // keystroke: `err.clone()` above, the preview `format!`).
+    let text = shell.dialog_input.read(cx).value();
+    let body = if shows_calendar(&text) {
+        h_flex()
+            .gap_3()
+            .items_start()
+            .child(div().flex_1().min_w_0().child(list))
+            .child(
+                div()
+                    .flex_none()
+                    .debug_selector(|| "as-of-calendar".to_string())
+                    .child(Calendar::new(&shell.as_of_calendar).small()),
+            )
+            .into_any_element()
+    } else {
+        list.into_any_element()
+    };
+    column.child(body).into_any_element()
 }
 
 /// The preset list: each row `"14:05:12 · risk / EOD · 3 books"`, the

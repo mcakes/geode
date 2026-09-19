@@ -267,3 +267,86 @@ fn hovering_the_as_of_badge_names_the_selector_chord(cx: &mut gpui::TestAppConte
         "the full timestamp is wider than the elided badge"
     );
 }
+
+/// Task 3: the calendar pane paints beside the presets while the field
+/// does not read `live`, and hides once it does.
+#[gpui::test]
+fn the_as_of_dialog_paints_a_calendar_that_live_hides(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let _shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-t");
+    assert!(
+        vcx.debug_bounds("as-of-calendar").is_some(),
+        "calendar pane painted on open"
+    );
+    vcx.simulate_input("live");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("as-of-calendar").is_none(),
+        "hidden under live"
+    );
+    vcx.simulate_keystrokes("backspace backspace backspace backspace");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("as-of-calendar").is_some(),
+        "back once live is gone"
+    );
+}
+
+/// Task 3: a day click (`CalendarState::activate_date`, the same call
+/// the component's own day cell makes) writes the field's date part
+/// through `compose_with_date`, keeping a typed time, and never steals
+/// focus from the field — `enter` still commits afterward.
+#[gpui::test]
+fn clicking_a_day_writes_the_date_and_keeps_a_typed_time(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-t");
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+    // A "click" is the same call the calendar's own day cell makes.
+    let calendar = shell.read_with(&vcx, |s, _| s.as_of_calendar().clone());
+    calendar.update(&mut vcx, |c, cx| {
+        c.activate_date(day, cx);
+    });
+    vcx.run_until_parked();
+    let text = shell.read_with(&vcx, |s, cx| s.dialog_input().read(cx).value().to_string());
+    assert_eq!(text, "2026-09-08", "a blank field becomes the bare date");
+    assert!(
+        vcx.debug_bounds("as-of-resolved").is_some(),
+        "the preview shows the end of that day"
+    );
+    // Now type a time, click another day: the time survives. `ctrl-a
+    // backspace` does not clear the field here — the dialog reclaims
+    // `ctrl+a` — so clear it the way `a_bad_time_...`'s sibling tests do:
+    // one `backspace` per character of "2026-09-08" (10).
+    vcx.simulate_keystrokes(&"backspace ".repeat(10));
+    vcx.simulate_input("14:05");
+    let other = chrono::NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+    calendar.update(&mut vcx, |c, cx| {
+        c.activate_date(other, cx);
+    });
+    vcx.run_until_parked();
+    let text = shell.read_with(&vcx, |s, cx| s.dialog_input().read(cx).value().to_string());
+    assert_eq!(text, "2026-09-09 14:05");
+    // The field still has the keyboard: enter commits.
+    vcx.simulate_keystrokes("enter");
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert!(matches!(
+        frame.read_with(&vcx, |f, _| f.as_of().clone()),
+        AsOf::At(_)
+    ));
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+}
+
+/// Task 3: typing a date mirrors onto the calendar's own selection.
+#[gpui::test]
+fn typing_a_date_moves_the_calendars_selection(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-t");
+    vcx.simulate_input("2026-09-08 14:05");
+    vcx.run_until_parked();
+    let calendar = shell.read_with(&vcx, |s, _| s.as_of_calendar().clone());
+    let selected = calendar.read_with(&vcx, |c, _| c.date().start());
+    assert_eq!(selected, chrono::NaiveDate::from_ymd_opt(2026, 9, 8));
+}
