@@ -5,6 +5,12 @@
 //! offers a catalogue, `demo_rest` does not, so both picker paths are
 //! exercised.
 //!
+//! The generated values are a cache: a span the `--demo` database already
+//! covers is never refetched, so a change to `IDENTITIES`, `ANCHOR` or
+//! the walk paints the OLD values beside the new ones with a visible
+//! step. Delete `$TMPDIR/geode-demo/<rows>-<seed>/` after any such change,
+//! the same rule CLAUDE.md gives for a `datasets.toml` column change.
+//!
 //! Span-independence is the property that matters: a request for
 //! `[a, b)` returns exactly the bars a wider request would return inside
 //! `[a, b)`, so an overlapping refetch appends nothing (spec §4.4 step 2)

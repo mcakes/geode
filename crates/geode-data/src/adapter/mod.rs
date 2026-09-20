@@ -271,7 +271,8 @@ impl SeriesRows {
 /// `&mut self` is what lets a vendor client keep a connection inside it
 /// with no lock. Called on that thread, so blocking is fine there.
 ///
-/// **A shim must bound its own `fetch` with a deadline** — the vendor
+/// **A shim must bound its own `fetch` — and `catalogue`, which rides the
+/// same worker thread and the same join — with a deadline** — the vendor
 /// client's own timeout where it has one, otherwise a deadline the shim
 /// enforces itself. There is no deadline on this side of the door and no
 /// cancellation: `ingest::fetch::FetchWorker::shutdown` drops its sender
