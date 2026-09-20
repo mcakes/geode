@@ -916,3 +916,50 @@ shifts) is its own spec against this one.
   time when the real one exposes it; `PriceResult` gains a field then.
 - The `:rm` path (§7.4): a store-level "forget batch" is the cleanest
   answer and is deferred to its own task.
+
+## 16. As built (Part 1, 2026-09-19)
+
+- The vocabulary, the `Pricer` trait and `PriceParams`/`PriceOutcome`/
+  `LocalPublish` live in `geode_core::pricing`, not `geode-pricing`:
+  the shell names `PriceOutcome` in `Delivery` and must not depend on
+  a calculation crate (§2.1). `geode-pricing` holds `MockPricer` and
+  is where vendor crates go. §4 and §5.1 read with that substitution.
+- `PricerConfig` (`geode_data::pricing`) carries the configured name
+  beside the optional pricer so a missing one names itself; an empty
+  name says "no pricer is configured".
+- The worker's queue is bounded by distinct keys (`PRICE_BOUND` = 64);
+  a replacement for a queued key always fits.
+- A local publish's ingest-sink arms emit no `Health` (no declared
+  source has a lane); a failed one is an error `Diagnostics` event
+  plus `LoadEnded`.
+- Retention for local datasets is NOT wired in Part 1 (nor is the
+  sweeper for anything else); §7.2's "keep_generations = 200" is
+  Part 4's.
+- Overrides (Task 7b, ruling 1 amended): the real library takes an
+  overridable `PricingDataSource`, so overrides are STATEFUL
+  (`Pricer::set_overrides` then `price`), batch-scoped by the worker —
+  set once per batch before its first line; a refusal or a panic
+  fails every line of the batch with `overrides refused: <reason>`
+  and prices none of them. `MarketOverrides { spot: BTreeMap<String,
+  f64> }`, `PriceParams.overrides`, and `Instrument::strike()` were
+  added for it. The mock's reference spot is the absolute strike, or
+  100 for a percent strike; it refuses a non-positive or non-finite
+  spot with `spot override must be a positive finite number` and
+  keeps the previous overrides in place.
+- A worker-refused batch is answered, not dropped (Task 6):
+  `DataService::price` returns `()`; when the worker's own bounded
+  queue refuses a batch, the service emits `DataEvent::Price` itself
+  with every line `Err("the pricing queue is full; resubmit")` and
+  logs a warning naming the key and tag. `DataHandle::price`'s `false`
+  means only that the request channel itself refused — a batch that
+  reaches the service always gets an outcome.
+- The `[pricing]` unknown-adapter diagnostic reads `pricer "<name>"
+  ([pricing] adapter) is not built into this binary (have: <names>);
+  every priced line will say so` (Task 8).
+- The worker's undelivered-outcome warning reads "a price outcome for
+  key {} was not delivered; further refusals are not logged" (Task 5)
+  — there is no counter, so only the first is logged.
+- `LogLevels` stores suffix keys (`"pricing"`, not `"geode::pricing"`)
+  like every other target; this is the existing, correct shape, not a
+  Part 1 gap.
+- Unverified on a real window: nothing in Part 1 paints.

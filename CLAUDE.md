@@ -23,7 +23,7 @@ Everything below is merged unless the row says otherwise. Specs live in `docs/su
 | Phase 2 (DataService) | Sentinel-gated discovery, CSV → DuckDB, grain split so `SUM` cannot double-count, per-file generations with live/archive pairs, retention, freshness catalog, restricted scope grammar + compiler, views/derived dimensions, `Attribution`/`ScopeSemantics`, grain-aware tree compiler, ENUM dictionaries, query pool, as-of routing, `Snapshot`. §7.1 <50 ms requery holds at 1M rows (`docs/perf.md`). | `2026-08-30-…phase-2-data` |
 | Phase 3a/3b/3c (blotter) | `[sources]`, discovery scheduler, `DataHandle`; module hosting contract (`geode_shell::module`), one shared `Frame`, per-tile command line (`/`, `:`), slots `ctrl+0..9`; `geode-blotter` hierarchy over any view; `--demo [rows]`. First painted-frame numbers in `docs/perf.md`; `docs/phase-3-prerequisites.md` records the three items deliberately not built. | `2026-09-03-…phase-3-blotter` |
 | Phase 4a (frame) | Carried dimensions (`grain = …`), `categorical`, per-keystroke text filter via dictionary `IN`, scope bar, dimension picker (`mod+p`), as-of selector (`mod+t`), scope undo/redo, `:filter`, named scopes, the flip barrier. | `2026-09-06-…phase-4-frame-features` |
-| Phase 4b (diagnostics) | `tracing` with six `geode::*` targets, the log `Ring`, `Diagnostics` entity, diagnostics tile, contained panics, crash files, the health tracker (five fix rounds — read the history before touching it). | same spec §4 |
+| Phase 4b (diagnostics) | `tracing` with seven `geode::*` targets, the log `Ring`, `Diagnostics` entity, diagnostics tile, contained panics, crash files, the health tracker (five fix rounds — read the history before touching it). | same spec §4 |
 | Adding tiles | Every tile is added by kind through `ShellView::add_tile`; no split verb. | `2026-09-08-…add-tile` |
 | Phase 4c Parts 1, 2a, 2 refinement, 2b, 2c | `config_write`, the two-stage object dialog (Views, Groupings, Scopes, Sources, Schema, Colours), committed text entry, per-field diagnostics, drift (`overrides.toml`), the column stage and named colours (OKLCH wheel with a readability floor). **No TOML editor tile is built; do not turn on `tree-sitter-toml`.** | `2026-09-08-…phase-4c-config-dialogs`, `2026-09-13-…part-2c-columns-and-colours` |
 | Dataset-level presentation | `dataset_presentation.toml` between the desk view and the view overlay; the Schema dialog's column stage. | `2026-09-13-…dataset-column-presentation` |
@@ -34,6 +34,7 @@ Everything below is merged unless the row says otherwise. Specs live in `docs/su
 | Choice with typeahead (2026-09-19) | `geode_shell::choice::ChoiceList` (one ranking, a 12-row window that follows the highlight, `choice::route` as the one key table); `i` on a `Choice` row in the object dialog, `i`/`enter` on every settings row (`enter` is no longer inert there), the market-data underlying picker over the same core. Display checks pending. | `2026-09-19-…dividend-schedule-and-choice` §3 |
 | Design-guide audit (2026-09-19) | `chip_paint`, `row_paint`, the rem scale, theme radii. Display checks pending. | history |
 | Scopes dialog editing (2026-09-19) | The Scopes dialog edits a scope's own criteria (reversing 4c §8.4): `dimensions` as an `OrderedList` with a values note, `i`-editable `text`/`expression`, a `Stage::Values` projection over a dimension's distinct values (fetched under `SCOPES_KEY`), `n` creates empty, `c` copies (`NameSeed::CopyOf`, `Domain::duplicable`), `o` still takes the frame's scope. Display checks pending. | `2026-09-19-…scopes-dialog-editing`, 4c §23 |
+| Line pricer Part 1 (2026-09-19) | `geode_core::pricing` (vocabulary, `Pricer`), `geode-pricing` (`MockPricer`), the pricing worker (`Request::Price` → `DataEvent::Price` → `Delivery::Price`), `Request::Publish` for `local = true` datasets, `[pricing] adapter`, `geode::pricing`. Parts 2–4 (core, tile, storage) next. | `2026-09-19-…line-pricer` |
 | **On hold** | Cold start: read `docs/ingest-cold-start-handoff.md` first — the 1.87× figure measures `read_csv` alone, and `staging_*` are fixed global table names. | — |
 
 Display checks on a real window are pending for most of the above (the implementation sandbox cannot paint one); each spec's "as built" section says which claims are pixel-unverified.
@@ -108,6 +109,16 @@ Each bullet is a rule the code depends on and a test or harness entry usually pi
 - Colours: state lives in the fill, text is `theme.foreground` (`cell_paint`); header chips use `FlooredTones` memoised behind a six-`Hsla` key refreshed at the top of `render`; the date field's active segment is `primary` under `primary_text`. Three bundled-theme sweeps pin it. `LABEL_WIDTH`/`CELL_WIDTH` are not on the rem scale (known gap: `TableDelegate::column` has no window).
 - CVI wire tag names are an assumption until the desk's XSD arrives; `SLICE_VALUES` in `geode-documents/src/cvi.rs` is the one place to change them.
 
+**Pricer (Part 1)**
+
+- The vocabulary and `Pricer` trait are `geode_core::pricing`; `geode-pricing` is implementations only (a leaf; the shell never depends on it). A calculation lives in the binary only as such a leaf, behind the request/outcome door — PHILOSOPHY §1 "In-process calculation".
+- The pricing worker is one thread beside the pool: latest wins per key, `Cancel { key }` stops at the next line boundary and delivers what was priced, `catch_unwind` + `contained` per line. `pricer: None` errors every line with `PricerConfig::missing_reason`.
+- Overrides are STATEFUL (`Pricer::set_overrides` then `price`) and batch-scoped by the worker — set once per batch before its first line, never per line; a refusal or a panic there fails every line of the batch (`overrides refused: <reason>`) and prices none of them, rather than pricing some lines against the wrong market data.
+- A batch the worker's own bounded queue refuses is still answered: `DataService::price` emits the `DataEvent::Price` itself with an error per line — `DataHandle::price`'s `false` means only that the request channel refused, never that a submitted batch went unanswered.
+- `Request::Publish` is refused unwritten for a non-`local` dataset; a local publish is source `LOCAL_SOURCE`, emits `Published` + `LoadEnded` and never `Health`; the bridge skips `Frame::note_published` for a local dataset (`Bridge.local_datasets`). A `[sources]` entry naming a local dataset is an error.
+- `[pricing]` changes are a restart stripe (`pricing_baseline`), like `sources`/`datasets`.
+- Known-redundant, pinned together: the worker clears `cancel_running` both when a batch is picked up and after it finishes — either alone would let a stale cancel leak into the next batch for the same key, and only `a_cancel_of_a_running_key_does_not_stop_the_next_batch` pins the pair (no separate harness entry: mutating either clear alone survives).
+
 ## Commands
 
 ```sh
@@ -123,7 +134,7 @@ cargo bench -p geode-shell                             # run criterion benchmark
 cargo bench -p geode-blotter                           # run criterion benchmarks (blotter pure core — see docs/perf.md)
 cargo bench -p geode-documents                         # run criterion benchmarks (CVI parse/write — see docs/perf.md)
 cargo bench -p geode-marketdata                        # run criterion benchmarks (panel matrix model + draft — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (1055 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (1111 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 zsh scripts/mutation-check.sh --anchors-only           # no cargo: stale or ambiguous anchors (<1 s, exits 1 on any) — run before every merge

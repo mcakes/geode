@@ -20,6 +20,20 @@ interpolation, a PnL attribution, a greek — it belongs upstream. This line is
 the load-bearing wall of the design. Every future "couldn't the app just
 quickly calculate X" gets judged against it.
 
+**In-process calculation.** A calculation may live inside the binary only as
+a leaf crate: one with no dependency on the shell, a module or the data
+crate, reached through the same request-and-outcome door a remote service
+would use (a keyed request in, a keyed outcome back, never a direct call
+from a module), so that it can be moved out of the process without a caller
+changing. Such a crate is upstream intelligence that happens to be linked
+in — a microservice that lives in our binary — and the rest of the app
+treats it exactly as it treats any other upstream: it sends definitions and
+shows what comes back. The pricing library behind the line pricer
+(`geode-pricing`) is the first; the rule is the pattern for the next. The
+app itself still performs no financial arithmetic: a package row summing
+its legs' returned numbers is aggregation, and nothing in a module
+interpolates, solves or converts.
+
 ## 2. The keyboard is the interface
 
 Every action reachable by mouse must be reachable by keyboard; the reverse is
