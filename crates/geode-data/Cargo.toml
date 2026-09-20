@@ -25,6 +25,20 @@ glob = "0.3.3"
 tracing.workspace = true
 
 [dev-dependencies]
+# Test-feature parity (2026-09-19): same reasoning as geode-shell's self
+# dev-dependency — geode-app's and the modules' dev-dependencies enable
+# this crate's `test-support`, so `-p geode-data` and `--workspace` must
+# resolve the same geode-data.
+geode-data = { path = ".", features = ["test-support"] }
+# Test-feature parity (2026-09-19): `cargo test --workspace` resolves
+# geode-core WITH `test-support` (geode-shell's dev-dependencies turn it
+# on, and cargo unifies features across every member it builds together),
+# so a `cargo test -p` of this crate alone must ask for the same thing or
+# it builds a second geode-core — and everything above it — that differs
+# only in that feature. One artifact per crate per profile is the rule;
+# `cargo tree -p <member> -i geode-core --format '{p} [{f}]'` must agree
+# with `cargo tree --workspace` for every member.
+geode-core = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
 geode-demo-data = { path = "../geode-demo-data" }
 tempfile = "3.27.0"
