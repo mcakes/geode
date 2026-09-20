@@ -626,18 +626,17 @@ mod tests {
 
     #[test]
     fn resolve_input_delegates_to_parse_as_of_for_a_clock_time() {
-        let now = Utc.with_ymd_and_hms(2026, 9, 6, 16, 0, 0).unwrap();
         // F1 (final fix wave): `HH:MM` resolves on the CLOCK's date (spec
-        // §3.6, "one clock throughout") — computed independently of
-        // `resolve_input`/`parse_as_of` so this holds for any clock, the
-        // same pattern `geode_core::query`'s own pinning test uses.
-        let clock = geode_core::clock::Clock::utc();
-        let expected = clock
-            .resolve_local(
-                clock.today(now),
-                chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
-            )
-            .unwrap();
+        // §3.6, "one clock throughout"), not UTC's — a non-UTC clock and
+        // an expectation computed BY HAND (not through the same `Clock`
+        // methods the code under test uses) so this actually proves the
+        // date/zone math, not just that the two call sites agree with
+        // each other. `now` = 2026-09-04 01:00 UTC is 2026-09-03 21:00
+        // EDT, so "14:05" must mean 14:05 on the 3rd in New York — EDT is
+        // UTC-4, so 2026-09-03 18:05 UTC.
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 1, 0, 0).unwrap();
+        let clock = geode_core::clock::Clock::in_zone_named("America/New_York");
+        let expected = Utc.with_ymd_and_hms(2026, 9, 3, 18, 5, 0).unwrap();
         assert_eq!(resolve_input("14:05", now, clock), Ok(AsOf::At(expected)));
     }
 

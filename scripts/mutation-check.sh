@@ -2655,14 +2655,18 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
 
 run_mutation "frame: bar_model is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \
-  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_clock == clock
             && *cached_today == today
         {
             return Rc::clone(cached);
         }' \
-  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions != versions
+            && *cached_clock == clock
             && *cached_today == today
         {
             return Rc::clone(cached);
@@ -4136,12 +4140,12 @@ run_mutation "flip: a fresh requery clears whatever was staged before it" \
 run_mutation "as-of: HH:MM resolves on the trader's local date, not UTC's" \
   crates/geode-core/src/query.rs \
   '    if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
-        return resolve_local(today_local, t, text);
+        return resolve(today, t);
     }' \
   '    if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
         return Ok(now.date_naive().and_time(t).and_utc());
     }' \
-  geode-core as_of_resolves_on_the_local_date_not_utcs
+  geode-core as_of_resolves_on_the_clocks_date_not_utcs
 
 # F3: `DataHandle::distinct`'s refusal (`false`: the queue is full or the
 # service thread is gone) used to be discarded — nothing else would ever
@@ -5010,12 +5014,16 @@ run_mutation "M11: save_scope bumps saved_scopes, not config" \
 
 run_mutation "M12: the bar-model cache key includes today's date" \
   crates/geode-shell/src/frame.rs \
-  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_clock == clock
             && *cached_today == today
         {' \
-  '        if let Some((cached_versions, _cached_today, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_clock, _cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_clock == clock
         {' \
   geode-shell the_bar_model_cache_rebuilds_when_today_changes_with_versions_unchanged
 
@@ -5040,13 +5048,16 @@ run_mutation "M6: an explicit default view wins over the alphabetical first" \
 run_mutation "M9: the as-of presets cache is keyed on the frame's data version" \
   crates/geode-shell/src/shell/asof_view.rs \
   '    let v = frame.versions().data;
-    if let Some((cached_v, cached)) = state.presets_cache.borrow().as_ref()
+    if let Some((cached_v, cached_clock, cached)) = state.presets_cache.borrow().as_ref()
         && *cached_v == v
+        && *cached_clock == clock
     {
         return Rc::clone(cached);
     }' \
   '    let v = frame.versions().data;
-    if let Some((_cached_v, cached)) = state.presets_cache.borrow().as_ref() {
+    if let Some((_cached_v, cached_clock, cached)) = state.presets_cache.borrow().as_ref()
+        && *cached_clock == clock
+    {
         return Rc::clone(cached);
     }' \
   geode-shell cached_presets_rebuilds_only_when_the_frames_data_version_changes
@@ -7302,6 +7313,7 @@ run_mutation "diagnostics: startup seeding folds in the computed config diagnost
   '            let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
             diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags.extend(clock_diags.iter().cloned());
             diags.extend(services.keymap_diagnostics.iter().cloned());' \
   '            let mut diags = cfg.diagnostics.clone();
             diags.extend(services.keymap_diagnostics.iter().cloned());' \
@@ -13482,8 +13494,8 @@ run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
 # publish, and every other assertion on the parse stays green.
 run_mutation "asof: a bare date resolves to the end of the day" \
   crates/geode-core/src/query.rs \
-  '        return resolve_local(d, END_OF_DAY, text);' \
-  '        return resolve_local(d, NaiveTime::MIN, text);' \
+  '        return resolve(d, END_OF_DAY);' \
+  '        return resolve(d, NaiveTime::MIN);' \
   geode-core \
   a_bare_date_resolves_to_the_end_of_that_local_day
 
@@ -13538,8 +13550,12 @@ run_mutation "asof: END_OF_DAY is the last microsecond, not the last whole secon
 # today on every invalid partial date, discarding whatever day it showed.
 run_mutation "asof: the mirror ignores a failed parse" \
   crates/geode-shell/src/shell/mod.rs \
-  '                if state.resolved.is_some() {' \
-  '                if true {' \
+  '                if let Some(state) = view.as_of_dialog.as_ref()
+                    && state.resolved.is_some()
+                {' \
+  '                if let Some(state) = view.as_of_dialog.as_ref()
+                    && true
+                {' \
   geode-shell \
   an_invalid_intermediate_keystroke_leaves_the_calendar_where_it_was
 

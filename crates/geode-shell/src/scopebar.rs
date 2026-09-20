@@ -343,5 +343,24 @@ mod tests {
             "another day: dated"
         );
         assert_eq!(m.as_of_full.as_deref(), Some("2026-09-18 22:00:00"));
+
+        // UTC alone cannot see a zone — the same instant on a real
+        // non-UTC clock (Tokyo, UTC+9) must read a different wall-clock
+        // time, by hand here, not through `clock.local` (which would
+        // just prove the arithmetic agrees with itself).
+        let tokyo = geode_core::clock::Clock::in_zone_named("Asia/Tokyo");
+        let m = build_model(&f, tokyo, tokyo.today(t));
+        assert_eq!(
+            m.as_of.as_deref(),
+            Some("07:00"),
+            "22:00 UTC is 07:00 the next day in Tokyo — today on the clock"
+        );
+        let m = build_model(&f, tokyo, tokyo.today(t).succ_opt().unwrap());
+        assert_eq!(
+            m.as_of.as_deref(),
+            Some("2026-09-19 07:00"),
+            "another day on the clock: dated"
+        );
+        assert_eq!(m.as_of_full.as_deref(), Some("2026-09-19 07:00:00"));
     }
 }
