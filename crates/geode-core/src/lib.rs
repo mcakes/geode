@@ -15,6 +15,7 @@ pub mod query;
 pub mod schema;
 pub mod scope;
 pub mod scopes;
+pub mod series;
 pub mod snapshot;
 pub mod source_config;
 pub mod tree;
