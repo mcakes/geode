@@ -208,17 +208,14 @@ impl Sheet {
                     inverse: vec![Edit::SetShift { row, shift: old }],
                 })
             }
-            Edit::Move {
-                row: _row,
-                delta: _delta,
-            } => todo!("Task 6"),
+            Edit::Move { row, delta } => self.move_row(row, delta),
             Edit::Group {
-                first: _first,
-                count: _count,
-                template: _template,
-                id: _id,
-            } => todo!("Task 6"),
-            Edit::Ungroup { row: _row } => todo!("Task 6"),
+                first,
+                count,
+                template,
+                id,
+            } => self.group(first, count, template, id),
+            Edit::Ungroup { row } => self.ungroup(row),
             Edit::SetSheetShift(shift) => {
                 let old = self.sheet_shift;
                 self.sheet_shift = shift;
@@ -398,6 +395,131 @@ impl Sheet {
             .count();
         Ok(Undo {
             inverse: vec![Edit::Remove { at }; restored_top],
+        })
+    }
+
+    /// Apply `undo`'s edits in order; the redo is their inverses in
+    /// reverse (the last one applied is the first to take back).
+    pub fn undo(&mut self, undo: &Undo) -> Result<Undo, EditError> {
+        let mut inverses = Vec::with_capacity(undo.inverse.len());
+        for edit in &undo.inverse {
+            inverses.extend(self.apply(edit.clone())?.inverse);
+        }
+        inverses.reverse();
+        Ok(Undo { inverse: inverses })
+    }
+
+    /// The flat block a row occupies: itself plus its legs.
+    fn block(&self, row: usize) -> std::ops::Range<usize> {
+        row..self.children(row).end
+    }
+
+    /// The siblings of `row`, in order: the roots, or the legs of its package.
+    fn siblings(&self, row: usize) -> Vec<usize> {
+        match self.parent(row) {
+            None => self.roots().collect(),
+            Some(p) => self.children(p).collect(),
+        }
+    }
+
+    fn move_row(&mut self, row: usize, delta: isize) -> Result<Undo, EditError> {
+        self.row_exists(row)?;
+        let siblings = self.siblings(row);
+        let pos = siblings
+            .iter()
+            .position(|s| *s == row)
+            .expect("a row is among its siblings");
+        let target = pos as isize + delta;
+        if target < 0 || target as usize >= siblings.len() {
+            return Err(EditError::MoveOffEnd);
+        }
+        let id = self.id(row);
+        let mut current = row;
+        for _ in 0..delta.unsigned_abs() {
+            let sibs = self.siblings(current);
+            let p = sibs
+                .iter()
+                .position(|s| *s == current)
+                .expect("still a sibling");
+            if delta > 0 {
+                let next = sibs[p + 1];
+                let (a, b) = (self.block(current), self.block(next));
+                self.swap_adjacent_blocks(a.clone(), b.clone());
+                current = a.start + b.len();
+            } else {
+                let prev = sibs[p - 1];
+                let (a, b) = (self.block(prev), self.block(current));
+                self.swap_adjacent_blocks(a.clone(), b);
+                current = a.start;
+            }
+            self.reindex_parents();
+        }
+        debug_assert_eq!(self.id(current), id);
+        Ok(Undo {
+            inverse: vec![Edit::Move {
+                row: current,
+                delta: -delta,
+            }],
+        })
+    }
+
+    fn group(
+        &mut self,
+        first: usize,
+        count: usize,
+        template: Template,
+        id: Option<LineId>,
+    ) -> Result<Undo, EditError> {
+        self.row_exists(first)?;
+        if count == 0 {
+            return Err(EditError::EmptyInsert);
+        }
+        if let Some(id) = id
+            && self.has_id(id)
+        {
+            return Err(EditError::IdInUse(id));
+        }
+        // `first` and the next `count − 1` rows must each be a root line:
+        // a root line has no legs, so consecutive root lines are
+        // consecutive rows.
+        let end = first + count;
+        if end > self.len() {
+            return Err(EditError::NotContiguousRoots);
+        }
+        if (first..end).any(|r| self.depth(r) != 0 || !self.is_line(r)) {
+            return Err(EditError::NotContiguousRoots);
+        }
+        let pkg = self.new_package_record(template, id);
+        self.splice_in(first, pkg, None);
+        for r in first + 1..=end {
+            self.set_leg_marker(r, true);
+        }
+        self.reindex_parents();
+        Ok(Undo {
+            inverse: vec![Edit::Ungroup { row: first }],
+        })
+    }
+
+    fn ungroup(&mut self, row: usize) -> Result<Undo, EditError> {
+        self.row_exists(row)?;
+        let RowKind::Package { template } = self.kind(row) else {
+            return Err(EditError::NotAPackage(row));
+        };
+        let legs = self.children(row);
+        let count = legs.len();
+        for r in legs {
+            self.set_leg_marker(r, false);
+        }
+        let pkg_id = self.id(row);
+        self.take_out(row);
+        self.reindex_parents();
+        Ok(Undo {
+            inverse: vec![Edit::Group {
+                first: row,
+                count,
+                template,
+                id: Some(pkg_id),
+            }],
         })
     }
 }
@@ -802,5 +924,405 @@ mod tests {
             (0..s.len()).map(|r| s.record(r)).collect::<Vec<_>>(),
             before
         );
+    }
+
+    fn ids(s: &Sheet) -> Vec<u64> {
+        (0..s.len()).map(|r| s.id(r).0).collect()
+    }
+
+    #[test]
+    fn move_stays_within_the_parent_and_carries_a_packages_legs() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(1.0, OptionKind::Call), 1),
+                callspread(1),
+                line(spx(2.0, OptionKind::Call), 1),
+            ],
+        );
+        // ids: 1 | 2 (3 4) | 5
+        let undo = s.apply(Edit::Move { row: 0, delta: 1 }).unwrap();
+        assert_eq!(
+            ids(&s),
+            vec![2, 3, 4, 1, 5],
+            "the line hops the whole package"
+        );
+        assert_eq!(s.parent(1), Some(0));
+        assert_eq!(s.parent(2), Some(0));
+        assert_eq!(undo.inverse, vec![Edit::Move { row: 3, delta: -1 }]);
+        for e in undo.inverse {
+            s.apply(e).unwrap();
+        }
+        assert_eq!(ids(&s), vec![1, 2, 3, 4, 5]);
+        // The package moves down, legs with it.
+        s.apply(Edit::Move { row: 1, delta: 1 }).unwrap();
+        assert_eq!(ids(&s), vec![1, 5, 2, 3, 4]);
+        assert_eq!(s.children(2), 3..5);
+        // A leg moves within its package only.
+        s.apply(Edit::Move { row: 3, delta: 1 }).unwrap();
+        assert_eq!(ids(&s), vec![1, 5, 2, 4, 3]);
+        assert_eq!(
+            s.apply(Edit::Move { row: 4, delta: 1 }).unwrap_err(),
+            EditError::MoveOffEnd
+        );
+        s.apply(Edit::Move { row: 4, delta: -1 }).unwrap();
+        assert_eq!(ids(&s), vec![1, 5, 2, 3, 4]);
+        assert_eq!(
+            s.apply(Edit::Move { row: 3, delta: -1 }).unwrap_err(),
+            EditError::MoveOffEnd,
+            "the first leg cannot leave the package"
+        );
+        assert_eq!(
+            s.apply(Edit::Move { row: 0, delta: -1 }).unwrap_err(),
+            EditError::MoveOffEnd
+        );
+        assert_eq!(
+            s.apply(Edit::Move { row: 2, delta: 1 }).unwrap_err(),
+            EditError::MoveOffEnd,
+            "the last root"
+        );
+        // A delta of 2 is two hops.
+        s.apply(Edit::Move { row: 0, delta: 2 }).unwrap();
+        assert_eq!(ids(&s), vec![5, 2, 3, 4, 1]);
+        assert_eq!(
+            s.apply(Edit::Move { row: 9, delta: 1 }).unwrap_err(),
+            EditError::NoSuchRow(9)
+        );
+        assert_eq!(
+            s.stale_lines().count(),
+            4,
+            "still stale from insertion: a move changes no request \
+             (4 of the 5 rows are lines; the package row is Fresh from creation)"
+        );
+        assert!((0..5).all(|r| s.revision(r) == 1));
+    }
+
+    #[test]
+    fn group_makes_a_custom_package_of_a_contiguous_run_of_root_lines() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(1.0, OptionKind::Call), 1),
+                line(spx(2.0, OptionKind::Put), -1),
+                line(spx(3.0, OptionKind::Call), 1),
+            ],
+        );
+        for r in 0..3 {
+            s.deliver(s.id(r), 1, Ok(result(10.0)), at(0));
+        }
+        let undo = s
+            .apply(Edit::Group {
+                first: 0,
+                count: 2,
+                template: Template::Custom,
+                id: None,
+            })
+            .unwrap();
+        assert_eq!(s.len(), 4);
+        assert_eq!(
+            s.kind(0),
+            RowKind::Package {
+                template: Template::Custom
+            }
+        );
+        assert_eq!(s.id(0), LineId(4), "a fresh id");
+        assert_eq!(s.children(0), 1..3);
+        assert_eq!(ids(&s), vec![4, 1, 2, 3]);
+        assert_eq!(s.result(0).unwrap().price, 10.0 - 10.0);
+        assert_eq!(
+            s.state(0),
+            &LineState::Fresh,
+            "grouping re-requests nothing"
+        );
+        assert_eq!(s.stale_lines().count(), 0);
+        assert_eq!(undo.inverse, vec![Edit::Ungroup { row: 0 }]);
+        let redo = s.undo(&undo).unwrap();
+        assert_eq!(ids(&s), vec![1, 2, 3]);
+        assert!(s.roots().eq(0..3));
+        assert_eq!(
+            redo.inverse,
+            vec![Edit::Group {
+                first: 0,
+                count: 2,
+                template: Template::Custom,
+                id: Some(LineId(4))
+            }]
+        );
+        s.undo(&redo).unwrap();
+        assert_eq!(
+            ids(&s),
+            vec![4, 1, 2, 3],
+            "redo restores the same package id"
+        );
+    }
+
+    #[test]
+    fn group_refuses_a_run_that_is_not_contiguous_roots() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(1.0, OptionKind::Call), 1),
+                callspread(1),
+                line(spx(2.0, OptionKind::Call), 1),
+            ],
+        );
+        // Over a package.
+        assert_eq!(
+            s.apply(Edit::Group {
+                first: 0,
+                count: 2,
+                template: Template::Custom,
+                id: None
+            })
+            .unwrap_err(),
+            EditError::NotContiguousRoots
+        );
+        // Starting on a leg.
+        assert_eq!(
+            s.apply(Edit::Group {
+                first: 2,
+                count: 1,
+                template: Template::Custom,
+                id: None
+            })
+            .unwrap_err(),
+            EditError::NotContiguousRoots
+        );
+        // Past the end.
+        assert_eq!(
+            s.apply(Edit::Group {
+                first: 4,
+                count: 2,
+                template: Template::Custom,
+                id: None
+            })
+            .unwrap_err(),
+            EditError::NotContiguousRoots
+        );
+        assert_eq!(
+            s.apply(Edit::Group {
+                first: 0,
+                count: 0,
+                template: Template::Custom,
+                id: None
+            })
+            .unwrap_err(),
+            EditError::EmptyInsert
+        );
+        assert_eq!(
+            s.apply(Edit::Group {
+                first: 9,
+                count: 1,
+                template: Template::Custom,
+                id: None
+            })
+            .unwrap_err(),
+            EditError::NoSuchRow(9)
+        );
+        // An id in use is refused.
+        assert_eq!(
+            s.apply(Edit::Group {
+                first: 0,
+                count: 1,
+                template: Template::Custom,
+                id: Some(LineId(1))
+            })
+            .unwrap_err(),
+            EditError::IdInUse(LineId(1))
+        );
+        assert_eq!(s.len(), 5, "nothing changed");
+        // A single root is a valid group.
+        s.apply(Edit::Group {
+            first: 4,
+            count: 1,
+            template: Template::Custom,
+            id: None,
+        })
+        .unwrap();
+        assert_eq!(s.children(4), 5..6);
+    }
+
+    #[test]
+    fn ungroup_promotes_the_legs_in_place_and_refuses_a_line() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(1.0, OptionKind::Call), 1),
+                callspread(2),
+                line(spx(2.0, OptionKind::Call), 1),
+            ],
+        );
+        let undo = s.apply(Edit::Ungroup { row: 1 }).unwrap();
+        assert_eq!(ids(&s), vec![1, 3, 4, 5]);
+        assert!(s.roots().eq(0..4));
+        assert_eq!(
+            undo.inverse,
+            vec![Edit::Group {
+                first: 1,
+                count: 2,
+                template: Template::CS,
+                id: Some(LineId(2))
+            }]
+        );
+        assert_eq!(
+            s.apply(Edit::Ungroup { row: 0 }).unwrap_err(),
+            EditError::NotAPackage(0)
+        );
+        assert_eq!(
+            s.apply(Edit::Ungroup { row: 9 }).unwrap_err(),
+            EditError::NoSuchRow(9)
+        );
+        s.undo(&undo).unwrap();
+        assert_eq!(ids(&s), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            s.kind(1),
+            RowKind::Package {
+                template: Template::CS
+            },
+            "the template survives the round trip"
+        );
+        // An empty package ungroups to nothing.
+        s.apply(Edit::Remove { at: 2 }).unwrap();
+        s.apply(Edit::Remove { at: 2 }).unwrap();
+        s.apply(Edit::Ungroup { row: 1 }).unwrap();
+        assert_eq!(ids(&s), vec![1, 5]);
+    }
+
+    /// Spec §12: `apply` then its `Undo` is identity for every `Edit`.
+    #[test]
+    fn apply_then_undo_is_identity_for_every_edit() {
+        fn fixture() -> Sheet {
+            let mut s = Sheet::new("t");
+            push(
+                &mut s,
+                vec![
+                    line(spx(1.0, OptionKind::Call), 1),
+                    callspread(2),
+                    line(spx(2.0, OptionKind::Put), -1),
+                    line(spx(3.0, OptionKind::Call), 1),
+                ],
+            );
+            for r in [0, 2, 3, 4, 5] {
+                s.deliver(s.id(r), 1, Ok(result(r as f64)), at(r as i64));
+            }
+            s.apply(Edit::SetSpotOverride {
+                underlying: "SPX".into(),
+                level: Some(5000.0),
+            })
+            .unwrap();
+            for r in [0, 2, 3, 4, 5] {
+                s.deliver(s.id(r), 2, Ok(result(r as f64)), at(10 + r as i64));
+            }
+            s
+        }
+        fn snapshot(s: &Sheet) -> (Vec<RowRecord>, OwnShifts, Vec<(String, f64)>) {
+            (
+                (0..s.len()).map(|r| s.record(r)).collect(),
+                s.sheet_shift,
+                s.overrides
+                    .spot
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
+            )
+        }
+        let edits = vec![
+            Edit::Insert {
+                place: Place::Root { at: 1 },
+                rows: vec![line(spx(9.0, OptionKind::Call), 1), callspread(1)],
+            },
+            Edit::Insert {
+                place: Place::Leg { package: 1, leg: 0 },
+                rows: vec![line(spx(9.0, OptionKind::Call), 1)],
+            },
+            Edit::Remove { at: 1 },
+            Edit::Remove { at: 2 },
+            Edit::SetInstrument {
+                row: 0,
+                instrument: spx(7.0, OptionKind::Put),
+            },
+            Edit::SetQty { row: 2, qty: 5 },
+            Edit::SetShift {
+                row: 3,
+                shift: OwnShifts {
+                    spot_pct: Some(1.0),
+                    vol_pts: Some(2.0),
+                },
+            },
+            Edit::Move { row: 0, delta: 1 },
+            Edit::Move { row: 2, delta: 1 },
+            Edit::Group {
+                first: 4,
+                count: 2,
+                template: Template::Custom,
+                id: None,
+            },
+            Edit::Ungroup { row: 1 },
+            Edit::SetSheetShift(OwnShifts {
+                spot_pct: Some(3.0),
+                vol_pts: None,
+            }),
+            Edit::SetSpotOverride {
+                underlying: "SPX".into(),
+                level: Some(5200.0),
+            },
+            Edit::SetSpotOverride {
+                underlying: "SPX".into(),
+                level: None,
+            },
+            Edit::SetSpotOverride {
+                underlying: "NDX".into(),
+                level: Some(1.0),
+            },
+        ];
+        for edit in edits {
+            let mut s = fixture();
+            let before = snapshot(&s);
+            let label = format!("{edit:?}");
+            let undo = s.apply(edit).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let redo = s
+                .undo(&undo)
+                .unwrap_or_else(|e| panic!("undo of {label}: {e}"));
+            assert!(
+                !redo.inverse.is_empty(),
+                "{label}: an undo always has a redo"
+            );
+            let after = snapshot(&s);
+            // Revisions may have moved (a request change and its reversal
+            // are two bumps) and states may be Stale; ids, kinds, parents,
+            // instruments, quantities, shifts, results and priced_at are identical.
+            assert_eq!(after.0.len(), before.0.len(), "{label}");
+            for (a, b) in after.0.iter().zip(&before.0) {
+                assert_eq!(
+                    (
+                        a.id,
+                        a.kind,
+                        a.parent,
+                        &a.instrument,
+                        a.qty,
+                        a.shift,
+                        a.result,
+                        a.priced_at
+                    ),
+                    (
+                        b.id,
+                        b.kind,
+                        b.parent,
+                        &b.instrument,
+                        b.qty,
+                        b.shift,
+                        b.result,
+                        b.priced_at
+                    ),
+                    "{label}"
+                );
+            }
+            assert_eq!(after.1, before.1, "{label}");
+            assert_eq!(after.2, before.2, "{label}");
+        }
     }
 }

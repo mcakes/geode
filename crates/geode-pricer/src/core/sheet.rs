@@ -502,12 +502,6 @@ impl Sheet {
         self.shift[row] = shift;
     }
 
-    // Task 6's `Group`/`Ungroup` arms are the only callers.
-    #[allow(dead_code)]
-    pub(crate) fn set_kind(&mut self, row: usize, kind: RowKind) {
-        self.kind[row] = kind;
-    }
-
     /// Bump the revision and mark stale: the line's request changed.
     pub(crate) fn touch(&mut self, row: usize) {
         self.revision[row] += 1;
@@ -517,7 +511,6 @@ impl Sheet {
     /// Rotate the flat range `a.start..b.end` so block `b` comes before
     /// block `a` (the two are adjacent: `a.end == b.start`).
     // Task 6's `Move` arm is the only caller.
-    #[allow(dead_code)]
     pub(crate) fn swap_adjacent_blocks(&mut self, a: Range<usize>, b: Range<usize>) {
         debug_assert_eq!(a.end, b.start);
         let whole = a.start..b.end;
