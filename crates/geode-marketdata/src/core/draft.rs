@@ -297,9 +297,10 @@ impl Draft {
     /// notice needs to say which happened).
     ///
     /// Dropping an inserted row hands every row anchored on it to ITS
-    /// anchor (spec §5.3): `d d` on the middle of a chain `D1 → new-2 →
-    /// new-1` leaves `new-1` under `D1`, where the trader put the chain,
-    /// rather than at the top where a vanished anchor lands.
+    /// anchor ([`Self::rehang_followers`], spec §5.3): `d d` on the
+    /// middle of a chain `D1 → new-2 → new-1` leaves `new-1` under `D1`,
+    /// where the trader put the chain, rather than at the top where a
+    /// vanished anchor lands.
     pub fn delete_row(&mut self, label: &str, base: &str) -> RowDelete {
         if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
@@ -311,13 +312,7 @@ impl Draft {
             Some(RowEdit::Inserted { after, .. }) => {
                 let after = after.clone();
                 self.rows.remove(label);
-                for edit in self.rows.values_mut() {
-                    if let RowEdit::Inserted { after: anchor, .. } = edit
-                        && anchor.as_deref() == Some(label)
-                    {
-                        *anchor = after.clone();
-                    }
-                }
+                self.rehang_followers(Some(label), after);
                 RowDelete::Dropped
             }
             Some(RowEdit::Deleted) => RowDelete::Already,
@@ -390,6 +385,26 @@ impl Draft {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Move every `Inserted` row anchored on `from` onto `to` — the one
+    /// spelling of a follower move (review of Task 8): `o` on a row that
+    /// already has a follower hangs that follower off the NEW row, so the
+    /// new row sits immediately below the cursor row rather than beside
+    /// its earlier sibling in label order (which would re-sort the pair
+    /// on a later rename); and dropping an inserted row hands its
+    /// followers to its own anchor. With both moves through here every
+    /// anchor has at most one direct follower by construction — a
+    /// rebase's vanished-anchor → `None` is the one remaining source of
+    /// siblings.
+    pub fn rehang_followers(&mut self, from: Option<&str>, to: Option<String>) {
+        for edit in self.rows.values_mut() {
+            if let RowEdit::Inserted { after, .. } = edit
+                && after.as_deref() == from
+            {
+                *after = to.clone();
+            }
         }
     }
 
@@ -1787,6 +1802,40 @@ mod tests {
                 Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D2"
             ),
             "a row anchored elsewhere is untouched"
+        );
+    }
+
+    /// `rehang_followers` moves exactly the rows anchored on `from` —
+    /// several at once, a `None` anchor included — and nothing anchored
+    /// elsewhere.
+    #[test]
+    fn rehang_followers_moves_every_row_anchored_on_from() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-3".into(), None, "t0");
+        d.insert_row("new-4".into(), Some("D2".into()), "t0");
+        d.delete_row("D1", "t0");
+        d.rehang_followers(Some("D1"), Some("new-9".into()));
+        fn after(d: &Draft, l: &str) -> Option<String> {
+            match d.row_state(l) {
+                Some(RowEdit::Inserted { after, .. }) => after.clone(),
+                _ => None,
+            }
+        }
+        assert_eq!(after(&d, "new-1").as_deref(), Some("new-9"));
+        assert_eq!(after(&d, "new-2").as_deref(), Some("new-9"));
+        assert_eq!(after(&d, "new-3"), None, "a top row is not anchored on D1");
+        assert_eq!(after(&d, "new-4").as_deref(), Some("D2"));
+        assert!(
+            matches!(d.row_state("D1"), Some(RowEdit::Deleted)),
+            "a deleted row is not a follower"
+        );
+        d.rehang_followers(None, Some("D2".into()));
+        assert_eq!(
+            after(&d, "new-3").as_deref(),
+            Some("D2"),
+            "the top group moves too"
         );
     }
 

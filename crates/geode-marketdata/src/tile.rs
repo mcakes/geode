@@ -2735,7 +2735,11 @@ impl MarketDataTile {
     /// row beside the cursor row and start filling it.
     ///
     /// WHERE it lands is the anchor (controller ruling 2026-09-19). `o`
-    /// anchors on the cursor row itself, document or inserted alike.
+    /// anchors on the cursor row itself, document or inserted alike —
+    /// and a follower that row already had is re-hung onto the new row
+    /// (`Draft::rehang_followers`), so the new row sits IMMEDIATELY below
+    /// the cursor row rather than beside its earlier sibling in label
+    /// order, where a later rename would re-sort the pair on commit.
     /// `shift+o` on a DOCUMENT row anchors on the row painted above it
     /// (`None` at the top) — which may itself be an inserted row; on an
     /// INSERTED row the new row takes that row's own anchor and the row
@@ -2762,8 +2766,12 @@ impl MarketDataTile {
             .draft
             .mint_label(|l| self.model.rows.iter().any(|r| r.label.as_ref() == l));
         // The anchor, and — on `shift+o` over an inserted row — the row
-        // to hang off the new one afterwards.
+        // to hang off the new one afterwards. On `o`, whatever already
+        // hung off the cursor row moves onto the new row FIRST, before
+        // the new row itself is anchored there.
         let (anchor, rehang) = if below {
+            self.draft
+                .rehang_followers(Some(&cursor_label), Some(label.clone()));
             (Some(cursor_label), None)
         } else if self.model.rows[row].state == RowState::Inserted {
             let inherited = match self.draft.row_state(&cursor_label) {
@@ -11371,5 +11379,125 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows_added()), 1);
         assert_eq!(row_labels(&h, &vcx), ["D1", "new-1", "D2"]);
         assert_eq!(h.cell(&vcx, 1, 1), ("2.5000".to_string(), true));
+    }
+
+    /// `o` on a row that already has a direct follower puts the new row
+    /// IMMEDIATELY below it (controller ruling): the existing follower is
+    /// re-hung onto the new row rather than left as a label-ordered
+    /// sibling — `o` on `D1` twice paints `D1, new-2, new-1`, never
+    /// `D1, new-1, new-2`, and a later rename of either cannot re-sort
+    /// the pair on commit.
+    #[gpui::test]
+    fn o_rehangs_the_existing_follower_onto_the_new_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "insert_below", None);
+        draw(&mut vcx);
+        type_keys(&mut vcx, "escape");
+        h.dispatch(&mut vcx, "up", None); // back on D1
+        h.dispatch(&mut vcx, "insert_below", None);
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-2", "new-1", "D2"]);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        let anchors = h.tile.read_with(&vcx, |t, _| {
+            let d = t.draft();
+            let after = |l: &str| match d.row_state(l) {
+                Some(RowEdit::Inserted { after, .. }) => after.clone(),
+                _ => None,
+            };
+            (after("new-2"), after("new-1"))
+        });
+        assert_eq!(
+            anchors,
+            (Some("D1".to_string()), Some("new-2".to_string())),
+            "new-2 hangs off D1 and new-1 was re-hung onto new-2"
+        );
+    }
+
+    /// A `Typed(I64)` axis (the `LADDER` fixture) opens the TEXT row-label
+    /// editor on `o`: a label already present is refused with the editor
+    /// open, a non-integer is refused the same way, a new label commits
+    /// through `parse_attr` → `attr_text` (`" 007 "` names the row `7`)
+    /// and opens the first cell, `up` in the field nudges the integer,
+    /// and `escape` drops the provisional row.
+    #[gpui::test]
+    fn o_on_an_integer_axis_opens_the_text_label_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::LADDER, None);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::ladder_snapshot(&[(100, 0.2), (110, 0.19)])),
+        );
+        assert_eq!(row_labels(&h, &vcx), ["100", "110"]);
+        h.dispatch(&mut vcx, "insert_below", None);
+        draw(&mut vcx);
+        assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.date_field().is_none()),
+            "an integer axis opens no date field"
+        );
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some(""), "seeded blank");
+        assert_eq!(h.mode(&vcx), "insert");
+        assert!(
+            vcx.debug_bounds(Box::leak(
+                format!("marketdata-editor-1-{LABEL_COL}").into_boxed_str()
+            ))
+            .is_some(),
+            "painted in the row-label column"
+        );
+        h.set_editor(&mut vcx, "110");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+        assert_eq!(
+            notice_of(&h, &vcx).as_deref(),
+            Some("'110' is already a row")
+        );
+        h.set_editor(&mut vcx, "abc");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+        assert_eq!(
+            notice_of(&h, &vcx).as_deref(),
+            Some("'abc' is not a whole number")
+        );
+        // The insert-mode arrows nudge the typed integer in place.
+        h.set_editor(&mut vcx, "5");
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("6"));
+        h.dispatch(&mut vcx, "insert_down_big", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("-4"));
+        h.set_editor(&mut vcx, " 007 ");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            row_labels(&h, &vcx),
+            ["100", "7", "110"],
+            "the canonical spelling is the label"
+        );
+        assert!(!h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("·"),
+            "the first cell's editor opened on the renamed row"
+        );
+        assert!(matches!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().row_state("7").cloned()),
+            Some(RowEdit::Inserted { .. })
+        ));
+        h.dispatch(&mut vcx, "cancel", None);
+        h.dispatch(&mut vcx, "insert_below", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows_added()), 2);
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().rows_added()),
+            1,
+            "escape dropped the provisional row"
+        );
+        assert_eq!(row_labels(&h, &vcx), ["100", "7", "110"]);
+        assert_eq!(h.mode(&vcx), "normal");
     }
 }

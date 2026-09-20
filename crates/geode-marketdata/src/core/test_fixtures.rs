@@ -258,3 +258,58 @@ pub(crate) fn schedule_snapshot_with_null_status() -> Snapshot {
         provenance(BASE),
     )
 }
+
+/// A strike ladder (Task 8's review): one row per strike, the row
+/// identity TYPED as an integer — the shape that opens the TEXT row-label
+/// editor on `o` (the shipped specs are `Minted` and `Typed(Date)`, so
+/// without this the `(Text, RowLabel)` commit arm and `nudge`'s
+/// `RowLabel` arm had no fixture). One `F64` value column at the
+/// schedule's own four-place format.
+pub(crate) const LADDER: PanelSpec = PanelSpec {
+    kind: "ladder",
+    title: "Strike ladder",
+    dataset: "strike_ladder",
+    document: "strike_ladder",
+    rows: RowAxis {
+        column: "strike",
+        identity: RowIdentity::Typed(ColumnType::I64),
+    },
+    columns: Columns::Values(&[ValueColumn {
+        column: "vol",
+        label: "vol",
+        ty: ColumnType::F64,
+        format: SCHEDULE_AMOUNT_FORMAT,
+        choices: None,
+        required: true,
+    }]),
+    header: &[],
+    slice_values: &[],
+    value_type: ColumnType::F64,
+    format: ColumnFormat::MEASURE,
+    actions: &[],
+};
+
+/// A [`LADDER`] document: `(strike, vol)` per row, the strike a real
+/// `Int64` column so the row label is read through the integer path
+/// (`label_at`'s `f64_at` fallback spells `100`, never `100.0`).
+pub(crate) fn ladder_snapshot(rows: &[(i64, f64)]) -> Snapshot {
+    let n = rows.len();
+    Snapshot::for_tests_with_provenance(
+        vec![
+            (
+                meta("underlying_ref", Attribution::Additive),
+                TestColumn::Dict(vec![Some("SPX.Z".into()); n]),
+            ),
+            (
+                meta("strike", Attribution::Additive),
+                TestColumn::I64(rows.iter().map(|r| r.0).collect()),
+            ),
+            (
+                meta("vol", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(rows.iter().map(|r| Some(r.1)).collect()),
+            ),
+        ],
+        0,
+        provenance(BASE),
+    )
+}

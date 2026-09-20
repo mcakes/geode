@@ -13794,9 +13794,33 @@ run_mutation "tile: escape drops a provisional row" \
 # `d d` that was meant to take one row out of the middle of it.
 run_mutation "draft: dropping an inserted row hands its followers to its anchor" \
   crates/geode-marketdata/src/core/draft.rs \
-  '                        *anchor = after.clone();' \
-  '                        *anchor = Some(label.to_string());' \
+  '                self.rehang_followers(Some(label), after);' \
+  '                self.rehang_followers(Some(label), Some(label.to_string()));' \
   geode-marketdata dropping_an_inserted_row_hands_its_followers_to_its_anchor
+
+# `o` on a row that already has a follower re-hangs that follower onto
+# the NEW row (Task 8's review), so the new row sits immediately below
+# the cursor row. Mutated away, the two hang off the same anchor as
+# siblings and label order paints `D1, new-1, new-2` — the new row one
+# below where it was asked for, and a later rename of either re-sorts
+# the pair on commit.
+run_mutation "tile: o re-hangs the existing follower onto the new row" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.draft
+                .rehang_followers(Some(&cursor_label), Some(label.clone()));' \
+  '            let _ = &label;' \
+  geode-marketdata o_rehangs_the_existing_follower_onto_the_new_row
+
+# A typed text label is the CANONICAL spelling of what was parsed
+# (`parse_attr` → `attr_text`), never the trimmed text as typed. Mutated
+# to keep the text, `" 007 "` on an integer axis names the row `007`
+# rather than `7` — a label the document itself would spell `7`, so the
+# same strike would exist twice under two spellings.
+run_mutation "tile: a typed text label commits through parse_attr" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    Ok(value) => attr_text(&value),' \
+  '                    Ok(_) => text.trim().to_string(),' \
+  geode-marketdata o_on_an_integer_axis_opens_the_text_label_editor
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
