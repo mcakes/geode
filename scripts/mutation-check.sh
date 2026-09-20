@@ -14755,6 +14755,22 @@ run_mutation "pricer storage: an empty sheet publishes a zero-row document" \
   '    let n = sheet.len();' \
   geode-pricer an_empty_sheet_has_no_document
 
+run_mutation "pricer storage: legs need not follow their package" \
+  crates/geode-pricer/src/core/storage.rs \
+  '            let follows = records
+                .last()
+                .is_some_and(|prev| prev.id == pid || prev.parent == Some(pid));' \
+  '            let follows = true;' \
+  geode-pricer a_hostile_document_is_refused_with_a_reason
+
+run_mutation "pricer shorthand: a template quantity overflows silently" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '                qty: qty
+                    .checked_mul(l.weight)
+                    .ok_or_else(|| err(qty_offset, "quantity out of range"))?,' \
+  '                qty: qty.wrapping_mul(l.weight),' \
+  geode-pricer every_error_names_the_offending_offset
+
 # The document family's numeric-only VALUE-column rule exempts a `local`
 # dataset (the pricer's sheets store enumerable text per row); this pins
 # the exemption's own boundary — a bool/timestamp value still drops.

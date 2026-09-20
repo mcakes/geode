@@ -542,7 +542,9 @@ role = "value"
 # document-level attributes, constant within one sheet:
 #   view utf8; sheet_spot_shift_own i64; sheet_spot_shift f64;
 #   sheet_vol_shift_own i64; sheet_vol_shift f64; refresh utf8
-#   ("" | 30s | off) — each declared as
+#   ("" | 30s | 500ms | off); spot_overrides utf8
+#   ("" | UND=LEVEL;UND=LEVEL) (Part 2, planning decision 6)
+#   — each declared as
 [pricer_sheets.columns.view]
 type = "utf8"
 role = "attribute"
@@ -1037,24 +1039,30 @@ the fifteen decisions above:
   rather than kept behind `allow(dead_code)`; no `allow(dead_code)`
   remains in the crate. The parser checks the expiry count BEFORE the
   strike count for a template (so `SPX DEC26/MAR27 5000 CS` points at
-  the expiries token), and classifies a trailing token after `C`/`P`
-  as a barrier kind only when it parses as one or a level token
-  follows it (so `... C extra` is "unexpected token").
+  the expiries token). A trailing token after `C`/`P` is a barrier
+  kind if and ONLY if it parses as `UI`/`UO`/`DI`/`DO`; what follows
+  it changes only the error MESSAGE, never the classification — with
+  another token after it the error is `'X' is not a barrier kind (UI
+  UO DI DO)` (it reads as a mistyped `BARRIER level` pair), alone it
+  is `unexpected token 'X'`.
 
-Twelve harness entries cover it: the eleven named in §12 above (an
-old revision's delivery, a package's signed sum, a failed leg's sum,
-undo of a remove, an inherited sheet shift, `SetQty`'s untouched
+Fourteen harness entries cover it: the eleven the Part 2 plan named
+(an old revision's delivery, a package's signed sum, a failed leg's
+sum, undo of a remove, an inherited sheet shift, `SetQty`'s untouched
 request, a spot override's stale sweep, `Group`'s contiguous-roots
 check, the third-Friday resolution, the unknown-column diagnostic's
-severity, and the empty-sheet storage refusal), plus a twelfth in
-`geode-core` pinning the `local` VALUE-column exemption's own
-boundary (a bool/timestamp value still drops).
+severity, and the empty-sheet storage refusal), one in `geode-core`
+pinning the `local` VALUE-column exemption's own boundary (a
+bool/timestamp value still drops), and two from the final review's
+fixes (a template quantity overflowing silently, and legs that need
+not follow their package contiguously).
 
 `cargo bench -p geode-pricer` at 1,000 lines (criterion medians,
 `bae830d`): `parse_1000_lines` 270 µs; `apply_undo_sheet_shift_1000`
 1.52 ms; `apply_undo_set_instrument_1000` 6.66 µs;
-`to_rows_from_rows_1000` 1.14 ms — all under the 8 ms budget.
-`docs/perf.md` has the full conditions.
+`to_rows_from_rows_1000` 1.14 ms; `deliver_all_1000` 175 µs — all
+under the 8 ms budget. `docs/perf.md` has
+the full conditions.
 
 Deferred minors, none blocking: the row-exists-and-is-line guard is
 triplicated across the three cell edits; `from_rows` validates a
