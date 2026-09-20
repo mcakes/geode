@@ -2533,6 +2533,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-chart"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "geode-core",
+ "geode-shell",
+ "gpui-component",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "proptest",
+]
+
+[[package]]
 name = "geode-core"
 version = "0.1.0"
 dependencies = [
