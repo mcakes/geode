@@ -14,6 +14,8 @@ use std::str::FromStr;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 
+use crate::config::{Config, Diagnostic, Severity};
+
 /// A local time that does not exist or is ambiguous (a DST gap or overlap).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClockError {
@@ -156,6 +158,68 @@ impl Clock {
     pub fn abbreviation(&self, t: DateTime<Utc>) -> String {
         self.local(t).format("%Z").to_string()
     }
+
+    /// Resolve the clock from the layered config: doc `app`, keys
+    /// `time.zone` (IANA name; absent = the machine's zone), `time.sod`
+    /// and `time.eod` (`HH:MM`; absent = 08:00 / 18:00). A value that
+    /// does not parse is an ERROR diagnostic at `time.<key>` and that
+    /// key's default — the same shape every other refused config key
+    /// takes. The machine zone being unreadable is a WARNING at
+    /// `time.zone` and UTC.
+    pub fn from_config(config: &Config) -> (Clock, Vec<Diagnostic>) {
+        let mut diags = Vec::new();
+        let diag = |severity: Severity, key: &str, message: String| Diagnostic {
+            severity,
+            layer: config.explain("app", &format!("time.{key}")),
+            file: None,
+            message: format!("app: time.{key}: {message}"),
+            path: Some(format!("time.{key}")),
+        };
+        let zone_value = config.get("app", "time.zone").and_then(|v| v.as_str());
+        let mut clock = match zone_value {
+            Some(name) => match Tz::from_str(name) {
+                Ok(zone) => Clock::in_zone(zone),
+                Err(_) => {
+                    diags.push(diag(
+                        Severity::Error,
+                        "zone",
+                        format!("'{name}' is not an IANA zone name (e.g. \"America/New_York\") — using the machine's zone"),
+                    ));
+                    Clock::machine().0
+                }
+            },
+            None => {
+                let (machine, warning) = Clock::machine();
+                if let Some(w) = warning {
+                    diags.push(diag(Severity::Warning, "zone", w));
+                }
+                machine
+            }
+        };
+        for (key, slot, default) in [
+            ("sod", &mut clock.sod, Clock::DEFAULT_SOD),
+            ("eod", &mut clock.eod, Clock::DEFAULT_EOD),
+        ] {
+            *slot = default;
+            if let Some(v) = config.get("app", &format!("time.{key}")) {
+                match v
+                    .as_str()
+                    .and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok())
+                {
+                    Some(t) => *slot = t,
+                    None => diags.push(diag(
+                        Severity::Error,
+                        key,
+                        format!(
+                            "expected \"HH:MM\", got {v} — using {}",
+                            default.format("%H:%M")
+                        ),
+                    )),
+                }
+            }
+        }
+        (clock, diags)
+    }
 }
 
 /// Walk `n` business days back from `date`, weekends skipped (spec §2
@@ -180,6 +244,7 @@ pub fn business_days_back(date: NaiveDate, n: u32) -> NaiveDate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_support::config_from;
     use chrono::TimeZone;
     use chrono_tz::America::New_York;
     use chrono_tz::Europe::London;
@@ -280,5 +345,40 @@ mod tests {
         assert_eq!(Clock::utc().zone_name(), "UTC");
         assert_eq!(Clock::utc().sod, Clock::DEFAULT_SOD);
         assert_eq!(Clock::utc().eod, Clock::DEFAULT_EOD);
+    }
+
+    #[test]
+    fn from_config_reads_the_three_keys_and_defaults_the_absent_ones() {
+        let cfg = config_from("app", "[time]\nzone = \"Europe/London\"\neod = \"17:30\"\n");
+        let (clock, diags) = Clock::from_config(&cfg);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(clock.zone_name(), "Europe/London");
+        assert_eq!(clock.sod, Clock::DEFAULT_SOD);
+        assert_eq!(clock.eod, hm(17, 30));
+    }
+
+    #[test]
+    fn a_bad_zone_or_time_is_an_error_at_its_key_and_the_default_applies() {
+        let cfg = config_from("app", "[time]\nzone = \"Mars/Olympus\"\nsod = \"eight\"\n");
+        let (clock, diags) = Clock::from_config(&cfg);
+        assert_eq!(diags.len(), 2);
+        assert!(diags.iter().all(|d| d.severity == Severity::Error));
+        assert_eq!(diags[0].path.as_deref(), Some("time.zone"));
+        assert_eq!(diags[1].path.as_deref(), Some("time.sod"));
+        assert_eq!(
+            clock.zone_name(),
+            Clock::machine().0.zone_name(),
+            "the machine's zone"
+        );
+        assert_eq!(clock.sod, Clock::DEFAULT_SOD);
+    }
+
+    #[test]
+    fn an_absent_section_is_the_machine_clock() {
+        let cfg = config_from("app", "config_version = 1\n");
+        let (clock, diags) = Clock::from_config(&cfg);
+        let (machine, warning) = Clock::machine();
+        assert_eq!(clock, machine);
+        assert_eq!(diags.len(), usize::from(warning.is_some()));
     }
 }
