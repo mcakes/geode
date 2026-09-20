@@ -1863,6 +1863,35 @@ role = "attribute"
         assert_eq!(ds.column("param").unwrap().ty, ColumnType::Utf8);
     }
 
+    /// The exemption above is "share the axis/attribute type set", not
+    /// "any type whatsoever": `bool`/`timestamp` still have no
+    /// `document::Value` variant to parse into and are refused the same
+    /// way an axis or attribute of either type is
+    /// (`a_document_axis_or_attribute_of_an_unsupported_type_is_refused`).
+    #[test]
+    fn a_local_documents_value_column_of_an_unsupported_type_is_still_dropped() {
+        let text =
+            CVI.replacen(
+                "family = \"document\"",
+                "family = \"document\"\nlocal = true",
+                1,
+            )
+            .replace(
+                "[cvi_params.columns.param]\ntype = \"f64\"",
+                "[cvi_params.columns.param]\ntype = \"utf8\"",
+            ) + "\n[cvi_params.columns.flag]\ntype = \"bool\"\nrole = \"value\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("cvi_params").expect("dataset kept");
+        assert!(ds.local);
+        assert!(ds.column("flag").is_none(), "a bool value is dropped");
+        assert_eq!(
+            ds.column("param").unwrap().ty,
+            ColumnType::Utf8,
+            "the sibling utf8 value column survives"
+        );
+        error_with_path(&diags, "datasets.cvi_params.columns.flag.type");
+    }
+
     #[test]
     fn a_document_dataset_declares_at_least_one_value() {
         let (schema, diags) = cvi_with(
