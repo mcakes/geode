@@ -1095,7 +1095,8 @@ mod tests {
     use super::*;
     use crate::core::draft::{Draft, DraftState};
     use crate::core::spec::{
-        CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, SliceValue, ValueColumn,
+        CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, SliceValue,
+        ValueColumn,
     };
     use crate::core::test_fixtures::{
         SCHEDULE, date, schedule_snapshot, schedule_snapshot_with_extra_value,
@@ -1643,6 +1644,7 @@ mod tests {
         rows: RowAxis {
             column: "ex_date",
             identity: RowIdentity::Typed(ColumnType::Date),
+            label: RowLabel::Shown,
         },
         columns: Columns::Values(&[
             ValueColumn {
@@ -1812,6 +1814,7 @@ mod tests {
             rows: RowAxis {
                 column: "ex_date",
                 identity: RowIdentity::Typed(ColumnType::Date),
+                label: RowLabel::Shown,
             },
             columns: Columns::Axis("currency"),
             header: &[],

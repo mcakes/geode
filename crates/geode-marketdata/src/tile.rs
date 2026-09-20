@@ -692,10 +692,11 @@ impl MarketDataTile {
                         // thread.
                         this.changed(cx);
                     }
-                    this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)
+                    let col = this.table.read(cx).delegate().model_col(*col);
+                    this.cursor_to(*row, col, cx)
                 }
                 TableEvent::DoubleClickedCell(row, col) => {
-                    if let Some(col) = MatrixDelegate::model_col(*col) {
+                    if let Some(col) = this.table.read(cx).delegate().model_col(*col) {
                         this.cursor_to(*row, Some(col), cx);
                         this.begin_edit(window, cx);
                         // `dispatch`'s own tail: the delegate paints the
@@ -1444,7 +1445,8 @@ impl MarketDataTile {
                 d.cursor = Some((row, col));
                 d.editor = editor;
                 d.choice = choice;
-                t.set_selected_col(MatrixDelegate::table_col(col), cx);
+                let table_col = d.table_col(col);
+                t.set_selected_col(table_col, cx);
                 t.set_selected_row(row, cx);
                 t.scroll_to_row(row, cx);
             }),
@@ -3574,12 +3576,15 @@ impl MarketDataTile {
                 Some(match what {
                     Yank::Cell => row.cells.get(c)?.text.to_string(),
                     Yank::Row => {
-                        let mut out = row.label.to_string();
-                        for cell in &row.cells {
-                            out.push('\t');
-                            out.push_str(&cell.text);
-                        }
-                        out
+                        // The copied line is what the trader SEES: the
+                        // label leads it only where the label column is
+                        // painted (`RowLabel::Shown`).
+                        let label = self.spec.rows.shown().then(|| row.label.as_ref());
+                        label
+                            .into_iter()
+                            .chain(row.cells.iter().map(|cell| cell.text.as_ref()))
+                            .collect::<Vec<_>>()
+                            .join("\t")
                     }
                     Yank::Col => self
                         .model
@@ -3602,12 +3607,30 @@ impl MarketDataTile {
         }
     }
 
+    /// What `/` searches, one string per row: the row label where it is
+    /// painted (`RowLabel::Shown`), the row's painted cell texts joined
+    /// where it is not — a trader can only look for what they can see,
+    /// and a hidden `dividend_id` is not that.
     fn row_labels(&self) -> Vec<String> {
-        self.model
-            .rows
-            .iter()
-            .map(|r| r.label.to_string())
-            .collect()
+        if self.spec.rows.shown() {
+            self.model
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()
+        } else {
+            self.model
+                .rows
+                .iter()
+                .map(|r| {
+                    r.cells
+                        .iter()
+                        .map(|c| c.text.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect()
+        }
     }
 
     /// `/` (spec §6.1's own example of a shell-owned door the popup must
@@ -4459,7 +4482,7 @@ mod tests {
     use crate::commands;
     use crate::content::MarketDataFactory;
     use crate::core::draft::RowEdit;
-    use crate::core::spec::{RowAxis, RowIdentity, ValueColumn};
+    use crate::core::spec::{RowAxis, RowIdentity, RowLabel, ValueColumn};
     use crate::core::test_fixtures;
     use crate::core::{CVI, DraftState};
     use crate::delegate::LABEL_COL;
@@ -6448,10 +6471,7 @@ mod tests {
         h.dispatch(&mut vcx, "bottom", None);
         assert_eq!(
             h.selection(&vcx),
-            (
-                Some(terms.len() - 1),
-                Some(MatrixDelegate::table_col(SLICE + 2))
-            ),
+            (Some(terms.len() - 1), Some(LABEL_COL + 1 + SLICE + 2)),
             "G moves the table's selected row, which is what scrolls it into view"
         );
     }
@@ -7501,6 +7521,7 @@ deleted = true
         rows: RowAxis {
             column: "dividend_id",
             identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
         columns: Columns::Values(&[ValueColumn {
             column: "note",
@@ -7528,6 +7549,7 @@ deleted = true
         rows: RowAxis {
             column: "dividend_id",
             identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
         columns: Columns::Values(&[ValueColumn {
             column: "note",
@@ -8066,6 +8088,7 @@ deleted = true
         rows: RowAxis {
             column: "dividend_id",
             identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
         columns: Columns::Values(&[ValueColumn {
             column: "units",
@@ -11137,6 +11160,68 @@ edits = [["2026-11-20", "-1", 9.5]]
     /// `new-1`'s anchor, `new-1` re-anchors onto it — controller ruling);
     /// `d d` on the inserted row drops it outright, on a document row
     /// marks it `Deleted`, and a second `d d` there says so.
+    /// A hidden row label (user ruling 2026-09-20): the table carries no
+    /// label column, so table column 0 is the first value column; `yy`
+    /// yanks the cells alone; `/` searches the painted cells rather than
+    /// the id nobody can see; `o` still mints an id for the draft and
+    /// lands the cursor on the first cell.
+    #[gpui::test]
+    fn a_hidden_row_label_withholds_the_label_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::HIDDEN_SCHEDULE, None);
+        h.with_flat_document(&mut vcx);
+        assert_eq!(h.columns(&vcx), 3, "ex, amount, status — no label column");
+        assert_eq!(
+            h.headers(&vcx),
+            vec!["ex", "amount", "status"],
+            "the first header is the first VALUE column, not the row axis"
+        );
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-cell-0-0").is_some(),
+            "table column 0 is painted"
+        );
+        assert!(
+            vcx.debug_bounds("marketdata-th-3").is_none(),
+            "no fourth header"
+        );
+        // The cell at table column 0 is the FIRST VALUE (ex date), not an id.
+        h.dispatch(&mut vcx, "yank", None);
+        assert_eq!(clipboard(&mut vcx).as_deref(), Some("2026-12-18"));
+        h.dispatch(&mut vcx, "yank_row", None);
+        assert_eq!(
+            clipboard(&mut vcx).as_deref(),
+            Some("2026-12-18\t1.2500\tdeclared"),
+            "the row is its cells alone, no id"
+        );
+        // `/` matches the painted cells (a status, a date), never the id.
+        vcx.update(|window, cx| {
+            h.content
+                .find(FindEvent::Changed("estimated".into()), window, cx)
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 },
+            "the second row's status matched"
+        );
+        vcx.update(|window, cx| h.content.find(FindEvent::Cancelled, window, cx));
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("D2".into()), window, cx));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 0 },
+            "the hidden id is not searchable"
+        );
+        vcx.update(|window, cx| h.content.find(FindEvent::Cancelled, window, cx));
+        // `o` mints the id for the draft and lands on the first cell.
+        h.dispatch(&mut vcx, "insert_below", None);
+        vcx.run_until_parked();
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-1", "D2"]);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()));
+    }
+
     #[gpui::test]
     fn o_inserts_a_minted_row_and_dd_deletes(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);

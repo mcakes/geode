@@ -28,7 +28,7 @@ use geode_core::view::ColumnFormat;
 use geode_marketdata::core::draft::Draft;
 use geode_marketdata::core::matrix::MatrixModel;
 use geode_marketdata::core::spec::{
-    CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, ValueColumn,
+    CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn,
 };
 use std::hint::black_box;
 
@@ -140,6 +140,7 @@ const SCHEDULE: PanelSpec = PanelSpec {
     rows: RowAxis {
         column: "ex_date",
         identity: RowIdentity::Typed(ColumnType::Date),
+        label: RowLabel::Shown,
     },
     columns: Columns::Values(&[
         ValueColumn {
