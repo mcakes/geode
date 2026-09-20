@@ -568,10 +568,23 @@ pub mod dividend {
     const MIN_WALK_STEP: f64 = 0.001;
     const MIN_AMOUNT: f64 = 0.01;
 
-    /// A row is a candidate for the one-per-republish promotion only
-    /// while its `ex_date` is this close to `today` — the "near" half of
-    /// the brief's "past → paid, near → declared, far → estimated" rule.
+    /// A row is created `declared` rather than `estimated` once its
+    /// `ex_date` is this close to `today` — the "near" half of the
+    /// brief's "past → paid, near → declared, far → estimated" rule,
+    /// applied in full at creation (review ruling, 2026-09-19: an
+    /// earlier build deferred this case to `republish`'s promotion
+    /// step, which left an index schedule's near-dated rows reading
+    /// `estimated` on the very first document — the reading a fresh
+    /// panel actually sees).
     const NEAR_DAYS: i64 = 30;
+
+    /// Every third republish promotes the nearest-dated `estimated` row
+    /// to `declared` (review ruling, 2026-09-19) — since creation now
+    /// applies the full three-way status rule, every row that starts
+    /// life `estimated` is already further than `NEAR_DAYS` from
+    /// `today`; this is the one way any of those far-out rows ever
+    /// moves, distance from `today` notwithstanding.
+    const PROMOTE_EVERY: u32 = 3;
 
     /// Every fifth republish appends one new row to the schedule (Task
     /// 10 brief) — the upstream-insert-under-a-draft case the design
@@ -585,7 +598,11 @@ pub mod dividend {
     /// and its slowly-drifting state (`amount`, `status`) — a
     /// republish either leaves a row untouched or nudges it by one small
     /// step; nothing here is ever regenerated, so an id and its dates
-    /// are stable for the life of the generator.
+    /// are stable for the life of the generator. `status` alone is
+    /// authoritative for "is this row cancelled": once set to
+    /// `"cancelled"` at creation it is never read as `"estimated"` by
+    /// `promote_nearest_estimated`'s `status == "estimated"` filter, so
+    /// there is no separate `cancelled` flag to keep in sync with it.
     struct Row {
         /// This row's position in creation order for its key — the
         /// `<n>` half of its id (`D<hash>-<n>`), assigned once and never
@@ -597,10 +614,6 @@ pub mod dividend {
         pay_date: NaiveDate,
         amount: f64,
         status: String,
-        /// Drawn once at creation: a cancelled row's status never
-        /// changes again, promotion included, however close its
-        /// `ex_date` sits to `today`.
-        cancelled: bool,
     }
 
     /// One seeded walk step of at most `MAX_WALK_STEP`, floored at
@@ -617,12 +630,14 @@ pub mod dividend {
     /// A freshly drawn row for `ex_date`: `announced_date` 30–60 days
     /// before it, `pay_date` 14–28 days after it (Task 10 brief), an
     /// amount in a plausible per-share range, a one-in-twenty chance of
-    /// being cancelled outright, and otherwise `paid` if `ex_date` has
-    /// already passed `today` or `estimated` if it has not — the
-    /// "near → declared" half of the brief's status rule is not applied
-    /// here; it is what `republish`'s promotion step exists to do; a row
-    /// created near-term still starts life as a still-being-firmed-up
-    /// `estimated`, the same as any other future row.
+    /// being cancelled outright, and otherwise the full three-way date
+    /// rule — `paid` if `ex_date` has already passed `today`, `declared`
+    /// if it is within `NEAR_DAYS`, else `estimated` — applied here in
+    /// full (review ruling, 2026-09-19) so a schedule's first document
+    /// is honest about every row's status from the start; a fresh panel
+    /// must never see `estimated` on a row the rule already calls
+    /// `declared`. `republish`'s promotion step handles only what this
+    /// static rule cannot: a far-out `estimated` row's eventual move.
     fn new_row(rng: &mut StdRng, ordinal: usize, today: NaiveDate, ex_date: NaiveDate) -> Row {
         let announced_date = ex_date - Days::new(rng.random_range(30..=60));
         let pay_date = ex_date + Days::new(rng.random_range(14..=28));
@@ -632,6 +647,8 @@ pub mod dividend {
             "cancelled"
         } else if ex_date < today {
             "paid"
+        } else if (ex_date - today).num_days() <= NEAR_DAYS {
+            "declared"
         } else {
             "estimated"
         }
@@ -643,7 +660,6 @@ pub mod dividend {
             pay_date,
             amount,
             status,
-            cancelled,
         }
     }
 
@@ -735,12 +751,12 @@ pub mod dividend {
         rows
     }
 
-    /// One republish for a key already seeded: walks one or two
-    /// amounts and promotes at most one near-term `estimated` row to
-    /// `declared`. Appending a row is a separate, caller-driven step
-    /// (`append_row`) — it depends on a republish *count* kept per key,
-    /// not on anything this one walk step alone can see.
-    fn republish(rng: &mut StdRng, today: NaiveDate, rows: &mut [Row]) {
+    /// Every republish walks one or two amounts by one seeded step each
+    /// — the one thing every republish does, independent of the
+    /// per-count decisions (`promote_nearest_estimated`, `append_row`)
+    /// `next_document` layers on top by comparing its own republish
+    /// count against `PROMOTE_EVERY`/`APPEND_EVERY`.
+    fn walk_amounts(rng: &mut StdRng, rows: &mut [Row]) {
         let n = if rows.len() >= 2 && rng.random_bool(0.5) {
             2
         } else {
@@ -749,17 +765,20 @@ pub mod dividend {
         for i in distinct_indices(rng, n, rows.len()) {
             rows[i].amount = walk_amount(rng, rows[i].amount);
         }
+    }
 
-        // Promote the single nearest-dated `estimated`, non-cancelled
-        // row still outside 30 days of `today` — never more than one
-        // per republish, mirroring the brief's "promotes one".
+    /// Promotes the nearest-dated `estimated` row to `declared`,
+    /// whatever its distance from `today` (review ruling, 2026-09-19).
+    /// Since `new_row` now applies the full three-way status rule at
+    /// creation, every row reading `estimated` by the time this runs is
+    /// already further than `NEAR_DAYS` out — a cancelled row is never a
+    /// candidate, since its status is always `cancelled`, never
+    /// `estimated`, from the moment it is drawn. A no-op once a
+    /// schedule has no `estimated` rows left.
+    fn promote_nearest_estimated(rows: &mut [Row]) {
         if let Some(row) = rows
             .iter_mut()
-            .filter(|r| {
-                !r.cancelled
-                    && r.status == "estimated"
-                    && (r.ex_date - today).num_days() <= NEAR_DAYS
-            })
+            .filter(|r| r.status == "estimated")
             .min_by_key(|r| r.ex_date)
         {
             row.status = "declared".to_string();
@@ -840,7 +859,8 @@ pub mod dividend {
         rngs: HashMap<String, StdRng>,
         /// Republishes served for this key so far (the very first,
         /// schedule-building call does not count) — compared against
-        /// `APPEND_EVERY` to decide whether this call also appends.
+        /// `PROMOTE_EVERY`/`APPEND_EVERY` to decide whether this call
+        /// also promotes/appends.
         republishes: HashMap<String, u32>,
     }
 
@@ -865,8 +885,9 @@ pub mod dividend {
         }
 
         /// The next document for `key`: a freshly built schedule on the
-        /// first call, or the existing one walked (and, every fifth
-        /// republish, extended) on every call after.
+        /// first call, or the existing one walked (and, every third
+        /// republish promoted, every fifth extended) on every call
+        /// after.
         pub fn next_document(&mut self, key: &str) -> DocumentRows {
             if !self.rows.contains_key(key) {
                 // First call for this key: seed its own RNG from a
@@ -887,13 +908,20 @@ pub mod dividend {
                     .rows
                     .get_mut(key)
                     .expect("checked present by the branch above");
-                republish(rng, self.today, rows);
                 let count = self
                     .republishes
                     .get_mut(key)
                     .expect("seeded alongside the schedule");
                 *count += 1;
-                if count.is_multiple_of(APPEND_EVERY) {
+                let n = *count;
+                // The walk happens on every republish; promotion and
+                // appending are separate, count-gated decisions layered
+                // on top (review ruling, 2026-09-19 — see `PROMOTE_EVERY`).
+                walk_amounts(rng, rows);
+                if n.is_multiple_of(PROMOTE_EVERY) {
+                    promote_nearest_estimated(rows);
+                }
+                if n.is_multiple_of(APPEND_EVERY) {
                     append_row(rng, self.today, rows);
                 }
             }
@@ -1029,6 +1057,121 @@ pub mod dividend {
                     }
                 }
             }
+        }
+
+        /// Review ruling (2026-09-19): creation applies the full
+        /// three-way status rule, not just past → `paid`, so a row
+        /// within 30 days of `today` must already read `declared` — and
+        /// a past row `paid` — on the very first document, before any
+        /// republish ever runs. `cancelled` is a one-in-twenty override
+        /// independent of the date rule, so it is accepted wherever
+        /// `declared`/`paid` would otherwise be expected; the one thing
+        /// this test must never see in either bucket is `estimated`,
+        /// which is exactly the bug the ruling fixed (an index
+        /// schedule's near-dated row used to read `estimated` on its
+        /// first document, the reading a freshly opened panel sees).
+        #[test]
+        fn near_rows_are_declared_on_the_first_document() {
+            let mut g = DividendGenerator::new(1, underlyings(), today());
+            let doc = g.next_document("SPX");
+            let ex_dates = ex_dates_of(&doc);
+            let statuses = statuses_of(&doc);
+
+            let mut saw_past = false;
+            let mut saw_near = false;
+            for (ex, status) in ex_dates.iter().zip(statuses.iter()) {
+                let days = (*ex - today()).num_days();
+                // A row further out than NEAR_DAYS is correctly
+                // "estimated" — only the past-or-near window is this
+                // test's concern (a row beyond it deliberately keeps no
+                // assertion here).
+                if *ex < today() {
+                    saw_past = true;
+                    assert!(
+                        status == "paid" || status == "cancelled",
+                        "past row {ex} should read paid (or cancelled), got {status}"
+                    );
+                } else if days <= NEAR_DAYS {
+                    saw_near = true;
+                    assert!(
+                        status == "declared" || status == "cancelled",
+                        "near row {ex} ({days}d) should read declared \
+                         (or cancelled), got {status}"
+                    );
+                }
+            }
+            assert!(saw_past, "expected at least one past row for this seed/key");
+            assert!(
+                saw_near,
+                "expected at least one row within 30 days of today for this seed/key"
+            );
+        }
+
+        /// Review ruling (2026-09-19): every third republish promotes
+        /// the single nearest-dated `estimated` row to `declared` —
+        /// compares the document from the second republish (before
+        /// promotion) against the third's (where it fires) and checks
+        /// that exactly one row's status changed, that it changed from
+        /// `estimated` to `declared`, and that it is the row the second
+        /// document's own nearest-dated `estimated` row names — never
+        /// merely "some row changed".
+        #[test]
+        fn the_third_republish_promotes_the_nearest_estimated_row() {
+            let mut g = DividendGenerator::new(21, underlyings(), today());
+            g.next_document("XYZ"); // creation
+            g.next_document("XYZ"); // republish 1
+            let second = g.next_document("XYZ"); // republish 2 (no promotion yet)
+            let third = g.next_document("XYZ"); // republish 3 (promotes)
+
+            let second_ids = ids_of(&second);
+            let second_ex_dates = ex_dates_of(&second);
+            let second_statuses = statuses_of(&second);
+            let third_ids = ids_of(&third);
+            let third_statuses = statuses_of(&third);
+
+            let second_map: HashMap<&str, &str> = second_ids
+                .iter()
+                .map(String::as_str)
+                .zip(second_statuses.iter().map(String::as_str))
+                .collect();
+            let third_map: HashMap<&str, &str> = third_ids
+                .iter()
+                .map(String::as_str)
+                .zip(third_statuses.iter().map(String::as_str))
+                .collect();
+            assert_eq!(
+                second_map.len(),
+                third_map.len(),
+                "no append should land between the second and third republish \
+                 (PROMOTE_EVERY and APPEND_EVERY never coincide this early)"
+            );
+
+            let changed: Vec<&str> = third_map
+                .iter()
+                .filter(|(id, status)| second_map.get(*id) != Some(*status))
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(
+                changed.len(),
+                1,
+                "expected exactly one status change on the third republish, got {changed:?}"
+            );
+            let changed_id = changed[0];
+            assert_eq!(second_map[changed_id], "estimated");
+            assert_eq!(third_map[changed_id], "declared");
+
+            let expected_id = second_ids
+                .iter()
+                .zip(second_ex_dates.iter())
+                .zip(second_statuses.iter())
+                .filter(|(_, status)| *status == "estimated")
+                .min_by_key(|((_, ex), _)| **ex)
+                .map(|((id, _), _)| id.as_str())
+                .expect("expected at least one estimated row left to promote for this seed/key");
+            assert_eq!(
+                changed_id, expected_id,
+                "the promoted row must be the nearest-dated estimated row, not just any of them"
+            );
         }
     }
 }

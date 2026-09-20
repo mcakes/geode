@@ -9513,6 +9513,19 @@ run_mutation "demo dividend: an index schedule carries same-day pairs" \
   '            let pairs = 0;' \
   geode-demo-data an_index_schedule_has_same_day_pairs
 
+# demo dividend: creation applies the full three-way status rule (past
+# -> paid, within 30 days -> declared, else estimated), not just
+# past-vs-not (review ruling, 2026-09-19) — a schedule's first document
+# must never show `estimated` on a row within the window. Collapsing
+# the threshold to zero widens "far" to swallow every row that isn't
+# exactly today, so a near-dated row reads `estimated` again — exactly
+# the bug the ruling fixed.
+run_mutation "demo dividend: a near row is declared on the first document" \
+  crates/geode-demo-data/src/documents.rs \
+  '    const NEAR_DAYS: i64 = 30;' \
+  '    const NEAR_DAYS: i64 = 0;' \
+  geode-demo-data near_rows_are_declared_on_the_first_document
+
 # ---- sources.toml grows an adapter (market-data-documents plan, Task 5) ----
 
 # A subscribed source (`adapter != "csv_dir"`) with no `topics` is
