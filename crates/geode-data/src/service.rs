@@ -1524,10 +1524,40 @@ impl DataService {
         }))
     }
 
-    /// The line pricer's batch (spec §5.3). `false` when the worker's
-    /// bounded queue refused it.
-    pub fn price(&self, params: PriceParams) -> bool {
-        self.pricing.request(params)
+    /// The line pricer's batch (spec §5.3). A batch the worker's own
+    /// bounded queue refuses is answered here, not dropped: every line
+    /// captured before `params` moves into `PricingWorker::request`
+    /// (which consumes it) so a refused batch still gets an outcome — a
+    /// tile must never sit waiting on a batch that will not come.
+    pub fn price(&self, params: PriceParams) {
+        let key = params.key;
+        let tag = params.tag;
+        let submitted = params.submitted;
+        let lines: Vec<(u64, u64)> = params.lines.iter().map(|l| (l.id, l.revision)).collect();
+        if self.pricing.request(params) {
+            return;
+        }
+        tracing::warn!(
+            target: "geode::pricing",
+            "the pricing queue is full; batch for key {} tag {tag} was refused",
+            key.0
+        );
+        let results = lines
+            .into_iter()
+            .map(|(id, revision)| {
+                (
+                    id,
+                    revision,
+                    Err("the pricing queue is full; resubmit".to_string()),
+                )
+            })
+            .collect();
+        let _ = (self.sink)(DataEvent::Price(PriceOutcome {
+            key,
+            tag,
+            submitted,
+            results,
+        }));
     }
 
     /// Publish an app-authored document (spec §5.3, §7.2). The dataset
@@ -1826,8 +1856,13 @@ mod tests {
     /// A service over a `local = true` document dataset (`sheets`) plus
     /// the CVI fixture dataset (not `local`), with a `FakePricer` behind
     /// the pricing worker — the fixture the publish and pricing tests
-    /// share (line-pricer spec §5.3, §7.2).
-    fn local_service() -> (
+    /// share (line-pricer spec §5.3, §7.2). `delay` is the fake's own
+    /// per-line delay: `Duration::ZERO` for most tests, non-zero where a
+    /// test needs a batch to still be running when it submits the next
+    /// one (the cancel and full-queue tests below).
+    fn local_service_with_delay(
+        delay: Duration,
+    ) -> (
         tempfile::TempDir,
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
@@ -1847,11 +1882,19 @@ mod tests {
             documents: Default::default(),
             pricer: PricerConfig::with(Arc::new(crate::pricing::worker::tests::FakePricer {
                 asked: Default::default(),
-                delay: Duration::ZERO,
+                delay,
             })),
         })
         .unwrap();
         (dir, service, rx)
+    }
+
+    fn local_service() -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        local_service_with_delay(Duration::ZERO)
     }
 
     /// Drains `rx` until `pick` answers `Some`, discarding everything
@@ -1930,6 +1973,42 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_local_publish_is_a_diagnostics_error_and_a_load_ended_with_no_health() {
+        let (_d, service, rx) = local_service();
+        // A zero-row document (`DocumentRows::validate`'s row floor):
+        // refused by the runner's own publish, never reaching the
+        // store, and — like any local publish — reported with no health
+        // lane at all (there is no `[sources]` entry to key one under).
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("s", &[]),
+        });
+        let mut saw_diagnostic = false;
+        let mut saw_ended = false;
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(5)) {
+            match e {
+                DataEvent::Health { source, .. } => {
+                    panic!("no health lane for a local publish, got {source}")
+                }
+                DataEvent::Diagnostics(diags) => {
+                    assert!(
+                        diags.iter().any(|d| d.severity == Severity::Error
+                            && d.message.contains("local publish of sheets/s failed")),
+                        "{diags:?}"
+                    );
+                    saw_diagnostic = true;
+                }
+                DataEvent::LoadEnded if saw_diagnostic => {
+                    saw_ended = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_diagnostic && saw_ended);
+    }
+
+    #[test]
     fn a_publish_to_a_dataset_that_is_not_local_is_refused_unwritten() {
         let (_d, service, rx) = local_service();
         service.publish(LocalPublish {
@@ -1938,7 +2017,9 @@ mod tests {
         });
         let diags = until(&rx, |e| match e {
             DataEvent::Diagnostics(d) => Some(d),
-            DataEvent::Published { dataset, .. } => panic!("written: {dataset}"),
+            DataEvent::Published { dataset, .. } if dataset == "cvi_params" => {
+                panic!("written: {dataset}")
+            }
             _ => None,
         });
         assert!(
@@ -1947,6 +2028,19 @@ mod tests {
                 .any(|d| d.severity == Severity::Error && d.message.contains("not a local dataset")),
             "{diags:?}"
         );
+        // Prove nothing landed rather than merely asserting the refusal
+        // fired: the runner's document queue is FIFO, so a wrongly
+        // submitted `cvi_params` job — if one had slipped through —
+        // would publish before this second, good `sheets` document does.
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("proof", &[1]),
+        });
+        let dataset = until(&rx, |e| match e {
+            DataEvent::Published { dataset, .. } => Some(dataset),
+            _ => None,
+        });
+        assert_eq!(dataset, "sheets");
         let catalog = service.catalog(&CatalogParams {
             key: QueryKey(1),
             tag: 1,
@@ -1965,20 +2059,82 @@ mod tests {
 
     #[test]
     fn a_price_request_reaches_the_sink_as_a_price_event_and_cancel_reaches_the_worker() {
-        let (_d, service, rx) = local_service();
-        assert!(service.price(crate::pricing::worker::tests::params(
+        // A ~150 ms delay so key 11's batch is still running when key
+        // 12's is submitted and cancelled — cancelling AFTER key 11's
+        // outcome had already been delivered would make the cancel a
+        // guaranteed no-op that a deleted `PricingWorker::cancel` call
+        // could not fail.
+        let (_d, service, rx) = local_service_with_delay(Duration::from_millis(150));
+        service.price(crate::pricing::worker::tests::params(
             11,
             4,
-            &["SPX", "FAIL"]
-        )));
+            &["SPX", "FAIL"],
+        ));
+        service.price(crate::pricing::worker::tests::params(12, 1, &["NDX"]));
+        service.cancel(QueryKey(12));
         let o = until(&rx, |e| match e {
-            DataEvent::Price(o) => Some(o),
+            DataEvent::Price(o) if o.key == QueryKey(11) => Some(o),
             _ => None,
         });
         assert_eq!((o.key, o.tag), (QueryKey(11), 4));
         assert!(o.results[0].2.is_ok());
         assert!(o.results[1].2.is_err());
-        service.cancel(QueryKey(11)); // must not panic or block
+        // No outcome for key 12 within a generous window after key 11's
+        // own arrived — cancel must have stopped it before it ran.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(DataEvent::Price(o)) if o.key == QueryKey(12) => {
+                    panic!("key 12 was cancelled and must not have priced")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_pricing_queue_answers_the_refused_batch_with_an_error_per_line() {
+        // The first key is given a moment to actually start running —
+        // freeing its slot from the WAITING queue — before the rest are
+        // submitted back to back. A margin well beyond `PRICE_BOUND`
+        // (not just one over it) is what makes this robust rather than
+        // a race against the worker's own draining: submitting one
+        // instant faster than the worker can pop-and-start the next
+        // (measured: the worker can drain a handful of keys during a
+        // tight submission loop even at a few milliseconds per line) is
+        // not reliable, but submitting dozens more than fit is.
+        let (_d, service, rx) = local_service_with_delay(Duration::from_millis(20));
+        let bound = crate::pricing::PRICE_BOUND as u64;
+        let first = 100u64;
+        service.price(crate::pricing::worker::tests::params(first, 1, &["SPX"]));
+        std::thread::sleep(Duration::from_millis(50));
+        let rest: Vec<u64> = (first + 1..=first + bound + 20).collect();
+        for &k in &rest {
+            service.price(crate::pricing::worker::tests::params(k, 1, &["SPX"]));
+        }
+        let mut keys = vec![first];
+        keys.extend(&rest);
+        let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        let mut saw_queue_full_error = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while seen.len() < keys.len() && std::time::Instant::now() < deadline {
+            if let Ok(DataEvent::Price(o)) = rx.recv_timeout(Duration::from_secs(5)) {
+                seen.insert(o.key.0);
+                if o.results.iter().any(|(_, _, r)| {
+                    r.as_ref()
+                        .is_err_and(|e| e.contains("the pricing queue is full"))
+                }) {
+                    saw_queue_full_error = true;
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            keys.iter().copied().collect(),
+            "every submitted key gets exactly one outcome"
+        );
+        assert!(saw_queue_full_error, "at least one batch was refused");
     }
 
     /// A service with one SUBSCRIBED source (market-data spec §5.4) on an

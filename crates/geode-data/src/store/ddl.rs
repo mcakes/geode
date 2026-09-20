@@ -616,6 +616,10 @@ role = "value"
         schema.dataset("sheets").unwrap().clone()
     }
 
+    /// A `sheets` document: one row per `qty` value, `line` numbered
+    /// from one. An empty `qty` produces a zero-row document, which
+    /// `DocumentRows::validate`'s row floor refuses — the shape the
+    /// failed-local-publish test wants.
     pub(crate) fn sheet_rows(sheet: &str, qty: &[i64]) -> DocumentRows {
         DocumentRows {
             key: vec![sheet.to_string()],

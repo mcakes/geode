@@ -152,9 +152,10 @@ impl DataHandle {
         self.send(Request::Catalog(params))
     }
 
-    /// Queue a pricing batch. `false` means it was not queued (the
-    /// request channel or the worker's queue is full); the tile keeps
-    /// its lines stale and resubmits next frame.
+    /// Queue a pricing batch. `false` means the request channel refused
+    /// it; a batch the worker's own queue refuses is answered with an
+    /// error per line, so a tile never waits on a batch that will not
+    /// come.
     pub fn price(&self, params: PriceParams) -> bool {
         self.send(Request::Price(params))
     }
@@ -295,11 +296,7 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
             Request::Catalog(params) => {
                 sink(DataEvent::Catalog(service.catalog(&params)));
             }
-            Request::Price(params) => {
-                if !service.price(params) {
-                    tracing::warn!(target: "geode::pricing", "the pricing queue is full; a batch was dropped");
-                }
-            }
+            Request::Price(params) => service.price(params),
             Request::Publish(publish) => service.publish(publish),
             Request::Cancel { key } => service.cancel(key),
             Request::ReplaceViews { views, dimensions } => {
