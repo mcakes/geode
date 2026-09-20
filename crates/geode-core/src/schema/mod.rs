@@ -712,12 +712,22 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     ds.columns.retain(|c| !foreign.contains(&c.name));
 
     // A value is a number: it feeds the numeric cell of the document
-    // grid, and a non-numeric one would fail every downstream fold.
+    // grid, and a non-numeric one would fail every downstream fold. This
+    // is a rule about an externally FED document (the CVI/market-data
+    // shape this family was designed for): a `local` document has no
+    // feed and no numeric grid to fold — it is the app's own row shape
+    // (line-pricer spec §7.2's `pricer_sheets`, one row per line or
+    // package row, several of them text) — so a local dataset's value
+    // columns share the axis/attribute type set instead (checked below,
+    // `unsupported`), never this narrower one.
+    let local = ds.local;
     let non_numeric: Vec<String> = ds
         .columns
         .iter()
         .filter(|c| {
-            c.role == ColumnRole::Value && !matches!(c.ty, ColumnType::F64 | ColumnType::I64)
+            c.role == ColumnRole::Value
+                && !local
+                && !matches!(c.ty, ColumnType::F64 | ColumnType::I64)
         })
         .map(|c| c.name.clone())
         .collect();
@@ -737,18 +747,20 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     // would be refused for a type mismatch and reported as a source
     // health failure, pointing at the feed rather than at the config
     // line that is actually wrong. Refused here instead, where the
-    // diagnostic can name the key. A value is already held to the
-    // stricter f64/i64 rule above and is deliberately not re-checked, so
-    // a `timestamp` value is reported once, not twice. Part 2 widens
-    // `Column`/`Value` if a document ever needs a timestamp axis; this
-    // rule moves with them.
+    // diagnostic can name the key. A NON-local value is already held to
+    // the stricter f64/i64 rule above and is deliberately not re-checked
+    // here, so a `timestamp` value is reported once, not twice; a LOCAL
+    // value reaches this check instead (never having been dropped above)
+    // and is held to the same f64/i64/utf8/date set as an axis or
+    // attribute. Part 2 widens `Column`/`Value` if a document ever needs
+    // a timestamp axis; this rule moves with them.
     let unsupported: Vec<String> = ds
         .columns
         .iter()
         .filter(|c| {
             matches!(
                 c.role,
-                ColumnRole::Axis | ColumnRole::Attribute { grain: None }
+                ColumnRole::Axis | ColumnRole::Attribute { grain: None } | ColumnRole::Value
             ) && !matches!(
                 c.ty,
                 ColumnType::F64 | ColumnType::I64 | ColumnType::Utf8 | ColumnType::Date
@@ -759,8 +771,8 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     for c in &unsupported {
         diags.push(err(
             format!(
-                "dataset '{name}' column '{c}': a document axis or attribute must be f64, \
-                 i64, utf8 or date — column dropped"
+                "dataset '{name}' column '{c}': a document axis, attribute or local value \
+                 must be f64, i64, utf8 or date — column dropped"
             ),
             format!("datasets.{name}.columns.{c}.type"),
         ));
@@ -1826,6 +1838,29 @@ role = "attribute"
         assert!(ds.column("param").is_none(), "the utf8 value is dropped");
         assert!(ds.column("param2").is_some());
         error_with_path(&diags, "datasets.cvi_params.columns.param.type");
+    }
+
+    /// A `local` document (the app's own row shape, no external feed to
+    /// fold — line-pricer spec §7.2) is not held to the externally-fed
+    /// numeric-grid rule above: its value columns share the axis/
+    /// attribute type set instead.
+    #[test]
+    fn a_local_documents_value_column_may_be_utf8() {
+        let text = CVI
+            .replacen(
+                "family = \"document\"",
+                "family = \"document\"\nlocal = true",
+                1,
+            )
+            .replace(
+                "[cvi_params.columns.param]\ntype = \"f64\"",
+                "[cvi_params.columns.param]\ntype = \"utf8\"",
+            );
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("cvi_params").expect("dataset kept");
+        assert!(ds.local);
+        assert_eq!(ds.column("param").unwrap().ty, ColumnType::Utf8);
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod columns;
 pub mod edit;
 pub mod sheet;
 pub mod shorthand;
+pub mod storage;
 pub mod template;
 pub mod views;
 
@@ -19,6 +20,9 @@ pub use sheet::{
     Sheet,
 };
 pub use shorthand::{ParseError, parse, render_expiry, render_line, render_package, render_strike};
+pub use storage::{
+    LINE_AXIS, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, SHEET_KEY, from_rows, to_rows,
+};
 pub use template::{LegSpec, Template};
 pub use views::{
     BUILTIN_VIEWS, ColumnPlan, PRICER_VIEWS_DOC, PlannedColumn, PricerView, ViewColumn, Views,

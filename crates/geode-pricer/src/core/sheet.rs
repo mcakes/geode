@@ -121,6 +121,7 @@ pub enum Delivered {
     },
 }
 
+#[derive(Debug)]
 pub struct Sheet {
     pub name: String,
     pub view: String,
