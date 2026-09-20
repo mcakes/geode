@@ -167,6 +167,29 @@ impl Workspace {
         }
     }
 
+    /// Click-to-focus on an EMPTY visible dock (2026-09-19, user ruling
+    /// "double-click should work on dock areas too"): the region moves to
+    /// the dock so an add — `mod+n`, `ctrl+k`, the empty-dock hint's own
+    /// double-click — lands in it, exactly the state [`toggle_dock`]'s
+    /// show arm leaves. Distinct from [`focus_dock`] on purpose: that is
+    /// the DIRECTIONAL target rule (an empty dock is never where `mod+l`
+    /// arrives), this the mouse's. Refused (false) on a hidden dock or
+    /// an occupied one — an occupied dock's click lands on a tile and
+    /// goes through [`focus_dock_tile`].
+    ///
+    /// [`toggle_dock`]: Self::toggle_dock
+    /// [`focus_dock`]: Self::focus_dock
+    /// [`focus_dock_tile`]: Self::focus_dock_tile
+    pub fn focus_empty_dock(&mut self, side: DockSide) -> bool {
+        let dock = self.docks.get(side);
+        if !dock.visible() || !dock.tree().is_empty() || self.region == FocusRegion::Dock(side) {
+            return false;
+        }
+        self.tree.exit_fullscreen();
+        self.region = FocusRegion::Dock(side);
+        true
+    }
+
     /// Click-to-focus on a specific tile inside a dock (dock-trees task —
     /// the dock counterpart of [`Workspace::focus_main_tile`]): focus that
     /// tile within the dock's own tree AND move the region there. Refused
@@ -2138,6 +2161,38 @@ mod tests {
         if let FocusRegion::Dock(side) = region {
             assert!(ws.active().docks().get(side).visible());
         }
+    }
+
+    /// `focus_empty_dock` (2026-09-19): the mouse's click-to-focus on
+    /// an empty visible dock moves the region there so the next add
+    /// lands in it; refused on a hidden dock, an occupied one (a click
+    /// there is a tile's, `focus_dock_tile`), and when the region is
+    /// already that dock (nothing to persist). The directional rule
+    /// (`focus_dock`) still refuses an empty dock.
+    #[test]
+    fn focus_empty_dock_takes_the_region_only_for_a_visible_empty_dock() {
+        let mut ws = Workspaces::new();
+        ws.split_active(Orientation::Horizontal);
+        let w = ws.active_mut();
+        assert!(!w.focus_empty_dock(DockSide::Left), "hidden: refused");
+        assert_eq!(w.region(), FocusRegion::Main);
+        w.docks.get_mut(DockSide::Left).set_visible(true);
+        assert!(
+            !w.focus_dock(DockSide::Left),
+            "directional focus still refuses it"
+        );
+        assert!(w.focus_empty_dock(DockSide::Left));
+        assert_eq!(w.region(), FocusRegion::Dock(DockSide::Left));
+        assert!(
+            !w.focus_empty_dock(DockSide::Left),
+            "already there: nothing changed"
+        );
+        assert_eq!(ws.split_active(Orientation::Horizontal), TileId(2));
+        let w = ws.active_mut();
+        assert_eq!(w.docks().get(DockSide::Left).tree().tiles().len(), 1);
+        w.focus_main_tile(TileId(1));
+        assert!(!w.focus_empty_dock(DockSide::Left), "occupied: refused");
+        assert_eq!(w.region(), FocusRegion::Main);
     }
 
     #[test]

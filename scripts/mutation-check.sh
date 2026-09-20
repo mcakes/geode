@@ -14193,6 +14193,37 @@ run_mutation "tilepicker: the empty-tree hint's double-click opens the picker" \
   geode-shell \
   double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tree
 
+# An empty dock's click focuses it as the region (user ruling
+# 2026-09-19), so the double-click's pick lands THERE — without the
+# focus move the pick would land in whatever region was focused.
+run_mutation "tilepicker: a click on an empty dock focuses it" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        if self.services.workspaces.active_mut().focus_empty_dock(side) {' \
+  '        if false {' \
+  geode-shell \
+  clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it
+
+# The pure door refuses an occupied dock (a click there is a tile's).
+run_mutation "tilepicker: focus_empty_dock refuses an occupied dock" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        if !dock.visible() || !dock.tree().is_empty() || self.region == FocusRegion::Dock(side) {' \
+  '        if !dock.visible() || self.region == FocusRegion::Dock(side) {' \
+  geode-shell \
+  focus_empty_dock_takes_the_region_only_for_a_visible_empty_dock
+
+# The empty dock hint's double-click opens the picker.
+run_mutation "tilepicker: the empty dock hint's double-click opens the picker" \
+  crates/geode-shell/src/shell/drag.rs \
+  '            self.session_dirty = true;
+            cx.notify();
+        }
+        self.try_pick_on_double_click(event, window, cx);' \
+  '            self.session_dirty = true;
+            cx.notify();
+        }' \
+  geode-shell \
+  clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

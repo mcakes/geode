@@ -292,7 +292,7 @@ longer exists:
 |------------------------------|---------------------------------------------------|
 | empty main tree              | `ctrl+k → Add a tile` — as built since 2026-09-19: `double-click or ctrl+k → Add a tile` (a bare double-click opens the tile picker) |
 | placeholder tile             | `ctrl+k → Add a tile` — as built since 2026-09-19: `double-click or ctrl+k → Add a tile` (a bare double-click opens the tile picker; see `docs/phase-history.md`, "Tile picker") |
-| empty dock (left/right/bottom) | `ctrl+k → Add a tile here · ctrl+shift+[ moves one` (bracket per side) |
+| empty dock (left/right/bottom) | `ctrl+k → Add a tile here · ctrl+shift+[ moves one` (bracket per side) — as built since 2026-09-19: `double-click or ctrl+k → …` (a click focuses the empty dock, a double-click opens the tile picker into it) |
 | empty main tree, dock focused | `ctrl+k → Add a tile · focus is in the left dock` (`right`/`bottom` per side) |
 
 The dock-focused row keeps the single `empty-hint` selector and the same
