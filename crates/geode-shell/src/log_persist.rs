@@ -1,6 +1,10 @@
-//! Persist a `:level` change into the user layer's `app.toml` `[log]`
+//! Persist a log-level change into the user layer's `app.toml` `[log]`
 //! table (Phase 4b Task 4, spec §4.3) — `Diagnostics::request_level`'s
 //! `take_pending_level` drain calls this on the background executor.
+//! `request_level` was reached by the tile command line's `:level`
+//! until command-line locality closed that route 2026-09-20; the live
+//! door is the palette's `Set log level…` (`log::level`), a two-step
+//! `shell::choicedialog` pick.
 //!
 //! Goes through [`crate::config_write::edit`], the one config-write door
 //! (Phase 4c §6): the format-preserving `toml_edit` read-modify-write, the

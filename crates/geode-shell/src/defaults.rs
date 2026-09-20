@@ -309,14 +309,15 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // slot groups by.
     action(reg, "config::groupings", "Edit groupings…", "Configuration");
     // Part 2a Task 5: the object dialog over `scopes` — the saved scopes
-    // `:scope load <name>` and the palette's own `scope::<name>` actions
-    // recall. Palette-only for the same reason `config::views` and
-    // `config::groupings` are: the chord that matters day to day is
-    // `:scope load` / the palette's own scope row, not the occasional
-    // management act (rename is unbuilt; there is no "load into frame"
-    // verb here either — both are design-review departures from spec
-    // §8.4, recorded in this crate's Part 2a Task 5 report) this dialog
-    // exists for.
+    // the palette's own `scope::<name>` actions recall (`:scope load
+    // <name>` recalled the same scopes until command-line locality
+    // closed that route 2026-09-20). Palette-only for the same reason
+    // `config::views` and `config::groupings` are: the chord that
+    // matters day to day is the palette's own scope row, not the
+    // occasional management act (rename is unbuilt; there is no "load
+    // into frame" verb here either — both are design-review departures
+    // from spec §8.4, recorded in this crate's Part 2a Task 5 report)
+    // this dialog exists for.
     action(reg, "config::scopes", "Edit scopes…", "Configuration");
     // Part 2b Task 2: the read-only schema inspector (spec §9, §19.4)
     // over `datasets` — the vocabulary the other three dialogs build
@@ -471,6 +472,20 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Swap to the previous as of",
         "Frame",
     );
+    // The scope expression dialog (command-line locality spec §4.1):
+    // palette-only, the typed door onto the frame's expression layer now
+    // that `:scope <expr>` is a refusal. `…` because it opens a dialog.
+    action(
+        reg,
+        "frame::scope_expression",
+        "Set scope expression…",
+        "Frame",
+    );
+    // Set log level… (command-line locality spec §4.2): target then level
+    // over the choice dialog, landing on `Diagnostics::request_level` —
+    // the diagnostics tile's `:level` moved here. Category "Diagnostics"
+    // beside the tile's own actions.
+    action(reg, "log::level", "Set log level…", "Diagnostics");
     // Profiler-feature actions (the `profiling` feature — gpui's own
     // `profiler` histograms/overlay): registered only when compiled in,
     // so the palette never advertises a no-op.
@@ -536,8 +551,10 @@ pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scop
         // crashing at every launch with no in-app way for a trader to
         // fix the file that caused it (the review finding this closes).
         // Skipping and logging once is the whole fix: the saved scope
-        // still exists and loads fine through `:scope load`/`Frame::
-        // load_scope`, it simply gets no palette row of its own under a
+        // still exists and loads fine through `Frame::load_scope` (the
+        // palette's `scope::<name>` action, or `:scope load` on a tile's
+        // command line until command-line locality closed that route
+        // 2026-09-20), it simply gets no palette row of its own under a
         // name something else already claimed.
         if reg.contains(&ActionId(id.clone())) {
             tracing::warn!(

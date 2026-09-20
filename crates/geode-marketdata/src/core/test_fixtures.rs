@@ -9,7 +9,7 @@
 
 #![cfg(test)]
 
-use crate::core::spec::{Columns, PanelSpec, RowAxis, RowIdentity, ValueColumn};
+use crate::core::spec::{Columns, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn};
 use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
@@ -60,6 +60,19 @@ const SCHEDULE_AMOUNT_FORMAT: ColumnFormat = ColumnFormat {
 /// — a date, a number at its own precision, and a status chosen from a
 /// fixed vocabulary — the shape [`crate::core::matrix::CellKind`] exists
 /// to paint and edit correctly.
+/// [`SCHEDULE`] with its row label withheld (`RowLabel::Hidden`) — the
+/// shipped `DIVIDEND`'s own shape, for the tests that pin what a hidden
+/// label changes: the table's columns, `/`, `yy`, and where `o` lands.
+pub(crate) const HIDDEN_SCHEDULE: PanelSpec = PanelSpec {
+    kind: "sched_hidden",
+    rows: RowAxis {
+        column: "dividend_id",
+        identity: RowIdentity::Minted,
+        label: RowLabel::Hidden,
+    },
+    ..SCHEDULE
+};
+
 pub(crate) const SCHEDULE: PanelSpec = PanelSpec {
     kind: "sched",
     title: "Dividends",
@@ -68,6 +81,7 @@ pub(crate) const SCHEDULE: PanelSpec = PanelSpec {
     rows: RowAxis {
         column: "dividend_id",
         identity: RowIdentity::Minted,
+        label: RowLabel::Shown,
     },
     columns: Columns::Values(&[
         ValueColumn {
@@ -273,6 +287,7 @@ pub(crate) const LADDER: PanelSpec = PanelSpec {
     rows: RowAxis {
         column: "strike",
         identity: RowIdentity::Typed(ColumnType::I64),
+        label: RowLabel::Shown,
     },
     columns: Columns::Values(&[ValueColumn {
         column: "vol",

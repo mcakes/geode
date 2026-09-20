@@ -2817,6 +2817,65 @@ run_mutation "commands: a bare sort abs is abs desc" \
   geode-blotter \
   every_command_parses
 
+# Command-line locality (2026-09-20) ---------------------------------------
+
+# A refusal must stay a refusal: mutated back into a frame write, the
+# sweep sees the frame's as-of move.
+run_mutation "locality: a refused word never writes the frame" \
+  crates/geode-blotter/src/tile.rs \
+  '            Command::Refused(message) => return Err(message.to_string()),' \
+  '            Command::Refused(_) => { self.frame.update(cx, |f, cx| { if f.set_as_of(AsOf::At(chrono::Utc::now())) { cx.notify(); } }); }' \
+  geode-blotter \
+  every_colon_command_leaves_the_frame_alone
+
+# A refused word is never offered as a completion.
+run_mutation "locality: refusals are not completions" \
+  crates/geode-blotter/src/core/commands.rs \
+  '        ["asof"] => vec!["clear".into(), "live".into()],' \
+  '        ["asof"] => vec!["clear".into(), "live".into(), "undo".into()],' \
+  geode-blotter \
+  frame_wide_words_are_refusals_that_name_their_door
+
+# The request carries the pin, not the frame's as-of.
+run_mutation "asof-pin: the request carries the pin" \
+  crates/geode-blotter/src/tile.rs \
+  '                TileAsOf::Pinned(pinned) => pinned.clone(),' \
+  '                TileAsOf::Pinned(_) => frame.as_of().clone(),' \
+  geode-blotter \
+  asof_pins_the_tile_and_leaves_the_frame_alone
+
+# A pinned tile does not follow the frame's as-of counter.
+run_mutation "asof-pin: a pinned tile does not follow the frame's as-of" \
+  crates/geode-blotter/src/tile.rs \
+  '            || (matches!(self.tile_as_of, TileAsOf::Follow) && versions.as_of != now.as_of)' \
+  '            || versions.as_of != now.as_of' \
+  geode-blotter \
+  a_pinned_tile_ignores_the_frames_as_of_and_answers_the_barrier
+
+# The record carries as_of only while pinned.
+run_mutation "asof-pin: the session writes as_of only while pinned" \
+  crates/geode-blotter/src/tile.rs \
+  '            TileAsOf::Follow => None,' \
+  '            TileAsOf::Follow => Some(toml::Value::String("live".into())),' \
+  geode-blotter \
+  as_of_round_trips_through_the_session_record
+
+# The pinned chip paints from the tile's own state.
+run_mutation "asof-pin: the pinned chip paints" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let TileAsOf::Pinned(_) = &self.tile_as_of {' \
+  '        if let TileAsOf::Pinned(_) = &TileAsOf::Follow {' \
+  geode-blotter \
+  a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
+
+# The provenance warning chip is suppressed while pinned.
+run_mutation "asof-pin: the frame chip hides while pinned" \
+  crates/geode-blotter/src/tile.rs \
+  '            if matches!(self.tile_as_of, TileAsOf::Follow)' \
+  '            if true' \
+  geode-blotter \
+  a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
+
 run_mutation "flatten: the absolute orders compare magnitudes, not signed values" \
   crates/geode-blotter/src/core/flatten.rs \
   '    let key = |v: f64| if absolute { v.abs() } else { v };' \
@@ -2907,12 +2966,6 @@ run_mutation "commands: a completions cursor mid-character is clamped to a bound
   '    while false {' \
   geode-blotter \
   completions_clamp_a_cursor_inside_a_multibyte_char
-
-run_mutation "commands: scope drop needs a dimension" \
-  crates/geode-blotter/src/core/commands.rs \
-  '                (Some("drop"), _) => Err("scope drop needs a dimension".into()),' \
-  '                (Some("drop"), _) => Ok(Command::ScopeDrop(String::new())),' \
-  geode-blotter new_scope_and_asof_forms_parse
 
 run_mutation "delegate: the cursor follows its node across a new snapshot" \
   crates/geode-blotter/src/delegate.rs \
@@ -6275,17 +6328,48 @@ run_mutation "sections: a source's path, priority and readiness are separate row
             ));' \
   geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
 
-run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
+run_mutation "commands: section parses each name, not just the first" \
   crates/geode-diagnostics/src/commands.rs \
-  '        ["level"] => known_targets().map(str::to_string).collect(),' \
-  '        ["level"] => known_targets().map(|t| format!("level {t}")).collect(),' \
-  geode-diagnostics a_candidate_is_the_word_under_the_cursor_not_the_line
+  '        Some("section") => {' \
+  '        Some("section") => {
+            return Ok(Command::Section(Section::Log));' \
+  geode-diagnostics section_parses_each_name_and_rejects_unknown
 
 run_mutation "commands: diagnostics completions split words on the shell's delimiters, not just a space" \
   crates/geode-diagnostics/src/commands.rs \
   '        .split(|c: char| c.is_whitespace() || c == '"'"','"'"')' \
   '        .split('"'"' '"'"')' \
   geode-diagnostics completions_split_words_the_way_the_shell_does
+
+# Command-line locality (2026-09-20): `:level` is a refusal, never a
+# log-level change.
+run_mutation "locality: :level never reaches the Diagnostics entity" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            Command::Refused(message) => return Err(message.to_string()),' \
+  '            Command::Refused(_) => { self.diagnostics.update(cx, |d, cx| { d.request_overlay_toggle(); cx.notify(); }); }' \
+  geode-diagnostics \
+  every_colon_command_leaves_the_app_alone
+
+# Command-line locality (2026-09-20) — the scope expression dialog
+# (spec §4.1), the palette door that replaced `:scope <expr>`.
+
+# An empty commit clears the frame's expression (locality §4.1).
+run_mutation "expr-dialog: an empty commit clears the expression" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return Ok(None);' \
+  '        return Err("empty".into());' \
+  geode-shell \
+  the_field_opens_seeded_and_an_empty_commit_clears
+
+# `clear_scope()` in place of `set_scope(scope)` drops the parsed
+# expression instead of committing it — caught by the test's very first
+# assertion (the expression never lands), not by its later undo check.
+run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '                if f.set_scope(scope) {' \
+  '                if f.clear_scope() {' \
+  geode-shell \
+  typing_an_expression_and_enter_sets_it_through_set_scope
 
 # ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
 #
@@ -12348,8 +12432,8 @@ run_mutation "mdtable: a model swap refreshes the table" \
 # column can scroll out of view while the label column is scrolled to.
 run_mutation "mdtable: the cursor mirror skips the label column" \
   crates/geode-marketdata/src/tile.rs \
-  '            t.set_selected_col(MatrixDelegate::table_col(col), cx);' \
-  '            t.set_selected_col(col, cx);' \
+  '                let table_col = d.table_col(col);' \
+  '                let table_col = col;' \
   geode-marketdata \
   the_cursor_never_enters_the_label_column
 
@@ -12365,8 +12449,8 @@ run_mutation "mdtable: the cursor mirror skips the label column" \
 # mutation, and now the only click path there is.
 run_mutation "mdtable: a clicked column is translated back through the label column" \
   crates/geode-marketdata/src/tile.rs \
-  '                this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)' \
-  '                this.cursor_to(*row, Some(*col), cx)' \
+  '                    let col = this.table.read(cx).delegate().model_col(*col);' \
+  '                    let col = Some(*col);' \
   geode-marketdata \
   the_cursor_never_enters_the_label_column
 
@@ -13262,8 +13346,8 @@ run_mutation "mdmenu: the arrow keys move the menu highlight" \
 # column, the double-click moves nothing and opens nothing.
 run_mutation "mdedit: a double-click on a cell opens the editor" \
   crates/geode-marketdata/src/tile.rs \
-  '                    if let Some(col) = MatrixDelegate::model_col(*col) {' \
-  '                    if let Some(col) = MatrixDelegate::model_col(*col).filter(|_| false) {' \
+  '                    if let Some(col) = this.table.read(cx).delegate().model_col(*col) {' \
+  '                    if let Some(col) = this.table.read(cx).delegate().model_col(*col).filter(|_| false) {' \
   geode-marketdata a_double_click_opens_the_editor_on_the_cell
 
 # The strip's half of the same ruling: the second press of a pair on an
@@ -14554,6 +14638,37 @@ run_mutation "tile: a typed text label commits through parse_attr" \
   '                    Ok(_) => text.trim().to_string(),' \
   geode-marketdata o_on_an_integer_axis_opens_the_text_label_editor
 
+# ---- Hidden row label (2026-09-20): dividend_id is not displayed ----
+
+# The delegate's one flag. Mutated to always show, a `RowLabel::Hidden`
+# spec paints its opaque id in column 0 exactly as before — every cursor
+# and editor test on the CVI fixture still passes, since those specs are
+# `Shown`; only the hidden fixture's column count and first header see it.
+run_mutation "mdhide: a hidden row label withholds the label column" \
+  crates/geode-marketdata/src/delegate.rs \
+  '            label_column: spec.rows.shown(),' \
+  '            label_column: true,' \
+  geode-marketdata a_hidden_row_label_withholds_the_label_column
+
+# `/` searches what is painted. Mutated to search labels whatever the
+# spec says, a find for a status or a date on the dividend panel lands
+# nowhere while a find for the id nobody can see still moves the cursor.
+run_mutation "mdhide: find searches the painted cells under a hidden label" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.spec.rows.shown() {
+            self.model
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()' \
+  '        if true {
+            self.model
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()' \
+  geode-marketdata a_hidden_row_label_withholds_the_label_column
+
 # ---- Task 12: DIVIDEND spec and the second factory ----
 
 # Mutated to keep shipping the fragment: `without_keymap` would no
@@ -15123,6 +15238,26 @@ run_mutation "tilepicker: the dock listener calls the door" \
                             if view.try_fullscreen_on_double_click(id, event, window, cx)' \
   geode-shell \
   a_docked_placeholder_double_click_opens_the_picker_and_fills_it
+
+# ---- Set log level… (command-line locality spec §4.2): a two-step
+# choice dialog, target then level, replacing the diagnostics tile's
+# `:level` -----------------------------------------------------------
+
+# Step 2 opens on the target's CURRENT level (locality §4.2).
+run_mutation "loglevel: the level step opens on the current level" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(Some(level_word(current)));' \
+  '        list.place(None);' \
+  geode-shell \
+  log_level_rows_name_targets_then_levels
+
+# The pick lands on request_level, not on a no-op.
+run_mutation "loglevel: the level pick reaches request_level" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                d.request_level(&target, level);' \
+  '                let _ = (&target, level);' \
+  geode-shell \
+  set_log_level_picks_a_target_then_a_level
 # ---------------------------------------------------------------------
 # Timeseries Part 1, the data tier (timeseries spec §4, §5.1–§5.6).
 #

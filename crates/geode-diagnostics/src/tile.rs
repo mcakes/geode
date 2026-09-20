@@ -598,18 +598,7 @@ impl DiagnosticsTile {
     pub fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
         match commands::parse(line)? {
             Command::Section(section) => self.set_section(section, cx),
-            Command::Level { target, level } => {
-                self.diagnostics.update(cx, |d, cx| {
-                    d.request_level(&target, level);
-                    cx.notify();
-                });
-            }
-            Command::Overlay => {
-                self.diagnostics.update(cx, |d, cx| {
-                    d.request_overlay_toggle();
-                    cx.notify();
-                });
-            }
+            Command::Refused(message) => return Err(message.to_string()),
         }
         Ok(())
     }
@@ -1028,18 +1017,52 @@ mod tests {
         );
     }
 
+    /// The rule (command-line locality spec §2): a `:` line on this tile
+    /// changes only this tile — never the app's log levels, the overlay
+    /// or the frame. Every accepted word plus every refusal. Checks the
+    /// frame's three counters (`scope`, `grouping`, `as_of`), not any
+    /// slot/scope/as-of *value* — a `save_slot` would still bump
+    /// `grouping` (and `config`) and be caught that way even though
+    /// nothing here reads what it wrote.
     #[gpui::test]
-    fn level_ingest_debug_changes_the_entity_and_queues_a_persist(cx: &mut gpui::TestAppContext) {
+    fn every_colon_command_leaves_the_app_alone(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
-        h.tile.update(&mut vcx, |t, cx| {
-            t.command("level ingest debug", cx).unwrap();
-        });
-        let levels = h.diagnostics.read_with(&vcx, |d, _| d.levels.clone());
-        assert_eq!(levels.targets, vec![("ingest".to_string(), Level::DEBUG)]);
-        let pending = h
-            .diagnostics
-            .update(&mut vcx, |d, _| d.take_pending_level());
-        assert_eq!(pending, Some(("ingest".to_string(), Level::DEBUG)));
+        let lines = [
+            "section log",
+            "section perf",
+            "level ingest debug",
+            "overlay",
+        ];
+        for word in commands::COMMANDS {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.split_whitespace().next() == Some(word)),
+                "no sweep line for `:{word}`"
+            );
+        }
+        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        for line in lines {
+            let result = h.tile.update(&mut vcx, |t, cx| t.command(line, cx));
+            if line.starts_with("level") {
+                assert_eq!(result, Err(commands::REFUSED_LEVEL.to_string()));
+            } else if line == "overlay" {
+                assert_eq!(result, Err(commands::REFUSED_OVERLAY.to_string()));
+            } else {
+                result.unwrap();
+            }
+            let (level, overlay) = h.diagnostics.update(&mut vcx, |d, _| {
+                (d.take_pending_level(), d.take_pending_overlay_toggle())
+            });
+            assert!(level.is_none(), "`:{line}` queued a log-level change");
+            assert!(!overlay, "`:{line}` queued an overlay toggle");
+            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            assert_eq!(
+                (after.scope, after.grouping, after.as_of),
+                (before.scope, before.grouping, before.as_of),
+                "`:{line}` moved the frame"
+            );
+        }
     }
 
     /// `Ring::oldest_seq`'s own contract: a reader whose `since` has

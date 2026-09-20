@@ -49,7 +49,7 @@ pub struct DataSetup {
     /// `DataSetup` in hand (rather than reaching into `config`) has it
     /// directly — mirrors `views` being both `config.views` and its own
     /// field for the same reason. `start` now reads this too (Phase 4a
-    /// §3.7): the blotter factory validates `:filter`/`:scope` against
+    /// §3.7): the blotter factory validates `:filter` (and, until 2026-09-20, `:scope`) against
     /// the same schema and dimensions the service itself runs on.
     pub dimensions: DerivedDimensions,
     /// `colours.toml` (Part 2c §6.2): the definitions a view column's
@@ -295,7 +295,7 @@ pub fn start(
     let dropped = Arc::new(AtomicU64::new(0));
     let sink = make_sink(tx, dropped.clone());
     // Cloned before the move into `DataService::spawn` below — the
-    // factory validates `:filter`/`:scope` against the same schema and
+    // factory validates `:filter` (and, until 2026-09-20, `:scope`) against the same schema and
     // dimensions the service itself was built from (spec §3.7).
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
@@ -515,7 +515,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // is refreshed the same way `marketdata`'s is — the two
                 // factories differ only in which one ships the fragment.
                 dividend.set_stale_after(stale_after);
-                // `:filter`/`:scope` validation (Phase 4a §3.7): the
+                // `:filter` validation (Phase 4a §3.7; `:scope` too until
+                // 2026-09-20): the
                 // `datasets` doc is re-read here too — `ConfigReloaded`
                 // doesn't fire for a `datasets`-only edit (that instead
                 // sets `restart_required`, since the data engine itself

@@ -637,6 +637,7 @@ mod palette;
 mod perf;
 mod picker;
 mod reload;
+mod scope_expr;
 mod scopebar;
 mod session;
 mod stacks;

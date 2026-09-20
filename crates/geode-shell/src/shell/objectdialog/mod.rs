@@ -443,12 +443,19 @@ impl Domain {
     /// scope by that name would collide with it in the palette (two rows
     /// reading "Scope: Save current…"/"Scope: save_current") and shadow
     /// it from `input.rs`'s `scope::<name>` dispatch arm besides. The
-    /// list is shared with `Frame::save_scope` (`:scope save` on a
-    /// tile's command line reaches that door directly, with no dialog in
-    /// between) rather than duplicated here — a review finding after
-    /// this dialog's own copy shipped: refusing only at the dialog left
-    /// `:scope save save_current` free to write an unfixable
-    /// `scopes.toml` entry that panicked the app at the next start.
+    /// list was shared with `Frame::save_scope` (historically, `:scope
+    /// save` on a tile's command line reached that door directly, with
+    /// no dialog in between) rather than duplicated here — a review
+    /// finding after this dialog's own copy shipped: refusing only at
+    /// the dialog left `:scope save save_current` free to write an
+    /// unfixable `scopes.toml` entry that panicked the app at the next
+    /// start. The `:scope save` route closed on 2026-09-20 (command-line
+    /// locality spec §5): `:scope` is a refusal on every tile now, and
+    /// `Frame::save_scope` has no production caller left — the
+    /// palette's `Scope: Save current as…` action opens this dialog's
+    /// own naming prompt (`objectdialog::render::open_save_scope`,
+    /// `NameSeed::FromFrame`) and is refused right here, by this same
+    /// list, on the dialog's own create path.
     /// Empty for every other domain, which has no such collision.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {

@@ -188,9 +188,12 @@ pub struct Diagnostics {
     /// batch, whole (Phase 4b Task 4 fix round 1, MAJ-5: was a capped,
     /// ever-appending log; a reload that changed nothing used to
     /// re-append its own unchanged batch, inflating
-    /// [`Self::summary`]'s error count every time `:level`'s own persist
-    /// triggered a reload). [`Self::note_config`] *replaces* this
-    /// wholesale; [`Self::config_history`] is the append-only log now.
+    /// [`Self::summary`]'s error count every time a log-level change's
+    /// own persist (the palette's `Set log level…`; `:level` on a
+    /// tile's command line until command-line locality closed that
+    /// route 2026-09-20) triggered a reload). [`Self::note_config`]
+    /// *replaces* this wholesale; [`Self::config_history`] is the
+    /// append-only log now.
     ///
     /// Fed *only* by config load/reload (`ShellView::new`'s startup call
     /// and `hot_reload::apply_reload`, every reload unconditionally) —
@@ -198,9 +201,9 @@ pub struct Diagnostics {
     /// [`Self::data_diagnostics`] (Phase 4b Task 4 fix round 2, NEW-1:
     /// round 1 fed both populations through this one field via
     /// `note_config`'s replace semantics, so a data-layer error and a
-    /// later config reload — including the one `:level`'s own persist
-    /// write triggers — silently erased each other from the summary,
-    /// the same false-signal class CRIT-1 was raised under, just the
+    /// later config reload — including the one a log-level change's own
+    /// persist write triggers — silently erased each other from the
+    /// summary, the same false-signal class CRIT-1 was raised under, just the
     /// opposite direction: a false *negative* instead of a false
     /// positive). [`Self::summary`] counts errors from both fields.
     pub config: Vec<Diagnostic>,
@@ -402,8 +405,11 @@ impl Diagnostics {
     /// *replaces* [`Self::config`] wholesale (Phase 4b Task 4 fix round
     /// 1, MAJ-5: used to append into a capped log unconditionally
     /// except on an empty batch, so an unchanged reload — e.g. the one
-    /// `:level`'s own persist write triggers — re-appended the exact
-    /// same diagnostics and inflated `summary`'s error count every
+    /// a log-level change's own persist write triggers (the palette's
+    /// `Set log level…`; `:level` on a tile's command line until
+    /// command-line locality closed that route 2026-09-20) —
+    /// re-appended the exact same diagnostics and inflated `summary`'s
+    /// error count every
     /// time). A no-op when `diags` is byte-identical to the current
     /// batch (this also covers the old "empty batch" guard: an empty
     /// batch equal to an already-empty `self.config` is a no-op, but an
@@ -621,8 +627,11 @@ impl Diagnostics {
         self.pending_catalog_request = true;
     }
 
-    /// `:level <target> <level>` (a later task's module command) or the
-    /// reload-driven `[log]` pickup: updates `self.levels` (via
+    /// Called by the palette's `Set log level…` two-step choice
+    /// (`log::level`, `shell::choicedialog`'s `Target::LogLevel`) — the
+    /// door that replaced `:level <target> <level>` when command-line
+    /// locality closed it 2026-09-20 — or by the reload-driven `[log]`
+    /// pickup: updates `self.levels` (via
     /// `LogLevels::with`, the same retain-then-push `[log]` parsing
     /// already uses) and queues one persist for
     /// [`Self::take_pending_level`] to drain. A no-op when `target`
@@ -664,9 +673,14 @@ impl Diagnostics {
         true
     }
 
-    /// `:overlay` (a later task's module command): queues a toggle for
-    /// [`Self::take_pending_overlay_toggle`] to drain. Modules never
-    /// reach `ShellView` directly (spec ruling); this is the door.
+    /// Until command-line locality closed it 2026-09-20, `:overlay` (a
+    /// module command) reached here to queue a toggle for
+    /// [`Self::take_pending_overlay_toggle`] to drain, since modules
+    /// never reach `ShellView` directly (spec ruling). The live door,
+    /// the palette's `Toggle performance overlay` (`perf::toggle_overlay`),
+    /// flips `ShellView::perf_overlay` directly instead; this method is
+    /// kept as the seam the locality sweep tests watch and has no
+    /// production caller any more.
     pub fn request_overlay_toggle(&mut self) {
         self.pending_overlay_toggle = true;
         self.version += 1;

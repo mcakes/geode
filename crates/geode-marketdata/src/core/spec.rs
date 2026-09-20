@@ -64,12 +64,33 @@ pub enum RowIdentity {
     Minted,
 }
 
-/// The axis down the side: the column a row's label comes from, and who
-/// gets to choose it.
+/// Whether the row label gets a column of its own. `Hidden` withholds
+/// it (user ruling 2026-09-20: a feed's opaque `dividend_id` means
+/// nothing to a trader) — the label is still the row's IDENTITY for the
+/// draft, the session and every rebase; it is just not painted, so the
+/// table's column 0 is the first value column, `/` searches the painted
+/// cells and `yy` copies them alone. A hidden label can only be `Minted`:
+/// a `Typed` axis needs the label column to type into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowLabel {
+    Shown,
+    Hidden,
+}
+
+/// The axis down the side: the column a row's label comes from, who
+/// gets to choose it, and whether it is painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowAxis {
     pub column: &'static str,
     pub identity: RowIdentity,
+    pub label: RowLabel,
+}
+
+impl RowAxis {
+    /// Whether the table carries a row-label column.
+    pub fn shown(&self) -> bool {
+        self.label == RowLabel::Shown
+    }
 }
 
 /// One flat column: what it reads, how it paints, how it is edited,
@@ -201,6 +222,7 @@ pub const CVI: PanelSpec = PanelSpec {
     rows: RowAxis {
         column: "term",
         identity: RowIdentity::Typed(ColumnType::Date),
+        label: RowLabel::Shown,
     },
     columns: Columns::Axis("node"),
     header: &[
@@ -312,6 +334,7 @@ pub const DIVIDEND: PanelSpec = PanelSpec {
     rows: RowAxis {
         column: "dividend_id",
         identity: RowIdentity::Minted,
+        label: RowLabel::Hidden,
     },
     columns: Columns::Values(&[
         ValueColumn {
@@ -411,6 +434,23 @@ mod tests {
     /// §4.2: a flat panel names its columns; `names` covers them, and
     /// `value_column` answers each by name so the build can refuse a
     /// value the spec does not list rather than paint it unlabelled.
+    /// A hidden row label (user ruling 2026-09-20, "dividend_id shouldn't
+    /// be displayed") is still the row's identity — only its column is
+    /// withheld — and it can only be minted: a `Typed` axis needs the
+    /// label column to type into.
+    #[test]
+    fn a_hidden_row_label_is_minted_on_every_shipped_spec() {
+        assert_eq!(DIVIDEND.rows.label, RowLabel::Hidden);
+        assert_eq!(CVI.rows.label, RowLabel::Shown);
+        for spec in [&CVI, &DIVIDEND] {
+            if spec.rows.label == RowLabel::Hidden {
+                assert_eq!(spec.rows.identity, RowIdentity::Minted, "{}", spec.kind);
+            }
+        }
+        assert!(!DIVIDEND.rows.shown());
+        assert!(CVI.rows.shown());
+    }
+
     #[test]
     fn a_flat_spec_names_its_value_columns() {
         const FLAT: PanelSpec = PanelSpec {
@@ -421,6 +461,7 @@ mod tests {
             rows: RowAxis {
                 column: "id",
                 identity: RowIdentity::Minted,
+                label: RowLabel::Shown,
             },
             columns: Columns::Values(&[
                 ValueColumn {

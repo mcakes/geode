@@ -370,7 +370,10 @@ fn main() {
                 // reload changed `views`/`dimensions` — most reloads
                 // (`[log]`, `[theme]`, `keymap.toml`, ...) never touch it,
                 // so the config section's explainer went stale on exactly
-                // the reload `:level`'s own persist causes. `Frame::
+                // the reload the palette's `Set log level…`'s own
+                // persist causes (`:level` on a tile's command line
+                // caused the same reload until command-line locality
+                // closed that route 2026-09-20). `Frame::
                 // versions().config` now bumps on every *applied* reload
                 // (`hot_reload::apply_reload`'s `note_config_reloaded`
                 // call moved out from under the `views_changed` gate), so
@@ -678,7 +681,9 @@ impl ModuleFactory for DiagnosticsFactoryHandle {
 /// the just-loaded `config` is applied through `log_control` the moment
 /// it's parsed, so it takes effect for everything logged after this
 /// call, and both go onto the returned `ShellServices` for the
-/// diagnostics tile and `:level` (later tasks) to reach.
+/// diagnostics tile and the palette's `Set log level…` (`:level` on a
+/// tile's command line reached the same services until command-line
+/// locality closed that route 2026-09-20) to reach.
 ///
 /// `adapters` (market-data-documents plan, Task 10) is the caller's own
 /// adapter roster — the `ChannelAdapter` registered under `--demo`, or
@@ -731,9 +736,11 @@ fn build_shell_services(
     // MIN-10 (fix round 1): unreachable at startup today (only a
     // poisoned or dropped reload handle can fail this, and neither
     // happens between `install_logging` and here) but `LevelControl::
-    // set` is the same door `:level` (a later task) reloads through at
-    // runtime, where a failure is real and swallowing it would be wrong
-    // — so it's never discarded, even here.
+    // set` is the same door the palette's `Set log level…` reloads
+    // through at runtime (`:level` on a tile's command line reloaded
+    // through the same door until command-line locality closed that
+    // route 2026-09-20), where a failure is real and swallowing it
+    // would be wrong — so it's never discarded, even here.
     if let Err(e) = log_control.set(&log_levels) {
         tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
     }
