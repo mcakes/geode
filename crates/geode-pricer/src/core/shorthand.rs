@@ -360,20 +360,29 @@ pub fn parse(text: &str) -> Result<RowSpec, ParseError> {
         };
         return Err(err(extra.offset, message));
     }
+    // A template weight multiplies the typed quantity: `i64::MAX FLY`
+    // would panic in debug and wrap in release, so it is a parse error
+    // named at the quantity token (which is `toks[0]` whenever one was
+    // read; with no quantity the weight multiplies 1 and cannot overflow).
+    let qty_offset = toks[0].offset;
     let legs = template
         .legs()
         .iter()
-        .map(|l| LineSpec {
-            instrument: Instrument::Vanilla(Vanilla {
-                underlying: underlying.clone(),
-                expiry: expiries[l.expiry].clone(),
-                strike: strikes[l.strike],
-                kind: l.kind,
-            }),
-            qty: qty * l.weight,
-            shift: OwnShifts::default(),
+        .map(|l| {
+            Ok(LineSpec {
+                instrument: Instrument::Vanilla(Vanilla {
+                    underlying: underlying.clone(),
+                    expiry: expiries[l.expiry].clone(),
+                    strike: strikes[l.strike],
+                    kind: l.kind,
+                }),
+                qty: qty
+                    .checked_mul(l.weight)
+                    .ok_or_else(|| err(qty_offset, "quantity out of range"))?,
+                shift: OwnShifts::default(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<LineSpec>, ParseError>>()?;
     Ok(RowSpec::Package { template, legs })
 }
 
@@ -770,6 +779,12 @@ mod tests {
         let e = parse("SPX DEC26 5000 C extra").unwrap_err();
         assert_eq!(e.offset, 17, "{e:?}");
         assert!(e.message.contains("unexpected"), "{e:?}");
+
+        // A quantity a template weight cannot multiply: the error names
+        // the quantity token, not the leg it would have built.
+        let e = parse("9223372036854775807 SPX Z26 4800/5000/5200 FLY").unwrap_err();
+        assert_eq!(e.offset, 0, "{e:?}");
+        assert!(e.message.contains("out of range"), "{e:?}");
     }
 
     #[test]
