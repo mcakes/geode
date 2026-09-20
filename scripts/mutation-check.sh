@@ -11219,16 +11219,17 @@ run_mutation "mdedit: the editor gives up focus before it is dropped" \
 # matching. Anchored on the `&base,\n);` two lines above (Task 5 gave the
 # attribute arm its own identical-looking `close_editor` +
 # `notice = None` pair, so the bare two lines alone are ambiguous —
-# `&base,` is `commit_cell_edit`'s own `draft.set` call ending, not
-# `commit_attr_edit`'s `draft.set_attr`).
+# the closing `}` pair is the row-state match that `commit_cell_value`
+# alone has since Task 7; `commit_attr_edit`'s pair follows a
+# `set_attr` call, not a match).
 run_mutation "mdedit: a committed edit closes the editor" \
   crates/geode-marketdata/src/tile.rs \
-  '            &base,
-        );
+  '            }
+        }
         self.close_editor(window, cx);
         self.notice = None;' \
-  '            &base,
-        );
+  '            }
+        }
         self.notice = None;' \
   geode-marketdata \
   key_context_reports_insert_while_the_editor_exists
@@ -11245,28 +11246,31 @@ run_mutation "mdedit: a committed edit closes the editor" \
 # is the tile half, which is what Task 7 built.
 run_mutation "mdedit: bump walks the cursor's row by default" \
   crates/geode-marketdata/src/tile.rs \
-  '            BumpAxis::Row => self.model.rows[row]
-                .cells
-                .iter()
-                .enumerate()
-                .skip(self.model.slice_columns)
-                .filter_map(|(ci, cell)| {
-                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
-                        skipped += 1;
-                        return None;
-                    }
-                    numeric_value(cell).map(|v| ((row, ci), v))
-                })
-                .collect(),' \
+  '            BumpAxis::Row => {
+                let r = &self.model.rows[row];
+                r.cells
+                    .iter()
+                    .enumerate()
+                    .skip(self.model.slice_columns)
+                    .filter_map(|(ci, cell)| {
+                        if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
+                            skipped += 1;
+                            return None;
+                        }
+                        numeric_value(r.state, cell).map(|v| ((row, ci), v))
+                    })
+                    .collect()
+            }' \
   '            BumpAxis::Row => self
                 .model
                 .rows
                 .iter()
                 .enumerate()
+                .filter(|(_, r)| r.state != RowState::Deleted)
                 .filter_map(|(ri, r)| {
                     r.cells
                         .get(col)
-                        .and_then(numeric_value)
+                        .and_then(|cell| numeric_value(r.state, cell))
                         .map(|v| ((ri, col), v))
                 })
                 .collect(),' \
@@ -11890,6 +11894,7 @@ run_mutation "mdpaint: an edited or sent cell's text is the theme foreground" \
   '    CellPaint {
         fill,
         text: theme.foreground,
+        strike: false,
     }' \
   '    CellPaint {
         fill,
@@ -11900,6 +11905,7 @@ run_mutation "mdpaint: an edited or sent cell's text is the theme foreground" \
         } else {
             theme.foreground
         },
+        strike: false,
     }' \
   geode-marketdata \
   dirty_and_sent_cells_are_readable_on_every_bundled_theme
@@ -13499,8 +13505,8 @@ run_mutation "tile: a flat commit parses by the column's declared type" \
 # the screen and the draft disagree with nothing to say so.
 run_mutation "matrix: patch_cell re-prepares the cell" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '        self.rows[row].cells[col] = cell_of(value, (row, col), kind, draft);' \
-  '        let _ = cell_of(value, (row, col), kind, draft);' \
+  '        self.rows[row].cells[col] = cell_of(value, (doc_row, col), kind, draft);' \
+  '        let _ = cell_of(value, (doc_row, col), kind, draft);' \
   geode-marketdata patch_cell_matches_a_rebuild
 
 # §4.4: a `Text` cell commits its trimmed text verbatim. Mutated back to
@@ -13698,6 +13704,34 @@ run_mutation "draft: dropping the last row leaves the draft clean" \
         result
     }' \
   geode-marketdata dropping_the_only_inserted_row_leaves_a_clean_draft
+
+# Task 7 — rows in the model (spec §5.2).
+#
+# An inserted row is spliced in AFTER its anchor: the document loop pulls
+# the row's own followers out and emits them right behind it. Mutated to
+# pull nothing, every anchored row falls through to the cycle sweep and
+# is appended at the END of the grid, in label order — every row still
+# present, every count still right, and `new-1` painted under `D3`
+# rather than under the `D1` the trader put it below.
+run_mutation "matrix: an inserted row lands after its anchor" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        let group = splicer.followers.remove(row.label.as_ref());' \
+  '        let group: Option<Vec<&str>> = None;' \
+  geode-marketdata inserted_rows_splice_after_their_anchor_and_deleted_rows_stay_marked
+
+# A deleted row is MARKED, never removed (ruling 6): it stays laid out,
+# struck through, so a trader sees what is going and `:revert` has a row
+# to put back. Mutated into a removal, the grid is one row short with
+# nothing to say why, and a cursor on that row lands on its neighbour.
+run_mutation "matrix: a deleted row stays painted" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        if matches!(draft.rows.get(row.label.as_ref()), Some(RowEdit::Deleted)) {
+            row.state = RowState::Deleted;
+        }' \
+  '        if matches!(draft.rows.get(row.label.as_ref()), Some(RowEdit::Deleted)) {
+            continue;
+        }' \
+  geode-marketdata inserted_rows_splice_after_their_anchor_and_deleted_rows_stay_marked
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
