@@ -1520,7 +1520,7 @@ so the stats case computes over every bucket it paints.
 
 | Benchmark | Result |
 |---|---|
-| `series_query/1_slot_1d_1y` (one slot, `1d` over the year: that slot's 250,000 rows folded into the 250 daily buckets its sessions cover) | 3.64 ms |
+| `series_query/1_slot_1d_1y` (one slot, `1d` over the year: that slot's 250,000 rows folded into the ~300 daily buckets its sessions touch — each 1,000-minute session starts at 14:30 UTC and spills into the next UTC day) | 3.64 ms |
 | `series_query/4_slots_plus_ratio_1d_1y` (four slots plus an `s1 / s2` expression, `1d` over the year: the whole million rows) | 9.56 ms |
 | `series_query/2_slots_1m_1mo_with_stats` (two slots, `1m` over a month — a 44,640-bucket span, ~23,000 of them carrying a bar — with three percentiles and 40 bins) | 14.5 ms |
 

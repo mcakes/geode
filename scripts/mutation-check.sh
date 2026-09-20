@@ -14527,7 +14527,7 @@ run_mutation "series query: as-of drops the received_at filter" \
 # bucket set regardless — the values are identical. What changes is the
 # shape of the statement, and with it what a later reader may assume
 # about the CTE's rows; do not "fix" this entry onto a value test.
-run_mutation "series query: an expression is an outer join of its operands" \
+run_mutation "series query: the expression CTE is emitted as an outer join" \
   crates/geode-data/src/query/series.rs \
   '.map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))' \
   '.map(|d| format!(" left join s{d} on s{d}.b = s{anchor}.b"))' \

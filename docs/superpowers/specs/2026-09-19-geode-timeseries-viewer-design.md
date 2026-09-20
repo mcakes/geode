@@ -677,6 +677,18 @@ specification now.
   request has an expression — a positional zip marks the wrong pane in
   both directions, and `health_is_attached_by_slot_number_not_position`
   is the test that would see it.
+- **Strings and timestamps are bound; three kinds of number are
+  formatted into the text (amends §6.2's "every parameter is a bound
+  value").** Identities, sources and every instant are bound values and
+  never text, as §6.2 says. The percentile fractions (`{f:?}`), the bin
+  count (`{k}`) and an expression's numeric literals (`{x:?}` in
+  `lower`) are not: they are written into the statement. Each is checked
+  before it gets there — `validate` refuses a fraction outside `(0, 1)`
+  and a bin count outside `MIN_BINS..=MAX_BINS`, and `lower` refuses a
+  non-finite literal, which is the whole reason that refusal exists.
+  Beyond those, only table names, the `time_bucket` interval, the
+  aggregates and `s{n}` are text.
+
 - **The pool carries a second payload kind (clarifies §6.1).**
   `Work::{Query(CompiledQuery), Series(Box<SeriesPlan>)}` and
   `Payload::{Snapshot, Series}`; the pool's coalescing, interruption
@@ -744,8 +756,9 @@ specification now.
   timed half is the round trip a tile pays — `DataService::series` plus
   the wait for its `DataEvent::Series` — over four identities of
   one-minute bars for a year (1,000,000 rows): **3.64 ms** for one slot
-  at `1d` over the year (that slot's 250,000 rows into 250 daily
-  buckets), **9.56 ms** for four slots plus an `s1 / s2` expression
+  at `1d` over the year (that slot's 250,000 rows into the ~300 daily
+  buckets its sessions touch — each 1,000-minute session starts at 14:30
+  UTC and spills into the next UTC day), **9.56 ms** for four slots plus an `s1 / s2` expression
   (the whole million), **14.5 ms** for two slots at `1m` over a month
   with three percentiles and 40 bins. All three are inside §7.1's 50 ms, the
   widest by a factor of three. **Known gap:** every stats statement
