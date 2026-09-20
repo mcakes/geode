@@ -215,6 +215,19 @@ pub struct Bridge {
     sources: Vec<(SourceSpec, SourceShape)>,
 }
 
+/// Each source paired with the shape it rides (timeseries spec §5.1),
+/// resolved against the schema the service is built from. This is the
+/// last place a `SchemaSpec` and the source list are both in hand — no
+/// tile downstream holds a schema, and neither `adapter` nor
+/// `topics.is_empty()` can tell a subscribed source from a fetch one —
+/// so the answer is computed once here and carried on `Bridge::sources`.
+fn source_shapes(sources: &[SourceSpec], schema: &SchemaSpec) -> Vec<(SourceSpec, SourceShape)> {
+    sources
+        .iter()
+        .map(|s| (s.clone(), s.shape(schema)))
+        .collect()
+}
+
 pub fn start(
     setup: DataSetup,
     find_style: FindStyle,
@@ -232,12 +245,7 @@ pub fn start(
     // dimensions the service itself was built from (spec §3.7).
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
-    let sources: Vec<(SourceSpec, SourceShape)> = setup
-        .config
-        .sources
-        .iter()
-        .map(|s| (s.clone(), s.shape(&schema)))
-        .collect();
+    let sources = source_shapes(&setup.config.sources, &schema);
     let handle = DataService::spawn(setup.config, sink);
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
@@ -745,6 +753,90 @@ mod tests {
     use geode_shell::tiling::{TileId, Workspaces};
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
+
+    /// The bridge is the one place a source's shape is resolved, and
+    /// every diagnostics row about a source is painted from the answer.
+    /// The three shapes are distinguished by two different facts — the
+    /// adapter (directory or not) and the dataset's family (series or
+    /// not) — so this pins the pairing rather than the classification,
+    /// which `source_config`'s own `shape_names_all_three` pins.
+    #[test]
+    fn source_shapes_names_each_of_the_three_shapes() {
+        let (schema, diags) = SchemaSpec::from_doc(&geode_core::config::merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                r#"
+[risk]
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+[risk.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk.columns.npv]
+type = "f64"
+role = "measure"
+grain = "position"
+
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+
+[series]
+family = "series"
+"#,
+            )
+            .unwrap()],
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+        let files = SourceSpec::directory("risk_files", "risk", vec!["/x/*.csv".into()]);
+        let bus = SourceSpec {
+            adapter: "demo_bus".into(),
+            document: Some("cvi_params".into()),
+            topics: vec!["marketdata/cvi/>".into()],
+            ..SourceSpec::directory("cvi", "cvi_params", Vec::new())
+        };
+        let kdb = SourceSpec {
+            adapter: "demo_kdb".into(),
+            ..SourceSpec::directory("history", "series", Vec::new())
+        };
+        let shapes = source_shapes(&[files, bus, kdb], &schema);
+        assert_eq!(
+            shapes
+                .iter()
+                .map(|(s, shape)| (s.name.as_str(), *shape))
+                .collect::<Vec<_>>(),
+            vec![
+                ("risk_files", SourceShape::Directory),
+                ("cvi", SourceShape::Subscribed),
+                ("history", SourceShape::Fetch),
+            ]
+        );
+    }
 
     /// Records logged while `f` runs, on this thread only — the same
     /// scoped-subscriber pattern `geode-data`'s own test modules use.

@@ -311,6 +311,16 @@ differs from the sections above, the code is the specification now.
   sweeper over every pair would have to scan the whole table to find
   the pairs that grew. `SeriesAppended` carries `swept` beside
   `appended`. The two predicates are unchanged from §4.7.
+- **A window that cannot be applied is an error diagnostic at load
+  (amends §4.2).** `SchemaSpec::from_doc` diagnoses both silent forms
+  of a `retention`/`history` declaration — a non-string value
+  (`retention = 30`, which `as_str()` alone turns into "absent") and a
+  value whose microseconds exceed `i64::MAX` (`parse_duration` accepts
+  `y`, so `"300000000y"` parses) — as an error at
+  `datasets.<name>.<field>`, leaving the window `None`, so the
+  "unrepresentable window sweeps nothing" answer in
+  `store::series::cutoff` is now only reachable by a hand-built
+  `DatasetSpec`.
 - **A fetch is clipped to `history` before coverage is subtracted
   (amends §4.7, and is the consequence of the amendment above).**
   Because the sweep is inside the append, a span older than `history`
@@ -354,6 +364,11 @@ differs from the sections above, the code is the specification now.
   `CatalogSnapshot::identities` as `(source, identities)` pairs. A
   source that cannot enumerate is not a failure — the picker simply
   has no typeahead for it.
+- **A `Fetch` shim owes its own deadline (clarifies §5.2).** The
+  worker's shutdown drops its sender and joins the thread, with no
+  cancellation, so an unbounded vendor call holds app exit for its whole
+  duration; the `Fetch` trait doc states the contract, and the demo
+  adapter (pure CPU) needs no deadline.
 - **`FetchWorker` hands an outcome to a service-built sink, which
   submits to the ingest runner (clarifies §5.4).** The worker owns the
   adapter and nothing else: rows become a `SeriesJob` on the runner's

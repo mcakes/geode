@@ -205,6 +205,11 @@ fn append_in_transaction(
 /// deletes entirely — unbounded is the safe direction, and it is the same
 /// answer `DataService::fetch` gives an unrepresentable window on the
 /// request side (no clip).
+///
+/// `SchemaSpec::from_doc` now refuses such a window at load (an error
+/// diagnostic, the window left `None`), so a trader's config no longer
+/// reaches here with one; this is the second defence, for a
+/// `DatasetSpec` assembled in code.
 fn cutoff(now: DateTime<Utc>, window: std::time::Duration) -> Option<i64> {
     i64::try_from(window.as_micros())
         .ok()
@@ -800,26 +805,32 @@ mod tests {
         assert_eq!(all_rows(&store).len(), 2);
     }
 
-    /// `parse_duration` accepts `y`, so a trader can configure a window
-    /// whose microseconds exceed `i64::MAX`. Cast rather than converted,
-    /// it wraps negative, the cutoff lands tens of thousands of years in
-    /// the future and BOTH sweeps match every row — the pair's whole
-    /// table and its whole coverage, gone inside the append's own
+    /// A window whose microseconds exceed `i64::MAX`, cast rather than
+    /// converted, wraps negative: the cutoff lands tens of thousands of
+    /// years in the future and BOTH sweeps match every row — the pair's
+    /// whole table and its whole coverage, gone inside the append's own
     /// transaction. Unrepresentable is unbounded, and unbounded sweeps
     /// nothing.
+    ///
+    /// The fixture is HAND-BUILT rather than parsed because
+    /// `SchemaSpec::from_doc` now refuses such a window at load with an
+    /// error diagnostic and leaves it `None` (spec §4.10) — the config
+    /// door and this one are two defences, and only a `DatasetSpec` built
+    /// in code (this test, or a future caller that assembles one) can
+    /// still reach the storage-side answer.
     #[test]
     fn an_unrepresentable_window_sweeps_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let mut ds = dataset_from("[series]\nfamily = \"series\"\n");
         // 3e8 years is 9.46e21 microseconds; `i64::MAX` is 9.22e18.
-        let ds = dataset_from(
-            "[series]\nfamily = \"series\"\nretention = \"300000000y\"\nhistory = \"300000000y\"\n",
-        );
+        let window = std::time::Duration::from_secs(300_000_000 * 365 * 86_400);
+        ds.series_retention = Some(geode_core::schema::SeriesRetention {
+            retention: Some(window),
+            history: Some(window),
+        });
         assert!(
-            ds.series_retention
-                .unwrap()
-                .retention
-                .is_some_and(|w| i64::try_from(w.as_micros()).is_err()),
+            i64::try_from(window.as_micros()).is_err(),
             "the fixture's window must be the unrepresentable one"
         );
         store.apply_schema(&ds).unwrap();
