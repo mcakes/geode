@@ -13776,7 +13776,7 @@ run_mutation "grouping: enter picks the HIGHLIGHTED row, re-fed from the live te
   '                let _ = &live;
                 state.highlighted_slot()' \
   geode-shell \
-  clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot
+  enter_re_feeds_the_fields_live_text_before_picking
 
 # A digit jumps only on an EMPTY field — typed after text it is text.
 run_mutation "grouping: the digit jump needs an empty field" \

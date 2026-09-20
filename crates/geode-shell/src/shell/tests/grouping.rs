@@ -195,6 +195,32 @@ fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppCont
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
 }
 
+/// `enter` picks from the field's LIVE text, not the last `Change` the
+/// list saw: a write through `set_value` emits no `Change` (the trap
+/// `sync_dialog_text` documents), so without the re-feed the list would
+/// still be ranked against an empty query and commit the view default.
+#[gpui::test]
+fn enter_re_feeds_the_fields_live_text_before_picking(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = open_with_slots(cx);
+    vcx.simulate_keystrokes("alt-g");
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.update(cx, |i, cx| i.set_value("under", window, cx));
+    });
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s
+            .grouping_picker
+            .as_ref()
+            .and_then(|p| p.highlighted_slot())),
+        Some(None),
+        "the list has not seen the write yet"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
+}
+
 /// `tab` completes the field to the highlighted row and keeps typing
 /// there — the choice core's rule, with the filter-only dialog writing
 /// the field itself.
