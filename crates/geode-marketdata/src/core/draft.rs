@@ -995,12 +995,13 @@ fn value_from_toml(value: &toml::Value) -> Option<Value> {
     }
 }
 
-/// Local, like every other displayed time in this codebase (Phase 4a's
-/// ruling) — `pub(crate)` because Task 4's header paints `DraftBadge`'s
-/// `Behind`/`Sent` times through it directly.
-pub(crate) fn local_hhmm(rfc3339: &str) -> String {
+/// On the trader's configured clock, like every other displayed time in
+/// this codebase (Phase 4a's ruling; as-of dialog spec §6.1 for the
+/// clock itself) — `pub(crate)` because Task 4's header paints
+/// `DraftBadge`'s `Behind`/`Sent` times through it directly.
+pub(crate) fn local_hhmm(rfc3339: &str, clock: geode_core::clock::Clock) -> String {
     match chrono::DateTime::parse_from_rfc3339(rfc3339) {
-        Ok(t) => t.with_timezone(&chrono::Local).format("%H:%M").to_string(),
+        Ok(t) => clock.hm(t.to_utc()),
         Err(_) => rfc3339.to_string(),
     }
 }
@@ -1414,8 +1415,14 @@ mod tests {
     }
 
     #[test]
-    fn local_hhmm_shows_an_unparseable_time_verbatim_rather_than_swallowing_it() {
-        assert_eq!(local_hhmm("not a time"), "not a time");
+    fn local_hhmm_reads_on_the_clock() {
+        use geode_core::clock::Clock;
+        assert_eq!(local_hhmm("2026-09-18T22:00:00Z", Clock::utc()), "22:00");
+        assert_eq!(
+            local_hhmm("2026-09-18T22:00:00Z", Clock::in_zone_named("Asia/Tokyo")),
+            "07:00"
+        );
+        assert_eq!(local_hhmm("not a time", Clock::utc()), "not a time");
     }
 
     #[test]

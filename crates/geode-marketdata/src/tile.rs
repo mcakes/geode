@@ -549,6 +549,14 @@ pub struct MarketDataTile {
     /// `spec.title` and `key`, replaced only in `set_key`, never
     /// `format!`-ed in `title()` itself.
     title: SharedString,
+    /// The `AppClock` global (as-of dialog spec §6.1), read once at
+    /// construction and refreshed by an `observe_global::<AppClock>`
+    /// handler — carried here, not read fresh from every formatting
+    /// site, so `HeaderModel::prepare` stays a pure function of its
+    /// `HeaderInputs` and `menu::rows` of its own arguments. `pub(crate)`
+    /// so tests read it directly (`t.clock`) rather than reaching for the
+    /// global themselves.
+    pub(crate) clock: geode_core::clock::Clock,
 }
 
 impl MarketDataTile {
@@ -769,6 +777,20 @@ impl MarketDataTile {
             cx.notify();
         })
         .detach();
+        // `AppClock` (as-of dialog spec §6.1): refresh the tile's own
+        // reading and re-prepare the header — the field the header's
+        // freshness/`Behind` text and the `⋯` menu's "Rebase onto …" row
+        // all read — then notify, the same shape every other mutation
+        // that reaches `rebuild_chrome` follows (`changed`, just above).
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.clock = cx
+                .try_global::<geode_shell::clock::AppClock>()
+                .map(|c| c.0)
+                .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
+            this.rebuild_chrome();
+            cx.notify();
+        })
+        .detach();
 
         let mut this = MarketDataTile {
             id,
@@ -815,6 +837,10 @@ impl MarketDataTile {
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
             state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
             stack: None,
+            clock: cx
+                .try_global::<geode_shell::clock::AppClock>()
+                .map(|c| c.0)
+                .unwrap_or_else(|| geode_core::clock::Clock::machine().0),
         };
         this.rebuild_chrome();
         // The delegate starts with the model this tile starts with (review
@@ -1151,7 +1177,10 @@ impl MarketDataTile {
                     let phrase = draft.count_phrase();
                     draft.revert();
                     // `Behind` implies `on_delivered` ran with `Some`.
-                    let when = as_of.as_deref().map(local_hhmm).unwrap_or_default();
+                    let when = as_of
+                        .as_deref()
+                        .map(|t| local_hhmm(t, self.clock))
+                        .unwrap_or_default();
                     notice = Some(format!("update {when} replaced {phrase}").into());
                 }
             }
@@ -1619,6 +1648,7 @@ impl MarketDataTile {
             notice: self.notice.as_ref(),
             source_at: self.source_at,
             incomplete: self.draft.incomplete_rows(self.spec, &self.model.columns),
+            clock: self.clock,
         });
     }
 
@@ -2057,7 +2087,7 @@ impl MarketDataTile {
             // say), today's local date, so the field always opens on
             // something a step or a digit can act on.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
-                .unwrap_or_else(|_| chrono::Local::now().date_naive());
+                .unwrap_or_else(|_| self.clock.today(chrono::Utc::now()));
             let field = DateField::open(date);
             let focus = cx.focus_handle();
             focus.focus(window, cx);
@@ -2852,7 +2882,7 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) {
         let state = if ty == ColumnType::Date {
-            let field = DateField::open(chrono::Local::now().date_naive());
+            let field = DateField::open(self.clock.today(chrono::Utc::now()));
             let focus = cx.focus_handle();
             focus.focus(window, cx);
             let paint = DateFieldPaint::of(&field);
@@ -2923,16 +2953,19 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        let rows = menu::rows(&MenuInputs {
-            badge: self.draft.badge(),
-            // Upload is Part 4; every build before it greys the row with
-            // `not built yet` (spec §6.2's table) rather than pretending
-            // the panel can send anything anywhere.
-            upload_built: false,
-            policy: self.policy,
-            kind_title: self.spec.title,
-            kind_actions: self.spec.actions,
-        });
+        let rows = menu::rows(
+            &MenuInputs {
+                badge: self.draft.badge(),
+                // Upload is Part 4; every build before it greys the row with
+                // `not built yet` (spec §6.2's table) rather than pretending
+                // the panel can send anything anywhere.
+                upload_built: false,
+                policy: self.policy,
+                kind_title: self.spec.title,
+                kind_actions: self.spec.actions,
+            },
+            self.clock,
+        );
         let highlighted = menu::first_enabled(&rows);
         self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
         cx.notify();
@@ -5550,11 +5583,8 @@ mod tests {
             chips.iter().any(|c| c == "spot 5000"),
             "each header attribute: {chips:?}"
         );
-        let local = chrono::DateTime::parse_from_rfc3339(BASE)
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M:%S")
-            .to_string();
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hms(chrono::DateTime::parse_from_rfc3339(BASE).unwrap().to_utc());
         // Exact, at an injected clock one second past `BASE`: not stale,
         // so the chip is the time alone (the staleness marker has its own
         // test below).
@@ -5621,11 +5651,8 @@ mod tests {
     fn the_time_chip_says_stale_past_stale_after(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        let local = chrono::DateTime::parse_from_rfc3339(BASE)
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M:%S")
-            .to_string();
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hms(chrono::DateTime::parse_from_rfc3339(BASE).unwrap().to_utc());
         let stale_after = 15 * 60;
         let fresh = h
             .tile
@@ -6121,11 +6148,10 @@ mod tests {
             "held, not replaced, on the first delivery after a restore — got {state:?}"
         );
         assert_eq!(len, 1, "the edit survives, parked at its label");
-        let local = chrono::DateTime::parse_from_rfc3339(NEWER)
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hm(chrono::DateTime::parse_from_rfc3339(NEWER)
             .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M")
-            .to_string();
+            .to_utc());
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
@@ -8337,11 +8363,10 @@ deleted = true
         assert_eq!(rows, 2, "still the base generation's two terms");
         assert_eq!(cell.text.to_string(), "0.50", "the edit is still on screen");
         assert!(cell.edited);
-        let local = chrono::DateTime::parse_from_rfc3339(NEWER)
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hm(chrono::DateTime::parse_from_rfc3339(NEWER)
             .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M")
-            .to_string();
+            .to_utc());
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
@@ -8391,11 +8416,10 @@ deleted = true
         );
         assert_eq!(rows, 2, "still the ORIGINAL base generation's two terms");
         assert_eq!(cell.text.to_string(), "0.50", "the edit is untouched");
-        let local = chrono::DateTime::parse_from_rfc3339(NEWEST)
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hm(chrono::DateTime::parse_from_rfc3339(NEWEST)
             .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M")
-            .to_string();
+            .to_utc());
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
@@ -10647,11 +10671,12 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(source.as_deref(), Some(NEWER));
         assert_eq!(rows, 1, "the newer document is painted");
         assert!(!cell.edited);
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
         assert_eq!(
             notice,
             Some(format!(
                 "update {} replaced 2 cells, spot_ref",
-                local_hhmm(NEWER)
+                local_hhmm(NEWER, clock)
             ))
         );
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
@@ -11000,9 +11025,13 @@ edits = [["2026-11-20", "-1", 9.5]]
             "replaced on the next new generation: {draft:?}"
         );
         assert_eq!(source.as_deref(), Some(NEWEST));
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
         assert_eq!(
             notice,
-            Some(format!("update {} replaced 1 cell", local_hhmm(NEWEST)))
+            Some(format!(
+                "update {} replaced 1 cell",
+                local_hhmm(NEWEST, clock)
+            ))
         );
     }
 
@@ -11090,7 +11119,8 @@ edits = [["2026-11-20", "-1", 9.5]]
             Some("0.6"),
             "the editor is untouched"
         );
-        let expected = format!("update {} replaced 1 cell", local_hhmm(NEWER));
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let expected = format!("update {} replaced 1 cell", local_hhmm(NEWER, clock));
         let (draft, notice) = h.tile.read_with(&vcx, |t, _| {
             (t.draft().clone(), t.notice().map(str::to_string))
         });

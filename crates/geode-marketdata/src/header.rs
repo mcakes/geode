@@ -9,6 +9,7 @@ use crate::core::spec::PanelSpec;
 use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
+use geode_core::clock::Clock;
 use geode_shell::fonts;
 use geode_shell::module::StackHandle;
 use geode_shell::shell::control::{self, PointerStates as _};
@@ -182,6 +183,11 @@ pub(crate) struct HeaderInputs<'a> {
     /// `Draft::incomplete_rows` — inserted rows with a required cell
     /// still empty (spec §5.2).
     pub incomplete: usize,
+    /// The `AppClock` global (as-of dialog spec §6.1), read once by the
+    /// tile and carried in here so `prepare` stays a pure function of
+    /// its inputs — the tile's own `clock` field, never a fresh global
+    /// read from inside `prepare`.
+    pub clock: Clock,
 }
 
 /// The header row, prepared once per change: every string already
@@ -232,7 +238,10 @@ impl HeaderModel {
             DraftBadge::Dirty => (true, None),
             DraftBadge::Behind { newer } => (
                 true,
-                Some((format!("update {}", local_hhmm(newer)).into(), Tone::Warn)),
+                Some((
+                    format!("update {}", local_hhmm(newer, i.clock)).into(),
+                    Tone::Warn,
+                )),
             ),
             DraftBadge::Sent => (false, Some(("sent".into(), Tone::Time))),
         };
@@ -257,12 +266,7 @@ impl HeaderModel {
             state,
             incomplete,
             notice: i.notice.cloned(),
-            time: i.source_at.map(|t| {
-                t.with_timezone(&chrono::Local)
-                    .format("%H:%M:%S")
-                    .to_string()
-                    .into()
-            }),
+            time: i.source_at.map(|t| i.clock.hms(t).into()),
             stale: false,
         }
     }
@@ -630,6 +634,7 @@ mod tests {
             notice: None,
             source_at: None,
             incomplete: 0,
+            clock: Clock::utc(),
         }
     }
 
@@ -706,10 +711,9 @@ mod tests {
         ));
         let expected = format!(
             "update {}",
-            chrono::DateTime::parse_from_rfc3339(&newer)
+            Clock::utc().hm(chrono::DateTime::parse_from_rfc3339(&newer)
                 .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%H:%M")
+                .to_utc())
         );
         assert_eq!(
             behind
@@ -765,22 +769,14 @@ mod tests {
     }
 
     #[test]
-    fn the_time_is_local_hhmmss_and_stale_is_a_flag() {
+    fn the_time_is_on_the_clock_hhmmss_and_stale_is_a_flag() {
         let model = model_with_rows();
         let key = vec!["SPX.Z".to_string()];
         let at = chrono::Utc::now();
         let mut i = inputs(&model, Some(&key), DraftBadge::Clean);
         i.source_at = Some(at);
         let h = HeaderModel::prepare(i);
-        assert_eq!(
-            h.time.as_deref(),
-            Some(
-                at.with_timezone(&chrono::Local)
-                    .format("%H:%M:%S")
-                    .to_string()
-                    .as_str()
-            )
-        );
+        assert_eq!(h.time.as_deref(), Some(Clock::utc().hms(at).as_str()));
         assert!(
             !h.stale,
             "staleness is the tile's clock reading, applied at paint"
