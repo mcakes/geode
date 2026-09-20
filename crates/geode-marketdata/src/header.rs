@@ -2,10 +2,10 @@
 //! by [`HeaderModel::prepare`] — the tile's `changed()` door — and painted
 //! by [`render`] with no formatting of its own.
 
-use crate::core::Segment;
 use crate::core::draft::{DraftBadge, local_hhmm};
 use crate::core::matrix::{HeaderCell, MatrixModel, RowState};
 use crate::core::spec::PanelSpec;
+use crate::core::{SegmentPaint, SegmentText};
 use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
@@ -120,7 +120,7 @@ pub(crate) fn render_date_field(
     tile_id: u64,
 ) -> impl IntoElement {
     let separator: Hsla = theme.muted_foreground;
-    let mut field = h_flex()
+    let field = h_flex()
         .track_focus(focus)
         .items_center()
         .px_1()
@@ -138,34 +138,40 @@ pub(crate) fn render_date_field(
                 }
             }
         });
-    for (i, text) in paint.segments.iter().enumerate() {
-        let active = paint.active == i;
-        let CellPaint {
-            fill, text: colour, ..
-        } = date_segment_paint(theme, tones, active, active && paint.typing);
-        if i > 0 {
-            field = field.child(div().text_color(separator).child("-"));
-        }
-        field = field.child(
-            div()
-                .px_0p5()
-                .rounded(theme.radius_tokens().sm)
-                .text_color(colour)
-                .when_some(fill, |d, f| d.bg(f))
-                .debug_selector(move || format!("marketdata-date-seg-{tile_id}-{i}"))
-                .on_mouse_down(gpui::MouseButton::Left, {
-                    let tile = tile.clone();
-                    move |_event, window, cx| {
-                        if let Some(segment) = Segment::at(i) {
-                            tile.update(cx, |t, cx| t.date_segment_clicked(segment, window, cx));
-                        }
-                        cx.stop_propagation();
-                    }
-                })
-                .child(text.clone()),
-        );
-    }
-    field
+    let rest = date_segment_paint(theme, tones, false, false);
+    let active = date_segment_paint(theme, tones, true, false);
+    let typing = date_segment_paint(theme, tones, true, true);
+    let segment_paint = SegmentPaint {
+        rest_text: rest.text,
+        rest_fill: rest.fill,
+        active_text: active.text,
+        active_fill: active.fill.expect("active segment has a fill"),
+        typing_text: typing.text,
+        typing_fill: typing.fill.expect("typing segment has a fill"),
+        separator,
+        suffix: separator,
+        radius: theme.radius_tokens().sm,
+    };
+    let segments: Vec<SegmentText> = paint
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(i, text)| SegmentText {
+            text: text.to_string(),
+            active: paint.active == i,
+            typing: paint.active == i && paint.typing,
+        })
+        .collect();
+    let tile = tile.clone();
+    field.child(geode_widgets::datefield::paint(
+        &segments,
+        None,
+        segment_paint,
+        format!("marketdata-date-seg-{tile_id}").into(),
+        move |segment, window, cx| {
+            tile.update(cx, |t, cx| t.date_segment_clicked(segment, window, cx));
+        },
+    ))
 }
 
 /// Everything [`HeaderModel::prepare`] needs, gathered so the tile's own

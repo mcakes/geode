@@ -7,6 +7,10 @@
 //! saturates, a digit that would make an impossible segment is refused,
 //! and `enter` therefore has nothing to refuse.
 
+mod paint;
+
+pub use paint::{SegmentPaint, paint};
+
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 /// How many segments the field shows: a date alone (the market-data
@@ -132,28 +136,6 @@ pub fn route(key: &str, shift: bool, chord: bool) -> Option<FieldKey> {
             }
         }
     })
-}
-
-impl DateTimeField {
-    /// Perform `key`'s arm on the field. `Commit` and `Cancel` do nothing
-    /// here — the host owns what a commit writes and what a cancel
-    /// restores — and answer `false`. Every other arm answers whether
-    /// anything about the field (value, segment or partial digits)
-    /// changed, so a host can skip a repaint on a no-op.
-    pub fn apply(&mut self, key: FieldKey) -> bool {
-        let before = self.clone();
-        match key {
-            FieldKey::Left => self.left(),
-            FieldKey::Right => self.right(),
-            FieldKey::Step(n) => self.step(n),
-            FieldKey::Digit(d) => {
-                self.digit(d);
-            }
-            FieldKey::Backspace => self.backspace(),
-            FieldKey::Commit | FieldKey::Cancel => return false,
-        }
-        *self != before
-    }
 }
 
 /// The field's state: the committed value, the precision, the active
@@ -439,6 +421,26 @@ impl DateTimeField {
     /// The committed date — the `Date` precision's whole answer.
     pub fn date(&self) -> NaiveDate {
         self.value.date()
+    }
+
+    /// Perform `key`'s arm on the field. `Commit` and `Cancel` do nothing
+    /// here — the host owns what a commit writes and what a cancel
+    /// restores — and answer `false`. Every other arm answers whether
+    /// anything about the field (value, segment or partial digits)
+    /// changed, so a host can skip a repaint on a no-op.
+    pub fn apply(&mut self, key: FieldKey) -> bool {
+        let before = self.clone();
+        match key {
+            FieldKey::Left => self.left(),
+            FieldKey::Right => self.right(),
+            FieldKey::Step(n) => self.step(n),
+            FieldKey::Digit(d) => {
+                self.digit(d);
+            }
+            FieldKey::Backspace => self.backspace(),
+            FieldKey::Commit | FieldKey::Cancel => return false,
+        }
+        *self != before
     }
 
     fn apply_date(&mut self, date: Option<NaiveDate>) {

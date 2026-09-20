@@ -20,7 +20,7 @@ pub(crate) mod test_fixtures;
 pub use cursor::Cursor;
 pub use draft::{Draft, DraftBadge, DraftState, UpdatePolicy, attr_text, parse_attr, parse_cell};
 pub use geode_widgets::datefield::{
-    DateTimeField, FieldKey, Precision, Segment, SegmentText, route,
+    DateTimeField, FieldKey, Precision, Segment, SegmentPaint, SegmentText, route,
 };
 pub use matrix::{Cell, CellKind, MatrixModel, RowModel, cell_text};
 pub use nudge::nudge_text;
