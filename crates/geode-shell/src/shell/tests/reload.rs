@@ -1122,6 +1122,63 @@ fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
     );
 }
 
+/// line-pricer §5.5: the pricer the data engine runs is chosen at startup
+/// from `[pricing] adapter`, so a reload that changes that table needs a
+/// restart on the same terms `sources`/`datasets` already follow —
+/// reverting to the baseline the shell started with clears the message
+/// again.
+#[gpui::test]
+fn a_pricing_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+
+    let mut with_pricing = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("app", "[pricing]\nadapter = \"vendor\"\n").unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_pricing), cx)
+    });
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(m) if m.contains("pricing"))),
+        "{:?}",
+        events.borrow()
+    );
+
+    events.borrow_mut().clear();
+    let mut reverted = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut reverted), cx)
+    });
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(_))),
+        "back at the baseline: {:?}",
+        events.borrow()
+    );
+    assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
+}
+
 /// Phase 4c: `view_presentation.toml` is merged over the views
 /// (`geode_core::config::load_views`), so a change to it changes the
 /// `ViewSpec`s every tile runs on just as a `views` edit does. The Views

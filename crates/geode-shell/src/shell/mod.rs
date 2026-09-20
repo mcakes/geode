@@ -846,6 +846,14 @@ pub struct ShellView {
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
     /// the `datasets` doc.
     datasets_baseline: Vec<LayerDoc>,
+    /// The `[pricing]` table (inside the `app` doc) the data engine's
+    /// pricer was actually chosen from at startup (line-pricer §5.5,
+    /// `crates/geode-app/src/bridge.rs::data_setup`) — same purpose and
+    /// lifecycle as [`sources_baseline`](Self::sources_baseline), never
+    /// re-seeded on reload. A reload whose `[pricing]` table no longer
+    /// matches this needs a restart to take effect, on the same terms
+    /// `sources`/`datasets` already follow.
+    pricing_baseline: Option<toml::Value>,
     /// Every column a dimension picker can open (Phase 4a §3.3),
     /// [`pickable_columns`] over the current config — computed once at
     /// construction and rebuilt by `hot_reload::apply_reload` whenever
@@ -1519,6 +1527,10 @@ impl ShellView {
         // `sources_baseline`'s field doc.
         let sources_baseline = services.config.layered_docs("sources").to_vec();
         let datasets_baseline = services.config.layered_docs("datasets").to_vec();
+        // Same reasoning, for the `[pricing]` table the data engine's
+        // pricer was chosen from (line-pricer §5.5) — see
+        // `pricing_baseline`'s field doc.
+        let pricing_baseline = services.config.get("app", "pricing").cloned();
         // The dimension pickers' column list (Phase 4a §3.3) — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
@@ -1574,6 +1586,7 @@ impl ShellView {
             restart_required: None,
             sources_baseline,
             datasets_baseline,
+            pricing_baseline,
             pickable,
             picker: None,
             next_picker_tag: 0,

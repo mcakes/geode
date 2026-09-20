@@ -326,7 +326,7 @@ impl ShellView {
             // session (comparing against the previous reload instead would
             // report "changed" on the revert too, since the value differs
             // from what was there a moment ago).
-            let restart = [
+            let mut restart = [
                 ("sources", &self.sources_baseline),
                 ("datasets", &self.datasets_baseline),
             ]
@@ -334,6 +334,12 @@ impl ShellView {
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
+            // Same rule, for the `[pricing]` table the data engine's
+            // pricer was chosen from at startup (line-pricer §5.5) — see
+            // `pricing_baseline`'s field doc.
+            if new_config.get("app", "pricing").cloned() != self.pricing_baseline {
+                restart.push("pricing");
+            }
 
             // Phase 4b §4.3: an `[log]` change applies through the same
             // `LevelControl` door `:level` (a later task) uses, and
