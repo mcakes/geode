@@ -46,6 +46,7 @@ use geode_shell::series::SeriesSettings;
 use geode_shell::shell::colours::{
     anchors_from_theme, theme_signature, to_hsla, tokens_from_theme,
 };
+use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{App, Context, ElementId, Entity, Hsla, SharedString, Window, div};
@@ -55,7 +56,7 @@ use crate::commands::{self, Command};
 use crate::core::model::{Changed, Colour, Model, SlotState};
 use crate::core::{Range, chart, request, resolve, session};
 use crate::header::{self, HeaderModel};
-use crate::popup::Popup;
+use crate::popup::{Popup, SeriesPopup, render_series_popup};
 
 /// Exactly what [`chart::build`] reads, and nothing else — the memo key
 /// that decides whether a chrome rebuild also rebuilds the chart model
@@ -163,7 +164,10 @@ pub struct TimeseriesTile {
     header: HeaderModel,
     title: SharedString,
     stack: Option<StackHandle>,
-    /// Tasks 8–10; always `None` in this task (the enum is uninhabited).
+    /// The tile's one overlay: the series list here, the add picker,
+    /// the expression editor and the range dialog in Tasks 9–10. Its
+    /// rows are PREPARED in `rebuild_chrome`, never formatted in
+    /// `render`.
     popup: Option<Popup>,
     footer: SharedString,
 }
@@ -237,12 +241,30 @@ impl TimeseriesTile {
                 // is load-bearing: `fetch_pending` drops the in-flight
                 // set only when the RANGE moved, and an as-of change
                 // leaves `Range` identical.
-                this.in_flight.clear();
-                this.model.mark_all_fetching();
-                this.fetch_pending(cx);
+                //
+                // Gated on a REAL as-of move, not on `follows_changed`
+                // (Task 8, folded review fix): that answers TRUE while
+                // `acted` is `None` — a tile that has never asked a
+                // query — so on a freshly shown tile whose first fetch
+                // is still out, any frame notify at all (a scope
+                // keystroke, say) re-marked every slot and asked for
+                // each pair's span a second time. The `requery` below
+                // stays on `follows_changed`, where "never asked" really
+                // does mean "ask".
+                if this
+                    .acted
+                    .is_some_and(|acted| Self::differs_on_followed(acted, now))
+                {
+                    this.in_flight.clear();
+                    this.model.mark_all_fetching();
+                    this.fetch_pending(cx);
+                }
                 // The barrier is answered on delivery instead, under the
                 // versions this request was made with.
                 this.requery(cx);
+                // `mark_all_fetching` moved every chip's tone; nothing
+                // else on this path re-prepares them.
+                this.rebuild_chrome(cx);
             } else {
                 this.self_arrive(now, cx);
             }
@@ -304,17 +326,24 @@ impl TimeseriesTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `insert` exactly while a popup holds a text field (Tasks 8–10);
-    /// `normal` otherwise. Task 8 adds the `popup == series` pair for
-    /// the series list's own three keys — its fragment layer is already
-    /// shipped, and binds nothing until a `Popup` variant can set it.
+    /// `insert` exactly while a popup holds a text field (Tasks 9–10);
+    /// `normal` otherwise — plus the `popup` pair a fieldless popup
+    /// adds. The series list is the fieldless one: it keeps the tile's
+    /// own keyboard, so `j`/`k`/`enter`/`escape` reach the matcher as
+    /// ordinary normal-mode keys and its fragment layer
+    /// (`timeseries && mode == normal && popup == series`) is what tells
+    /// them apart from `h`/`l` and the rest.
     pub fn key_context(&self) -> KeyContext {
         let mode = if self.popup.as_ref().is_some_and(Popup::is_insert) {
             "insert"
         } else {
             "normal"
         };
-        KeyContext::new("timeseries").pair("mode", mode).counts()
+        let mut ctx = KeyContext::new("timeseries").pair("mode", mode).counts();
+        if let Some(pair) = self.popup.as_ref().and_then(Popup::context_pair) {
+            ctx = ctx.pair("popup", pair);
+        }
+        ctx
     }
 
     /// The ownership half of the shell's insert-focus predicate: does
@@ -497,7 +526,43 @@ impl TimeseriesTile {
         // here and put back on the two unhandled paths.
         let previous = self.notice.take();
         let n = count.unwrap_or(1).max(1) as usize;
-        // Task 8: a popup closes first unless the verb is its own.
+        // A popup closes before any verb that is not its own (the
+        // market-data panel's rule): a trader who pans, zooms or adds
+        // with the list up meant the tile, not the list, and an overlay
+        // left open over the answer is the confusing half.
+        //
+        // The keep-list carries Tasks 9–10's verbs already — the field
+        // popups' `commit`/`cancel`/`insert_*` and the three that OPEN
+        // one — so those tasks add a variant and its handler without
+        // touching this gate. `close_popup_with_window`, never a
+        // `Window`-less closer: a popup whose field holds the keyboard
+        // must be blurred before it is dropped (CLAUDE.md), and this is
+        // the path every such verb reaches it by.
+        if self.popup.is_some()
+            && !matches!(
+                verb,
+                "list"
+                    | "list_down"
+                    | "list_up"
+                    | "list_close"
+                    | "toggle_visible"
+                    | "axis_next"
+                    | "axis_prev"
+                    | "colour"
+                    | "rule"
+                    | "remove"
+                    | "edit"
+                    | "add"
+                    | "expr"
+                    | "range"
+                    | "commit"
+                    | "cancel"
+                    | "insert_up"
+                    | "insert_down"
+            )
+        {
+            self.close_popup_with_window(window, cx);
+        }
         let (now, as_of) = self.now_and_as_of(cx);
         // A view move ends at `view_moved`, never `apply_changed` — see
         // the module doc's three tails.
@@ -563,10 +628,13 @@ impl TimeseriesTile {
         true
     }
 
-    /// Every popup verb, answered `false` until Tasks 8–10 build the
-    /// overlay. The one thing this task owes is `e`'s refusal on a
-    /// SOURCE slot: there is no expression to open, and a trader who
-    /// pressed it deserves the reason rather than a dead key.
+    /// Every popup verb. The series list is built here; Tasks 9–10 add
+    /// the add picker, the expression editor and the range dialog, whose
+    /// verbs still answer `false`.
+    ///
+    /// `e`'s refusal on a SOURCE slot stays this method's: there is no
+    /// expression to open, and a trader who pressed it deserves the
+    /// reason rather than a dead key.
     fn popup_verb(
         &mut self,
         verb: &str,
@@ -574,18 +642,85 @@ impl TimeseriesTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let _ = (n, window);
-        if verb == "edit"
-            && let Some(number) = header::cursor_is_source(&self.model)
-        {
-            self.notice = Some(format!("s{number} is not an expression").into());
-            cx.notify();
+        let series_open = matches!(self.popup, Some(Popup::Series(_)));
+        match verb {
+            // A second `L` closes it — one key for both halves, the way
+            // the market-data menu's own `menu` verb toggles.
+            "list" => {
+                if self.popup.is_some() {
+                    self.close_popup_with_window(window, cx);
+                } else {
+                    self.open_series_popup(cx);
+                }
+                true
+            }
+            // The list's cursor IS the chips' cursor, so `j`/`k` are
+            // `tab`/`shift+tab` under another name — and wrap the same
+            // way. Guarded on the list being open: the fragment binds
+            // them only there, but the palette can reach any action.
+            "list_down" if series_open => {
+                let changed = self.model.cursor_next(n);
+                self.apply_changed(changed, cx);
+                true
+            }
+            "list_up" if series_open => {
+                let changed = self.model.cursor_prev(n);
+                self.apply_changed(changed, cx);
+                true
+            }
+            "list_close" if series_open => {
+                self.close_popup_with_window(window, cx);
+                true
+            }
+            "edit" => {
+                if let Some(number) = header::cursor_is_source(&self.model) {
+                    self.notice = Some(format!("s{number} is not an expression").into());
+                    cx.notify();
+                }
+                false
+            }
+            _ => false,
         }
-        false
+    }
+
+    /// Open the series list (spec §9.5). The rows are prepared by the
+    /// ONE door that prepares every other piece of chrome, so an empty
+    /// popup can never be painted: `rebuild_chrome` fills it in the same
+    /// update it is opened in.
+    fn open_series_popup(&mut self, cx: &mut Context<Self>) {
+        self.popup = Some(Popup::Series(SeriesPopup::default()));
+        self.rebuild_chrome(cx);
+        cx.notify();
+    }
+
+    /// The ONE closer (the market-data panel's rule): every path that
+    /// drops a popup comes through here, because a popup whose own field
+    /// holds the keyboard has to be blurred BEFORE it is dropped — an
+    /// unblurred dead handle leaves `Window::focused` pointing at
+    /// nothing for the rest of the session, and the shell's focus-return
+    /// net never fires.
+    ///
+    /// The series list holds no field, so today the blur is a no-op;
+    /// Tasks 9–10's variants are what make the `window` parameter earn
+    /// its keep, and the door exists now so they add an arm rather than
+    /// a second closer.
+    pub(crate) fn close_popup_with_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let own_field_focused = match &self.popup {
+            Some(Popup::Series(_)) | None => false,
+        };
+        if own_field_focused {
+            window.blur(cx);
+        }
+        self.popup = None;
+        cx.notify();
     }
 
     /// The mouse's form of `tab` (spec §9.3): a chip click moves the
-    /// cursor onto its slot.
+    /// cursor onto its slot — and so does a click on the series list's
+    /// row, which is the same slot under another painting. Whatever
+    /// popup is open STAYS open: the list's own highlight is this
+    /// cursor, so a row click that closed it would take the thing it
+    /// just moved off the screen.
     pub(crate) fn chip_clicked(&mut self, index: usize, cx: &mut Context<Self>) {
         let changed = self.model.set_cursor(index);
         self.apply_changed(changed, cx);
@@ -1039,6 +1174,19 @@ impl TimeseriesTile {
         let colour_of = colour_fn(Arc::clone(&self.colours.borrow()), cx.theme());
         self.header = HeaderModel::prepare(&self.model, default_source.as_deref(), &colour_of);
         self.title = header::title_text(&self.model);
+        // ABOVE the chart-key early return: the list's rows read the
+        // model, the last result and the theme, none of which the chart
+        // key covers on its own — an `axis_next` with the list open
+        // moves a row's letter without touching a single chart input.
+        if matches!(self.popup, Some(Popup::Series(_))) {
+            let rows = SeriesPopup::prepare(
+                &self.model,
+                self.result.as_deref(),
+                default_source.as_deref(),
+                &colour_of,
+            );
+            self.popup = Some(Popup::Series(rows));
+        }
         let key = chart_key(
             &self.model,
             self.result_seq,
@@ -1080,6 +1228,13 @@ impl TimeseriesTile {
     #[cfg(test)]
     pub(crate) fn model(&self) -> &Model {
         &self.model
+    }
+
+    /// What the tile has open — the popup's own "painted text" is its
+    /// PREPARED rows, read here the way the header's chips are.
+    #[cfg(test)]
+    pub(crate) fn popup(&self) -> Option<&Popup> {
+        self.popup.as_ref()
     }
 
     #[cfg(test)]
@@ -1147,9 +1302,18 @@ impl Render for TimeseriesTile {
                 ))
                 .into_any_element()
         };
-        v_flex()
-            .size_full()
-            .bg(theme.background)
+        // The popup is anchored off a zero-size, absolutely positioned
+        // sibling at the header's own right edge (the market-data
+        // panel's §6.1 placement) — `relative()` on the wrapper is what
+        // makes that position read against the HEADER rather than the
+        // window, and `deferred` inside it is what lifts the list above
+        // the chart and the neighbouring tiles.
+        let popup = self.popup.as_ref().map(|p| match p {
+            Popup::Series(s) => render_series_popup(s, self.header.cursor, &tile, tile_id, cx),
+        });
+        let header = div()
+            .relative()
+            .w_full()
             .child(header::render_header(
                 &self.header,
                 theme,
@@ -1157,12 +1321,24 @@ impl Render for TimeseriesTile {
                 tile_id,
                 self.stack.as_ref(),
             ))
+            .when_some(popup, |el, popup_el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .top(scale::design(header::HEADER_HEIGHT))
+                        .child(popup_el),
+                )
+            });
+        v_flex()
+            .size_full()
+            .bg(theme.background)
+            .child(header)
             .when_some(self.notice.clone(), |el, n| {
                 el.child(header::render_notice(&n, theme))
             })
             .child(body)
             .child(header::render_footer(self.footer.clone(), theme))
-        // Tasks 8–10 add the popup layer here.
     }
 }
 
@@ -1246,6 +1422,7 @@ mod tests {
     use crate::content::{ACTIONS, DEFAULT_KEYMAP, TimeseriesFactory};
     use crate::core::model::SlotState;
     use crate::core::{Colour, Model, Preset, Range};
+    use crate::popup::SeriesRow;
     use geode_chart::{Axis, ChartModel};
     use geode_core::colour::NamedColours;
     use geode_core::groupings::GroupingSlots;
@@ -1649,6 +1826,76 @@ mod tests {
                 let _ = window.draw(cx);
             });
         }
+        /// Whether the series list is what the tile has open.
+        fn popup_is_series(&self, vcx: &gpui::VisualTestContext) -> bool {
+            self.tile
+                .read_with(vcx, |t, _| matches!(t.popup(), Some(Popup::Series(_))))
+        }
+        fn popup_is_none(&self, vcx: &gpui::VisualTestContext) -> bool {
+            self.tile.read_with(vcx, |t, _| t.popup().is_none())
+        }
+        /// The list's PREPARED rows — the popup's own "painted text",
+        /// read the way [`Harness::painted_text`] reads the header's.
+        fn series_rows(&self, vcx: &gpui::VisualTestContext) -> Vec<SeriesRow> {
+            self.tile.read_with(vcx, |t, _| match t.popup() {
+                Some(Popup::Series(p)) => p.rows.clone(),
+                None => Vec::new(),
+            })
+        }
+        /// One pair off the tile's live key context. `KeyContext` reads a
+        /// pair BY KEY and offers no iterator over its pairs, so this
+        /// takes the key rather than handing back a map — the assertion
+        /// ("`popup` is `series`") is the same either way, and the shell
+        /// keeps its own surface.
+        fn key_context_pair(&self, vcx: &mut gpui::VisualTestContext, key: &str) -> Option<String> {
+            self.tile.read_with(vcx, |_, cx| {
+                self.content.key_context(cx).get(key).map(str::to_string)
+            })
+        }
+        /// A real click on a PAINTED element, by debug selector: the
+        /// bounds come out of the drawn frame, so a listener that is not
+        /// actually wired to the element it looks wired to fails here.
+        fn click(&self, vcx: &mut gpui::VisualTestContext, selector: &str) {
+            let at = centre_of(vcx, selector);
+            click_at(vcx, at, 1);
+            self.draw(vcx);
+        }
+    }
+
+    /// Paints the tile and hands back the centre of one painted element
+    /// by its debug selector (`geode-marketdata`'s own helper).
+    fn centre_of(vcx: &mut gpui::VisualTestContext, selector: &str) -> gpui::Point<gpui::Pixels> {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        // `debug_bounds` wants a `&'static str`; a formatted selector is
+        // not one, so it is leaked — a test-only cost, once per call.
+        let selector: &'static str = Box::leak(selector.to_string().into_boxed_str());
+        vcx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is painted"))
+            .center()
+    }
+
+    /// A left mouse-down/up pair at `at` carrying `click_count` — gpui's
+    /// own `simulate_click` hardwires a count of 1.
+    fn click_at(
+        vcx: &mut gpui::VisualTestContext,
+        at: gpui::Point<gpui::Pixels>,
+        click_count: usize,
+    ) {
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+        });
     }
 
     #[gpui::test]
@@ -1844,8 +2091,11 @@ mod tests {
         // A verb this tile does not handle leaves the notice on screen:
         // clearing it in state while the old text is still painted is a
         // lie (review round 1, MIN-3).
+        // (`list` is no longer one of those: Task 8 built it, and a
+        // handled verb clears the notice — `add` and `range` are the
+        // ones still waiting for Tasks 9–10.)
         h.dispatch(&mut vcx, "add", None);
-        h.dispatch(&mut vcx, "list", None);
+        h.dispatch(&mut vcx, "range", None);
         assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
         // A handled one takes it away and speaks for itself.
         h.dispatch(&mut vcx, "next", None);
@@ -2062,6 +2312,24 @@ mod tests {
         h.visible(&mut vcx, true);
         h.command(&mut vcx, "add SPX.close").unwrap();
         let first = h.fetch_request().expect("the add's own fetch");
+        // A frame notify carrying nothing this tile follows, while that
+        // first fetch is still unanswered, must not re-ask for the same
+        // span (Task 8, folded review fix): `acted` is `None` — this
+        // tile has never asked a QUERY — so `follows_changed` says true,
+        // and the refetch trio hanging off it alone fired a duplicate
+        // `Fetch` per pair on the first scope keystroke after a show.
+        // The trio is gated on a REAL as-of move instead.
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_scope(geode_core::scope::Scope {
+                text: Some("spx".into()),
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        assert!(
+            h.fetch_request().is_none(),
+            "a scope bump sends no second fetch"
+        );
         // Deliberately unanswered: the pair is still in flight, and the
         // new range is a DIFFERENT span, so the in-flight set must not
         // suppress it (`in_flight_range`).
@@ -2354,6 +2622,70 @@ mod tests {
         assert!(
             h2.fetch_request().is_some(),
             "every show refetches (coverage subtraction makes it cheap)"
+        );
+    }
+
+    #[gpui::test]
+    fn shift_l_opens_the_series_popup_whose_cursor_is_the_chips_cursor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+        h.command(&mut vcx, "rule s2 mean").unwrap();
+        h.dispatch(&mut vcx, "list", None);
+        assert!(h.popup_is_series(&vcx));
+        assert_eq!(
+            h.key_context_pair(&mut vcx, "popup").as_deref(),
+            Some("series")
+        );
+        assert_eq!(
+            h.key_context_mode(&mut vcx),
+            "normal",
+            "the list holds no field: normal mode with a popup pair"
+        );
+        let rows = h.series_rows(&vcx);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].label.as_ref(), "VIX@demo_rest");
+        assert_eq!(rows[1].source_rule.as_ref(), "demo_rest · mean");
+        assert_eq!(rows[1].axis, "L");
+        assert_eq!(rows[1].state.as_ref(), "fetching");
+        h.dispatch(&mut vcx, "list_up", None);
+        assert_eq!(h.model(&vcx).cursor(), Some(0));
+        h.dispatch(&mut vcx, "list_down", Some(3));
+        assert_eq!(h.model(&vcx).cursor(), Some(1), "wraps like the chips");
+        h.dispatch(&mut vcx, "axis_next", None);
+        assert!(h.popup_is_series(&vcx), "a popup verb keeps it open");
+        assert_eq!(h.series_rows(&vcx)[1].axis, "R");
+        h.dispatch(&mut vcx, "pan_left", None);
+        assert!(!h.popup_is_series(&vcx), "any other verb closes it first");
+        h.dispatch(&mut vcx, "list", None);
+        h.dispatch(&mut vcx, "list_close", None);
+        assert!(h.popup_is_none(&vcx));
+        h.dispatch(&mut vcx, "list", None);
+        assert!(h.popup_is_series(&vcx));
+        h.dispatch(&mut vcx, "list", None);
+        assert!(h.popup_is_none(&vcx), "a second L closes it");
+    }
+
+    #[gpui::test]
+    fn a_chip_click_moves_the_cursor_without_opening_the_popup_and_a_row_click_moves_it_too(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.command(&mut vcx, "add VIX").unwrap();
+        // The chips are keyed by SLOT NUMBER, not by index: the first
+        // chip is `s1`.
+        h.click(&mut vcx, &format!("timeseries-chip-{TILE}-1"));
+        assert_eq!(h.model(&vcx).cursor(), Some(0));
+        assert!(h.popup_is_none(&vcx));
+        h.dispatch(&mut vcx, "list", None);
+        h.click(&mut vcx, &format!("ts-list-row-{TILE}-1"));
+        assert_eq!(h.model(&vcx).cursor(), Some(1));
+        assert!(
+            h.popup_is_series(&vcx),
+            "a row click moves the cursor and keeps the list"
         );
     }
 
