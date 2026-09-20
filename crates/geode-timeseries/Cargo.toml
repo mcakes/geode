@@ -1,0 +1,40 @@
+[package]
+name = "geode-timeseries"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# `geode-core` for the series vocabulary (`Frequency`, `SeriesParams`,
+# the expression AST), `geode-shell` for the module-hosting contract
+# (`TileContent`, `Frame`, `Diagnostics`, `ChoiceList`, the chip/control
+# doors) and the `SeriesSettings` global, `geode-widgets` for the
+# segmented date field, `geode-chart` for the model and the element,
+# `geode-data` for `DataHandle` alone — the one door a module asks for
+# data through (never `geode-blotter`, never `geode-diagnostics`),
+# `chrono` for range resolution and the local offset, `toml` for the
+# session round trip.
+[dependencies]
+geode-core.workspace = true
+geode-shell.workspace = true
+geode-widgets.workspace = true
+geode-chart.workspace = true
+geode-data = { path = "../geode-data" }
+gpui.workspace = true
+gpui-component.workspace = true
+chrono = "0.4.42"
+toml = "1.1.4"
+
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+criterion = "0.8.2"
+proptest = "1"
+
+[[bench]]
+name = "chart_model"
+harness = false
