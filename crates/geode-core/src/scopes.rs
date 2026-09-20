@@ -9,6 +9,30 @@ use std::collections::BTreeMap;
 
 pub type SavedScopes = BTreeMap<String, Scope>;
 
+/// Names a saved scope may never take, shared by every door that can
+/// create one — `Frame::save_scope` (`geode-shell`, `:scope save` on a
+/// tile's command line) and `shell::objectdialog::Domain::Scopes::
+/// reserved_names` (the config dialog's `n`/`c`/`scope::save_current`
+/// naming prompt) both read this one list, in the mould of
+/// `geode_core::colour::RESERVED_NAMES`. `save_current` is the
+/// `scope::save_current` palette action's own id (scope-save spec's
+/// amendment): a saved scope by that name would collide with it in the
+/// palette and shadow it from `input.rs`'s `scope::<name>` dispatch arm.
+/// **Refusing it at the dialog alone is not enough** — the review that
+/// added this constant found `:scope save save_current` on a tile still
+/// reached `Frame::save_scope` unchecked, persisting `[save_current]` to
+/// `scopes.toml`; the next `register_scope_actions` at startup then
+/// tried to register `scope::save_current` a second time and panicked
+/// (`ActionRegistry::register`'s `.expect("builtin action ids are
+/// unique by construction")`) — a config value on disk that crashes the
+/// app at every launch, unfixable by a trader who cannot even open the
+/// dialog that would tell them why. `register_scope_actions` itself
+/// (`geode-shell/src/defaults.rs`) is the second, independent backstop:
+/// even a scope named some OTHER already-registered id (a future
+/// action, or a name collision this list has not yet learned about)
+/// must not panic the registry either, so it skips rather than expects.
+pub const RESERVED_NAMES: [&str; 1] = ["save_current"];
+
 /// Read every named scope out of a merged `scopes` doc, dropping (with a
 /// warning) any that isn't a table, names a column no dataset declares, or
 /// carries an unparseable expression. Validated against every dataset in

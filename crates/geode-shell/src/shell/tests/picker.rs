@@ -74,21 +74,6 @@ fn services_with_pickable() -> ShellServices {
     }
 }
 
-/// Dispatch `action` through `ShellView::dispatch` directly — the same
-/// route `shell::tests::dialog_test_shell` uses to open the keybinding/
-/// settings dialogs, reused here rather than driving the palette (`frame::
-/// pick_book` has no keymap binding of its own — it's palette-only,
-/// "Pick: book" — so a keystroke-only path would have to go through the
-/// palette's own filter-and-enter dance for no benefit over calling the
-/// one method every dispatch route already funnels through).
-fn dispatch_action(shell: &Entity<ShellView>, action: &str, vcx: &mut gpui::VisualTestContext) {
-    vcx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.dispatch(&ActionId(action.to_string()), None, window, cx);
-        });
-    });
-}
-
 #[gpui::test]
 fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_scope_change(
     cx: &mut gpui::TestAppContext,

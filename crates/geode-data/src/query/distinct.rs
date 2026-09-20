@@ -79,7 +79,11 @@ pub(crate) fn compile_distinct_with_cache(
             Some(d) => crate::query::compile::derived_case(d),
         };
         selects.push(format!(
-            "select {value_expr} as value, count(*) as n from {} where {} group by 1",
+            // `base` is the alias `membership`'s probes correlate on
+            // (`probe.k is not distinct from base.k`), the same one
+            // `compile_view` gives its own `from`; a scope term routed to
+            // another grain fails to bind without it.
+            "select {value_expr} as value, count(*) as n from {} base where {} group by 1",
             // `era.relation` already applies the generation predicate to
             // both sides it reads (Phase 4a's as-of baseline fix); the
             // scope predicate alone is left for the caller to apply.
@@ -645,6 +649,53 @@ grain = "instrument"
         };
         let all = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &unscoped).unwrap());
         assert!(all.iter().map(|(_, n)| n).sum::<u64>() > 8);
+    }
+
+    /// A scope term on a column the picked dimension's own grain does not
+    /// carry is routed through `membership`'s `exists (… probe where
+    /// probe.k is not distinct from base.k …)`, which names the outer
+    /// relation `base` — the alias `compile_view` gives its `from`.
+    /// `compile_distinct` shipped without it (2026-09-19, seen on the
+    /// scope chip: `Referenced table "base" not found`): picking `book`
+    /// while scoped on an instrument-grain `currency` probed the
+    /// instrument table from an unaliased position table.
+    #[test]
+    fn distinct_under_a_scope_probing_a_finer_grain_aliases_its_relation_as_base() {
+        let f = two_dataset_fixture();
+        f.conn()
+            .execute_batch(
+                "insert into risk_position_live values
+                   ('BK000','L','P1','C', 1.0, 'b', 1, 1, now()),
+                   ('BK000','L','P2','C', 1.0, 'b', 1, 1, now()),
+                   ('BK000','L','P3','C', 1.0, 'b', 1, 1, now()),
+                   ('BK000','L','P4','C', 1.0, 'b', 1, 1, now()),
+                   ('BK001','L','P5','C', 1.0, 'b', 1, 1, now()),
+                   ('BK001','L','P6','C', 1.0, 'b', 1, 1, now());",
+            )
+            .unwrap();
+        let params = DistinctParams {
+            key: QueryKey(1),
+            tag: 1,
+            column: "book".into(),
+            scope: Scope {
+                dimensions: vec![DimensionSelection {
+                    column: "currency".into(),
+                    values: vec!["EUR".into()],
+                }],
+                ..Scope::default()
+            },
+            as_of: AsOf::Live,
+        };
+        let compiled = compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap();
+        assert!(
+            compiled.sql.contains("risk_position_live base where exists (select 1 from risk_instrument_live probe where"),
+            "{}",
+            compiled.sql
+        );
+        // risk: BK000's P3 and P4 hold EUR instruments, BK001's none.
+        // ref has no position grain, so its `book` comes straight off
+        // `ref_instrument_live`, where BK000 has one EUR row (J4).
+        assert_eq!(f.run(&compiled), vec![("BK000".to_string(), 3)]);
     }
 
     #[test]

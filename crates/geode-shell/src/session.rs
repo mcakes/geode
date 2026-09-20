@@ -45,6 +45,26 @@
 //! id = 2
 //! ```
 //!
+//! A `stack` node (tile-stacks spec §3) holds `members` (tile ids, two or
+//! more once healed) and `active` (index into `members`):
+//! ```toml
+//! [[workspaces.1.node.children]]
+//! kind = "stack"
+//! members = [3, 4, 5]
+//! active = 1
+//! ```
+//! An older build meets `kind = "stack"` as an unknown node kind, which
+//! `node_from_toml` reports as an error — but the two trees it can appear
+//! in diverge sharply from there. A stack in a workspace's MAIN tree
+//! propagates through `parse_workspace`'s `?` into `from_toml`'s
+//! `errors`, so `from_toml` returns `Err` and `load` answers a wholly
+//! fresh session (`fresh(errors)`): every workspace, every tile record
+//! and the palette usage history are discarded, and the next periodic
+//! flush overwrites the file with that empty state. A stack in a DOCK
+//! tree is caught inside `parse_docks`'s own `match node_from_toml { .. }`
+//! arm, which only warns and drops that one dock's tree — the main tree,
+//! the workspace's other docks and every other workspace survive intact.
+//!
 //! Dock-regions task adds two optional per-workspace shapes (absent in
 //! every pre-dock file, which therefore loads unchanged — no
 //! `config_version` bump; `from_toml` tolerates unknown keys in both
@@ -866,6 +886,21 @@ fn node_to_toml(node: &Node) -> toml::Value {
             t.insert("id".to_string(), toml::Value::Integer(tile_id_to_i64(*id)));
             toml::Value::Table(t)
         }
+        Node::Stack { children, active } => {
+            let mut t = toml::Table::new();
+            t.insert("kind".to_string(), toml::Value::String("stack".to_string()));
+            t.insert(
+                "members".to_string(),
+                toml::Value::Array(
+                    children
+                        .iter()
+                        .map(|id| toml::Value::Integer(tile_id_to_i64(*id)))
+                        .collect(),
+                ),
+            );
+            t.insert("active".to_string(), toml::Value::Integer(*active as i64));
+            toml::Value::Table(t)
+        }
         Node::Split {
             orientation,
             children,
@@ -943,6 +978,36 @@ fn node_from_toml(value: &toml::Value) -> Result<Node, String> {
                 orientation,
                 children,
                 ratios,
+            })
+        }
+        Some("stack") => {
+            let members = table
+                .get("members")
+                .and_then(|v| v.as_array())
+                .ok_or("stack missing 'members' array")?
+                .iter()
+                .map(|v| {
+                    let id = v
+                        .as_integer()
+                        .ok_or_else(|| "stack member is not an integer".to_string())?;
+                    if id < 0 {
+                        return Err(format!("stack member id {id} is negative"));
+                    }
+                    Ok(TileId(id as u64))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            // Healing — a short list, a repeated or already-claimed member,
+            // an out-of-range `active` — is `Tree::from_parts`'s job
+            // (`validate_node`); this reader only refuses what it cannot
+            // read at all, exactly as the `leaf` arm does.
+            let active = table
+                .get("active")
+                .and_then(|v| v.as_integer())
+                .map(|a| a.max(0) as usize)
+                .unwrap_or(0);
+            Ok(Node::Stack {
+                children: members,
+                active,
             })
         }
         other => Err(format!("unknown node kind {other:?}")),
@@ -1196,6 +1261,94 @@ mod tests {
     }
 
     // --- to_toml / from_toml round-trip ---------------------------------
+
+    #[test]
+    fn round_trips_a_stack_in_the_main_tree_and_in_a_dock() {
+        let mut ws = Workspaces::new();
+        let a = ws.split_active(Orientation::Horizontal);
+        let b = ws.stack_active().unwrap();
+        let _c = ws.stack_active().unwrap();
+        ws.active_mut().focus_main_tile(b); // b active, hidden c and a
+        let d = ws.split_active(Orientation::Horizontal);
+        ws.active_mut().move_to_dock(crate::tiling::DockSide::Left);
+        let _e = ws.stack_active().unwrap(); // stack in the dock
+        let _ = (a, d);
+
+        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage());
+        let text = toml::to_string(&table).unwrap();
+        assert!(text.contains("kind = \"stack\""), "{text}");
+        assert!(text.contains("members = ["), "{text}");
+        let Restored {
+            workspaces: restored,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored.active().tree().tiles(), ws.active().tree().tiles());
+        assert_eq!(
+            restored.active().tree().visible_tiles(),
+            ws.active().tree().visible_tiles()
+        );
+        assert_eq!(
+            restored.active().tree().focused(),
+            ws.active().tree().focused()
+        );
+        let side = crate::tiling::DockSide::Left;
+        assert_eq!(
+            restored.active().docks().get(side).tree().visible_tiles(),
+            ws.active().docks().get(side).tree().visible_tiles()
+        );
+    }
+
+    #[test]
+    fn a_hostile_stack_node_is_healed_not_refused() {
+        let text = r#"
+config_version = 1
+active = 1
+[workspaces.1]
+focused = 2
+[workspaces.1.node]
+kind = "split"
+orientation = "horizontal"
+ratios = [0.5, 0.5]
+[[workspaces.1.node.children]]
+kind = "leaf"
+id = 1
+[[workspaces.1.node.children]]
+kind = "stack"
+members = [1, 2, 3]
+active = 12
+"#;
+        let table: toml::Table = toml::from_str(text).unwrap();
+        let Restored { workspaces, .. } = from_toml(&table).unwrap();
+        let tree = workspaces.active().tree();
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(2), TileId(3)]);
+        assert_eq!(
+            tree.stack_position(TileId(2)),
+            Some((1, 2)),
+            "the leaf's claim on 1 won"
+        );
+        assert_eq!(
+            tree.visible_tiles(),
+            vec![TileId(1), TileId(2)],
+            "active clamped to 0; focused 2 activated"
+        );
+    }
+
+    #[test]
+    fn a_stack_node_with_a_bad_member_list_is_an_error_like_a_bad_leaf() {
+        let text = r#"
+config_version = 1
+active = 1
+[workspaces.1]
+[workspaces.1.node]
+kind = "stack"
+members = [1, -4]
+"#;
+        let table: toml::Table = toml::from_str(text).unwrap();
+        let err = from_toml(&table).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("negative")), "{err:?}");
+    }
 
     #[test]
     fn round_trips_a_fresh_workspaces() {

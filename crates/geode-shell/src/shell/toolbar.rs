@@ -10,8 +10,10 @@
 //! putting content inside it via `TitleBar::new().child(...)`.
 //!
 //! Content: the app title left, the frame readout centered in the
-//! previously-reserved middle region (Task 6, spec §4.4 — slot, scope
-//! chips, and an unmissable AS OF badge when scoped to a snapshot), and a
+//! previously-reserved middle region (Task 6, spec §4.4 — the grouping
+//! readout, a click on which opens the grouping picker (2026-09-19),
+//! scope chips, and an unmissable AS OF badge when scoped to a
+//! snapshot), and a
 //! right-aligned scope text [`Input`] (Task 4, spec §3.1/§3.11) — every
 //! keystroke while it's focused feeds the frame's scope through
 //! `ShellView`'s own `InputEvent` subscription; this function only
@@ -31,6 +33,7 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
 use super::chip;
+use super::control::{self, PointerStates as _};
 use super::scale;
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
@@ -54,7 +57,7 @@ const FILTER_WIDTH: f32 = 200.0;
 /// one.
 fn chip(
     id: ElementId,
-    label: String,
+    label: impl Into<SharedString>,
     fg: Hsla,
     bg: Hsla,
     radius: Pixels,
@@ -67,15 +70,50 @@ fn chip(
         .rounded(radius)
         .bg(bg)
         .text_color(fg)
-        .child(label)
+        .child(label.into())
         .debug_selector(selector)
 }
 
+/// [`chip`] for a glyph rather than a label: the same box, the icon
+/// coloured as the chip's text would be. Kept separate from `chip` so its
+/// label parameter stays a `SharedString` the selection chips hand in
+/// prepared, rather than every caller paying for an `AnyElement`.
+fn icon_chip(
+    id: ElementId,
+    icon: Icon,
+    fg: Hsla,
+    bg: Hsla,
+    radius: Pixels,
+    selector: impl Fn() -> String + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_2()
+        .py_0p5()
+        .rounded(radius)
+        .bg(bg)
+        .text_color(fg)
+        // The icon inherits `fg` from the box rather than pinning it, so a
+        // hover recolours glyph and box together (`control::PointerStates`).
+        .child(icon)
+        .debug_selector(selector)
+}
+
+/// Five separate mouse doors rather than a bundling struct (clippy's
+/// `too_many_arguments`, `-D warnings`-enforced) — `status_bar`'s own
+/// reasoning: `render.rs`'s one call site builds each as its own
+/// `cx.entity()`-capturing closure, and this body hands each to exactly
+/// one element, so a struct would only move the assembly for no reader
+/// benefit.
+#[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
     on_chip_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+    on_pick: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_grouping: impl Fn(&mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -84,6 +122,17 @@ pub fn toolbar(
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
+    // Pointer states for the chips that are clickable (the selection
+    // chips, `+`, save) and for the bare `×` glyph; the text, expression
+    // and contradiction chips have no listener and take none — a hover
+    // fill promises a click (design guide, interaction states).
+    let chip_states = control::paint(
+        theme,
+        control::Rest::Filled(chip_bg),
+        theme.title_bar,
+        chip_fg,
+    );
+    let glyph_states = control::paint(theme, control::Rest::Bare, theme.title_bar, chip_fg);
 
     let mut chips_row = h_flex().gap_1().items_center();
     for (i, c) in model.chips.iter().enumerate() {
@@ -130,6 +179,7 @@ pub fn toolbar(
                         Some("frame::pick"),
                         Some(SharedString::new_static("click: pick values")),
                     ))
+                    .pointer_states(chip_states)
                     .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                         on_open(&open_column, window, cx)
                     }),
@@ -140,8 +190,11 @@ pub fn toolbar(
                             SharedString::new_static("scope-chip-close"),
                             i as u64,
                         ))
-                        .child(Icon::new(IconName::Close).text_color(chip_fg))
+                        .rounded(theme.radius_tokens().sm)
+                        .text_color(chip_fg)
+                        .child(Icon::new(IconName::Close))
                         .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                        .pointer_states(glyph_states)
                         .tooltip(tips::tip_with(
                             c.close_selector.clone(),
                             c.close_title.clone(),
@@ -190,6 +243,62 @@ pub fn toolbar(
             )),
         );
     }
+    // The `+` pick chip (scope-save spec's amendment): a mouse door onto
+    // the dimension picker (`mod+p`/`frame::pick`) for a trader who has
+    // not memorised the chord — always painted, empty scope or not,
+    // since picking a dimension is exactly how a scope starts.
+    chips_row = chips_row.child(
+        chip(
+            "scope-pick-chip".into(),
+            SharedString::new_static("+"),
+            chip_fg,
+            chip_bg,
+            chip_radius,
+            || "scope-pick-chip".to_string(),
+        )
+        .tooltip(tips::tip(
+            "tip-scope-pick-chip",
+            "Pick a dimension",
+            Some("frame::pick"),
+            None,
+        ))
+        .pointer_states(chip_states)
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            on_pick(window, cx)
+        }),
+    );
+    if model.savable {
+        // The save chip: the mouse form of `scope::save_current`,
+        // withdrawn rather than merely disabled while the frame has
+        // nothing to save (`ScopeBarModel::savable`'s own doc has the
+        // reasoning — a chip that always does nothing is worse than no
+        // chip). A save icon rather than the word (user ruling
+        // 2026-09-19): `Save` is outside `gpui_component::IconName`'s 101,
+        // so it is named through the shared catalog and its bytes come
+        // from `geode-app`'s `ExtraIcons` source — a shell that paints it
+        // under the plain `Assets` alone gets an empty glyph, not a
+        // panic, which is why the tooltip still says what it does.
+        chips_row = chips_row.child(
+            icon_chip(
+                "scope-save-chip".into(),
+                Icon::new(gpui_kit_assets::IconName::Save),
+                chip_fg,
+                chip_bg,
+                chip_radius,
+                || "scope-save-chip".to_string(),
+            )
+            .tooltip(tips::tip(
+                "tip-scope-save-chip",
+                "Save as a named scope",
+                Some("scope::save_current"),
+                None,
+            ))
+            .pointer_states(chip_states)
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                on_save(window, cx)
+            }),
+        );
+    }
     if let Some(named) = &model.impossible {
         // The contradiction chip: `chip::Tone::Danger`, not the muted
         // scheme every other chip uses — a scope that can match nothing
@@ -215,11 +324,9 @@ pub fn toolbar(
             )),
         );
     }
-    let has_chips = !model.chips.is_empty()
-        || model.text.is_some()
-        || model.expr.is_some()
-        || model.impossible.is_some();
-
+    // `chips_row` used to be conditionally omitted when the frame had
+    // nothing to show (`has_chips`, now gone) — the `+` pick chip above
+    // is always painted, so the row is never empty any more.
     TitleBar::new().child(
         h_flex()
             .w_full()
@@ -276,12 +383,33 @@ pub fn toolbar(
                                 )
                         },
                     )
+                    // The grouping readout (2026-09-19) is a control: a
+                    // click opens the grouping picker, the mouse form of
+                    // `frame::grouping`/`mod+g`, so it takes the bare
+                    // glyph's pointer states (the same `(Bare, title_bar,
+                    // muted_foreground)` pairing the `×` glyph ships in
+                    // `control`'s sweep) and a tooltip naming the chord.
+                    // Padded and rounded so the hover fill has a shape.
                     .child(
                         div()
-                            .text_color(theme.muted_foreground)
+                            .id("scope-grouping")
+                            .px_1()
+                            .rounded(chip_radius)
+                            .text_color(chip_fg)
+                            .debug_selector(|| "scope-grouping".to_string())
+                            .tooltip(tips::tip(
+                                "tip-scope-grouping",
+                                "Pick a grouping",
+                                Some("frame::grouping"),
+                                None,
+                            ))
+                            .pointer_states(glyph_states)
+                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                on_grouping(window, cx)
+                            })
                             .child(model.slot_label.clone()),
                     )
-                    .when(has_chips, |el| el.child(chips_row)),
+                    .child(chips_row),
             )
             // A muted search icon in the `prefix` slot rather than a
             // "filter" placeholder (user direction), matching the palette

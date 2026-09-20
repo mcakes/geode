@@ -591,7 +591,39 @@ Two helpers for the test module, beside `open_with`:
 - Split `commit_cell_edit` into `commit_cell_edit(text)` (parse by kind: `Number` → `parse_cell(text, ty)` → `Value::F64`/`I64` by the column's declared type; `Text`/`Choice` → trimmed string, empty refused with `"a value is required"` when the `ValueColumn.required` is true, else allowed) and `commit_cell_value(cell, labels, value)` (the label-identity check, `draft.set`, `close_editor`, then `patch_cell` instead of `rebuild_model` — call `install_model` after the patch so the table refreshes; if `patch_cell` answers `false` fall back to `rebuild_model`).
 - `nudge`'s cell arm: `Date` cells step the date field (the attr arm already does this — share it).
 
-`delegate.rs`: the editor slot paints `EditorPaint::Date` in a cell when the tile's editor is a date field on that cell — extend the delegate's `editor` field to the `EditorPaint`-shaped enum the header already uses (read `header::render_date_field` and call it from `render_td` with the same arguments; the `MarketDataTile` entity the delegate needs for key routing is what `sync_cursor`/`install_model` can hand it — read how the delegate gets `editor` today and extend that path).
+`delegate.rs` — the editor slot learns the date field, in a cell AND (Task 8) in the row-label column:
+
+```rust
+/// What the tile's open editor looks like from the delegate: which cell it
+/// sits in (`col: None` is the row-label column, Task 8) and what to paint
+/// there — the text `Input`, or the segmented date field's prepared
+/// segments plus the focus handle its keys route through.
+#[derive(Clone)]
+pub(crate) struct DelegateEditor {
+    pub row: usize,
+    pub col: Option<usize>,
+    pub paint: DelegateEditorPaint,
+}
+#[derive(Clone)]
+pub(crate) enum DelegateEditorPaint {
+    Text(Entity<InputState>),
+    Date { paint: DateFieldPaint, focus: FocusHandle },
+}
+pub(crate) struct MatrixDelegate {
+    ...,
+    pub(crate) editor: Option<DelegateEditor>,
+    /// The tile, for the date field's key and click routing
+    /// (`header::render_date_field` takes the entity). Weak: the table
+    /// is owned by the tile, and a strong handle here would be a cycle.
+    pub(crate) tile: WeakEntity<MarketDataTile>,
+    pub(crate) tile_id: u64,
+    /// Refreshed by `sync_cursor` from the tile's own `tones` — the date
+    /// field paints its active segment through `FlooredTones::primary_text`.
+    pub(crate) tones: FlooredTones,
+}
+```
+
+`DateFieldPaint` and `FlooredTones` derive `Clone`. `MarketDataTile::new` builds the delegate with `cx.entity().downgrade()` (the `TableState` is created inside `cx.new`, so the tile's own entity is available there — read `new`). `sync_cursor` mirrors `self.editor` into `DelegateEditor` for BOTH `EditorState` forms on a `Cell` target (the "a cell never opens the date form" arm goes) and copies `self.tones`. `render_td`'s editor arm matches the paint: `Text` → `Input::new(state)` as today; `Date { paint, focus }` → `header::render_date_field(paint, focus, theme, &self.tones, &tile, self.tile_id)` after `self.tile.upgrade()` (a dropped tile paints the cell's text instead) — make `render_date_field` `pub(crate)`. The field's own `on_key_down` calls `tile.date_field_key`, which already routes `enter` into `commit_edit` — so a date CELL commits through the same door the strip does.
 
 - [ ] **Step 4: Run** — `cargo test -p geode-marketdata 2>&1 | tail -3`; clippy on the crate.
 
@@ -853,13 +885,12 @@ Entries: `matrix: patch_cell re-prepares the cell` (mutate `patch_cell`'s assign
 **Files:**
 - Modify: `crates/geode-marketdata/src/content.rs` (`ACTIONS` + `DEFAULT_KEYMAP`: `"o" = "marketdata::insert_below"`, `"shift+o" = "marketdata::insert_above"`, `"d d" = "marketdata::delete_row"`)
 - Modify: `crates/geode-marketdata/src/tile.rs` (the three verbs; `EditTarget::RowLabel { row, label }`; `commit_edit`'s label arm; `serialize`/restore carry `rows` through `Draft::to_toml` — already does, since parking and session write the whole table; `yank_row` on an inserted row)
-- Modify: `crates/geode-marketdata/src/delegate.rs` (`label_editor: Option<(usize, Entity<InputState>)>` painted in column 0)
+- Modify: `crates/geode-marketdata/src/delegate.rs` (`render_td`'s row-label arm paints `DelegateEditor { col: None, .. }` — the text `Input` or the date field — in column 0)
 - Test: `tile.rs` window tests
 
 **Interfaces:**
 - Consumes: Task 6's `Draft::{insert_row, delete_row, mint_label, rename_row, set_row_cell}`, Task 7's `RowState`.
-- Produces: the three verbs; `EditTarget::RowLabel`; `pub(crate) fn label_editor_state(&self) -> Option<Entity<InputState>>` for tests.
-- **Deviation from spec §5.3, ruled here:** the row-label editor for a `Typed` axis is the text `Input` for every axis type — a `Date` axis is typed as `YYYY-MM-DD` and parsed through `parse_attr(text, ty)` — not the segmented date field. The delegate's label column would otherwise need the segmented field's key routing wired into the table cell; the spec's As-built note records this (Task 13).
+- Produces: the three verbs; `EditTarget::RowLabel { row, label }`; `pub(crate) fn label_editor_open(&self) -> bool` for tests. The row-label editor takes the axis's own form (spec §5.3, user ruling 2026-09-19 "I'd rather have the segmented field"): `RowIdentity::Typed(ColumnType::Date)` opens `EditorState::Date` — the segmented field, painted in the row-label column through Task 4's `DelegateEditor { col: None, paint: Date { .. } }`, landing on the day segment as the strip's does, seeded with today's local date — and any other `Typed` type opens the text `Input`, parsed through `parse_attr(text, ty)` with `attr_text` as the canonical label. `sync_cursor` mirrors a `RowLabel` target as `col: None`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -899,13 +930,17 @@ Entries: `matrix: patch_cell re-prepares the cell` (mutate `patch_cell`'s assign
         let (h, mut vcx) = open(cx);   // the existing CVI fixture, terms include 2026-10-16
         vcx.simulate_keystrokes("o");
         vcx.run_until_parked();
-        assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_state().is_some()));
-        set_label_editor_text(&h, &mut vcx, "2026-10-16"); // an existing term
+        assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+        assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()), "a Date axis opens the segmented field");
+        assert!(vcx.debug_bounds("marketdata-date-1").is_some(), "painted in the row-label column");
+        // Type an existing term into the field (year, month, day digits — the
+        // field's own `digit` grammar; the fixture's terms include 2026-10-16).
+        vcx.simulate_keystrokes("left left 2 0 2 6 1 0 1 6");
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
-        assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_state().is_some()), "refused, still open");
+        assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()), "refused, still open");
         assert!(h.tile.read_with(&vcx, |t, _| t.notice().unwrap_or("").contains("already")));
-        set_label_editor_text(&h, &mut vcx, "2027-01-15");
+        vcx.simulate_keystrokes("left left 2 0 2 7 0 1 1 5");
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
         assert!(row_labels(&h, &vcx).contains(&"2027-01-15".to_string()));
@@ -915,12 +950,6 @@ Entries: `matrix: patch_cell re-prepares the cell` (mutate `patch_cell`'s assign
         vcx.simulate_keystrokes("escape");
         vcx.run_until_parked();
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows_added()), 1, "escape dropped the provisional row");
-    }
-
-    /// `set_editor_text`'s twin for the row-label editor (`label_editor_state`).
-    fn set_label_editor_text(h: &Harness, vcx: &mut gpui::VisualTestContext, text: &str) {
-        let state = h.tile.read_with(vcx, |t, _| t.label_editor_state().expect("the label editor is open"));
-        vcx.update(|window, cx| state.update(cx, |s, cx| s.set_value(text, window, cx)));
     }
 
     /// The model's row labels in painted order.
@@ -939,7 +968,7 @@ Entries: `matrix: patch_cell re-prepares the cell` (mutate `patch_cell`'s assign
 
 - [ ] **Step 3: Implement**
 
-`insert_row_at(below: bool)`: refusals (editor open → cancel it first exactly as `set_key` does; `Behind`; empty model; strip); anchor = the cursor row's label for `below`, the previous row's label (or `None` at row 0) for `above`; `label = draft.mint_label(|l| model has a row labelled l)`; `draft.insert_row(label, anchor, base)`; `rebuild_model`; move the cursor to the new row (find by label), col 0; then for `RowIdentity::Minted` run `begin_edit` on the cell; for `Typed(ty)` open the label editor: `EditTarget::RowLabel { row, label }` with an `InputState` seeded empty, focused, mirrored to the delegate's `label_editor`. `commit_edit`'s `RowLabel` arm: parse through `parse_attr(text, ty)` → `attr_text` as the canonical label; refuse `"'{label}' is already a row"` if any model row has it; `draft.rename_row(old, new)`, close the editor, rebuild, cursor stays on the row, and then `begin_edit` on col 0 (the first cell to fill). `close_editor` on a `RowLabel` target whose row is still provisional (label starts with `new-` and no cell filled) drops the row through `delete_row` and rebuilds. `delete_row` verb: `d d` → `draft.delete_row(label)` → `Dropped` rebuild + clamp; `Marked` rebuild; `Already` notice. `yank_text(Row)` on an inserted row yanks `cells` as painted. `content.rs` gets the three actions and bindings.
+`insert_row_at(below: bool)`: refusals (editor open → cancel it first exactly as `set_key` does; `Behind`; empty model; strip); anchor = the cursor row's label for `below`, the previous row's label (or `None` at row 0) for `above`; `label = draft.mint_label(|l| model has a row labelled l)`; `draft.insert_row(label, anchor, base)`; `rebuild_model`; move the cursor to the new row (find by label), col 0; then for `RowIdentity::Minted` run `begin_edit` on the cell; for `Typed(ty)` open the label editor with target `EditTarget::RowLabel { row, label }`: `ty == Date` → `EditorState::Date` (`DateField::open(today)`, a fresh focus handle focused, `DateFieldPaint::of`), else `EditorState::Text` seeded empty and focused; `sync_cursor` mirrors it as `DelegateEditor { row, col: None, .. }`. `commit_edit`'s `RowLabel` arms: `(Date, RowLabel)` runs `complete_pending()` exactly as the attr arm and takes `field.value()` formatted `%Y-%m-%d`; `(Text, RowLabel)` parses through `parse_attr(text, ty)` → `attr_text`; both then refuse `"'{label}' is already a row"` if any model row has it; `draft.rename_row(old, new)`, close the editor, rebuild, cursor stays on the row, and then `begin_edit` on col 0 (the first cell to fill). `close_editor` on a `RowLabel` target whose row is still provisional (label starts with `new-` and no cell filled) drops the row through `delete_row` and rebuilds. `delete_row` verb: `d d` → `draft.delete_row(label)` → `Dropped` rebuild + clamp; `Marked` rebuild; `Already` notice. `yank_text(Row)` on an inserted row yanks `cells` as painted. `content.rs` gets the three actions and bindings.
 
 - [ ] **Step 4: Run** — crate tests; `cargo test -p geode-shell` (fragment).
 
@@ -1054,9 +1083,9 @@ Entries: `matrix: patch_cell re-prepares the cell` (mutate `patch_cell`'s assign
 **Files:**
 - Modify: `crates/geode-marketdata/benches/matrix.rs` (`patch_cell` at 20×30 and 10,000×5; `build` 10,000×5 with 100 inserted rows; `rebase` with 1,000 cells + 100 rows)
 - Modify: `docs/perf.md` ("Market-data panel" section: the new numbers, and the note that the flat build is no longer a per-commit cost)
-- Modify: `docs/phase-history.md` (one paragraph at the end: the dividend slice, in the CLAUDE.md house voice — what it built, the rulings, the traps: the label-editor deviation, `flex_shrink`/`patch_cell` rules, `click_opened_stage`-style guards if any, the `new-` prefix, the second factory's `without_keymap`)
+- Modify: `docs/phase-history.md` (one paragraph at the end: the dividend slice, in the CLAUDE.md house voice — what it built, the rulings, the traps: the segmented field painted in a table cell through `DelegateEditor`, `flex_shrink`/`patch_cell` rules, `click_opened_stage`-style guards if any, the `new-` prefix, the second factory's `without_keymap`)
 - Modify: `CLAUDE.md` (a status row `Dividend schedule (2026-09-19)`; rule bullets under "Market-data panel": typed cells + `patch_cell`; rows by label, `new-` minted, deleted rows stay painted; the two-producer bus; `without_keymap`)
-- Modify: the choice/dividend spec (§4–§6 "As built" note incl. the label-editor deviation and anything else the tasks deviated on), the market-data documents spec (§3/§6 value types, §8.1 `Columns::Values` shape — the amendments §7 lists), the roadmap's §6 status line ("dividends: done 2026-09-19")
+- Modify: the choice/dividend spec (§4–§6 "As built" note recording whatever the tasks deviated on), the market-data documents spec (§3/§6 value types, §8.1 `Columns::Values` shape — the amendments §7 lists), the roadmap's §6 status line ("dividends: done 2026-09-19")
 
 - [ ] **Step 1**: run `cargo bench -p geode-marketdata` and record p50s.
 - [ ] **Step 2**: write the docs; verify every sentence against the code (the field-help ruling: help copy is a behaviour claim).

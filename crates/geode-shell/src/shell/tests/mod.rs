@@ -376,6 +376,27 @@ pub(super) fn shell_of(
     })
 }
 
+/// Dispatch `action` through `ShellView::dispatch` directly — the same
+/// route `dialog_test_shell_in`'s own preamble uses to open the
+/// keybinding/settings/object dialogs, reused here for a palette-only
+/// action with no keymap binding of its own (`frame::pick_book`,
+/// `scope::save_current`, …) rather than driving the palette's own
+/// filter-and-enter dance for no benefit over calling the one method
+/// every dispatch route already funnels through. Hoisted here (review
+/// finding) after `shell::tests::picker` and `shell::tests::objectdialog`
+/// each carried an identical private copy.
+pub(super) fn dispatch_action(
+    shell: &Entity<ShellView>,
+    action: &str,
+    cx: &mut gpui::VisualTestContext,
+) {
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId(action.to_string()), None, window, cx);
+        });
+    });
+}
+
 /// Shared scaffolding for the dock e2e tests below (dock-regions task):
 /// open a window over a fresh `ShellView`, draw once so the key
 /// dispatch tree exists, and hand back the visual context plus the
@@ -607,6 +628,7 @@ mod diagnostics;
 mod dock;
 mod drag;
 mod flip;
+mod grouping;
 mod input;
 mod keybindings_dialog;
 mod objectdialog;
@@ -617,4 +639,6 @@ mod picker;
 mod reload;
 mod scopebar;
 mod session;
+mod stacks;
+mod tilepicker;
 mod tiling_keys;

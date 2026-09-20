@@ -2,6 +2,7 @@
 //! with the painted bar itself.
 
 use super::*;
+use crate::shell::objectdialog;
 use geode_core::config::ConfigSources;
 use geode_core::scope::{DimensionSelection, Scope};
 
@@ -254,6 +255,98 @@ fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
     vcx.simulate_click(close.center(), gpui::Modifiers::default());
     assert!(frame.read_with(&vcx, |f, _| f.scope().dimensions.is_empty()));
     assert!(vcx.debug_bounds("scope-chip-close-book").is_none());
+}
+
+/// The `save` chip (scope-save spec's amendment) is withdrawn while the
+/// frame's scope is empty — nothing to save — and appears the moment it
+/// isn't; clicking it opens the Scopes dialog's naming prompt seeded
+/// from the frame, the mouse form of `scope::save_current`.
+#[gpui::test]
+fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+    assert!(
+        vcx.debug_bounds("scope-save-chip").is_none(),
+        "an empty scope has nothing to save"
+    );
+
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(book_scope("BK000"));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    let save = vcx
+        .debug_bounds("scope-save-chip")
+        .expect("the save chip should paint once the scope is non-empty");
+    vcx.simulate_click(save.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s
+            .object_dialog
+            .as_ref()
+            .map(|d| d.stage.clone())),
+        Some(objectdialog::Stage::Naming)
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s
+            .object_dialog
+            .as_ref()
+            .map(|d| d.naming_seed.clone())),
+        Some(objectdialog::NameSeed::FromFrame)
+    );
+    // The naming field keeps the focus the open gave it through the rest
+    // of the mouse-down (`open_shell_dialog_with_key`'s `prevent_default`,
+    // grouping-picker work 2026-09-19) — the same defect the `+` chip had.
+    vcx.simulate_input("eu");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "eu",
+        "typing after the click reaches the naming field"
+    );
+}
+
+/// The `+` pick chip paints regardless of the scope's own state — picking
+/// a dimension is how a scope starts — and its click opens the same
+/// picker `mod+p`/`frame::pick` does, with the filter field HOLDING the
+/// focus the open gave it (grouping-picker work, 2026-09-19): gpui's
+/// bubble-phase focus grab on the same mouse-down used to hand focus to
+/// the shell root a moment later, so typing after a chip click went
+/// nowhere. `open_shell_dialog_with_key`'s `prevent_default` is the fix,
+/// for every dialog a mouse-down opens.
+#[gpui::test]
+fn the_pick_chip_is_always_present_and_opens_the_picker(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    assert!(shell.read_with(&vcx, |s, cx| s.frame().read(cx).scope().is_empty()));
+
+    let pick = vcx
+        .debug_bounds("scope-pick-chip")
+        .expect("the pick chip should paint even with an empty scope");
+    vcx.simulate_click(pick.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+
+    assert!(shell.read_with(&vcx, |s, _| s.picker.is_some()));
+    let focused = vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(
+        focused,
+        "the picker's field must keep focus through the rest of the mouse-down"
+    );
+    vcx.simulate_input("bo");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.query.clone())),
+        Some("bo".to_string()),
+        "typing after the click reaches the filter"
+    );
 }
 
 /// A `[scopes]` doc with one entry, "eu" — no `[datasets]` doc at all,

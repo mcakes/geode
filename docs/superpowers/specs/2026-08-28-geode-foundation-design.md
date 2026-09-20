@@ -98,7 +98,7 @@ module instance. Core verbs, chord-driven, i3 as the default map:
 - move tile (`mod+shift+h/j/k/l`)
 - resize mode (`mod+r`, then hjkl, `Esc` to exit)
 - fullscreen tile (`mod+f`; also `mod`+double-click on a main-tree tile, the one mouse door — 2026-09-19), close tile (`mod+shift+q`)
-- tabbed/stacked container modes for dense workspaces
+- tabbed/stacked container modes for dense workspaces — superseded by `docs/superpowers/specs/2026-09-19-geode-tile-stacks-design.md`: stacked (`Node::Stack`) is built, tabbed is not.
 
 `mod` defaults to Alt on Windows; fully remappable. **Layouts** — the split
 tree plus which module/view occupies each leaf, per workspace — are saveable

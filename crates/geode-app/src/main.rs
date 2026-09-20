@@ -2,6 +2,7 @@
 //! registry, keymap, and starting workspace state, then opens the window on
 //! `geode_shell::shell::ShellView` — the keyboard-driven shell root.
 
+mod assets;
 mod bridge;
 mod crash;
 mod demo;
@@ -90,7 +91,7 @@ fn main() {
     }
 
     gpui_platform::application()
-        .with_assets(gpui_kit_assets::Assets)
+        .with_assets(assets::AppAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
             // Reclaim `tab`/`shift-tab` (from gpui-component's `Root` focus
