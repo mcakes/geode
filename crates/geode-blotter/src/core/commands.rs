@@ -4,35 +4,56 @@
 
 use crate::core::flatten::SortOrder;
 
+/// A `:asof` argument (command-line locality spec §3.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsOfArg {
+    /// Pin the tile to this instant; parsed by `parse_as_of` at apply time.
+    At(String),
+    /// Pin the tile to live.
+    Live,
+    /// Follow the frame again.
+    Clear,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Group(Vec<String>),
     GroupSlot(u8),
-    GroupSave(u8),
     Unpin,
     Unscoped,
-    ScopeExpr(String),
-    ScopeText(String),
-    ScopeClear,
-    ScopeUndo,
-    ScopeRedo,
-    ScopeDrop(String),
-    ScopeSave(String),
-    ScopeLoad(String),
     FilterExpr(String),
     FilterText(String),
     FilterClear,
-    AsOf(String),
-    AsOfUndo,
-    Live,
+    AsOf(AsOfArg),
     View(String),
-    Sort { column: String, order: SortOrder },
+    Sort {
+        column: String,
+        order: SortOrder,
+    },
     SortClear,
+    /// A word this line no longer runs because it was frame-wide
+    /// (command-line locality spec §5): the message names the door it
+    /// moved to. The tile shows it inline like any parse error. Never a
+    /// completion — a refusal is not a suggestion.
+    Refused(&'static str),
 }
 
-const COMMANDS: [&str; 9] = [
-    "asof", "filter", "group", "live", "scope", "sort", "unpin", "unscoped", "view",
+/// The words `completions` offers at the start of a line — every word
+/// `parse` accepts EXCEPT the refusals. The tile's sweep test
+/// (`every_colon_command_leaves_the_frame_alone`) reads this list so a
+/// word added here is swept the day it lands.
+pub const COMMANDS: [&str; 7] = [
+    "asof", "filter", "group", "sort", "unpin", "unscoped", "view",
 ];
+
+/// The refusal messages (spec §5). Frame-wide verbs left the `:` line on
+/// 2026-09-20; each message names the door that replaced it.
+pub const REFUSED_SCOPE: &str = ":scope is frame-wide — the scope bar (mod+/), Set scope expression…, or the palette's Scope: entries";
+pub const REFUSED_ASOF_UNDO: &str =
+    "frame as-of undo is in the palette (Swap to the previous as of)";
+pub const REFUSED_LIVE: &str = ":asof live pins this tile; Return to live (palette) sets the frame";
+pub const REFUSED_GROUP_SAVE: &str =
+    "saving a slot is in the Groupings dialog (palette: Edit groupings…)";
 
 fn slot(arg: Option<&str>, what: &str) -> Result<u8, String> {
     arg.and_then(|a| a.parse::<u8>().ok())
@@ -54,13 +75,13 @@ pub fn parse(line: &str) -> Result<Command, String> {
     match head {
         "unpin" => Ok(Command::Unpin),
         "unscoped" => Ok(Command::Unscoped),
-        "live" => Ok(Command::Live),
+        "live" => Ok(Command::Refused(REFUSED_LIVE)),
         "group" => {
             let mut words = rest.split_whitespace();
             match words.next() {
-                None => Err("group needs columns, `slot N` or `save N`".into()),
+                None => Err("group needs columns or `slot N`".into()),
                 Some("slot") => slot(words.next(), "group slot").map(Command::GroupSlot),
-                Some("save") => slot(words.next(), "group save").map(Command::GroupSave),
+                Some("save") => Ok(Command::Refused(REFUSED_GROUP_SAVE)),
                 Some(_) => {
                     let columns: Vec<String> = rest
                         .split(|c: char| c == ',' || c.is_whitespace())
@@ -71,43 +92,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 }
             }
         }
-        "scope" => {
-            // `rest.splitn(2, ..).next()` returns `Some("")`, never `None`,
-            // when `rest` is empty (the same one-piece-for-no-match
-            // behaviour `str::split` has on `""`) — so the tuple match
-            // below can never itself reach its own `(None, _)` arm for a
-            // bare `scope`. Guarding here keeps that arm's error message
-            // reachable instead of silently falling through to
-            // `(Some(_), _) => Ok(Command::ScopeExpr(rest.to_string()))`
-            // with an empty expression.
-            if rest.is_empty() {
-                return Err(
-                    "scope needs an expression, `text …`, `clear`, `undo`, `redo`, \
-                     `drop <dim>`, `save <name>` or `load <name>`"
-                        .into(),
-                );
-            }
-            let mut words = rest.splitn(2, char::is_whitespace);
-            match (words.next(), words.next().map(str::trim)) {
-                (Some("clear"), None) => Ok(Command::ScopeClear),
-                (Some("undo"), None) => Ok(Command::ScopeUndo),
-                (Some("redo"), None) => Ok(Command::ScopeRedo),
-                (Some("drop"), Some(d)) if !d.is_empty() => Ok(Command::ScopeDrop(d.to_string())),
-                (Some("drop"), _) => Err("scope drop needs a dimension".into()),
-                (Some("save"), Some(n)) if !n.is_empty() => Ok(Command::ScopeSave(n.to_string())),
-                (Some("save"), _) => Err("scope save needs a name".into()),
-                (Some("load"), Some(n)) if !n.is_empty() => Ok(Command::ScopeLoad(n.to_string())),
-                (Some("load"), _) => Err("scope load needs a name".into()),
-                (Some("text"), Some(w)) => Ok(Command::ScopeText(w.to_string())),
-                (Some("text"), None) => Ok(Command::ScopeText(String::new())),
-                (Some(_), _) => Ok(Command::ScopeExpr(rest.to_string())),
-                (None, _) => Err(
-                    "scope needs an expression, `text …`, `clear`, `undo`, `redo`, \
-                     `drop <dim>`, `save <name>` or `load <name>`"
-                        .into(),
-                ),
-            }
-        }
+        "scope" => Ok(Command::Refused(REFUSED_SCOPE)),
         "filter" => {
             let mut words = rest.splitn(2, char::is_whitespace);
             match (words.next(), words.next().map(str::trim)) {
@@ -119,12 +104,14 @@ pub fn parse(line: &str) -> Result<Command, String> {
         }
         "asof" => match rest {
             "" => Err(
-                "asof needs a time: HH:MM, HH:MM:SS, YYYY-MM-DD[ HH:MM[:SS]], RFC 3339 \
-                 or live, or `undo`"
+                "asof needs a time (HH:MM, HH:MM:SS, YYYY-MM-DD[ HH:MM[:SS]] or RFC 3339), \
+                 `live` or `clear`"
                     .into(),
             ),
-            "undo" => Ok(Command::AsOfUndo),
-            t => Ok(Command::AsOf(t.to_string())),
+            "undo" => Ok(Command::Refused(REFUSED_ASOF_UNDO)),
+            "live" => Ok(Command::AsOf(AsOfArg::Live)),
+            "clear" => Ok(Command::AsOf(AsOfArg::Clear)),
+            t => Ok(Command::AsOf(AsOfArg::At(t.to_string()))),
         },
         "view" => {
             if rest.is_empty() {
@@ -178,14 +165,12 @@ pub struct Vocabulary {
     /// Every column the tile's dataset carries as a dimension at any
     /// grain it has, plus every derived dimension (Phase 4a §3.2, §6.8)
     /// — distinct from `columns` since a dimension the view does not
-    /// display (e.g. `book`, `currency`) is still a legal `group`,
-    /// `scope drop`, `scope` or `filter` target. `group`/`scope drop`
-    /// complete from this alone; `scope`/`filter` complete from this
-    /// union `columns` (an expression can also name a measure).
+    /// display (e.g. `book`, `currency`) is still a legal `group` or
+    /// `filter` target. `group` completes from this alone; `filter`
+    /// completes from this union `columns` (an expression can also name
+    /// a measure).
     pub dimensions: Vec<String>,
     pub views: Vec<String>,
-    /// Saved-scope names (Phase 4a §3.9), for `scope load`'s completion.
-    pub scopes: Vec<String>,
 }
 
 /// The candidates for the word at `cursor`. Sorted, so the shell's
@@ -219,26 +204,11 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
         ["sort", _, "abs"] => vec!["asc".into(), "desc".into()],
         ["group"] => {
             let mut v = vocab.dimensions.clone();
-            v.push("save".into());
             v.push("slot".into());
             v
         }
-        ["group", "slot"] | ["group", "save"] => (1..=9).map(|n| n.to_string()).collect(),
+        ["group", "slot"] => (1..=9).map(|n| n.to_string()).collect(),
         ["group", ..] => vocab.dimensions.clone(),
-        ["scope"] => {
-            let mut v = vocab.dimensions.clone();
-            v.extend(vocab.columns.clone());
-            v.extend(["clear", "drop", "load", "redo", "save", "text", "undo"].map(String::from));
-            v
-        }
-        ["scope", "drop"] => vocab.dimensions.clone(),
-        ["scope", "load"] => vocab.scopes.clone(),
-        ["scope", "text", ..] => Vec::new(),
-        ["scope", ..] => {
-            let mut v = vocab.dimensions.clone();
-            v.extend(vocab.columns.clone());
-            v
-        }
         ["filter"] => {
             let mut v = vocab.dimensions.clone();
             v.extend(vocab.columns.clone());
@@ -251,7 +221,7 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
             v.extend(vocab.columns.clone());
             v
         }
-        ["asof"] => vec!["undo".into()],
+        ["asof"] => vec!["clear".into(), "live".into()],
         ["view"] => vocab.views.clone(),
         _ => Vec::new(),
     };
@@ -274,7 +244,6 @@ mod tests {
             columns: vec!["book".into(), "lhu".into(), "delta01".into()],
             dimensions: vec!["book".into(), "lhu".into()],
             views: vec!["tree".into(), "wide".into()],
-            scopes: vec![],
         }
     }
 
@@ -289,21 +258,14 @@ mod tests {
             Command::Group(vec!["lhu".into(), "book".into()])
         );
         assert_eq!(parse("group slot 3").unwrap(), Command::GroupSlot(3));
-        assert_eq!(parse("group save 9").unwrap(), Command::GroupSave(9));
         assert_eq!(parse("unpin").unwrap(), Command::Unpin);
         assert_eq!(parse("unscoped").unwrap(), Command::Unscoped);
         assert_eq!(
-            parse("scope book = 'BK001' and delta01 > 5").unwrap(),
-            Command::ScopeExpr("book = 'BK001' and delta01 > 5".into())
+            parse("asof 14:05").unwrap(),
+            Command::AsOf(AsOfArg::At("14:05".into()))
         );
-        assert_eq!(
-            parse("scope text spx rut").unwrap(),
-            Command::ScopeText("spx rut".into())
-        );
-        assert_eq!(parse("scope clear").unwrap(), Command::ScopeClear);
-        assert_eq!(parse("scope undo").unwrap(), Command::ScopeUndo);
-        assert_eq!(parse("asof 14:05").unwrap(), Command::AsOf("14:05".into()));
-        assert_eq!(parse("live").unwrap(), Command::Live);
+        assert_eq!(parse("asof live").unwrap(), Command::AsOf(AsOfArg::Live));
+        assert_eq!(parse("asof clear").unwrap(), Command::AsOf(AsOfArg::Clear));
         assert_eq!(parse("view wide").unwrap(), Command::View("wide".into()));
         let sort = |column: &str, order| Command::Sort {
             column: column.into(),
@@ -352,14 +314,12 @@ mod tests {
         );
         assert!(parse("group").unwrap_err().contains("group"));
         assert!(parse("group slot 12").unwrap_err().contains("1–9"));
-        assert!(parse("group save x").unwrap_err().contains("1–9"));
         assert!(parse("sort").unwrap_err().contains("column"));
         assert!(parse("sort delta01 up").unwrap_err().contains("abs"));
         assert!(parse("sort clear extra").unwrap_err().contains("clear"));
         assert!(parse("sort delta01 abs up").unwrap_err().contains("abs"));
         assert!(parse("sort delta01 desc abs").unwrap_err().contains("abs"));
         assert!(parse("view").unwrap_err().contains("name"));
-        assert!(parse("scope").unwrap_err().contains("scope"));
         assert!(parse("asof").unwrap_err().contains("time"));
     }
 
@@ -386,52 +346,19 @@ mod tests {
     }
 
     #[test]
-    fn new_scope_and_asof_forms_parse() {
-        assert_eq!(
-            parse("scope drop book").unwrap(),
-            Command::ScopeDrop("book".into())
-        );
-        assert_eq!(parse("scope redo").unwrap(), Command::ScopeRedo);
-        assert_eq!(
-            parse("scope save mine").unwrap(),
-            Command::ScopeSave("mine".into())
-        );
-        assert_eq!(
-            parse("scope load mine").unwrap(),
-            Command::ScopeLoad("mine".into())
-        );
-        assert_eq!(parse("asof undo").unwrap(), Command::AsOfUndo);
-        assert!(parse("scope drop").unwrap_err().contains("dimension"));
-        assert!(parse("scope save").unwrap_err().contains("name"));
-    }
-
-    #[test]
-    fn completions_offer_dimensions_after_drop_and_scope_names_after_load() {
-        let vocab = Vocabulary {
-            columns: vec!["book".into()],
-            dimensions: vec!["book".into()],
-            views: vec![],
-            scopes: vec!["mine".into()],
-        };
-        assert_eq!(completions("scope drop ", 11, &vocab), vec!["book"]);
-        assert_eq!(completions("scope load ", 11, &vocab), vec!["mine"]);
-        assert!(completions("", 0, &vocab).contains(&"filter".to_string()));
-    }
-
-    #[test]
     fn completions_follow_the_argument_position() {
         let v = vocab();
         let names = |line: &str| completions(line, line.len(), &v);
         assert_eq!(
             names(""),
             vec![
-                "asof", "filter", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
+                "asof", "filter", "group", "sort", "unpin", "unscoped", "view"
             ]
         );
         assert_eq!(
             names("so"),
             vec![
-                "asof", "filter", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
+                "asof", "filter", "group", "sort", "unpin", "unscoped", "view"
             ],
             "the shell ranks; the vocabulary is whole"
         );
@@ -441,7 +368,7 @@ mod tests {
         assert!(names("sort clear ").is_empty());
         assert_eq!(
             names("group "),
-            vec!["book", "lhu", "save", "slot"],
+            vec!["book", "lhu", "slot"],
             "group completes dimensions (book, lhu), never the delta01 measure"
         );
         assert_eq!(names("group lhu,"), vec!["book", "lhu"]);
@@ -449,27 +376,13 @@ mod tests {
             names("group slot "),
             (1..=9).map(|n| n.to_string()).collect::<Vec<_>>()
         );
-        assert_eq!(
-            names("group save "),
-            (1..=9).map(|n| n.to_string()).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            names("scope "),
-            vec![
-                "book", "clear", "delta01", "drop", "lhu", "load", "redo", "save", "text", "undo"
-            ]
-        );
-        assert_eq!(
-            names("scope book = 'x' and "),
-            vec!["book", "delta01", "lhu"]
-        );
         assert_eq!(names("view "), vec!["tree", "wide"]);
-        assert_eq!(names("asof "), vec!["undo"]);
+        assert_eq!(names("asof "), vec!["clear", "live"]);
         assert!(names("sort delta01 desc ").is_empty());
         assert_eq!(
             completions("sort delta01", 2, &v),
             vec![
-                "asof", "filter", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
+                "asof", "filter", "group", "sort", "unpin", "unscoped", "view"
             ],
             "the cursor's word, not the last"
         );
@@ -481,7 +394,6 @@ mod tests {
             columns: vec!["délta".into()],
             dimensions: vec![],
             views: vec![],
-            scopes: vec![],
         };
         let line = "sort dé";
         // `é` is two bytes; this cursor lands one byte past its start,
@@ -490,31 +402,26 @@ mod tests {
         assert_eq!(completions(line, cursor, &v), vec!["clear", "délta"]);
     }
 
-    /// Regression: before this fix, `group`/`scope drop`/`scope`/`filter`
-    /// all completed from `Vocabulary::columns` alone — the view's own
-    /// column plan (what's *displayed*), so a dimension the view does
-    /// not show (`book`, `currency`) never appeared after `:group `,
-    /// `:scope drop ` or `:filter `. `sort` is unaffected: it still
-    /// ranks only what's actually a column in the view.
+    /// Regression: before this fix, `group`/`filter` all completed from
+    /// `Vocabulary::columns` alone — the view's own column plan (what's
+    /// *displayed*), so a dimension the view does not show (`book`,
+    /// `currency`) never appeared after `:group ` or `:filter `. `sort`
+    /// is unaffected: it still ranks only what's actually a column in
+    /// the view.
     ///
-    /// `group`'s expected vector includes `save`/`slot` — its own
-    /// existing keyword completions, untouched by this fix (only the
-    /// column source changed from `columns` to `dimensions`).
+    /// `group`'s expected vector includes `slot` — its own existing
+    /// keyword completion, untouched by this fix (only the column
+    /// source changed from `columns` to `dimensions`).
     #[test]
     fn group_and_drop_complete_dimensions_not_measures() {
         let vocab = Vocabulary {
             columns: vec!["npv".into(), "delta01".into()],
             dimensions: vec!["book".into(), "currency".into()],
             views: vec![],
-            scopes: vec![],
         };
         assert_eq!(
             completions("group ", 6, &vocab),
-            vec!["book", "currency", "save", "slot"]
-        );
-        assert_eq!(
-            completions("scope drop ", 11, &vocab),
-            vec!["book", "currency"]
+            vec!["book", "currency", "slot"]
         );
         assert_eq!(
             completions("sort ", 5, &vocab),
@@ -523,6 +430,46 @@ mod tests {
         assert_eq!(
             completions("filter ", 7, &vocab),
             vec!["book", "clear", "currency", "delta01", "npv", "text"]
+        );
+    }
+
+    /// Command-line locality (2026-09-20): the frame-wide words are
+    /// refusals whose message names the door, and none is a completion.
+    #[test]
+    fn frame_wide_words_are_refusals_that_name_their_door() {
+        assert_eq!(
+            parse("scope lhu = 'L1'").unwrap(),
+            Command::Refused(REFUSED_SCOPE)
+        );
+        assert_eq!(
+            parse("scope clear").unwrap(),
+            Command::Refused(REFUSED_SCOPE)
+        );
+        assert_eq!(
+            parse("asof undo").unwrap(),
+            Command::Refused(REFUSED_ASOF_UNDO)
+        );
+        assert_eq!(parse("live").unwrap(), Command::Refused(REFUSED_LIVE));
+        assert_eq!(
+            parse("group save 3").unwrap(),
+            Command::Refused(REFUSED_GROUP_SAVE)
+        );
+        for refused in ["scope", "live"] {
+            assert!(
+                !COMMANDS.contains(&refused),
+                "`{refused}` must not be offered"
+            );
+        }
+        let first = completions("", 0, &vocab());
+        assert_eq!(
+            first,
+            COMMANDS.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(completions("asof ", 5, &vocab()), vec!["clear", "live"]);
+        assert_eq!(
+            completions("group ", 6, &vocab()),
+            vec!["book", "lhu", "slot"],
+            "`save` is no longer offered after `group`"
         );
     }
 }
