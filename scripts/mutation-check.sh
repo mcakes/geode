@@ -2026,11 +2026,20 @@ run_mutation "keybindings: d performs its write without acknowledging it" \
 # the row is selected, the notice is right) survives a stray focus_next
 # untouched. Only a test asserting the FOCUS STATE across a `tab` sees
 # it.
+#
+# Re-anchored 2026-09-20 (timeseries Part 4): the root's key context is
+# now one `if` — `"GeodeShell GeodeModalOpen"` open, `"GeodeShell"`
+# closed — and the `tab` reclaim is scoped to BOTH identifiers, so
+# dropping `GeodeModalOpen` alone survives (the unconditional
+# `GeodeShell` reclaim covers it, and is pinned by its own entry below).
+# The claim this entry makes is the one that still bites: while a modal
+# is open the root must carry a context the reclaim names.
 run_mutation "dialog: tab escapes the modal in normal mode" \
   crates/geode-shell/src/shell/render.rs \
-  '            .when(self.modal.is_some(), |el| el.key_context("GeodeModalOpen"))
-' \
-  '' \
+  '            .key_context(if self.modal.is_some() {
+                "GeodeShell GeodeModalOpen"' \
+  '            .key_context(if self.modal.is_some() {
+                "GeodeModalUnreclaimed"' \
   geode-shell \
   tab_in_normal_mode_leaves_focus_on_the_shell_root
 
@@ -7373,22 +7382,22 @@ run_mutation "focus: the departed-tile backstop spares the shell's own surfaces"
 # add them — a diagnostic that exists, is logged, and is invisible where
 # a trader would look for it.
 
-# The anchor deliberately ENDS on the keymap extend rather than on the
-# block's bare `diags` tail (fix round 2). Matching is exact-substring,
-# so a `from` ending in `\n            diags` matches the PREFIX of the
-# next line, `diags.extend(services.keymap_diagnostics…)` — the mutated
-# body then read `services.config.diagnostics.clone().extend(…); diags`
-# with `diags` unbound, and a compile error is reported as a plain
-# `caught` with the named test never run. The header's "an entry can lie"
-# case, and the reason an anchor must end somewhere no live line begins.
+# The anchor deliberately ENDS on a complete `extend` line rather than on
+# the block's bare `diags` tail (fix round 2). Matching is
+# exact-substring, so a `from` ending in `\n            diags` matches the
+# PREFIX of the next line, `diags.extend(…)` — the mutated body then read
+# `services.config.diagnostics.clone().extend(…); diags` with `diags`
+# unbound, and a compile error is reported as a plain `caught` with the
+# named test never run. The header's "an entry can lie" case, and the
+# reason an anchor must end somewhere no live line begins. Re-anchored
+# 2026-09-20 (timeseries Part 4): `series::default_source_diagnostic` now
+# sits between the two `defaults::` extends and the keymap one.
 run_mutation "diagnostics: startup seeding folds in the computed config diagnostics" \
   crates/geode-shell/src/shell/mod.rs \
   '            let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
-            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
-            diags.extend(services.keymap_diagnostics.iter().cloned());' \
-  '            let mut diags = cfg.diagnostics.clone();
-            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+            diags.extend(crate::defaults::modules_default_diagnostic(cfg));' \
+  '            let mut diags = cfg.diagnostics.clone();' \
   geode-shell a_modules_default_key_is_in_the_diagnostics_entity_at_startup
 
 # The fourth group is the one that cannot be recomputed — it rides on
@@ -16159,6 +16168,451 @@ run_mutation "chart: the density bound is not enforced" \
   '                        if false {' \
   geode-chart \
   a_frame_paints_at_most_the_density_bound
+
+# ---------------------------------------------------------------------
+# The timeseries module (spec §9, Part 4): the tile's model, its
+# resolution rules, the request it builds, the chart model it hands the
+# element, and the data flow between the three — fetch, query, deliver.
+#
+# The pure core (`src/core/*.rs`) is unit-tested; the tile is tested in a
+# real window through `TestAppContext`, so every entry below names the
+# one test expected to catch it.
+# ---------------------------------------------------------------------
+
+# Removing a source takes every expression that reads it — and every
+# expression that reads THOSE. Without the frontier push the walk is one
+# level deep, which looks right in every two-slot fixture and silently
+# leaves `s6 = s5 * 100` behind when s5's own operand goes.
+run_mutation "timeseries: dependant removal is transitive" \
+  crates/geode-timeseries/src/core/model.rs \
+  '                    frontier.push(s.number);' \
+  '                    let _ = s.number;' \
+  geode-timeseries \
+  removing_an_operand_removes_its_dependants_transitively
+
+# A bare `VIX` under two loaded sources is ambiguous — unless one of them
+# is the desk's default, which is the whole point of `[timeseries]
+# default_source` (§7). Dropped, a two-source tile can never name a
+# series without an explicit `@source`.
+run_mutation "timeseries: a bare identity prefers the default source" \
+  crates/geode-timeseries/src/core/resolve.rs \
+  '            if let Some(d) = default_source
+                && let Some((n, _, _)) = matches.iter().find(|(_, s, _)| *s == d)
+            {
+                return Ok(*n);
+            }
+' \
+  '' \
+  geode-timeseries \
+  ambiguity_and_absence_are_named_errors
+
+# …and with no default, two matches are a REFUSAL naming both, never a
+# silent pick of the first. Picking one would plot a different series
+# from the one the trader typed, with nothing on screen to say so.
+run_mutation "timeseries: an ambiguous identity is refused" \
+  crates/geode-timeseries/src/core/resolve.rs \
+  '                many => Err(format!(' \
+  '                [(n, _, _), ..] => Ok(*n),
+                many => Err(format!(' \
+  geode-timeseries \
+  ambiguity_and_absence_are_named_errors
+
+# `f`/`:freq`/`:range` refuse in place against the same 500,000-point cap
+# the service enforces (controller decision 4), so a step that would
+# overrun it never leaves the tile. Unchecked, the tile sends a request
+# the service refuses and the trader gets an error notice instead of an
+# unchanged chart.
+run_mutation "timeseries: the cap is pre-checked" \
+  crates/geode-timeseries/src/core/model.rs \
+  '        if points > SERIES_POINT_CAP {' \
+  '        if points > u64::MAX {' \
+  geode-timeseries \
+  frequency_and_range_are_pre_checked_against_the_cap
+
+# Density is one uncached quad per bin per visible slot and the chart
+# bounds a FRAME at 2,000 of them (§8.5, "Part 4 owns the slot count"):
+# the model is what keeps the product under it, turning density off with
+# a notice. Unbounded, every bar past the bound is dropped at the element
+# and the strip paints a lie.
+run_mutation "timeseries: density is bounded by the chart quad budget" \
+  crates/geode-timeseries/src/core/model.rs \
+  '        (bins as usize * visible > MAX_DENSITY_QUADS).then(|| {' \
+  '        (false).then(|| {' \
+  geode-timeseries \
+  density_is_bounded_by_the_chart_quad_budget
+
+# Ruling 10: the stats follow the VIEW, so a pan or a zoom requeries —
+# but only while percentiles or density are on. Always requerying makes
+# every keystroke of `h`/`l` a round trip for a chart that shows no
+# statistic at all.
+run_mutation "timeseries: a view move requeries only while stats are on" \
+  crates/geode-timeseries/src/core/model.rs \
+  '        if self.stats_on() {' \
+  '        if true {' \
+  geode-timeseries \
+  view_verbs_are_chrome_plus_a_query_while_stats_are_on
+
+# The stats window is the VISIBLE span, not the loaded range: under a
+# session axis the view is an index window into the buckets. Reading the
+# first and last bucket instead computes the percentiles over everything
+# loaded, which is right on an unzoomed chart and quietly wrong on every
+# other one.
+run_mutation "timeseries: the window is the visible span" \
+  crates/geode-timeseries/src/core/request.rs \
+  '            (at(buckets[lo]), at(buckets[hi - 1] + step))' \
+  '            (at(buckets[0]), at(buckets[buckets.len() - 1] + step))' \
+  geode-timeseries \
+  the_window_is_the_visible_span_in_both_axis_modes
+
+# A result carries one entry per SLOT NUMBER and the model's slots are
+# not positionally aligned with them (a removal, an expression added
+# between two sources). Indexing by position pairs a slot with another
+# slot's points — the silent wrong-data defect this file exists for.
+run_mutation "timeseries: a result slot the model lacks is skipped" \
+  crates/geode-timeseries/src/core/chart.rs \
+  '            let r = result.slots.iter().find(|r| r.slot == s.number);' \
+  '            let r = result.slots.get(i);' \
+  geode-timeseries \
+  a_slot_the_result_lacks_paints_no_points_and_a_result_slot_the_model_lacks_is_skipped
+
+# The session stores a slot's bucket rule only when it is not the
+# default, and a restore reads it back: dropped, a `mean` slot comes back
+# as `last` and paints different points from the ones the trader left.
+run_mutation "timeseries: the session round trip keeps the rule" \
+  crates/geode-timeseries/src/core/session.rs \
+  '                    if *rule != BucketRule::Last {' \
+  '                    if false {' \
+  geode-timeseries \
+  a_model_round_trips_through_its_table
+
+# An add is a FETCH and a look, never a query (§9.10): the points are not
+# there yet, and asking before the fetch answers spends a round trip to
+# paint an empty chart a beat sooner. `SeriesFetched Ok` is what sends
+# the query.
+run_mutation "timeseries: an add fetches before it queries" \
+  crates/geode-timeseries/src/core/model.rs \
+  '        let mut changed = Changed::FETCH | LOOK;' \
+  '        let mut changed = ALL;' \
+  geode-timeseries \
+  adding_a_source_numbers_slots_from_one_marks_them_fetching_and_lands_the_cursor
+
+# A late answer to a superseded request is dropped — and deliberately not
+# counted as a barrier arrival either (the newer request is what the
+# barrier waits for). Applied, it paints the old question's points under
+# the new question's header.
+run_mutation "timeseries: a stale tag is dropped" \
+  crates/geode-timeseries/src/tile.rs \
+  '        if outcome.tag != self.tag {' \
+  '        if false {' \
+  geode-timeseries \
+  a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped
+
+# `as_of` is the ONE frame counter this tile follows (spec §6.5): a
+# series is a dataset of its own, and no scope, grouping or dimension
+# shapes it. Following scope too makes every keystroke in the scope bar a
+# refetch and a requery on every open chart.
+run_mutation "timeseries: only as_of is followed" \
+  crates/geode-timeseries/src/tile.rs \
+  '        versions.as_of != now.as_of' \
+  '        versions.as_of != now.as_of || versions.scope != now.scope' \
+  geode-timeseries \
+  the_tile_follows_as_of_only_and_stages_under_an_open_barrier
+
+# `Ok(0)` means "the span is covered", not "there is nothing there": the
+# data tier subtracts coverage, so a pair already held answers zero rows
+# appended. Gated on n > 0, a tile that already has its data never asks
+# for it and paints the empty hint for ever.
+run_mutation "timeseries: Ok(0) still requeries" \
+  crates/geode-timeseries/src/tile.rs \
+  '        if result.is_ok() && self.visible {' \
+  '        if matches!(result, Ok(n) if n > 0) && self.visible {' \
+  geode-timeseries \
+  a_fetched_ok_marks_the_pair_idle_and_queries_once_and_an_err_marks_it_failed
+
+# `DataEvent::SeriesFetched` is keyed by the PAIR, not by the asking
+# tile, so every visible tile sees every answer (CLAUDE.md). A tile that
+# holds none of that pair's slots gets `Changed::NONE` from
+# `set_pair_state` and must stop there; without the early return another
+# chart's fetch requeries this one.
+run_mutation "timeseries: a pair the tile does not hold is ignored" \
+  crates/geode-timeseries/src/tile.rs \
+  '        if changed.is_none() {' \
+  '        if false {' \
+  geode-timeseries \
+  a_fetched_ok_marks_the_pair_idle_and_queries_once_and_an_err_marks_it_failed
+
+# A hidden tile paints nothing, so an in-flight query for it is a round
+# trip spent for nothing — and one the pool would rather spend on a
+# visible chart.
+run_mutation "timeseries: a hidden tile cancels in flight" \
+  crates/geode-timeseries/src/tile.rs \
+  '            self.data.cancel(QueryKey(self.id.0));' \
+  '            let _ = QueryKey(self.id.0);' \
+  geode-timeseries \
+  a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_once
+
+# `enter` picks the HIGHLIGHTED option, never row 0 and never the typed
+# text (the 2026-09-19 choice-core rule). Picking the first declared
+# option adds a different pair from the one under the highlight — here,
+# the default source instead of the one the trader arrowed down to.
+run_mutation "timeseries: enter picks the highlighted row not the text" \
+  crates/geode-timeseries/src/tile.rs \
+  '            PickerStage::Sources { identity } => match p.list.pick() {' \
+  '            PickerStage::Sources { identity } => match Some(0usize) {' \
+  geode-timeseries \
+  an_unmatched_text_offers_the_add_row_which_opens_the_source_stage
+
+# A popup whose field holds the keyboard must be BLURRED before it is
+# dropped: at the pinned rev `Root` holds a focused input strongly, a
+# dropped handle never reports `None`, and the shell's focus-return net
+# never fires — every chord dies for the rest of the session (CLAUDE.md).
+run_mutation "timeseries: the picker closer blurs before dropping" \
+  crates/geode-timeseries/src/tile.rs \
+  '            window.blur(cx);' \
+  '            let _ = &window;' \
+  geode-timeseries \
+  every_closer_blurs_before_dropping_the_focused_handle
+
+# A parse error leaves the field OPEN on the text that caused it, with
+# the reason underneath (§9.7). Closing it throws the trader's
+# expression away and reports the error as a tile notice with nothing
+# left to fix.
+run_mutation "timeseries: an expression parse error keeps the field open" \
+  crates/geode-timeseries/src/tile.rs \
+  '                if let Some(Popup::Expr(f)) = &mut self.popup {
+                    f.error = Some(e.into());
+                }
+                cx.notify();' \
+  '                let _ = e;
+                self.close_popup_with_window(window, cx);
+                cx.notify();' \
+  geode-timeseries \
+  x_opens_the_expression_field_and_enter_adds_or_reports_inline
+
+# In the range popup a bare `1`..`7` is a PRESET until the trader starts
+# editing a date (§9.8, Task 10 ruling). Without the preset arm the digit
+# types itself into the day segment and the popup stays open — the
+# keyboard path to `3m` is gone.
+run_mutation "timeseries: a digit in the range popup commits a preset" \
+  crates/geode-timeseries/src/tile.rs \
+  '                    && Preset::digit(d).is_some() =>' \
+  '                    && false =>' \
+  geode-timeseries \
+  r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset
+
+# …and the other half of the same rule: only a key that MOVED something
+# counts as an edit. `right` on the last segment, or a `tab`, changes
+# nothing on screen, and a popup that called either an edit would look
+# exactly as it opened while the preset digits had silently gone dead.
+run_mutation "timeseries: a no-op key is not an edit" \
+  crates/geode-timeseries/src/popup.rs \
+  '        self.edited |= moved;' \
+  '        self.edited = true;' \
+  geode-timeseries \
+  a_key_that_moves_nothing_leaves_the_preset_digits_live
+
+# An `Absolute` range seeds the popup from the dates it STORES; only a
+# relative one resolves against now/as-of (Task 10 ruling). Resolved, a
+# trader who opens `r` under a historical as-of and presses `enter` has
+# their stored `to` silently rewritten to the as-of day.
+run_mutation "timeseries: an absolute range seeds from its stored dates" \
+  crates/geode-timeseries/src/tile.rs \
+  '            Range::Absolute { from, to } => (*from, *to),' \
+  '' \
+  geode-timeseries \
+  an_absolute_range_reopens_on_the_dates_it_stores
+
+# The series list stays open through the verbs that change what it shows
+# and closes before every other one (the market-data panel's rule): a
+# trader who pans with the list up meant the chart, and an overlay left
+# over the answer is the confusing half.
+run_mutation "timeseries: a popup closes before another verb" \
+  crates/geode-timeseries/src/tile.rs \
+  '                "list"
+                    | "list_down"' \
+  '                "pan_left"
+                    | "list"
+                    | "list_down"' \
+  geode-timeseries \
+  shift_l_opens_the_series_popup_whose_cursor_is_the_chips_cursor
+
+# …and a popup that holds the KEYBOARD keeps only its own four verbs
+# (Task 9 review): the palette can dispatch any action over an open field
+# (`ctrl+k` is a chord), and a verb that ran with the field still
+# installed leaves `key_context` reporting `insert` with nothing focused
+# — a tile deaf to every bare key until `escape`.
+run_mutation "timeseries: an insert popup closes on any verb but its own four" \
+  crates/geode-timeseries/src/tile.rs \
+  '                matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")' \
+  '                true' \
+  geode-timeseries \
+  any_verb_but_the_fields_own_four_closes_an_insert_popup_first
+
+# The chart model is rebuilt only when a field `chart::build` READS moves
+# (review round 1, I-2): it clones every slot's values and the whole
+# bucket vector, so at the 500,000-point cap a cursor move, a chip click
+# or a finished fetch would each copy megabytes and — through the version
+# bump — flush every path `geode-chart` has cached, for a model identical
+# to the one it replaced.
+run_mutation "timeseries: the chart model is rebuilt only when its inputs change" \
+  crates/geode-timeseries/src/tile.rs \
+  '        if self.last_chart_key.as_ref() == Some(&key) {' \
+  '        if false {' \
+  geode-timeseries \
+  only_a_change_the_chart_model_reads_rebuilds_it
+
+# …and the converse, §8.5's version contract: a rebuild BUMPS the
+# version, because `axis_mode` and `step_us` ride on it and no cache key
+# in `geode-chart` carries them. Frozen, an axis-mode change paints the
+# old geometry from the cache for ever.
+#
+# There is deliberately no third entry moving the bump ABOVE the guard:
+# measured 2026-09-20, that mutation survives the whole crate suite, and
+# on inspection it is equivalent rather than untested — `chart_version`
+# is read only where a model is built, so an early bump leaves the
+# counter monotonic and every built model still carries a fresh, larger
+# version. The two entries around it are the load-bearing pair.
+run_mutation "timeseries: a chrome change bumps the chart version" \
+  crates/geode-timeseries/src/tile.rs \
+  '        self.chart_version += 1;' \
+  '        self.chart_version += 0;' \
+  geode-timeseries \
+  normal_mode_verbs_drive_the_model_and_bump_the_chart_version
+
+# A reloaded `colours.toml` reaches an OPEN tile only through the named
+# colours Arc's address in the chart key: `set_colours` swaps a fresh
+# `Arc` into the cell every tile shares, and nothing else would ever tell
+# a painted chart that a name it draws with was redefined.
+run_mutation "timeseries: a colours reload reaches an open tile" \
+  crates/geode-timeseries/src/tile.rs \
+  '        theme,
+        colours,
+    }
+}' \
+  '        theme,
+        colours: 0,
+    }
+}' \
+  geode-timeseries \
+  a_reloaded_colours_doc_reaches_an_open_tile
+
+# One entry for the PAIR of defences behind a removed pair leaving no
+# ghost (Task 7, review round 1, I-2): `prune_in_flight` is the
+# load-bearing half and is mutated here at the helper, so both its call
+# sites — `remove`, which takes an operand's dependants with it, and
+# `:clear` — go at once. The other half, `on_fetched` dropping the entry
+# ABOVE its early return, is defence in depth and is not separately
+# observable: it covers the ANSWERED case, which a pruned set covers too.
+# A stale entry is indistinguishable from a live fetch, so the same pair,
+# re-added, would be skipped for the tile's whole life.
+run_mutation "timeseries: a removed pair leaves no in_flight ghost" \
+  crates/geode-timeseries/src/tile.rs \
+  '        self.in_flight
+            .retain(|(source, identity)| model.holds_pair(source, identity));' \
+  '        let _ = model;' \
+  geode-timeseries \
+  a_removed_pair_leaves_no_ghost_and_a_re_add_fetches_again
+
+# The in-flight set suppresses a second fetch for a pair already asked
+# for — but only within the SAME range. A range change is a different
+# span, and without this compare an unanswered pair keeps its entry and
+# the new span is never asked for at all.
+run_mutation "timeseries: a range change refetches an unanswered pair" \
+  crates/geode-timeseries/src/tile.rs \
+  '        if self.in_flight_range.as_ref() != Some(self.model.range()) {' \
+  '        if false {' \
+  geode-timeseries \
+  a_range_change_refetches_a_pair_whose_fetch_has_not_answered
+
+# An as-of change moves the span's LEFT edge too, and live fetching
+# never covered anything before `now − preset` (Task 7 ruling): the tile
+# refetches as well as requeries, gaps first. Requery alone paints a
+# truncated left edge with no sign that anything is missing.
+#
+# The `in_flight.clear()` on the line above is NOT separately pinned:
+# measured 2026-09-20, removing it survives the whole crate suite,
+# because it only bites when a pair's FIRST fetch is still unanswered as
+# the as-of moves (`fetch_pending` drops the set only when the RANGE
+# moved, and an as-of change leaves `Range` identical) and no fixture
+# reaches that window. A known gap, recorded rather than papered over.
+run_mutation "timeseries: an as-of change refetches" \
+  crates/geode-timeseries/src/tile.rs \
+  '                    this.fetch_pending(cx);' \
+  '                    ();' \
+  geode-timeseries \
+  the_tile_follows_as_of_only_and_stages_under_an_open_barrier
+
+# …and that refetch is gated on a REAL as-of move, never on
+# `follows_changed` (Task 8, folded review fix): that answers true while
+# `acted` is `None` — a tile that has never asked a query — so on a
+# freshly shown tile whose first fetch is still out, ANY frame notify (a
+# scope keystroke, say) asked for every pair's span a second time.
+run_mutation "timeseries: the as-of refetch is gated on a real as-of move" \
+  crates/geode-timeseries/src/tile.rs \
+  '                if this
+                    .acted
+                    .is_some_and(|acted| Self::differs_on_followed(acted, now))
+                {' \
+  '                if true
+                {' \
+  geode-timeseries \
+  a_range_change_refetches_a_pair_whose_fetch_has_not_answered
+
+# `[timeseries] default_source` naming nothing configured is a WARNING
+# that names what IS configured (§9.12) — never silence, which leaves
+# `:add SPX.close` refusing with no clue that the default is the stale
+# half.
+run_mutation "series settings: the default source diagnostic names the sources" \
+  crates/geode-shell/src/series.rs \
+  '    if settings.dataset_of(name).is_some() {' \
+  '    if true {' \
+  geode-shell \
+  the_default_source_is_read_and_diagnosed
+
+# A tile may only name a FETCH-shaped source (a non-directory adapter
+# over a series dataset). Without the shape filter the picker offers the
+# desk's CSV directories and a pick sends a fetch nothing can answer.
+run_mutation "series settings: fetch sources are the Fetch-shaped ones" \
+  crates/geode-shell/src/series.rs \
+  '            .filter(|source| source.shape(&schema) == SourceShape::Fetch)' \
+  '            .filter(|_source| true)' \
+  geode-shell \
+  the_fetch_sources_are_the_non_directory_sources_over_a_series_dataset
+
+# gpui-component's `Root` binds `tab`/`shift-tab` window-wide to its own
+# focus cycling, and gpui dispatches a matched BINDING before any
+# `on_key_down` listener — so without this reclaim a bare `tab` never
+# reaches `ShellView::handle_key_down` while a tile is focused, and a
+# module that binds `tab` in its own context (the timeseries tile's
+# `tab = timeseries::next`) is simply dead in the real app.
+run_mutation "shell: the root reclaims tab from Root's focus cycling" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeShell")),' \
+  '' \
+  geode-shell \
+  tab_reaches_a_focused_tiles_own_binding_rather_than_roots_focus_cycling
+
+# …and the context those two reclaims are scoped BY: the shell root
+# carries `GeodeShell` unconditionally, not only while a modal is open.
+# Renamed, the reclaim matches nothing and `Root` takes `tab` back — the
+# same dead key, from the other end.
+run_mutation "shell: the root always carries the GeodeShell context" \
+  crates/geode-shell/src/shell/render.rs \
+  '                "GeodeShell"' \
+  '                "GeodeRoot"' \
+  geode-shell \
+  tab_reaches_a_focused_tiles_own_binding_rather_than_roots_focus_cycling
+
+# No entry for `geode-app`'s `the_whole_production_keymap_builds_with_no_
+# diagnostics`, deliberately. That test asserts a NEGATIVE over the whole
+# spliced keymap — every builtin layer, the demo layer, the full registry
+# and every roster factory's fragment, with no diagnostic anywhere — so
+# the only mutation that changes its answer is breaking a binding, which
+# is breaking the fixture rather than the behaviour: it would report
+# "caught" for a keymap that no longer exists. The behaviour it defends
+# (a module shipping an unspellable key, `"+"`, that parses nowhere) has
+# no branch to flip; the test is the branch. Recorded here so its absence
+# reads as a decision rather than an oversight.
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
