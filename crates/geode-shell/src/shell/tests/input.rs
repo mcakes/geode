@@ -639,12 +639,11 @@ fn tab_reaches_a_focused_tiles_own_binding_rather_than_roots_focus_cycling(
     };
     services.keymap = test_keymap(&services.registry, &[tab_layer]);
 
-    let (window, mut vcx) = open_shell(cx, services);
+    let (_window, mut vcx) = open_shell(cx, services);
     vcx.simulate_keystrokes("ctrl-v"); // a recorder tile, focused
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let _ = &window;
 
     vcx.simulate_keystrokes("tab");
 
