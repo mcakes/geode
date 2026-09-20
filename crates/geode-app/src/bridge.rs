@@ -13,7 +13,7 @@ use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
 use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
-use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink};
+use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink, PricerConfig};
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::CVI;
 use geode_shell::diagnostics::SourceSummary;
@@ -115,6 +115,7 @@ pub fn data_setup(
                 }
                 documents
             },
+            pricer: PricerConfig::default(),
         },
         views,
         dimensions,
@@ -698,6 +699,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
+                    // Line-pricer spec §5.3: the pricing tile that sends
+                    // `Request::Price` lands in a later task, so nothing
+                    // in the shell can produce this event yet — the arm
+                    // exists only to keep this match exhaustive.
+                    DataEvent::Price(_outcome) => {}
                 }
             });
             if handled.is_err() {

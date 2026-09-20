@@ -8,6 +8,7 @@
 use crate::service::{DataEvent, DataService, DataServiceConfig, EventSink, QueryParams};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::pricing::{LocalPublish, PriceParams};
 use geode_core::query::{
     CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey, QueryOutcome,
 };
@@ -34,6 +35,12 @@ pub enum Request {
     /// (Phase 4b §4.5). Answered synchronously on the service thread,
     /// not through the query pool — see `DataService::catalog`.
     Catalog(CatalogParams),
+    /// The line pricer's batch (line-pricer spec §5.3), answered by the
+    /// pricing worker as `DataEvent::Price`.
+    Price(PriceParams),
+    /// A document the app authored, published as a generation of a
+    /// `local = true` dataset (spec §5.3, §7.2).
+    Publish(LocalPublish),
     Cancel {
         key: QueryKey,
     },
@@ -143,6 +150,19 @@ impl DataHandle {
     /// the sink as `DataEvent::Catalog`, keyed and tagged as asked.
     pub fn catalog(&self, params: CatalogParams) -> bool {
         self.send(Request::Catalog(params))
+    }
+
+    /// Queue a pricing batch. `false` means it was not queued (the
+    /// request channel or the worker's queue is full); the tile keeps
+    /// its lines stale and resubmits next frame.
+    pub fn price(&self, params: PriceParams) -> bool {
+        self.send(Request::Price(params))
+    }
+
+    /// Queue a local publish. Refused (an error `Diagnostics` event,
+    /// nothing written) unless the dataset is declared `local`.
+    pub fn publish(&self, publish: LocalPublish) -> bool {
+        self.send(Request::Publish(publish))
     }
 
     /// The safe hot-reload path for views (foundation §8). Diagnostics
@@ -275,6 +295,12 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
             Request::Catalog(params) => {
                 sink(DataEvent::Catalog(service.catalog(&params)));
             }
+            Request::Price(params) => {
+                if !service.price(params) {
+                    tracing::warn!(target: "geode::pricing", "the pricing queue is full; a batch was dropped");
+                }
+            }
+            Request::Publish(publish) => service.publish(publish),
             Request::Cancel { key } => service.cancel(key),
             Request::ReplaceViews { views, dimensions } => {
                 let diags = service.replace_views(views, dimensions);
@@ -291,8 +317,9 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::PricerConfig;
     use crate::query::as_of::AsOf;
-    use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc, ts};
+    use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc, local_dataset, sheet_rows, ts};
     use geode_core::scope::Scope;
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
@@ -446,6 +473,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
         );
@@ -518,6 +546,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
         );
@@ -589,6 +618,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
         );
@@ -610,6 +640,55 @@ mod tests {
             }
         }
         h.shutdown();
+    }
+
+    #[test]
+    fn price_and_publish_requests_reach_the_real_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(local_dataset());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.path().join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters: Default::default(),
+                documents: Default::default(),
+                pricer: PricerConfig::missing("vendor"),
+            },
+            sink,
+        );
+        assert!(handle.price(crate::pricing::worker::tests::params(2, 9, &["SPX"])));
+        assert!(handle.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("a", &[7]),
+        }));
+        let mut priced = false;
+        let mut published = false;
+        while !(priced && published) {
+            match rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() {
+                DataEvent::Price(o) => {
+                    assert_eq!((o.key, o.tag), (QueryKey(2), 9));
+                    assert_eq!(
+                        o.results[0].2.as_ref().unwrap_err(),
+                        "pricer \"vendor\" is not built into this binary"
+                    );
+                    priced = true;
+                }
+                DataEvent::Published { dataset, .. } if dataset == "sheets" => published = true,
+                _ => {}
+            }
+        }
+        handle.shutdown();
+        assert!(
+            !handle.price(crate::pricing::worker::tests::params(2, 10, &["SPX"])),
+            "refused after shutdown"
+        );
     }
 
     #[test]
@@ -649,6 +728,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
         );
@@ -686,6 +766,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
         );
