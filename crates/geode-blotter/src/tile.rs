@@ -137,6 +137,14 @@ pub struct BlotterTile {
     /// The as-of override (spec §3.1); `Follow` on a fresh tile. Tests
     /// read it directly, the way they read `pin`.
     pub(crate) tile_as_of: TileAsOf,
+    /// The pinned chip's text and tooltip title, cached when
+    /// `tile_as_of` changes (`set_tile_as_of`) so `render` clones two
+    /// `SharedString`s rather than formatting — the `filter_tip` rule.
+    /// Both empty while `Follow`.
+    asof_chip: SharedString,
+    asof_tip: SharedString,
+    /// `"tip-blotter-asof-{id}"`, built once.
+    asof_tip_selector: SharedString,
     tile_scope: Scope,
     /// [`filter_summary`] of `tile_scope`, cached so the `filtered`
     /// pill's tooltip clones a `SharedString` at paint time rather than
@@ -275,7 +283,30 @@ impl BlotterTile {
                 Some(scope)
             })
             .unwrap_or_default();
-        let tile_as_of = TileAsOf::Follow;
+        // `as_of` (command-line locality spec §3.5): `"live"`, an RFC 3339
+        // instant, or absent (following). A value that is neither follows
+        // the frame, logged like a restored `filter.expr` that no longer
+        // parses.
+        let tile_as_of = match restored
+            .and_then(|t| t.get("as_of"))
+            .and_then(|v| v.as_str())
+        {
+            None => TileAsOf::Follow,
+            Some("live") => TileAsOf::Pinned(AsOf::Live),
+            Some(text) => match chrono::DateTime::parse_from_rfc3339(text) {
+                Ok(at) => TileAsOf::Pinned(AsOf::At(at.with_timezone(&chrono::Utc))),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "tile {}: restored as_of '{text}' is not RFC 3339 ({e}) — following the frame",
+                        tile.0
+                    );
+                    TileAsOf::Follow
+                }
+            },
+        };
+        let (asof_chip, asof_tip) = Self::asof_chip_strings(&tile_as_of);
+        let asof_tip_selector: SharedString = format!("tip-blotter-asof-{}", tile.0).into();
         let unscoped_tip_selector: SharedString = format!("tip-blotter-unscoped-{}", tile.0).into();
         let filter_tip_selector: SharedString = format!("tip-blotter-filtered-{}", tile.0).into();
         let filter_tip: SharedString = filter_summary(&tile_scope).into();
@@ -341,6 +372,9 @@ impl BlotterTile {
             unscoped,
             unscoped_tip_selector,
             tile_as_of,
+            asof_chip,
+            asof_tip,
+            asof_tip_selector,
             tile_scope,
             filter_tip,
             filter_tip_selector,
@@ -411,12 +445,32 @@ impl BlotterTile {
         self.tile_scope = scope;
     }
 
+    /// The chip text and tooltip title for `as_of` (spec §3.4).
+    fn asof_chip_strings(as_of: &TileAsOf) -> (SharedString, SharedString) {
+        match as_of {
+            TileAsOf::Follow => (SharedString::default(), SharedString::default()),
+            TileAsOf::Pinned(AsOf::Live) => ("LIVE".into(), "Pinned to live".into()),
+            TileAsOf::Pinned(AsOf::At(at)) => (
+                pinned_chip_text(*at, chrono::Utc::now()).into(),
+                format!(
+                    "Pinned to {}",
+                    at.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S %Z")
+                )
+                .into(),
+            ),
+        }
+    }
+
     /// Change the as-of override; `true` when it changed. The one door,
     /// so Task 3's chip cache cannot go stale.
     fn set_tile_as_of(&mut self, next: TileAsOf) -> bool {
         if self.tile_as_of == next {
             return false;
         }
+        let (chip, tip) = Self::asof_chip_strings(&next);
+        self.asof_chip = chip;
+        self.asof_tip = tip;
         self.tile_as_of = next;
         true
     }
@@ -1191,6 +1245,9 @@ impl BlotterTile {
             }
         }
         t.insert("unscoped".into(), toml::Value::Boolean(self.unscoped));
+        if let Some(v) = self.as_of_record() {
+            t.insert("as_of".into(), v);
+        }
         if !self.tile_scope.is_empty() {
             let mut filter = toml::Table::new();
             if let Some(expr) = &self.tile_scope.expression {
@@ -1202,6 +1259,18 @@ impl BlotterTile {
             t.insert("filter".into(), toml::Value::Table(filter));
         }
         t
+    }
+
+    /// The session record's `as_of` value (spec §3.5): `None` while
+    /// following, `"live"`, or the pinned instant in RFC 3339 (UTC).
+    fn as_of_record(&self) -> Option<toml::Value> {
+        match &self.tile_as_of {
+            TileAsOf::Follow => None,
+            TileAsOf::Pinned(AsOf::Live) => Some(toml::Value::String("live".into())),
+            TileAsOf::Pinned(AsOf::At(at)) => Some(toml::Value::String(
+                at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            )),
+        }
     }
 
     /// Whether a per-dataset freshness reading (§6.5) is old enough to
@@ -1229,6 +1298,22 @@ impl BlotterTile {
 /// render thread down with it.
 fn short_time(t: &str) -> &str {
     t.get(11..16.min(t.len())).unwrap_or(t)
+}
+
+/// The pinned chip's text (spec §3.4): `AS OF HH:MM` when `at` falls on
+/// today's LOCAL date, `AS OF YYYY-MM-DD HH:MM` otherwise — the same rule
+/// the toolbar's readout uses. Local because every displayed time is the
+/// trader's clock (Phase 4a ruling).
+pub(crate) fn pinned_chip_text(
+    at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let local = at.with_timezone(&chrono::Local);
+    if local.date_naive() == now.with_timezone(&chrono::Local).date_naive() {
+        format!("AS OF {}", local.format("%H:%M"))
+    } else {
+        format!("AS OF {}", local.format("%Y-%m-%d %H:%M"))
+    }
 }
 
 /// One line for the `filtered` pill's tooltip: the tile's own filter
@@ -1353,6 +1438,31 @@ impl gpui::Render for BlotterTile {
                     )),
             );
         }
+        // The as-of override's chip (spec §3.4): neutral, like `pinned`
+        // and `filtered` — a state the trader chose. Painted from the
+        // tile's own state, so it is right from the keystroke, not from
+        // the next delivery.
+        if let TileAsOf::Pinned(_) = &self.tile_as_of {
+            header = header.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("blotter-asof"),
+                        self.tile.0,
+                    ))
+                    .text_color(neutral_chip.text)
+                    .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .debug_selector(|| format!("blotter-asof-{}", self.tile.0))
+                    .child(self.asof_chip.clone())
+                    .tooltip(tips::tip_with(
+                        self.asof_tip_selector.clone(),
+                        self.asof_tip.clone(),
+                        None,
+                        Some(SharedString::new_static(":asof clear follows the frame")),
+                    )),
+            );
+        }
         if let Some(snapshot) = &snapshot {
             let p = snapshot.provenance();
             let mut datasets: Vec<_> = p.datasets.iter().collect();
@@ -1366,13 +1476,19 @@ impl gpui::Render for BlotterTile {
                 let stale = self.is_stale(f.as_of.as_deref(), now);
                 header = header.child(div().when(stale, |el| el.text_color(warn_text)).child(text));
             }
-            if let Some(req) = &p.as_of_request {
+            // The frame's historical warning (inherited danger) — only
+            // while FOLLOWING; a pinned tile's request always carries its
+            // pin and the neutral chip above already says so.
+            if matches!(self.tile_as_of, TileAsOf::Follow)
+                && let Some(req) = &p.as_of_request
+            {
                 header = header.child(
                     div()
                         .text_color(warn_chip.text)
                         .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                         .px_1()
                         .rounded(theme.radius_tokens().sm)
+                        .debug_selector(|| format!("blotter-asof-frame-{}", self.tile.0))
                         .child(format!("AS OF {}", &req[..16.min(req.len())])),
                 );
             }
@@ -2816,6 +2932,122 @@ mod tests {
         assert!(
             !h.frame.read_with(&cx, |f, _| f.barrier_open()),
             "and it answered the barrier without a query"
+        );
+    }
+
+    /// The pinned chip reads `AS OF HH:MM` for today in the trader's
+    /// local clock and carries the date otherwise (spec §3.4).
+    #[test]
+    fn pinned_chip_text_elides_todays_date() {
+        let now = chrono::Utc::now();
+        let today = pinned_chip_text(now, now);
+        assert!(today.starts_with("AS OF "), "{today}");
+        assert_eq!(today.len(), "AS OF HH:MM".len(), "{today}");
+        let old = now - chrono::Duration::days(3);
+        let past = pinned_chip_text(old, now);
+        assert_eq!(past.len(), "AS OF YYYY-MM-DD HH:MM".len(), "{past}");
+    }
+
+    /// The pinned chip paints from the tile's own state the moment the
+    /// line runs, in place of the provenance-driven warning chip; a
+    /// following tile under a historical frame paints only the latter.
+    #[gpui::test]
+    fn a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-asof-7").is_none(),
+            "following, live: no chip"
+        );
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-asof-7").is_some(),
+            "pinned: the chip paints"
+        );
+        assert!(
+            cx.debug_bounds("blotter-asof-frame-7").is_none(),
+            "the provenance chip is suppressed while pinned"
+        );
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        let _ = next_query(&h.requests);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-asof-7").is_none(),
+            "cleared: no chip"
+        );
+    }
+
+    /// Session (spec §3.5): `as_of` is written only while pinned, as
+    /// `"live"` or RFC 3339, restored to the same pin, and a malformed
+    /// value restores to `Follow`.
+    #[gpui::test]
+    fn as_of_round_trips_through_the_session_record(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        assert!(state.get("as_of").is_none(), "following writes nothing");
+
+        h.tile
+            .update(&mut vcx, |t, cx| t.command("asof live", cx).unwrap());
+        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        assert_eq!(state["as_of"].as_str(), Some("live"));
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("asof 2026-09-20 14:05", cx).unwrap()
+        });
+        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = state["as_of"].as_str().unwrap().to_string();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&written).is_ok(),
+            "{written}"
+        );
+
+        let mut record = toml::Table::new();
+        record.insert("as_of".into(), toml::Value::String(written.clone()));
+        let (h2, mut vcx2) = open_with(cx, Some(&record));
+        assert!(matches!(
+            h2.tile.read_with(&vcx2, |t, _| t.tile_as_of.clone()),
+            TileAsOf::Pinned(AsOf::At(_))
+        ));
+        h2.tile.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h2.requests);
+        assert!(
+            matches!(p.as_of, AsOf::At(_)),
+            "the first request carries the restored pin"
+        );
+
+        let mut record = toml::Table::new();
+        record.insert("as_of".into(), toml::Value::String("live".into()));
+        let (h3, vcx3) = open_with(cx, Some(&record));
+        assert_eq!(
+            h3.tile.read_with(&vcx3, |t, _| t.tile_as_of.clone()),
+            TileAsOf::Pinned(AsOf::Live)
+        );
+
+        let mut record = toml::Table::new();
+        record.insert("as_of".into(), toml::Value::String("yesterday-ish".into()));
+        let (h4, vcx4) = open_with(cx, Some(&record));
+        assert_eq!(
+            h4.tile.read_with(&vcx4, |t, _| t.tile_as_of.clone()),
+            TileAsOf::Follow,
+            "a malformed value follows the frame"
         );
     }
 
