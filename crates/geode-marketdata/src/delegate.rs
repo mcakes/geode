@@ -4,7 +4,8 @@
 //!
 //! It owns nothing the tile does not already have: the prepared
 //! [`MatrixModel`] as an `Rc` swapped wholesale on every rebuild, a mirror
-//! of the tile's cursor, and a mirror of the open cell editor. **The
+//! of the tile's cursor, and mirrors of the open cell editor and of a
+//! choice cell's open typeahead (painted under its cell). **The
 //! tile's own cursor stays the truth** — this is a paint-time copy, kept
 //! in step by `MarketDataTile::sync_cursor`, so nothing here decides
 //! anything a keystroke, a yank or a commit reads back.
@@ -19,6 +20,7 @@
 
 use crate::core::{MatrixModel, PanelSpec};
 use crate::header;
+use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
 use geode_shell::fonts;
 use gpui::prelude::*;
@@ -85,6 +87,20 @@ pub(crate) enum DelegateEditorPaint {
     },
 }
 
+/// The open `Choice` cell's typeahead as the delegate paints it (dividend
+/// spec §4.4): the cell it hangs under, in model coordinates, and the
+/// prepared rows. A paint-time COPY like [`DelegateEditor`] — the tile's
+/// `Popup::Choice` is the truth, re-mirrored on every change through
+/// `MarketDataTile::sync_editor`; the `Rc` is the tile's own prepared
+/// paint, so a re-mirror is a refcount bump and `render_td` reads
+/// prepared strings.
+#[derive(Clone)]
+pub(crate) struct DelegateChoice {
+    pub row: usize,
+    pub col: usize,
+    pub paint: Rc<ChoicePaint>,
+}
+
 /// Every field is `pub(crate)`, never `pub` (review Minor 4): a model swap
 /// is only correct when it is paired with a `TableState::refresh`, and
 /// `MarketDataTile::install_model` is the one place that pairs them. Crate
@@ -108,6 +124,10 @@ pub struct MatrixDelegate {
     /// Painted IN that cell, which is what makes it typeable at all
     /// (`MarketDataTile`'s `Editing::state`).
     pub(crate) editor: Option<DelegateEditor>,
+    /// The open choice popup, mirrored from the tile: painted hanging
+    /// under its cell (`render_td`'s value arm), the one place the popup
+    /// can know where that cell is.
+    pub(crate) choice: Option<DelegateChoice>,
     /// The tile, for the date field's key and click routing
     /// (`header::render_date_field` takes the entity, and the field's
     /// `on_key_down` runs `MarketDataTile::date_field_key` through it).
@@ -139,6 +159,7 @@ impl MatrixDelegate {
             row_axis: SharedString::from(spec.rows.column),
             cursor: Some((0, 0)),
             editor: None,
+            choice: None,
             tile,
             tile_id,
             tones,
@@ -387,7 +408,23 @@ impl TableDelegate for MatrixDelegate {
             .editor_at(row_ix, col_ix)
             .cloned()
             .and_then(|e| self.render_editor(&e, theme));
-        match editor {
+        // The choice popup hangs under THIS cell when it is the one being
+        // edited (dividend spec §4.4): a zero-size absolute child at the
+        // cell's bottom-left is the anchor `render_choice`'s `TopLeft`
+        // positions against — the header popups' own arrangement, with
+        // the cell as the anchor's frame instead of the header. Painted
+        // through `deferred`, so the table's clip never cuts it. A tile
+        // that has been dropped paints nothing, as `render_editor` does.
+        let choice = self
+            .choice
+            .as_ref()
+            .filter(|c| c.row == row_ix && c.col == model_col)
+            .map(|c| Rc::clone(&c.paint))
+            .and_then(|paint| {
+                let tile = self.tile.upgrade()?;
+                Some(render_choice(&paint, &tile, self.tile_id, cx).into_any_element())
+            });
+        let el = match editor {
             Some(editor) => el.child(
                 div()
                     .flex_1()
@@ -395,7 +432,11 @@ impl TableDelegate for MatrixDelegate {
                     .child(editor),
             ),
             None => el.child(text),
-        }
+        };
+        el.when_some(choice, |el, popup| {
+            el.relative()
+                .child(div().absolute().left_0().bottom_0().child(popup))
+        })
     }
 }
 

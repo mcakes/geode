@@ -56,6 +56,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::insert_up_big", "Insert: up (big)"),
     ("marketdata::insert_down_big", "Insert: down (big)"),
     ("marketdata::load_underlying", "Load underlying…"),
+    // A `Choice` cell's in-place step (dividend spec §4.4): the dialogs'
+    // own `space`/`shift+space`, brought to a grid cell.
+    ("marketdata::step", "Step value"),
+    ("marketdata::step_back", "Step value back"),
     ("marketdata::upload", "Upload"),
     ("marketdata::revert", "Revert edits"),
     ("marketdata::rebase", "Rebase"),
@@ -138,6 +142,8 @@ context = "marketdata && mode == normal"
 "escape" = "marketdata::escape"
 "." = "marketdata::menu"
 "u" = "marketdata::load_underlying"
+"space" = "marketdata::step"
+"shift+space" = "marketdata::step_back"
 
 [[bindings]]
 context = "marketdata && mode == insert"

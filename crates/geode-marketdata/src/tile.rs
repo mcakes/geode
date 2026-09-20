@@ -57,9 +57,11 @@ use crate::core::{
     Cell, CellKind, Columns, DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment,
     UpdatePolicy, parse_attr, parse_cell,
 };
-use crate::delegate::{DelegateEditor, DelegateEditorPaint, MatrixDelegate};
+use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
-use crate::popup::{MenuState, PickerRows, PickerState, Popup, render_menu, render_picker};
+use crate::popup::{
+    ChoicePopup, MenuState, PickerRows, PickerState, Popup, render_menu, render_picker,
+};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{Value, split_key};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
@@ -75,6 +77,7 @@ use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
+use geode_shell::vimnav::NavCommand;
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable as _, Hsla, IntoElement,
@@ -237,12 +240,12 @@ struct Editing {
 /// The two forms an editor takes (header spec §5.2, 2026-09-19; a cell
 /// opens either by its column's [`CellKind`] since spec §4.4).
 enum EditorState {
-    /// A text `Input` — every `Number`/`Text`/`Choice` cell, and every
-    /// attribute but a `Date`. Tile-owned, and PAINTED in the cell or the
-    /// strip (see `render` and `MatrixDelegate::render_td`): gpui installs
-    /// a text-input handler only for a focused `Input` that has been
-    /// drawn, so an editor kept off the element tree would take no
-    /// characters at all.
+    /// A text `Input` — every `Number`/`Text` cell, and every attribute
+    /// but a `Date` (a `Choice` cell opens `Popup::Choice` instead).
+    /// Tile-owned, and PAINTED in the cell or the strip (see `render` and
+    /// `MatrixDelegate::render_td`): gpui installs a text-input handler
+    /// only for a focused `Input` that has been drawn, so an editor kept
+    /// off the element tree would take no characters at all.
     Text(Entity<InputState>),
     /// The segmented date field a `Date` attribute or a `Date` cell opens
     /// instead: a pure [`DateField`] the tile routes keys into
@@ -781,9 +784,11 @@ impl MarketDataTile {
 
     /// Pushed onto the keymap context stack while this tile is focused.
     /// `insert` while the cell editor holds the keyboard OR the
-    /// underlying picker is open (spec §7/§8.6 — a `Popup::Picker`'s
-    /// field holds the keyboard exactly as the cell editor does, which is
-    /// the shell's insert branch's own one pair to key on), `menu` exactly
+    /// underlying picker or a choice cell's typeahead is open (spec
+    /// §7/§8.6, dividend spec §4.4 — a `Popup::Picker`'s or
+    /// `Popup::Choice`'s field holds the keyboard exactly as the cell
+    /// editor does, which is the shell's insert branch's own one pair to
+    /// key on), `menu` exactly
     /// while the action list is open (spec §6.1; `editor` wins over
     /// `popup` since the two are exclusive by construction, see
     /// `toggle_menu`/`open_picker`), else `normal`. `counts()` stays on in
@@ -806,7 +811,9 @@ impl MarketDataTile {
     /// cell editor. Spec §7 named `ctrl+j`/`ctrl+k` in error; Task 8
     /// records the amendment.
     pub fn key_context(&self) -> KeyContext {
-        let mode = if self.editor.is_some() || matches!(self.popup, Some(Popup::Picker(_))) {
+        let mode = if self.editor.is_some()
+            || matches!(self.popup, Some(Popup::Picker(_) | Popup::Choice(_)))
+        {
             "insert"
         } else if matches!(self.popup, Some(Popup::Menu(_))) {
             "menu"
@@ -817,7 +824,8 @@ impl MarketDataTile {
     }
 
     /// `TileContent::holds_focus` (review C-1, 2026-09-17): does THIS
-    /// panel's open editor or its picker's field hold window focus? The
+    /// panel's open editor, its picker's field or a choice popup's field
+    /// hold window focus? The
     /// mode above says an editor is OPEN; this says whose field the
     /// keyboard is actually in — two different facts once an editor has
     /// been left open by a tile-focus move (I-3), and the shell's
@@ -827,9 +835,12 @@ impl MarketDataTile {
             .editor
             .as_ref()
             .is_some_and(|e| e.state.is_focused(window, cx));
-        let picker = matches!(&self.popup, Some(Popup::Picker(p))
-            if p.input.read(cx).focus_handle(cx).is_focused(window));
-        editor || picker
+        let popup = match &self.popup {
+            Some(Popup::Picker(p)) => p.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Choice(c)) => c.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Menu(_)) | None => false,
+        };
+        editor || popup
     }
 
     // ---- the request -------------------------------------------------
@@ -1344,11 +1355,13 @@ impl MarketDataTile {
     /// rather than painting nothing at all.
     fn sync_cursor(&self, cx: &mut Context<Self>) {
         let editor = self.delegate_editor();
+        let choice = self.delegate_choice();
         match self.cursor {
             Cursor::Cell { row, col } => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = Some((row, col));
                 d.editor = editor;
+                d.choice = choice;
                 t.set_selected_col(MatrixDelegate::table_col(col), cx);
                 t.set_selected_row(row, cx);
                 t.scroll_to_row(row, cx);
@@ -1357,6 +1370,7 @@ impl MarketDataTile {
                 let d = t.delegate_mut();
                 d.cursor = None;
                 d.editor = editor;
+                d.choice = choice;
                 t.clear_selection(cx);
             }),
         }
@@ -1385,18 +1399,42 @@ impl MarketDataTile {
         })
     }
 
-    /// Re-mirror the open editor alone — what a date CELL's field needs
-    /// after every keystroke and segment click, since the delegate paints
-    /// its own COPY of the segments (`DelegateEditorPaint::Date`) and the
-    /// field's own key path ends in neither `dispatch` nor
-    /// [`Self::sync_cursor`]. Deliberately not `sync_cursor` itself: that
-    /// door also re-sets the table's selection, and the pinned
-    /// `set_selected_row` stops propagation of the event in flight, which
-    /// a key the field did NOT consume must still reach the shell.
+    /// The open choice popup as the delegate paints it (dividend spec
+    /// §4.4): the cell it hangs under and the tile's own prepared paint —
+    /// an `Rc` bump, never a re-preparation. `None` with no popup, or a
+    /// popup of another kind.
+    fn delegate_choice(&self) -> Option<DelegateChoice> {
+        match &self.popup {
+            Some(Popup::Choice(c)) => {
+                let (cell, _) = c.target();
+                Some(DelegateChoice {
+                    row: cell.0,
+                    col: cell.1,
+                    paint: c.paint(),
+                })
+            }
+            Some(Popup::Menu(_) | Popup::Picker(_)) | None => None,
+        }
+    }
+
+    /// Re-mirror the open editor and choice popup alone — what a date
+    /// CELL's field needs after every keystroke and segment click, since
+    /// the delegate paints its own COPY of the segments
+    /// (`DelegateEditorPaint::Date`) and the field's own key path ends in
+    /// neither `dispatch` nor [`Self::sync_cursor`]; and what the choice
+    /// popup needs after a keystroke in its field, a hover or a close
+    /// from its own mouse door, for the same reason. Deliberately not
+    /// `sync_cursor` itself: that door also re-sets the table's
+    /// selection, and the pinned `set_selected_row` stops propagation of
+    /// the event in flight, which a key the field did NOT consume must
+    /// still reach the shell.
     fn sync_editor(&self, cx: &mut Context<Self>) {
         let editor = self.delegate_editor();
+        let choice = self.delegate_choice();
         self.table.update(cx, |t, cx| {
-            t.delegate_mut().editor = editor;
+            let d = t.delegate_mut();
+            d.editor = editor;
+            d.choice = choice;
             cx.notify();
         });
     }
@@ -1614,19 +1652,20 @@ impl MarketDataTile {
                 self.begin_edit(window, cx);
                 true
             }
-            "commit" => {
-                if matches!(self.popup, Some(Popup::Picker(_))) {
+            "commit" => match self.popup {
+                Some(Popup::Picker(_)) => {
                     self.commit_picker(window, cx);
                     false
-                } else {
-                    self.commit_edit(window, cx)
                 }
-            }
+                Some(Popup::Choice(_)) => self.commit_choice(window, cx),
+                Some(Popup::Menu(_)) | None => self.commit_edit(window, cx),
+            },
             "cancel" => {
-                // A picker takes priority over the (otherwise absent)
-                // editor: the two are exclusive by construction, so this
-                // is really "whichever of the two is open, if either".
-                if matches!(self.popup, Some(Popup::Picker(_))) {
+                // A picker or choice popup takes priority over the
+                // (otherwise absent) editor: the three are exclusive by
+                // construction, so this is really "whichever of them is
+                // open, if any".
+                if matches!(self.popup, Some(Popup::Picker(_) | Popup::Choice(_))) {
                     self.close_popup_with_window(window, cx);
                     false
                 } else {
@@ -1682,22 +1721,34 @@ impl MarketDataTile {
                         m.highlighted = menu::step(&m.rows, m.highlighted, delta);
                     }
                     Some(Popup::Picker(p)) => p.rows.step_highlighted(delta),
-                    None => {}
+                    // Reachable from the palette alone (`mode == menu` is
+                    // never reported with a choice popup open), and it
+                    // has nothing to move there.
+                    Some(Popup::Choice(_)) | None => {}
                 }
                 false
             }
             // The insert-mode arrow pair (2026-09-17), whose meaning
             // follows which input is open: the picker's highlight step
             // while the picker holds the keyboard (`_big` is the same one
-            // step — a list has no "big"), a nudge of the editor's number
-            // while the cell or attribute editor does, and nothing at all
-            // with neither (the palette can reach these; a `false` there
-            // is "not handled", not a silent success).
+            // step — a list has no "big"), the choice popup's highlight
+            // step while IT does (a bare step wraps, §20.5's one motion
+            // rule — the picker's clamp is header spec §7's own), a nudge
+            // of the editor's number while the cell or attribute editor
+            // does, and nothing at all with none (the palette can reach
+            // these; a `false` there is "not handled", not a silent
+            // success).
             "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big" => {
                 let up = verb.starts_with("insert_up");
                 match &mut self.popup {
                     Some(Popup::Picker(p)) => {
                         p.rows.step_highlighted(if up { -n } else { n });
+                        false
+                    }
+                    Some(Popup::Choice(c)) => {
+                        c.list
+                            .nav(NavCommand::Move((if up { -n } else { n }) as i64));
+                        c.prepare();
                         false
                     }
                     Some(Popup::Menu(_)) => return false,
@@ -1731,6 +1782,15 @@ impl MarketDataTile {
             "load_underlying" => {
                 self.open_picker(window, cx);
                 false
+            }
+            // `space`/`shift+space` on a choice cell (dividend spec §4.4):
+            // the next/previous option, in place, no popup.
+            "step" | "step_back" => {
+                let delta = if verb == "step" { n } else { -n };
+                if let Err(e) = self.step_choice(delta, window, cx) {
+                    self.notice = Some(e.into());
+                }
+                true
             }
             // The menu's `On new document` rows and the palette's
             // `Auto: …` actions. Nothing the header paints reads the
@@ -1817,11 +1877,13 @@ impl MarketDataTile {
     ///
     /// WHICH editor is the column's [`CellKind`] (spec §4.4): a `Date`
     /// cell opens the segmented date field exactly as a `Date` attribute
-    /// does, a `Number` or `Text` cell the text `Input`; a `Choice` cell
-    /// is edited as `Text` until Task 5 builds its chooser. The two
-    /// decisions — a cell's kind, an attribute's declared type — resolve
-    /// to the one `wants_date` below, so the field opens the same way
-    /// from either.
+    /// does, a `Number` or `Text` cell the text `Input`, and a `Choice`
+    /// cell the typeahead popup ([`Self::open_choice`]) — after the same
+    /// refusals as the other two, since a popup over a `Behind` draft or
+    /// an empty grid would be exactly as dishonest as an editor. The two
+    /// text-or-date decisions — a cell's kind, an attribute's declared
+    /// type — resolve to the one `wants_date` below, so the field opens
+    /// the same way from either.
     ///
     /// Every painted cell is editable, in both pivots: `Columns::Axis`
     /// fills the grid from the document's one value column, and
@@ -1849,6 +1911,10 @@ impl MarketDataTile {
                 let cell = (row, col);
                 let text = self.model.rows[row].cells[col].text.clone();
                 let labels = self.model.label_of(cell);
+                if let Some(CellKind::Choice(options)) = self.model.kind_of(col) {
+                    self.open_choice(cell, labels, &text, options, window, cx);
+                    return;
+                }
                 let wants_date = matches!(self.model.kind_of(col), Some(CellKind::Date));
                 (text, EditTarget::Cell { cell, labels }, wants_date)
             }
@@ -2154,15 +2220,17 @@ impl MarketDataTile {
     /// anything is written, by the column's [`CellKind`] (spec §4.4) — a
     /// `Number` through [`parse_cell`] and the column's declared type
     /// (`Value::F64`/`I64` by that type, never by what the text happens
-    /// to parse as), a `Text` (and, until Task 5, a `Choice`) trimmed and
-    /// taken verbatim, empty refused only where the column is `required`
-    /// (an optional note may honestly be cleared), a `Date` through the
-    /// ISO spelling its cell paints (unreachable from `begin_edit`, which
-    /// opens the field on a `Date` cell, but parsed rather than declared
-    /// impossible). A refusal is inline, with the editor left open and
-    /// focused, because retyping a value is one keystroke away where
-    /// dropping the editor would throw the whole line back at the
-    /// trader. What is written, and how, is [`Self::commit_cell_value`]'s.
+    /// to parse as), a `Text` trimmed and taken verbatim, empty refused
+    /// only where the column is `required` (an optional note may
+    /// honestly be cleared), a `Date` through the ISO spelling its cell
+    /// paints (unreachable from `begin_edit`, which opens the field on a
+    /// `Date` cell, but parsed rather than declared impossible), and a
+    /// `Choice` as a `Text` — unreachable the same way since Task 5's
+    /// popup, and kept the same way. A refusal is inline, with the editor
+    /// left open and focused, because retyping a value is one keystroke
+    /// away where dropping the editor would throw the whole line back at
+    /// the trader. What is written, and how, is
+    /// [`Self::commit_cell_value`]'s.
     fn commit_cell_edit(
         &mut self,
         cell: (usize, usize),
@@ -2424,7 +2492,7 @@ impl MarketDataTile {
                 self.close_popup_with_window(window, cx);
                 return;
             }
-            Some(Popup::Picker(_)) => self.close_popup_with_window(window, cx),
+            Some(Popup::Picker(_) | Popup::Choice(_)) => self.close_popup_with_window(window, cx),
             None => {}
         }
         if self.editor.is_some() {
@@ -2471,13 +2539,27 @@ impl MarketDataTile {
     /// focus backstop cancelled the command line on the next render: the
     /// trader's find died after one character. Blurring is a module
     /// giving up focus it holds, never focus something else holds.
+    ///
+    /// A [`Popup::Choice`] (dividend spec §4.4) is the picker's twin here
+    /// in both halves: its field holds the keyboard the same way, and it
+    /// is orphaned the same ways. It is also MIRRORED into the delegate
+    /// (painted under its cell), so the close re-mirrors — this door is
+    /// reachable from the popup's own `on_mouse_down_out`, which ends in
+    /// no `dispatch` tail.
     pub(crate) fn close_popup_with_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Popup::Picker(p)) = &self.popup
-            && p.input.read(cx).focus_handle(cx).is_focused(window)
-        {
+        let own_field_focused = match &self.popup {
+            Some(Popup::Picker(p)) => p.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Choice(c)) => c.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Menu(_)) | None => false,
+        };
+        if own_field_focused {
             window.blur(cx);
         }
+        let was_choice = matches!(self.popup, Some(Popup::Choice(_)));
         self.popup = None;
+        if was_choice {
+            self.sync_editor(cx);
+        }
         cx.notify();
     }
 
@@ -2635,6 +2717,185 @@ impl MarketDataTile {
         let key = p.rows.all()[i].clone();
         self.close_popup_with_window(window, cx);
         self.set_key(parse_display_key(&key), window, cx);
+    }
+
+    // ---- the choice cell (dividend spec §4.4) --------------------------
+
+    /// `begin_edit`'s `Choice` arm: open the typeahead popup over the
+    /// column's own vocabulary, placed on the cell's current text, and
+    /// give its field the keyboard — the picker's contract, spec §7.
+    /// The popup is exclusive with the editor and every other popup
+    /// (`begin_edit` returned early on an open editor; `dispatch` closed
+    /// any other popup before `edit` ran; a double-click's mouse-down
+    /// closed one through `on_mouse_down_out`), and the one path that
+    /// could still find one — the palette's `Edit cell` with a picker
+    /// open — is closed through the one door, blur first.
+    fn open_choice(
+        &mut self,
+        cell: (usize, usize),
+        labels: (SharedString, SharedString),
+        current: &str,
+        options: &'static [&'static str],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.popup.is_some() {
+            self.close_popup_with_window(window, cx);
+        }
+        // The column's own label is the placeholder — what the field is
+        // choosing a value FOR.
+        let placeholder: SharedString = self
+            .model
+            .columns
+            .get(cell.1)
+            .cloned()
+            .unwrap_or_else(|| SharedString::new_static("option"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
+            // The LIVE path, for a trader typing (`open_picker`'s own
+            // subscription, for the same reason): `set_value` emits no
+            // `Change`, so `commit_choice` re-reads the field as well.
+            if let InputEvent::Change = event {
+                let query = input.read(cx).value().to_string();
+                if let Some(Popup::Choice(c)) = &mut this.popup
+                    && c.list.set_query(&query)
+                {
+                    c.prepare();
+                    this.sync_editor(cx);
+                }
+                cx.notify();
+            }
+        })
+        .detach();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.popup = Some(Popup::Choice(ChoicePopup::new(
+            input, options, current, cell, labels,
+        )));
+        self.notice = None;
+    }
+
+    /// `commit` (`enter`) with the choice popup open: re-rank from the
+    /// field's CURRENT text (`commit_picker`'s own defensive rule —
+    /// `InputState::set_value` emits no `Change`, and a pick must be
+    /// decided by a ranking that was actually run), then write the lit
+    /// option through the cell door. Nothing lit — the typed text matches
+    /// no option — is refused with the popup left open, since retyping is
+    /// one keystroke away. Answers whether the header needs re-preparing.
+    fn commit_choice(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(Popup::Choice(c)) = &mut self.popup else {
+            return false;
+        };
+        let query = c.input.read(cx).value().to_string();
+        if c.list.set_query(&query) {
+            c.prepare();
+        }
+        let Some(i) = c.list.pick() else {
+            self.notice = Some("no option matches".into());
+            return true;
+        };
+        let option = c.list.options()[i].clone();
+        self.pick_option(option, window, cx)
+    }
+
+    /// A row click, or `enter` after [`Self::commit_choice`]'s re-rank:
+    /// light painted row `row` (window-relative, the row a click carries)
+    /// and write it. Refused silently past the painted range, which a
+    /// click cannot reach anyway.
+    pub(crate) fn choice_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Choice(c)) = &mut self.popup else {
+            return;
+        };
+        if !c.list.set_highlighted(row) {
+            return;
+        }
+        let Some(i) = c.list.pick() else {
+            return;
+        };
+        let option = c.list.options()[i].clone();
+        if self.pick_option(option, window, cx) {
+            self.rebuild_chrome();
+        }
+        cx.notify();
+    }
+
+    /// The pick itself: close the popup FIRST (blur, then drop — its
+    /// field is done being useful the moment an option is chosen, as
+    /// `picker_pick` closes before `set_key`), then write through
+    /// [`Self::commit_cell_value`], the one door every cell value lands
+    /// through, so the identity check and the patch are spelled once.
+    fn pick_option(&mut self, option: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(Popup::Choice(c)) = &self.popup else {
+            return false;
+        };
+        let (cell, labels) = c.target();
+        self.close_popup_with_window(window, cx);
+        self.commit_cell_value(cell, labels, Value::Utf8(option), window, cx)
+    }
+
+    /// A hover over painted choice row `row` — the mouse form of
+    /// `up`/`down`; [`Self::picker_hover`]'s change-only rule, plus the
+    /// re-mirror the delegate's copy needs.
+    pub(crate) fn choice_hover(&mut self, row: usize, cx: &mut Context<Self>) {
+        let Some(Popup::Choice(c)) = &mut self.popup else {
+            return;
+        };
+        if c.list.highlighted() == row || !c.list.set_highlighted(row) {
+            return;
+        }
+        c.prepare();
+        self.sync_editor(cx);
+        cx.notify();
+    }
+
+    /// `space`/`shift+space` (`step`/`step_back`): move the cursor cell
+    /// to the next/previous option of its column's vocabulary, in place,
+    /// wrapping at both ends — the settings and object dialogs' own
+    /// stepping verbs, brought to a grid cell. The CURRENT option is what
+    /// the cell paints (the draft's own value where one exists), so two
+    /// steps compose; a NULL cell, or one holding a value the vocabulary
+    /// no longer lists, has no current option and lands on the first
+    /// (forward) or last (back) rather than treating the hole as option
+    /// 0 and stepping past it. The gates are `:bump`'s: `Behind`, no
+    /// document, the strip; and a cell of any other kind says so.
+    fn step_choice(
+        &mut self,
+        delta: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.draft.is_behind() {
+            return Err(BEHIND_REFUSED.to_string());
+        }
+        self.edit_base()?;
+        let Cursor::Cell { row, col } = self.cursor else {
+            return Err("step needs a grid cell — the cursor is in the header".to_string());
+        };
+        let Some(CellKind::Choice(options)) = self.model.kind_of(col) else {
+            return Err("not a choice cell".to_string());
+        };
+        let options: &'static [&'static str] = options;
+        let len = options.len() as isize;
+        if len == 0 {
+            // A spec declaring `choices: Some(&[])` — nothing to step
+            // through, and `rem_euclid(0)` below would panic.
+            return Err("the column declares no options".to_string());
+        }
+        let current = self.model.rows[row].cells[col].text.as_ref();
+        let next = match options.iter().position(|o| *o == current) {
+            Some(i) => (i as isize + delta).rem_euclid(len),
+            None if delta > 0 => 0,
+            None => len - 1,
+        };
+        let cell = (row, col);
+        let labels = self.model.label_of(cell);
+        self.commit_cell_value(
+            cell,
+            labels,
+            Value::Utf8(options[next as usize].to_string()),
+            window,
+            cx,
+        );
+        Ok(())
     }
 
     /// `:revert` (spec §8.4) — drop every edit. The document's own numbers
@@ -3416,6 +3677,35 @@ impl MarketDataTile {
         }
     }
 
+    /// Whether the choice cell's typeahead popup is open (dividend spec
+    /// §4.4) — a test-only door; production code matches `popup` itself.
+    #[cfg(test)]
+    pub(crate) fn choice_popup_open(&self) -> bool {
+        matches!(self.popup, Some(Popup::Choice(_)))
+    }
+
+    /// The open choice popup's own field entity — `picker_state`'s twin,
+    /// for seeding a value the way `set_value` does (no `Change` event).
+    #[cfg(test)]
+    pub(crate) fn choice_state(&self) -> Option<Entity<InputState>> {
+        match &self.popup {
+            Some(Popup::Choice(c)) => Some(c.input.clone()),
+            _ => None,
+        }
+    }
+
+    /// The option the choice popup's highlight is on, `None` with no
+    /// popup open or nothing ranked — read by TEXT, as
+    /// [`Self::picker_highlighted_key`] is, so a test can tell a real
+    /// re-rank from a coincidence of indices.
+    #[cfg(test)]
+    pub(crate) fn choice_highlighted(&self) -> Option<String> {
+        match &self.popup {
+            Some(Popup::Choice(c)) => c.list.highlighted_text().map(str::to_string),
+            _ => None,
+        }
+    }
+
     /// The catalog key the picker's highlight is currently on, `None`
     /// with no picker open or an empty ranked list — the identity a
     /// re-rank (a keystroke, or a catalog change) must preserve, read by
@@ -3646,6 +3936,10 @@ impl gpui::Render for MarketDataTile {
                         Popup::Picker(p) => {
                             render_picker(p, &tile, self.id.0, cx).into_any_element()
                         }
+                        // Painted by the delegate, under its own cell
+                        // (`MatrixDelegate::render_td`), never off the
+                        // header.
+                        Popup::Choice(_) => return el,
                     };
                     // Anchored just under the header strip, whose height
                     // this follows (`header::HEADER_HEIGHT`).
@@ -4193,6 +4487,18 @@ mod tests {
                 state.update(cx, |s, cx| s.set_value(text, window, cx));
             });
         }
+        /// Seed the open choice popup's field — `set_picker_text`'s twin,
+        /// and the same reason: `set_value` emits no `Change`, which is
+        /// what `commit_choice`'s own re-rank exists to cover.
+        fn set_choice_text(&self, vcx: &mut gpui::VisualTestContext, text: &str) {
+            let state = self
+                .tile
+                .read_with(vcx, |t, _| t.choice_state())
+                .expect("an open choice popup");
+            vcx.update(|window, cx| {
+                state.update(cx, |s, cx| s.set_value(text, window, cx));
+            });
+        }
         /// One cell as painted: its text and whether it reads as an edit.
         fn cell(&self, vcx: &gpui::VisualTestContext, row: usize, col: usize) -> (String, bool) {
             self.tile.read_with(vcx, |t, _| {
@@ -4279,6 +4585,22 @@ mod tests {
             self.tile.read_with(vcx, |t, cx| {
                 let table = t.table().read(cx);
                 (table.selected_row(), table.selected_col())
+            })
+        }
+        /// The choice popup as the DELEGATE holds it — the painted rows
+        /// and the lit one — `None` with no popup mirrored. What
+        /// `render_td` paints, as distinct from the tile's own list.
+        fn delegate_choice_rows(
+            &self,
+            vcx: &gpui::VisualTestContext,
+        ) -> Option<(Vec<String>, usize)> {
+            self.tile.read_with(vcx, |t, cx| {
+                t.table().read(cx).delegate().choice.as_ref().map(|c| {
+                    (
+                        c.paint.rows.iter().map(|r| r.to_string()).collect(),
+                        c.paint.highlighted,
+                    )
+                })
             })
         }
     }
@@ -6248,25 +6570,27 @@ edits = [["2026-11-20", "-1", 9.5]]
     /// §4.4: a Text cell commits its text verbatim (trimmed); a Date cell
     /// opens the segmented date field IN the cell rather than a text
     /// input; both land in the draft as typed values and paint by the
-    /// column's kind. `status` is a `Choice` column, edited as plain
-    /// `Text` until Task 5 builds the chooser.
+    /// column's kind. The text half runs over [`SCHEDULE_REQUIRED_NOTE`]
+    /// — [`SCHEDULE`]'s own `status` is a `Choice` column, which opens
+    /// the typeahead popup (Task 5), never the text input.
     #[gpui::test]
     fn a_text_cell_commits_verbatim_and_a_date_cell_opens_the_date_field(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (h, mut vcx) = open_flat(cx);
-        h.with_flat_document(&mut vcx);
-        // status is column 2 in the model: move there and type.
-        h.dispatch(&mut vcx, "right", Some(2));
+        let (h, mut vcx) = open_spec(cx, &SCHEDULE_REQUIRED_NOTE, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(schedule_note_snapshot()));
         h.dispatch(&mut vcx, "edit", None);
         assert!(h.tile.read_with(&vcx, |t, _| t.editor_state().is_some()));
         h.set_editor(&mut vcx, "  paid ");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.mode(&vcx), "normal");
-        assert_eq!(h.cell(&vcx, 0, 2), ("paid".to_string(), true));
+        assert_eq!(h.cell(&vcx, 0, 0), ("paid".to_string(), true));
         assert_eq!(
             h.tile
-                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 2)).cloned()),
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 0)).cloned()),
             Some(Value::Utf8("paid".into()))
         );
         assert!(
@@ -6274,10 +6598,11 @@ edits = [["2026-11-20", "-1", 9.5]]
             "a clean commit leaves no notice"
         );
 
-        // ex date is column 0: `i` opens the date field, not a text input,
-        // seeded with the painted date and — the strip's own rule — on
-        // the day segment.
-        h.dispatch(&mut vcx, "left", Some(2));
+        // ex date is column 0 of the schedule: `i` opens the date field,
+        // not a text input, seeded with the painted date and — the
+        // strip's own rule — on the day segment.
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
         h.dispatch(&mut vcx, "edit", None);
         assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()));
         assert!(h.tile.read_with(&vcx, |t, _| t.editor_state().is_none()));
@@ -6348,9 +6673,11 @@ edits = [["2026-11-20", "-1", 9.5]]
     /// open, and a non-required one is allowed and paints blank.
     #[gpui::test]
     fn an_empty_required_text_commit_is_refused(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open_flat(cx);
-        h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2));
+        let (h, mut vcx) = open_spec(cx, &SCHEDULE_REQUIRED_NOTE, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(schedule_note_snapshot()));
         h.dispatch(&mut vcx, "edit", None);
         h.set_editor(&mut vcx, "   ");
         h.dispatch(&mut vcx, "commit", None);
@@ -6378,6 +6705,34 @@ edits = [["2026-11-20", "-1", 9.5]]
             Some(Value::Utf8(String::new()))
         );
     }
+
+    /// A one-column flat panel whose value is REQUIRED free text — the
+    /// plain `Text` cell every text-editor test runs over, since
+    /// [`SCHEDULE`]'s own `status` is a `Choice` (Task 5's popup, not the
+    /// text input). Otherwise [`SCHEDULE_OPTIONAL_NOTE`]'s twin.
+    const SCHEDULE_REQUIRED_NOTE: PanelSpec = PanelSpec {
+        kind: "sched_note_req",
+        title: "Dividends (note)",
+        dataset: "div_schedule_note",
+        document: "div_schedule_note",
+        rows: RowAxis {
+            column: "dividend_id",
+            identity: RowIdentity::Minted,
+        },
+        columns: Columns::Values(&[ValueColumn {
+            column: "note",
+            label: "note",
+            ty: ColumnType::Utf8,
+            format: ColumnFormat::MEASURE,
+            choices: None,
+            required: true,
+        }]),
+        header: &[],
+        slice_values: &[],
+        value_type: ColumnType::F64,
+        format: ColumnFormat::MEASURE,
+        actions: &[],
+    };
 
     /// A one-column flat panel whose value is optional free text — what
     /// tells "empty is refused" (a required column) from "empty is a
@@ -6513,16 +6868,20 @@ edits = [["2026-11-20", "-1", 9.5]]
 
     /// `nudge`'s own refusal (spec §4.3, `declared_type`'s door): a
     /// `Text` cell's editor is the plain text `Input`, so `insert_up` on
-    /// `status` is reachable and must refuse rather than step, leaving the
-    /// typed text untouched — there is no unit to step a word by.
+    /// a note is reachable and must refuse rather than step, leaving the
+    /// typed text untouched — there is no unit to step a word by. Over
+    /// [`SCHEDULE_REQUIRED_NOTE`], since `status` is a `Choice` whose
+    /// `insert_up` moves the popup's highlight instead (Task 5).
     #[gpui::test]
     fn a_flat_panels_nudge_on_a_non_numeric_cell_is_refused(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open_flat(cx);
-        h.with_flat_document(&mut vcx);
-        h.dispatch(&mut vcx, "right", Some(2));
+        let (h, mut vcx) = open_spec(cx, &SCHEDULE_REQUIRED_NOTE, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(schedule_note_snapshot()));
 
         h.dispatch(&mut vcx, "edit", None);
-        assert_eq!(h.editor_value(&vcx).as_deref(), Some("declared"));
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("special"));
         h.dispatch(&mut vcx, "insert_up", None);
 
         assert_eq!(
@@ -6532,7 +6891,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         assert_eq!(
             h.editor_value(&vcx).as_deref(),
-            Some("declared"),
+            Some("special"),
             "the typed text is untouched"
         );
         assert_eq!(h.mode(&vcx), "insert");
@@ -6575,6 +6934,331 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
             "a nudge commits nothing"
+        );
+    }
+
+    // ---- the Choice cell (dividend spec §4.4, Task 5) ----------------
+
+    /// §4.4: `space`/`shift+space` (`step`/`step_back`) step a choice
+    /// cell in place through the options in declared order, wrapping at
+    /// both ends and composing on the draft's own current value; on any
+    /// other kind of cell they say so and write nothing.
+    #[gpui::test]
+    fn space_steps_a_choice_cell_and_refuses_elsewhere(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2)); // status = declared
+        h.dispatch(&mut vcx, "step", None);
+        assert_eq!(h.cell(&vcx, 0, 2), ("paid".to_string(), true));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 2)).cloned()),
+            Some(Value::Utf8("paid".into())),
+            "a step lands in the draft as the option's own text"
+        );
+        h.dispatch(&mut vcx, "step_back", None);
+        h.dispatch(&mut vcx, "step_back", None);
+        assert_eq!(
+            h.cell(&vcx, 0, 2).0,
+            "estimated",
+            "two steps back from paid, composing on the draft's value"
+        );
+        h.dispatch(&mut vcx, "step_back", None);
+        assert_eq!(
+            h.cell(&vcx, 0, 2).0,
+            "cancelled",
+            "a step back from the first option wraps to the last"
+        );
+        h.dispatch(&mut vcx, "step", None);
+        assert_eq!(
+            h.cell(&vcx, 0, 2).0,
+            "estimated",
+            "a step from the last option wraps to the first"
+        );
+        assert_eq!(h.mode(&vcx), "normal", "a step opens nothing");
+
+        h.dispatch(&mut vcx, "left", None); // amount
+        h.dispatch(&mut vcx, "step", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("not a choice cell".to_string())
+        );
+        assert_eq!(h.cell(&vcx, 0, 1), ("1.2500".to_string(), false));
+    }
+
+    /// A NULL choice cell has no current option: a step forward lands on
+    /// the FIRST option and a step back on the last, rather than treating
+    /// the hole as option 0 and skipping past it.
+    #[gpui::test]
+    fn a_step_on_a_null_choice_cell_lands_on_the_first_or_last_option(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot_with_null_status(),
+        );
+        h.dispatch(&mut vcx, "right", Some(2));
+        assert_eq!(h.cell(&vcx, 0, 2), (String::new(), false));
+        h.dispatch(&mut vcx, "step_back", None);
+        assert_eq!(h.cell(&vcx, 0, 2), ("cancelled".to_string(), true));
+        h.dispatch(&mut vcx, "revert", None);
+        h.dispatch(&mut vcx, "step", None);
+        assert_eq!(h.cell(&vcx, 0, 2), ("estimated".to_string(), true));
+    }
+
+    /// A step is refused with the same gates `:bump` uses: no document,
+    /// the cursor in the strip, and a draft that is `Behind`.
+    #[gpui::test]
+    fn a_step_is_refused_without_a_document_in_the_strip_and_while_behind(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_flat(cx);
+        h.dispatch(&mut vcx, "step", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(NO_DOCUMENT.to_string())
+        );
+
+        // CVI has a strip; the schedule does not.
+        let (h, mut vcx) = open(cx);
+        let tag = h.with_document_tagged(&mut vcx);
+        h.dispatch(&mut vcx, "up", None); // Attr(0)
+        h.dispatch(&mut vcx, "step", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("step needs a grid cell — the cursor is in the header".to_string())
+        );
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        h.dispatch(&mut vcx, "step", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(BEHIND_REFUSED.to_string())
+        );
+    }
+
+    /// `i` on a choice cell opens the typeahead popup with its field
+    /// focused (insert mode, no text editor); `enter` picks the lit
+    /// option — re-ranked from the field's live text — and commits it
+    /// through the cell door; the field gives the keyboard up before it
+    /// is dropped.
+    #[gpui::test]
+    fn i_on_a_choice_cell_opens_a_typeahead_and_enter_picks(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2));
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.editor_state().is_none()),
+            "a choice cell opens no text editor"
+        );
+        assert_eq!(h.mode(&vcx), "insert");
+        assert!(
+            vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "the popup's field holds the keyboard"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.choice_highlighted()),
+            Some("declared".into()),
+            "the popup opens on the cell's current value"
+        );
+        draw(&mut vcx);
+        vcx.simulate_input("can");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.choice_highlighted()),
+            Some("cancelled".into()),
+            "typing narrows the list live"
+        );
+        assert_eq!(
+            h.delegate_choice_rows(&vcx),
+            Some((vec!["cancelled".to_string()], 0)),
+            "and the delegate's own paint follows on the same keystroke"
+        );
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+        assert_eq!(h.cell(&vcx, 0, 2), ("cancelled".to_string(), true));
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "blur, then drop"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.notice().is_none()),
+            "a clean pick leaves no notice"
+        );
+    }
+
+    /// `commit` re-feeds the field's LIVE text before picking — a value
+    /// seeded through `set_value` (which emits no `Change`) is still what
+    /// decides the pick; a text matching no option is refused with the
+    /// popup left open; the neutral arrow pair moves the highlight; and
+    /// `escape` closes it with nothing written.
+    #[gpui::test]
+    fn the_choice_popup_ranks_from_the_live_text_and_escape_writes_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_choice_text(&mut vcx, "zzz");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("no option matches".to_string())
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.choice_popup_open()),
+            "the popup stays open for a retype"
+        );
+        h.set_choice_text(&mut vcx, "pa");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 0, 2), ("paid".to_string(), true));
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.choice_highlighted()),
+            Some("paid".into())
+        );
+        h.dispatch(&mut vcx, "insert_down", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.choice_highlighted()),
+            Some("cancelled".into()),
+            "the neutral arrow pair moves the highlight"
+        );
+        h.dispatch(&mut vcx, "insert_down", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.choice_highlighted()),
+            Some("estimated".into()),
+            "a bare step wraps (§20.5)"
+        );
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, 2), ("paid".to_string(), true));
+        assert!(vcx.update(|window, cx| window.focused(cx).is_none()));
+    }
+
+    /// The popup is painted anchored under the cell it edits, a row click
+    /// picks that row, and a click elsewhere closes it with nothing
+    /// written — the picker's own mouse rules.
+    #[gpui::test]
+    fn the_choice_popup_hangs_under_its_cell_and_a_row_click_picks(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", Some(2));
+        h.dispatch(&mut vcx, "edit", None);
+        draw(&mut vcx);
+        let cell = vcx
+            .debug_bounds("marketdata-cell-0-3")
+            .expect("the status cell is painted");
+        let popup = vcx
+            .debug_bounds(Box::leak(
+                format!("marketdata-choice-{TILE}").into_boxed_str(),
+            ))
+            .expect("the popup is painted");
+        assert!(
+            popup.origin.y >= cell.bottom() - gpui::px(1.),
+            "the popup hangs under the cell: popup {popup:?}, cell {cell:?}"
+        );
+        assert!(
+            (popup.origin.x - cell.origin.x).abs() <= gpui::px(1.),
+            "and starts at its left edge: popup {popup:?}, cell {cell:?}"
+        );
+
+        // Row 2 of the declared order under an empty query is `paid`.
+        let row = centre_of(&mut vcx, &format!("marketdata-choice-row-{TILE}-2"));
+        click_at(&mut vcx, row, 1);
+        assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+        assert_eq!(h.cell(&vcx, 0, 2), ("paid".to_string(), true));
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.selection(&vcx),
+            (Some(0), Some(3)),
+            "a row click picks and never also selects the grid cell beneath the popup"
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+        let elsewhere = centre_of(&mut vcx, "marketdata-cell-1-2");
+        click_at(&mut vcx, elsewhere, 1);
+        assert!(
+            !h.tile.read_with(&vcx, |t, _| t.choice_popup_open()),
+            "a click elsewhere closes the popup"
+        );
+        assert_eq!(
+            h.delegate_choice_rows(&vcx),
+            None,
+            "the mouse close re-mirrors: the delegate paints no popup"
+        );
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds(Box::leak(
+                format!("marketdata-choice-{TILE}").into_boxed_str()
+            ))
+            .is_none(),
+            "nothing hangs under the cell any more"
+        );
+        assert_eq!(
+            h.cell(&vcx, 0, 2),
+            ("paid".to_string(), true),
+            "nothing written"
+        );
+        assert_eq!(h.mode(&vcx), "normal");
+    }
+
+    /// A double-click on a choice cell opens the popup exactly as `i`
+    /// does (header spec §8.8.6 applies to every kind), and `i` has the
+    /// same refusal gate every editor has: `Behind` opens nothing.
+    #[gpui::test]
+    fn a_double_click_opens_the_choice_popup_and_behind_refuses_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        let at = centre_of(&mut vcx, "marketdata-cell-0-3");
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+        assert_eq!(h.mode(&vcx), "insert");
+        h.dispatch(&mut vcx, "cancel", None);
+
+        // Behind: a step, then a different generation of the same rows.
+        let rows = [("D1", "2026-12-18", 1.25, "declared")];
+        let (h, mut vcx) = open_flat(cx);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot_at(&rows, BASE)),
+        );
+        h.dispatch(&mut vcx, "right", Some(2));
+        h.dispatch(&mut vcx, "step", None);
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot_at(&rows, NEWER)),
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(BEHIND_REFUSED.to_string())
         );
     }
 

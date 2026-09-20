@@ -109,6 +109,13 @@ pub(crate) const SCHEDULE: PanelSpec = PanelSpec {
 /// text through a dictionary), so `MatrixModel::build` must read it as
 /// one.
 pub(crate) fn schedule_snapshot(rows: &[(&str, &str, f64, &str)]) -> Snapshot {
+    schedule_snapshot_at(rows, BASE)
+}
+
+/// [`schedule_snapshot`] stamped as a generation of the caller's choosing
+/// — a second delivery of the same rows at a later `as_of` is what moves
+/// a flat panel's draft to `Behind`.
+pub(crate) fn schedule_snapshot_at(rows: &[(&str, &str, f64, &str)], as_of: &str) -> Snapshot {
     let n = rows.len();
     Snapshot::for_tests_with_provenance(
         vec![
@@ -143,7 +150,7 @@ pub(crate) fn schedule_snapshot(rows: &[(&str, &str, f64, &str)]) -> Snapshot {
             ),
         ],
         0,
-        provenance(BASE),
+        provenance(as_of),
     )
 }
 
@@ -213,6 +220,38 @@ pub(crate) fn schedule_snapshot_with_null_amount() -> Snapshot {
             (
                 meta("status", Attribution::DeterminedNonAdditive),
                 TestColumn::Dict(vec![Some("declared".into())]),
+            ),
+        ],
+        0,
+        provenance(BASE),
+    )
+}
+
+/// A one-row [`SCHEDULE`] document whose `status` — its one `Choice`
+/// column — is NULL: a hole the desk left, with no current option for a
+/// step to start from.
+pub(crate) fn schedule_snapshot_with_null_status() -> Snapshot {
+    Snapshot::for_tests_with_provenance(
+        vec![
+            (
+                meta("underlying_ref", Attribution::Additive),
+                TestColumn::Dict(vec![Some("SPX.Z".into())]),
+            ),
+            (
+                meta("dividend_id", Attribution::Additive),
+                TestColumn::Dict(vec![Some("D1".into())]),
+            ),
+            (
+                meta("ex_date", Attribution::DeterminedNonAdditive),
+                TestColumn::Date(vec![Some(date(2026, 12, 18))]),
+            ),
+            (
+                meta("amount", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(vec![Some(1.25)]),
+            ),
+            (
+                meta("status", Attribution::DeterminedNonAdditive),
+                TestColumn::Dict(vec![None]),
             ),
         ],
         0,
