@@ -104,7 +104,8 @@ pub(crate) struct SeriesRow {
     pub source_rule: SharedString,
     /// `L`, `R`, `L2`, `R2` — the axis letter the chip shows.
     pub axis: &'static str,
-    /// `fetching`, `failed: <reason>`, `degraded`, `failed`, or empty.
+    /// `fetching`, `failed: <reason>` (the slot's own fetch, or the
+    /// delivered load lane's), `degraded`, or empty.
     pub state: SharedString,
     /// Resolved against the theme here, like the chip's (see the module
     /// doc).
@@ -168,8 +169,15 @@ fn state_text(number: u8, state: &SlotState, result: Option<&SeriesResult>) -> S
         .and_then(|r| r.slots.iter().find(|s| s.slot == number))
         .and_then(|s| s.provenance.health.as_ref());
     match health {
+        // The reason rides along on a FAILURE, spelled the way the
+        // slot's own failure above spells it (review round 1): a load
+        // lane that failed under an answer this tile is still painting
+        // is the one health state a trader has to act on, and "failed"
+        // alone says nothing about what to do. `Degraded` stays the bare
+        // word — the answer on screen is usable, and its reason belongs
+        // to the diagnostics tile rather than a row in a popup.
         Some(Health::Degraded { .. }) => "degraded".into(),
-        Some(Health::Failed { .. }) => "failed".into(),
+        Some(Health::Failed { reason }) => format!("failed: {reason}").into(),
         _ => SharedString::default(),
     }
 }
@@ -381,6 +389,24 @@ mod tests {
         m.set_state(1, SlotState::Failed("no route".into()));
         let p = SeriesPopup::prepare(&m, Some(&degraded), Some("demo_kdb"), &stub);
         assert_eq!(p.rows[0].state.as_ref(), "failed: no route");
+        // A FAILED load lane names its reason, exactly as the slot's own
+        // failure does — and is outranked by that failure just the same.
+        m.set_state(1, SlotState::Idle);
+        let failed = result(
+            1,
+            Some(Health::Failed {
+                reason: "no generation".into(),
+            }),
+        );
+        let p = SeriesPopup::prepare(&m, Some(&failed), Some("demo_kdb"), &stub);
+        assert_eq!(p.rows[0].state.as_ref(), "failed: no generation");
+        m.set_state(1, SlotState::Failed("no route".into()));
+        let p = SeriesPopup::prepare(&m, Some(&failed), Some("demo_kdb"), &stub);
+        assert_eq!(
+            p.rows[0].state.as_ref(),
+            "failed: no route",
+            "this tile's own fetch failure is the news, not the lane's"
+        );
         // An idle slot with a healthy answer says nothing at all.
         m.set_state(1, SlotState::Idle);
         let ok = result(1, None);

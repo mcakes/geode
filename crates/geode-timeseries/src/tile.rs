@@ -2662,10 +2662,31 @@ mod tests {
         h.dispatch(&mut vcx, "list", None);
         h.dispatch(&mut vcx, "list_close", None);
         assert!(h.popup_is_none(&vcx));
+        assert_eq!(
+            h.key_context_pair(&mut vcx, "popup"),
+            None,
+            "the pair goes with the popup: `j` is nothing again"
+        );
         h.dispatch(&mut vcx, "list", None);
         assert!(h.popup_is_series(&vcx));
         h.dispatch(&mut vcx, "list", None);
         assert!(h.popup_is_none(&vcx), "a second L closes it");
+    }
+
+    #[gpui::test]
+    fn l_on_an_empty_model_opens_the_list_on_its_empty_hint(cx: &mut gpui::TestAppContext) {
+        // `L` does not refuse on an empty tile: the list opens, paints
+        // the hint naming the keys that end the state, and stays open —
+        // a popup that refused would leave the trader nothing to read.
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "list", None);
+        assert!(h.popup_is_series(&vcx));
+        assert!(h.series_rows(&vcx).is_empty());
+        // Painted, not merely in state: `centre_of` panics on an element
+        // the frame does not carry.
+        let _ = centre_of(&mut vcx, &format!("ts-list-{TILE}"));
+        h.dispatch(&mut vcx, "list_close", None);
+        assert!(h.popup_is_none(&vcx));
     }
 
     #[gpui::test]
