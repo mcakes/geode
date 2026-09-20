@@ -18,7 +18,7 @@ use crate::query::compile::compile_view;
 use crate::query::distinct::compile_distinct;
 use crate::query::document::compile_document;
 use crate::query::pool::{
-    QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId,
+    Payload, QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId, Work,
 };
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
@@ -189,6 +189,17 @@ pub struct FetchParams {
     pub identity: String,
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
+}
+
+/// The `Snapshot` a `Query` or `Distinct` result must carry. A series
+/// payload under either kind is a routing defect, not data: reported as
+/// that key's failure rather than unwrapped, so it degrades one tile and
+/// leaves the pool running (spec §10.1).
+fn view_snapshot(payload: Payload) -> Result<geode_core::snapshot::Snapshot, String> {
+    match payload {
+        Payload::Snapshot(s) => Ok(s),
+        Payload::Series(_) => Err("internal: a view query answered with a series".to_string()),
+    }
 }
 
 /// `SchedulerEvent::Polled` -> `DataEvent::Polled` (Phase 4b §4.4's
@@ -853,14 +864,14 @@ impl DataService {
                 RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
                     key: r.key,
                     tag: r.tag,
-                    snapshot: r.snapshot.map(Arc::new),
+                    snapshot: r.payload.and_then(view_snapshot).map(Arc::new),
                     submitted: r.submitted,
                 })),
                 RequestKind::Distinct { column } => sink(DataEvent::Distinct(DistinctOutcome {
                     key: r.key,
                     tag: r.tag,
                     column,
-                    values: r.snapshot.map(|s| {
+                    values: r.payload.and_then(view_snapshot).map(|s| {
                         let v = s.column_index("value").expect("distinct selects value");
                         let n = s.column_index("n").expect("distinct selects n");
                         (0..s.rows())
@@ -870,6 +881,8 @@ impl DataService {
                             .collect()
                     }),
                 })),
+                // Task 7 maps this to `DataEvent::Series`.
+                RequestKind::Series { .. } => true,
             })
         };
         let pool = QueryPool::spawn_with_sink(&store, config.query_workers.max(1), result_sink)?;
@@ -1667,7 +1680,7 @@ impl DataService {
             // order here is why this line precedes `compiled` rather than
             // sitting next to its other fields.
             grouping: compiled.grouping.clone(),
-            compiled,
+            work: Work::Query(compiled),
             provenance,
             kind: RequestKind::Query,
         }))
@@ -1690,7 +1703,7 @@ impl DataService {
             submitted: Instant::now(),
             view: ViewId(format!("distinct:{}", params.column)),
             grouping: Vec::new(),
-            compiled,
+            work: Work::Query(compiled),
             provenance: Provenance::default(),
             kind: RequestKind::Distinct {
                 column: params.column.clone(),
@@ -1757,7 +1770,7 @@ impl DataService {
                 params.document_key.join("/")
             )),
             grouping: Vec::new(),
-            compiled,
+            work: Work::Query(compiled),
             provenance,
             kind: RequestKind::Query,
         }))
