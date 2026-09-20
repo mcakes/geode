@@ -491,3 +491,66 @@ Parts 1 and 2 are independent and may run in parallel.
 - Per-tile as-of (the command-line locality design owns `:asof`).
 - A `CalendarView` anywhere; the market-data strip's date-only field is
   the only other segmented field.
+
+## As built (Part 1)
+
+`geode-widgets` (`crates/geode-widgets`) shipped as designed: `DateTimeField`,
+`Precision::{Date, DateTime}`, six `Segment`s, the `route`/`FieldKey`/`apply`
+key table and the `SegmentPaint`/`paint` painter, with the market-data panel
+migrated onto it (no visible change). Five tasks, one whole-branch fix wave;
+`docs/phase-history.md`'s "As-of dialog Part 1" entry has the day-by-day
+record. Parts 2 (`Clock`) and 3 (the dialog) are next and unstarted.
+
+**`route(key: &str, shift: bool, chord: bool) -> Option<FieldKey>`** takes
+three primitives rather than a `Keystroke` because the two hosts that call
+it — the market-data panel (a gpui `KeyDownEvent`) and the future as-of
+dialog (`geode_shell::keymap::Keystroke`) — carry two different keystroke
+types, and the crate sits below both in the dependency graph (below
+`geode-shell`, and a module never shares a type with another module through
+the shell). A shared vocabulary would have had to live somewhere above
+both, which is exactly the layering this crate exists to avoid; a caller
+computes its own `chord` (`modifiers.control || modifiers.alt ||
+modifiers.platform`) and hands `route` the key's name string instead.
+
+**`SegmentText.text` is a `gpui::SharedString`**, not a `String`, and
+`DateTimeField::segments()` builds each one fresh (`format!(..).into()`)
+so every segment of an open field costs one string per call, not one per
+render: a host is expected to call `segments()` once per field CHANGE
+(`DateFieldPaint::of`, on the market-data panel) and hand the prepared
+value through unchanged for however many frames render before the next
+change, never inside its own `render`. The final review's fix wave made
+that ruling load-bearing rather than aspirational: `DateFieldPaint.segments`
+is now `Rc<[SegmentText]>` (a clone at a render site is a refcount bump)
+and `DateFieldPaint.selector` a `SharedString` built once in `of` alongside
+it, rather than a `format!("marketdata-date-seg-{tile_id}")` rebuilt in
+`render_date_field` on every frame.
+
+**Part 3's obligations, deferred out of Part 1 by ruling:** the painter
+takes every colour as a `SegmentPaint` value and never reads `cx.theme()`,
+which is what lets it paint from a closure — but it also means it has no
+route to `geode_shell::shell::control`, the design-guide's hover/pressed
+door, since that lives above this crate. A segment currently has no hover
+or pressed state at all. When the dialog (or any future host) needs one:
+
+1. Hover/pressed colours must arrive as NEW fields on `SegmentPaint`
+   (or a sibling struct), derived by the SHELL (the one place that can
+   call `control::paint`) and handed down the same way every other colour
+   already is — the crate must not gain a `geode_shell` dependency to
+   compute them itself.
+2. Each segment's `div` needs an `.id(..)` and to become `Stateful` for
+   `.hover(..)` to repaint at all at the pinned gpui-component rev (a
+   stateless element's hover is a no-op, per the control-affordance
+   handoff); `paint`'s per-segment `div()` is bare today.
+3. The new `(rest, surface, text)` pairing a segment's hover introduces
+   joins `control::shipped()`, the list `every_control_state_is_readable_
+   on_every_bundled_theme` and `every_control_state_is_distinct_from_
+   rest_on_every_bundled_theme` sweep with no exception list — a segment
+   hover that does not clear both sweeps cannot ship.
+
+**Display check pending:** the market-data panel's date field now nests
+its segments in a second `h_flex` (the crate's `paint` builds its own row
+inside the panel's existing container `div`) rather than painting them
+as direct children of one `h_flex` as before the migration — the panel's
+own selector-keyed tests all still find every segment and click target,
+but nobody has yet looked at the nested row on a real window to confirm
+it reads identically to the pre-migration layout.

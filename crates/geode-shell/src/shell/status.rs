@@ -70,10 +70,11 @@ pub fn height(window: &Window) -> f32 {
 /// review — though `open_module` does mark the session dirty on its
 /// own).
 /// Then the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
-/// is scoped to a past instant — an unmissable `AS OF {t} · :live to
-/// return` segment in the same warning tokens the toolbar's own AS OF
-/// badge uses, since spec §4.5 says nothing on screen may look live when
-/// it is not); right — the active theme name in `muted_foreground`. All
+/// is scoped to a past instant — an unmissable `AS OF {t} · Return to
+/// live in the palette` segment in the same warning tokens the toolbar's
+/// own AS OF badge uses, since spec §4.5 says nothing on screen may look
+/// live when it is not); right — the active theme name in
+/// `muted_foreground`. All
 /// colors come from `cx.theme()`; no other input is read, so the same
 /// call always renders the same tree for the same arguments.
 ///
@@ -219,7 +220,7 @@ pub fn status_bar(
         // whole resolved timestamp (final review, spec §5.1) — a trader
         // hovering to see exactly when must not get the same elided text
         // the segment already shows.
-        let as_of_text: SharedString = format!("AS OF {t} · :live to return").into();
+        let as_of_text: SharedString = format!("AS OF {t} · Return to live in the palette").into();
         // Through the chip door (`shell::chip`): `warning_foreground` over
         // the tint is the background family on a barely-tinted background
         // at the pinned rev.

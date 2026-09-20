@@ -30,6 +30,7 @@ pub mod picker;
 pub mod profiling_hook;
 mod render;
 pub mod scale;
+pub mod scope_expr_view;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;
@@ -123,8 +124,11 @@ pub struct ShellServices {
     /// doesn't opt in. `ShellView::new` takes it as the live history.
     pub restored_palette_usage: crate::palette_usage::PaletteUsage,
     /// The `tracing` foundation (Phase 4b Task 2): the ring the
-    /// diagnostics tile reads, the control `:level` writes through, and
-    /// the levels `[log]` resolved to at startup. `None` in every test
+    /// diagnostics tile reads, the control the palette's `Set log
+    /// level…` writes through (the `:level` command line word wrote
+    /// through it too, until command-line locality closed that route
+    /// 2026-09-20), and the levels `[log]` resolved to at startup. `None`
+    /// in every test
     /// setup that doesn't opt in — logging is then simply not wired up,
     /// never a panic (mirrors `session_path`'s own "missing = skipped").
     pub log: Option<LogServices>,
@@ -183,7 +187,9 @@ pub struct ShellServices {
 
 /// The pieces of the installed `tracing` subscriber the shell needs at
 /// runtime: a handle to read the ring (the diagnostics tile), a handle to
-/// change the level filter (`:level`), and the levels currently in
+/// change the level filter (the palette's `Set log level…`; `:level` on
+/// a tile's command line reached the same handle until command-line
+/// locality closed that route 2026-09-20), and the levels currently in
 /// effect.
 pub struct LogServices {
     pub ring: Arc<Ring>,
@@ -771,8 +777,11 @@ pub struct ShellView {
     /// alongside the frame so every occupant can hold it too. Fed by
     /// the app bridge and by config load/reload (`hot_reload::
     /// apply_reload`); drained by the `cx.observe` set up in `new` for
-    /// `:level` persistence, the overlay toggle, and the catalog
-    /// request.
+    /// the palette's `Set log level…` persistence (`:level` reached the
+    /// same drain until command-line locality closed that route
+    /// 2026-09-20), the overlay toggle (kept as the sweep seam; `:overlay`
+    /// closed the same day and `perf::toggle_overlay` no longer routes
+    /// through it), and the catalog request.
     diagnostics: Entity<Diagnostics>,
     /// Occupant requests addressed by tile id (spec 2026-09-08 add-tile
     /// §4.3): `add_tile` records one under the id it just allocated (or
@@ -929,6 +938,12 @@ pub struct ShellView {
     /// and cleared by [`close_modal`](Self::close_modal), same as the
     /// other three dialogs.
     as_of_dialog: Option<asof_view::AsOfState>,
+    /// The open scope expression dialog's own pure state (command-line
+    /// locality spec §4.1), or `None` when closed/never opened — the
+    /// `picker`/`as_of_dialog` fields' own contract. Set fresh by
+    /// [`scope_expr_view::open`] each time and cleared by
+    /// [`close_modal`](Self::close_modal).
+    scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
     /// The as-of dialog's calendar (spec §5.2), built once here like
     /// `dialog_input` — one entity, seeded on every open (`gpui` focus
     /// handles are refcounted, so a fresh one per open would not have
@@ -1225,6 +1240,10 @@ impl ShellView {
                         }
                     });
                 }
+            } else if let Some(state) = view.scope_expr_dialog.as_mut() {
+                // The field IS the value (spec §4.1); typing clears the last
+                // failed commit's message.
+                scope_expr_view::on_query_changed(state);
             }
             cx.notify();
         })
@@ -1485,11 +1504,16 @@ impl ShellView {
             let saved = hot_reload::rebuild_saved_scopes(&services.config, true);
             cx.new(|_| Frame::new(slots, saved, user_dir.clone()))
         };
-        // A slot or scope saved by a module (`:group save N`, `:scope
-        // save NAME`) is drained and persisted here — see
-        // `on_frame_changed`'s own doc comment (§4.2/§3.9: the frame is
-        // pure and has no file access, so `ShellView` is the one place
-        // that can do the write). `observe_in` (not `observe`) because
+        // A slot or scope saved through `Frame::save_slot`/`save_scope`
+        // is drained and persisted here — see `on_frame_changed`'s own
+        // doc comment (§4.2/§3.9: the frame is pure and has no file
+        // access, so `ShellView` is the one place that can do the
+        // write). Until command-line locality closed the route
+        // 2026-09-20, a module reached those two through `:group save
+        // N`/`:scope save NAME`; both now save through the Groupings and
+        // Scopes dialogs' own `config_write` calls, and this drain is
+        // kept as the seam the locality sweep tests watch. `observe_in`
+        // (not `observe`) because
         // Task 4's text-field reflection needs `&mut Window` to call
         // `InputState::set_value`.
         //
@@ -1660,6 +1684,7 @@ impl ShellView {
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
+            scope_expr_dialog: None,
             as_of_calendar,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
@@ -1694,6 +1719,7 @@ impl ShellView {
         self.keybindings = None;
         self.picker = None;
         self.as_of_dialog = None;
+        self.scope_expr_dialog = None;
         self.choice_dialog = None;
         self.object_dialog = None;
         self.return_focus_from_overlay(window, cx);
@@ -1728,12 +1754,14 @@ impl ShellView {
     }
 
     /// Fired by the `cx.observe_in(&frame, ..)` set up in `new` whenever
-    /// the frame notifies — which covers both the keyboard's
-    /// `frame::slot_*` dispatches and a module's own `:group save N`. A
-    /// slot saved by a module is persisted here, off the UI thread,
-    /// because the frame is pure and the module has no file access
-    /// (§4.2): the frame only remembers the save in `pending_persist`,
-    /// and this is where it gets drained and actually written.
+    /// the frame notifies — which covers the keyboard's `frame::slot_*`
+    /// dispatches and, until command-line locality closed the route
+    /// 2026-09-20, a module's own `:group save N` (now the Groupings
+    /// dialog's own `config_write` call). A slot saved through
+    /// `Frame::save_slot` is persisted here, off the UI thread, because
+    /// the frame is pure and has no file access (§4.2): the frame only
+    /// remembers the save in `pending_persist`, and this is where it
+    /// gets drained and actually written.
     fn on_frame_changed(
         &mut self,
         frame: Entity<Frame>,
@@ -1789,9 +1817,15 @@ impl ShellView {
                 })
                 .detach();
         }
-        // A scope saved by a module (`:scope save NAME`, spec §3.9) is
+        // A scope saved through `Frame::save_scope` (spec §3.9) is
         // persisted here too — same reasoning as the grouping slot above:
-        // the frame is pure and has no file access.
+        // the frame is pure and has no file access. Until command-line
+        // locality closed the route 2026-09-20, a module reached
+        // `save_scope` through `:scope save NAME`; the live door is the
+        // Scopes dialog's `Scope: Save current as…` action
+        // (`open_save_scope`, `NameSeed::FromFrame`), which writes
+        // through `config_write` directly, so this drain is kept as the
+        // seam the locality sweep tests watch.
         if let Some((name, scope)) = frame.update(cx, |f, _| f.take_pending_scope_persist())
             && let Some(dir) = self.user_dir.clone()
         {
@@ -1806,8 +1840,8 @@ impl ShellView {
         }
         // Reflect the frame's text back into the field (Task 4, spec
         // §3.11): an unfocused field always shows the frame's truth — a
-        // scope set elsewhere (a saved-scope load, a module's own
-        // `:scope` command) must show up here even though this field
+        // scope set elsewhere (a saved-scope load, the expression dialog —
+        // `:scope` was a tile command until 2026-09-20) must show up here even though this field
         // never had focus. Skipped while the field IS focused: the user's
         // own typing is the truth then, and `set_value` would stomp the
         // caret/selection mid-edit. Reading the value is a `SharedString`
@@ -1865,11 +1899,15 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Set a grouping slot in memory (`:group save N`, a module command —
-    /// modules hold no config/file access, so this is the seam they call
-    /// through). The write to the user layer's `groupings.toml` happens
-    /// off the UI thread, via `on_frame_changed` observing the frame's own
-    /// notify.
+    /// Set a grouping slot in memory. Until command-line locality closed
+    /// the route 2026-09-20, a module reached this through `:group save
+    /// N` — modules hold no config/file access, so this was the seam
+    /// they called through; the Groupings dialog now writes a slot
+    /// through `config_write` directly. This method has had no
+    /// production caller since 2026-09-20 and is kept as the seam the
+    /// locality sweep tests watch. The write to the user layer's
+    /// `groupings.toml` happens off the UI thread, via
+    /// `on_frame_changed` observing the frame's own notify.
     pub fn save_slot(
         &mut self,
         slot: u8,

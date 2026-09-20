@@ -544,3 +544,46 @@ fn the_ingest_strip_and_segment_paint_only_while_a_load_is_running(cx: &mut gpui
         "ended: segment gone"
     );
 }
+
+/// `Set log level…` (command-line locality spec §4.2): target, then
+/// level, landing on `Diagnostics::request_level` — the path `:level`
+/// used to take. `escape` on the level step returns to the target step.
+#[gpui::test]
+fn set_log_level_picks_a_target_then_a_level(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "log::level");
+    assert!(vcx.debug_bounds("loglevel-choice-list").is_some());
+    vcx.simulate_input("ingest");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        "step 2 is open"
+    );
+    assert!(vcx.debug_bounds("loglevel-choice-debug").is_some());
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "",
+        "the field is reset between steps"
+    );
+
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        "back on step 1"
+    );
+    assert!(vcx.debug_bounds("loglevel-choice-ingest · info").is_some());
+
+    vcx.simulate_input("ingest");
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_input("debug");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+    let levels = diagnostics.read_with(&vcx, |d, _| d.levels.clone());
+    assert_eq!(
+        levels.targets,
+        vec![("ingest".to_string(), geode_core::log::Level::DEBUG)]
+    );
+}

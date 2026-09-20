@@ -1,8 +1,11 @@
 //! The `Domain::Scopes` adapter (spec §8.4, reversed by
 //! `docs/superpowers/specs/2026-09-19-geode-scopes-dialog-editing-design.md`
 //! from a read-only summary to a real editor): the scopes a trader saves
-//! with `:scope save <name>` and recalls with `:scope load <name>` or the
-//! palette's `scope::<name>` actions.
+//! through this dialog (or the palette's/scope bar's `Scope: Save current
+//! as…`, `open_save_scope`) and recalls through the palette's `Scope:
+//! <name>` entries. `:scope save <name>`/`:scope load <name>` reached the
+//! same saved scopes until command-line locality closed both routes
+//! 2026-09-20.
 //!
 //! The adapter edits all three keys a saved [`Scope`] has: `dimensions`
 //! as a [`FieldKind::OrderedList`] (one item per non-empty selection,
@@ -283,8 +286,10 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
 
 /// Everything wrong with the draft as it stands (spec §7.2): the
 /// rendered table, parsed back and read by exactly the reader that
-/// decides which saved scopes `:scope load` and the palette's
-/// `scope::<name>` actions can reach (`saved_scopes_from_doc`) — on the
+/// decides which saved scopes the palette's `scope::<name>` actions can
+/// reach (`saved_scopes_from_doc`) — `:scope load` reached the same
+/// reader until command-line locality closed that route 2026-09-20 — on
+/// the
 /// object being edited alone, wrapped in a document of its own, for the
 /// reason `views::validate` and `groupings::validate` both give for doing
 /// the same: validating the whole merged doc would report every other

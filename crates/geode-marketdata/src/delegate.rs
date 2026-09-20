@@ -52,9 +52,13 @@ use std::rc::Rc;
 const LABEL_WIDTH: f32 = 128.0;
 const CELL_WIDTH: f32 = 84.0;
 
-/// The table column the row labels live in. Column 0, pinned left for the
-/// blotter's own reason (user ruling 2026-09-12 on the tree column): the
-/// row's identity must stay readable however far right the values scroll.
+/// The table column the row labels live in WHEN the spec shows them
+/// (`RowLabel::Shown`). Column 0, pinned left for the blotter's own
+/// reason (user ruling 2026-09-12 on the tree column): the row's identity
+/// must stay readable however far right the values scroll. Under
+/// `RowLabel::Hidden` there is no such column and the first value column
+/// takes its place, pin included — `MatrixDelegate::label_column` is the
+/// one flag every column arithmetic here reads.
 pub(crate) const LABEL_COL: usize = 0;
 
 /// What the tile's open editor looks like from the delegate: which cell it
@@ -81,8 +85,8 @@ pub(crate) struct DelegateEditor {
 
 /// The two forms an editor paints in a cell — the tile's `EditorState`,
 /// with the date form reduced to what `render_td` needs: the pure
-/// `DateField` itself stays on the tile, since only the tile's key path
-/// ever steps it.
+/// `DateTimeField` itself stays on the tile, since only the tile's key
+/// path ever steps it.
 #[derive(Clone)]
 pub(crate) enum DelegateEditorPaint {
     Text(Entity<InputState>),
@@ -116,8 +120,14 @@ pub struct MatrixDelegate {
     /// The prepared grid. An `Rc` swapped by the tile on every rebuild —
     /// never cloned per frame, and never mutated in place.
     pub(crate) model: Rc<MatrixModel>,
-    /// The row axis's name (`term`), painted as column 0's header.
+    /// The row axis's name (`term`), painted as column 0's header while
+    /// `label_column` holds.
     row_axis: SharedString,
+    /// Whether table column [`LABEL_COL`] is the row-label column
+    /// (`spec.rows.label == Shown`). When false, every table column is a
+    /// model column and the label is never painted — the row's identity
+    /// still lives on `RowModel::label` for the draft and the session.
+    label_column: bool,
     /// The tile's cursor, mirrored. `Some((model row, model column))` —
     /// NOT a table column index — while the cursor is on a grid cell;
     /// `None` while it is in the header strip (`Cursor::Attr`), which
@@ -162,6 +172,7 @@ impl MatrixDelegate {
         MatrixDelegate {
             model: Rc::new(MatrixModel::default()),
             row_axis: SharedString::from(spec.rows.column),
+            label_column: spec.rows.shown(),
             cursor: Some((0, 0)),
             editor: None,
             choice: None,
@@ -177,7 +188,7 @@ impl MatrixDelegate {
     fn editor_at(&self, row_ix: usize, col_ix: usize) -> Option<&DelegateEditor> {
         self.editor
             .as_ref()
-            .filter(|e| e.row == row_ix && e.col == Self::model_col(col_ix))
+            .filter(|e| e.row == row_ix && e.col == self.model_col(col_ix))
     }
 
     /// One editor's element, painted in whichever cell it belongs to:
@@ -211,32 +222,38 @@ impl MatrixDelegate {
         }
     }
 
+    /// How many table columns sit ahead of the first model column: one
+    /// (the row-label column) or none.
+    fn offset(&self) -> usize {
+        if self.label_column { LABEL_COL + 1 } else { 0 }
+    }
+
     /// The model column a table column carries, or `None` for the
     /// row-label column — which is every caller's cue that the cursor has
-    /// no business there.
-    pub fn model_col(table_col: usize) -> Option<usize> {
-        table_col.checked_sub(LABEL_COL + 1)
+    /// no business there. Never `None` under a hidden label.
+    pub fn model_col(&self, table_col: usize) -> Option<usize> {
+        table_col.checked_sub(self.offset())
     }
 
     /// Whether table column `col_ix` is the LAST slice-value column — the
     /// one whose right edge closes the slice block ahead of the ladder.
     /// Never true for a model with no slice columns.
     pub fn closes_slice_block(&self, col_ix: usize) -> bool {
-        self.model.slice_columns > 0
-            && Self::model_col(col_ix) == Some(self.model.slice_columns - 1)
+        self.model.slice_columns > 0 && self.model_col(col_ix) == Some(self.model.slice_columns - 1)
     }
 
     /// The table column a model column is painted in.
-    pub fn table_col(model_col: usize) -> usize {
-        model_col + LABEL_COL + 1
+    pub fn table_col(&self, model_col: usize) -> usize {
+        model_col + self.offset()
     }
 }
 
 impl TableDelegate for MatrixDelegate {
-    /// The row-label column plus one per value column. Always at least
-    /// one, so an empty panel still paints its row axis's name.
+    /// The row-label column (when shown) plus one per value column. A
+    /// shown label keeps an empty panel painting its row axis's name; a
+    /// hidden one paints nothing until a document arrives.
     fn columns_count(&self, _cx: &App) -> usize {
-        1 + self.model.columns.len()
+        self.offset() + self.model.columns.len()
     }
 
     fn rows_count(&self, _cx: &App) -> usize {
@@ -246,7 +263,7 @@ impl TableDelegate for MatrixDelegate {
     /// Read only on prepare and `TableState::refresh` — which is why every
     /// model swap on the tile goes through `install_model`.
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
-        let Some(model_col) = Self::model_col(col_ix) else {
+        let Some(model_col) = self.model_col(col_ix) else {
             return Column {
                 key: SharedString::from("__row_axis"),
                 name: self.row_axis.clone(),
@@ -282,6 +299,10 @@ impl TableDelegate for MatrixDelegate {
             align: TextAlign::Right,
             sort: None,
             width: px(CELL_WIDTH),
+            // Under a hidden label the FIRST value column is what keeps
+            // a row identifiable under horizontal scroll, so it takes
+            // the pin the label column would have had.
+            fixed: (!self.label_column && model_col == 0).then_some(ColumnFixed::Left),
             movable: false,
             resizable: false,
             ..Column::default()
@@ -331,7 +352,7 @@ impl TableDelegate for MatrixDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let Some(model_col) = Self::model_col(col_ix) else {
+        let Some(model_col) = self.model_col(col_ix) else {
             // The row-label column: the label in the data face — it is
             // what identifies the row — painted in the ROW's own state
             // (spec §5.2): an inserted row's label takes the same tint
@@ -525,7 +546,7 @@ pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool, state: RowStat
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::core::CVI;
+    use crate::core::{CVI, DIVIDEND};
     use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio};
     use geode_shell::shell::colours::to_rgb;
 
@@ -626,14 +647,25 @@ pub(crate) mod tests {
 
     /// The label column is index 0 and every value column sits one to its
     /// right — the one arithmetic every cursor mirror, click and editor
-    /// lookup in this crate shares.
-    #[test]
-    fn the_label_column_is_index_zero_and_the_cursor_never_enters_it() {
-        assert_eq!(MatrixDelegate::model_col(0), None);
-        assert_eq!(MatrixDelegate::model_col(1), Some(0));
-        assert_eq!(MatrixDelegate::model_col(4), Some(3));
-        assert_eq!(MatrixDelegate::table_col(0), 1);
-        assert_eq!(MatrixDelegate::table_col(3), 4);
+    /// lookup in this crate shares. Under a hidden label there is no
+    /// offset at all: table column 0 IS model column 0.
+    #[gpui::test]
+    fn the_label_column_is_index_zero_and_the_cursor_never_enters_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let tones = cx.update(|cx| FlooredTones::derive(cx.theme()));
+        let shown = MatrixDelegate::new(&CVI, WeakEntity::new_invalid(), 1, tones);
+        assert_eq!(shown.model_col(0), None);
+        assert_eq!(shown.model_col(1), Some(0));
+        assert_eq!(shown.model_col(4), Some(3));
+        assert_eq!(shown.table_col(0), 1);
+        assert_eq!(shown.table_col(3), 4);
+        let hidden = MatrixDelegate::new(&DIVIDEND, WeakEntity::new_invalid(), 1, tones);
+        assert_eq!(hidden.model_col(0), Some(0));
+        assert_eq!(hidden.model_col(3), Some(3));
+        assert_eq!(hidden.table_col(0), 0);
+        assert_eq!(hidden.table_col(3), 3);
     }
 
     /// A fresh delegate paints the row axis's name and nothing else: one

@@ -756,7 +756,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         .filter(|c| {
             matches!(
                 c.role,
-                ColumnRole::Axis | ColumnRole::Attribute { grain: None }
+                ColumnRole::Axis | ColumnRole::Attribute { grain: None } | ColumnRole::Value
             ) && !matches!(
                 c.ty,
                 ColumnType::F64 | ColumnType::I64 | ColumnType::Utf8 | ColumnType::Date
@@ -767,8 +767,8 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     for c in &unsupported {
         diags.push(err(
             format!(
-                "dataset '{name}' column '{c}': a document axis or attribute must be f64, \
-                 i64, utf8 or date — column dropped"
+                "dataset '{name}' column '{c}': a document axis, attribute or local value \
+                 must be f64, i64, utf8 or date — column dropped"
             ),
             format!("datasets.{name}.columns.{c}.type"),
         ));

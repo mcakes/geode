@@ -1,8 +1,9 @@
-//! The diagnostics tile's `:` line (Phase 4b Task 5, spec §4.6): `:section
-//! <name>`, `:level <target> <level>`, `:overlay`. Pure — no gpui, no I/O —
-//! same discipline as `geode_blotter::core::commands`.
-
-use geode_core::log::Level;
+//! The diagnostics tile's `:` line (Phase 4b Task 5, spec §4.6; command-line
+//! locality 2026-09-20): `:section <name>`. `:level` and `:overlay` were
+//! app-wide and are refusals now (`REFUSED_LEVEL`/`REFUSED_OVERLAY`); the
+//! palette's `Set log level…` and `Toggle performance overlay` are their
+//! doors. Pure — no gpui, no I/O — same discipline as
+//! `geode_blotter::core::commands`.
 
 /// One of the five sections a diagnostics tile can show (spec §4.6),
 /// switched by `:section <name>` or `[`/`]`.
@@ -39,43 +40,18 @@ impl Section {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Section(Section),
-    Level { target: String, level: Level },
-    Overlay,
+    /// A word this line no longer runs because it was app-wide
+    /// (command-line locality spec §5): the message names the door.
+    Refused(&'static str),
 }
 
-/// The `[log]` target suffixes `:level` accepts, derived from
-/// `geode_core::log::TARGETS` rather than duplicated (Phase 4b Task 5 fix
-/// round 1, MIN-2: a hardcoded copy here could silently drift from the
-/// list `LogLevels::from_doc` actually validates `[log]` keys against —
-/// add a target there and forget here, and `:level <it> debug` rejects
-/// exactly the key `[log]` itself would accept). `strip_prefix` mirrors
-/// `LogLevels::from_doc`'s own `t.strip_prefix("geode::") == Some(key.
-/// as_str())` check for the same suffixes.
-fn known_targets() -> impl Iterator<Item = &'static str> {
-    geode_core::log::TARGETS
-        .iter()
-        .filter_map(|t| t.strip_prefix("geode::"))
-}
+/// The words `completions` offers at the start of a line; the tile's
+/// sweep test reads it.
+pub const COMMANDS: [&str; 1] = ["section"];
 
-const LEVELS: [(&str, Level); 5] = [
-    ("error", Level::ERROR),
-    ("warn", Level::WARN),
-    ("info", Level::INFO),
-    ("debug", Level::DEBUG),
-    ("trace", Level::TRACE),
-];
-
-fn levels_hint() -> String {
-    LEVELS
-        .iter()
-        .map(|(n, _)| *n)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn targets_hint() -> String {
-    known_targets().collect::<Vec<_>>().join(", ")
-}
+pub const REFUSED_LEVEL: &str = "log levels are app-wide — Set log level… in the palette";
+pub const REFUSED_OVERLAY: &str =
+    "the overlay is app-wide — Toggle performance overlay (mod+shift+p)";
 
 /// Parse a `:` line, without its leading colon. `Err` is one line, shown
 /// inline on the command line — same contract as every other module's
@@ -95,27 +71,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
                     format!("unknown section '{name}' (sources, data, config, log, perf)")
                 })
         }
-        Some("level") => {
-            let target = words
-                .next()
-                .ok_or_else(|| "usage: level <target> <level>".to_string())?;
-            let level_str = words
-                .next()
-                .ok_or_else(|| "usage: level <target> <level>".to_string())?;
-            if !known_targets().any(|t| t == target) {
-                return Err(format!("unknown target '{target}' ({})", targets_hint()));
-            }
-            let level = LEVELS
-                .iter()
-                .find(|(n, _)| *n == level_str)
-                .map(|(_, l)| *l)
-                .ok_or_else(|| format!("unknown level '{level_str}' ({})", levels_hint()))?;
-            Ok(Command::Level {
-                target: target.to_string(),
-                level,
-            })
-        }
-        Some("overlay") => Ok(Command::Overlay),
+        Some("level") => Ok(Command::Refused(REFUSED_LEVEL)),
+        Some("overlay") => Ok(Command::Refused(REFUSED_OVERLAY)),
         Some(other) => Err(format!("unknown command '{other}'")),
         None => Err("empty command".to_string()),
     }
@@ -133,9 +90,9 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// vocabulary for the position is returned, unfiltered, as the blotter's
 /// is: the shell's fuzzy (subsequence) ranking decides what a partial
 /// word matches — which also means Enter on a short prefix that several
-/// words contain (`:o`, matched by `overlay` AND `section`) is refused as
-/// ambiguous rather than run, exactly as the blotter's `:so` is; the
-/// old prefix filter used to auto-run it. Words are split the way the
+/// words contain (the blotter's `:so`, matched by more than one of its
+/// commands) is refused as ambiguous rather than run; the old prefix
+/// filter used to auto-run it. Words are split the way the
 /// shell's `commandline::word_at` splits them — any whitespace or a
 /// comma — so the position this computes is the word the shell will
 /// splice over. `cursor` truncates `line` to the text so far (the word
@@ -162,18 +119,8 @@ pub fn completions(line: &str, cursor: usize) -> Vec<String> {
     words.pop();
     words.retain(|w| !w.is_empty());
     match words.as_slice() {
-        [] => ["section", "level", "overlay"]
-            .iter()
-            .map(|c| (*c).to_string())
-            .collect(),
+        [] => COMMANDS.iter().map(|c| (*c).to_string()).collect(),
         ["section"] => Section::ALL.iter().map(|s| s.name().to_string()).collect(),
-        ["level"] => known_targets().map(str::to_string).collect(),
-        ["level", target] => {
-            if !known_targets().any(|t| t == *target) {
-                return Vec::new();
-            }
-            LEVELS.iter().map(|(n, _)| (*n).to_string()).collect()
-        }
         _ => Vec::new(),
     }
 }
@@ -211,54 +158,23 @@ mod tests {
     }
 
     #[test]
-    fn level_parses_target_and_level() {
-        assert!(matches!(
-            parse("level ingest debug"),
-            Ok(Command::Level { .. })
-        ));
-        assert_eq!(
-            parse("level ingest debug"),
-            Ok(Command::Level {
-                target: "ingest".into(),
-                level: Level::DEBUG
-            })
-        );
-        assert_eq!(
-            parse("level ingest loud").unwrap_err(),
-            "unknown level 'loud' (error, warn, info, debug, trace)"
-        );
-        assert_eq!(
-            parse("level nope info").unwrap_err(),
-            "unknown target 'nope' (ingest, query, config, session, shell, theme, pricing)"
-        );
-    }
-
-    #[test]
-    fn overlay_parses() {
-        assert_eq!(parse("overlay"), Ok(Command::Overlay));
-    }
-
-    #[test]
     fn an_unknown_or_empty_command_is_an_error() {
         assert!(parse("bogus").is_err());
         assert!(parse("").is_err());
     }
 
-    /// MIN-2: `known_targets` derives from `geode_core::log::TARGETS`
-    /// rather than a hand-copied list — every one of `[log]`'s own
-    /// accepted target suffixes must parse for `:level` too.
+    /// Command-line locality (2026-09-20): `level` and `overlay` are
+    /// app-wide and left the line as refusals naming their door.
     #[test]
-    fn every_log_target_suffix_is_a_known_level_target() {
-        for target in geode_core::log::TARGETS {
-            let suffix = target.strip_prefix("geode::").unwrap();
-            assert!(
-                matches!(
-                    parse(&format!("level {suffix} debug")),
-                    Ok(Command::Level { .. })
-                ),
-                "{suffix} (from geode_core::log::TARGETS) must be a known :level target"
-            );
-        }
+    fn level_and_overlay_are_refusals_and_not_completions() {
+        assert_eq!(
+            parse("level ingest debug"),
+            Ok(Command::Refused(REFUSED_LEVEL))
+        );
+        assert_eq!(parse("level"), Ok(Command::Refused(REFUSED_LEVEL)));
+        assert_eq!(parse("overlay"), Ok(Command::Refused(REFUSED_OVERLAY)));
+        assert_eq!(completions("", 0), vec!["section"]);
+        assert!(completions("level ", 6).is_empty());
     }
 
     /// MIN-1: a cursor that does not land on a char boundary must not
@@ -289,48 +205,36 @@ mod tests {
     #[test]
     fn a_candidate_is_the_word_under_the_cursor_not_the_line() {
         use geode_shell::commandline::{Submit, accept, rank_candidates, resolve_submit, word_at};
-        for (line, pick, expect) in [
-            ("section ", "log", "section log"),
-            ("level ", "ingest", "level ingest"),
-            ("level ingest ", "debug", "level ingest debug"),
-        ] {
-            let cursor = line.len();
-            let words = completions(line, cursor);
-            assert!(
-                words.iter().any(|w| w == pick),
-                "{line:?}: {pick} is offered as a bare word, got {words:?}"
-            );
-            let (out, _) = accept(line, word_at(line, cursor), pick);
-            assert_eq!(out, expect, "accepting {pick} on {line:?}");
-        }
-        // Enter on the fully typed line runs it as typed: `debug` is exact
+        let (line, pick, expect) = ("section ", "log", "section log");
+        let cursor = line.len();
+        let words = completions(line, cursor);
+        assert!(
+            words.iter().any(|w| w == pick),
+            "{line:?}: {pick} is offered as a bare word, got {words:?}"
+        );
+        let (out, _) = accept(line, word_at(line, cursor), pick);
+        assert_eq!(out, expect, "accepting {pick} on {line:?}");
+        // Enter on the fully typed line runs it as typed: `log` is exact
         // against the vocabulary, so nothing is re-accepted.
-        let line = "level ingest debug";
+        let line = "section log";
         let words = completions(line, line.len());
-        let ranked = rank_candidates(&words, "debug");
+        let ranked = rank_candidates(&words, "log");
         assert!(
             matches!(
                 resolve_submit(line, line.len(), &ranked, &words),
                 Submit::Run(_)
             ),
-            "a typed level is exact, not re-accepted"
+            "a typed section is exact, not re-accepted"
         );
     }
 
     #[test]
-    fn completions_offer_sections_then_targets_then_levels() {
+    fn completions_offer_sections_after_the_section_word() {
         // The whole vocabulary for the position, as bare words — the
         // shell's ranking narrows it to the partial word.
         assert_eq!(
             completions("section l", 9),
             vec!["sources", "data", "config", "log", "perf"]
-        );
-        let targets: Vec<String> = known_targets().map(str::to_string).collect();
-        assert!(targets.iter().any(|t| t == "ingest"));
-        assert_eq!(completions("level in", 8), targets);
-        assert_eq!(
-            completions("level ingest d", 14),
-            vec!["error", "warn", "info", "debug", "trace"]
         );
     }
 
@@ -340,21 +244,15 @@ mod tests {
     /// doubled space is no word, as `parse`'s `split_whitespace` agrees.
     #[test]
     fn completions_split_words_the_way_the_shell_does() {
-        let levels = vec!["error", "warn", "info", "debug", "trace"];
-        assert_eq!(completions("level ingest,d", 14), levels, "comma");
-        assert_eq!(completions("level\tingest d", 14), levels, "tab");
-        let targets: Vec<String> = known_targets().map(str::to_string).collect();
-        assert_eq!(completions("level  d", 8), targets, "doubled space");
+        let sections = vec!["sources", "data", "config", "log", "perf"];
+        assert_eq!(completions("section,l", 9), sections, "comma");
+        assert_eq!(completions("section\tl", 9), sections, "tab");
+        assert_eq!(completions("section  l", 10), sections, "doubled space");
     }
 
     #[test]
-    fn completions_at_the_start_offer_the_three_commands() {
+    fn completions_at_the_start_offer_section_alone() {
         let c = completions("", 0);
-        assert_eq!(c, vec!["section", "level", "overlay"]);
-    }
-
-    #[test]
-    fn completions_for_an_unknown_level_target_are_empty() {
-        assert!(completions("level nope ", 11).is_empty());
+        assert_eq!(c, vec!["section"]);
     }
 }

@@ -73,7 +73,7 @@ pub enum Command {
 /// caller's `behind` flag (spec §8.3: it is offered only while a newer
 /// generation sits under the draft) — listed here so one table is the
 /// vocabulary and the filter is one line.
-const VERBS: [&str; 8] = [
+pub(crate) const VERBS: [&str; 8] = [
     "underlying",
     "revert",
     "bump",

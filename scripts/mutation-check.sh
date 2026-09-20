@@ -2821,6 +2821,65 @@ run_mutation "commands: a bare sort abs is abs desc" \
   geode-blotter \
   every_command_parses
 
+# Command-line locality (2026-09-20) ---------------------------------------
+
+# A refusal must stay a refusal: mutated back into a frame write, the
+# sweep sees the frame's as-of move.
+run_mutation "locality: a refused word never writes the frame" \
+  crates/geode-blotter/src/tile.rs \
+  '            Command::Refused(message) => return Err(message.to_string()),' \
+  '            Command::Refused(_) => { self.frame.update(cx, |f, cx| { if f.set_as_of(AsOf::At(chrono::Utc::now())) { cx.notify(); } }); }' \
+  geode-blotter \
+  every_colon_command_leaves_the_frame_alone
+
+# A refused word is never offered as a completion.
+run_mutation "locality: refusals are not completions" \
+  crates/geode-blotter/src/core/commands.rs \
+  '        ["asof"] => vec!["clear".into(), "live".into()],' \
+  '        ["asof"] => vec!["clear".into(), "live".into(), "undo".into()],' \
+  geode-blotter \
+  frame_wide_words_are_refusals_that_name_their_door
+
+# The request carries the pin, not the frame's as-of.
+run_mutation "asof-pin: the request carries the pin" \
+  crates/geode-blotter/src/tile.rs \
+  '                TileAsOf::Pinned(pinned) => pinned.clone(),' \
+  '                TileAsOf::Pinned(_) => frame.as_of().clone(),' \
+  geode-blotter \
+  asof_pins_the_tile_and_leaves_the_frame_alone
+
+# A pinned tile does not follow the frame's as-of counter.
+run_mutation "asof-pin: a pinned tile does not follow the frame's as-of" \
+  crates/geode-blotter/src/tile.rs \
+  '            || (matches!(self.tile_as_of, TileAsOf::Follow) && versions.as_of != now.as_of)' \
+  '            || versions.as_of != now.as_of' \
+  geode-blotter \
+  a_pinned_tile_ignores_the_frames_as_of_and_answers_the_barrier
+
+# The record carries as_of only while pinned.
+run_mutation "asof-pin: the session writes as_of only while pinned" \
+  crates/geode-blotter/src/tile.rs \
+  '            TileAsOf::Follow => None,' \
+  '            TileAsOf::Follow => Some(toml::Value::String("live".into())),' \
+  geode-blotter \
+  as_of_round_trips_through_the_session_record
+
+# The pinned chip paints from the tile's own state.
+run_mutation "asof-pin: the pinned chip paints" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let TileAsOf::Pinned(_) = &self.tile_as_of {' \
+  '        if let TileAsOf::Pinned(_) = &TileAsOf::Follow {' \
+  geode-blotter \
+  a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
+
+# The provenance warning chip is suppressed while pinned.
+run_mutation "asof-pin: the frame chip hides while pinned" \
+  crates/geode-blotter/src/tile.rs \
+  '            if matches!(self.tile_as_of, TileAsOf::Follow)' \
+  '            if true' \
+  geode-blotter \
+  a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
+
 run_mutation "flatten: the absolute orders compare magnitudes, not signed values" \
   crates/geode-blotter/src/core/flatten.rs \
   '    let key = |v: f64| if absolute { v.abs() } else { v };' \
@@ -2911,12 +2970,6 @@ run_mutation "commands: a completions cursor mid-character is clamped to a bound
   '    while false {' \
   geode-blotter \
   completions_clamp_a_cursor_inside_a_multibyte_char
-
-run_mutation "commands: scope drop needs a dimension" \
-  crates/geode-blotter/src/core/commands.rs \
-  '                (Some("drop"), _) => Err("scope drop needs a dimension".into()),' \
-  '                (Some("drop"), _) => Ok(Command::ScopeDrop(String::new())),' \
-  geode-blotter new_scope_and_asof_forms_parse
 
 run_mutation "delegate: the cursor follows its node across a new snapshot" \
   crates/geode-blotter/src/delegate.rs \
@@ -6284,17 +6337,48 @@ run_mutation "sections: a source's path, priority and readiness are separate row
             ));' \
   geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
 
-run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
+run_mutation "commands: section parses each name, not just the first" \
   crates/geode-diagnostics/src/commands.rs \
-  '        ["level"] => known_targets().map(str::to_string).collect(),' \
-  '        ["level"] => known_targets().map(|t| format!("level {t}")).collect(),' \
-  geode-diagnostics a_candidate_is_the_word_under_the_cursor_not_the_line
+  '        Some("section") => {' \
+  '        Some("section") => {
+            return Ok(Command::Section(Section::Log));' \
+  geode-diagnostics section_parses_each_name_and_rejects_unknown
 
 run_mutation "commands: diagnostics completions split words on the shell's delimiters, not just a space" \
   crates/geode-diagnostics/src/commands.rs \
   '        .split(|c: char| c.is_whitespace() || c == '"'"','"'"')' \
   '        .split('"'"' '"'"')' \
   geode-diagnostics completions_split_words_the_way_the_shell_does
+
+# Command-line locality (2026-09-20): `:level` is a refusal, never a
+# log-level change.
+run_mutation "locality: :level never reaches the Diagnostics entity" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            Command::Refused(message) => return Err(message.to_string()),' \
+  '            Command::Refused(_) => { self.diagnostics.update(cx, |d, cx| { d.request_overlay_toggle(); cx.notify(); }); }' \
+  geode-diagnostics \
+  every_colon_command_leaves_the_app_alone
+
+# Command-line locality (2026-09-20) — the scope expression dialog
+# (spec §4.1), the palette door that replaced `:scope <expr>`.
+
+# An empty commit clears the frame's expression (locality §4.1).
+run_mutation "expr-dialog: an empty commit clears the expression" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return Ok(None);' \
+  '        return Err("empty".into());' \
+  geode-shell \
+  the_field_opens_seeded_and_an_empty_commit_clears
+
+# `clear_scope()` in place of `set_scope(scope)` drops the parsed
+# expression instead of committing it — caught by the test's very first
+# assertion (the expression never lands), not by its later undo check.
+run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '                if f.set_scope(scope) {' \
+  '                if f.clear_scope() {' \
+  geode-shell \
+  typing_an_expression_and_enter_sets_it_through_set_scope
 
 # ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
 #
@@ -12364,8 +12448,8 @@ run_mutation "mdtable: a model swap refreshes the table" \
 # column can scroll out of view while the label column is scrolled to.
 run_mutation "mdtable: the cursor mirror skips the label column" \
   crates/geode-marketdata/src/tile.rs \
-  '            t.set_selected_col(MatrixDelegate::table_col(col), cx);' \
-  '            t.set_selected_col(col, cx);' \
+  '                let table_col = d.table_col(col);' \
+  '                let table_col = col;' \
   geode-marketdata \
   the_cursor_never_enters_the_label_column
 
@@ -12381,8 +12465,8 @@ run_mutation "mdtable: the cursor mirror skips the label column" \
 # mutation, and now the only click path there is.
 run_mutation "mdtable: a clicked column is translated back through the label column" \
   crates/geode-marketdata/src/tile.rs \
-  '                this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)' \
-  '                this.cursor_to(*row, Some(*col), cx)' \
+  '                    let col = this.table.read(cx).delegate().model_col(*col);' \
+  '                    let col = Some(*col);' \
   geode-marketdata \
   the_cursor_never_enters_the_label_column
 
@@ -13278,8 +13362,8 @@ run_mutation "mdmenu: the arrow keys move the menu highlight" \
 # column, the double-click moves nothing and opens nothing.
 run_mutation "mdedit: a double-click on a cell opens the editor" \
   crates/geode-marketdata/src/tile.rs \
-  '                    if let Some(col) = MatrixDelegate::model_col(*col) {' \
-  '                    if let Some(col) = MatrixDelegate::model_col(*col).filter(|_| false) {' \
+  '                    if let Some(col) = this.table.read(cx).delegate().model_col(*col) {' \
+  '                    if let Some(col) = this.table.read(cx).delegate().model_col(*col).filter(|_| false) {' \
   geode-marketdata a_double_click_opens_the_editor_on_the_cell
 
 # The strip's half of the same ruling: the second press of a pair on an
@@ -13319,25 +13403,28 @@ run_mutation "mdnudge: a slice column steps at its own precision" \
   geode-marketdata a_slice_column_nudges_at_its_own_precision
 
 # ---- The segmented date field (header spec §5.2, 2026-09-19) -----------
-# A `Date` attribute opens the segmented field, not a text editor, and the
-# field opens on the DAY segment (user ruling 2026-09-19). Mutated to open
-# on the year, the first `up` a trader presses steps the year by one — a
-# whole year off, on the segment they change least, with nothing refused.
-run_mutation "mddate: the field opens on the day segment" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '            segment: Segment::Day,' \
-  '            segment: Segment::Year,' \
-  geode-marketdata i_on_a_date_attribute_opens_the_field_on_the_day_segment
+# Re-anchored 2026-09-20 (as-of dialog Part 1): the field's pure core
+# moved from `geode-marketdata/src/core/datefield.rs` (deleted) to
+# `geode-widgets/src/datefield/mod.rs`, generalised from a three-segment
+# `DateField` to a six-segment `DateTimeField` (`Precision::{Date,
+# DateTime}`). The entries below that tested code now inside
+# `geode-widgets` are re-anchored there with package `geode-widgets`;
+# the ones testing the PANEL's own use of the field stay on
+# `geode-marketdata`/`tile.rs`. The "field opens on the day segment"
+# entry is gone: `open` no longer hardcodes a segment default (the day is
+# now the CALLER's explicit choice), and the "marketdata: the date field
+# opens on the day segment" entry below (the widgets-migration section)
+# is its direct replacement.
 
 # A day step ROLLS into the next month (Sep 30 + 1 = Oct 1), the mockup's
 # own rule. Mutated to clamp at the month's end instead, `up` on the 30th
 # goes nowhere and a trader who wanted October has to reach the month
 # segment by hand — and nothing on screen says the step was swallowed.
 run_mutation "mddate: the day rolls over into the next month" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '            Segment::Day => Duration::try_days(n).and_then(|d| date.checked_add_signed(d)),' \
-  '            Segment::Day => NaiveDate::from_ymd_opt(date.year(), date.month(), (i64::from(date.day()) + n).clamp(1, i64::from(days_in_month(date))) as u32),' \
-  geode-marketdata a_day_step_rolls_over_into_the_next_month
+  crates/geode-widgets/src/datefield/mod.rs \
+  '                    Segment::Day => Duration::try_days(n).and_then(|d| date.checked_add_signed(d)),' \
+  '                    Segment::Day => NaiveDate::from_ymd_opt(date.year(), date.month(), (i64::from(date.day()) + n).clamp(1, i64::from(days_in_month(date))) as u32),' \
+  geode-widgets a_day_step_rolls_over_into_the_next_month
 
 # A month (or year, or typed month) step CLAMPS the day to the new month's
 # length — `clamped_ymd` is the one door. Mutated to keep the day as it
@@ -13345,51 +13432,57 @@ run_mutation "mddate: the day rolls over into the next month" \
 # lands the field on chrono's `NaiveDate::MAX` (year 262142): a valid date,
 # committable, and absurd.
 run_mutation "mddate: a month step clamps the day" \
-  crates/geode-marketdata/src/core/datefield.rs \
+  crates/geode-widgets/src/datefield/mod.rs \
   '    NaiveDate::from_ymd_opt(year, month, day.min(last))' \
   '    NaiveDate::from_ymd_opt(year, month, day)' \
-  geode-marketdata a_month_step_clamps_the_day_to_the_new_months_length
+  geode-widgets a_month_step_clamps_the_day_to_the_new_months_length
 
 # A first month digit of 2–9 completes at once as `0d` (only 0/1 can
-# still become a two-digit month). Mutated so no first digit completes,
-# `3` waits for a second digit that can never make a month under 13 with
-# it — the segment sits typing `3` until the trader backspaces.
+# still become a two-digit month). Mutated so no single first digit
+# completes at all, the segment sits typing whatever was pressed until
+# the trader backspaces or types a second digit that can never make a
+# valid month with it. Re-anchored 2026-09-20: `digit`'s per-segment
+# threshold and range are now one shared `(waits_below, max)` pair keyed
+# by `Segment` instead of a hardcoded condition per field; the month's
+# own pair is the anchor.
 run_mutation "mddate: a first month digit 2-9 completes at once" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '                    "" if d >= 2 => u32::from(d),' \
-  '                    "" if d >= 10 => u32::from(d),' \
-  geode-marketdata a_first_month_digit_two_to_nine_completes_at_once
+  crates/geode-widgets/src/datefield/mod.rs \
+  '            Segment::Month => (2, 12),' \
+  '            Segment::Month => (10, 12),' \
+  geode-widgets a_first_month_digit_two_to_nine_completes_at_once
 
 # A second month digit past twelve is refused and the first digit stays
 # for another try. Mutated to accept anything under 100, `1` then `9`
 # asks `clamped_ymd` for month 19 — no date — and the segment is silently
 # left as it was while the field claims a completed month by advancing.
 run_mutation "mddate: a second month digit past twelve is refused" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '                        if candidate == 0 || candidate > 12 {' \
-  '                        if candidate == 0 || candidate > 99 {' \
-  geode-marketdata a_second_month_digit_past_twelve_or_making_zero_is_refused
+  crates/geode-widgets/src/datefield/mod.rs \
+  '            Segment::Month => (2, 12),' \
+  '            Segment::Month => (2, 99),' \
+  geode-widgets a_second_month_digit_past_twelve_or_making_zero_is_refused
 
 # A second day digit past the month's length is refused (`31` in
-# September). Mutated to accept it, the same silent non-date as above.
+# September). Mutated to accept anything under 100, the same silent
+# non-date as above.
 run_mutation "mddate: a day the month lacks is refused" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '                        if candidate == 0 || candidate > days_in_month(self.date) {' \
-  '                        if candidate == 0 || candidate > 99 {' \
-  geode-marketdata day_typing_waits_on_zero_to_three_and_refuses_a_day_the_month_lacks
+  crates/geode-widgets/src/datefield/mod.rs \
+  '            Segment::Day => (4, days_in_month(self.value.date())),' \
+  '            Segment::Day => (4, 99),' \
+  geode-widgets day_typing_waits_on_zero_to_three_and_refuses_a_day_the_month_lacks
 
-# A chord is never the field's. Mutated to drop the gate, `ctrl+up` steps
-# the day and stops at the field instead of reaching the shell — and
-# every other shell chord on a key the field reads (`ctrl+k` is safe only
-# because `k` is not one) would be swallowed the same way.
+# A chord is never the field's — `route` itself gates it (see the
+# `widgets: a chord falls through route` entry), but the panel must
+# actually PASS its own computed `chord` through rather than a constant.
+# Re-anchored 2026-09-20 (Task 3's `date_field_key` rewrite routes
+# through the shared `route`/`FieldKey` table instead of matching key
+# strings inline): mutated to always claim "not a chord", `ctrl+up` would
+# step the day inside the field instead of reaching the shell, and every
+# other shell chord on a key the field reads would be swallowed the same
+# way.
 run_mutation "mddate: chords pass through the field to the shell" \
   crates/geode-marketdata/src/tile.rs \
-  '        if modifiers.control || modifiers.alt || modifiers.platform {
-            return false;
-        }' \
-  '        if false {
-            return false;
-        }' \
+  '        let Some(key) = route(event.keystroke.key.as_str(), modifiers.shift, chord) else {' \
+  '        let Some(key) = route(event.keystroke.key.as_str(), modifiers.shift, false) else {' \
   geode-marketdata a_chord_passes_through_the_field_to_the_shell
 
 # The shell-dispatched `insert_up`/`insert_down` (the fragment's own
@@ -13428,15 +13521,126 @@ run_mutation "mddate: a date cell's enter completes a pending digit too" \
 # `escape` in the field CANCELS: the painted date comes back and the draft
 # is untouched. Mutated to commit instead, every abandoned edit is written
 # — the one key the mockup promises "puts 2026-09-14 back untouched".
+# Re-anchored 2026-09-20: `date_field_key` now routes through the shared
+# `FieldKey` table (`route`/`apply`) instead of matching key strings
+# directly; `FieldKey::Cancel` is escape's arm.
 run_mutation "mddate: escape restores the painted date" \
   crates/geode-marketdata/src/tile.rs \
-  '            "escape" => {
+  '            FieldKey::Cancel => {
                 self.close_editor(window, cx);
                 self.sync_cursor(cx);' \
-  '            "escape" => {
+  '            FieldKey::Cancel => {
                 self.commit_edit(window, cx);
                 self.sync_cursor(cx);' \
   geode-marketdata escape_restores_the_painted_date_and_blurs_the_field
+
+# ---- As-of dialog Part 1 (2026-09-20): the shared date-time field ------
+# `right` past the precision's last segment must stay — a Date field that
+# stepped into a hidden hour would type into a segment nobody can see.
+# `Segment::right`'s own clamp is NOT the last line of defence —
+# `DateTimeField::select` independently refuses any segment past the
+# precision (the entry below this one), so mutating this clamp alone
+# leaves `segment()` unchanged at the boundary; the only thing that
+# differs is that `select` is now called with the UNCLAMPED (unfit)
+# segment and refuses it outright, where the correct code calls it with
+# `self` (already fitting) and it succeeds — clearing `typed`. So a
+# partial digit typed into the last segment SURVIVES a `right` at the
+# boundary instead of being dropped, and the next digit typed appends to
+# that stale one rather than starting fresh.
+run_mutation "widgets: right at the last segment re-selects it, clearing partial digits" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '        if next.fits(precision) { next } else { self }' \
+  '        next' \
+  geode-widgets \
+  a_reselect_of_the_active_segment_drops_partial_digits
+
+# The real gate a hidden segment is refused by: `select` itself, which
+# every path into a new segment (`left`, `right`, a completed `digit`,
+# a click) goes through. Mutated away, `right` at the Date precision's
+# last segment (Day) would move the active segment to Hour — invisible
+# under `Precision::Date` — and a trader's next `up`/digit would act on
+# a segment nobody can see.
+run_mutation "widgets: a segment past the precision is refused" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '        if !segment.fits(self.precision) {
+            return false;
+        }' \
+  '        if false {
+            return false;
+        }' \
+  geode-widgets \
+  right_stops_at_the_precisions_last_segment
+
+# An hour step wraps within the hour; carrying into the day would move
+# the date under a trader stepping the time alone.
+run_mutation "widgets: a time step wraps without carrying" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '                let next = (current + n.rem_euclid(modulus)).rem_euclid(modulus) as u32;' \
+  '                let next = ((current + n).clamp(0, modulus - 1)) as u32;' \
+  geode-widgets \
+  a_time_step_wraps_within_its_segment_without_carrying
+
+# `enter` is Commit, not Cancel — the host's two arms must stay distinct.
+run_mutation "widgets: enter routes to Commit" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '        "enter" => FieldKey::Commit,' \
+  '        "enter" => FieldKey::Cancel,' \
+  geode-widgets \
+  route_maps_every_field_key_and_lets_a_chord_through
+
+# A chord is never the field's: with this gate gone, `ctrl+d` inside an
+# open field would be swallowed as a non-key instead of reaching the
+# shell.
+run_mutation "widgets: a chord falls through route" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '    if chord {
+        return None;
+    }' \
+  '    let _ = chord;' \
+  geode-widgets \
+  route_maps_every_field_key_and_lets_a_chord_through
+
+# The panel's Date field still opens on the DAY segment through the
+# generalised core (user ruling 2026-09-19).
+run_mutation "marketdata: the date field opens on the day segment" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let field = DateTimeField::open(
+                date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            );' \
+  '            let field = DateTimeField::open(
+                date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+                Precision::Date,
+                Segment::Year,
+            );' \
+  geode-marketdata \
+  i_on_a_date_attribute_opens_the_field_on_the_day_segment
+
+# The row-label editor is the OTHER `DateTimeField::open` call site (a
+# provisional row on a `Typed(Date)` axis, `begin_label_edit`) — a
+# separate site from the attribute/cell editor above, seeded empty on
+# today's date rather than a painted value, so it needs its own entry.
+run_mutation "marketdata: the row-label date editor opens on the day segment" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let field = DateTimeField::open(
+                self.clock
+                    .today(chrono::Utc::now())
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            );' \
+  '            let field = DateTimeField::open(
+                self.clock
+                    .today(chrono::Utc::now())
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight exists"),
+                Precision::Date,
+                Segment::Year,
+            );' \
+  geode-marketdata \
+  o_on_a_typed_axis_opens_the_label_editor
 
 run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
   crates/geode-shell/src/vimnav.rs \
@@ -14454,6 +14658,37 @@ run_mutation "tile: a typed text label commits through parse_attr" \
   '                    Ok(_) => text.trim().to_string(),' \
   geode-marketdata o_on_an_integer_axis_opens_the_text_label_editor
 
+# ---- Hidden row label (2026-09-20): dividend_id is not displayed ----
+
+# The delegate's one flag. Mutated to always show, a `RowLabel::Hidden`
+# spec paints its opaque id in column 0 exactly as before — every cursor
+# and editor test on the CVI fixture still passes, since those specs are
+# `Shown`; only the hidden fixture's column count and first header see it.
+run_mutation "mdhide: a hidden row label withholds the label column" \
+  crates/geode-marketdata/src/delegate.rs \
+  '            label_column: spec.rows.shown(),' \
+  '            label_column: true,' \
+  geode-marketdata a_hidden_row_label_withholds_the_label_column
+
+# `/` searches what is painted. Mutated to search labels whatever the
+# spec says, a find for a status or a date on the dividend panel lands
+# nowhere while a find for the id nobody can see still moves the cursor.
+run_mutation "mdhide: find searches the painted cells under a hidden label" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.spec.rows.shown() {
+            self.model
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()' \
+  '        if true {
+            self.model
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()' \
+  geode-marketdata a_hidden_row_label_withholds_the_label_column
+
 # ---- Task 12: DIVIDEND spec and the second factory ----
 
 # Mutated to keep shipping the fragment: `without_keymap` would no
@@ -15023,6 +15258,26 @@ run_mutation "tilepicker: the dock listener calls the door" \
                             if view.try_fullscreen_on_double_click(id, event, window, cx)' \
   geode-shell \
   a_docked_placeholder_double_click_opens_the_picker_and_fills_it
+
+# ---- Set log level… (command-line locality spec §4.2): a two-step
+# choice dialog, target then level, replacing the diagnostics tile's
+# `:level` -----------------------------------------------------------
+
+# Step 2 opens on the target's CURRENT level (locality §4.2).
+run_mutation "loglevel: the level step opens on the current level" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(Some(level_word(current)));' \
+  '        list.place(None);' \
+  geode-shell \
+  log_level_rows_name_targets_then_levels
+
+# The pick lands on request_level, not on a no-op.
+run_mutation "loglevel: the level pick reaches request_level" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                d.request_level(&target, level);' \
+  '                let _ = (&target, level);' \
+  geode-shell \
+  set_log_level_picks_a_target_then_a_level
 # ---------------------------------------------------------------------
 # Timeseries Part 1, the data tier (timeseries spec §4, §5.1–§5.6).
 #
@@ -15309,6 +15564,112 @@ run_mutation "tilepicker: the empty dock hint's double-click opens the picker" \
   geode-shell \
   clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it
 
+# Line pricer Part 2 (core): geode-pricer's Sheet/Edit/shorthand/views/
+# storage, plus one geode-core seam the document family gained for it.
+run_mutation "pricer core: an old revision's delivery is installed" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        if revision < current {
+            return Delivered::OldRevision { current };
+        }' \
+  '        if false {
+            return Delivered::OldRevision { current };
+        }' \
+  geode-pricer a_delivery_for_an_old_revision_is_dropped_and_the_current_one_installed
+
+run_mutation "pricer core: a package sums its legs unsigned" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                        let q = self.qty[leg] as f64;' \
+  '                        let q = (self.qty[leg] as f64).abs();' \
+  geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
+
+run_mutation "pricer core: a failed leg still sums" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '            self.result[p] = if complete && failed.is_none() {' \
+  '            self.result[p] = if complete {' \
+  geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
+
+run_mutation "pricer core: undo of a remove re-requests the row" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        self.state.insert(at, rec.state);' \
+  '        self.state.insert(at, LineState::Stale);' \
+  geode-pricer undo_of_a_remove_reinstates_rows_with_ids_and_results_and_requests_nothing
+
+run_mutation "pricer core: an inherited sheet shift reprices nothing" \
+  crates/geode-pricer/src/core/edit.rs \
+  '            Edit::SetSheetShift(_) => (0..self.len())
+                .filter(|r| self.is_line(*r))
+                .map(|r| self.id(r))
+                .collect(),' \
+  '            Edit::SetSheetShift(_) => Vec::new(),' \
+  geode-pricer a_sheet_shift_reprices_only_lines_that_inherit_it
+
+run_mutation "pricer core: qty changes the request" \
+  crates/geode-pricer/src/core/edit.rs \
+  '                let old = self.qty(row);
+                self.set_qty(row, qty);' \
+  '                let old = self.qty(row);
+                self.set_qty(row, qty);
+                self.touch(row);' \
+  geode-pricer set_qty_and_move_change_no_request
+
+run_mutation "pricer core: a spot override stales every underlying" \
+  crates/geode-pricer/src/core/edit.rs \
+  '                        if self.is_line(row)
+                            && self.instrument(row).is_some_and(|i| i.underlying() == key)
+                        {' \
+  '                        if self.is_line(row) {' \
+  geode-pricer a_spot_override_stales_every_line_on_that_underlying_and_only_a_changed_level_does
+
+run_mutation "pricer core: group accepts a package in the run" \
+  crates/geode-pricer/src/core/edit.rs \
+  '        if (first..end).any(|r| self.depth(r) != 0 || !self.is_line(r)) {' \
+  '        if (first..end).any(|r| self.depth(r) != 0) {' \
+  geode-pricer group_refuses_a_run_that_is_not_contiguous_roots
+
+run_mutation "pricer shorthand: the third Friday is the first" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '    first.checked_add_days(chrono::Days::new(u64::from(to_friday) + 14))' \
+  '    first.checked_add_days(chrono::Days::new(u64::from(to_friday)))' \
+  geode-pricer a_month_code_resolves_to_the_third_friday
+
+run_mutation "pricer views: an unknown column is only a warning" \
+  crates/geode-pricer/src/core/views.rs \
+  '                        Severity::Error,
+                        &format!("columns.{i}"),
+                        format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
+  '                        Severity::Warning,
+                        &format!("columns.{i}"),
+                        format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
+  geode-pricer an_unknown_column_is_an_error_and_dropped
+
+run_mutation "pricer storage: an empty sheet publishes a zero-row document" \
+  crates/geode-pricer/src/core/storage.rs \
+  '    if sheet.is_empty() {
+        return None;
+    }
+    let n = sheet.len();' \
+  '    let n = sheet.len();' \
+  geode-pricer an_empty_sheet_has_no_document
+
+run_mutation "pricer storage: legs need not follow their package" \
+  crates/geode-pricer/src/core/storage.rs \
+  '            let follows = records
+                .last()
+                .is_some_and(|prev| prev.id == pid || prev.parent == Some(pid));' \
+  '            let follows = true;' \
+  geode-pricer a_hostile_document_is_refused_with_a_reason
+
+run_mutation "pricer shorthand: a template quantity overflows silently" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '                qty: qty
+                    .checked_mul(l.weight)
+                    .ok_or_else(|| err(qty_offset, "quantity out of range"))?,' \
+  '                qty: qty.wrapping_mul(l.weight),' \
+  geode-pricer every_error_names_the_offending_offset
+
+# The document family's numeric-only VALUE-column rule exempts a `local`
+# dataset (the pricer's sheets store enumerable text per row); this pins
+# the exemption's own boundary — a bool/timestamp value still drops.
 # ---- timeseries Part 2 Task 6: the two `Delivery` variants and the broadcast ----
 
 # The whole point of the key-less arm (timeseries §5.4): a `SeriesFetched`

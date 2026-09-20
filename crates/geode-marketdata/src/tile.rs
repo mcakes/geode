@@ -56,8 +56,8 @@ use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment,
-    UpdatePolicy, attr_text, parse_attr, parse_cell,
+    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, FieldKey, MatrixModel, PanelSpec,
+    Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell, route,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -267,13 +267,13 @@ enum EditorState {
     /// off the element tree would take no characters at all.
     Text(Entity<InputState>),
     /// The segmented date field a `Date` attribute or a `Date` cell opens
-    /// instead: a pure [`DateField`] the tile routes keys into
+    /// instead: a pure [`DateTimeField`] the tile routes keys into
     /// ([`MarketDataTile::date_field_key`]), its own focus handle (what
     /// makes the shell's insert branch see a non-shell focus and what
     /// `holds_focus` answers off), and the three segment strings prepared
     /// on every key so `render` formats nothing.
     Date {
-        field: DateField,
+        field: DateTimeField,
         focus: FocusHandle,
         paint: DateFieldPaint,
     },
@@ -290,27 +290,29 @@ impl EditorState {
     }
 }
 
-/// The date field as painted: one `SharedString` per segment, which one
-/// is active and whether that one is mid-typing — prepared by
-/// [`DateFieldPaint::of`] whenever the field changes, never in `render`.
-/// `Clone` (three refcounts and two words) because the delegate mirrors
-/// it into the cell it paints (`crate::delegate::DelegateEditorPaint`).
+/// The date field as painted: the segments exactly as
+/// [`DateTimeField::segments`] answers them (`text` a `SharedString`,
+/// already carrying which one is active and mid-typing) plus the
+/// per-tile selector the painter needs — all prepared by
+/// [`DateFieldPaint::of`] whenever the field changes, never in `render`,
+/// so the painter (`geode_widgets::datefield::paint`) and the delegate
+/// mirror both take them straight through with NO allocation of their
+/// own: `segments` is an `Rc<[SegmentText]>` (one clone is a refcount
+/// bump, not a `Vec` copy) and `selector` a `SharedString` (an inline or
+/// refcounted copy, never a `format!` per render). `Clone` — three
+/// refcounts at most — because the delegate mirrors it into the cell it
+/// paints (`crate::delegate::DelegateEditorPaint`).
 #[derive(Clone)]
 pub(crate) struct DateFieldPaint {
-    pub segments: [SharedString; 3],
-    pub active: usize,
-    pub typing: bool,
+    pub segments: Rc<[SegmentText]>,
+    pub selector: SharedString,
 }
 
 impl DateFieldPaint {
-    fn of(field: &DateField) -> Self {
-        let [y, m, d] = field.segments();
-        let active = field.segment.index();
-        let typing = y.typing || m.typing || d.typing;
+    fn of(field: &DateTimeField, tile_id: u64) -> Self {
         Self {
-            segments: [y.text.into(), m.text.into(), d.text.into()],
-            active,
-            typing,
+            segments: field.segments().into(),
+            selector: format!("marketdata-date-seg-{tile_id}").into(),
         }
     }
 }
@@ -700,10 +702,11 @@ impl MarketDataTile {
                         // thread.
                         this.changed(cx);
                     }
-                    this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)
+                    let col = this.table.read(cx).delegate().model_col(*col);
+                    this.cursor_to(*row, col, cx)
                 }
                 TableEvent::DoubleClickedCell(row, col) => {
-                    if let Some(col) = MatrixDelegate::model_col(*col) {
+                    if let Some(col) = this.table.read(cx).delegate().model_col(*col) {
                         this.cursor_to(*row, Some(col), cx);
                         this.begin_edit(window, cx);
                         // `dispatch`'s own tail: the delegate paints the
@@ -1473,7 +1476,8 @@ impl MarketDataTile {
                 d.cursor = Some((row, col));
                 d.editor = editor;
                 d.choice = choice;
-                t.set_selected_col(MatrixDelegate::table_col(col), cx);
+                let table_col = d.table_col(col);
+                t.set_selected_col(table_col, cx);
                 t.set_selected_row(row, cx);
                 t.scroll_to_row(row, cx);
             }),
@@ -2088,10 +2092,14 @@ impl MarketDataTile {
             // something a step or a digit can act on.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
                 .unwrap_or_else(|_| self.clock.today(chrono::Utc::now()));
-            let field = DateField::open(date);
+            let field = DateTimeField::open(
+                date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            );
             let focus = cx.focus_handle();
             focus.focus(window, cx);
-            let paint = DateFieldPaint::of(&field);
+            let paint = DateFieldPaint::of(&field, self.id.0);
             EditorState::Date {
                 field,
                 focus,
@@ -2115,6 +2123,9 @@ impl MarketDataTile {
     /// cmd) is never consumed: it reaches the shell exactly as it does
     /// from any editor (`ctrl+k` still opens the palette). Shift alone is
     /// the arrows' "ten steps", the number nudge's own rule.
+    /// `geode_widgets::datefield::route` is the ONE key table this
+    /// consults — the panel just computes `chord` and matches the two
+    /// arms (`Commit`/`Cancel`) it alone owns, `field.apply` the rest.
     ///
     /// `enter` and `escape` are ALSO bound by the fragment
     /// (`marketdata::commit`/`cancel`) for the shell's dispatch: both
@@ -2127,9 +2138,10 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) -> bool {
         let modifiers = event.keystroke.modifiers;
-        if modifiers.control || modifiers.alt || modifiers.platform {
+        let chord = modifiers.control || modifiers.alt || modifiers.platform;
+        let Some(key) = route(event.keystroke.key.as_str(), modifiers.shift, chord) else {
             return false;
-        }
+        };
         let Some(Editing {
             state: EditorState::Date { field, paint, .. },
             ..
@@ -2137,37 +2149,24 @@ impl MarketDataTile {
         else {
             return false;
         };
-        let key = event.keystroke.key.as_str();
-        let big = if modifiers.shift { 10 } else { 1 };
         match key {
-            "left" => field.left(),
-            "right" => field.right(),
-            "up" => field.step(big),
-            "down" => field.step(-big),
-            "backspace" => field.backspace(),
-            "enter" => {
+            FieldKey::Commit => {
                 self.commit_edit(window, cx);
                 self.sync_cursor(cx);
                 self.changed(cx);
                 return true;
             }
-            "escape" => {
+            FieldKey::Cancel => {
                 self.close_editor(window, cx);
                 self.sync_cursor(cx);
                 self.changed(cx);
                 return true;
             }
-            _ => {
-                let mut chars = key.chars();
-                match (chars.next().and_then(|c| c.to_digit(10)), chars.next()) {
-                    (Some(d), None) => {
-                        field.digit(d as u8);
-                    }
-                    _ => return false,
-                }
+            other => {
+                field.apply(other);
             }
         }
-        *paint = DateFieldPaint::of(field);
+        *paint = DateFieldPaint::of(field, self.id.0);
         // A date CELL's segments are painted from the delegate's copy.
         self.sync_editor(cx);
         // A keystroke that changed the field retires a standing refusal
@@ -2206,7 +2205,7 @@ impl MarketDataTile {
         }) = self.editor.as_mut()
         {
             field.select(segment);
-            *paint = DateFieldPaint::of(field);
+            *paint = DateFieldPaint::of(field, self.id.0);
             if !focus.is_focused(window) {
                 focus.focus(window, cx);
             }
@@ -2246,10 +2245,10 @@ impl MarketDataTile {
                         Some(format!("finish the {} or backspace", segment.name()).into());
                     return true;
                 }
-                *paint = DateFieldPaint::of(field);
+                *paint = DateFieldPaint::of(field, self.id.0);
                 // Always a valid date from here (the field's own
                 // invariant): nothing to parse, nothing to refuse.
-                let value = Value::Date(field.value());
+                let value = Value::Date(field.date());
                 self.commit_attr_edit(index, column, AttrInput::Value(value), window, cx)
             }
             (EditorState::Date { field, paint, .. }, EditTarget::Cell { cell, labels }) => {
@@ -2262,8 +2261,8 @@ impl MarketDataTile {
                         Some(format!("finish the {} or backspace", segment.name()).into());
                     return true;
                 }
-                *paint = DateFieldPaint::of(field);
-                let value = Value::Date(field.value());
+                *paint = DateFieldPaint::of(field, self.id.0);
+                let value = Value::Date(field.date());
                 self.commit_cell_value(cell, labels, value, window, cx)
             }
             (EditorState::Text(state), EditTarget::RowLabel { row, label }) => {
@@ -2301,8 +2300,8 @@ impl MarketDataTile {
                         Some(format!("finish the {} or backspace", segment.name()).into());
                     return true;
                 }
-                *paint = DateFieldPaint::of(field);
-                let new = field.value().format("%Y-%m-%d").to_string();
+                *paint = DateFieldPaint::of(field, self.id.0);
+                let new = field.date().format("%Y-%m-%d").to_string();
                 self.commit_row_label(row, label, new, window, cx)
             }
         }
@@ -2380,7 +2379,7 @@ impl MarketDataTile {
                 // field's own listener did not consume the key, and step
                 // the same way it would have.
                 field.step(steps);
-                *paint = DateFieldPaint::of(field);
+                *paint = DateFieldPaint::of(field, self.id.0);
                 return self.notice.take().is_some();
             }
         };
@@ -2882,10 +2881,17 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) {
         let state = if ty == ColumnType::Date {
-            let field = DateField::open(self.clock.today(chrono::Utc::now()));
+            let field = DateTimeField::open(
+                self.clock
+                    .today(chrono::Utc::now())
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            );
             let focus = cx.focus_handle();
             focus.focus(window, cx);
-            let paint = DateFieldPaint::of(&field);
+            let paint = DateFieldPaint::of(&field, self.id.0);
             EditorState::Date {
                 field,
                 focus,
@@ -3607,12 +3613,15 @@ impl MarketDataTile {
                 Some(match what {
                     Yank::Cell => row.cells.get(c)?.text.to_string(),
                     Yank::Row => {
-                        let mut out = row.label.to_string();
-                        for cell in &row.cells {
-                            out.push('\t');
-                            out.push_str(&cell.text);
-                        }
-                        out
+                        // The copied line is what the trader SEES: the
+                        // label leads it only where the label column is
+                        // painted (`RowLabel::Shown`).
+                        let label = self.spec.rows.shown().then(|| row.label.as_ref());
+                        label
+                            .into_iter()
+                            .chain(row.cells.iter().map(|cell| cell.text.as_ref()))
+                            .collect::<Vec<_>>()
+                            .join("\t")
                     }
                     Yank::Col => self
                         .model
@@ -3635,12 +3644,30 @@ impl MarketDataTile {
         }
     }
 
+    /// What `/` searches, one string per row: the row label where it is
+    /// painted (`RowLabel::Shown`), the row's painted cell texts joined
+    /// where it is not — a trader can only look for what they can see,
+    /// and a hidden `dividend_id` is not that.
     fn row_labels(&self) -> Vec<String> {
-        self.model
-            .rows
-            .iter()
-            .map(|r| r.label.to_string())
-            .collect()
+        if self.spec.rows.shown() {
+            self.model
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()
+        } else {
+            self.model
+                .rows
+                .iter()
+                .map(|r| {
+                    r.cells
+                        .iter()
+                        .map(|c| c.text.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect()
+        }
     }
 
     /// `/` (spec §6.1's own example of a shell-owned door the popup must
@@ -4149,7 +4176,7 @@ impl MarketDataTile {
 
     /// The open date field, `None` when the open editor is not one.
     #[cfg(test)]
-    pub(crate) fn date_field(&self) -> Option<DateField> {
+    pub(crate) fn date_field(&self) -> Option<DateTimeField> {
         self.editor.as_ref().and_then(|e| match &e.state {
             EditorState::Date { field, .. } => Some(field.clone()),
             EditorState::Text(_) => None,
@@ -4492,7 +4519,7 @@ mod tests {
     use crate::commands;
     use crate::content::MarketDataFactory;
     use crate::core::draft::RowEdit;
-    use crate::core::spec::{RowAxis, RowIdentity, ValueColumn};
+    use crate::core::spec::{RowAxis, RowIdentity, RowLabel, ValueColumn};
     use crate::core::test_fixtures;
     use crate::core::{CVI, DraftState};
     use crate::delegate::LABEL_COL;
@@ -6511,10 +6538,7 @@ mod tests {
         h.dispatch(&mut vcx, "bottom", None);
         assert_eq!(
             h.selection(&vcx),
-            (
-                Some(terms.len() - 1),
-                Some(MatrixDelegate::table_col(SLICE + 2))
-            ),
+            (Some(terms.len() - 1), Some(LABEL_COL + 1 + SLICE + 2)),
             "G moves the table's selected row, which is what scrolls it into view"
         );
     }
@@ -7564,6 +7588,7 @@ deleted = true
         rows: RowAxis {
             column: "dividend_id",
             identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
         columns: Columns::Values(&[ValueColumn {
             column: "note",
@@ -7591,6 +7616,7 @@ deleted = true
         rows: RowAxis {
             column: "dividend_id",
             identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
         columns: Columns::Values(&[ValueColumn {
             column: "note",
@@ -7690,20 +7716,28 @@ deleted = true
         let (row, col, date) = mirrored.expect("the editor is mirrored");
         assert_eq!((row, col), (1, Some(0)));
         let (segments, mirrored_focus) = date.expect("as a date field");
-        assert_eq!(segments.map(|s| s.to_string()), ["2027", "03", "19"]);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|s| s.text.to_string())
+                .collect::<Vec<_>>(),
+            vec!["2027", "03", "19"]
+        );
         assert_eq!(mirrored_focus, focus);
         // A keystroke re-prepares the mirror's segments.
         draw(&mut vcx);
         type_keys(&mut vcx, "up");
         let segments = h.tile.read_with(&vcx, |t, cx| {
             match &t.table().read(cx).delegate().editor.as_ref().unwrap().paint {
-                DelegateEditorPaint::Date { paint, .. } => {
-                    paint.segments.clone().map(|s| s.to_string())
-                }
+                DelegateEditorPaint::Date { paint, .. } => paint
+                    .segments
+                    .iter()
+                    .map(|s| s.text.to_string())
+                    .collect::<Vec<_>>(),
                 DelegateEditorPaint::Text(_) => unreachable!(),
             }
         });
-        assert_eq!(segments, ["2027", "03", "20"]);
+        assert_eq!(segments, vec!["2027", "03", "20"]);
         h.dispatch(&mut vcx, "cancel", None);
         assert!(
             h.tile
@@ -8129,6 +8163,7 @@ deleted = true
         rows: RowAxis {
             column: "dividend_id",
             identity: RowIdentity::Minted,
+            label: RowLabel::Shown,
         },
         columns: Columns::Values(&[ValueColumn {
             column: "units",
@@ -9657,8 +9692,15 @@ edits = [["2099-01-01", "-1", 1.0]]
             .tile
             .read_with(vcx, |t, _| t.date_field())
             .expect("an open date field");
-        let [y, m, d] = field.segments();
-        ([y.text, m.text, d.text], field.segment)
+        let v = field.segments();
+        (
+            [
+                v[0].text.to_string(),
+                v[1].text.to_string(),
+                v[2].text.to_string(),
+            ],
+            field.segment(),
+        )
     }
 
     fn type_keys(vcx: &mut gpui::VisualTestContext, keys: &str) {
@@ -9759,7 +9801,7 @@ edits = [["2099-01-01", "-1", 1.0]]
             ("1", true, true)
         );
         assert_eq!(
-            field.value(),
+            field.date(),
             chrono::NaiveDate::from_ymd_opt(2026, 9, 12).unwrap()
         );
         type_keys(&mut vcx, "2");
@@ -11185,6 +11227,54 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.editor_value(&vcx).is_none());
     }
 
+    /// The rule (command-line locality spec §2): every `:` verb the panel
+    /// accepts changes only the panel — never the frame or the app.
+    /// Checks the frame's three counters (`scope`, `grouping`, `as_of`),
+    /// not any slot/scope/as-of *value* — a `save_slot` would still
+    /// bump `grouping` (and `config`) and be caught that way even
+    /// though nothing here reads what it wrote.
+    #[gpui::test]
+    fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let lines = [
+            "underlying SPX",
+            "revert",
+            "bump 0.5",
+            "rebase",
+            "upload",
+            "set spot 100",
+            "auto hold",
+            "menu",
+        ];
+        for word in crate::commands::VERBS {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.split_whitespace().next() == Some(word)),
+                "no sweep line for `:{word}`"
+            );
+        }
+        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        for line in lines {
+            assert!(
+                crate::commands::parse(line).is_ok(),
+                "`{line}` no longer parses"
+            );
+            let _ = vcx.update(|window, cx| h.content.command(line, window, cx));
+            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            assert_eq!(
+                (after.scope, after.grouping, after.as_of),
+                (before.scope, before.grouping, before.as_of),
+                "`:{line}` moved the frame"
+            );
+            let (level, overlay) = h.diagnostics.update(&mut vcx, |d, _| {
+                (d.take_pending_level(), d.take_pending_overlay_toggle())
+            });
+            assert!(level.is_none() && !overlay, "`:{line}` reached the app");
+            // Any per-line outcome is fine (a refused key, nothing to
+            // revert); the rule is about what it did NOT touch.
+        }
+    }
     // ---- row verbs: o / shift+o / d d (dividend spec §5.3) ------------
 
     /// The model's row labels in painted order.
@@ -11204,6 +11294,68 @@ edits = [["2026-11-20", "-1", 9.5]]
     /// `new-1`'s anchor, `new-1` re-anchors onto it — controller ruling);
     /// `d d` on the inserted row drops it outright, on a document row
     /// marks it `Deleted`, and a second `d d` there says so.
+    /// A hidden row label (user ruling 2026-09-20): the table carries no
+    /// label column, so table column 0 is the first value column; `yy`
+    /// yanks the cells alone; `/` searches the painted cells rather than
+    /// the id nobody can see; `o` still mints an id for the draft and
+    /// lands the cursor on the first cell.
+    #[gpui::test]
+    fn a_hidden_row_label_withholds_the_label_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::HIDDEN_SCHEDULE, None);
+        h.with_flat_document(&mut vcx);
+        assert_eq!(h.columns(&vcx), 3, "ex, amount, status — no label column");
+        assert_eq!(
+            h.headers(&vcx),
+            vec!["ex", "amount", "status"],
+            "the first header is the first VALUE column, not the row axis"
+        );
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-cell-0-0").is_some(),
+            "table column 0 is painted"
+        );
+        assert!(
+            vcx.debug_bounds("marketdata-th-3").is_none(),
+            "no fourth header"
+        );
+        // The cell at table column 0 is the FIRST VALUE (ex date), not an id.
+        h.dispatch(&mut vcx, "yank", None);
+        assert_eq!(clipboard(&mut vcx).as_deref(), Some("2026-12-18"));
+        h.dispatch(&mut vcx, "yank_row", None);
+        assert_eq!(
+            clipboard(&mut vcx).as_deref(),
+            Some("2026-12-18\t1.2500\tdeclared"),
+            "the row is its cells alone, no id"
+        );
+        // `/` matches the painted cells (a status, a date), never the id.
+        vcx.update(|window, cx| {
+            h.content
+                .find(FindEvent::Changed("estimated".into()), window, cx)
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 },
+            "the second row's status matched"
+        );
+        vcx.update(|window, cx| h.content.find(FindEvent::Cancelled, window, cx));
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("D2".into()), window, cx));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 0 },
+            "the hidden id is not searchable"
+        );
+        vcx.update(|window, cx| h.content.find(FindEvent::Cancelled, window, cx));
+        // `o` mints the id for the draft and lands on the first cell.
+        h.dispatch(&mut vcx, "insert_below", None);
+        vcx.run_until_parked();
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-1", "D2"]);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.date_field().is_some()));
+    }
+
     #[gpui::test]
     fn o_inserts_a_minted_row_and_dd_deletes(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -11290,6 +11442,12 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             h.tile.read_with(&vcx, |t, _| t.date_field().is_some()),
             "a Date axis opens the segmented field"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t
+                .date_field()
+                .is_some_and(|f| f.segments()[Segment::Day as usize].active)),
+            "the row-label editor opens on the day segment"
         );
         assert_eq!(h.mode(&vcx), "insert");
         assert!(

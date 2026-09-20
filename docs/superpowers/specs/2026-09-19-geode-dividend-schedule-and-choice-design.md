@@ -630,6 +630,21 @@ three records of where the text above and the build differ:
   and `geode_demo_data::documents::dividend::STATUSES`, and two
   `geode-app` tests (`demo_bus.rs`) assert all three equal — one to
   change means three, and the tests say which.
+- **The dividend row label is not displayed (user ruling 2026-09-20,
+  "dividend_id shouldn't be displayed — keep it hidden").** `RowAxis`
+  gained `label: RowLabel::{Shown, Hidden}` — `CVI` Shown, `DIVIDEND`
+  Hidden. The label stays the row's IDENTITY everywhere §5 uses it
+  (draft edits by label, anchors, `rebase`, the session, the minted
+  `new-<n>`); only its COLUMN is withheld: `MatrixDelegate` reads one
+  `label_column` flag and `model_col`/`table_col`/`columns_count`/
+  `column` go through its offset (1 or 0) rather than a fixed
+  `LABEL_COL + 1`, so under Hidden table column 0 is the first value
+  column and takes the left pin the label column had; `/` searches each
+  row's painted cell texts joined (a trader can only look for what they
+  can see) and `yy` copies the cells alone. Hidden implies Minted — a
+  `Typed` axis needs the column to type into — pinned by
+  `a_hidden_row_label_is_minted_on_every_shipped_spec` over the shipped
+  specs.
 
 ## 7. Amendments to earlier specs
 

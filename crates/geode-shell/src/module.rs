@@ -184,6 +184,21 @@ pub trait TileContent {
         cx: &mut App,
     ) -> bool;
     /// A `:` line, without the colon. `Err` is shown inline on the line.
+    ///
+    /// **The rule (command-line locality spec §2, 2026-09-20): a `:` line
+    /// changes only THIS tile** — what it queries for, how it paints,
+    /// its cursor, its draft. It never writes the frame (scope, grouping,
+    /// as-of, slots), the shell, the config or the log levels, and never
+    /// changes what another tile shows. A frame- or app-wide effect is a
+    /// palette action instead (the palette is global or local per
+    /// action). Every module with a vocabulary keeps a sweep test (an
+    /// `every_colon_command_leaves_…` test) that runs each word and
+    /// checks, of the channels its own vocabulary could reach, that the
+    /// frame's `scope`/`grouping`/`as_of` counters, `Frame::
+    /// take_pending_persist`, `Frame::take_pending_scope_persist` and
+    /// the `Diagnostics` entity's pending level/overlay requests are all
+    /// untouched; a word that used to be frame-wide stays in the parser
+    /// as a REFUSAL whose message names the door.
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String>;
     /// Candidates for the word under `cursor` on a `:` line. The shell
     /// ranks and shows them; the occupant only knows its vocabulary.

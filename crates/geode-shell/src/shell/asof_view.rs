@@ -45,6 +45,7 @@ use crate::keymap::{Keystroke, Modifiers};
 use crate::{listfilter, vimnav};
 
 use super::ShellView;
+use super::chip;
 use super::dialog;
 use super::listrow::RowPaint;
 use super::scale;
@@ -384,7 +385,11 @@ fn build(
     };
     let theme = cx.theme();
     let muted = theme.muted_foreground;
-    let danger = theme.danger;
+    // Through the chip door (`shell::chip`): a raw `theme.danger` bypasses
+    // the readability floor, and the parse error is the single thing in
+    // this dialog a trader must be able to read (review finding, Task 6
+    // fix round 1).
+    let danger = chip::chip_paint(theme, chip::Tone::DangerText).text;
     let radius = theme.radius;
     let clock = shell.clock(cx);
 

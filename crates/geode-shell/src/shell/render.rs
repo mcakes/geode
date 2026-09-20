@@ -27,7 +27,7 @@ use super::drag::{
 };
 use super::{
     ShellView, asof_view, choicedialog, commandline_view, dialog, objectdialog, perf_overlay,
-    picker, sidebar, stacklist, status, toolbar, whichkey,
+    picker, scope_expr_view, sidebar, stacklist, status, toolbar, whichkey,
 };
 
 /// gpui hover-group name shared by every divider strip (drag-splitters
@@ -1052,6 +1052,14 @@ impl Render for ShellView {
                 asof_view::open(view, window, cx);
             });
         };
+        // The expression chip's click (command-line locality 2026-09-20)
+        // — the mouse form of `frame::scope_expression`.
+        let expr_entity = cx.entity();
+        let on_expr = move |window: &mut Window, cx: &mut App| {
+            expr_entity.update(cx, |view, cx| {
+                scope_expr_view::open(view, window, cx);
+            });
+        };
         // Whether the grouping picker is up: the readout holds its pressed
         // fill for exactly as long as it is (design guide: a control that
         // owns a popup stays visibly pressed until the popup closes). The
@@ -1070,6 +1078,7 @@ impl Render for ShellView {
             on_save,
             on_grouping,
             on_as_of,
+            on_expr,
             cx,
         );
 

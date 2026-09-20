@@ -166,6 +166,7 @@ pub fn toolbar(
     on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_grouping: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_as_of: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_expr: impl Fn(&mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -181,9 +182,10 @@ pub fn toolbar(
     // states, not the bare ones: it occludes the body's hitbox, so while
     // the pointer is on it the body sits at its rest fill, and the `×`'s
     // hover has to be distinct from THAT — exactly what the chip pairing
-    // measures. The text, expression and contradiction chips have no
-    // listener and take none — a hover fill promises a click (design
-    // guide, interaction states).
+    // measures. The contradiction chip has no listener and takes none —
+    // a hover fill promises a click (design guide, interaction states).
+    // The expression chip is clickable since 2026-09-20 (command-line
+    // locality spec §4.1) and takes the same `chip_states` pairing.
     let chip_states = control::paint(
         theme,
         control::Rest::Filled(chip_bg),
@@ -280,6 +282,10 @@ pub fn toolbar(
     }
     if let Some(expr) = &model.expr {
         has_chips = true;
+        // Clickable since 2026-09-20 (command-line locality spec §4.1): the
+        // mouse form of `frame::scope_expression`. The chip pairing is the
+        // selection chips' own (`chip_states`), already in `shipped()`.
+        let on_expr = on_expr.clone();
         chips_row = chips_row.child(
             chip(
                 "scope-expr-chip".into(),
@@ -292,9 +298,13 @@ pub fn toolbar(
             .tooltip(tips::tip_with(
                 SharedString::new_static("tip-scope-expr-chip"),
                 model.expr_full.clone().unwrap_or_default(),
-                None,
-                Some(SharedString::new_static(":filter <expr> sets it")),
-            )),
+                Some("frame::scope_expression"),
+                Some(SharedString::new_static("click to edit")),
+            ))
+            .pointer_states(chip_states)
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                on_expr(window, cx)
+            }),
         );
     }
     if let Some(named) = &model.impossible {
