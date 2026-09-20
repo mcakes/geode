@@ -788,15 +788,15 @@ impl Render for ShellView {
             } else {
                 let (hint, selector) = match side {
                     crate::tiling::DockSide::Left => (
-                        "ctrl+k → Add a tile here · ctrl+shift+[ moves one",
+                        "double-click or ctrl+k → Add a tile here · ctrl+shift+[ moves one",
                         "dock-empty-hint-left",
                     ),
                     crate::tiling::DockSide::Right => (
-                        "ctrl+k → Add a tile here · ctrl+shift+] moves one",
+                        "double-click or ctrl+k → Add a tile here · ctrl+shift+] moves one",
                         "dock-empty-hint-right",
                     ),
                     crate::tiling::DockSide::Bottom => (
-                        "ctrl+k → Add a tile here · ctrl+shift+/ moves one",
+                        "double-click or ctrl+k → Add a tile here · ctrl+shift+/ moves one",
                         "dock-empty-hint-bottom",
                     ),
                 };
@@ -814,6 +814,16 @@ impl Render for ShellView {
                         .border_1()
                         .border_color(cx.theme().border)
                         .text_color(cx.theme().muted_foreground)
+                        // A click focuses the empty dock as the region,
+                        // a double-click opens the tile picker into it
+                        // (`on_empty_dock_mouse_down`, user ruling
+                        // 2026-09-19).
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                                view.on_empty_dock_mouse_down(side, event, window, cx);
+                            }),
+                        )
                         .child(div().debug_selector(|| selector.to_string()).child(hint)),
                 );
             }

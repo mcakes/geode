@@ -297,6 +297,30 @@ impl ShellView {
         self.try_pick_on_double_click(event, window, cx)
     }
 
+    /// A mouse-down on an EMPTY dock's hint (user ruling 2026-09-19,
+    /// "double-click should work on dock areas too"): every click is
+    /// click-to-focus for the dock as a region
+    /// (`Workspace::focus_empty_dock`, dirtying the session like a
+    /// tile's click), and the pair's second click is the picker door —
+    /// so the pick lands in THIS dock, the region the first click just
+    /// moved, and the hint's "add a tile here" is a gesture that adds one
+    /// here. The single-click half is what a trader who shows a dock and
+    /// then clicks into it expects; before this the click reached
+    /// nothing.
+    pub(super) fn on_empty_dock_mouse_down(
+        &mut self,
+        side: DockSide,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.services.workspaces.active_mut().focus_empty_dock(side) {
+            self.session_dirty = true;
+            cx.notify();
+        }
+        self.try_pick_on_double_click(event, window, cx);
+    }
+
     /// The gesture and overlay table both tile-picker doors share: the
     /// pair's second click, no modifier, no overlay or drag in flight.
     /// Opens the picker and stops propagation (the shell root's own

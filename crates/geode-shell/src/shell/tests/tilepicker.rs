@@ -388,3 +388,127 @@ fn a_single_or_modified_click_on_the_empty_tree_hint_opens_nothing(cx: &mut gpui
         s.services.workspaces.active().tree().tiles().is_empty()
     }));
 }
+
+/// Showing an empty dock focuses it (`Workspace::toggle_dock`, add-tile
+/// spec §8), so `mod+n` there adds INTO the dock — user ruling
+/// 2026-09-19, pinned through the real key path with a real tile in
+/// the main tree first, as on a working screen.
+#[gpui::test]
+fn showing_an_empty_dock_focuses_it_and_mod_n_adds_into_it(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell) = dock_test_shell(cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("ctrl-[");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let region = shell.read_with(&cx, |s, _| s.services.workspaces.active().region());
+    assert_eq!(
+        region,
+        crate::tiling::FocusRegion::Dock(DockSide::Left),
+        "region after show"
+    );
+    cx.simulate_keystrokes("alt-n");
+    cx.run_until_parked();
+    assert!(is_tile_picker(&shell, &cx), "picker opened");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let docked = shell.read_with(&cx, |s, _| {
+        s.services
+            .workspaces
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .tiles()
+    });
+    assert_eq!(docked.len(), 1, "the pick landed in the dock");
+    let main = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(main.len(), 1, "main untouched");
+}
+
+/// The mouse half of the same ruling: a click on an EMPTY dock focuses
+/// it as the region (click-to-focus, like a tile's), and a double-click
+/// there opens the picker whose pick lands in THAT dock — an empty
+/// dock's "add a tile here" is a gesture that adds one here.
+#[gpui::test]
+fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut cx, shell) = dock_test_shell(cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let main_tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    cx.simulate_keystrokes("ctrl-["); // show the (empty) left dock
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    // Put the region back on the main tile by clicking it, so the dock
+    // click below has something to change.
+    let at = main_tile_point(&mut cx, &shell, main_tile, 0.5, 0.5);
+    cx.simulate_click(at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().region()),
+        crate::tiling::FocusRegion::Main
+    );
+    shell.update(&mut cx, |s, _| s.session_dirty = false);
+
+    let hint = cx
+        .debug_bounds("dock-empty-hint-left")
+        .expect("the empty dock hint painted");
+    cx.simulate_click(hint.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().region()),
+        crate::tiling::FocusRegion::Dock(DockSide::Left),
+        "a click on an empty dock focuses it"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        "a single click opens nothing"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.session_dirty),
+        "a region change persists"
+    );
+
+    double_click(&mut cx, hint.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        is_tile_picker(&shell, &cx),
+        "the picker opened from the dock"
+    );
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let docked = shell.read_with(&cx, |s, _| {
+        s.services
+            .workspaces
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .tiles()
+    });
+    assert_eq!(docked.len(), 1, "the pick landed in the dock");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(docked[0])),
+        Some("rec")
+    );
+    let main = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(main, vec![main_tile], "main untouched");
+    assert!(cx.debug_bounds("dock-empty-hint-left").is_none());
+}

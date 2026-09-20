@@ -367,7 +367,12 @@ design above:
   user override exists. Closing the gap for real needs `derive_rows` to
   record *which* user-layer entry is suppressing a row — a change to the
   row vocabulary, not a call-site fix — and is parked as a follow-up,
-  not built here.
+  not built here. **As built 2026-09-19:** closed. `KeybindingRow::
+  overrides` carries the set `keymap::user_overrides_for` finds over
+  the whole keymap (a rebind's new key AND its shadow, or a bare
+  shadow), `r` removes the set in one `apply_reset` write, and `d`'s
+  acknowledgement names `r` as the way back; `shift+r` resets every
+  user binding. See `docs/phase-history.md`.
 - **§8's `d` on a user-layer row reverts to the lower layer rather than
   unbinding the action outright.** This falls out of `apply_unbind`'s
   existing shadow-vs-remove split (`is_user_layer`, from Task 2): a row
@@ -1095,9 +1100,10 @@ dialog's confirm: the verb arms a question, `y`/`enter` runs it,
 `n`/`escape` withdraws it, every other key is claimed and dropped while
 it stands, and both verbs are also offered as `danger` buttons under
 the list. This is the direction that adds safety rather than removing
-it: the keybinding `d` is the *less* recoverable of the two (a `"none"`
-shadow it writes over a builtin binding is one `r` cannot lift —
-`reset_selected`'s own doc), and it was the one that asked nothing.
+it: the keybinding `d` was, when this was written, the *less*
+recoverable of the two (a `"none"` shadow it wrote over a builtin
+binding was one `r` could not lift; since 2026-09-19 `r` lifts it), and
+it was the one that asked nothing.
 
 **Mechanism.** `Confirm`, the confirm row (question, two buttons) and
 the key router that answers it move out of `objectdialog/render.rs`
