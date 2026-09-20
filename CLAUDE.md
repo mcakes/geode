@@ -115,8 +115,8 @@ Each bullet is a rule the code depends on and a test or harness entry usually pi
 - The pricing worker is one thread beside the pool: latest wins per key, `Cancel { key }` stops at the next line boundary and delivers what was priced, `catch_unwind` + `contained` per line. `pricer: None` errors every line with `PricerConfig::missing_reason`.
 - Overrides are STATEFUL (`Pricer::set_overrides` then `price`) and batch-scoped by the worker — set once per batch before its first line, never per line; a refusal or a panic there fails every line of the batch (`overrides refused: <reason>`) and prices none of them, rather than pricing some lines against the wrong market data.
 - A batch the worker's own bounded queue refuses is still answered: `DataService::price` emits the `DataEvent::Price` itself with an error per line — `DataHandle::price`'s `false` means only that the request channel refused, never that a submitted batch went unanswered.
-- `Request::Publish` is refused unwritten for a non-`local` dataset; a local publish is source `LOCAL_SOURCE`, emits `Published` + `LoadEnded` and never `Health`; the bridge skips `Frame::note_published` for a local dataset (`Bridge.local_datasets`). A `[sources]` entry naming a local dataset is an error.
-- `[pricing]` changes are a restart stripe (`pricing_baseline`), like `sources`/`datasets`.
+- `Request::Publish` is refused unwritten for a non-`local` dataset; a local publish is source `LOCAL_SOURCE`, emits `Published` + `LoadEnded` and never `Health` or `Started`/`Loading` (a sheet autosave must never blink the ingest progress strip — the runner's document arm skips `Started` when `job.source == LOCAL_SOURCE`); the bridge skips `Frame::note_published` for a local dataset (`Bridge.local_datasets`). A `[sources]` entry naming a local dataset is an error.
+- A `[pricing] adapter` change is a restart stripe (`pricing_baseline`), like `sources`/`datasets` — narrowed to that one key because `refresh` is a live sheet setting from Part 3 onward and must never demand a restart.
 - The worker clears `cancel_running` both when a batch is picked up and after it finishes — the two clears are REDUNDANT by design, neither alone is load-bearing (either one resets the flag before the next batch starts), and only `a_cancel_of_a_running_key_does_not_stop_the_next_batch` pins the pair; there is no separate harness entry because mutating either clear alone survives.
 
 ## Commands
@@ -134,7 +134,7 @@ cargo bench -p geode-shell                             # run criterion benchmark
 cargo bench -p geode-blotter                           # run criterion benchmarks (blotter pure core — see docs/perf.md)
 cargo bench -p geode-documents                         # run criterion benchmarks (CVI parse/write — see docs/perf.md)
 cargo bench -p geode-marketdata                        # run criterion benchmarks (panel matrix model + draft — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (1111 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (1113 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 zsh scripts/mutation-check.sh --anchors-only           # no cargo: stale or ambiguous anchors (<1 s, exits 1 on any) — run before every merge

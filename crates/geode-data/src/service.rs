@@ -1962,6 +1962,15 @@ mod tests {
                 DataEvent::Health { source, .. } => {
                     panic!("no health lane for a local publish, got {source}")
                 }
+                // final-review finding 3: a sheet autosave must never
+                // blink the ingest progress strip — the runner skips
+                // `Started` for `LOCAL_SOURCE`, so no `Loading` for
+                // "local" should ever reach here. A `Loading` for some
+                // other source (there is none in this fixture) is not
+                // the concern.
+                DataEvent::Loading { ref source, .. } if source == "local" => {
+                    panic!("a local publish must not emit Loading, got {e:?}")
+                }
                 DataEvent::Published { .. } => saw_published = true,
                 DataEvent::LoadEnded if saw_published => {
                     saw_ended = true;

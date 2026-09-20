@@ -145,10 +145,10 @@ impl ShellView {
     /// doc replaces the frame's slots, a changed `views`/`dimensions` doc
     /// tells the frame a config reload happened and emits `ShellEvent::
     /// ConfigReloaded` for the app bridge to forward to the data thread,
-    /// and a `sources`/`datasets` doc — or the `[pricing]` table
+    /// and a `sources`/`datasets` doc — or the `[pricing] adapter` key
     /// (line-pricer §5.5) — that disagrees with
     /// `sources_baseline`/`datasets_baseline`/`pricing_baseline` — the
-    /// docs (and table) the data engine was actually built from, not
+    /// docs (and key) the data engine was actually built from, not
     /// merely the previous reload's config — sets `restart_required` and
     /// emits `ShellEvent::RestartRequired`;
     /// once the docs agree with that baseline again (M8, 3b final review:
@@ -336,10 +336,12 @@ impl ShellView {
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
-            // Same rule, for the `[pricing]` table the data engine's
-            // pricer was chosen from at startup (line-pricer §5.5) — see
-            // `pricing_baseline`'s field doc.
-            if new_config.get("app", "pricing").cloned() != self.pricing_baseline {
+            // Same rule, for the `[pricing] adapter` key the data
+            // engine's pricer was chosen from at startup (line-pricer
+            // §5.5) — see `pricing_baseline`'s field doc. Narrowed to
+            // this one key: `refresh` is a live sheet setting (Part 3)
+            // and must not demand a restart.
+            if new_config.get("app", "pricing.adapter").cloned() != self.pricing_baseline {
                 restart.push("pricing");
             }
 

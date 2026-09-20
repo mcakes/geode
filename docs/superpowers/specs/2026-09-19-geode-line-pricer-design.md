@@ -246,7 +246,7 @@ Two new requests and two new events.
 // handle.rs
 Request::Price(PriceParams)            // DataHandle::price(params) -> bool
 Request::Publish(LocalPublish)         // DataHandle::publish(local) -> bool
-// geode_core::query
+// geode_core::pricing
 pub struct PriceParams  { pub key: QueryKey, pub tag: u64, pub submitted: Instant, pub overrides: MarketOverrides, pub lines: Vec<PriceLine> }
 pub struct PriceLine    { pub id: u64, pub revision: u64, pub request: PriceRequest }
 pub struct PriceOutcome { pub key: QueryKey, pub tag: u64, pub submitted: Instant,
@@ -581,10 +581,10 @@ three store rules and how the sheet meets them:
   dataset through its own document request. A test in `geode-app`
   pins that a local publish leaves `FrameVersions.data` unchanged.
 
-A local dataset cannot name a source (`validate_dataset` refuses
-`local = true` on a dataset any `[sources]` entry feeds), and the
-document family's own rules (utf8 key, dimensions in key, no `book`)
-hold unchanged.
+A local dataset cannot name a source (`SourceSpec::from_doc` refuses
+a `[sources]` entry naming a dataset with `local = true`, at the
+source's own `dataset` key), and the document family's own rules
+(utf8 key, dimensions in key, no `book`) hold unchanged.
 
 ### 7.3 Write-behind
 
@@ -962,4 +962,16 @@ shifts) is its own spec against this one.
 - `LogLevels` stores suffix keys (`"pricing"`, not `"geode::pricing"`)
   like every other target; this is the existing, correct shape, not a
   Part 1 gap.
+- Final-review fix wave: the `[pricing]` restart baseline is narrowed
+  to the `adapter` key alone (`ShellView::pricing_baseline`,
+  `hot_reload::apply_reload`) — `refresh` is a live sheet setting from
+  Part 3 onward and must never demand a restart, so only the adapter
+  choice, which really is baked into the running data engine, gates
+  it.
+- Final-review fix wave: a local publish's document arm in the ingest
+  runner emits no `IngestEvent::Started` (and so no `DataEvent::
+  Loading`) when `job.source == LOCAL_SOURCE` — a sheet autosave must
+  never blink the ingest progress strip. The unconditional `LoadEnded`
+  after every publish is untouched; the strip tolerates a `LoadEnded`
+  with no matching `Started`.
 - Unverified on a real window: nothing in Part 1 paints.

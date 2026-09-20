@@ -13560,9 +13560,30 @@ run_mutation "shell: a Price delivery is routed to the wrong key" \
 
 run_mutation "shell: a pricing change needs no restart" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '            if new_config.get("app", "pricing").cloned() != self.pricing_baseline {' \
+  '            if new_config.get("app", "pricing.adapter").cloned() != self.pricing_baseline {' \
   '            if false {' \
   geode-shell a_pricing_change_requires_a_restart_and_a_revert_clears_it
+
+# Final-review fix wave: the baseline is narrowed to `pricing.adapter`
+# alone (`refresh` is a live sheet setting from Part 3 onward and must
+# not demand a restart) — reintroducing the whole-`[pricing]`-table read
+# must be caught by the sibling test that adds `refresh` with no
+# `adapter` key.
+run_mutation "shell: a pricing refresh change asks for a restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '"pricing.adapter"' \
+  '"pricing"' \
+  geode-shell a_pricing_refresh_change_needs_no_restart
+
+# Final-review fix wave: a local publish must never blink the ingest
+# progress strip — the runner's document arm skips `Started` (and so
+# `DataEvent::Loading`) when `job.source == LOCAL_SOURCE`. Reinstating
+# the emit must be caught by the extended service-level test.
+run_mutation "runner: a local publish reports Loading" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                if job.source != LOCAL_SOURCE' \
+  '                if false && job.source != LOCAL_SOURCE' \
+  geode-data a_local_publish_emits_no_health_event_and_a_load_ended
 
 # Overrides (Task 7b, ruling 1 amended): stateful, batch-scoped. A no-op
 # `set_overrides` proves the worker actually calls the pricer's real

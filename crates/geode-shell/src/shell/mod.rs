@@ -846,13 +846,16 @@ pub struct ShellView {
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
     /// the `datasets` doc.
     datasets_baseline: Vec<LayerDoc>,
-    /// The `[pricing]` table (inside the `app` doc) the data engine's
-    /// pricer was actually chosen from at startup (line-pricer §5.5,
-    /// `crates/geode-app/src/bridge.rs::data_setup`) — same purpose and
-    /// lifecycle as [`sources_baseline`](Self::sources_baseline), never
-    /// re-seeded on reload. A reload whose `[pricing]` table no longer
-    /// matches this needs a restart to take effect, on the same terms
-    /// `sources`/`datasets` already follow.
+    /// The `[pricing] adapter` key (inside the `app` doc) the data
+    /// engine's pricer was actually chosen from at startup (line-pricer
+    /// §5.5, `crates/geode-app/src/bridge.rs::data_setup`) — same purpose
+    /// and lifecycle as [`sources_baseline`](Self::sources_baseline),
+    /// never re-seeded on reload. A reload whose `adapter` key no longer
+    /// matches this needs a restart, on the same terms `sources`/
+    /// `datasets` already follow. Narrowed to just this key (not the
+    /// whole `[pricing]` table) because `refresh` is a live sheet setting
+    /// (Part 3) the frame picks up without a restart — only the adapter
+    /// choice is baked into the running data engine.
     pricing_baseline: Option<toml::Value>,
     /// Every column a dimension picker can open (Phase 4a §3.3),
     /// [`pickable_columns`] over the current config — computed once at
@@ -1527,10 +1530,10 @@ impl ShellView {
         // `sources_baseline`'s field doc.
         let sources_baseline = services.config.layered_docs("sources").to_vec();
         let datasets_baseline = services.config.layered_docs("datasets").to_vec();
-        // Same reasoning, for the `[pricing]` table the data engine's
-        // pricer was chosen from (line-pricer §5.5) — see
+        // Same reasoning, for the `[pricing] adapter` key the data
+        // engine's pricer was chosen from (line-pricer §5.5) — see
         // `pricing_baseline`'s field doc.
-        let pricing_baseline = services.config.get("app", "pricing").cloned();
+        let pricing_baseline = services.config.get("app", "pricing.adapter").cloned();
         // The dimension pickers' column list (Phase 4a §3.3) — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);

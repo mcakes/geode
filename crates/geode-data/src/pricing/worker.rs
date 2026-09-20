@@ -148,7 +148,14 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: PricerConfig, sink: PriceSin
                 }));
                 match outcome {
                     Ok(Ok(())) => None,
-                    Ok(Err(e)) => Some(format!("overrides refused: {}", e.0)),
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            target: "geode::pricing",
+                            "overrides refused for key {} tag {}: {}",
+                            params.key.0, params.tag, e.0
+                        );
+                        Some(format!("overrides refused: {}", e.0))
+                    }
                     Err(payload) => {
                         let message = panic_message(&payload);
                         tracing::warn!(
