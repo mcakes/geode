@@ -41,6 +41,11 @@ geode-blotter = { path = "../geode-blotter" }
 # panel spec, built beside the blotter's in `bridge::start` because it
 # needs the same `DataHandle`.
 geode-marketdata = { path = "../geode-marketdata" }
+# The timeseries viewer (timeseries spec §9): one roster factory, built
+# beside the blotter's and the panels' in `bridge::start` for the same
+# reason — it asks for its series through the same `DataHandle`, and the
+# reload handler needs a clone to hand it a reparsed `colours` doc.
+geode-timeseries.workspace = true
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-demo-data = { path = "../geode-demo-data" }
 # The demo bus (`src/demo_bus.rs`, market-data-documents plan Task 10)

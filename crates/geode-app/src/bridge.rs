@@ -253,6 +253,13 @@ pub struct Bridge {
     /// `marketdata` above ships the fragment; this one still registers
     /// its own actions and reads its own reloaded `stale_after`.
     pub dividend: Rc<MarketDataFactory>,
+    /// The timeseries viewer's factory (timeseries spec §9.1), built
+    /// here for the same two reasons the others are: it asks for its
+    /// series through this bridge's `DataHandle`, and `attach`'s reload
+    /// handler needs a clone of it to hand every open tile the reparsed
+    /// `colours` doc (the chart's slot palette resolves named colours
+    /// exactly as the blotter's cells do).
+    pub timeseries: Rc<geode_timeseries::content::TimeseriesFactory>,
     events: async_channel::Receiver<DataEvent>,
     dropped: Arc<AtomicU64>,
     /// The sources the running service was actually built from (Phase 4b
@@ -302,6 +309,14 @@ pub fn start(
     let sources = source_shapes(&setup.config.sources, &schema);
     let local_datasets = Rc::new(setup.local_datasets);
     let handle = DataService::spawn(setup.config, sink);
+    // Cloned BEFORE `setup.colours` moves into the blotter's factory two
+    // statements down: both readers hold the same startup definitions,
+    // and `attach`'s `ConfigReloaded` arm hands both the same reparsed
+    // set afterwards.
+    let timeseries = Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+        handle.clone(),
+        setup.colours.clone(),
+    ));
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
         setup.views,
@@ -326,6 +341,7 @@ pub fn start(
         dividend: Rc::new(
             MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after).without_keymap(),
         ),
+        timeseries,
         handle,
         factory,
         events: rx,
@@ -345,6 +361,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let factory = bridge.factory.clone();
     let marketdata = bridge.marketdata.clone();
     let dividend = bridge.dividend.clone();
+    let timeseries = bridge.timeseries.clone();
 
     let shell = window
         .read(cx)
@@ -438,6 +455,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let factory = factory.clone();
         let marketdata = marketdata.clone();
         let dividend = dividend.clone();
+        let timeseries = timeseries.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
@@ -486,6 +504,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 for d in &colour_diags {
                     tracing::warn!(target: "geode::query", "{d}");
                 }
+                // Both readers of the `colours` doc, from the one parse:
+                // the blotter's cells and the timeseries chart's slot
+                // palette resolve named colours through the same
+                // `NamedColours`, and a reload that reached only one of
+                // them would leave a redefined colour painting stale in
+                // the other for the rest of the session.
+                timeseries.set_colours(colours.clone());
                 factory.set_colours(colours);
                 let (dims, _) = config
                     .doc("dimensions")
@@ -1331,6 +1356,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -1447,6 +1476,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -1517,6 +1550,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -1643,6 +1680,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -1705,6 +1746,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -1765,6 +1810,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -1839,6 +1888,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -1917,6 +1970,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -1985,6 +2042,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory: factory.clone(),
             events: rx,
@@ -2047,6 +2108,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -2147,6 +2212,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -2219,6 +2288,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -2319,6 +2392,10 @@ role = "key"
                 MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
                     .without_keymap(),
             ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
             handle,
             factory,
             events: rx,
@@ -2604,6 +2681,43 @@ role = "key"
             geode_blotter::tile::DEFAULT_STALE_AFTER,
             "an unparsable value falls back rather than panicking"
         );
+    }
+
+    /// Task 11 (timeseries spec §9.1): `start` builds the timeseries
+    /// viewer's factory beside the blotter's and the two panels', from
+    /// the same `DataHandle` and the same startup `colours` — and that
+    /// ordering is load-bearing in one small way the compiler cannot
+    /// state, since `setup.colours` MOVES into the blotter's factory a
+    /// few lines down and the clone has to be taken before it.
+    ///
+    /// The factory's own `kind()` is what `register_add_actions` titles
+    /// the "Timeseries: Split" palette row from and what a session
+    /// record names to be restored into this module rather than a
+    /// placeholder, so it is asserted here as well as on the roster.
+    #[gpui::test]
+    fn start_builds_a_timeseries_factory_beside_the_blotters(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: crate::demo::layer(&dir.path().join("src")),
+            ..ConfigSources::default()
+        });
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
+        let setup = data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            AdapterRegistry::default(),
+            pricers,
+        )
+        .expect("the demo layer declares datasets and views");
+        let bridge =
+            cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        assert_eq!(bridge.timeseries.kind(), "timeseries");
+        // The neighbours, so a future edit that swaps one factory for
+        // another is caught here rather than at a painted tile.
+        assert_eq!(bridge.factory.kind(), "blotter");
+        assert_eq!(bridge.marketdata.kind(), "cvi");
+        assert_eq!(bridge.dividend.kind(), "dividend");
     }
 
     #[test]

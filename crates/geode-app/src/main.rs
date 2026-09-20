@@ -119,6 +119,15 @@ fn main() {
             // ruling 2026-09-14), so it owes the same reclaim; binding the
             // same keys to `NoAction` twice is harmless.
             geode_marketdata::init(cx);
+            // The timeseries tile hosts no `DataTable`, but its range
+            // popup owns the keyboard across two segmented date fields
+            // and `tab` is how a trader moves between them (timeseries
+            // spec §9.8) — so it owes the same `NoAction` reclaim of
+            // `Root`'s focus cycling, scoped to the popup's own key
+            // context. (The shell root's own `GeodeShell` reclaim is
+            // what gets `tab` as far as a focused TILE at all; this one
+            // is the popup's, at its own depth.)
+            geode_timeseries::init(cx);
 
             // The demo bus's adapter (market-data-documents plan, Task
             // 10): registered only under `--demo`, since it is the
@@ -625,6 +634,48 @@ impl ModuleFactory for MarketDataFactoryHandle {
     }
 }
 
+/// Same shape as [`BlotterFactoryHandle`], for the timeseries viewer's
+/// factory (timeseries spec §9.1): the bridge's reload handler holds a
+/// clone for `set_colours`, so the roster gets a forwarder rather than
+/// the factory itself.
+///
+/// **Every defaulted trait method is forwarded**, for the reason
+/// [`BlotterFactoryHandle::contexts`] gives — `contexts()` included,
+/// even though this factory's kind and its key context are the same word
+/// (`timeseries`) and the trait default would therefore answer
+/// correctly today. A wrapper that forwards some methods and inherits
+/// others is a wrapper that lies the moment the wrapped factory changes
+/// one of them, and `MarketDataFactoryHandle` is what that failure looks
+/// like when it happens.
+struct TimeseriesFactoryHandle(Rc<geode_timeseries::content::TimeseriesFactory>);
+
+impl ModuleFactory for TimeseriesFactoryHandle {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    fn register_actions(&self, registry: &mut ActionRegistry) {
+        self.0.register_actions(registry)
+    }
+    fn contexts(&self) -> Vec<&'static str> {
+        self.0.contexts()
+    }
+    fn default_keymap(&self) -> Option<&'static str> {
+        self.0.default_keymap()
+    }
+    fn create(
+        &self,
+        tile: TileId,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> TileOccupant {
+        self.0
+            .create(tile, restored, frame, diagnostics, window, cx)
+    }
+}
+
 /// Same shape as [`BlotterFactoryHandle`], for the diagnostics factory:
 /// `main`'s config-reload subscription (set up once a window exists, in
 /// the `cx.spawn` block below) also holds a clone, for `set_config`.
@@ -813,6 +864,12 @@ fn build_shell_services(
         // defaulted trait method is, per `MarketDataFactoryHandle`'s own
         // doc comment) and simply answers `None` for this one.
         roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
+        // The timeseries viewer (timeseries spec §9), on the same
+        // condition and for the same reason as every module above: it
+        // fetches and queries its series through the bridge's
+        // `DataHandle`, so with no bridge there is nothing for it to ask
+        // and the palette lists no "Timeseries: Split" row either.
+        roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
         bridge
     });
 
@@ -1050,6 +1107,56 @@ mod tests {
                 .is_some(),
             "the cvi kind keeps its own row"
         );
+    }
+
+    /// Task 11 (timeseries spec §9): the roster carries the timeseries
+    /// viewer's factory through `TimeseriesFactoryHandle`, exactly as
+    /// `run` wires it beside the blotter's and the two panels' — so
+    /// `register_add_actions` lists a "Timeseries: Split" row for it
+    /// (`register_add_actions`'s own `"{Kind}: Split"` pattern, user
+    /// ruling 2026-09-09) and the module's own actions are registered
+    /// through the forwarder rather than being silently dropped by a
+    /// wrapper that answered the trait's defaults.
+    ///
+    /// `timeseries::add` is the one asserted by name because it is the
+    /// action the tile's own `DEFAULT_KEYMAP` binds `a` to: a forwarder
+    /// whose `register_actions` did not reach the factory would leave
+    /// every one of the fragment's bindings pointing at nothing, and
+    /// `build_keymap` drops such a binding without a word.
+    #[test]
+    fn the_roster_lists_timeseries_and_registers_its_add_action() {
+        use geode_data::DataHandle;
+        use geode_shell::actions::ActionId;
+
+        let mut roster = ModuleRoster::new();
+        let (data, _rx) = DataHandle::for_tests();
+        roster.add(Box::new(TimeseriesFactoryHandle(Rc::new(
+            geode_timeseries::content::TimeseriesFactory::new(data, Default::default()),
+        ))));
+        assert!(roster.kinds().contains(&"timeseries"));
+
+        let mut registry = ActionRegistry::default();
+        register_add_actions(&mut registry, &roster.kinds());
+        roster.register_actions(&mut registry);
+        assert_eq!(
+            registry
+                .get(&ActionId("tile::add_timeseries".to_string()))
+                .expect("the timeseries kind gets an add-tile row")
+                .title,
+            "Timeseries: Split"
+        );
+        assert!(
+            registry
+                .get(&ActionId("timeseries::add".to_string()))
+                .is_some(),
+            "the forwarder's `register_actions` reaches the factory"
+        );
+        // And its keymap fragment: `contexts()` is forwarded, so
+        // `check_fragment` accepts a binding into `timeseries`.
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].file.to_string_lossy(), "<module:timeseries>");
     }
 
     /// Phase 4b Task 2's migration invariant, kept true rather than

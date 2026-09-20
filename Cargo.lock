@@ -2503,6 +2503,7 @@ dependencies = [
  "geode-marketdata",
  "geode-pricing",
  "geode-shell",
+ "geode-timeseries",
  "gpui-base",
  "gpui-component",
  "gpui-component-macros",
