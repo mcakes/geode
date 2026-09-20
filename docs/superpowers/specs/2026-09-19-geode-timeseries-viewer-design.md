@@ -47,7 +47,14 @@ crate, the module.
 2. A series query over one million cached rows returns under 50 ms;
    decimating 500,000 points to pixel columns and rebuilding the paths
    takes under 2 ms; a frame with nothing changed allocates nothing
-   in the chart element.
+   in the chart element. **As built (Part 3): the last clause is too
+   strong and §8.5 restates it.** An unchanged frame REBUILDS nothing
+   — no decimation, no tessellation, no `xs` refill, no chrome
+   derivation — but the pinned `Window::paint_path` takes its path by
+   value, so a cache HIT still clones and translates it: one vertex
+   `Vec` per painted path, bounded by the decimated point count, plus
+   the chrome `Vec`s the component's own painters take. Both are the
+   pinned API's price and neither is O(the data).
 3. A corrected value for an existing `ts` wins live and loses under an
    as-of set before its `received_at`; an overlapping refetch does not
    grow the table; a tile restored from `session.toml` refetches once
@@ -893,7 +900,8 @@ bounds)`, then that slot's percentile lines as dashed segment paths
 (gpui's `PathBuilder` has no dash style; `DASH` design px on, `GAP`
 off, one path per line), then the pane's density bars as `paint_quad`
 (at most `bins × slots`, a few hundred, under the spike's 5,000-quad
-cliff). Then, once, the shared x-axis under the lowest pane and the
+cliff — as built, capped at `MAX_DENSITY_QUADS` = 2,000 per frame,
+§8.5). Then, once, the shared x-axis under the lowest pane and the
 crosshair, which spans both panes at one x with the readout listing
 every visible slot from either pane, through the component's
 tooltip. Labels `p5 p50 p95` are painted at the right end of each
@@ -901,14 +909,274 @@ line in the slot's colour through `prepaint`'s child elements. A
 slot's percentiles and bins are drawn in its own pane against its
 own axis.
 
-A frame with an unchanged key pushes cached paths and allocates
-nothing; the cache invalidates on model version, view or bounds.
+A frame with an unchanged key pushes cached paths and rebuilds
+nothing on the data path (as built: one `Path` clone per painted path
+per frame is the pinned `paint_path` API's price, §8.5); the cache
+invalidates on model version, view or bounds.
 
 ### 8.4 Budget
 
 A criterion bench, `geode-chart/benches/decimate.rs`: 500,000 points
 into 1,600 columns, target under 2 ms including the path rebuild.
 Numbers into `docs/perf.md`.
+
+### 8.5 As built (Part 3)
+
+Part 3 (the `geode-chart` crate) is built; §9–§10 are not. Where the
+code differs from §8 above, the code is the specification now. The
+crate depends on `geode-core`, `gpui`, `gpui-component` and `chrono`
+and nothing else — `geode-shell` appears under `[dev-dependencies]`
+alone, for the bundled-theme sweep.
+
+Built as written: `LinearScale` (1-2-5 nice ticks, `DOMAIN_PAD` either
+side of a domain), the two `TimeScale` modes, `Layout::solve` with its
+per-side axis columns, density strip, `PANE_GAP` and clamped `split`,
+`decimate`'s min-max per pixel column with a `Point::BREAK` at a `NaN`
+run, `View` with clamped pan/zoom/reset, the floored `Palette`, one
+`ChartElement` implementing gpui-component's `Plot` with cached paths,
+dashed percentile lines, density quads, one shared x axis and the
+crosshair readout, the criterion bench and the example window.
+
+- **`Crosshair::at(cursor_x, scale, view, plot)` replaces §8.1's
+  `(cursor_x, scale, buckets)`.** The nearest bucket is a question
+  about PIXELS, so it needs the same three things `x_of` needs — the
+  scale, the visible window and the rect the window is mapped into —
+  and the buckets reach it through the scale. It binary-searches the
+  first visible centre at or past the cursor and compares with its
+  predecessor.
+- **Paint is batched BY KIND within a pane, not per slot (amends
+  §8.3).** §8.3 reads "per visible slot on that pane the polyline,
+  then that slot's percentile lines, then the bars"; the element
+  paints the grid, the axes, then ALL the polylines, ALL the
+  percentile paths, one `PlotLabel` carrying every tag, and then all
+  the bars. That is two cache `update`s and one label batch per pane
+  instead of three per slot, at the price of a z-order where every
+  line sits under every percentile rule — deliberate, and the reason
+  a percentile reads as chrome over the data rather than as part of
+  one slot.
+
+- **`Palette::from_theme(chart, background, foreground)` replaces
+  §8.1's `default_for(slot, theme_chart, background)`.** The floor is
+  `geode_core::colour::readable_on`, which needs the direction to move
+  a faint colour in; the cycling is `Palette::colour(index)`. The
+  sweep (`every_bundled_themes_palette_is_readable`, 220 checks over
+  44 themes, no exception list) passes with no theme needing a manual
+  exception.
+- **Two constants join §8's list: `X_AXIS_HEIGHT` = 18 and
+  `Y_TICK_GAP` = 40 design px.** The first is gpui-component's own
+  `AXIS_GAP`, so our x labels sit where the component's charts put
+  theirs; the second is the minimum vertical distance between two y
+  ticks, which is how a pane's tick count is derived from its height.
+  `DESIGN_REM` = 12 is a literal mirroring `geode_shell::shell::scale`
+  (the crate must not depend on the shell) and is pinned to that value
+  by a test; every length resolves through `core::design_px`.
+- **The tick chooser is four explicit rules with `MIN_TICKS` = 3, plus
+  a resolution floor (amends §8.2's "at least `TICK_GAP` apart").**
+  §8.2's single rule picks `Day` for a day of minute bars — two
+  candidates 380 px apart — and paints two ticks where a trader wants
+  hours. The chooser now takes, in order: (1) the FINEST unit with
+  `MIN_TICKS` candidates whose minimum gap already clears
+  `tick_gap_px`, unthinned; (2) else the COARSEST unit that still
+  keeps `MIN_TICKS` once thinned by `k = ceil(tick_gap / min_gap)`;
+  (3) else the FINEST unit with two candidates, thinned; (4) else one
+  `Day`-labelled tick on the first visible bucket. Emission keeps an
+  `x <= last_x` guard so x strictly increases however coarse the plot.
+  Above all four sits `resolution_floor`: no unit FINER than the
+  data's own step is offered at all, because on daily sessions every
+  bucket is also a new minute and a new hour, so the three units offer
+  the SAME candidates and only the coarsest one's label names what
+  changed. The floor is the coarsest unit whose length the step fills
+  (`step_us` under `Continuous`, the smallest positive delta between
+  consecutive visible buckets under `Session`) — 5-minute bars still
+  floor at `Minute`, so a zoomed view is not left tickless. Under
+  `Continuous` a unit with more than `MAX_CANDIDATES` = 4,096
+  boundaries in the view is skipped as unfittable.
+- **The `Axis` vocabulary lives here, in `geode_chart::core::axis`
+  (clarifies §9.2).** `Axis::{Left, Right, BottomLeft, BottomRight}`
+  with `pane()`/`side()`/`next()`/`prev()`/`as_str()`/`letter()`/
+  `parse`, plus `Pane`, `Side` and `AxisMode::{Session, Continuous}`
+  (whose wire spellings are `session`/`time`, §9.9's `:axis`), all
+  re-exported from the crate root. §9.2's module imports them rather
+  than declaring its own: the element dispatches on them, so a second
+  copy would be two vocabularies for one thing.
+- **Percentile tags are painted through `PlotLabel` in `paint`, not
+  `prepaint`'s child elements (amends §8.3).** One `PlotLabel` per
+  pane carrying every visible slot's tags, right-aligned at
+  `plot.right() - TAG_INSET` (width-independent, so `p99.5` does not
+  overflow the fixed allowance §8.3 assumed).
+- **Each pane's data painting is CLIPPED to its own rect
+  (`Window::with_content_mask`).** The element's own mask is the whole
+  element, so without this a polyline paints over the left y-axis
+  column: a path is built from the visible buckets' CENTRES, and the
+  first visible bucket's centre can sit up to half a bucket left of
+  `view.lo` — at the zoom floor (`View::MIN_SPAN` = 2 buckets) a
+  quarter of the plot's width, not a hairline. One mask per pane
+  covers the polylines, the percentile paths and the tag `PlotLabel`
+  (the plot rect); a second covers the density bars (the STRIP rect,
+  which is a column beside the plot, not inside it, so the plot's own
+  mask would erase them). `with_content_mask` intersects with the mask
+  in force, so it can only ever narrow. This is unpinned by the
+  harness: a content mask is not observable in a `TestAppContext`.
+- **An out-of-pane percentile line is SKIPPED, line and tag together.**
+  A percentile is computed over the QUERY window while its pane's
+  domain comes from the VISIBLE slice, so a zoom into a quiet stretch
+  can put p5 or p95 outside the pane. The mask above would now clip
+  such a line, but the skip stands on its own and stays: a level the
+  pane's domain does not contain has no business being BUILT, and the
+  skip happens BEFORE the cache `get`, which is what makes "never
+  built" mean "never painted" and is the half the harness can see.
+  Clamping instead would park the line on the pane's edge and read as
+  a real level at that value. The density bars keep their clamp: a
+  clipped bar still reads as "the tail continues past here"; a
+  horizontal rule at a value does not. A percentile TAG whose lift
+  would leave the pane is placed below its line (`TAG_DROP` = 2)
+  instead of above (`TAG_LIFT` = 11) — at the top of the lower pane it
+  used to print into `PANE_GAP` and the upper pane, and under the mask
+  it would simply be cut in half.
+- **At most `MAX_DENSITY_QUADS` = 2,000 density bars per FRAME.** A bar
+  is one uncached `paint_quad` and nothing in the model bounds the
+  product: `geode_core::series::MAX_BINS` is 200 and a tile may hold
+  many slots, so nine density slots are ~1,800 quads every frame
+  against a spike that disqualified per-cell quads past about 5,000
+  and measured 10,000 at 42 ms
+  (`docs/superpowers/spikes/2026-08-29-gpui-chart-rendering-spike.md`)
+  — §8.3's "at most `bins × slots`, a few hundred" was wrong by an
+  order. The element counts the bars it paints across BOTH panes and
+  stops at the bound, per pane in slot order, so a tile with more
+  density slots than fit paints the first ones and drops the rest of
+  that frame. **Part 4 owns the slot count**: the bound is the render
+  thread's backstop, not a presentation rule, and a module that lets a
+  trader turn density on for a dozen slots should say so in its own
+  vocabulary rather than let bars silently vanish.
+  `element::density_quads()` is the thread-local counter, beside
+  `rebuilds()`/`chrome_rebuilds()`, and
+  `a_frame_paints_at_most_the_density_bound` pins both directions.
+- **`ChartElement::new`'s `ElementId` must be unique among the charts
+  in one window.** Every scrap of cross-frame state hangs off it — the
+  reused `Buffers` and both sets of `PathCaches` live under the
+  element's `GlobalElementId`, which `Plot` takes straight from this id
+  — so two charts sharing an id share one chrome key (thrashing between
+  their models every frame) and one set of path caches, where two
+  models that agree on `(version, slot.number, pane, view, plot rect)`
+  serve each other's paths and paint the wrong line with every
+  assertion still green. **Part 4 passes the tile's own `TileId`**,
+  never a literal; the example and the test hosts pass `"chart"`
+  because each has exactly one.
+- **Two caches. The paths' keys are `(model.version, slot.number,
+  pane, view.key())` plus the plot rect's `x`, `y`, `w`, `h` — and for
+  a percentile `(model.version, slot.number, percentile index)` plus
+  its own `y` and the plot's `x` and `w`. The chrome's is
+  `(model.version, view.key(), offset_secs, buckets.len())` plus the
+  bounds width, the bounds height and the rem.** Neither PATH key
+  carries a rem or a bounds term of its own: the rem reaches them
+  through the plot rect the layout solved with it. Neither key of
+  either kind carries `axis_mode` or `step_us`, which is the whole of
+  the version-bump contract below. The paths sit behind
+  gpui-component's own `PathCache`; the chrome — the four sides'
+  `LinearScale`s, each a scan of every visible value on that side,
+  their y ticks and the tick LABELS, and the x ticks — sits behind
+  `chrome_key` in the element's own `Buffers`. Without the second one a steady frame re-ran up to four
+  full scans of every visible value (≈2M comparisons at the
+  500,000-point cap), computed each pane's y ticks three times and
+  allocated a `String` per y tick per axis, all invisible to the path
+  counter. `element::rebuilds()` counts path misses and
+  `element::chrome_rebuilds()` chrome derivations; both are
+  thread-local `Cell`s, not process-wide atomics, because two
+  `#[gpui::test]`s paint on their own threads in parallel and an
+  atomic folds one's frames into the other's delta at random.
+  `an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds` is
+  the test that pins both.
+- **An unchanged frame REBUILDS nothing; it does not allocate
+  nothing.** What the two caches buy is that no work proportional to
+  the data runs again: no `xs` refill, no decimation, no
+  tessellation, no `core::time::ticks`, no scan of the values, no tick
+  label. `rebuilds()`/`chrome_rebuilds()` pin exactly that claim and
+  nothing wider. Two allocation classes remain on every frame, and
+  both are the pinned API's price. (1) `Window::paint_path` takes its
+  path BY VALUE, so `PathCache::get` clones and translates the cached
+  path on every call, hit or miss (registry `plot/path_cache.rs`) —
+  one vertex `Vec` and one walk of its vertices per painted path,
+  bounded by the DECIMATED point count (two per pixel column, so
+  ~3,200 for a maximised plot) rather than by the 500,000-point cap.
+  There is no fix short of forking the component. (2) The chrome the
+  component's own painters take: `Grid` takes its lines as `Vec`s,
+  `PlotAxis` and `PlotLabel` each collect a small `Vec`, and the
+  tooltip builds `SharedString`s while the cursor is over the plot —
+  each bounded by the TICK count, and the same cost every chart
+  gpui-component ships pays.
+- **`ChartModel` carries `version`, `step_us`, `offset_secs` and
+  per-slot `percentile_labels` (clarifies §8.3).** `version` is the
+  first component of every cache key, and **the module must bump it on
+  ANY change to the model** — including a flip of `axis_mode` or
+  `step_us`, which the keys read THROUGH the model but do not carry as
+  terms of their own. `step_us` is the display bucket's width (the
+  frequency) and `offset_secs` the trader's local offset, applied to
+  every displayed time (Phase 4a's ruling); `percentile_labels` is
+  parallel to `percentiles` and pre-formatted by
+  `ChartModel::percentile_label`, so nothing formats a tag per frame.
+  `layout_options` reserves an axis column per side a VISIBLE slot
+  uses and the density strip only while a visible slot HAS bins.
+- **Registry corrections worth knowing (they are not in §8.3).**
+  `PlotAxis::new()` leaves `y_axis` FALSE, so a y axis needs
+  `.y_axis(true)` or the stroke it is handed paints nothing;
+  `Grid::x`/`y` take a `Vec`, and `Grid::paint(&bounds, window)` takes
+  no `cx` (unlike `PlotAxis::paint`); there is no
+  `From<(&'static str, ElementId)>`, so the per-pane cache keys are
+  `(&'static str, usize)`; `Buffers` and `PathCaches` are both
+  entities and their `update`s cannot nest, so the buffers are
+  `mem::take`n once at the top of `paint` and put back once at the
+  bottom.
+- **Known limits, none of them pinned.** `MAX_PERCENTILES` = 8
+  silently truncates a ninth percentile line, and a
+  `percentile_labels` shorter than `percentiles` silently drops the
+  tail; a slot whose side scale is `None` (every visible value `NaN`)
+  paints nothing and says so nowhere; a polyline still OVERHANGS its
+  plot by up to half a bucket and is clipped rather than shortened, so
+  the leading segment ends at the plot's edge mid-slope; and the
+  session resolution floor derives from the VISIBLE window, so monthly
+  buckets could in principle relabel on a zoom (unreachable from the
+  frequencies §4 offers).
+
+**Budget (§8.4).** `cargo bench -p geode-chart`, 500,000 points into
+1,600 columns with a `NaN` every 5,000, on the `bench` profile:
+decimation alone **0.847 ms**, decimation plus the `PathBuilder`
+rebuild **1.513 ms** — §8.4's 2 ms holds, with 0.49 ms of headroom and
+criterion's own upper bound for that row at 1.58 ms. That is the price
+of a cache MISS, once per visible slot, on the frame after a
+pan/zoom/resize/delivery; a hit pays neither half. `docs/perf.md` holds
+the conditions and says plainly that the cache, not the margin, is what
+makes it safe.
+
+**Harness.** Eighteen `chart:` entries (§11.2's two plus sixteen),
+every one verified `caught` by the test it names. Four of them mutate a
+CACHE KEY rather than a calculation, because a key missing a term does
+not fail — it serves last frame's path with every assertion about this
+frame still green; the eighteenth mutates the density bound, which
+likewise changes no painted pixel, only how many of them there are.
+
+**What is pixel-unverified: everything painted.** The implementation
+sandbox has no window, so the harness can see that nothing panics and
+that the caches do their job, and nothing else — a painted `text_color`
+is unobservable in a `TestAppContext`, the same limit the market-data
+panel records. `cargo run -p geode-chart --example chart` is the
+display check (two panes, `s3` on the lower left, density on, three
+percentiles per slot, a `NaN` gap every 97 buckets, 2,000 one-minute
+buckets over five 400-bar days; `h`/`l` pan, `=`/`-` zoom, `0` reset —
+the example's own keys, not Part 4's). What to look at, from the
+reviews: that the y-axis labels land inside their 44 px column and the
+x labels sit centred in the 18 px strip without colliding at the plot's
+edges; that the grid's dashes read as a grid rather than noise; that a
+percentile tag at `plot.right() - 2` does not sit on the right axis's
+own tick labels; that a density bar at 45% fill is distinguishable from
+the polyline of the same colour, and that two slots sharing a strip do
+not simply obscure one another (they overdraw by design); that the
+crosshair spans both panes, stops at the x axis, and that the tooltip
+flips near an edge; that three theme chart colours are actually
+separable on the default theme; and — the content mask, which no test
+can see — that at the zoom floor (`=` held down) a polyline stops
+cleanly at the plot's left and right edges instead of running over the
+y-axis column, and that a percentile tag at the very top of the lower
+pane sits below its line rather than half-cut in `PANE_GAP`.
 
 ## 9. The module (`geode-timeseries`)
 

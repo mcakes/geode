@@ -446,7 +446,8 @@ fn main() {
 /// MIN-7 (fix round 1): that date is `tracing-appender`'s own clock,
 /// which is UTC (`OffsetDateTime::now_utc`) — unlike every *displayed*
 /// time in this app (Phase 4a's ruling: "times are the trader's local
-/// clock throughout"), the log file's name is not local. West of UTC,
+/// clock throughout" — as originally worded; now the configured clock,
+/// `[time] zone`), the log file's name is not local. West of UTC,
 /// `geode.2026-09-08.log` can hold the evening of the 7th, local.
 /// `trim_log_files`'s seven-file cap still sorts and counts correctly
 /// (the names are still in age order relative to each other), only the

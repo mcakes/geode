@@ -1626,3 +1626,82 @@ and quadratic for a batch (one full reprice of a 1,200-row sheet
 measured 3.37 ms that way against 175 µs here). Part 3's
 `Delivery::Price` arm calls `deliver_all`; `deliver` stays the
 single-result form.
+## Timeseries chart (spec §8, Part 3)
+
+What one **cache miss** costs the render thread in `geode-chart`: the
+two halves of turning a slot's values into a painted polyline —
+min-max decimation (`core::decimate`), and decimation plus the path
+rebuild through `gpui::PathBuilder`, which is lyon tessellating the
+decimated points into the vertex buffer a frame submits. Spec §8.4
+names the shape and the budget: 500,000 points — the series query's own
+point cap — decimated into 1,600 columns, the width of a maximised plot
+on a 4K screen, with a `NaN` hole every 5,000 points so the polyline
+breaks like a real one. Under 2 ms for the second is the contract.
+
+A cache **hit** costs neither. Both halves sit behind gpui-component's
+`PathCache`, keyed on `(model.version, slot.number, pane, view)` plus
+the pane's plot rect, so a repaint of an unchanged chart never runs
+either of them (`geode_chart::rebuilds()` is the counter a test reads).
+A hit is not free, though: `Window::paint_path` takes its path BY
+VALUE, so `PathCache::get` clones the cached path and walks its
+vertices to translate it on every call, hit or miss — O(the DECIMATED
+points), about 3,200 per slot at the shape below, against the 500,000
+the miss reads. The numbers in the table are the price of the frame
+after a pan, a zoom, a resize or a delivery — once per visible slot —
+and nothing else.
+
+**Bench** (`cargo bench -p geode-chart`, criterion medians, the `bench`
+profile — `--release` plus debug symbols — on an Apple M5 Pro):
+
+| Benchmark | Result |
+|---|---|
+| `decimate/500k_into_1600` (decimation alone, into a reused buffer) | 847 µs |
+| `decimate_and_path/500k_into_1600` (the same decimation plus the `PathBuilder` rebuild of its ~3,200 points) | 1.51 ms |
+
+**§8.4's 2 ms holds**, at 1.51 ms — but with under half a millisecond
+of headroom, and criterion's own upper bound for that row is 1.58 ms.
+Two thirds of the budget is decimation, which is a linear scan of half
+a million `f64`s; the tessellation of what comes out of it is the
+cheaper half (about 660 µs). The honest reading is that the miss is
+inside budget at the widest shape the spec names and is not comfortable
+there: a slot near the cap that misses the cache on every frame of a
+drag would spend most of a 60 Hz frame in this path, and three of them
+would not fit. What makes it safe in practice is the cache, not the
+margin — a pan invalidates the key once per gesture step, not per
+slot-per-frame — and the first lever if it ever bites is the visible
+slice (the element already decimates only `visible`, so a zoomed chart
+pays for a fraction of the 500,000).
+
+**What is NOT measured here: a painted frame.** The implementation
+sandbox has no window, so every number above is CPU work measured
+headless — `PathBuilder::build` tessellates without a GPU, which is why
+the second row is measurable at all. The cost of submitting those
+vertices, of the quads and the labels, and of the whole element's
+`prepaint`/`paint` is unmeasured and belongs to the display check
+(`cargo run -p geode-chart --example chart`, the example kept for
+exactly that).
+
+**The per-frame allocation exception.** PHILOSOPHY's "per-frame heap
+churn is a defect" is met on the REBUILD — the `xs` buffer and the
+decimated points are element-owned and reused, the paths and the chrome
+derivation are cached, and a frame that changed nothing moves neither
+`rebuilds()` nor `chrome_rebuilds()` — but not on the frame's own
+submission, where two classes allocate every time and both are the
+pinned API's price rather than a choice. First, the path clone above:
+one vertex `Vec` per painted path per frame, bounded by the decimated
+point count. Second, the chrome the component's own painters take:
+`Grid` takes its lines as `Vec`s and `PlotAxis`/`PlotLabel` each
+collect a small `Vec`, bounded by the tick count (tens). Neither is
+O(the data) and neither is forked; what IS O(the data) — the
+decimation, the tessellation, the side scales, the ticks and their
+formatted labels — is what the two caches keep off an unchanged frame.
+
+**Density bars are bounded, not cached.** A bar is one `paint_quad`
+with nothing behind it, and the 2026-08-29 rendering spike disqualified
+per-cell `paint_quad` past about 5,000 quads (10,000 cost 42 ms). The
+model bounds nothing — `MAX_BINS` is 200 and a tile may hold many
+slots — so the element counts the bars it paints across both panes and
+stops at `MAX_DENSITY_QUADS` = 2,000 per frame, in slot order
+(`geode_chart::density_quads()` is the counter;
+`a_frame_paints_at_most_the_density_bound` pins it). Unmeasured on a
+real window, like everything else painted here.
