@@ -3,11 +3,14 @@
 //! it escapes the tile's own clip and paints above neighbouring tiles —
 //! instant, no animation, Geode's own chrome rather than a gpui-component
 //! `Dialog` or `Popover`. `Popup::Menu` is Task 6's variant; `Popup::Picker`
-//! (Task 7, spec §7) is the underlying picker `u` and the menu row open.
+//! (Task 7, spec §7) is the underlying picker `u` and the menu row open;
+//! `Popup::Choice` (dividend spec §4.4) is a `Choice` cell's typeahead,
+//! the picker's shape hung under the cell it edits.
 //! [`PickerRows`] is the picker's pure half, tested below without a window.
 
 use crate::core::menu::MenuRow;
 use crate::tile::MarketDataTile;
+use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{
@@ -16,6 +19,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
+use std::rc::Rc;
 
 /// A menu row's height, in pixels at the design rem — gpui-component's
 /// own `PopupMenu` item height at its default size, so this popup keeps
@@ -47,10 +51,116 @@ use std::collections::BTreeMap;
 /// §6.1); `Picker` is the underlying picker (spec §7) — its `input`
 /// HOLDS the keyboard, which is what makes `key_context()` report
 /// `mode == insert` while it is open rather than a third mode of its
-/// own.
+/// own; `Choice` is a `Choice` cell's typeahead (dividend spec §4.4),
+/// whose field holds the keyboard exactly as the picker's does.
 pub(crate) enum Popup {
     Menu(MenuState),
     Picker(PickerState),
+    Choice(ChoicePopup),
+}
+
+/// A `Choice` cell's typeahead (dividend spec §4.4): the picker's shape —
+/// a field that HOLDS the keyboard over a ranked list — opened by
+/// `i`/`enter`/a double-click on a cell whose column declares a fixed
+/// vocabulary, placed on the cell's current value, and hung UNDER that
+/// cell rather than off the header (spec §3.4: "anchored at the cell").
+///
+/// The list is [`geode_shell::choice::ChoiceList`] directly rather than
+/// [`PickerRows`]: the options are a column's `&'static [&'static str]`,
+/// so every row label is a static `SharedString` (no marks, no catalog
+/// to swap) and the picker's label preparation has nothing to do here.
+///
+/// `cell`/`labels` are the cell it opened on and that cell's labels at
+/// the time — `EditTarget::Cell`'s own identity pair, checked by
+/// `commit_cell_value` at the pick so a document that moved under the
+/// popup refuses rather than writing to whatever cell now sits there.
+///
+/// `paint` is the delegate's paint-time COPY of the rows (the cursor
+/// and editor mirrors' own rule): the popup is painted from
+/// `MatrixDelegate::render_td`, inside the cell it hangs under, and the
+/// delegate never reads the tile — so [`Self::prepare`] re-prepares this
+/// `Rc` on every change to the list (a keystroke, an arrow, a hover) and
+/// the tile mirrors the `Rc` across. Never in `render`.
+pub(crate) struct ChoicePopup {
+    pub input: Entity<InputState>,
+    pub list: ChoiceList,
+    cell: (usize, usize),
+    labels: (SharedString, SharedString),
+    /// One static `SharedString` per DECLARED option — what
+    /// [`Self::prepare`] indexes by `Ranked::row`.
+    option_labels: Vec<SharedString>,
+    paint: Rc<ChoicePaint>,
+}
+
+/// The rows [`render_choice`] paints — the painted WINDOW of the ranked
+/// list as prepared labels, and which of them is lit — plus the field,
+/// so the delegate can paint the whole popup from this one `Rc`.
+pub(crate) struct ChoicePaint {
+    pub input: Entity<InputState>,
+    pub rows: Vec<SharedString>,
+    pub highlighted: usize,
+}
+
+impl ChoicePopup {
+    /// Every option ranked in declared order under an empty query, the
+    /// highlight on `current` (row 0 when the cell is NULL or holds a
+    /// value the vocabulary no longer lists — a hole is still editable).
+    pub(crate) fn new(
+        input: Entity<InputState>,
+        options: &'static [&'static str],
+        current: &str,
+        cell: (usize, usize),
+        labels: (SharedString, SharedString),
+    ) -> Self {
+        let mut list =
+            ChoiceList::new(options.iter().map(|s| s.to_string()).collect(), DEFAULT_CAP);
+        list.place(Some(current));
+        let option_labels = options
+            .iter()
+            .map(|s| SharedString::new_static(s))
+            .collect();
+        let mut popup = Self {
+            paint: Rc::new(ChoicePaint {
+                input: input.clone(),
+                rows: Vec::new(),
+                highlighted: 0,
+            }),
+            input,
+            list,
+            cell,
+            labels,
+            option_labels,
+        };
+        popup.prepare();
+        popup
+    }
+
+    /// The cell this popup edits and its labels at open — what a pick
+    /// hands to `commit_cell_value`.
+    pub(crate) fn target(&self) -> ((usize, usize), (SharedString, SharedString)) {
+        (self.cell, self.labels.clone())
+    }
+
+    /// The prepared paint, for the delegate's mirror — an `Rc` bump.
+    pub(crate) fn paint(&self) -> Rc<ChoicePaint> {
+        Rc::clone(&self.paint)
+    }
+
+    /// Re-prepare [`Self::paint`] from the list's painted window. Called
+    /// after every change to the list; `render_choice` reads the result
+    /// and formats nothing. Each row is a static-string clone.
+    pub(crate) fn prepare(&mut self) {
+        self.paint = Rc::new(ChoicePaint {
+            input: self.input.clone(),
+            rows: self
+                .list
+                .painted()
+                .iter()
+                .map(|r| self.option_labels[r.row].clone())
+                .collect(),
+            highlighted: self.list.highlighted(),
+        });
+    }
 }
 
 /// The action list's own state: the prepared rows ([`crate::core::menu::rows`],
@@ -494,6 +604,99 @@ pub(crate) fn render_picker(
     deferred(
         anchored()
             .anchor(Anchor::TopRight)
+            .position_mode(AnchoredPositionMode::Local)
+            .snap_to_window_with_margin(px(8.))
+            .child(list),
+    )
+    .with_priority(1)
+}
+
+/// Paint a `Choice` cell's typeahead (dividend spec §4.4): the picker's
+/// own surface — the field on top, one row per painted option below, the
+/// lit one in `accent`, a row click picks it, a hover lights it, a click
+/// anywhere outside closes it — anchored by its TOP-LEFT corner at the
+/// point it is painted from, which `MatrixDelegate::render_td` places at
+/// the edited cell's bottom-left, so the list hangs under the cell like
+/// a `Select`'s. `deferred` escapes the table's own clip exactly as the
+/// header popups escape the tile's, and `snap_to_window_with_margin`
+/// keeps a bottom-row popup on screen.
+///
+/// Reads only the prepared [`ChoicePaint`] (a static-string clone per
+/// row): nothing here formats or ranks.
+pub(crate) fn render_choice(
+    p: &ChoicePaint,
+    tile: &Entity<MarketDataTile>,
+    tile_id: u64,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let mut list = popover_surface(cx)
+        .debug_selector(move || format!("marketdata-choice-{tile_id}"))
+        // Occludes for the same reason the menu does (see `render_menu`).
+        .occlude()
+        .on_mouse_down_out({
+            let tile = tile.clone();
+            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
+        })
+        .child(
+            div()
+                .w_full()
+                .pb_1()
+                .mb_1()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(Input::new(&p.input).appearance(false).w_full()),
+        );
+    if p.rows.is_empty() {
+        // Asked and answered, never a blank rectangle (`render_picker`'s
+        // own rule): `enter` on this refuses with the same words.
+        list = list.child(
+            div()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .flex()
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child("no option matches"),
+        );
+    } else {
+        for (row_i, text) in p.rows.iter().enumerate() {
+            list = list.child(
+                h_flex()
+                    .h(scale::design(ROW_HEIGHT))
+                    .px(scale::design(ROW_INSET))
+                    .rounded(theme.radius)
+                    .items_center()
+                    .when(row_i == p.highlighted, |d| {
+                        d.bg(theme.accent).text_color(theme.accent_foreground)
+                    })
+                    .when(row_i != p.highlighted, |d| {
+                        d.text_color(theme.popover_foreground)
+                    })
+                    .debug_selector(move || format!("marketdata-choice-row-{tile_id}-{row_i}"))
+                    // `stop_propagation` for the menu row's reason (see
+                    // `render_menu`): a click that means "pick a row"
+                    // must not also be a click on the grid beneath.
+                    .on_mouse_down(MouseButton::Left, {
+                        let tile = tile.clone();
+                        move |_, window, cx| {
+                            cx.stop_propagation();
+                            tile.update(cx, |t, cx| t.choice_pick(row_i, window, cx))
+                        }
+                    })
+                    // The mouse form of `up`/`down` (see `render_menu`).
+                    .on_mouse_move({
+                        let tile = tile.clone();
+                        move |_, _, cx| tile.update(cx, |t, cx| t.choice_hover(row_i, cx))
+                    })
+                    .child(text.clone())
+                    .into_any_element(),
+            );
+        }
+    }
+    deferred(
+        anchored()
+            .anchor(Anchor::TopLeft)
             .position_mode(AnchoredPositionMode::Local)
             .snap_to_window_with_margin(px(8.))
             .child(list),

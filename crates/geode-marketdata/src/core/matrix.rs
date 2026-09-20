@@ -12,14 +12,49 @@
 //! answer the same `Cell`, so the tile's cursor, yank and edit paths know
 //! only about a grid.
 
-use crate::core::draft::{Draft, attr_text};
-use crate::core::spec::{Columns, PanelSpec};
+use crate::core::draft::{Draft, RowEdit, attr_text};
+use crate::core::spec::{Columns, PanelSpec, ValueColumn};
 use geode_core::attribution::Attribution;
+use geode_core::document::Value;
 use geode_core::format::format_number;
+use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
 use geode_core::view::ColumnFormat;
 use gpui::SharedString;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+/// One column's edited shape (spec §4.3): a number paints through its own
+/// `ColumnFormat` exactly as before, a date paints ISO, and text/choice
+/// paint themselves. Parallel to [`MatrixModel::columns`] — the pivot's
+/// ladder and slice columns are always `Number`, a flat panel's columns
+/// are whatever each [`ValueColumn::ty`] declares.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CellKind {
+    Number(ColumnFormat),
+    Date,
+    Text,
+    Choice(&'static [&'static str]),
+}
+
+/// The one formatter a [`Cell`]'s text is ever built through — the
+/// document's own value and an edited one alike, so a typed edit paints
+/// in exactly the shape the document would have.
+///
+/// A number in a non-number column (and vice versa) is spelled plainly
+/// rather than through a format the column does not have: the mismatch
+/// itself is a defect elsewhere (a spec whose `ValueColumn::ty` disagrees
+/// with what it reads), and this function's job is to paint something
+/// honest, not to hide that.
+pub fn cell_text(value: &Value, kind: &CellKind) -> String {
+    match (kind, value) {
+        (CellKind::Number(format), Value::F64(v)) => format_number(*v, format).text,
+        (CellKind::Number(format), Value::I64(v)) => format_number(*v as f64, format).text,
+        (_, Value::Date(d)) => d.format("%Y-%m-%d").to_string(),
+        (_, Value::Utf8(s)) => s.clone(),
+        (_, Value::F64(v)) => format!("{v}"),
+        (_, Value::I64(v)) => v.to_string(),
+    }
+}
 
 /// One header attribute as painted: prepared text, and whether the draft
 /// has overridden it — `true` exactly when [`header_of`] found a
@@ -35,24 +70,44 @@ pub struct HeaderCell {
 /// One prepared cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
-    /// Formatted with the panel's `ColumnFormat`, or empty for a NULL.
-    /// Empty is the honest rendering of "no value here" (§6.3): a blank
-    /// cell and a `0.0000` are different claims.
+    /// Formatted through [`cell_text`], or empty for a NULL. Empty is the
+    /// honest rendering of "no value here" (§6.3): a blank cell and a
+    /// `0.0000` are different claims.
     pub text: SharedString,
-    pub value: Option<f64>,
+    pub value: Option<Value>,
     pub edited: bool,
     pub sent: bool,
-    /// The grid index this cell sits at, which is also the key a
-    /// [`Draft`] edit is stored under. Carried on the cell so a render
-    /// closure that already has the cell never has to reconstruct it —
-    /// for `Columns::Values` it reads as (document row, value column).
+    /// The key a [`Draft`] edit on this cell is stored under. For a
+    /// document row it is the row's position in the DOCUMENT's own grid
+    /// — the pivot row, or the snapshot row for `Columns::Values` — plus
+    /// the column, which is the cell's model index only while no row is
+    /// inserted above it: an [`RowState::Inserted`] row is spliced into
+    /// the model and shifts every row below it, and `Draft::edits` is
+    /// keyed by the document position precisely so an insert moves no
+    /// edit. For an inserted row it is `(model row, col)` — there is no
+    /// document position to name — and `Draft::edits` never holds one:
+    /// an inserted row's cells live in `RowEdit.cells` by column label
+    /// (spec §5.1). Carried on the cell so a render closure that already
+    /// has the cell never has to reconstruct it.
     pub cell_ref: (usize, usize),
+}
+
+/// Whose row this is (spec §5.2): the document's own, one the draft
+/// inserted (spliced in after its anchor, cells from `RowEdit.cells`),
+/// or one the draft marked deleted — still laid out, struck through,
+/// until upload or a rebase drops it outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    Document,
+    Inserted,
+    Deleted,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowModel {
     pub label: SharedString,
     pub cells: Vec<Cell>,
+    pub state: RowState,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -69,14 +124,53 @@ pub struct MatrixModel {
     /// The slice-value labels first (`slice_columns` of them), then the
     /// ladder.
     pub columns: Vec<SharedString>,
+    /// Parallel to `columns`: each column's [`CellKind`], so a cell's own
+    /// column says how it paints and how a typed edit to it is parsed —
+    /// a pivot's are always `Number`, a flat panel's follow each
+    /// [`ValueColumn::ty`].
+    pub column_kinds: Vec<CellKind>,
     /// How many of `columns` (and of every row's leading `cells`) are the
     /// spec's per-slice values rather than the pivot's own ladder — what
     /// lets a row bump skip them and the delegate rule them off.
     pub slice_columns: usize,
     pub rows: Vec<RowModel>,
+    /// Where each pivot cell's value was read from (spec §4.5), so
+    /// [`Self::patch_cell`] can re-prepare one cell without re-indexing
+    /// the document; `None` for the flat shape, where a grid row IS a
+    /// snapshot row and the spec's own column list says the rest.
+    pub pivot_index: Option<PivotIndex>,
+}
+
+/// The pivot's (grid row, ladder column) → snapshot row map, plus the
+/// snapshot columns the ladder and each slice column are read from —
+/// everything [`pivot`] had in hand when it filled the grid, kept so a
+/// patch reads the same cell of the same document the build did. Indices
+/// into the snapshot the model was built from; meaningless against any
+/// other.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PivotIndex {
+    /// The one value column's snapshot index.
+    value_idx: usize,
+    /// Per slice column (in `columns` order), the snapshot column it is
+    /// read from.
+    slice_idx: Vec<usize>,
+    /// Per grid row, the first snapshot row of its slice — where a slice
+    /// value is read.
+    first_row: Vec<usize>,
+    /// The ladder's width — the stride of `at`.
+    ladder: usize,
+    /// Row-major `rows × ladder`: the snapshot row holding the value for
+    /// (grid row, ladder column).
+    at: Vec<usize>,
 }
 
 impl MatrixModel {
+    /// The [`CellKind`] a column paints and edits through, if `col` is in
+    /// range.
+    pub fn kind_of(&self, col: usize) -> Option<&CellKind> {
+        self.column_kinds.get(col)
+    }
+
     /// Pivot or flatten `snapshot` per `spec`, with `draft`'s edits
     /// painted over the document's own values.
     ///
@@ -95,6 +189,13 @@ impl MatrixModel {
     /// unique and its column labels unique — the invariant
     /// [`Draft`]'s own doc states and [`Draft::rebase`] resolves edits
     /// against.
+    ///
+    /// The draft's row edits (spec §5.2) are applied last, by
+    /// [`splice_rows`]: a document row the draft marks deleted stays in
+    /// the grid as [`RowState::Deleted`], and each inserted row is
+    /// spliced in after its anchor. A document row's cells — and its
+    /// `cell_ref` — are decided BEFORE the splice, against the document's
+    /// own grid, which is what `Draft::edits` is keyed by.
     pub fn build(
         snapshot: &Snapshot,
         spec: &PanelSpec,
@@ -117,25 +218,126 @@ impl MatrixModel {
         }
 
         let rows_idx = snapshot
-            .column_index(spec.rows)
-            .ok_or_else(|| format!("the document has no '{}' column", spec.rows))?;
+            .column_index(spec.rows.column)
+            .ok_or_else(|| format!("the document has no '{}' column", spec.rows.column))?;
         let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec, draft);
-        let (columns, slice_columns, rows) = match spec.columns {
-            Columns::Axis(axis) => pivot(snapshot, spec, draft, rows_idx, axis)?,
-            Columns::Values => {
-                let (columns, rows) = flatten(snapshot, spec, draft, rows_idx)?;
-                (columns, 0, rows)
+        let (columns, column_kinds, slice_columns, rows, pivot_index) = match &spec.columns {
+            Columns::Axis(axis) => {
+                let (columns, column_kinds, slice_columns, rows, index) =
+                    pivot(snapshot, spec, draft, rows_idx, axis)?;
+                (columns, column_kinds, slice_columns, rows, Some(index))
+            }
+            Columns::Values(_) => {
+                let (columns, column_kinds, rows) = flatten(snapshot, spec, draft, rows_idx)?;
+                (columns, column_kinds, 0, rows, None)
             }
         };
+        let rows = splice_rows(rows, draft, &columns, &column_kinds);
         Ok(MatrixModel {
             key,
             source_time,
             header,
             columns,
+            column_kinds,
             slice_columns,
             rows,
+            pivot_index,
         })
+    }
+
+    /// Re-prepare ONE cell from `snapshot` and `draft` — text, value,
+    /// `edited`, `sent` — and answer whether the cell exists (spec §4.5).
+    /// Identical to what [`Self::build`] would paint for that cell (the
+    /// test `patch_cell_matches_a_rebuild` proves it, on both shapes), so
+    /// a committed edit costs one cell's formatting rather than every
+    /// row's: the flat build is the per-commit cost `docs/perf.md`
+    /// records at the edge of the 8 ms pure-UI budget for a 10,000-row
+    /// schedule.
+    ///
+    /// `snapshot` must be the document this model was built from — a
+    /// flat grid row is that snapshot's row of the same index, and
+    /// [`PivotIndex`] holds that snapshot's row numbers. The tile hands
+    /// over `painted_snapshot()`, which is exactly that.
+    ///
+    /// `row` is the MODEL row. A document row's position in the document
+    /// (the one `Draft::edits`, `PivotIndex` and the flat snapshot are all
+    /// indexed by) is read off its own `cell_ref`, since an inserted row
+    /// above it has shifted the two apart; an inserted row's cell is
+    /// re-read from `RowEdit.cells` instead, and answers `false` once the
+    /// draft no longer holds that row — the model has a row the draft
+    /// does not, and only a rebuild can say what belongs there.
+    ///
+    /// Out of range answers `false` rather than panicking: the caller
+    /// falls back to a rebuild, the one answer that is always right.
+    pub fn patch_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        snapshot: &Snapshot,
+        spec: &PanelSpec,
+        draft: &Draft,
+    ) -> bool {
+        let Some(kind) = self.column_kinds.get(col) else {
+            return false;
+        };
+        let Some(current) = self.rows.get(row) else {
+            return false;
+        };
+        if current.state == RowState::Inserted {
+            let Some(RowEdit::Inserted { cells, .. }) = draft.rows.get(current.label.as_ref())
+            else {
+                return false;
+            };
+            let Some(label) = self.columns.get(col) else {
+                return false;
+            };
+            self.rows[row].cells[col] =
+                inserted_cell(cells.get(label.as_ref()), (row, col), kind, draft);
+            return true;
+        }
+        let Some(doc_row) = current.cells.get(col).map(|c| c.cell_ref.0) else {
+            return false;
+        };
+        let value = match &self.pivot_index {
+            Some(index) => match col.checked_sub(self.slice_columns) {
+                // A ladder cell: the value column at the snapshot row the
+                // build's own grid map recorded for this pair.
+                Some(ci) => {
+                    let Some(&srow) = index.at.get(doc_row * index.ladder + ci) else {
+                        return false;
+                    };
+                    snapshot.f64_at(index.value_idx, srow).map(Value::F64)
+                }
+                // A slice cell: read off its slice's first row, as
+                // `pivot` reads it (the whole slice was checked to
+                // agree at build time, and nothing since has changed
+                // the document).
+                None => {
+                    let (Some(&idx), Some(&first)) =
+                        (index.slice_idx.get(col), index.first_row.get(doc_row))
+                    else {
+                        return false;
+                    };
+                    snapshot.f64_at(idx, first).map(Value::F64)
+                }
+            },
+            // The flat shape: document row `doc_row` is snapshot row
+            // `doc_row`, and grid column `col` is the spec's `col`th flat
+            // column — the same resolution `flatten` made, redone for one
+            // column.
+            None => {
+                let Some(vc) = spec.flat_columns().get(col) else {
+                    return false;
+                };
+                let Some(idx) = snapshot.column_index(vc.column) else {
+                    return false;
+                };
+                read_flat_value(snapshot, idx, doc_row, vc.ty)
+            }
+        };
+        self.rows[row].cells[col] = cell_of(value, (doc_row, col), kind, draft);
+        true
     }
 
     /// The "no document received" shape: the key the panel asked about
@@ -332,7 +534,7 @@ fn index_grid(
     let mut seen_rows: HashMap<String, usize> = HashMap::new();
     let mut seen_cols: HashMap<String, ()> = HashMap::new();
     for row in 0..snapshot.rows() {
-        let row_label = required_label(snapshot, rows_idx, row, spec.rows)?;
+        let row_label = required_label(snapshot, rows_idx, row, spec.rows.column)?;
         let col_label = required_label(snapshot, col_idx, row, axis)?;
         let ri = match seen_rows.entry(row_label.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => *e.get(),
@@ -354,7 +556,7 @@ fn index_grid(
             return Err(format!(
                 "the document repeats {}='{row_label}' {axis}='{col_label}' \
                  (rows {previous} and {row}): one of the two values would vanish",
-                spec.rows
+                spec.rows.column
             ));
         }
     }
@@ -381,13 +583,28 @@ fn index_grid(
 /// `Grid::at` is keyed by the labels themselves rather than by their
 /// indices precisely so that this ordering decision is separable from
 /// where the values come from.
+/// `pivot`'s own result: the column headers (slice labels then the
+/// ladder), each one's [`CellKind`] in the same order, how many of the
+/// two leading vecs are slice columns, the built rows, and the
+/// [`PivotIndex`] a later [`MatrixModel::patch_cell`] reads.
+type PivotResult = Result<
+    (
+        Vec<SharedString>,
+        Vec<CellKind>,
+        usize,
+        Vec<RowModel>,
+        PivotIndex,
+    ),
+    String,
+>;
+
 fn pivot(
     snapshot: &Snapshot,
     spec: &PanelSpec,
     draft: &Draft,
     rows_idx: usize,
     axis: &str,
-) -> Result<(Vec<SharedString>, usize, Vec<RowModel>), String> {
+) -> PivotResult {
     let col_idx = snapshot
         .column_index(axis)
         .ok_or_else(|| format!("the document has no '{axis}' column"))?;
@@ -421,6 +638,19 @@ fn pivot(
             ));
         }
     };
+    // The pivot's one cell column must be numeric: `display_at` reads
+    // text, dictionaries, dates, timestamps and bools and deliberately
+    // leaves numbers alone (`label_at`'s own rule, above), so `Some` here
+    // means "this is one of the types `display_at` covers" — i.e. not a
+    // number. Row 0 stands for the whole column: a document's columns are
+    // uniformly typed, so one row settles it.
+    if snapshot.display_at(value_idx, 0).is_some() {
+        let name = snapshot
+            .meta_at(value_idx)
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        return Err(format!("a pivot's value column '{name}' must be numeric"));
+    }
 
     let grid = index_grid(snapshot, spec, rows_idx, col_idx, axis)?;
 
@@ -453,7 +683,7 @@ fn pivot(
                     if snapshot.f64_at(*idx, first) != snapshot.f64_at(*idx, srow) {
                         return Err(format!(
                             "the document's {}='{}' rows disagree on '{}' ({} on row {first}, {} on row {srow}): a slice value is constant across its slice",
-                            spec.rows,
+                            spec.rows.column,
                             grid.rows[ri],
                             sv.column,
                             label_at(snapshot, *idx, first).unwrap_or_default(),
@@ -466,29 +696,55 @@ fn pivot(
     }
     let slice_columns = slices.len();
 
+    // A slice column carries its own format (a forward at two places
+    // beside `param`'s four); every ladder column shares the panel's
+    // `spec.format`. Both are always `Number` — the refusal above is what
+    // makes that true of the ladder, and a slice value is `f64` only by
+    // the spec's own doc comment.
+    let mut column_kinds: Vec<CellKind> = slices
+        .iter()
+        .map(|(sv, _)| CellKind::Number(sv.format.clone()))
+        .collect();
+    column_kinds.extend(
+        std::iter::repeat_with(|| CellKind::Number(spec.format.clone())).take(grid.columns.len()),
+    );
+
+    // The index a patch reads back, filled as the grid is: one entry per
+    // cell the loop below visits, in the same order.
+    let mut index = PivotIndex {
+        value_idx,
+        slice_idx: slices.iter().map(|(_, idx)| *idx).collect(),
+        first_row: Vec::with_capacity(grid.rows.len()),
+        ladder: grid.columns.len(),
+        at: Vec::with_capacity(grid.rows.len() * grid.columns.len()),
+    };
     let mut rows = Vec::with_capacity(grid.rows.len());
     for (ri, row_label) in grid.rows.iter().enumerate() {
         let mut cells = Vec::with_capacity(slice_columns + grid.columns.len());
         // Every row label came out of `index_grid`'s pass over the
         // snapshot rows, so each has a first row.
         let first = first_row[ri].unwrap_or_default();
-        for (ci, (sv, idx)) in slices.iter().enumerate() {
-            cells.push(cell_of(snapshot, *idx, first, (ri, ci), &sv.format, draft));
+        index.first_row.push(first);
+        for (ci, (_, idx)) in slices.iter().enumerate() {
+            let value = snapshot.f64_at(*idx, first).map(Value::F64);
+            cells.push(cell_of(value, (ri, ci), &column_kinds[ci], draft));
         }
         for (ci, col_label) in grid.columns.iter().enumerate() {
             match grid.at.get(row_label).and_then(|m| m.get(col_label)) {
-                Some(&srow) => cells.push(cell_of(
-                    snapshot,
-                    value_idx,
-                    srow,
-                    (ri, slice_columns + ci),
-                    &spec.format,
-                    draft,
-                )),
+                Some(&srow) => {
+                    index.at.push(srow);
+                    let value = snapshot.f64_at(value_idx, srow).map(Value::F64);
+                    cells.push(cell_of(
+                        value,
+                        (ri, slice_columns + ci),
+                        &column_kinds[slice_columns + ci],
+                        draft,
+                    ));
+                }
                 None => {
                     return Err(format!(
                         "the document has no cell for {}='{row_label}' {axis}='{col_label}'",
-                        spec.rows
+                        spec.rows.column
                     ));
                 }
             }
@@ -496,6 +752,7 @@ fn pivot(
         rows.push(RowModel {
             label: SharedString::from(row_label.clone()),
             cells,
+            state: RowState::Document,
         });
     }
     Ok((
@@ -504,30 +761,94 @@ fn pivot(
             .map(|(sv, _)| SharedString::from(sv.label))
             .chain(grid.columns.into_iter().map(SharedString::from))
             .collect(),
+        column_kinds,
         slice_columns,
         rows,
+        index,
     ))
 }
 
-/// The flat shape: one row per document row, one column per value column.
-fn flatten(
-    snapshot: &Snapshot,
-    spec: &PanelSpec,
-    draft: &Draft,
-    rows_idx: usize,
-) -> Result<(Vec<SharedString>, Vec<RowModel>), String> {
-    let value_idxs = value_columns(snapshot, spec);
-    if value_idxs.is_empty() {
+/// The [`CellKind`] a flat [`ValueColumn`] paints and edits through: a
+/// number for `F64`/`I64`, `Date` for a date, and for `Utf8` either
+/// `Choice` (the column declares a fixed vocabulary) or plain `Text`.
+/// `Timestamp`/`Bool` are not yet a shape this crate's typed cells cover
+/// and fall back to `Text` — the same "paint something honest" rule
+/// [`cell_text`] follows for a mismatch, rather than refuse a spec that
+/// declares one.
+fn flat_kind(vc: &ValueColumn) -> CellKind {
+    match (vc.ty, vc.choices) {
+        (ColumnType::F64 | ColumnType::I64, _) => CellKind::Number(vc.format.clone()),
+        (ColumnType::Date, _) => CellKind::Date,
+        (_, Some(choices)) => CellKind::Choice(choices),
+        (ColumnType::Utf8 | ColumnType::Timestamp | ColumnType::Bool, None) => CellKind::Text,
+    }
+}
+
+/// One flat cell's document value, read per its column's declared type —
+/// `f64_at`/`i64_at` for a number, `display_at` for everything else
+/// (a `Date32` displays as `%Y-%m-%d`, [`label_at`]'s own rule, so the
+/// round trip back into a [`Value::Date`] is exact).
+fn read_flat_value(snapshot: &Snapshot, idx: usize, row: usize, ty: ColumnType) -> Option<Value> {
+    match ty {
+        ColumnType::F64 => snapshot.f64_at(idx, row).map(Value::F64),
+        ColumnType::I64 => snapshot.i64_at(idx, row).map(Value::I64),
+        ColumnType::Date => snapshot
+            .display_at(idx, row)
+            .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
+            .map(Value::Date),
+        ColumnType::Utf8 | ColumnType::Timestamp | ColumnType::Bool => {
+            snapshot.display_at(idx, row).map(Value::Utf8)
+        }
+    }
+}
+
+/// `flatten`'s own result: the column headers, each one's [`CellKind`] in
+/// the same order, and the built rows.
+type FlattenResult = Result<(Vec<SharedString>, Vec<CellKind>, Vec<RowModel>), String>;
+
+/// The flat shape: one row per document row, one column per
+/// [`PanelSpec::flat_columns`] entry, in the spec's own order — the paint
+/// order, not the document's column order.
+fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize) -> FlattenResult {
+    let flat_columns = spec.flat_columns();
+    if flat_columns.is_empty() {
         return Err(format!(
             "the document '{}' has no value column",
             spec.dataset
         ));
     }
-    let columns = value_idxs
+    // Resolve each spec-declared column against the document, in spec
+    // order: this loop's order is what `columns`, `column_kinds` and
+    // every row's `cells` inherit.
+    let mut idxs = Vec::with_capacity(flat_columns.len());
+    for vc in flat_columns {
+        let idx = snapshot
+            .column_index(vc.column)
+            .ok_or_else(|| format!("the document has no '{}' column", vc.column))?;
+        idxs.push(idx);
+    }
+    // The reverse direction: a value column the document carries that the
+    // spec does not list is refused, never painted unlabelled — a schema
+    // drifting under a spec is reported rather than silently shown or
+    // silently dropped.
+    for idx in 0..snapshot.columns() {
+        let name = snapshot
+            .meta_at(idx)
+            .map(|m| m.name.clone())
+            .unwrap_or_default();
+        if is_value(snapshot, idx) && spec.value_column(&name).is_none() {
+            return Err(format!(
+                "the document carries a value column '{name}' this panel does not declare"
+            ));
+        }
+    }
+
+    let columns = flat_columns
         .iter()
-        .filter_map(|i| snapshot.meta_at(*i))
-        .map(|m| SharedString::from(m.name.clone()))
+        .map(|vc| SharedString::from(vc.label))
         .collect();
+    let column_kinds: Vec<CellKind> = flat_columns.iter().map(flat_kind).collect();
+
     // A row label must name exactly one row, the same rule `index_grid`
     // applies to a pivot's (row, column) pair and for the same reason: a
     // draft resolves its edits by label across generations, so a repeated
@@ -537,53 +858,230 @@ fn flatten(
     let mut seen: HashMap<String, usize> = HashMap::with_capacity(snapshot.rows());
     let mut rows = Vec::with_capacity(snapshot.rows());
     for row in 0..snapshot.rows() {
-        let label = required_label(snapshot, rows_idx, row, spec.rows)?;
+        let label = required_label(snapshot, rows_idx, row, spec.rows.column)?;
         if let Some(previous) = seen.insert(label.clone(), row) {
             return Err(format!(
                 "the document repeats {}='{label}' (rows {previous} and {row}): a row \
                  label identifies an edit, so it must name one row",
-                spec.rows
+                spec.rows.column
             ));
         }
+        let cells = idxs
+            .iter()
+            .zip(flat_columns.iter())
+            .zip(column_kinds.iter())
+            .enumerate()
+            .map(|(ci, ((&idx, vc), kind))| {
+                let value = read_flat_value(snapshot, idx, row, vc.ty);
+                cell_of(value, (row, ci), kind, draft)
+            })
+            .collect();
         rows.push(RowModel {
             label: SharedString::from(label),
-            cells: value_idxs
-                .iter()
-                .enumerate()
-                .map(|(ci, &idx)| cell_of(snapshot, idx, row, (row, ci), &spec.format, draft))
-                .collect(),
+            cells,
+            state: RowState::Document,
         });
     }
-    Ok((columns, rows))
+    Ok((columns, column_kinds, rows))
 }
 
-/// One cell: the draft's value where there is an edit, the document's
-/// otherwise, formatted with `format` — the panel's own for a ladder
-/// cell, the slice value's own for one of those.
-fn cell_of(
-    snapshot: &Snapshot,
-    value_idx: usize,
-    srow: usize,
+/// Apply the draft's row edits to the document's rows (spec §5.2): mark
+/// each `Deleted` row rather than removing it — it is still laid out,
+/// struck through, so a trader sees what is going — and splice each
+/// `Inserted` row in after its anchor. A row anchored on the top (`None`)
+/// leads; several under one anchor land in label order (the draft's
+/// `BTreeMap` order); a row anchored on another inserted row follows that
+/// one, so a row inserted below an inserted row sits where it was put;
+/// and an anchor naming no row at all — a document row that vanished
+/// before `rebase` re-anchored it, say — lands at the top rather than
+/// losing the row, since unsent work is never dropped in silence.
+///
+/// A document row's cells, and their `cell_ref`, are left exactly as
+/// `pivot`/`flatten` built them — the document's own positions, which
+/// `Draft::edits` is keyed by — so the splice moves rows and never
+/// re-keys an edit. An inserted row's cells come from `RowEdit.cells`
+/// alone, by column label, through [`inserted_cell`].
+///
+/// With no row edits this is the identity and allocates nothing.
+fn splice_rows(
+    rows: Vec<RowModel>,
+    draft: &Draft,
+    columns: &[SharedString],
+    column_kinds: &[CellKind],
+) -> Vec<RowModel> {
+    if draft.rows.is_empty() {
+        return rows;
+    }
+    // Every label the model will carry — the document's rows and the
+    // draft's inserted ones — so an anchor can be checked against the
+    // whole set; then the inserted rows grouped by anchor (the top's own
+    // group apart), each group in label order (the draft's own `BTreeMap`
+    // order), and each row's cells by label for the fill below.
+    let known: HashSet<&str> = rows
+        .iter()
+        .map(|r| r.label.as_ref())
+        .chain(draft.rows.keys().map(String::as_str))
+        .collect();
+    let mut top: Vec<&str> = Vec::new();
+    let mut splicer = Splicer {
+        followers: HashMap::new(),
+        stack: Vec::new(),
+        cells_of: HashMap::new(),
+        columns,
+        column_kinds,
+        draft,
+    };
+    for (label, edit) in &draft.rows {
+        if let RowEdit::Inserted { after, cells } = edit {
+            match after.as_deref() {
+                Some(a) if known.contains(a) => {
+                    splicer.followers.entry(a).or_default().push(label);
+                }
+                _ => top.push(label),
+            }
+            splicer.cells_of.insert(label, cells);
+        }
+    }
+
+    let mut out: Vec<RowModel> = Vec::with_capacity(rows.len() + splicer.cells_of.len());
+    splicer.emit(top, &mut out);
+    for mut row in rows {
+        if matches!(draft.rows.get(row.label.as_ref()), Some(RowEdit::Deleted)) {
+            row.state = RowState::Deleted;
+        }
+        let group = splicer.followers.remove(row.label.as_ref());
+        out.push(row);
+        if let Some(group) = group {
+            splicer.emit(group, &mut out);
+        }
+    }
+    // An anchor that is an inserted row is reachable only through that
+    // row, so a cycle among inserted rows (a after b, b after a — nothing
+    // in this crate writes one, but a session file could) would leave
+    // both unplaced. Appended at the end, in label order, rather than
+    // lost: unsent work is never dropped in silence.
+    if !splicer.followers.is_empty() {
+        let mut rest: Vec<&str> = std::mem::take(&mut splicer.followers)
+            .into_values()
+            .flatten()
+            .collect();
+        rest.sort_unstable();
+        splicer.emit(rest, &mut out);
+    }
+    out
+}
+
+/// [`splice_rows`]'s working state: the inserted rows still waiting by
+/// anchor label, the depth-first worklist, each row's cells, and what a
+/// row's cells are built from. A struct rather than a closure so the
+/// document loop can pull a row's own group out of `followers` while the
+/// emitter is alive, which one closure borrowing both could not allow.
+struct Splicer<'a> {
+    followers: HashMap<&'a str, Vec<&'a str>>,
+    stack: Vec<&'a str>,
+    cells_of: HashMap<&'a str, &'a BTreeMap<String, Value>>,
+    columns: &'a [SharedString],
+    column_kinds: &'a [CellKind],
+    draft: &'a Draft,
+}
+
+impl<'a> Splicer<'a> {
+    /// Emit `group` and, depth first, every row anchored on each of them:
+    /// a row's own followers go on TOP of the stack, so a chain hangs off
+    /// its anchor ahead of the anchor's next sibling. A worklist rather
+    /// than recursion, so a long chain costs no stack frames. A row is
+    /// removed from `followers` as it is placed, so nothing is emitted
+    /// twice.
+    fn emit(&mut self, group: Vec<&'a str>, out: &mut Vec<RowModel>) {
+        self.stack.extend(group.into_iter().rev());
+        while let Some(label) = self.stack.pop() {
+            let at = out.len();
+            out.push(inserted_row(
+                label,
+                self.cells_of[label],
+                at,
+                self.columns,
+                self.column_kinds,
+                self.draft,
+            ));
+            if let Some(next) = self.followers.remove(label) {
+                self.stack.extend(next.into_iter().rev());
+            }
+        }
+    }
+}
+/// One inserted row at model position `at`: a cell per column, each from
+/// the row's own `cells` by column label through [`inserted_cell`].
+fn inserted_row(
+    label: &str,
+    cells: &BTreeMap<String, Value>,
+    at: usize,
+    columns: &[SharedString],
+    column_kinds: &[CellKind],
+    draft: &Draft,
+) -> RowModel {
+    RowModel {
+        label: SharedString::from(label.to_string()),
+        cells: columns
+            .iter()
+            .zip(column_kinds)
+            .enumerate()
+            .map(|(ci, (column, kind))| {
+                inserted_cell(cells.get(column.as_ref()), (at, ci), kind, draft)
+            })
+            .collect(),
+        state: RowState::Inserted,
+    }
+}
+
+/// One cell of an inserted row (spec §5.2): the draft's own value for
+/// this column, formatted through `kind` exactly as a document cell's
+/// edit is, or `·` where the trader has not filled it yet — never empty,
+/// which is a document's NULL (§6.3), and never a zero. Every cell of an
+/// inserted row is `edited`: the whole row is unsent work.
+fn inserted_cell(
+    value: Option<&Value>,
     cell_ref: (usize, usize),
-    format: &ColumnFormat,
+    kind: &CellKind,
     draft: &Draft,
 ) -> Cell {
-    if let Some(&edited) = draft.edits.get(&cell_ref) {
+    Cell {
+        text: value.map_or_else(
+            || SharedString::new_static(UNFILLED),
+            |v| SharedString::from(cell_text(v, kind)),
+        ),
+        value: value.cloned(),
+        edited: true,
+        sent: draft.is_sent(),
+        cell_ref,
+    }
+}
+
+/// What an inserted row's unfilled cell paints.
+pub const UNFILLED: &str = "·";
+
+/// One cell: the draft's value where there is an edit, `value` (already
+/// read off the document, per the caller's own rule — `f64_at` for a
+/// pivot cell, [`read_flat_value`] for a flat one) otherwise. Both are
+/// formatted through [`cell_text`] and `kind`, the column's own.
+fn cell_of(value: Option<Value>, cell_ref: (usize, usize), kind: &CellKind, draft: &Draft) -> Cell {
+    if let Some(edited) = draft.edits.get(&cell_ref) {
         return Cell {
-            text: SharedString::from(format_number(edited, format).text),
-            value: Some(edited),
+            text: SharedString::from(cell_text(edited, kind)),
+            value: Some(edited.clone()),
             edited: true,
             sent: draft.is_sent(),
             cell_ref,
         };
     }
-    // `f64_at`, never a raw values slice: a NULL there is a deliberate
-    // "this number does not belong to this row" and reads back as 0.0
-    // out of the storage buffer.
-    let value = snapshot.f64_at(value_idx, srow);
+    // NULL here is a deliberate "this number does not belong to this
+    // row" (never a real value coerced away, since `read_flat_value` and
+    // the pivot's own `f64_at` read both return `None` for one) and reads
+    // back as a blank cell rather than a confident zero.
     Cell {
         text: value
-            .map(|v| SharedString::from(format_number(v, format).text))
+            .as_ref()
+            .map(|v| SharedString::from(cell_text(v, kind)))
             .unwrap_or_default(),
         value,
         edited: false,
@@ -596,7 +1094,12 @@ fn cell_of(
 mod tests {
     use super::*;
     use crate::core::draft::{Draft, DraftState};
-    use crate::core::spec::{CVI, Columns, HeaderAttr, PanelSpec, SliceValue};
+    use crate::core::spec::{
+        CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, SliceValue, ValueColumn,
+    };
+    use crate::core::test_fixtures::{
+        SCHEDULE, date, schedule_snapshot, schedule_snapshot_with_extra_value,
+    };
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::document::Value;
     use geode_core::schema::ColumnType;
@@ -636,8 +1139,10 @@ mod tests {
     /// grouping.
     ///
     /// `term` is a dictionary column of date text rather than a real
-    /// `Date32`: `TestColumn` has no date arm, and what the panel reads
-    /// off an axis is its label either way.
+    /// `Date32`: an axis's own value is read as a label either way
+    /// ([`label_at`]'s rule), so nothing here needs `TestColumn::Date` —
+    /// [`schedule_snapshot`] (below) is what exercises that arm, since a
+    /// flat panel's `ex_date` is a typed `Value::Date` cell, not a label.
     ///
     /// The per-slice values (`forward`/`atm`/`skew`) ride on every node
     /// row of their term, from [`slice_values_for`] — the long form the
@@ -761,7 +1266,7 @@ mod tests {
             labels(&model, 0),
             vec!["4512.30", "0.1820", "-1.1000", "0.1000", "0.2000", "0.3000"]
         );
-        assert_eq!(model.rows[0].cells[0].value, Some(4512.3));
+        assert_eq!(model.rows[0].cells[0].value, Some(Value::F64(4512.3)));
         assert_eq!(model.rows[0].cells[0].cell_ref, (0, 0));
 
         let cell = &model.rows[0].cells[4];
@@ -770,7 +1275,7 @@ mod tests {
             "0.2000",
             "CVI formats to four places"
         );
-        assert_eq!(cell.value, Some(0.2));
+        assert_eq!(cell.value, Some(Value::F64(0.2)));
         assert!(!cell.edited);
         assert!(!cell.sent);
         assert_eq!(
@@ -997,7 +1502,12 @@ mod tests {
     #[test]
     fn an_edited_slice_cell_paints_the_draft_in_the_slice_values_own_format() {
         let mut draft = Draft::default();
-        draft.set((1, 0), ("2026-11-20".into(), "fwd".into()), 4600.0, BASE);
+        draft.set(
+            (1, 0),
+            ("2026-11-20".into(), "fwd".into()),
+            Value::F64(4600.0),
+            BASE,
+        );
         let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
         let cell = &model.rows[1].cells[0];
         assert_eq!(cell.text.to_string(), "4600.00");
@@ -1049,14 +1559,14 @@ mod tests {
         draft.set(
             (0, 4),
             ("2026-10-16".into(), "-1".into()),
-            0.9,
+            Value::F64(0.9),
             "2026-09-12T14:00:00Z",
         );
         let model = MatrixModel::build(&snap, &CVI, &draft).expect("a complete grid");
 
         let cell = &model.rows[0].cells[4];
         assert_eq!(cell.text.to_string(), "0.9000");
-        assert_eq!(cell.value, Some(0.9));
+        assert_eq!(cell.value, Some(Value::F64(0.9)));
         assert!(cell.edited);
         assert!(!cell.sent, "an edit is sent only once an upload said so");
         assert_eq!(
@@ -1090,7 +1600,12 @@ mod tests {
     #[test]
     fn a_sent_draft_marks_its_own_cells_sent() {
         let mut draft = Draft::default();
-        draft.set((1, 3), ("2026-11-20".into(), "-20".into()), 0.5, BASE);
+        draft.set(
+            (1, 3),
+            ("2026-11-20".into(), "-20".into()),
+            Value::F64(0.5),
+            BASE,
+        );
         draft.state = DraftState::Sent;
         let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
         assert!(model.rows[1].cells[3].sent);
@@ -1115,15 +1630,38 @@ mod tests {
         );
     }
 
-    /// A schedule-shaped panel: one row per document row, the value
-    /// columns laid flat.
-    const SCHEDULE: PanelSpec = PanelSpec {
+    /// A flat-shaped panel over two plain `F64` value columns — the
+    /// generic "columns are flat" fixture the tests below use for
+    /// behaviour that has nothing to do with a column's own type (row
+    /// routing, repeated labels, the pivot's one-value-column rule).
+    /// [`SCHEDULE`] (below) is the typed-cell fixture proper.
+    const FLAT_SPEC: PanelSpec = PanelSpec {
         kind: "sched",
         title: "Dividends",
         dataset: "div_schedule",
         document: "div_schedule",
-        rows: "ex_date",
-        columns: Columns::Values,
+        rows: RowAxis {
+            column: "ex_date",
+            identity: RowIdentity::Typed(ColumnType::Date),
+        },
+        columns: Columns::Values(&[
+            ValueColumn {
+                column: "gross",
+                label: "gross",
+                ty: ColumnType::F64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+            ValueColumn {
+                column: "net",
+                label: "net",
+                ty: ColumnType::F64,
+                format: ColumnFormat::MEASURE,
+                choices: None,
+                required: true,
+            },
+        ]),
         header: &[HeaderAttr {
             column: "currency",
             label: "currency",
@@ -1135,13 +1673,13 @@ mod tests {
         actions: &[],
     };
 
-    fn schedule() -> Snapshot {
-        schedule_dated(&["2026-10-16", "2026-11-20", "2026-12-18"])
+    fn flat_snapshot() -> Snapshot {
+        flat_snapshot_dated(&["2026-10-16", "2026-11-20", "2026-12-18"])
     }
 
     /// The same three-row schedule with the row axis spelled by the caller,
     /// so a repeat can be delivered.
-    fn schedule_dated(dates: &[&str; 3]) -> Snapshot {
+    fn flat_snapshot_dated(dates: &[&str; 3]) -> Snapshot {
         Snapshot::for_tests_with_provenance(
             vec![
                 (
@@ -1172,8 +1710,8 @@ mod tests {
 
     #[test]
     fn values_columns_lay_the_documents_value_columns_flat() {
-        let model =
-            MatrixModel::build(&schedule(), &SCHEDULE, &Draft::default()).expect("a flat document");
+        let model = MatrixModel::build(&flat_snapshot(), &FLAT_SPEC, &Draft::default())
+            .expect("a flat document");
         assert_eq!(model.rows.len(), 3, "one row per document row");
         assert_eq!(columns_of(&model), vec!["gross", "net"]);
         assert_eq!(model.key, vec!["SPX.Z".to_string()]);
@@ -1201,8 +1739,14 @@ mod tests {
     #[test]
     fn an_edit_lands_on_the_right_value_column_when_the_columns_are_flat() {
         let mut draft = Draft::default();
-        draft.set((2, 1), ("2026-12-18".into(), "net".into()), 9.0, BASE);
-        let model = MatrixModel::build(&schedule(), &SCHEDULE, &draft).expect("a flat document");
+        draft.set(
+            (2, 1),
+            ("2026-12-18".into(), "net".into()),
+            Value::F64(9.0),
+            BASE,
+        );
+        let model =
+            MatrixModel::build(&flat_snapshot(), &FLAT_SPEC, &draft).expect("a flat document");
         assert_eq!(labels(&model, 2), vec!["3.50", "9.00"]);
         assert!(model.rows[2].cells[1].edited);
         assert!(!model.rows[2].cells[0].edited);
@@ -1246,8 +1790,8 @@ mod tests {
         // reviewer's case, where `rebase` silently kept one and reported
         // nothing dropped.
         let err = MatrixModel::build(
-            &schedule_dated(&["2026-10-16", "2026-10-16", "2026-12-18"]),
-            &SCHEDULE,
+            &flat_snapshot_dated(&["2026-10-16", "2026-10-16", "2026-12-18"]),
+            &FLAT_SPEC,
             &Draft::default(),
         )
         .expect_err("a row label must name one row");
@@ -1265,7 +1809,10 @@ mod tests {
             title: "Dividends",
             dataset: "div_schedule",
             document: "div_schedule",
-            rows: "ex_date",
+            rows: RowAxis {
+                column: "ex_date",
+                identity: RowIdentity::Typed(ColumnType::Date),
+            },
             columns: Columns::Axis("currency"),
             header: &[],
             slice_values: &[],
@@ -1273,7 +1820,7 @@ mod tests {
             format: ColumnFormat::MEASURE,
             actions: &[],
         };
-        let err = MatrixModel::build(&schedule(), &PIVOTED, &Draft::default())
+        let err = MatrixModel::build(&flat_snapshot(), &PIVOTED, &Draft::default())
             .expect_err("one value per cell");
         assert!(err.contains("gross") && err.contains("net"), "{err}");
         assert!(err.contains("currency"), "{err}");
@@ -1356,6 +1903,395 @@ mod tests {
         assert!(err.contains("underlying_ref"), "{err}");
     }
 
+    /// A CVI document whose `param` column carries TEXT instead of a
+    /// number — the pivot's one value column must be numeric, and this
+    /// is what a misdeclared spec (or a genuinely non-numeric dataset)
+    /// looks like. No slice values: CVI's own are optional (see
+    /// `a_document_without_the_slice_columns_builds_the_ladder_alone`
+    /// above), so this fixture can leave them out.
+    fn cvi_with_text_param() -> Snapshot {
+        let n = 2;
+        Snapshot::for_tests_with_provenance(
+            vec![
+                (
+                    meta("underlying_ref", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("SPX.Z".into()); n]),
+                ),
+                (
+                    meta("term", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("2026-10-16".into()); n]),
+                ),
+                (
+                    meta("node", Attribution::Additive),
+                    TestColumn::F64(vec![Some(-20.0), Some(-1.0)]),
+                ),
+                (
+                    meta("param", Attribution::DeterminedNonAdditive),
+                    TestColumn::Dict(vec![Some("n/a".into()); n]),
+                ),
+                (
+                    meta("anchor_date", Attribution::Additive),
+                    TestColumn::Dict(vec![Some("2026-09-12".into()); n]),
+                ),
+                (
+                    meta("spot_ref", Attribution::Additive),
+                    TestColumn::F64(vec![Some(5000.0); n]),
+                ),
+            ],
+            0,
+            provenance(BASE),
+        )
+    }
+
+    /// §4.3: a flat panel's cells are typed per column — a date paints
+    /// ISO, text paints itself, a number paints through its column's
+    /// own format — and `column_kinds` runs parallel to `columns`.
+    #[test]
+    fn a_flat_model_types_each_column_by_its_spec() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ]);
+        let model = MatrixModel::build(&snapshot, &SCHEDULE, &Draft::default()).unwrap();
+        assert_eq!(model.columns, ["ex", "amount", "status"]);
+        assert!(matches!(model.column_kinds[0], CellKind::Date));
+        assert!(matches!(model.column_kinds[1], CellKind::Number(_)));
+        assert!(matches!(model.column_kinds[2], CellKind::Choice(_)));
+        assert_eq!(model.rows[0].cells[0].text.as_ref(), "2026-12-18");
+        assert_eq!(model.rows[0].cells[1].text.as_ref(), "1.2500");
+        assert_eq!(model.rows[0].cells[2].text.as_ref(), "declared");
+        assert_eq!(
+            model.rows[1].cells[0].value,
+            Some(Value::Date(date(2027, 3, 19)))
+        );
+    }
+
+    /// A value column the spec does not list is refused, never painted
+    /// unlabelled: a schema drifting under a spec is reported.
+    #[test]
+    fn a_flat_model_refuses_a_value_column_the_spec_does_not_list() {
+        let snapshot = schedule_snapshot_with_extra_value("bonus");
+        let err = MatrixModel::build(&snapshot, &SCHEDULE, &Draft::default()).unwrap_err();
+        assert!(
+            err.contains("'bonus'") && err.contains("does not declare"),
+            "{err}"
+        );
+    }
+
+    /// The pivot's one cell column must be numeric.
+    #[test]
+    fn a_pivot_refuses_a_non_numeric_value_column() {
+        let snapshot = cvi_with_text_param();
+        let err = MatrixModel::build(&snapshot, &CVI, &Draft::default()).unwrap_err();
+        assert!(err.contains("numeric"), "{err}");
+    }
+
+    /// A typed edit paints in its column's own kind.
+    #[test]
+    fn a_typed_edit_paints_by_its_columns_kind() {
+        let snapshot = schedule_snapshot(&[("D1", "2026-12-18", 1.25, "declared")]);
+        let mut draft = Draft::default();
+        draft.set(
+            (0, 2),
+            ("D1".into(), "status".into()),
+            Value::Utf8("paid".into()),
+            "t0",
+        );
+        draft.set(
+            (0, 0),
+            ("D1".into(), "ex".into()),
+            Value::Date(date(2026, 12, 20)),
+            "t0",
+        );
+        let model = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(model.rows[0].cells[2].text.as_ref(), "paid");
+        assert!(model.rows[0].cells[2].edited);
+        assert_eq!(model.rows[0].cells[0].text.as_ref(), "2026-12-20");
+    }
+
+    /// §4.5: a cell commit patches instead of rebuilding, and the patch
+    /// is exactly what a rebuild would have painted for that cell.
+    #[test]
+    fn patch_cell_matches_a_rebuild() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ]);
+        let mut draft = Draft::default();
+        let mut patched = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        draft.set(
+            (1, 1),
+            ("D2".into(), "amount".into()),
+            Value::F64(0.75),
+            "t0",
+        );
+        assert!(patched.patch_cell(1, 1, &snapshot, &SCHEDULE, &draft));
+        let rebuilt = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(patched.rows[1].cells[1], rebuilt.rows[1].cells[1]);
+        assert_eq!(patched.rows[1].cells[1].text.as_ref(), "0.7500");
+        assert_eq!(
+            patched.rows[0].cells[1], rebuilt.rows[0].cells[1],
+            "untouched cells untouched"
+        );
+        assert_eq!(patched, rebuilt, "and nothing else about the model moved");
+        // A reverted edit patches back to the document's own value: the
+        // patch reads the draft as it stands, not the cell as it was.
+        draft.revert();
+        assert!(patched.patch_cell(1, 1, &snapshot, &SCHEDULE, &draft));
+        assert_eq!(patched.rows[1].cells[1].text.as_ref(), "0.5000");
+        assert!(!patched.rows[1].cells[1].edited);
+        assert!(
+            !patched.patch_cell(9, 0, &snapshot, &SCHEDULE, &draft),
+            "out of range answers false"
+        );
+        assert!(
+            !patched.patch_cell(0, 9, &snapshot, &SCHEDULE, &draft),
+            "on either axis"
+        );
+    }
+
+    /// The pivot's own patch: a ladder cell and a slice cell each find
+    /// their snapshot row through the grid the build indexed — the
+    /// (row, column) → snapshot row map a flat layout does not need,
+    /// since there a grid row IS a snapshot row.
+    #[test]
+    fn patch_cell_matches_a_rebuild_under_a_pivot() {
+        let snapshot = full_grid();
+        let mut draft = Draft::default();
+        let mut patched = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
+        // Node 3.5 of the second term: column 3 + 2 in the grid, snapshot
+        // row 5 — the last of six, so a patch that read "grid row" as
+        // "snapshot row" would land on the wrong term.
+        draft.set(
+            (1, 5),
+            ("2026-11-20".into(), "3.5".into()),
+            Value::F64(9.0),
+            "t0",
+        );
+        // And a slice cell: `fwd` of the first term, read off that
+        // slice's first row.
+        draft.set(
+            (0, 0),
+            ("2026-10-16".into(), "fwd".into()),
+            Value::F64(4600.5),
+            "t0",
+        );
+        assert!(patched.patch_cell(1, 5, &snapshot, &CVI, &draft));
+        assert!(patched.patch_cell(0, 0, &snapshot, &CVI, &draft));
+        let rebuilt = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
+        assert_eq!(patched, rebuilt);
+        assert_eq!(patched.rows[1].cells[5].text.as_ref(), "9.0000");
+        assert_eq!(patched.rows[0].cells[0].text.as_ref(), "4600.50");
+        draft.revert();
+        assert!(patched.patch_cell(1, 5, &snapshot, &CVI, &draft));
+        assert!(patched.patch_cell(0, 0, &snapshot, &CVI, &draft));
+        assert_eq!(patched.rows[1].cells[5].text.as_ref(), "0.6000");
+        assert_eq!(patched.rows[0].cells[0].text.as_ref(), "4512.30");
+        assert!(!patched.patch_cell(2, 0, &snapshot, &CVI, &draft));
+    }
+
+    /// §5.2: an `Inserted` row is spliced after its anchor (the top for
+    /// `None`), several under one anchor in label order; a `Deleted` row
+    /// stays in the grid, marked; an inserted row's cells come from the
+    /// draft's own `RowEdit.cells` by column label, an unfilled one
+    /// painting `·`; and the incomplete count is per row, not per cell.
+    #[test]
+    fn inserted_rows_splice_after_their_anchor_and_deleted_rows_stay_marked() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+            ("D3", "2027-06-18", 0.75, "estimated"),
+        ]);
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-2".into(), None, "t0");
+        d.set_row_cell("new-1", "amount", Value::F64(2.0));
+        d.delete_row("D3", "t0");
+        let m = MatrixModel::build(&snapshot, &SCHEDULE, &d).unwrap();
+        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        assert_eq!(labels, ["new-2", "D1", "new-1", "D2", "D3"]);
+        assert_eq!(m.rows[0].state, RowState::Inserted);
+        assert_eq!(m.rows[1].state, RowState::Document);
+        assert_eq!(m.rows[2].state, RowState::Inserted);
+        assert_eq!(m.rows[2].cells[1].text.as_ref(), "2.0000");
+        assert_eq!(m.rows[2].cells[1].value, Some(Value::F64(2.0)));
+        assert!(m.rows[2].cells[1].edited);
+        assert_eq!(
+            m.rows[2].cells[0].text.as_ref(),
+            "·",
+            "an unfilled cell paints a dot"
+        );
+        assert_eq!(m.rows[2].cells[0].value, None);
+        assert!(m.rows[2].cells[0].edited);
+        assert_eq!(m.rows[4].state, RowState::Deleted);
+        assert_eq!(
+            m.rows[4].cells[1].text.as_ref(),
+            "0.7500",
+            "a deleted row still paints the document's own cells"
+        );
+        assert_eq!(
+            d.incomplete_rows(&SCHEDULE, &m.columns),
+            2,
+            "new-1 lacks ex and status; new-2 lacks all three"
+        );
+        // An inserted row's cell_ref is its MODEL position (there is no
+        // document position for it); a document row keeps the document's
+        // own, which is what `Draft::edits` is keyed by — so D2, now at
+        // model row 3, still says it is document row 1.
+        assert_eq!(m.rows[2].cells[1].cell_ref, (2, 1));
+        assert_eq!(m.rows[3].cells[0].cell_ref, (1, 0));
+    }
+
+    /// Several rows under one anchor land in label order; a row anchored
+    /// on an inserted row follows it; an anchor that names no row at all
+    /// lands at the top rather than losing the row.
+    #[test]
+    fn inserted_rows_chain_and_an_unknown_anchor_lands_at_the_top() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ]);
+        let mut d = Draft::default();
+        d.insert_row("new-3".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-2".into(), Some("new-3".into()), "t0");
+        d.insert_row("new-4".into(), Some("gone".into()), "t0");
+        let m = MatrixModel::build(&snapshot, &SCHEDULE, &d).unwrap();
+        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        assert_eq!(labels, ["new-4", "D1", "new-1", "new-3", "new-2", "D2"]);
+        for (i, row) in m.rows.iter().enumerate() {
+            if row.state == RowState::Inserted {
+                for (j, cell) in row.cells.iter().enumerate() {
+                    assert_eq!(cell.cell_ref, (i, j));
+                }
+            }
+        }
+    }
+
+    /// A pivot's inserted row is incomplete until EVERY column — the
+    /// ladder and the slice values alike — is filled: a CVI term with a
+    /// node missing is not a term the desk can price.
+    #[test]
+    fn a_pivot_inserted_row_is_incomplete_until_every_cell_is_filled() {
+        let snapshot = full_grid();
+        let mut d = Draft::default();
+        d.insert_row("2027-01-15".into(), Some("2026-11-20".into()), BASE);
+        let m = MatrixModel::build(&snapshot, &CVI, &d).unwrap();
+        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        assert_eq!(labels, ["2026-10-16", "2026-11-20", "2027-01-15"]);
+        assert_eq!(m.rows[2].state, RowState::Inserted);
+        assert_eq!(
+            m.rows[2].cells.len(),
+            6,
+            "three slice values and three nodes"
+        );
+        assert!(m.rows[2].cells.iter().all(|c| c.text.as_ref() == "·"));
+        assert_eq!(d.incomplete_rows(&CVI, &m.columns), 1);
+        for node in ["-20", "-1", "3.5"] {
+            d.set_row_cell("2027-01-15", node, Value::F64(0.2));
+        }
+        assert_eq!(
+            d.incomplete_rows(&CVI, &m.columns),
+            1,
+            "the ladder is filled but the slice values are not"
+        );
+        for slice in ["fwd", "atm", "skew"] {
+            d.set_row_cell("2027-01-15", slice, Value::F64(1.0));
+        }
+        assert_eq!(d.incomplete_rows(&CVI, &m.columns), 0);
+        let m = MatrixModel::build(&snapshot, &CVI, &d).unwrap();
+        assert_eq!(
+            m.rows[2].cells[0].text.as_ref(),
+            "1.00",
+            "fwd at its own format"
+        );
+        assert_eq!(
+            m.rows[2].cells[3].text.as_ref(),
+            "0.2000",
+            "a node at the panel's"
+        );
+    }
+
+    /// Under `Columns::Values` only the `required` columns count: a row
+    /// missing an optional column is complete.
+    #[test]
+    fn a_flat_inserted_row_is_complete_once_its_required_columns_are_filled() {
+        let spec = PanelSpec {
+            columns: Columns::Values(&[
+                ValueColumn {
+                    column: "gross",
+                    label: "gross",
+                    ty: ColumnType::F64,
+                    format: ColumnFormat::MEASURE,
+                    choices: None,
+                    required: true,
+                },
+                ValueColumn {
+                    column: "net",
+                    label: "net",
+                    ty: ColumnType::F64,
+                    format: ColumnFormat::MEASURE,
+                    choices: None,
+                    required: false,
+                },
+            ]),
+            ..FLAT_SPEC.clone()
+        };
+        let m = MatrixModel::build(&flat_snapshot(), &spec, &Draft::default()).unwrap();
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), None, BASE);
+        assert_eq!(d.incomplete_rows(&spec, &m.columns), 1);
+        d.set_row_cell("new-1", "gross", Value::F64(1.0));
+        assert_eq!(d.incomplete_rows(&spec, &m.columns), 0, "net is optional");
+        assert_eq!(
+            Draft::default().incomplete_rows(&spec, &m.columns),
+            0,
+            "no inserted rows, nothing incomplete"
+        );
+    }
+
+    /// §4.5 with rows spliced in: a patch on an inserted row re-reads its
+    /// cell from `RowEdit.cells`, a patch on a document row shifted below
+    /// an insert still reads the DOCUMENT's row (the edit stays on D2, not
+    /// on the row now sitting at its old index), and both match a rebuild.
+    #[test]
+    fn patch_cell_matches_a_rebuild_with_rows_spliced() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ]);
+        let mut draft = Draft::default();
+        draft.insert_row("new-1".into(), None, "t0");
+        let mut patched = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(patched.rows[2].label.as_ref(), "D2");
+        // D2 is model row 2 but document row 1 — its cell_ref says so, and
+        // that is the key its edit lives under.
+        let d2_ref = patched.rows[2].cells[1].cell_ref;
+        assert_eq!(d2_ref, (1, 1));
+        draft.set(
+            d2_ref,
+            ("D2".into(), "amount".into()),
+            Value::F64(0.75),
+            "t0",
+        );
+        draft.set_row_cell("new-1", "amount", Value::F64(3.0));
+        assert!(patched.patch_cell(2, 1, &snapshot, &SCHEDULE, &draft));
+        assert!(patched.patch_cell(0, 1, &snapshot, &SCHEDULE, &draft));
+        let rebuilt = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(patched, rebuilt);
+        assert_eq!(patched.rows[2].cells[1].text.as_ref(), "0.7500");
+        assert_eq!(patched.rows[0].cells[1].text.as_ref(), "3.0000");
+        assert_eq!(
+            patched.rows[1].cells[1].text.as_ref(),
+            "1.2500",
+            "D1, at the inserted row's old index, is untouched"
+        );
+        // An inserted row the draft no longer holds cannot be patched:
+        // the caller rebuilds.
+        draft.delete_row("new-1", "t0");
+        assert!(!patched.patch_cell(0, 1, &snapshot, &SCHEDULE, &draft));
+    }
+
     proptest! {
         /// The pivot is a bijection between the document's rows and the
         /// grid's cells, and it is POSITIONAL: cell (i, j) holds the value
@@ -1420,7 +2356,7 @@ mod tests {
                 prop_assert_eq!(row.cells.len(), s + n);
                 for (j, cell) in row.cells.iter().enumerate().skip(s) {
                     let want = want_value[&(want_rows[i].clone(), want_columns[j - s].clone())];
-                    prop_assert_eq!(cell.value, Some(want));
+                    prop_assert_eq!(cell.value.clone(), Some(Value::F64(want)));
                     prop_assert_eq!(cell.cell_ref, (i, j));
                 }
             }

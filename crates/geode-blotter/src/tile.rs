@@ -4517,7 +4517,7 @@ mod tests {
         let mut colours = NamedColours::default();
         colours.insert(
             "delta".into(),
-            geode_core::colour::Definition::Token(geode_core::colour::Token::Danger),
+            geode_core::colour::Definition::token(geode_core::colour::Token::Danger),
         );
         let (h, mut cx) =
             open_with_views_and_colours(cx, None, ViewSpec::from_doc(&doc).0, colours);
@@ -4560,7 +4560,9 @@ mod tests {
         });
         assert_eq!(
             resolved,
-            Some(geode_shell::shell::colours::to_hsla(danger)),
+            Some(crate::colour_cache::Resolved::plain(
+                geode_shell::shell::colours::to_hsla(danger)
+            )),
             "the tile's own colours must reach the delegate with the plan"
         );
     }

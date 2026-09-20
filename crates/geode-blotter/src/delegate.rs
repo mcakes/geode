@@ -4,7 +4,7 @@
 //! `render_td` is a lookup. The pure core does the work; this file only
 //! sequences it and paints.
 
-use crate::colour_cache::ColourCache;
+use crate::colour_cache::{ColourCache, Resolved};
 use crate::core::cache::{FormatCache, cell};
 use crate::core::cursor::{Cursor, Mode, restore_by_path, selection};
 use crate::core::expansion::{Expansion, Path, depth_bound, path_of};
@@ -206,17 +206,18 @@ impl BlotterDelegate {
         }
     }
 
-    /// The resolved named colour of column `col_ix`, or `None` for
-    /// `none`, `sign` and a name the doc lacks — all three painted in
-    /// the theme's foreground (§6.3). The one door both `render_td` and
-    /// `render_th` go through, so a cell and its header can never
-    /// disagree about a column's colour.
+    /// The resolved named colour of column `col_ix` — its base and two
+    /// sign variants — or `None` for `none`, `sign` and a name the doc
+    /// lacks, all three painted in the theme's foreground (§6.3). The one
+    /// door both `render_td` and `render_th` go through, so a cell and
+    /// its header can never disagree about a column's colour; the cell
+    /// picks its variant by sign, the header takes the base.
     pub fn cell_colour(
         &mut self,
         col_ix: usize,
         anchors: &Anchors,
         tokens: &Tokens,
-    ) -> Option<Hsla> {
+    ) -> Option<Resolved> {
         // Borrows `self.plan` only, so the `&mut self.colour_cache`
         // below is a disjoint field — which is what lets the name stay a
         // `&str` rather than being cloned per cell per frame. That is
@@ -233,7 +234,7 @@ impl BlotterDelegate {
     ///
     /// The one door both paint sites use, so a cell and its header can no
     /// more disagree about the memo than they can about the colour.
-    pub fn themed_cell_colour(&mut self, col_ix: usize, theme: &Theme) -> Option<Hsla> {
+    pub fn themed_cell_colour(&mut self, col_ix: usize, theme: &Theme) -> Option<Resolved> {
         self.ensure_theme_inputs(theme);
         // Four disjoint field borrows in one body — `plan` and `colours`
         // and `theme_inputs` shared, `colour_cache` mutable. Splitting
@@ -907,9 +908,10 @@ impl TableDelegate for BlotterDelegate {
             Some(ColourKind::Named) => self.themed_cell_colour(col_ix, cx.theme()),
             _ => None,
         };
+        // The base, never a sign variant: a header has no sign.
         div()
             .size_full()
-            .when_some(colour, |el, c| el.text_color(c))
+            .when_some(colour, |el, c| el.text_color(c.base))
             .child(name)
     }
 
@@ -1065,12 +1067,16 @@ impl TableDelegate for BlotterDelegate {
                     (Some(ColourKind::Sign), Some(Sign::Positive)) => {
                         el.text_color(theme.chart_bullish)
                     }
-                    // A named colour ignores the sign entirely (§6.3):
-                    // `sign` and a name are alternatives, not layers.
-                    // An unknown name falls back to the theme's own
-                    // foreground — the same thing an uncoloured cell
-                    // paints in, so a deleted definition is invisible
-                    // rather than wrong (`load_views` warns about it).
+                    // A named colour never paints bullish/bearish (§6.3):
+                    // `sign` and a name are alternatives, not layers —
+                    // but a `tint_sign` colour carries its own two sign
+                    // variants, and `Resolved::for_sign` picks by the
+                    // cell's sign (the base for an untinted colour, for
+                    // zero and for a cell with no number). An unknown
+                    // name falls back to the theme's own foreground —
+                    // the same thing an uncoloured cell paints in, so a
+                    // deleted definition is invisible rather than wrong
+                    // (`load_views` warns about it).
                     //
                     // The theme is read into the resolver's vocabulary
                     // *here*, inside the arm, rather than once at the top
@@ -1088,9 +1094,9 @@ impl TableDelegate for BlotterDelegate {
                     // remember to call, and the signature is what makes
                     // sure the memo hands it a *fresh* pair to be keyed
                     // on.
-                    (Some(ColourKind::Named), _) => el.text_color(
+                    (Some(ColourKind::Named), sign) => el.text_color(
                         self.themed_cell_colour(col_ix, theme)
-                            .unwrap_or(theme.foreground),
+                            .map_or(theme.foreground, |c| c.for_sign(sign)),
                     ),
                     _ => el,
                 };
@@ -1828,7 +1834,7 @@ mod tests {
         let mut colours = NamedColours::default();
         // A token definition, so the expected value is exactly the
         // token's own colour and the assertion reads as one.
-        colours.insert("delta".into(), Definition::Token(Token::Foreground));
+        colours.insert("delta".into(), Definition::token(Token::Foreground));
 
         // Columns 1..3: a named colour, `sign`, and a name the doc lacks.
         let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
@@ -1854,7 +1860,7 @@ mod tests {
 
         assert_eq!(
             d.cell_colour(1, &anchors, &tokens),
-            Some(geode_shell::shell::colours::to_hsla(red)),
+            Some(Resolved::plain(geode_shell::shell::colours::to_hsla(red))),
             "a named column resolves its own definition against the theme"
         );
         assert_eq!(
@@ -1878,6 +1884,92 @@ mod tests {
             None,
             "a column index the plan does not have is not a panic"
         );
+    }
+
+    /// A `tint_sign` colour: `cell_colour` hands back the triad — the
+    /// three the cache resolved together — and `render_td`'s named arm
+    /// picks by the cell's own sign through `Resolved::for_sign`, while
+    /// the header takes the base. The cell signs come from the cache the
+    /// same way the `sign` arm reads them.
+    #[test]
+    fn a_tint_sign_column_resolves_a_variant_per_sign() {
+        let grey = Rgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+        };
+        let green = Rgb {
+            r: 0.2,
+            g: 0.7,
+            b: 0.3,
+        };
+        let anchors = Anchors {
+            normal: [grey; 6],
+            light: [grey; 6],
+        };
+        let tokens = Tokens {
+            foreground: green,
+            muted: grey,
+            primary: grey,
+            accent: grey,
+            danger: grey,
+            warning: grey,
+            success: grey,
+            info: grey,
+            chart: [grey; 5],
+            bullish: grey,
+            bearish: grey,
+            background: Rgb {
+                r: 0.05,
+                g: 0.05,
+                b: 0.05,
+            },
+        };
+        let mut colours = NamedColours::default();
+        colours.insert(
+            "delta".into(),
+            Definition::token(Token::Foreground).tinted(),
+        );
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[t.columns]]\nname = \"delta01\"\nformat = { colour = \"delta\" }\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let snapshot = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1"), s("L2")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    dim("delta01"),
+                    TestColumn::F64(vec![Some(0.0), Some(5.0), Some(-5.0)]),
+                ),
+            ],
+            1,
+        ));
+        let mut d = BlotterDelegate::new();
+        d.set_colours(Arc::new(colours));
+        d.apply_snapshot(snapshot, &view, &["lhu".to_string()]);
+        d.refill_window(0..3);
+
+        let resolved = d.cell_colour(1, &anchors, &tokens).unwrap();
+        let expect = |sign| {
+            geode_shell::shell::colours::to_hsla(geode_core::colour::resolve_signed(
+                &Definition::token(Token::Foreground).tinted(),
+                sign,
+                &anchors,
+                &tokens,
+            ))
+        };
+        assert_eq!(resolved.base, expect(Sign::Zero));
+        assert_eq!(resolved.positive, expect(Sign::Positive));
+        assert_eq!(resolved.negative, expect(Sign::Negative));
+        // The cells' signs, as the painter reads them off the cache.
+        let sign_at = |d: &BlotterDelegate, row: usize| d.cache.get(row, 1).unwrap().sign;
+        assert_eq!(sign_at(&d, 0), Some(Sign::Zero));
+        assert_eq!(sign_at(&d, 1), Some(Sign::Positive));
+        assert_eq!(sign_at(&d, 2), Some(Sign::Negative));
+        assert_eq!(resolved.for_sign(sign_at(&d, 1)), resolved.positive);
+        assert_eq!(resolved.for_sign(sign_at(&d, 2)), resolved.negative);
+        assert_eq!(resolved.for_sign(sign_at(&d, 0)), resolved.base);
     }
 
     /// I-1 (Part 2c final review): the theme -> `Anchors`/`Tokens`

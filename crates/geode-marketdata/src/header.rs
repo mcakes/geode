@@ -4,7 +4,7 @@
 
 use crate::core::Segment;
 use crate::core::draft::{DraftBadge, local_hhmm};
-use crate::core::matrix::{HeaderCell, MatrixModel};
+use crate::core::matrix::{HeaderCell, MatrixModel, RowState};
 use crate::core::spec::PanelSpec;
 use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
@@ -80,31 +80,38 @@ pub(crate) fn date_segment_paint(
         CellPaint {
             fill: Some(theme.accent),
             text: theme.accent_foreground,
+            strike: false,
         }
     } else if active {
         CellPaint {
             fill: Some(theme.primary),
             text: tones.primary_text,
+            strike: false,
         }
     } else {
         CellPaint {
             fill: None,
             text: theme.foreground,
+            strike: false,
         }
     }
 }
 
-/// The segmented date field in an attribute's editor slot: three spans in
-/// the data face separated by `-`, the active segment highlighted, the
-/// container bordered as the cell editor is. The field is the focusable
+/// The segmented date field in an attribute's editor slot — or, since
+/// spec §4.4, in a `Date` cell of the grid, painted there by
+/// `MatrixDelegate::render_td` through this same function so the two
+/// cannot paint or route keys differently: three spans in the data face
+/// separated by `-`, the active segment highlighted, the container
+/// bordered as the cell editor is. The field is the focusable
 /// (`track_focus`) so its `on_key_down` sits on the focused element and
 /// runs before the shell root's: `MarketDataTile::date_field_key` decides,
 /// and a consumed key stops here. A click on a segment selects it and
-/// STOPS propagation — the attribute value's own mouse-down would
-/// otherwise run `attr_clicked` and cancel the editor the click was aimed
-/// into; a click on the container's padding or the separators bubbles as
-/// before, so a click "elsewhere" still cancels.
-fn render_date_field(
+/// STOPS propagation — the attribute value's own mouse-down (or the
+/// table's own cell click, which cancels an open editor) would otherwise
+/// cancel the editor the click was aimed into; a click on the container's
+/// padding or the separators bubbles as before, so a click "elsewhere"
+/// still cancels.
+pub(crate) fn render_date_field(
     paint: &DateFieldPaint,
     focus: &FocusHandle,
     theme: &Theme,
@@ -133,8 +140,9 @@ fn render_date_field(
         });
     for (i, text) in paint.segments.iter().enumerate() {
         let active = paint.active == i;
-        let CellPaint { fill, text: colour } =
-            date_segment_paint(theme, tones, active, active && paint.typing);
+        let CellPaint {
+            fill, text: colour, ..
+        } = date_segment_paint(theme, tones, active, active && paint.typing);
         if i > 0 {
             field = field.child(div().text_color(separator).child("-"));
         }
@@ -171,6 +179,9 @@ pub(crate) struct HeaderInputs<'a> {
     pub unresolved_restore: bool,
     pub notice: Option<&'a SharedString>,
     pub source_at: Option<DateTime<Utc>>,
+    /// `Draft::incomplete_rows` — inserted rows with a required cell
+    /// still empty (spec §5.2).
+    pub incomplete: usize,
 }
 
 /// The header row, prepared once per change: every string already
@@ -181,7 +192,9 @@ pub(crate) struct HeaderModel {
     pub title: SharedString,
     /// `display_key(key)`, or `None` with no underlying loaded at all.
     pub underlying: Option<SharedString>,
-    /// Whether the draft has any edit, cell or attribute — the dirty dot.
+    /// Whether the draft has any edit — cell, attribute, or a row
+    /// inserted or deleted (the badge reads `Dirty` for all three, one
+    /// draft state) — the dirty dot.
     pub dirty: bool,
     /// A clone of `model.header` — `Rc`-cheap `SharedString`s, prepared by
     /// [`crate::core::matrix::MatrixModel::build`] already.
@@ -194,6 +207,11 @@ pub(crate) struct HeaderModel {
     pub badge: DraftBadge,
     /// The one short state run (spec §4 item 5), if any.
     pub state: Option<(SharedString, Tone)>,
+    /// `N rows incomplete` (dividend spec §5.2), painted after the state
+    /// run and ahead of the notice, only while the count is non-zero.
+    /// Prepared as a `(text, tone)` pair like `state`, so `render` paints
+    /// the two through the same arm.
+    pub incomplete: Option<(SharedString, Tone)>,
     pub notice: Option<SharedString>,
     /// The generation's source time, `HH:MM:SS` on the trader's own clock.
     pub time: Option<SharedString>,
@@ -225,6 +243,11 @@ impl HeaderModel {
                 ("no document yet".into(), Tone::Warn)
             });
         }
+        let incomplete = match i.incomplete {
+            0 => None,
+            1 => Some(("1 row incomplete".into(), Tone::Warn)),
+            n => Some((format!("{n} rows incomplete").into(), Tone::Warn)),
+        };
         HeaderModel {
             title: i.spec.title.into(),
             underlying,
@@ -232,6 +255,7 @@ impl HeaderModel {
             attrs: i.model.header.clone(),
             badge: i.badge,
             state,
+            incomplete,
             notice: i.notice.cloned(),
             time: i.source_at.map(|t| {
                 t.with_timezone(&chrono::Local)
@@ -258,6 +282,9 @@ impl HeaderModel {
             out.push(format!("{} {}", a.label, a.text));
         }
         if let Some((text, _)) = &self.state {
+            out.push(text.to_string());
+        }
+        if let Some((text, _)) = &self.incomplete {
             out.push(text.to_string());
         }
         if let Some(n) = &self.notice {
@@ -354,7 +381,10 @@ pub(crate) fn render(
 
     // 3. Attribute strip, inline.
     for (i, attr) in h.attrs.iter().enumerate() {
-        let CellPaint { fill, text } = cell_paint(theme, false, attr.edited);
+        // An attribute is a document-level value: it belongs to no row,
+        // so it paints as a document row's cell would.
+        let CellPaint { fill, text, .. } =
+            cell_paint(theme, false, attr.edited, RowState::Document);
         let at_cursor = cursor_attr == Some(i);
         let mut value = div()
             .px_1()
@@ -431,6 +461,17 @@ pub(crate) fn render(
                         )),
                     ))
                 }),
+        );
+    }
+    // The incomplete-rows chip (dividend spec §5.2), between the state
+    // and the notice: a warning, since an incomplete row is one an
+    // upload will refuse, and not an error, since nothing has gone wrong.
+    if let Some((text, tone)) = &h.incomplete {
+        row = row.child(
+            div()
+                .debug_selector(move || format!("marketdata-incomplete-{tile_id}"))
+                .text_color(tone_colour(*tone, false, theme, tones))
+                .child(text.clone()),
         );
     }
     if let Some(n) = &h.notice {
@@ -558,6 +599,7 @@ mod tests {
             rows: vec![crate::core::matrix::RowModel {
                 label: "row".into(),
                 cells: Vec::new(),
+                state: RowState::Document,
             }],
             ..MatrixModel::default()
         }
@@ -568,6 +610,7 @@ mod tests {
             rows: vec![crate::core::matrix::RowModel {
                 label: "row".into(),
                 cells: Vec::new(),
+                state: RowState::Document,
             }],
             ..MatrixModel::default()
         }
@@ -586,7 +629,50 @@ mod tests {
             unresolved_restore: false,
             notice: None,
             source_at: None,
+            incomplete: 0,
         }
+    }
+
+    /// §5.2: an inserted row with a required cell still empty is counted
+    /// in the header, in the warning tone, after the state run and ahead
+    /// of the notice — and a count of zero paints nothing at all.
+    #[test]
+    fn incomplete_rows_are_a_warn_chip_after_the_state() {
+        let model = model_with_rows();
+        let key = vec!["SPX.Z".to_string()];
+        let mut one = inputs(&model, Some(&key), DraftBadge::Dirty);
+        one.incomplete = 1;
+        let h = HeaderModel::prepare(one);
+        assert_eq!(
+            h.incomplete
+                .as_ref()
+                .map(|(t, tone)| (t.to_string(), *tone)),
+            Some(("1 row incomplete".to_string(), Tone::Warn))
+        );
+        assert_eq!(h.texts(), vec!["CVI", "SPX.Z", "1 row incomplete"]);
+
+        let notice: SharedString = "'abc' is not a number".into();
+        let mut two = inputs(
+            &model,
+            Some(&key),
+            DraftBadge::Behind {
+                newer: "2026-09-14T14:09:00Z".into(),
+            },
+        );
+        two.incomplete = 2;
+        two.notice = Some(&notice);
+        let texts = HeaderModel::prepare(two).texts();
+        let state_at = texts.iter().position(|t| t.starts_with("update ")).unwrap();
+        let chip_at = texts.iter().position(|t| t == "2 rows incomplete").unwrap();
+        let notice_at = texts
+            .iter()
+            .position(|t| t == "'abc' is not a number")
+            .unwrap();
+        assert!(state_at < chip_at && chip_at < notice_at, "{texts:?}");
+
+        let none = HeaderModel::prepare(inputs(&model, Some(&key), DraftBadge::Dirty));
+        assert!(none.incomplete.is_none());
+        assert_eq!(none.texts(), vec!["CVI", "SPX.Z"]);
     }
 
     #[test]

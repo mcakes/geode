@@ -213,7 +213,18 @@ disagree) and built in two parts, each with the slice that needs it.
    demo bus) are done, 2026-09-13; Part 3 (the panel: `geode-marketdata`,
    `MarketDataTile`, insert mode, keymap fragments, the draft's `Behind`/
    `:rebase`/`:discard` states) is done, 2026-09-14; Part 4 (egress)
-   remains.
+   remains. **Dividends: done 2026-09-19** — sub-project D's second
+   document kind and panel (`DIVIDEND`, registered `.without_keymap()`
+   beside `CVI`'s factory), governed by
+   `docs/superpowers/specs/2026-09-19-geode-dividend-schedule-and-choice-design.md`
+   §4–§6: the document family's `value` role widened to `date`/`utf8`,
+   `PanelSpec` naming its flat columns and row-axis identity explicitly,
+   typed grid cells (`CellKind::{Number, Date, Text, Choice}`), row
+   insert/delete on both panels (CVI's row is a term slice), and the
+   `DividendGenerator` + two-producer demo bus. Reused Phase 1's
+   `geode_shell::choice::ChoiceList` for the panel's own `status` cell
+   rather than building a second typeahead. Part 4 (egress) remains for
+   both panels.
 2. **Scenario panel** — axes on measures, link groups, launch context,
    the pivot grid with its cell-count measurement.
 3. **Vol viewers** — fetch, cache datasets, charts.

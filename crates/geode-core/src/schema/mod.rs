@@ -711,23 +711,31 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     }
     ds.columns.retain(|c| !foreign.contains(&c.name));
 
-    // A value is a number: it feeds the numeric cell of the document
-    // grid, and a non-numeric one would fail every downstream fold.
-    let non_numeric: Vec<String> = ds
+    // A value is a per-row fact that is not identity (spec 2026-09-19
+    // §4.1, ruling 7): a number, a date or text — a dividend's amount,
+    // its ex date, its status. `timestamp`/`bool` are refused because
+    // `geode_core::document::Column`/`Value` — the shapes a parsed
+    // document arrives in — carry neither, so such a column could be
+    // declared but never filled.
+    let non_value: Vec<String> = ds
         .columns
         .iter()
         .filter(|c| {
-            c.role == ColumnRole::Value && !matches!(c.ty, ColumnType::F64 | ColumnType::I64)
+            c.role == ColumnRole::Value
+                && !matches!(
+                    c.ty,
+                    ColumnType::F64 | ColumnType::I64 | ColumnType::Date | ColumnType::Utf8
+                )
         })
         .map(|c| c.name.clone())
         .collect();
-    for c in &non_numeric {
+    for c in &non_value {
         diags.push(err(
-            format!("dataset '{name}' column '{c}': a value must be f64 or i64 — column dropped"),
+            format!("dataset '{name}' column '{c}': a value must be f64, i64, date or utf8 — column dropped"),
             format!("datasets.{name}.columns.{c}.type"),
         ));
     }
-    ds.columns.retain(|c| !non_numeric.contains(&c.name));
+    ds.columns.retain(|c| !non_value.contains(&c.name));
 
     // `geode_core::document::Column` and `Value` — the shapes a parsed
     // document actually arrives in — cover f64, i64, utf8 and date and
@@ -737,11 +745,11 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     // would be refused for a type mismatch and reported as a source
     // health failure, pointing at the feed rather than at the config
     // line that is actually wrong. Refused here instead, where the
-    // diagnostic can name the key. A value is already held to the
-    // stricter f64/i64 rule above and is deliberately not re-checked, so
-    // a `timestamp` value is reported once, not twice. Part 2 widens
-    // `Column`/`Value` if a document ever needs a timestamp axis; this
-    // rule moves with them.
+    // diagnostic can name the key. A value is already held to the same
+    // four-type rule above (spec 2026-09-19 §4.1, ruling 7) and is
+    // deliberately not re-checked, so a `timestamp` value is reported
+    // once, not twice. Part 2 widens `Column`/`Value` if a document ever
+    // needs a timestamp axis; this rule moves with them.
     let unsupported: Vec<String> = ds
         .columns
         .iter()
@@ -1814,18 +1822,68 @@ role = "attribute"
     }
 
     #[test]
-    fn a_non_numeric_value_column_is_dropped_and_the_dataset_kept() {
+    fn an_unsupported_value_column_is_dropped_and_the_dataset_kept() {
         // Only value column gone → the "at least one value" rule fires
-        // next, so add a second numeric value to isolate this rule.
+        // next, so add a second numeric value to isolate this rule. `bool`
+        // is refused; date and utf8 are legal values now (spec 2026-09-19
+        // §4.1, ruling 7) — see `a_document_value_may_be_a_date_or_text`.
         let text = CVI.replace(
             "[cvi_params.columns.param]\ntype = \"f64\"",
-            "[cvi_params.columns.param]\ntype = \"utf8\"",
+            "[cvi_params.columns.param]\ntype = \"bool\"",
         ) + "\n[cvi_params.columns.param2]\ntype = \"i64\"\nrole = \"value\"\n";
         let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
         let ds = schema.dataset("cvi_params").expect("dataset kept");
-        assert!(ds.column("param").is_none(), "the utf8 value is dropped");
+        assert!(ds.column("param").is_none(), "the bool value is dropped");
         assert!(ds.column("param2").is_some());
         error_with_path(&diags, "datasets.cvi_params.columns.param.type");
+    }
+
+    /// Spec 2026-09-19 §4.1 (ruling 7): a value is "a per-row fact that
+    /// is not identity" and may be a date or text — a dividend's ex date
+    /// and status. `timestamp`/`bool` stay refused: `document::Column`
+    /// carries neither.
+    #[test]
+    fn a_document_value_may_be_a_date_or_text() {
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.ex]\ntype = \"date\"\nrole = \"value\"\n"
+            + "\n[cvi_params.columns.status]\ntype = \"utf8\"\nrole = \"value\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("cvi_params").expect("the dataset survives");
+        assert!(
+            ds.columns
+                .iter()
+                .any(|c| c.name == "ex" && c.role == ColumnRole::Value)
+        );
+        assert!(
+            ds.columns
+                .iter()
+                .any(|c| c.name == "status" && c.role == ColumnRole::Value)
+        );
+        assert!(
+            !diags.iter().any(|d| d.message.contains("a value must be")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_document_value_may_not_be_a_timestamp_or_bool() {
+        let text = CVI.to_string()
+            + "\n[cvi_params.columns.when]\ntype = \"timestamp\"\nrole = \"value\"\n"
+            + "\n[cvi_params.columns.flag]\ntype = \"bool\"\nrole = \"value\"\n";
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let ds = schema.dataset("cvi_params").expect("dataset kept");
+        assert!(!ds.columns.iter().any(|c| c.name == "when"));
+        assert!(!ds.columns.iter().any(|c| c.name == "flag"));
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("a value must be f64, i64, date or utf8"))
+            .collect();
+        assert_eq!(errors.len(), 2, "{diags:?}");
+        assert!(
+            errors
+                .iter()
+                .all(|d| d.path.as_deref().is_some_and(|p| p.ends_with(".type")))
+        );
     }
 
     #[test]

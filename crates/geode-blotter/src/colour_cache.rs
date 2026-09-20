@@ -15,10 +15,42 @@
 //! theme file all empty the map by construction, with nothing to
 //! remember to call.
 
-use geode_core::colour::{Anchors, NamedColours, Tokens, resolve};
+use geode_core::colour::{Anchors, NamedColours, Sign, Tokens, resolve_signed};
 use geode_shell::shell::colours::to_hsla;
 use gpui::Hsla;
 use std::collections::HashMap;
+
+/// One named colour resolved for every sign a cell can carry: the base,
+/// and the two `tint_sign` variants (both equal to the base when the
+/// definition does not tint). All three are resolved on the one cache
+/// miss, so the per-cell pick ([`Resolved::for_sign`]) is a field read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Resolved {
+    pub base: Hsla,
+    pub positive: Hsla,
+    pub negative: Hsla,
+}
+
+impl Resolved {
+    /// An untinted colour: the base three times over.
+    pub fn plain(base: Hsla) -> Resolved {
+        Resolved {
+            base,
+            positive: base,
+            negative: base,
+        }
+    }
+
+    /// The variant for a cell of `sign`; `None` (a header, a cell with
+    /// no number) and `Zero` are the base.
+    pub fn for_sign(self, sign: Option<Sign>) -> Hsla {
+        match sign {
+            Some(Sign::Positive) => self.positive,
+            Some(Sign::Negative) => self.negative,
+            Some(Sign::Zero) | None => self.base,
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct ColourCache {
@@ -26,7 +58,7 @@ pub struct ColourCache {
     /// `Anchors`/`Tokens` are plain `Copy` structs of floats — comparable,
     /// not hashable — so this is one compare per lookup, not a hash.
     key: Option<(Anchors, Tokens)>,
-    by_name: HashMap<String, Hsla>,
+    by_name: HashMap<String, Resolved>,
     misses: u64,
 }
 
@@ -35,11 +67,11 @@ impl ColourCache {
         ColourCache::default()
     }
 
-    /// The colour for `name` under `(anchors, tokens)`, resolved once
-    /// and reused until they change. `None` when the doc does not define
-    /// `name` at all — the caller paints such a cell in the theme's
-    /// foreground (§6.3), so a name the trader deleted from
-    /// `colours.toml` is never left showing a stale colour.
+    /// The colour for `name` under `(anchors, tokens)` — all three sign
+    /// variants — resolved once and reused until they change. `None`
+    /// when the doc does not define `name` at all — the caller paints
+    /// such a cell in the theme's foreground (§6.3), so a name the trader
+    /// deleted from `colours.toml` is never left showing a stale colour.
     ///
     /// A miss costs one `String` (the key); a hit costs a hash lookup by
     /// `&str` and nothing else — the name is never cloned on the hit
@@ -53,7 +85,7 @@ impl ColourCache {
         name: &str,
         anchors: &Anchors,
         tokens: &Tokens,
-    ) -> Option<Hsla> {
+    ) -> Option<Resolved> {
         let key = (*anchors, *tokens);
         if self.key.as_ref() != Some(&key) {
             self.key = Some(key);
@@ -64,9 +96,13 @@ impl ColourCache {
             return Some(*hit);
         }
         let def = colours.get(name)?;
-        let hsla = to_hsla(resolve(def, anchors, tokens));
-        self.by_name.insert(name.to_string(), hsla);
-        Some(hsla)
+        let resolved = Resolved {
+            base: to_hsla(resolve_signed(def, Sign::Zero, anchors, tokens)),
+            positive: to_hsla(resolve_signed(def, Sign::Positive, anchors, tokens)),
+            negative: to_hsla(resolve_signed(def, Sign::Negative, anchors, tokens)),
+        };
+        self.by_name.insert(name.to_string(), resolved);
+        Some(resolved)
     }
 
     /// Everything resolved so far is against the old definitions: drop
@@ -92,7 +128,7 @@ impl ColourCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::colour::{Definition, Rgb, Tone};
+    use geode_core::colour::{Definition, Rgb, Sign, Tone, resolve_signed};
 
     /// Six anchors, all grey but `blue` (index 4 of
     /// `ANCHOR_DEGREES`, the 240° one this test's definition names).
@@ -139,13 +175,7 @@ mod tests {
     #[test]
     fn a_steady_theme_costs_no_recompute_and_a_changed_anchor_empties_the_cache() {
         let mut colours = NamedColours::default();
-        colours.insert(
-            "delta".into(),
-            Definition::Hue {
-                degrees: 240.0,
-                tone: Tone::Normal,
-            },
-        );
+        colours.insert("delta".into(), Definition::hue(240.0, Tone::Normal));
         let (tokens, a) = (
             tokens(),
             anchors(Rgb {
@@ -189,13 +219,7 @@ mod tests {
     #[test]
     fn invalidate_drops_colours_resolved_from_the_old_definitions() {
         let mut colours = NamedColours::default();
-        colours.insert(
-            "delta".into(),
-            Definition::Hue {
-                degrees: 240.0,
-                tone: Tone::Normal,
-            },
-        );
+        colours.insert("delta".into(), Definition::hue(240.0, Tone::Normal));
         let (tokens, a) = (
             tokens(),
             anchors(Rgb {
@@ -210,7 +234,7 @@ mod tests {
         let mut redefined = NamedColours::default();
         redefined.insert(
             "delta".into(),
-            Definition::Token(geode_core::colour::Token::Foreground),
+            Definition::token(geode_core::colour::Token::Foreground),
         );
         assert_eq!(
             cache.get(&redefined, "delta", &a, &tokens),
@@ -220,8 +244,78 @@ mod tests {
         cache.invalidate();
         assert_eq!(
             cache.get(&redefined, "delta", &a, &tokens),
-            Some(to_hsla(tokens.foreground)),
+            Some(Resolved::plain(to_hsla(tokens.foreground))),
             "after invalidation the new definition is what resolves"
+        );
+    }
+
+    /// One entry holds all three variants, resolved together on the
+    /// miss: a tinted definition's positive and negative differ from its
+    /// base and from each other, an untinted one's are the base three
+    /// times over — so `for_sign` is a field read either way and a cell
+    /// never resolves anything per frame.
+    #[test]
+    fn a_tinted_definition_resolves_three_variants_and_an_untinted_one_three_of_the_base() {
+        let mut colours = NamedColours::default();
+        colours.insert(
+            "plain".into(),
+            Definition::token(geode_core::colour::Token::Chart(1)),
+        );
+        colours.insert(
+            "tinted".into(),
+            Definition::token(geode_core::colour::Token::Chart(1)).tinted(),
+        );
+        let mut tokens = tokens();
+        // A saturated green so the rotation is visible in the result.
+        tokens.chart[0] = Rgb {
+            r: 0.2,
+            g: 0.7,
+            b: 0.3,
+        };
+        let a = anchors(tokens.chart[0]);
+        let mut cache = ColourCache::new();
+
+        let plain = cache.get(&colours, "plain", &a, &tokens).unwrap();
+        assert_eq!(plain, Resolved::plain(to_hsla(tokens.chart[0])));
+        for sign in [
+            None,
+            Some(Sign::Negative),
+            Some(Sign::Zero),
+            Some(Sign::Positive),
+        ] {
+            assert_eq!(plain.for_sign(sign), plain.base, "{sign:?}");
+        }
+
+        let tinted = cache.get(&colours, "tinted", &a, &tokens).unwrap();
+        assert_eq!(tinted.base, plain.base, "the base is the token itself");
+        assert_eq!(
+            tinted.positive,
+            to_hsla(resolve_signed(
+                colours.get("tinted").unwrap(),
+                Sign::Positive,
+                &a,
+                &tokens
+            ))
+        );
+        assert_eq!(
+            tinted.negative,
+            to_hsla(resolve_signed(
+                colours.get("tinted").unwrap(),
+                Sign::Negative,
+                &a,
+                &tokens
+            ))
+        );
+        assert_ne!(tinted.positive, tinted.base);
+        assert_ne!(tinted.negative, tinted.base);
+        assert_ne!(tinted.positive, tinted.negative);
+        assert_eq!(tinted.for_sign(Some(Sign::Positive)), tinted.positive);
+        assert_eq!(tinted.for_sign(Some(Sign::Negative)), tinted.negative);
+        assert_eq!(tinted.for_sign(Some(Sign::Zero)), tinted.base);
+        assert_eq!(
+            tinted.for_sign(None),
+            tinted.base,
+            "a cell with no sign (a header, a NULL) is the base"
         );
     }
 }
