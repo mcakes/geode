@@ -567,15 +567,28 @@ impl TimeseriesTile {
         // with the list up meant the tile, not the list, and an overlay
         // left open over the answer is the confusing half.
         //
-        // The keep-list carries Tasks 9–10's verbs already — the field
-        // popups' `commit`/`cancel`/`insert_*` and the three that OPEN
-        // one — so those tasks add a variant and its handler without
-        // touching this gate. `close_popup_with_window`, never a
-        // `Window`-less closer: a popup whose field holds the keyboard
-        // must be blurred before it is dropped (CLAUDE.md), and this is
-        // the path every such verb reaches it by.
-        if self.popup.is_some()
-            && !matches!(
+        // The keep-list is STAGE-AWARE (Task 9 review, Important): a
+        // popup that holds the KEYBOARD keeps only its own four verbs.
+        // Everything else — including the verbs the series list happily
+        // stays open through — closes it first, because the palette can
+        // dispatch any action over an open field (`ctrl+k` is a chord,
+        // so it opens over one) and a verb that ran with the field still
+        // installed would leave `key_context` reporting `insert` with
+        // nothing focused: a tile deaf to every bare key until `escape`.
+        //
+        // `close_popup_with_window`, never a `Window`-less closer: a
+        // popup whose field holds the keyboard must be blurred before it
+        // is dropped (CLAUDE.md), and this is the path every such verb
+        // reaches it by.
+        let popup_survives = match &self.popup {
+            None => true,
+            Some(p) if p.is_insert() => {
+                matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")
+            }
+            // The series list holds no field: a trader who cycles a
+            // colour or an axis with it up meant the list to stay and
+            // show the change (spec §9.5).
+            Some(_) => matches!(
                 verb,
                 "list"
                     | "list_down"
@@ -591,12 +604,9 @@ impl TimeseriesTile {
                     | "add"
                     | "expr"
                     | "range"
-                    | "commit"
-                    | "cancel"
-                    | "insert_up"
-                    | "insert_down"
-            )
-        {
+            ),
+        };
+        if !popup_survives {
             self.close_popup_with_window(window, cx);
         }
         let (now, as_of) = self.now_and_as_of(cx);
@@ -900,8 +910,9 @@ impl TimeseriesTile {
                 // outright, or the source stage asks which source it
                 // belongs to.
                 Some(_) => match text.trim() {
-                    // A query of nothing but spaces ranks nothing and so
-                    // offers the add row; it still names no identity.
+                    // Belt and braces: `refresh_add_row` trims, so a
+                    // query of nothing but spaces offers no add row to
+                    // reach this arm through in the first place.
                     "" => Commit::Nothing,
                     typed => match parse_pair(typed) {
                         Some((identity, source))
@@ -938,7 +949,11 @@ impl TimeseriesTile {
             },
         };
         match decision {
-            Commit::Nothing => {}
+            // Nothing to commit: the picker stays open (retyping is one
+            // keystroke away) and the verb answers UNHANDLED, so the
+            // notice `dispatch` took on the way in goes back on screen
+            // rather than being cleared by an `enter` that did nothing.
+            Commit::Nothing => return false,
             Commit::Add(identity, source) => {
                 self.close_popup_with_window(window, cx);
                 if let Err(e) = self.add_pair(&identity, &source, cx) {
@@ -953,6 +968,15 @@ impl TimeseriesTile {
                     .unwrap_or_default();
                 let sources: Vec<String> = settings.names();
                 let default_source = settings.default_source.clone();
+                // A stage with nothing to choose from would be a dead
+                // end (Task 9 review, minor 3): say why and close, the
+                // way `:add` refuses an unconfigured source.
+                if sources.is_empty() {
+                    self.close_popup_with_window(window, cx);
+                    self.notice = Some("no fetch source is configured".into());
+                    cx.notify();
+                    return true;
+                }
                 if let Some(Popup::Picker(p)) = &mut self.popup {
                     p.enter_sources(identity, sources, default_source.as_deref());
                     // The field is the STAGE's filter now, not the
@@ -2037,43 +2061,54 @@ mod tests {
     }
 
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
-        open_full(cx, None, Some("demo_kdb"))
+        open_full(cx, None, Some("demo_kdb"), demo_sources())
     }
 
     fn open_with(
         cx: &mut gpui::TestAppContext,
         restored: Option<toml::Table>,
     ) -> (Harness, gpui::VisualTestContext) {
-        open_full(cx, restored, Some("demo_kdb"))
+        open_full(cx, restored, Some("demo_kdb"), demo_sources())
     }
 
     fn open_with_default_source(
         cx: &mut gpui::TestAppContext,
         default_source: Option<&str>,
     ) -> (Harness, gpui::VisualTestContext) {
-        open_full(cx, None, default_source)
+        open_full(cx, None, default_source, demo_sources())
+    }
+
+    /// A build with `[sources]` holding no fetch source at all — what a
+    /// desk that has not configured one yet actually has.
+    fn open_without_sources(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        open_full(cx, None, None, Vec::new())
+    }
+
+    fn demo_sources() -> Vec<FetchSource> {
+        vec![
+            FetchSource {
+                name: "demo_kdb".into(),
+                dataset: "series".into(),
+            },
+            FetchSource {
+                name: "demo_rest".into(),
+                dataset: "series".into(),
+            },
+        ]
     }
 
     fn open_full(
         cx: &mut gpui::TestAppContext,
         restored: Option<toml::Table>,
         default_source: Option<&str>,
+        sources: Vec<FetchSource>,
     ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         let default_source = default_source.map(str::to_string);
         cx.update(move |cx| {
             cx.set_global(SeriesSettings {
                 default_source,
-                sources: vec![
-                    FetchSource {
-                        name: "demo_kdb".into(),
-                        dataset: "series".into(),
-                    },
-                    FetchSource {
-                        name: "demo_rest".into(),
-                        dataset: "series".into(),
-                    },
-                ],
+                sources,
             })
         });
         let (data, rx) = DataHandle::for_tests();
@@ -2134,8 +2169,19 @@ mod tests {
             vcx.update(|window, cx| self.content.command(line, window, cx))
         }
         fn dispatch(&self, vcx: &mut gpui::VisualTestContext, verb: &str, count: Option<u32>) {
+            self.dispatch_handled(vcx, verb, count);
+        }
+        /// [`Harness::dispatch`] keeping the answer — "did this tile
+        /// handle it?", which is what decides whether a standing notice
+        /// survives the keystroke.
+        fn dispatch_handled(
+            &self,
+            vcx: &mut gpui::VisualTestContext,
+            verb: &str,
+            count: Option<u32>,
+        ) -> bool {
             let id = ActionId(format!("timeseries::{verb}"));
-            vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx));
+            vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx))
         }
         fn visible(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
             vcx.update(|_, cx| self.content.set_visible(visible, cx));
@@ -3367,6 +3413,10 @@ mod tests {
             "the default source is highlighted"
         );
         assert_eq!(h.input_text(&vcx), "", "the field is cleared for the stage");
+        assert!(
+            vcx.update(|w, cx| h.content.holds_focus(w, cx)),
+            "and it keeps the keyboard across the stage"
+        );
         h.dispatch(&mut vcx, "insert_down", None);
         h.dispatch(&mut vcx, "commit", None);
         assert!(h.model(&vcx).holds_pair("demo_rest", "/v1/px?sym=SPX"));
@@ -3412,6 +3462,10 @@ mod tests {
         vcx.simulate_input("s1 ^ s2");
         h.dispatch(&mut vcx, "commit", None);
         assert!(h.popup_is_expr(&vcx), "a parse error keeps the field open");
+        assert!(
+            vcx.update(|w, cx| h.content.holds_focus(w, cx)),
+            "and keeps the keyboard, so the text can be corrected in place"
+        );
         assert!(h.expr_error(&vcx).unwrap().contains("arithmetic only"));
         assert_eq!(h.model(&vcx).slots().len(), 2);
         h.set_input_text(&mut vcx, "s1 / s2");
@@ -3443,6 +3497,88 @@ mod tests {
         h.dispatch(&mut vcx, "edit", None);
         assert!(h.popup_is_none(&vcx), "`e` on a source slot does nothing");
         assert_eq!(h.notice(&vcx).as_deref(), Some("s2 is not an expression"));
+    }
+
+    /// The palette can dispatch any action over an open field (`ctrl+k`
+    /// is a chord, so it opens with the picker up, and `commit_selected`
+    /// closes the palette and dispatches). A verb that ran with the
+    /// field still installed would leave `key_context` reporting
+    /// `insert` with nothing focused — a tile deaf to every bare key
+    /// until `escape` (Task 9 review, Important).
+    #[gpui::test]
+    fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        let before = h.model(&vcx).slots()[0].colour.clone();
+        h.dispatch(&mut vcx, "add", None);
+        assert_eq!(h.key_context_mode(&mut vcx), "insert");
+        // The palette's path: an action the picker has no verb for.
+        h.dispatch(&mut vcx, "colour", None);
+        assert!(h.popup_is_none(&vcx), "the picker closed first");
+        assert_eq!(h.key_context_mode(&mut vcx), "normal");
+        assert!(!vcx.update(|w, cx| h.content.holds_focus(w, cx)));
+        assert_ne!(
+            h.model(&vcx).slots()[0].colour,
+            before,
+            "and the verb itself ran"
+        );
+        // The series list, which holds no field, is unchanged: it stays
+        // open through exactly the verbs it always did (spec §9.5).
+        h.dispatch(&mut vcx, "list", None);
+        h.dispatch(&mut vcx, "colour", None);
+        assert!(h.popup_is_series(&vcx));
+    }
+
+    /// A desk that has configured no fetch source at all: the second
+    /// stage would have nothing to choose from, so the commit says why
+    /// and closes rather than parking the trader in a dead list.
+    #[gpui::test]
+    fn the_source_stage_refuses_when_no_fetch_source_is_configured(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_without_sources(cx);
+        h.dispatch(&mut vcx, "add", None);
+        h.draw(&mut vcx);
+        vcx.simulate_input("VIX");
+        assert_eq!(h.picker_add_row(&vcx).as_deref(), Some("add \"VIX\"…"));
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.popup_is_none(&vcx));
+        assert_eq!(
+            h.notice(&vcx).as_deref(),
+            Some("no fetch source is configured")
+        );
+        assert!(h.model(&vcx).slots().is_empty());
+    }
+
+    /// A query of nothing but spaces ranks nothing, but names no
+    /// identity either: no add row, and `enter` is UNHANDLED, so a
+    /// notice already on screen survives it.
+    #[gpui::test]
+    fn a_blank_query_offers_no_add_row_and_an_inert_enter_keeps_the_notice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
+        h.dispatch(&mut vcx, "add", None);
+        h.draw(&mut vcx);
+        vcx.simulate_input("   ");
+        assert_eq!(h.picker_add_row(&vcx), None, "spaces name no identity");
+        assert!(h.picker_rows(&vcx).is_empty());
+        // UNHANDLED: `dispatch`'s own tail is what puts a standing
+        // notice back, and it only does so for a verb that answers
+        // `false`.
+        assert!(!h.dispatch_handled(&mut vcx, "commit", None));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.popup().is_some()),
+            "an inert enter leaves the picker open"
+        );
+        assert_eq!(h.model(&vcx).slots().len(), 1, "and adds nothing");
+        assert!(
+            h.dispatch_handled(&mut vcx, "cancel", None),
+            "while a verb the field does own is handled"
+        );
     }
 
     #[gpui::test]

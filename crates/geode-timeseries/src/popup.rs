@@ -180,10 +180,15 @@ impl PickerState {
     }
 
     /// `add "<text>"…` exactly while the ranked list is empty and the
-    /// query is not — the identities stage only: a source that matches
-    /// nothing cannot be invented here.
+    /// query names something — the identities stage only: a source that
+    /// matches nothing cannot be invented here.
+    ///
+    /// The text is TRIMMED (Task 9 review, minor 2), and the trimmed
+    /// form is what the row shows, because it is what the commit stores
+    /// as the identity: a query of nothing but spaces ranks nothing and
+    /// would otherwise offer an `add "   "…` row that can only be inert.
     pub(crate) fn refresh_add_row(&mut self) {
-        let text = self.list.query();
+        let text = self.list.query().trim().to_string();
         self.add_row = (matches!(self.stage, PickerStage::Identities)
             && self.list.ranked().is_empty()
             && !text.is_empty())
