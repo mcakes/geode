@@ -652,6 +652,11 @@ impl HealthTracker {
     /// A read, not a report: it neither stamps nor offers, so asking it
     /// on every series result cannot disturb the transition bookkeeping
     /// the two `report_*_and_emit` doors own.
+    ///
+    /// Called from the query pool's result sink UNDER the pool's queue
+    /// lock: the order is pool queue lock → tracker lock, never the
+    /// reverse, and nothing reachable from a `report_*_and_emit` emit
+    /// closure may touch the pool.
     pub(crate) fn load_lane(&self, source: &str, batch: &str) -> Option<Health> {
         let sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
         sources
@@ -2584,8 +2589,83 @@ mod tests {
         );
     }
 
+    /// A request's `pairs` are matched to the result's slots BY SLOT
+    /// NUMBER, never by position (timeseries spec §6.4): `SeriesResult::
+    /// slots` holds EVERY slot in request order, expression slots
+    /// included, while `pairs` holds only the source ones. Here the
+    /// expression sits BETWEEN the two source slots, so a positional zip
+    /// would file `broken`'s failure on the expression slot and leave
+    /// the second source slot clean — the wrong pane marked, in both
+    /// directions, with every single-slot assertion still green.
+    #[test]
+    fn health_is_attached_by_slot_number_not_position() {
+        use geode_core::series::expr::{Ast, Op};
+        use geode_core::series::{BucketRule, SeriesSpec, SlotKind};
+
+        let (_d, _calls, service, rx) = fetch_service(None);
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let _ = next_series_fetched(&rx);
+        service.fetch(&fetch_params(
+            "broken",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let _ = next_series_fetched(&rx);
+
+        let source_slot = |slot: u8, identity: &str| SeriesSpec {
+            slot,
+            kind: SlotKind::Source {
+                source: "kdb_hist".into(),
+                identity: identity.into(),
+                rule: BucketRule::Last,
+            },
+        };
+        let mut p = series_params("SPX.close");
+        p.series = vec![
+            source_slot(1, "SPX.close"),
+            SeriesSpec {
+                slot: 3,
+                kind: SlotKind::Expr(Ast::Bin(
+                    Op::Mul,
+                    Box::new(Ast::Ref(1)),
+                    Box::new(Ast::Num(2.0)),
+                )),
+            },
+            source_slot(2, "broken"),
+        ];
+        service.series(&p).unwrap();
+
+        let r = next_series(&rx).result.unwrap();
+        assert_eq!(
+            r.slots.iter().map(|s| s.slot).collect::<Vec<_>>(),
+            vec![1, 3, 2],
+            "slots come back in REQUEST order, not sorted"
+        );
+        assert_eq!(
+            r.slots[0].provenance.health,
+            Some(Health::Ok),
+            "slot 1 is the pair that fetched cleanly"
+        );
+        assert_eq!(
+            r.slots[1].provenance.health, None,
+            "slot 3 is an expression: no pair, so no lane to read"
+        );
+        assert!(
+            matches!(r.slots[2].provenance.health, Some(Health::Failed { .. })),
+            "slot 2 is the pair that failed: {:?}",
+            r.slots[2].provenance
+        );
+    }
+
     /// Spec §6.3: the cap is checked BEFORE compilation, so a request no
-    /// one could paint never reaches the compiler or the pool.
+    /// one could paint never reaches the compiler or the pool. The
+    /// dataset is deliberately unknown: a cap moved BELOW `compile_
+    /// series` would answer `unknown dataset 'nope'` instead, which is
+    /// the only way the ordering is observable from out here.
     #[test]
     fn a_capped_request_is_refused_before_compilation() {
         let (_d, _calls, service, _rx) = fetch_service(None);
@@ -2593,10 +2673,15 @@ mod tests {
         p.frequency = geode_core::series::Frequency::M1;
         p.range = (ts("2026-01-05T00:00:00Z"), ts("2029-01-05T00:00:00Z"));
         p.window = p.range;
+        p.dataset = "nope".into();
         let e = service.series(&p).unwrap_err().to_string();
         assert!(
             e.contains("1m over 3y is ") && e.contains("; the cap is 500,000"),
             "{e}"
+        );
+        assert!(
+            !e.contains("unknown dataset"),
+            "the compiler never ran: {e}"
         );
     }
 

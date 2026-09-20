@@ -38,6 +38,10 @@ pub type QueryId = u64;
 /// Called with the queue's own lock held (see the worker's delivery site),
 /// so a sink must not block and must not call back into this pool:
 /// `submit`/`cancel` take the same lock, and std `Mutex` is not re-entrant.
+/// The service's sink does take one other lock — the health tracker's,
+/// to attach a series slot's load-lane word (timeseries spec §6.4) — and
+/// that is a LEAF: nothing reachable from it takes a pool lock, so the
+/// order is queue lock → tracker lock and no sink may take any third one.
 pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
 
 /// What a worker produced (timeseries spec §6.4): a view or document
