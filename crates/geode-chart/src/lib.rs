@@ -11,5 +11,5 @@ pub mod model;
 
 pub use crate::core::axis::{Axis, AxisMode, Pane, Side};
 pub use crate::core::view::View;
-pub use element::{ChartElement, chrome_rebuilds, rebuilds};
+pub use element::{ChartElement, chrome_rebuilds, density_quads, rebuilds};
 pub use model::{ChartModel, ChartSlot};

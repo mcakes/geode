@@ -9,33 +9,48 @@
 //! then the one shared x axis under the lowest pane and, through the
 //! component's own tooltip plumbing, the crosshair and its readout.
 //!
-//! **Nothing that is O(the data) runs on a frame that changed nothing.**
-//! Two caches, both in element state ([`Buffers`]), stand between the
-//! model and the frame:
+//! **Nothing that is O(the data) is REBUILT on a frame that changed
+//! nothing.** Two caches, both in element state ([`Buffers`]), stand
+//! between the model and the frame:
 //!
-//! * the **chrome**, behind `chrome_key` — the four sides' [`LinearScale`]s
-//!   (each a scan of every visible value on that side), their y ticks and
-//!   the tick LABELS, and the x ticks. [`chrome_rebuilds`] counts the
+//! * the **chrome**, behind `chrome_key` — `(model.version,
+//!   view.key(), offset_secs, buckets.len(), bounds width, bounds
+//!   height, rem)` — the four sides' [`LinearScale`]s (each a scan of
+//!   every visible value on that side), their y ticks and the tick
+//!   LABELS, and the x ticks. [`chrome_rebuilds`] counts the
 //!   derivations;
 //! * the **paths**, behind gpui-component's own `PathCache` — the `xs`
-//!   refill, the decimation and the tessellation. [`rebuilds`] counts
-//!   the misses.
+//!   refill, the decimation and the tessellation. A polyline's key is
+//!   `(model.version, slot.number, pane, view.key())` plus the plot
+//!   rect's `x`, `y`, `w`, `h`; a percentile's is `(model.version,
+//!   slot.number, percentile index)` plus its own `y` and the plot's
+//!   `x` and `w`. Neither carries a rem or a bounds term of its own —
+//!   the rem reaches them through the plot rect the layout solved with
+//!   it — and neither carries `axis_mode` or `step_us`, which is why
+//!   the module MUST bump `ChartModel::version` on any model change.
+//!   [`rebuilds`] counts the misses.
 //!
-//! Both keys are functions of exactly `(model.version, view, bounds
-//! size, rem)` — plus, for a path, its own slot and plot rect — so a
-//! repaint of an unchanged chart is a walk of prepared values and
-//! nothing else. What still allocates per frame is chrome the component
-//! owns: `Grid` takes its lines as `Vec`s, and `PlotAxis`/`PlotLabel`
-//! each collect a small `Vec` — the documented exception, shared with
-//! every chart gpui-component ships.
+//! So a repaint of an unchanged chart rebuilds nothing: no decimation,
+//! no tessellation, no `xs` refill, no tick, no tick label, no scan of
+//! the values. It does not, however, allocate nothing. The pinned
+//! `Window::paint_path` takes its path BY VALUE, so `PathCache::get`
+//! clones and translates the cached path on every call, hit or miss:
+//! one vertex `Vec` per painted path per frame, bounded by the
+//! DECIMATED point count (two per pixel column) rather than by the
+//! data, and unavoidable without forking the component. Beside it sit
+//! the chrome `Vec`s the component's own painters take — `Grid` takes
+//! its lines as `Vec`s, `PlotAxis`/`PlotLabel` each collect a small one
+//! — bounded by the tick count. Those two classes are the whole
+//! per-frame allocation budget, and both are the pinned API's price,
+//! shared with every chart gpui-component ships.
 
 use std::cell::Cell;
 use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Hsla, IntoElement, Path, PathBuilder, Pixels, SharedString,
-    TextAlign, Window, fill, point, px, size,
+    AnyElement, App, Bounds, ContentMask, ElementId, Hsla, IntoElement, Path, PathBuilder, Pixels,
+    SharedString, TextAlign, Window, fill, point, px, size,
 };
 use gpui_component::ActiveTheme;
 use gpui_component::plot::label::Text;
@@ -50,7 +65,7 @@ use crate::core::layout::{Layout, PaneRects};
 use crate::core::scale::{LinearScale, axis_domain, fmt_tick, fmt_value};
 use crate::core::time::{Crosshair, Tick, TimeScale, ticks};
 use crate::core::view::View;
-use crate::core::{DASH, GAP, Point, Rect, TICK_GAP, Y_TICK_GAP, design_px};
+use crate::core::{DASH, GAP, MAX_DENSITY_QUADS, Point, Rect, TICK_GAP, Y_TICK_GAP, design_px};
 use crate::model::ChartModel;
 
 thread_local! {
@@ -64,6 +79,10 @@ thread_local! {
     /// ticks and labels, the x ticks) — the O(n) work that is invisible
     /// to [`REBUILDS`] because it never touches a path.
     static CHROME_REBUILDS: Cell<usize> = const { Cell::new(0) };
+    /// The same, for density bars actually painted — the one per-frame
+    /// cost with no cache behind it and a bound instead
+    /// ([`MAX_DENSITY_QUADS`]).
+    static DENSITY_QUADS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How many times a slot's polyline or percentile path was rebuilt on
@@ -79,12 +98,23 @@ pub fn chrome_rebuilds() -> usize {
     CHROME_REBUILDS.with(|c| c.get())
 }
 
+/// How many density bars were painted on this thread since it started.
+/// One frame's delta can never exceed [`MAX_DENSITY_QUADS`], however
+/// many slots and bins the model carries.
+pub fn density_quads() -> usize {
+    DENSITY_QUADS.with(|c| c.get())
+}
+
 fn note_rebuild() {
     REBUILDS.with(|c| c.set(c.get() + 1));
 }
 
 fn note_chrome_rebuild() {
     CHROME_REBUILDS.with(|c| c.set(c.get() + 1));
+}
+
+fn note_density_quad() {
+    DENSITY_QUADS.with(|c| c.set(c.get() + 1));
 }
 
 /// Element-state key of the reused buffers, within this element's scope.
@@ -100,12 +130,17 @@ const MAX_PERCENTILES: usize = 8;
 const LINE_WIDTH: f32 = 1.5;
 /// How much of the density strip's width a bar's fill carries.
 const BAR_OPACITY: f32 = 0.45;
-/// A percentile tag's right edge, inside the plot's right edge, and how
-/// far above its own line it sits. Device pixels, not the rem scale:
-/// the component's plot text is a fixed `label::TEXT_SIZE`, so an inset
-/// measured against it must not scale either.
+/// A percentile tag's right edge, inside the plot's right edge, how far
+/// above its own line it sits, and how far BELOW it sits instead when
+/// the lift would take it out of the pane (a tag near the top of the
+/// lower pane would otherwise print into `PANE_GAP` and the upper pane;
+/// the content mask would clip it, which reads as a half-drawn label).
+/// Device pixels, not the rem scale: the component's plot text is a
+/// fixed `label::TEXT_SIZE`, so an inset measured against it must not
+/// scale either.
 const TAG_INSET: f32 = 2.0;
 const TAG_LIFT: f32 = 11.0;
+const TAG_DROP: f32 = 2.0;
 
 /// One pane side's resolved y axis: the scale over that side's VISIBLE
 /// values and the ticks it paints, labels already formatted.
@@ -178,6 +213,17 @@ pub struct ChartElement {
 }
 
 impl ChartElement {
+    /// **`id` must be unique among the chart elements in one window.**
+    /// Every scrap of cross-frame state this element keeps hangs off it:
+    /// the reused [`Buffers`] (`window.use_keyed_state(BUFFERS, …)`) and
+    /// both sets of [`PathCaches`], all stored under the element's
+    /// `GlobalElementId`, which gpui-component's `Plot` takes straight
+    /// from this id. Two charts sharing one id therefore share one
+    /// chrome key — which thrashes between their models every frame —
+    /// and one set of path caches, so two models that happen to agree on
+    /// `(version, slot.number, pane, view, plot rect)` serve each other's
+    /// paths and paint the wrong line with every assertion still green.
+    /// A tile passes its own `TileId`, never a literal.
     pub fn new(model: Arc<ChartModel>, view: View, rem_px: f32, id: impl Into<ElementId>) -> Self {
         Self {
             model,
@@ -275,13 +321,23 @@ impl ChartElement {
     }
 
     /// One pane: grid, its two axes, then per visible slot the polyline,
-    /// the percentile lines and the density bars.
+    /// the percentile lines and the density bars. Paint is batched BY
+    /// KIND rather than per slot (amends §8.3's per-slot order): all the
+    /// polylines, then all the percentile paths, then one `PlotLabel`
+    /// carrying every tag, then the bars — two cache `update`s and one
+    /// label batch for the pane instead of three per slot, at the price
+    /// of a z-order where every line sits under every percentile.
+    ///
+    /// `painted` is the FRAME's density-bar count, carried across both
+    /// panes so [`MAX_DENSITY_QUADS`] bounds the frame and not the pane.
+    #[allow(clippy::too_many_arguments)]
     fn paint_pane(
         &self,
         pane: Pane,
         rects: &PaneRects,
         ctx: &Paint<'_>,
         scratch: &mut Scratch,
+        painted: &mut usize,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -326,136 +382,170 @@ impl ChartElement {
         let scale = ctx.scale;
         let visible = ctx.visible;
 
-        // Polylines.
-        let caches = PathCaches::for_paint((LINES, pane_ix), window, cx);
-        caches.update(cx, |caches, _| {
-            for (k, slot) in model.slots.iter().enumerate() {
-                if !slot.visible || slot.axis.pane() != pane {
-                    continue;
-                }
-                let Some(y) = side_scale_of(slot.axis.side(), left, right) else {
-                    continue;
-                };
-                let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))
-                    .f32(plot.x)
-                    .f32(plot.y)
-                    .f32(plot.w)
-                    .f32(plot.h)
-                    .finish();
-                let path = caches.slot(k).get(key, bounds.origin, || {
-                    note_rebuild();
-                    polyline(scale, view, plot, &y, &slot.values, visible, scratch)
-                });
-                if let Some(path) = path {
-                    window.paint_path(path, slot.colour);
-                }
-            }
-        });
-
-        // Percentile lines, then their tags in one label batch.
-        //
-        // A percentile is computed over the QUERY window while the side
-        // scale's domain comes from the VISIBLE slice, so a zoom into a
-        // quiet stretch can put p5 or p95 outside the pane entirely —
-        // and `paint_path` is masked to the whole element, not to the
-        // pane, so an unclamped line would paint across the other pane
-        // or the x-axis strip. A slot's percentiles draw in its own pane
-        // or not at all (spec §8.3), so one outside it is SKIPPED, line
-        // and tag together. Clamping instead would park it on the pane's
-        // edge and read as a real level at that value.
-        let dash = design_px(DASH, self.rem_px);
-        let gap = design_px(GAP, self.rem_px);
-        let caches = PathCaches::for_paint((PERCENTILES, pane_ix), window, cx);
-        caches.update(cx, |caches, _| {
-            for (k, slot) in model.slots.iter().enumerate() {
-                if !slot.visible || slot.axis.pane() != pane {
-                    continue;
-                }
-                let Some(scale_y) = side_scale_of(slot.axis.side(), left, right) else {
-                    continue;
-                };
-                for (j, (_, value)) in slot.percentiles.iter().enumerate().take(MAX_PERCENTILES) {
-                    let y = scale_y.y(*value);
-                    if !inside(y, plot) {
+        // Everything data-shaped is clipped to the pane's OWN plot rect.
+        // A path is cached at a zero origin and translated, and the
+        // element's own mask is the whole element, so without this a
+        // polyline paints over the left axis column (the first visible
+        // bucket's centre can sit half a bucket left of `view.lo`, which
+        // at the zoom floor of two buckets is a quarter of the plot's
+        // width) and a dashed rule runs into the neighbouring pane.
+        // `with_content_mask` intersects with the mask already in force,
+        // so this only ever narrows.
+        let mask = ContentMask {
+            bounds: bounds_of(plot, bounds),
+        };
+        window.with_content_mask(Some(mask), |window| {
+            // Polylines.
+            let caches = PathCaches::for_paint((LINES, pane_ix), window, cx);
+            caches.update(cx, |caches, _| {
+                for (k, slot) in model.slots.iter().enumerate() {
+                    if !slot.visible || slot.axis.pane() != pane {
                         continue;
                     }
-                    let key = ShapeKey::new((model.version, slot.number, j))
-                        .f32(y)
+                    let Some(y) = side_scale_of(slot.axis.side(), left, right) else {
+                        continue;
+                    };
+                    let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))
                         .f32(plot.x)
+                        .f32(plot.y)
                         .f32(plot.w)
+                        .f32(plot.h)
                         .finish();
-                    let path = caches
-                        .slot(k * MAX_PERCENTILES + j)
-                        .get(key, bounds.origin, || {
-                            note_rebuild();
-                            dashed_horizontal(plot.x, plot.right(), y, dash, gap)
-                        });
+                    let path = caches.slot(k).get(key, bounds.origin, || {
+                        note_rebuild();
+                        polyline(scale, view, plot, &y, &slot.values, visible, scratch)
+                    });
                     if let Some(path) = path {
                         window.paint_path(path, slot.colour);
                     }
                 }
-            }
-        });
-        let tags: Vec<Text> = model
-            .slots
-            .iter()
-            .filter(|s| s.visible && s.axis.pane() == pane)
-            .flat_map(|slot| {
-                let scale_y = side_scale_of(slot.axis.side(), left, right);
-                slot.percentiles
-                    .iter()
-                    .zip(slot.percentile_labels.iter())
-                    .take(MAX_PERCENTILES)
-                    .filter_map(move |((_, value), label)| {
-                        let y = scale_y.as_ref()?.y(*value);
-                        if !inside(y, plot) {
-                            return None;
-                        }
-                        Some(
-                            Text::new(
-                                label.clone(),
-                                point(px(plot.right() - TAG_INSET), px(y - TAG_LIFT)),
-                                slot.colour,
-                            )
-                            .align(TextAlign::Right),
-                        )
-                    })
-            })
-            .collect();
-        if !tags.is_empty() {
-            PlotLabel::new(tags).paint(&bounds, window, cx);
-        }
+            });
 
-        // Density bars: one strip shared by the pane's visible slots.
-        if let Some(strip) = rects.density {
-            window.paint_quad(fill(bounds_of(strip, bounds), ctx.ink.strip));
-            for slot in model.slots.iter() {
-                if !slot.visible || slot.axis.pane() != pane || slot.bins.is_empty() {
-                    continue;
-                }
-                let Some(scale_y) = side_scale_of(slot.axis.side(), left, right) else {
-                    continue;
-                };
-                let max = slot.bins.iter().map(|(_, _, n)| *n).max().unwrap_or(0);
-                if max == 0 {
-                    continue;
-                }
-                for (lo, hi, n) in slot.bins.iter() {
-                    let top = scale_y.y(*hi).clamp(strip.y, strip.bottom());
-                    let bottom = scale_y.y(*lo).clamp(strip.y, strip.bottom());
-                    let w = strip.w * *n as f32 / max as f32;
-                    if w <= 0.0 {
+            // Percentile lines, then their tags in one label batch.
+            //
+            // A percentile is computed over the QUERY window while the
+            // side scale's domain comes from the VISIBLE slice, so a
+            // zoom into a quiet stretch can put p5 or p95 outside the
+            // pane entirely. A slot's percentiles draw in its own pane
+            // or not at all (spec §8.3), so one outside it is SKIPPED,
+            // line and tag together — the mask above would clip it, but
+            // a level the pane's domain does not contain has no business
+            // being built, and skipping BEFORE the cache `get` is what
+            // makes "never built" mean "never painted" and is the half
+            // the harness can see. Clamping instead would park it on the
+            // pane's edge and read as a real level at that value.
+            let dash = design_px(DASH, self.rem_px);
+            let gap = design_px(GAP, self.rem_px);
+            let caches = PathCaches::for_paint((PERCENTILES, pane_ix), window, cx);
+            caches.update(cx, |caches, _| {
+                for (k, slot) in model.slots.iter().enumerate() {
+                    if !slot.visible || slot.axis.pane() != pane {
                         continue;
                     }
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            bounds.origin + point(px(strip.x), px(top)),
-                            size(px(w), px((bottom - top).max(1.0))),
-                        ),
-                        slot.colour.opacity(BAR_OPACITY),
-                    ));
+                    let Some(scale_y) = side_scale_of(slot.axis.side(), left, right) else {
+                        continue;
+                    };
+                    for (j, (_, value)) in slot.percentiles.iter().enumerate().take(MAX_PERCENTILES)
+                    {
+                        let y = scale_y.y(*value);
+                        if !inside(y, plot) {
+                            continue;
+                        }
+                        let key = ShapeKey::new((model.version, slot.number, j))
+                            .f32(y)
+                            .f32(plot.x)
+                            .f32(plot.w)
+                            .finish();
+                        let path =
+                            caches
+                                .slot(k * MAX_PERCENTILES + j)
+                                .get(key, bounds.origin, || {
+                                    note_rebuild();
+                                    dashed_horizontal(plot.x, plot.right(), y, dash, gap)
+                                });
+                        if let Some(path) = path {
+                            window.paint_path(path, slot.colour);
+                        }
+                    }
                 }
+            });
+            let tags: Vec<Text> = model
+                .slots
+                .iter()
+                .filter(|s| s.visible && s.axis.pane() == pane)
+                .flat_map(|slot| {
+                    let scale_y = side_scale_of(slot.axis.side(), left, right);
+                    slot.percentiles
+                        .iter()
+                        .zip(slot.percentile_labels.iter())
+                        .take(MAX_PERCENTILES)
+                        .filter_map(move |((_, value), label)| {
+                            let y = scale_y.as_ref()?.y(*value);
+                            if !inside(y, plot) {
+                                return None;
+                            }
+                            Some(
+                                Text::new(
+                                    label.clone(),
+                                    point(px(plot.right() - TAG_INSET), px(tag_y(y, plot))),
+                                    slot.colour,
+                                )
+                                .align(TextAlign::Right),
+                            )
+                        })
+                })
+                .collect();
+            if !tags.is_empty() {
+                PlotLabel::new(tags).paint(&bounds, window, cx);
             }
+        });
+
+        // Density bars: one strip shared by the pane's visible slots,
+        // clipped to the strip (its own column, beside the plot rather
+        // than inside it) and counted against `MAX_DENSITY_QUADS`, which
+        // is the whole FRAME's budget across both panes. A bar is an
+        // uncached `paint_quad` and nothing in the model bounds the
+        // product of slots and bins, so past the bound this pane simply
+        // stops drawing them, in slot order.
+        if let Some(strip) = rects.density {
+            window.paint_quad(fill(bounds_of(strip, bounds), ctx.ink.strip));
+            let mask = ContentMask {
+                bounds: bounds_of(strip, bounds),
+            };
+            window.with_content_mask(Some(mask), |window| {
+                'bars: for slot in model.slots.iter() {
+                    if !slot.visible || slot.axis.pane() != pane || slot.bins.is_empty() {
+                        continue;
+                    }
+                    let Some(scale_y) = side_scale_of(slot.axis.side(), left, right) else {
+                        continue;
+                    };
+                    let max = slot.bins.iter().map(|(_, _, n)| *n).max().unwrap_or(0);
+                    if max == 0 {
+                        continue;
+                    }
+                    for (lo, hi, n) in slot.bins.iter() {
+                        let top = scale_y.y(*hi).clamp(strip.y, strip.bottom());
+                        let bottom = scale_y.y(*lo).clamp(strip.y, strip.bottom());
+                        let w = strip.w * *n as f32 / max as f32;
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        if *painted >= MAX_DENSITY_QUADS {
+                            break 'bars;
+                        }
+                        *painted += 1;
+                        note_density_quad();
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                bounds.origin + point(px(strip.x), px(top)),
+                                size(px(w), px((bottom - top).max(1.0))),
+                            ),
+                            slot.colour.opacity(BAR_OPACITY),
+                        ));
+                    }
+                }
+            });
         }
     }
 
@@ -535,9 +625,26 @@ impl Plot for ChartElement {
             sides: &sides,
             ink,
         };
-        self.paint_pane(Pane::Upper, &layout.upper, &ctx, &mut scratch, window, cx);
+        let mut painted = 0usize;
+        self.paint_pane(
+            Pane::Upper,
+            &layout.upper,
+            &ctx,
+            &mut scratch,
+            &mut painted,
+            window,
+            cx,
+        );
         if let Some(lower) = layout.lower.as_ref() {
-            self.paint_pane(Pane::Lower, lower, &ctx, &mut scratch, window, cx);
+            self.paint_pane(
+                Pane::Lower,
+                lower,
+                &ctx,
+                &mut scratch,
+                &mut painted,
+                window,
+                cx,
+            );
         }
 
         // The one shared x axis, under the lowest pane. A tick's `x` is
@@ -678,6 +785,20 @@ fn side_scale_of(side: Side, left: &SideAxis, right: &SideAxis) -> Option<Linear
 /// Whether a y coordinate is inside a pane's plot rect, ends included.
 fn inside(y: f32, plot: Rect) -> bool {
     y.is_finite() && y >= plot.y && y <= plot.bottom()
+}
+
+/// Where a percentile tag's text TOP sits for a line at `y`: lifted
+/// clear of its own line, or dropped below it when the lift would leave
+/// the pane. A percentile at the very top of the lower pane would
+/// otherwise print into `PANE_GAP` and the upper pane — the same bleed
+/// the out-of-pane skip exists to prevent, one order smaller — and
+/// under the pane's content mask it would simply be cut in half.
+fn tag_y(y: f32, plot: Rect) -> f32 {
+    if y - TAG_LIFT < plot.y {
+        y + TAG_DROP
+    } else {
+        y - TAG_LIFT
+    }
 }
 
 /// A layout rect (zero origin) as window bounds.
@@ -1021,6 +1142,143 @@ mod tests {
             cx.notify();
         });
         draw(&mut vcx);
+    }
+
+    /// `slots` slots on one axis, each carrying `bins` density bins —
+    /// the shape nothing in the model bounds.
+    fn dense(slots: usize, bins: usize) -> Arc<ChartModel> {
+        let day = 86_400_000_000i64;
+        let n = 40usize;
+        let one = |number: u8| ChartSlot {
+            number,
+            label: format!("s{number}").into(),
+            values: (0..n).map(|i| 100.0 + i as f64 * 0.1).collect(),
+            colour: gpui::red(),
+            axis: Axis::Left,
+            visible: true,
+            percentiles: Vec::new(),
+            percentile_labels: Vec::new(),
+            // Every count is at least one, so no bar is skipped for
+            // having no width and the painted total is the product.
+            bins: (0..bins)
+                .map(|b| {
+                    (
+                        100.0 + b as f64 * 0.01,
+                        100.01 + b as f64 * 0.01,
+                        (b % 7 + 1) as u32,
+                    )
+                })
+                .collect(),
+        };
+        Arc::new(ChartModel {
+            version: 1,
+            buckets: (0..n as i64).map(|i| i * day).collect(),
+            step_us: day,
+            axis_mode: AxisMode::Session,
+            offset_secs: 0,
+            split: 0.7,
+            density: true,
+            slots: (0..slots).map(|i| one(i as u8 + 1)).collect(),
+        })
+    }
+
+    #[gpui::test]
+    fn a_frame_paints_at_most_the_density_bound(cx: &mut gpui::TestAppContext) {
+        // 12 × 200 = 2,400 bars asked for, against a 2,000 bound.
+        let (_host, mut vcx) = open(cx, dense(12, 200));
+        // Measured across ONE deliberate frame: a bar has no cache, so
+        // unlike `rebuilds()` the count is not idempotent across the
+        // frames opening a window happens to paint.
+        draw(&mut vcx);
+        let before = density_quads();
+        draw(&mut vcx);
+        assert_eq!(
+            density_quads() - before,
+            MAX_DENSITY_QUADS,
+            "the frame painted the bound and stopped, not all 2,400 uncached quads"
+        );
+
+        // Under the bound, every bar is painted.
+        let (_host, mut vcx) = open(cx, dense(3, 100));
+        draw(&mut vcx);
+        let before = density_quads();
+        draw(&mut vcx);
+        assert_eq!(
+            density_quads() - before,
+            300,
+            "three slots of a hundred bins is under the bound and paints in full"
+        );
+    }
+
+    #[gpui::test]
+    fn the_crosshair_answers_inside_a_plot_and_nowhere_else(cx: &mut gpui::TestAppContext) {
+        let m = model(500);
+        let (_host, mut vcx) = open(cx, m.clone());
+        // A synthetic bounds, not the window's: `tooltip_state` is
+        // handed a position already relative to the plot's origin
+        // (gpui-component's `Plot` contract), so the origin is free and
+        // a fixed size makes the rects the test reasons about exact.
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(600.)));
+        let element = ChartElement::new(m.clone(), View::full(m.full()), 12.0, "probe");
+        let view = element.view;
+        let layout = element.layout(bounds);
+        let scale = m.time_scale();
+        let at = |r: Rect, fx: f32, fy: f32| point(px(r.x + r.w * fx), px(r.y + r.h * fy));
+
+        let upper = layout.upper.plot;
+        let cursor = at(upper, 0.4, 0.5);
+        let state = vcx
+            .update(|_, cx| element.tooltip_state(cursor, bounds, cx))
+            .expect("a cursor inside the upper plot resolves a bucket");
+        let index = Crosshair::at(cursor.x.as_f32(), &scale, view, upper)
+            .expect("the visible window is not empty");
+        assert_eq!(
+            state.index, index,
+            "the upper pane's rect resolves the index"
+        );
+        assert_eq!(
+            state.cross_line.x,
+            px(scale.x_of(index, view, upper)),
+            "the cross line sits on the bucket's own centre, not the cursor"
+        );
+        assert_eq!(state.cross_line.y, cursor.y);
+
+        let axis = layout
+            .upper
+            .left_axis
+            .expect("a left slot reserves a column");
+        assert!(
+            vcx.update(|_, cx| element.tooltip_state(at(axis, 0.5, 0.5), bounds, cx))
+                .is_none(),
+            "the y-axis column is not the plot"
+        );
+        let strip = layout.upper.density.expect("density is on");
+        assert!(
+            vcx.update(|_, cx| element.tooltip_state(at(strip, 0.5, 0.5), bounds, cx))
+                .is_none(),
+            "the density strip is not the plot"
+        );
+
+        let lower = layout
+            .lower
+            .expect("a bottom-left slot opens a lower pane")
+            .plot;
+        let cursor = at(lower, 0.8, 0.5);
+        let state = vcx
+            .update(|_, cx| element.tooltip_state(cursor, bounds, cx))
+            .expect("a cursor inside the lower plot resolves a bucket too");
+        let index = Crosshair::at(cursor.x.as_f32(), &scale, view, lower)
+            .expect("the visible window is not empty");
+        assert_eq!(state.index, index);
+        assert_eq!(state.cross_line.x, px(scale.x_of(index, view, lower)));
+
+        // And the readout builds for a state the cursor resolved.
+        let built = vcx.update(|window, cx| {
+            element
+                .tooltip(&state, cursor, bounds, window, cx)
+                .is_some()
+        });
+        assert!(built, "the tooltip renders over a bucket the model has");
     }
 
     #[test]

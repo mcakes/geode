@@ -15762,8 +15762,8 @@ run_mutation "chart: the palette skips the floor" \
 # so each of these is only visible through `rebuilds()`/`chrome_rebuilds()`.
 run_mutation "chart: the path key ignores the view" \
   crates/geode-chart/src/element.rs \
-  '                let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))' \
-  '                let key = ShapeKey::new((model.version, slot.number, pane as u8, (0u64, 0u64)))' \
+  '                    let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))' \
+  '                    let key = ShapeKey::new((model.version, slot.number, pane as u8, (0u64, 0u64)))' \
   geode-chart \
   an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds
 
@@ -15773,10 +15773,10 @@ run_mutation "chart: the path key ignores the view" \
 # they annotate move under them.
 run_mutation "chart: the percentile key ignores its y" \
   crates/geode-chart/src/element.rs \
-  '                    let key = ShapeKey::new((model.version, slot.number, j))
-                        .f32(y)' \
-  '                    let key = ShapeKey::new((model.version, slot.number, j))
-                        .f32(0.0f32)' \
+  '                        let key = ShapeKey::new((model.version, slot.number, j))
+                            .f32(y)' \
+  '                        let key = ShapeKey::new((model.version, slot.number, j))
+                            .f32(0.0f32)' \
   geode-chart \
   an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds
 
@@ -15787,10 +15787,10 @@ run_mutation "chart: the percentile key ignores its y" \
 # painted across the other pane or the x-axis strip".
 run_mutation "chart: an out-of-pane percentile is still built" \
   crates/geode-chart/src/element.rs \
-  '                    let y = scale_y.y(*value);
-                    if !inside(y, plot) {' \
-  '                    let y = scale_y.y(*value);
-                    if false {' \
+  '                        let y = scale_y.y(*value);
+                        if !inside(y, plot) {' \
+  '                        let y = scale_y.y(*value);
+                        if false {' \
   geode-chart \
   a_percentile_outside_its_panes_domain_is_neither_built_nor_painted
 
@@ -15815,6 +15815,20 @@ run_mutation "chart: the dashes are one solid line" \
   '    1' \
   geode-chart \
   a_percentile_line_is_dashed_at_dash_and_gap
+
+# A density bar is one uncached `paint_quad` and nothing in the model
+# bounds the product of visible slots and bins (`MAX_BINS` is 200), so
+# without this check a tile with a dozen density slots would submit
+# thousands of quads every frame — the spike disqualified per-cell
+# quads past about 5,000 and measured 10,000 at 42 ms. Unbounded, the
+# chart still paints correctly; it just stalls, which no assertion
+# about pixels can see.
+run_mutation "chart: the density bound is not enforced" \
+  crates/geode-chart/src/element.rs \
+  '                        if *painted >= MAX_DENSITY_QUADS {' \
+  '                        if false {' \
+  geode-chart \
+  a_frame_paints_at_most_the_density_bound
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

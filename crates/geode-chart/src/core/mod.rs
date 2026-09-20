@@ -27,6 +27,21 @@ pub const X_AXIS_HEIGHT: f32 = 18.0;
 /// Minimum vertical distance between two y ticks.
 pub const Y_TICK_GAP: f32 = 40.0;
 
+/// Most density bars one FRAME paints, across both panes and every
+/// visible slot.
+///
+/// A bar is one `paint_quad` with no cache behind it, and the rendering
+/// spike (`docs/superpowers/spikes/2026-08-29-gpui-chart-rendering-spike.md`)
+/// measured per-cell `paint_quad` blowing up past about 5,000 quads —
+/// 10,000 cost 42 ms, six times a 60 Hz frame. Nothing in the model
+/// bounds the product: `geode_core::series::MAX_BINS` is 200 and a tile
+/// may hold many slots, so nine slots with density on would be ~1,800
+/// quads and a dozen more would cross the cliff. The element counts the
+/// bars it paints and stops at this bound, per pane in slot order, so
+/// the render thread's density cost has a ceiling whatever a module
+/// asks for.
+pub const MAX_DENSITY_QUADS: usize = 2_000;
+
 /// A design length resolved for the window's rem.
 pub fn design_px(px_at_design_rem: f32, rem_px: f32) -> f32 {
     px_at_design_rem * rem_px / DESIGN_REM
