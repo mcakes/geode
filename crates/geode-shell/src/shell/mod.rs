@@ -9,6 +9,7 @@
 mod add_tile;
 pub mod asof_view;
 pub mod chip;
+pub mod choicedialog;
 pub mod colours;
 mod commandline_ctl;
 pub mod commandline_view;
@@ -925,6 +926,18 @@ pub struct ShellView {
     /// the dialog is open and the field does not read `live`; its
     /// selection mirrors the field.
     as_of_calendar: Entity<gpui_component::calendar::CalendarState>,
+    /// The open choice dialog's own pure state (2026-09-19: the grouping
+    /// picker — the toolbar readout's click and `frame::grouping` — and
+    /// the tile picker — a placeholder's double-click and `tile::add`),
+    /// or `None` when closed/never opened — the `picker`/`as_of_dialog`
+    /// fields' own contract. Set fresh by `choicedialog::open_grouping`/
+    /// `open_tile_kinds` each time and cleared by
+    /// [`close_modal`](Self::close_modal).
+    choice_dialog: Option<choicedialog::ChoiceDialogState>,
+    /// Scroll state for the choice dialog's row list
+    /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
+    /// one dialog over.
+    choice_dialog_scroll: ScrollHandle,
     /// The open config-object dialog's own pure state (Phase 4c: the
     /// shared scaffold every config domain's dialog is built on — see
     /// `objectdialog`'s module doc), or `None` when closed/never opened.
@@ -1160,6 +1173,12 @@ impl ShellView {
                 state.query = query;
                 state.selected = 0;
                 picker::sync_picker_scroll(view);
+            } else if let Some(state) = view.choice_dialog.as_mut() {
+                // A choice list re-ranks on every keystroke and the lit
+                // row is followed, as the settings dialog's choice does.
+                state.list.set_query(&query);
+                view.choice_dialog_scroll
+                    .scroll_to_item(state.list.ranked_highlighted());
             } else if let Some(state) = view.as_of_dialog.as_mut() {
                 // Unlike the three dialogs above, this field's raw text IS
                 // the value being edited (spec §3.6), not a filter over
@@ -1606,6 +1625,8 @@ impl ShellView {
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             as_of_calendar,
+            choice_dialog: None,
+            choice_dialog_scroll: ScrollHandle::new(),
             object_dialog: None,
             object_dialog_scroll: ScrollHandle::new(),
             pending_config_write: None,
@@ -1637,6 +1658,7 @@ impl ShellView {
         self.keybindings = None;
         self.picker = None;
         self.as_of_dialog = None;
+        self.choice_dialog = None;
         self.object_dialog = None;
         self.return_focus_from_overlay(window, cx);
         cx.notify();

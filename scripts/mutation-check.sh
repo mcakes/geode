@@ -3900,7 +3900,9 @@ run_mutation "picker: the values stage stops advertising tab" \
 run_mutation "picker: the footer hint never paints" \
   crates/geode-shell/src/shell/picker.rs \
   '        .child(hint_row(
-            &picker.stage,
+            hints(&picker.stage),
+            "picker-hints",
+            WIDTH,
             theme.muted_foreground,
             theme.muted,
             theme.border,
@@ -7130,8 +7132,10 @@ run_mutation "fullscreen: a docked tile is refused, not redirected to the main t
 run_mutation "fullscreen: the double-click door runs ahead of the drag arm" \
   crates/geode-shell/src/shell/render.rs \
   '                                if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                    || view.try_pick_tile_on_double_click(id, event, window, cx)
                                     || view.try_arm_tile_drag(id, event, cx)' \
   '                                if view.try_arm_tile_drag(id, event, cx)
+                                    || view.try_pick_tile_on_double_click(id, event, window, cx)
                                     || view.try_fullscreen_on_double_click(id, event, window, cx)' \
   geode-shell mod_double_click_toggles_fullscreen_on_that_tile
 
@@ -13888,6 +13892,188 @@ run_mutation "stacks: the marker is gated on len > 1" \
   '        if false {' \
   geode-blotter \
   the_stack_marker_paints_only_while_a_member
+
+# ---- grouping picker (2026-09-19): the toolbar readout's click and
+# `frame::grouping` / `mod+g` ---------------------------------------------
+
+# Only FILLED slots are rows: an empty slot listed would be a row that
+# visibly does nothing (`set_active_slot` ignores it).
+run_mutation "grouping: only filled slots are rows" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        if let Some(label) = slots.label(n) {' \
+  '        if let Some(label) = Some(slots.label(n).unwrap_or_default()) {' \
+  geode-shell \
+  rows_are_the_view_default_then_every_filled_slot
+
+# The picker opens on the frame's ACTIVE slot, so a bare `enter` changes
+# nothing.
+run_mutation "grouping: the highlight opens on the active slot" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(text.as_deref());' \
+  '        list.place(None);' \
+  geode-shell \
+  mod_g_opens_the_picker_on_the_active_slot
+
+# `enter` re-feeds the field's live text before trusting the highlight
+# (`set_value` emits no `Change`).
+run_mutation "grouping: enter picks the HIGHLIGHTED row, re-fed from the live text" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                state.list.set_query(&live);
+                state.highlighted_pick()' \
+  '                let _ = &live;
+                state.highlighted_pick()' \
+  geode-shell \
+  enter_re_feeds_the_fields_live_text_before_picking
+
+# A slot emptied under the open picker commits nothing AND says so.
+run_mutation "grouping: a vanished slot is reported on the status bar" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if !changed && !still_there {' \
+  '    if false {' \
+  geode-shell \
+  picking_a_slot_emptied_under_the_picker_says_so
+
+# A digit jumps only on an EMPTY field — typed after text it is text.
+run_mutation "grouping: the digit jump needs an empty field" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        && shell.dialog_input.read(cx).text().len() == 0' \
+  '        && true' \
+  geode-shell \
+  a_digit_after_text_filters_rather_than_jumps
+
+# An unfilled slot's digit is claimed and dropped, never typed.
+run_mutation "grouping: an unfilled slot's digit is dropped, not typed" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        if let Some(slot) = slot {
+            commit(shell, Pick::Slot(slot), window, cx);
+        }
+        return true;' \
+  '        if let Some(slot) = slot {
+            commit(shell, Pick::Slot(slot), window, cx);
+            return true;
+        }
+        return false;' \
+  geode-shell \
+  a_digit_jumps_to_a_filled_slot_and_zero_to_the_view_default
+
+# A row click resolves through the RANKED order (the click's index),
+# not the declared one — after a filter the two differ.
+run_mutation "grouping: a row click resolves through the ranked order" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        self.list.ranked().get(ranked).map(|r| self.pick_at(r.row))' \
+  '        (ranked < self.list.options().len()).then(|| self.pick_at(ranked))' \
+  geode-shell \
+  a_click_resolves_through_the_ranked_order
+
+# The toolbar readout's click goes through the same open door as `mod+g`.
+run_mutation "grouping: the readout click opens the picker" \
+  crates/geode-shell/src/shell/render.rs \
+  '                choicedialog::open_grouping(view, window, cx);' \
+  '                let _ = (view, window, cx);' \
+  geode-shell \
+  clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot
+
+# `open_shell_dialog_with_key`'s `prevent_default`: without it the shell
+# root's bubble-phase focus grab takes the field's focus back on the same
+# mouse-down and typing after any chip click goes nowhere.
+run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    window.prevent_default();
+    // The open-door seam' \
+  '    // The open-door seam' \
+  geode-shell \
+  the_pick_chip_is_always_present_and_opens_the_picker
+
+# ---- tile picker (2026-09-19): a placeholder's double-click and
+# `tile::add` / `mod+n` over the same choice dialog ----------------------
+
+# Only a PLACEHOLDER's double-click is the door — a real tile's may
+# belong to its module.
+run_mutation "tilepicker: the double-click door is gated on a placeholder" \
+  crates/geode-shell/src/shell/drag.rs \
+  '            || self.occupant_kind(id) != Some(crate::module::placeholder::PLACEHOLDER_KIND)' \
+  '            || false' \
+  geode-shell \
+  a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing
+
+# Only the pair's SECOND click opens it.
+run_mutation "tilepicker: the door needs click_count 2" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        if event.click_count != 2
+            || event.modifiers.modified()' \
+  '        if false
+            || event.modifiers.modified()' \
+  geode-shell \
+  a_single_click_on_a_placeholder_opens_nothing
+
+# A modified double-click is not this door's (mod+ is fullscreen's).
+run_mutation "tilepicker: a modifier refuses the door" \
+  crates/geode-shell/src/shell/drag.rs \
+  '            || event.modifiers.modified()
+            || self.occupant_kind(id)' \
+  '            || self.occupant_kind(id)' \
+  geode-shell \
+  a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing
+
+# The door returning true must skip the click tail, which re-arms the
+# root focus restore and would take the picker's field focus next frame.
+run_mutation "tilepicker: the door skips the click-to-focus tail" \
+  crates/geode-shell/src/shell/render.rs \
+  '                                    || view.try_pick_tile_on_double_click(id, event, window, cx)
+                                    || view.try_arm_tile_drag(id, event, cx)' \
+  '                                    || { view.try_pick_tile_on_double_click(id, event, window, cx); false }
+                                    || view.try_arm_tile_drag(id, event, cx)' \
+  geode-shell \
+  double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it
+
+# The placeholder kind is never a row.
+run_mutation "tilepicker: the placeholder is not a row" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            .filter(|k| *k != PLACEHOLDER_KIND)' \
+  '            .filter(|_| true)' \
+  geode-shell \
+  tile_rows_are_the_roster_kinds_titled_minus_the_placeholder
+
+# `tile::add` reaches the picker through its own dispatch arm.
+run_mutation "tilepicker: tile::add opens the picker" \
+  crates/geode-shell/src/shell/input.rs \
+  '        } else if action.0 == "tile::add" {' \
+  '        } else if false {' \
+  geode-shell \
+  mod_n_opens_the_picker_and_a_pick_from_a_real_tile_splits
+
+# A kind pick goes through add_tile.
+run_mutation "tilepicker: a kind pick adds the tile" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            shell.add_tile(&kind, AddPlacement::Split(None), None, window, cx);' \
+  '            let _ = kind;' \
+  geode-shell \
+  a_row_click_adds_that_kind
+
+# The door requires the placeholder to be the FOCUSED tile (review
+# finding): a lone second click on an unfocused one — the first landed
+# on an occluding divider or backdrop — would otherwise pick onto
+# whatever tile IS focused.
+run_mutation "tilepicker: the door requires the placeholder to be focused" \
+  crates/geode-shell/src/shell/drag.rs \
+  '            || self.services.workspaces.active().focused_tile() != Some(id)' \
+  '            || false' \
+  geode-shell \
+  a_second_click_on_an_unfocused_placeholder_is_a_plain_click
+
+# The DOCK listener calls the door too. Anchored through the dock
+# listener's own comment: its lines are indented four less than the
+# main-tree listener's, and a shorter-indented line is a SUBSTRING of
+# the longer one, so the bare line would match the main-tree site first.
+run_mutation "tilepicker: the dock listener calls the door" \
+  crates/geode-shell/src/shell/render.rs \
+  '                            // same gesture table.
+                            if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                || view.try_pick_tile_on_double_click(id, event, window, cx)' \
+  '                            // same gesture table.
+                            if view.try_fullscreen_on_double_click(id, event, window, cx)' \
+  geode-shell \
+  a_docked_placeholder_double_click_opens_the_picker_and_fills_it
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

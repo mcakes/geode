@@ -143,6 +143,8 @@ context = "workspace"
 "mod+/" = "frame::focus_text"
 "mod+p" = "frame::pick"
 "mod+t" = "frame::as_of"
+"mod+g" = "frame::grouping"
+"mod+n" = "tile::add"
 
 [[bindings]]
 context = "tile"
@@ -368,6 +370,14 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Tile",
     );
     action(reg, "tile::find", "Find in tile", "Tile");
+    // The tile picker (2026-09-19): `mod+n` lists the roster's kinds with
+    // typeahead — the choosing form of the `<Kind>: Split` rows
+    // `register_add_actions` registers, and what a bare double-click on
+    // a placeholder tile opens. Category "Tiles" beside those rows; `…`
+    // because it opens a dialog. NOT `tile::add_<kind>`-shaped, so
+    // `parse_add_action` never reads it as an add of an empty kind (its
+    // prefix is `tile::add_`, underscore included).
+    action(reg, "tile::add", "Add a tile…", "Tiles");
     // The nine grouping slots (Phase 3 §4.2): ctrl+1..9 activate a
     // configured slot (an empty one is ignored — see `Frame::
     // set_active_slot`), ctrl+0 returns every following tile to its
@@ -421,6 +431,11 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // schema to enumerate at `register_builtin_actions`' own call site
     // (before any config is loaded).
     action(reg, "frame::pick", "Pick a dimension…", "Frame");
+    // The grouping picker (2026-09-19): `mod+g` lists the filled slots
+    // and the view default with typeahead — the choosing form of the
+    // nine `frame::slot_N` chords above, and what a click on the
+    // toolbar's grouping readout opens. `…` because it opens a dialog.
+    action(reg, "frame::grouping", "Pick a grouping…", "Frame");
     // The scope bar's live text field (Phase 4a §3.11): `mod+/` moves
     // focus into it from anywhere in the shell, the one keyboard route
     // in (typing itself, once focused, needs no action — the field's own
@@ -565,7 +580,10 @@ pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) {
     }
 }
 
-fn capitalize(kind: &str) -> String {
+/// A kind's palette title (`blotter` → `Blotter`) — also the tile
+/// picker's row text (`shell::choicedialog`), so the two spell a kind
+/// the same way.
+pub fn capitalize(kind: &str) -> String {
     let mut chars = kind.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),

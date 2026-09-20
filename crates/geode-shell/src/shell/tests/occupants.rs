@@ -1060,7 +1060,11 @@ fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
 /// Dispatch an action id straight into the shell and draw once — the
 /// add rows are palette rows, and `dispatch` is exactly what a palette
 /// `enter` calls (`palette_ctl::dispatch_palette_item`).
-fn dispatch_and_draw(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, id: &str) {
+pub(super) fn dispatch_and_draw(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+    id: &str,
+) {
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
             s.dispatch(&ActionId(id.to_string()), None, window, cx);

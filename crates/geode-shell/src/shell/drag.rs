@@ -241,6 +241,54 @@ impl ShellView {
         }
     }
 
+    /// The mouse form of `tile::add` (2026-09-19): a bare double-click on
+    /// a PLACEHOLDER tile opens the tile picker, whose pick fills that
+    /// placeholder in place (`add_tile`'s first rule). Returns true when
+    /// it acted — the caller's drag-arm and click-to-focus tail must then
+    /// NOT run: the tail re-arms `pending_focus_restore`, which would move
+    /// window focus to the shell root on the next frame and take it from
+    /// the picker's field. The pick lands on the FOCUSED tile (`add_tile`
+    /// reads it at commit), so the door also requires `id` to be that
+    /// tile — normally the pair's first click focused it through the
+    /// ordinary tail, but a first click that landed on an occluding
+    /// neighbour inside the OS double-click distance (a divider strip,
+    /// a modal's backdrop that closed on it) never reached this listener,
+    /// and an ungated door would then fill a DIFFERENT placeholder, or
+    /// split a real tile, on the second click (review finding). Refused,
+    /// the click is the plain click-to-focus it looks like, and the next
+    /// double-click works. A double-click on a real tile is left alone —
+    /// a module may own it (the market-data panel's cell editor does).
+    /// Bare modifiers only: with the mod key held the pair is
+    /// `try_fullscreen_on_double_click`'s, which both listeners try
+    /// first. `click_count == 2` rather than `>= 2` for the same reason
+    /// as there; the same overlay/drag gates.
+    pub(super) fn try_pick_tile_on_double_click(
+        &mut self,
+        id: TileId,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.click_count != 2
+            || event.modifiers.modified()
+            || self.occupant_kind(id) != Some(crate::module::placeholder::PLACEHOLDER_KIND)
+            || self.services.workspaces.active().focused_tile() != Some(id)
+        {
+            return false;
+        }
+        if self.palette.is_some()
+            || self.modal.is_some()
+            || !self.matcher.pending().is_empty()
+            || self.divider_drag.is_some()
+            || self.tile_drag.is_some()
+        {
+            return false;
+        }
+        super::choicedialog::open_tile_kinds(self, window, cx);
+        cx.stop_propagation();
+        true
+    }
+
     /// The mouse form of `mod+f` (2026-09-19): a mod+double-click on a
     /// main-tree tile focuses it and toggles fullscreen on it. Returns
     /// true when it acted — the caller's drag-arm and click-to-focus

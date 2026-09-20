@@ -26,8 +26,8 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, commandline_view, dialog, objectdialog, perf_overlay, picker, sidebar, stacklist,
-    status, toolbar, whichkey,
+    ShellView, choicedialog, commandline_view, dialog, objectdialog, perf_overlay, picker, sidebar,
+    stacklist, status, toolbar, whichkey,
 };
 
 /// gpui hover-group name shared by every divider strip (drag-splitters
@@ -684,8 +684,12 @@ impl Render for ShellView {
                                 // below.
                                 view.leave_command_line(window, cx);
                                 // Ahead of the drag arm on purpose — see
-                                // `try_fullscreen_on_double_click`.
+                                // `try_fullscreen_on_double_click`; the
+                                // placeholder's bare double-click opens
+                                // the tile picker and must skip the tail
+                                // (`try_pick_tile_on_double_click`).
                                 if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                    || view.try_pick_tile_on_double_click(id, event, window, cx)
                                     || view.try_arm_tile_drag(id, event, cx)
                                 {
                                     return;
@@ -745,6 +749,7 @@ impl Render for ShellView {
                             // called here too so both listeners read the
                             // same gesture table.
                             if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                || view.try_pick_tile_on_double_click(id, event, window, cx)
                                 || view.try_arm_tile_drag(id, event, cx)
                             {
                                 return;
@@ -1005,6 +1010,15 @@ impl Render for ShellView {
                 objectdialog::render::open_save_scope(view, window, cx);
             });
         };
+        // The grouping readout's click (2026-09-19) — the mouse form of
+        // `frame::grouping`/`mod+g`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let grouping_entity = cx.entity();
+        let on_grouping = move |window: &mut Window, cx: &mut App| {
+            grouping_entity.update(cx, |view, cx| {
+                choicedialog::open_grouping(view, window, cx);
+            });
+        };
         let toolbar = toolbar::toolbar(
             &self.filter_input,
             &bar_model,
@@ -1012,6 +1026,7 @@ impl Render for ShellView {
             on_chip_open,
             on_pick,
             on_save,
+            on_grouping,
             cx,
         );
 
