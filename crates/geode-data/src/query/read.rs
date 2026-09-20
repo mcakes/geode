@@ -138,12 +138,11 @@ impl ReadQuery {
             }
         };
         after_plan();
-        let snapshot = super::pool::run_snapshot(&tx, &compiled, provenance).map_err(|source| {
-            StoreError::Sql {
+        let snapshot = super::pool::run_snapshot(&tx, &compiled, &compiled.grouping, provenance)
+            .map_err(|source| StoreError::Sql {
                 statement: compiled.sql,
                 source,
-            }
-        })?;
+            })?;
         commit_transaction(tx)?;
         Ok(snapshot)
     }

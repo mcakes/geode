@@ -423,7 +423,8 @@ pub(crate) fn run_one(
             .map(Payload::Snapshot)
             .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
         Work::Query(compiled) => {
-            run_snapshot(conn, compiled, req.provenance.clone()).map(Payload::Snapshot)
+            run_snapshot(conn, compiled, &req.grouping, req.provenance.clone())
+                .map(Payload::Snapshot)
         }
     }
 }
@@ -431,6 +432,7 @@ pub(crate) fn run_one(
 pub(crate) fn run_snapshot(
     conn: &duckdb::Connection,
     compiled: &CompiledQuery,
+    grouping: &[String],
     provenance: Provenance,
 ) -> Result<Snapshot, duckdb::Error> {
     let mut stmt = conn.prepare(&compiled.sql)?;
@@ -446,7 +448,7 @@ pub(crate) fn run_snapshot(
             scope_semantics: c.scope_semantics.clone(),
         })
         .collect();
-    Snapshot::from_batches(batches, meta, compiled.grouping.clone(), provenance)
+    Snapshot::from_batches(batches, meta, grouping.to_vec(), provenance)
         .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string()))
 }
 
