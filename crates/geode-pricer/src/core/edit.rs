@@ -287,8 +287,8 @@ impl Sheet {
         // Capture every record in the range BEFORE removing any of them:
         // `parent` stores flat indices, so once the first row is gone the
         // remaining ones' stored index no longer points at the removed
-        // package — `take_out`'s own record (computed just before each
-        // removal) would self-reference instead.
+        // package — a record taken between `take_out` calls would
+        // self-reference instead (see `take_out`'s own doc comment).
         let rows: Vec<RowRecord> = (at..at + count).map(|r| self.record(r)).collect();
         for _ in 0..count {
             self.take_out(at);

@@ -448,10 +448,14 @@ impl Sheet {
         self.next_id = self.next_id.max(rec.id.0 + 1);
     }
 
-    /// Remove one row at flat `at`, answering its record (with the
-    /// parent's ID, resolved before the removal).
-    pub(crate) fn take_out(&mut self, at: usize) -> RowRecord {
-        let rec = self.record(at);
+    /// Remove one row at flat `at`. Answers nothing: `parent` stores flat
+    /// indices, so once one row in a range is gone every later index in
+    /// that range shifts and a record taken here-after would misread its
+    /// parent (this is exactly the bug `remove` avoids by calling
+    /// `record(at)` for the WHOLE range first). A caller that needs the
+    /// removed row's record takes it via `record(at)` before calling
+    /// this, never after.
+    pub(crate) fn take_out(&mut self, at: usize) {
         self.ids.remove(at);
         self.kind.remove(at);
         self.parent.remove(at);
@@ -462,7 +466,6 @@ impl Sheet {
         self.result.remove(at);
         self.state.remove(at);
         self.priced_at.remove(at);
-        rec
     }
 
     /// Rebuild `parent` after a structural edit: a row marked as a leg
