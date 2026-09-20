@@ -251,6 +251,128 @@ pub const CVI: PanelSpec = PanelSpec {
     ],
 };
 
+/// The dividend schedule's closed status vocabulary (design spec §6.1,
+/// §6.5). Copied here rather than imported: `geode-marketdata` must not
+/// depend on `geode-documents` (CLAUDE.md's layering rules — a module
+/// crate is one of "the modules" the shell/data boundary is drawn
+/// around, and `geode-documents` sits below it), so this and
+/// `geode_documents::dividend::STATUSES` are two declarations of the
+/// same four words. A `geode-app` test — the one crate where every layer
+/// meets — asserts they agree; `geode-demo-data`'s own copy (fed to the
+/// generator) is checked against `geode-documents`' the same way.
+pub const STATUSES: [&str; 4] = ["estimated", "declared", "paid", "cancelled"];
+
+/// The dividend schedule's cell format (spec §6.5): four places, because
+/// a per-share amount can carry fractional cents a trader trades on
+/// exactly as a CVI parameter's fourth place does (see [`CVI_FORMAT`]);
+/// no grouping, since a dividend amount never reaches a size where
+/// `1,234` reads as anything but noise; and — unlike a P&L figure —
+/// `Colour::None` rather than `Colour::Sign`, because every dividend
+/// amount here is a positive per-share payment: there is no "bad" sign
+/// for red to mark, and colouring it anyway would paint a claim the
+/// number itself never makes.
+const DIVIDEND_FORMAT: ColumnFormat = ColumnFormat {
+    precision: 4,
+    thousands: false,
+    negative: Negative::Minus,
+    colour: Colour::None,
+    scale: Scale::None,
+};
+
+/// The dividend schedule surface (spec §6.4/§6.5): one document per
+/// underlying, one row per scheduled dividend. `Columns::Values`, not a
+/// pivot — a schedule is a handful of rows with a handful of values
+/// each, the shape that variant's own doc comment describes — and rows
+/// are minted by the panel (`RowIdentity::Minted`) rather than typed,
+/// since a dividend's identity is the document's own `dividend_id`, a
+/// generated key rather than a value a trader would ever type.
+///
+/// The three date columns (`ex`/`announced`/`pay`) share
+/// [`ColumnFormat::TEXT`]: precision, grouping, sign and scale are all
+/// irrelevant to them, because [`crate::core::matrix::cell_text`] paints
+/// every `Value::Date` as `%Y-%m-%d` regardless of what the column's
+/// format says — the same reason `status`, also `Utf8`, uses it too.
+///
+/// Only `ex_date`, `amount` and `status` are `required`
+/// ([`Draft::incomplete_rows`](crate::core::draft::Draft::incomplete_rows)'s
+/// gate on when an inserted row counts as complete, spec §5.2): a
+/// dividend can be scheduled the moment its ex-date, amount and status
+/// are known — an `estimated` row, `STATUSES`' own first word — while
+/// `announced_date` and `pay_date` are facts the issuer discloses later,
+/// once the dividend is formally declared. An inserted row must not be
+/// held incomplete waiting on information that does not exist yet.
+/// `status` is the one column with a closed vocabulary (`choices`),
+/// stepped in place exactly as a config dialog's `Choice` field is (spec
+/// §4.4).
+pub const DIVIDEND: PanelSpec = PanelSpec {
+    kind: "dividend",
+    title: "Dividend",
+    dataset: "dividend_schedule",
+    document: "dividend_schedule",
+    rows: RowAxis {
+        column: "dividend_id",
+        identity: RowIdentity::Minted,
+    },
+    columns: Columns::Values(&[
+        ValueColumn {
+            column: "ex_date",
+            label: "ex",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: true,
+        },
+        ValueColumn {
+            column: "announced_date",
+            label: "announced",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: false,
+        },
+        ValueColumn {
+            column: "pay_date",
+            label: "pay",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: false,
+        },
+        ValueColumn {
+            column: "amount",
+            label: "amount",
+            ty: ColumnType::F64,
+            format: DIVIDEND_FORMAT,
+            choices: None,
+            required: true,
+        },
+        ValueColumn {
+            column: "status",
+            label: "status",
+            ty: ColumnType::Utf8,
+            format: ColumnFormat::TEXT,
+            choices: Some(&STATUSES),
+            required: true,
+        },
+    ]),
+    header: &[
+        HeaderAttr {
+            column: "currency",
+            label: "ccy",
+            ty: ColumnType::Utf8,
+        },
+        HeaderAttr {
+            column: "schedule_date",
+            label: "struck",
+            ty: ColumnType::Date,
+        },
+    ],
+    slice_values: &[],
+    value_type: ColumnType::F64,
+    format: DIVIDEND_FORMAT,
+    actions: &[],
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +458,52 @@ mod tests {
         assert_eq!(FLAT.flat_columns().len(), 2);
         assert!(CVI.flat_columns().is_empty());
         assert_eq!(CVI.rows.identity, RowIdentity::Typed(ColumnType::Date));
+    }
+
+    /// The second panel spec (dividend design spec §6.5): a flat layout
+    /// (`Columns::Values`, so `flat_columns` is non-empty and `names`
+    /// covers every listed column plus the two header attributes) with
+    /// rows the panel itself mints rather than the trader typing a
+    /// label.
+    #[test]
+    fn the_dividend_spec_names_its_own_columns_and_header_attributes() {
+        assert_eq!(DIVIDEND.kind, "dividend");
+        assert_eq!(DIVIDEND.rows.identity, RowIdentity::Minted);
+        for column in [
+            "dividend_id",
+            "ex_date",
+            "announced_date",
+            "pay_date",
+            "amount",
+            "status",
+            "currency",
+            "schedule_date",
+        ] {
+            assert!(DIVIDEND.names(column), "{column}");
+        }
+        assert!(!DIVIDEND.names("underlying_ref"));
+        assert_eq!(DIVIDEND.flat_columns().len(), 5);
+        assert!(DIVIDEND.slice_values.is_empty());
+    }
+
+    /// Only `ex_date`, `amount` and `status` are required (see
+    /// [`DIVIDEND`]'s own doc comment for why `announced`/`pay` are
+    /// not), and `status` alone carries a closed vocabulary — the one
+    /// [`STATUSES`] this crate must keep in step with
+    /// `geode_documents::dividend::STATUSES` (checked in `geode-app`,
+    /// the one crate where both are visible).
+    #[test]
+    fn the_dividend_spec_requires_ex_date_amount_and_status_only() {
+        let required = |label: &str| DIVIDEND.value_column(label).unwrap().required;
+        assert!(required("ex_date"));
+        assert!(!required("announced_date"));
+        assert!(!required("pay_date"));
+        assert!(required("amount"));
+        assert!(required("status"));
+        assert_eq!(
+            DIVIDEND.value_column("status").unwrap().choices,
+            Some(&STATUSES[..])
+        );
+        assert_eq!(STATUSES, ["estimated", "declared", "paid", "cancelled"]);
     }
 }

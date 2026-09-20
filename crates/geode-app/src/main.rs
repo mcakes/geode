@@ -777,6 +777,15 @@ fn build_shell_services(
         // bridge there is nothing for it to ask, and the palette then
         // lists no "CVI: Split" row either.
         roster.add(Box::new(MarketDataFactoryHandle(bridge.marketdata.clone())));
+        // The dividend schedule panel (spec §6.5): a second document
+        // kind over the same `MarketDataFactoryHandle` shape, on the
+        // same condition — and the palette then lists no "Dividend:
+        // Split" row either. Its factory was built `.without_keymap()`,
+        // so this registration adds no second `<module:dividend>`
+        // fragment; `default_keymap` is forwarded regardless (every
+        // defaulted trait method is, per `MarketDataFactoryHandle`'s own
+        // doc comment) and simply answers `None` for this one.
+        roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
         bridge
     });
 
@@ -961,6 +970,59 @@ mod tests {
     #[test]
     fn an_unrecognised_flag_is_a_usage_error() {
         assert!(parse_args(&["--nonesuch".to_string()]).is_err());
+    }
+
+    /// Task 12: the roster carries both document kinds' factories
+    /// (`MarketDataFactoryHandle`, exactly as `run` wires them beside
+    /// each other), but the dividend one was built `.without_keymap()`
+    /// — so `keymap_fragments()` splices only ONE `<module:cvi>` layer,
+    /// never a second `<module:dividend>` one binding the identical
+    /// `marketdata` context a second time — and `register_add_actions`
+    /// over the roster's own kinds still lists "Dividend: Split" for it
+    /// (`register_add_actions`'s own `"{Kind}: Split"` pattern, user
+    /// ruling 2026-09-09), since a factory that ships no fragment still
+    /// gets an add-tile row. (`register_add_actions`'s `capitalize`
+    /// title-cases only the first letter, so `cvi`'s own row reads
+    /// "Cvi: Split" rather than the "CVI: Split" several doc comments
+    /// describe — a pre-existing mismatch this test does not fix, since
+    /// it is not this task's kind; only `dividend`'s title is asserted
+    /// exactly, `cvi`'s presence merely confirmed.)
+    #[test]
+    fn the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row() {
+        use geode_data::DataHandle;
+        use geode_marketdata::core::{CVI, DIVIDEND};
+        use geode_shell::actions::ActionId;
+
+        let mut roster = ModuleRoster::new();
+        let (data, _rx) = DataHandle::for_tests();
+        roster.add(Box::new(MarketDataFactoryHandle(Rc::new(
+            MarketDataFactory::new(data.clone(), &CVI, Duration::from_secs(60)),
+        ))));
+        roster.add(Box::new(MarketDataFactoryHandle(Rc::new(
+            MarketDataFactory::new(data, &DIVIDEND, Duration::from_secs(60)).without_keymap(),
+        ))));
+
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            docs.len(),
+            1,
+            "the second factory must not splice its own fragment doc"
+        );
+        assert_eq!(docs[0].file.to_string_lossy(), "<module:cvi>");
+
+        let mut registry = ActionRegistry::default();
+        register_add_actions(&mut registry, &roster.kinds());
+        let dividend_split = registry
+            .get(&ActionId("tile::add_dividend".to_string()))
+            .expect("the dividend kind still gets an add-tile row");
+        assert_eq!(dividend_split.title, "Dividend: Split");
+        assert!(
+            registry
+                .get(&ActionId("tile::add_cvi".to_string()))
+                .is_some(),
+            "the cvi kind keeps its own row"
+        );
     }
 
     /// Phase 4b Task 2's migration invariant, kept true rather than

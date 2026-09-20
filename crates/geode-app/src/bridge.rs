@@ -15,7 +15,7 @@ use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink};
 use geode_marketdata::MarketDataFactory;
-use geode_marketdata::core::CVI;
+use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_shell::diagnostics::SourceSummary;
 use geode_shell::module::Delivery;
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
@@ -202,6 +202,13 @@ pub struct Bridge {
     /// refresh `stale_after` on. One factory per panel spec — a second
     /// document kind's panel is a second field here, not a second crate.
     pub marketdata: Rc<MarketDataFactory>,
+    /// The dividend schedule panel's factory (spec §6.5) — the second
+    /// document kind, built `.without_keymap()`
+    /// (`MarketDataFactory::without_keymap`): both factories share the
+    /// one `marketdata` context and its `DEFAULT_KEYMAP`, so only
+    /// `marketdata` above ships the fragment; this one still registers
+    /// its own actions and reads its own reloaded `stale_after`.
+    pub dividend: Rc<MarketDataFactory>,
     events: async_channel::Receiver<DataEvent>,
     dropped: Arc<AtomicU64>,
     /// The sources the running service was actually built from (Phase 4b
@@ -249,6 +256,12 @@ pub fn start(
             // keys for one idea would be two things to keep in step.
             stale_after,
         )),
+        // The second document kind, over the same shared `marketdata`
+        // context: `.without_keymap()` is what keeps `keymap_fragments`
+        // from splicing a second, identical `<module:{kind}>` layer.
+        dividend: Rc::new(
+            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after).without_keymap(),
+        ),
         handle,
         factory,
         events: rx,
@@ -266,6 +279,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let handle = bridge.handle.clone();
     let factory = bridge.factory.clone();
     let marketdata = bridge.marketdata.clone();
+    let dividend = bridge.dividend.clone();
 
     let shell = window
         .read(cx)
@@ -352,6 +366,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let handle = handle.clone();
         let factory = factory.clone();
         let marketdata = marketdata.clone();
+        let dividend = dividend.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
@@ -425,6 +440,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // so this can only ever drift as far as the next
                 // views/dimensions reload.
                 marketdata.set_stale_after(stale_after);
+                // The second document kind reads the same key too, and
+                // is refreshed the same way `marketdata`'s is — the two
+                // factories differ only in which one ships the fragment.
+                dividend.set_stale_after(stale_after);
                 // `:filter`/`:scope` validation (Phase 4a §3.7): the
                 // `datasets` doc is re-read here too — `ConfigReloaded`
                 // doesn't fire for a `datasets`-only edit (that instead
@@ -919,6 +938,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -987,6 +1010,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1056,6 +1083,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1129,6 +1160,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1192,6 +1227,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory: factory.clone(),
             events: rx,
@@ -1249,6 +1288,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1344,6 +1387,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1411,6 +1458,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1506,6 +1557,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,

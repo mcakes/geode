@@ -13902,6 +13902,18 @@ run_mutation "tile: a typed text label commits through parse_attr" \
   '                    Ok(_) => text.trim().to_string(),' \
   geode-marketdata o_on_an_integer_axis_opens_the_text_label_editor
 
+# ---- Task 12: DIVIDEND spec and the second factory ----
+
+# Mutated to keep shipping the fragment: `without_keymap` would no
+# longer do anything, so a second document kind's factory would splice
+# its own byte-identical `<module:{kind}>` layer beside the first's —
+# `keymap_fragments()` over both factories must yield exactly one doc.
+run_mutation "factory: the second panel ships no second fragment" \
+  crates/geode-marketdata/src/content.rs \
+  '        self.ships_keymap = false;' \
+  '        self.ships_keymap = true;' \
+  geode-app the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

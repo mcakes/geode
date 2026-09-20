@@ -404,4 +404,17 @@ mod tests {
             geode_documents::dividend::STATUSES
         );
     }
+
+    /// Task 12: the `DIVIDEND` panel spec's own copy — `geode-marketdata`
+    /// cannot depend on `geode-documents` either — must agree with
+    /// `geode_documents::dividend::STATUSES` the same way the generator's
+    /// copy above does; `geode-app` is the one crate where all three are
+    /// visible at once.
+    #[test]
+    fn the_dividend_panel_specs_status_vocabulary_matches_the_dividend_kind() {
+        assert_eq!(
+            geode_marketdata::core::STATUSES,
+            geode_documents::dividend::STATUSES
+        );
+    }
 }
