@@ -2124,7 +2124,7 @@ mod tests {
                 seen.insert(o.key.0);
                 if o.results.iter().any(|(_, _, r)| {
                     r.as_ref()
-                        .is_err_and(|e| e.contains("the pricing queue is full"))
+                        .is_err_and(|e| e == "the pricing queue is full; resubmit")
                 }) {
                     saw_queue_full_error = true;
                 }

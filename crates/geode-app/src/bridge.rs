@@ -1078,10 +1078,10 @@ role = "key"
             .find(|d| d.message.contains("pricer"))
             .unwrap();
         assert_eq!(d.severity, Severity::Warning);
-        assert!(
-            d.message.contains("vendor") && d.message.contains("mock"),
-            "{}",
-            d.message
+        assert_eq!(
+            d.message,
+            "pricer \"vendor\" ([pricing] adapter) is not built into this binary \
+             (have: mock); every priced line will say so"
         );
     }
 

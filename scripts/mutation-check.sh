@@ -13484,7 +13484,7 @@ run_mutation "mdpark: the picker opens while the draft has edits" \
 # publish gate, the frame bump and the restart stripe (line-pricer spec
 # §5.3, §5.5, §7.2). ---
 
-run_mutation "pricing: latest wins per key while queued" \
+run_mutation "pricing: a replacement for a queued key takes a new slot" \
   crates/geode-data/src/pricing/worker.rs \
   '        if let Some(slot) = q.pending.get_mut(&key) {
             *slot = params;
@@ -13569,7 +13569,7 @@ run_mutation "shell: a pricing change needs no restart" \
 # method rather than assuming a plain `Ok`, which is what "once per
 # batch, before the first line" (`overrides_are_set_once_per_batch_
 # before_its_first_line`) is really pinning: the seen-list stays empty.
-run_mutation "pricing: overrides are set per line, not once per batch" \
+run_mutation "pricing: overrides are never set" \
   crates/geode-data/src/pricing/worker.rs \
   '                    geode_core::panic::contained(|| pricer.set_overrides(&params.overrides))' \
   '                    geode_core::panic::contained(|| Ok::<(), geode_core::pricing::PricingError>(()))' \
@@ -13633,6 +13633,15 @@ run_mutation "service: a refused pricing batch is dropped silently" \
             results,
         }));
         }' \
+  geode-data a_full_pricing_queue_answers_the_refused_batch_with_an_error_per_line
+
+# Review fix (Important 2a): the message text itself is pinned by an
+# exact-equality assertion now, not a `contains`, so a drift in the
+# wording — not just the outcome being dropped — is its own finding.
+run_mutation "service: the queue-full message drifts" \
+  crates/geode-data/src/service.rs \
+  '                    Err("the pricing queue is full; resubmit".to_string()),' \
+  '                    Err("the pricing queue is full".to_string()),' \
   geode-data a_full_pricing_queue_answers_the_refused_batch_with_an_error_per_line
 
 run_mutation "service: a failed local publish reports health" \

@@ -117,7 +117,7 @@ Each bullet is a rule the code depends on and a test or harness entry usually pi
 - A batch the worker's own bounded queue refuses is still answered: `DataService::price` emits the `DataEvent::Price` itself with an error per line — `DataHandle::price`'s `false` means only that the request channel refused, never that a submitted batch went unanswered.
 - `Request::Publish` is refused unwritten for a non-`local` dataset; a local publish is source `LOCAL_SOURCE`, emits `Published` + `LoadEnded` and never `Health`; the bridge skips `Frame::note_published` for a local dataset (`Bridge.local_datasets`). A `[sources]` entry naming a local dataset is an error.
 - `[pricing]` changes are a restart stripe (`pricing_baseline`), like `sources`/`datasets`.
-- Known-redundant, pinned together: the worker clears `cancel_running` both when a batch is picked up and after it finishes — either alone would let a stale cancel leak into the next batch for the same key, and only `a_cancel_of_a_running_key_does_not_stop_the_next_batch` pins the pair (no separate harness entry: mutating either clear alone survives).
+- The worker clears `cancel_running` both when a batch is picked up and after it finishes — the two clears are REDUNDANT by design, neither alone is load-bearing (either one resets the flag before the next batch starts), and only `a_cancel_of_a_running_key_does_not_stop_the_next_batch` pins the pair; there is no separate harness entry because mutating either clear alone survives.
 
 ## Commands
 
