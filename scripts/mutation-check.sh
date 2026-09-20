@@ -14668,6 +14668,105 @@ run_mutation "tilepicker: the empty dock hint's double-click opens the picker" \
   geode-shell \
   clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it
 
+# Line pricer Part 2 (core): geode-pricer's Sheet/Edit/shorthand/views/
+# storage, plus one geode-core seam the document family gained for it.
+run_mutation "pricer core: an old revision's delivery is installed" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        if revision < current {
+            return Delivered::OldRevision { current };
+        }' \
+  '        if false {
+            return Delivered::OldRevision { current };
+        }' \
+  geode-pricer a_delivery_for_an_old_revision_is_dropped_and_the_current_one_installed
+
+run_mutation "pricer core: a package sums its legs unsigned" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                        let q = self.qty[leg] as f64;' \
+  '                        let q = (self.qty[leg] as f64).abs();' \
+  geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
+
+run_mutation "pricer core: a failed leg still sums" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '            self.result[p] = if complete && failed.is_none() {' \
+  '            self.result[p] = if complete {' \
+  geode-pricer a_package_sums_qty_times_value_over_its_legs_with_signed_quantities
+
+run_mutation "pricer core: undo of a remove re-requests the row" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        self.state.insert(at, rec.state);' \
+  '        self.state.insert(at, LineState::Stale);' \
+  geode-pricer undo_of_a_remove_reinstates_rows_with_ids_and_results_and_requests_nothing
+
+run_mutation "pricer core: an inherited sheet shift reprices nothing" \
+  crates/geode-pricer/src/core/edit.rs \
+  '            Edit::SetSheetShift(_) => (0..self.len())
+                .filter(|r| self.is_line(*r))
+                .map(|r| self.id(r))
+                .collect(),' \
+  '            Edit::SetSheetShift(_) => Vec::new(),' \
+  geode-pricer a_sheet_shift_reprices_only_lines_that_inherit_it
+
+run_mutation "pricer core: qty changes the request" \
+  crates/geode-pricer/src/core/edit.rs \
+  '                let old = self.qty(row);
+                self.set_qty(row, qty);' \
+  '                let old = self.qty(row);
+                self.set_qty(row, qty);
+                self.touch(row);' \
+  geode-pricer set_qty_and_move_change_no_request
+
+run_mutation "pricer core: a spot override stales every underlying" \
+  crates/geode-pricer/src/core/edit.rs \
+  '                        if self.is_line(row)
+                            && self.instrument(row).is_some_and(|i| i.underlying() == key)
+                        {' \
+  '                        if self.is_line(row) {' \
+  geode-pricer a_spot_override_stales_every_line_on_that_underlying_and_only_a_changed_level_does
+
+run_mutation "pricer core: group accepts a package in the run" \
+  crates/geode-pricer/src/core/edit.rs \
+  '        if (first..end).any(|r| self.depth(r) != 0 || !self.is_line(r)) {' \
+  '        if (first..end).any(|r| self.depth(r) != 0) {' \
+  geode-pricer group_refuses_a_run_that_is_not_contiguous_roots
+
+run_mutation "pricer shorthand: the third Friday is the first" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '    first.checked_add_days(chrono::Days::new(u64::from(to_friday) + 14))' \
+  '    first.checked_add_days(chrono::Days::new(u64::from(to_friday)))' \
+  geode-pricer a_month_code_resolves_to_the_third_friday
+
+run_mutation "pricer views: an unknown column is only a warning" \
+  crates/geode-pricer/src/core/views.rs \
+  '                        Severity::Error,
+                        &format!("columns.{i}"),
+                        format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
+  '                        Severity::Warning,
+                        &format!("columns.{i}"),
+                        format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
+  geode-pricer an_unknown_column_is_an_error_and_dropped
+
+run_mutation "pricer storage: an empty sheet publishes a zero-row document" \
+  crates/geode-pricer/src/core/storage.rs \
+  '    if sheet.is_empty() {
+        return None;
+    }
+    let n = sheet.len();' \
+  '    let n = sheet.len();' \
+  geode-pricer an_empty_sheet_has_no_document
+
+# The document family's numeric-only VALUE-column rule exempts a `local`
+# dataset (the pricer's sheets store enumerable text per row); this pins
+# the exemption's own boundary — a bool/timestamp value still drops.
+run_mutation "core: a local document's value column may be any type" \
+  crates/geode-core/src/schema/mod.rs \
+  '            c.role == ColumnRole::Value
+                && !local
+                && !matches!(c.ty, ColumnType::F64 | ColumnType::I64)' \
+  '            c.role == ColumnRole::Value
+                && !matches!(c.ty, ColumnType::F64 | ColumnType::I64)' \
+  geode-core a_local_documents_value_column_may_be_utf8
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

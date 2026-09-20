@@ -975,3 +975,92 @@ shifts) is its own spec against this one.
   after every publish is untouched; the strip tolerates a `LoadEnded`
   with no matching `Started`.
 - Unverified on a real window: nothing in Part 1 paints.
+
+## 17. As built (Part 2, 2026-09-20)
+
+The core landed as `geode-pricer::core` with these resolutions of
+§6/§7 (plan `2026-09-20-line-pricer-part-2-core.md`, "Decisions made
+in planning"):
+
+- `RowSpec` is an enum (`Line` | `Package { template, legs }`) and IS
+  the parser's answer; `Insert` takes a `Place` (`Root { at }` |
+  `Leg { package, leg }`), not a bare index.
+- `Remove`'s inverse is `Edit::Restore { at, rows: Vec<RowRecord> }`;
+  `Undo { inverse: Vec<Edit> }`; `Sheet::undo` answers the redo;
+  `Group` carries `id: Option<LineId>` for undo's sake.
+- `SetSpotOverride` stales its underlying's lines inside `apply`
+  (§9.3's "the tile marks" is the sheet's job).
+- `Sheet::refresh` is `Refresh { Default, Off, Every(Duration) }`.
+- Spot overrides persist as one `spot_overrides` utf8 attribute
+  (`UND=LEVEL;…`); §7.2's column list gains it (ruling 1 was amended
+  after §7.2 was written).
+- `ColumnPlan::build(view)` takes no sheet.
+- A package may be empty. Package state precedence is `Failed` >
+  `Stale` > `Fresh`; a package's result is `Some` only when every leg
+  has one.
+- `cell_text` (`core::columns`) is the pure half of §8.2's grid
+  model.
+- A custom package's shorthand is its legs one per line.
+- The two bundled views are `BUILTIN_VIEWS` in the crate; §11's "the
+  demo layer adds `pricer_views`" is unnecessary.
+- `Instrument::vanilla()`/`expiry()` were added to
+  `geode_core::pricing`; `"pricer_views"` to
+  `config::merge::atomic_depth`.
+- `PRICER_SHEETS_DECLARATION` (the §7.2 dataset as TOML) lives in
+  `core::storage`; Part 4 wires it.
+- Benches: parse, `apply` + undo (two shapes) and the storage round
+  trip; `GridModel::build` is Part 3's. Numbers in `docs/perf.md`.
+- Nothing in Part 2 paints; the crate is not yet in the app's
+  dependency graph.
+
+Four execution deviations, found in review and worth recording beside
+the fifteen decisions above:
+
+- `Sheet::take_out(at)` returns `()`: a `RowRecord` taken after
+  neighbouring rows have moved carries a stale parent index, so a
+  caller takes `record(at)` BEFORE removing (the review of Task 4
+  found the brief's `remove` doing it after, and fixed it).
+- The inverse of `Ungroup` on an EMPTY package is `Restore { at,
+  rows: [its record] }`, not `Group { count: 0 }` (which `apply`
+  refuses); `Sheet::undo` is documented as NOT atomic — an inverse
+  refused mid-batch leaves earlier inverses applied.
+- `geode_core::schema::validate_document`'s numeric-only VALUE-column
+  rule now exempts `local` document datasets (f64/i64/utf8/date, the
+  axis/attribute set): spec §7.2 declares utf8 per-row values and the
+  numeric rule was written for feed documents. `local` is forced
+  `false` outside the document family, so the gate is unreachable
+  elsewhere. **Part 4 must verify the DuckDB publish path binds a
+  utf8 VALUE column and quotes `order`/`kind`/`parent`/`template` as
+  identifiers** — if it cannot, the row shape needs re-encoding and
+  this exemption reverts.
+- `Sheet` derives `Debug`; the unused `set_kind` helper was deleted
+  rather than kept behind `allow(dead_code)`; no `allow(dead_code)`
+  remains in the crate. The parser checks the expiry count BEFORE the
+  strike count for a template (so `SPX DEC26/MAR27 5000 CS` points at
+  the expiries token), and classifies a trailing token after `C`/`P`
+  as a barrier kind only when it parses as one or a level token
+  follows it (so `... C extra` is "unexpected token").
+
+Twelve harness entries cover it: the eleven named in §12 above (an
+old revision's delivery, a package's signed sum, a failed leg's sum,
+undo of a remove, an inherited sheet shift, `SetQty`'s untouched
+request, a spot override's stale sweep, `Group`'s contiguous-roots
+check, the third-Friday resolution, the unknown-column diagnostic's
+severity, and the empty-sheet storage refusal), plus a twelfth in
+`geode-core` pinning the `local` VALUE-column exemption's own
+boundary (a bool/timestamp value still drops).
+
+`cargo bench -p geode-pricer` at 1,000 lines (criterion medians,
+`bae830d`): `parse_1000_lines` 270 µs; `apply_undo_sheet_shift_1000`
+1.52 ms; `apply_undo_set_instrument_1000` 6.66 µs;
+`to_rows_from_rows_1000` 1.14 ms — all under the 8 ms budget.
+`docs/perf.md` has the full conditions.
+
+Deferred minors, none blocking: the row-exists-and-is-line guard is
+triplicated across the three cell edits; `from_rows` validates a
+leg's parent by id but `Restore` re-parents positionally; override
+encoding does no `;`/`=` escaping; a package hopping upward and a
+multi-edit redo are untested; `restore` does not validate that `at`
+is a root boundary.
+
+Unverified on a real window: nothing in Part 2 paints.
