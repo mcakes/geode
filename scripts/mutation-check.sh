@@ -2655,14 +2655,18 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
 
 run_mutation "frame: bar_model is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \
-  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_clock == clock
             && *cached_today == today
         {
             return Rc::clone(cached);
         }' \
-  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions != versions
+            && *cached_clock == clock
             && *cached_today == today
         {
             return Rc::clone(cached);
@@ -4189,12 +4193,12 @@ run_mutation "flip: a fresh requery clears whatever was staged before it" \
 run_mutation "as-of: HH:MM resolves on the trader's local date, not UTC's" \
   crates/geode-core/src/query.rs \
   '    if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
-        return resolve_local(today_local, t, text);
+        return resolve(today, t);
     }' \
   '    if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
         return Ok(now.date_naive().and_time(t).and_utc());
     }' \
-  geode-core as_of_resolves_on_the_local_date_not_utcs
+  geode-core as_of_resolves_on_the_clocks_date_not_utcs
 
 # F3: `DataHandle::distinct`'s refusal (`false`: the queue is full or the
 # service thread is gone) used to be discarded — nothing else would ever
@@ -5063,12 +5067,16 @@ run_mutation "M11: save_scope bumps saved_scopes, not config" \
 
 run_mutation "M12: the bar-model cache key includes today's date" \
   crates/geode-shell/src/frame.rs \
-  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_clock == clock
             && *cached_today == today
         {' \
-  '        if let Some((cached_versions, _cached_today, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_clock, _cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_clock == clock
         {' \
   geode-shell the_bar_model_cache_rebuilds_when_today_changes_with_versions_unchanged
 
@@ -5093,13 +5101,16 @@ run_mutation "M6: an explicit default view wins over the alphabetical first" \
 run_mutation "M9: the as-of presets cache is keyed on the frame's data version" \
   crates/geode-shell/src/shell/asof_view.rs \
   '    let v = frame.versions().data;
-    if let Some((cached_v, cached)) = state.presets_cache.borrow().as_ref()
+    if let Some((cached_v, cached_clock, cached)) = state.presets_cache.borrow().as_ref()
         && *cached_v == v
+        && *cached_clock == clock
     {
         return Rc::clone(cached);
     }' \
   '    let v = frame.versions().data;
-    if let Some((_cached_v, cached)) = state.presets_cache.borrow().as_ref() {
+    if let Some((_cached_v, cached_clock, cached)) = state.presets_cache.borrow().as_ref()
+        && *cached_clock == clock
+    {
         return Rc::clone(cached);
     }' \
   geode-shell cached_presets_rebuilds_only_when_the_frames_data_version_changes
@@ -5747,13 +5758,11 @@ run_mutation "diagnostics module: the diagnostics observer rebuilds on every not
                 this.rebuild(cx);
             }
         })
-        .detach();
-        // MIN-7 (final review)' \
+        .detach();' \
   '            this.last_diag_versions = now;
             this.rebuild(cx);
         })
-        .detach();
-        // MIN-7 (final review)' \
+        .detach();' \
   geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
 
 # Re-homed 2026-09-08 (add-tile): `open_module` moved from `shell/mod.rs`
@@ -7386,6 +7395,7 @@ run_mutation "diagnostics: startup seeding folds in the computed config diagnost
   '            let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
             diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags.extend(clock_diags.iter().cloned());
             diags.extend(services.keymap_diagnostics.iter().cloned());' \
   '            let mut diags = cfg.diagnostics.clone();
             diags.extend(services.keymap_diagnostics.iter().cloned());' \
@@ -12196,8 +12206,14 @@ run_mutation "final: a painting delivery clears the previous delivery's notice" 
 # pinned assertions.
 run_mutation "final: the Behind chip does not call an older document newer" \
   crates/geode-marketdata/src/header.rs \
-  'Some((format!("update {}", local_hhmm(newer)).into(), Tone::Warn)),' \
-  'Some((format!("newer document received {}", local_hhmm(newer)).into(), Tone::Warn)),' \
+  '                Some((
+                    format!("update {}", local_hhmm(newer, i.clock)).into(),
+                    Tone::Warn,
+                )),' \
+  '                Some((
+                    format!("newer document received {}", local_hhmm(newer, i.clock)).into(),
+                    Tone::Warn,
+                )),' \
   geode-marketdata \
   a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base
 
@@ -12911,8 +12927,8 @@ run_mutation "mddraft: a malformed attribute entry is skipped, not the whole dra
 
 run_mutation "mdheader: behind reads update HH:MM" \
   crates/geode-marketdata/src/header.rs \
-  'format!("update {}", local_hhmm(newer))' \
-  'format!("different document received {}", local_hhmm(newer))' \
+  'format!("update {}", local_hhmm(newer, i.clock))' \
+  'format!("different document received {}", local_hhmm(newer, i.clock))' \
   geode-marketdata dirty_is_a_dot_and_behind_reads_update_hhmm
 
 run_mutation "mdheader: a dirty draft sets the dot flag" \
@@ -13608,16 +13624,16 @@ run_mutation "marketdata: the date field opens on the day segment" \
 run_mutation "marketdata: the row-label date editor opens on the day segment" \
   crates/geode-marketdata/src/tile.rs \
   '            let field = DateTimeField::open(
-                chrono::Local::now()
-                    .date_naive()
+                self.clock
+                    .today(chrono::Utc::now())
                     .and_hms_opt(0, 0, 0)
                     .expect("midnight exists"),
                 Precision::Date,
                 Segment::Day,
             );' \
   '            let field = DateTimeField::open(
-                chrono::Local::now()
-                    .date_naive()
+                self.clock
+                    .today(chrono::Utc::now())
                     .and_hms_opt(0, 0, 0)
                     .expect("midnight exists"),
                 Precision::Date,
@@ -13686,8 +13702,8 @@ run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
 # publish, and every other assertion on the parse stays green.
 run_mutation "asof: a bare date resolves to the end of the day" \
   crates/geode-core/src/query.rs \
-  '        return resolve_local(d, END_OF_DAY, text);' \
-  '        return resolve_local(d, NaiveTime::MIN, text);' \
+  '        return resolve(d, END_OF_DAY);' \
+  '        return resolve(d, NaiveTime::MIN);' \
   geode-core \
   a_bare_date_resolves_to_the_end_of_that_local_day
 
@@ -13742,8 +13758,12 @@ run_mutation "asof: END_OF_DAY is the last microsecond, not the last whole secon
 # today on every invalid partial date, discarding whatever day it showed.
 run_mutation "asof: the mirror ignores a failed parse" \
   crates/geode-shell/src/shell/mod.rs \
-  '                if state.resolved.is_some() {' \
-  '                if true {' \
+  '                if let Some(state) = view.as_of_dialog.as_ref()
+                    && state.resolved.is_some()
+                {' \
+  '                if let Some(state) = view.as_of_dialog.as_ref()
+                    && true
+                {' \
   geode-shell \
   an_invalid_intermediate_keystroke_leaves_the_calendar_where_it_was
 
@@ -15951,6 +15971,98 @@ run_mutation "pool: a series work item runs the view path" \
   '        Work::Series(_) => Err(duckdb::Error::InvalidParameterName("series".into())),' \
   geode-data \
   a_series_request_rides_the_pool_and_delivers_a_series_payload
+
+# As-of dialog Part 2 (2026-09-20): one clock. A weekend must not count.
+run_mutation "clock: business days skip the weekend" \
+  crates/geode-core/src/clock.rs \
+  '        if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {' \
+  '        {' \
+  geode-core \
+  business_days_back_skips_weekends_and_snaps_a_weekend_start_to_friday
+
+# A preset after `now` means live and must be dropped, not offered.
+run_mutation "clock: a future preset is dropped" \
+  crates/geode-core/src/clock.rs \
+  '            Ok(at) if at <= now => Some(Preset { label, at }),' \
+  '            Ok(at) => Some(Preset { label, at }),' \
+  geode-core \
+  presets_resolve_on_business_days_in_order_and_drop_a_future_one
+
+# The guard's scanner must actually see a banned chrono clock: an emptied
+# pattern list passes the tree vacuously and the self-check is what
+# catches it.
+run_mutation "clock: the Local guard sees a planted site" \
+  crates/geode-core/src/clock.rs \
+  '                .filter(|l| PATTERNS.iter().any(|p| l.contains(p)))' \
+  '                .filter(|_l| false)' \
+  geode-core \
+  no_crate_uses_chrono_local
+
+# HH:MM resolves on the CLOCK's date: on UTC's date a New York trader at
+# 21:00 typing "14:05" would get tomorrow.
+run_mutation "clock: parse_as_of resolves on the clock's date" \
+  crates/geode-core/src/query.rs \
+  '    let today = clock.today(now);' \
+  '    let today = now.date_naive();' \
+  geode-core \
+  as_of_resolves_on_the_clocks_date_not_utcs
+
+# A bad zone is an ERROR, not a silent fallback. This is the non-string
+# `time.zone` arm specifically (`zone = 42`, 24-space indent) — the
+# sibling "not an IANA name" arm a few lines up (28-space indent) is the
+# next entry's business.
+run_mutation "clock: a non-string zone value is an error diagnostic" \
+  crates/geode-core/src/clock.rs \
+  '                        Severity::Error,
+                        "zone",' \
+  '                        Severity::Warning,
+                        "zone",' \
+  geode-core \
+  a_non_string_zone_is_an_error_and_the_machine_zone_applies
+
+# The sibling arm: a STRING that is not a recognised IANA name
+# (`zone = "Mars/Olympus"`) is also an ERROR, not a silent fallback. The
+# 28-space indent is what disambiguates this anchor from the previous
+# entry's 24-space one — collapsing them to one shared string would let
+# only the FIRST site in the file ever be mutated.
+run_mutation "clock: a bad zone name is an error diagnostic" \
+  crates/geode-core/src/clock.rs \
+  '                            Severity::Error,
+                            "zone",' \
+  '                            Severity::Warning,
+                            "zone",' \
+  geode-core \
+  a_bad_zone_or_time_is_an_error_at_its_key_and_the_default_applies
+
+# A reload must republish the global or every module keeps the old zone.
+run_mutation "clock: a reload republishes AppClock" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                cx.set_global(crate::clock::AppClock(clock));' \
+  '                let _ = clock;' \
+  geode-shell \
+  a_time_zone_reload_republishes_the_clock_without_a_requery
+
+# The blotter's freshness readout formats on the clock, not by slicing UTC.
+run_mutation "clock: the blotter's short_time reads on the clock" \
+  crates/geode-blotter/src/tile.rs \
+  '        Ok(at) => clock.hm(at.to_utc()),' \
+  '        Ok(at) => at.format("%H:%M").to_string(),' \
+  geode-blotter \
+  short_time_formats_an_rfc3339_instant_on_the_clock_and_echoes_garbage
+
+# Final review, Important 1: a `[time]` zone reload landing on the SAME
+# date (the common case — `Clock::today` agrees across most zone pairs)
+# must not leave the pinned `AS OF` chip painted in the OLD zone until an
+# unrelated midnight or the next `:asof` edit shakes it loose.
+run_mutation "clock: the blotter's as-of chip cache is keyed on the clock" \
+  crates/geode-blotter/src/tile.rs \
+  '            && (clock.today(chrono::Utc::now()) != self.asof_chip_date
+                || clock != self.asof_chip_clock)
+        {' \
+  '            && (clock.today(chrono::Utc::now()) != self.asof_chip_date)
+        {' \
+  geode-blotter \
+  the_pinned_chip_reads_the_installed_app_clock_and_follows_a_later_change
 
 
 # --- geode-chart (spec §8, Part 3) ------------------------------------

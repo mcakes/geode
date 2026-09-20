@@ -149,7 +149,7 @@ pub struct ShellServices {
     /// against the `ActionRegistry` as it stood at startup, after the
     /// roster's and the pick/scope/add registrations. Carrying the list
     /// is what lets `ShellView::new` seed the diagnostics entity's config
-    /// section with the same four groups `apply_reload` extends, in the
+    /// section with the same five groups `apply_reload` extends, in the
     /// same order — otherwise a keymap diagnostic (a binding naming an
     /// action nothing registered, say) was logged at startup and then
     /// invisible in the diagnostics tile until some later hot reload.
@@ -1009,15 +1009,15 @@ pub struct ShellView {
     /// commonest way to reach the failure path with no dialog left on
     /// screen to carry a notice.
     pub(crate) config_write_error: Option<String>,
-    /// Today's local date (Phase 4b Task 1 fix round 1, MIN-9) —
-    /// refreshed once per reload-poll tick (~500ms, alongside the flip
-    /// sweep and the dirty-session flush) rather than read fresh on
-    /// every paint. Before this, `render`'s own `chrono::Local::now()`
-    /// call (feeding `Frame::bar_model`'s `(versions, today)` cache key,
-    /// M12) ran on every single render — including every one of the
-    /// ~100% of frames that hit the cache — new per-frame clock-read
-    /// work on the render path for a value that only meaningfully
-    /// changes once a day.
+    /// Today's date on the configured clock (Phase 4b Task 1 fix round
+    /// 1, MIN-9) — refreshed once per reload-poll tick (~500ms,
+    /// alongside the flip sweep and the dirty-session flush) rather than
+    /// read fresh on every paint. Before this, `render`'s own fresh
+    /// clock-read call (feeding `Frame::bar_model`'s `(versions, today)`
+    /// cache key, M12) ran on every single render — including every one
+    /// of the ~100% of frames that hit the cache — new per-frame
+    /// clock-read work on the render path for a value that only
+    /// meaningfully changes once a day.
     pub(super) today: chrono::NaiveDate,
 }
 
@@ -1205,13 +1205,21 @@ impl ShellView {
                 state.list.set_query(&query);
                 view.choice_dialog_scroll
                     .scroll_to_item(state.list.ranked_highlighted());
-            } else if let Some(state) = view.as_of_dialog.as_mut() {
+            } else if view.as_of_dialog.is_some() {
                 // Unlike the three dialogs above, this field's raw text IS
                 // the value being edited (spec §3.6), not a filter over
                 // something else — re-resolve it and store the outcome
                 // (`resolved`/`error`) for `build` to show; see
-                // `asof_view::on_query_changed`'s own doc comment.
-                asof_view::on_query_changed(state, &query, chrono::Utc::now());
+                // `asof_view::on_query_changed`'s own doc comment. The
+                // clock is read BEFORE `as_of_dialog.as_mut()`'s borrow
+                // (`ShellView::clock` needs `&self`/`&App`, which a `&mut
+                // AsOfState` borrowed out of `view` would otherwise
+                // conflict with).
+                let clock = view.clock(cx);
+                let now = chrono::Utc::now();
+                if let Some(state) = view.as_of_dialog.as_mut() {
+                    asof_view::on_query_changed(state, &query, now, clock);
+                }
                 // Typing mirrors onto the calendar (spec §5.2): the parsed
                 // day, and ONLY the parsed day — final review, finding 4.
                 // `calendar_date` falls back to today when `resolved` is
@@ -1222,8 +1230,10 @@ impl ShellView {
                 // to today on every invalid partial date, discarding
                 // whatever day it was showing. `set_date` notifies the
                 // calendar only.
-                if state.resolved.is_some() {
-                    let day = asof_view::calendar_date(state, chrono::Utc::now());
+                if let Some(state) = view.as_of_dialog.as_ref()
+                    && state.resolved.is_some()
+                {
+                    let day = asof_view::calendar_date(state, now, clock);
                     view.as_of_calendar.update(cx, |c, cx| {
                         if c.date().start() != Some(day) {
                             c.set_date(day, window, cx);
@@ -1350,14 +1360,17 @@ impl ShellView {
                 // changed" shape as the sweep just above — this is the
                 // one clock read the whole ~500ms tick needs; `render`
                 // (and therefore `Frame::bar_model`'s cache key) reads
-                // `self.today` rather than calling `chrono::Local::now()`
+                // `self.today` rather than reading the clock fresh
                 // itself, so a held key no longer pays a clock read on
                 // every repaint for a value that only changes once a
                 // day. Only notifies when the date actually moved on —
                 // any other trigger repaints "for free" with the fresh
                 // value already in place.
-                let Ok(changed) = this.update(cx, |view, _cx| {
-                    let today = chrono::Local::now().date_naive();
+                let Ok(changed) = this.update(cx, |view, cx| {
+                    let today = cx
+                        .global::<crate::clock::AppClock>()
+                        .0
+                        .today(chrono::Utc::now());
                     let changed = view.today != today;
                     view.today = today;
                     changed
@@ -1465,6 +1478,11 @@ impl ShellView {
         let line_numbers = crate::linenumbers::LineNumbers::from_config(&services.config);
         cx.set_global(crate::linenumbers::UiSettings { line_numbers });
 
+        // The app-wide clock (`crate::clock::AppClock`, the workspace's
+        // third global — see its own doc comment).
+        let (clock, clock_diags) = geode_core::clock::Clock::from_config(&services.config);
+        cx.set_global(crate::clock::AppClock(clock));
+
         // The keymap's bindings for module-visible chord lookup
         // (`tips::Chords`, the workspace's second global — see its doc).
         cx.set_global(crate::tips::Chords(Arc::new(
@@ -1543,17 +1561,19 @@ impl ShellView {
         // mid-session saw neither in the diagnostics tile — while
         // `apply_reload` had been folding both in all along, meaning the
         // tile's contents depended on whether a reload had happened yet.
-        // Same four groups `apply_reload` extends, in the same order
-        // (config, mod alias, `modules.default`, keymap), so the section
-        // reads the same whichever path filled it. The first two are pure
-        // over `&Config` and recomputed here; the keymap diagnostics are
-        // not — `build_keymap` needs the startup registry — so they ride
-        // on `ShellServices::keymap_diagnostics`, which `main.rs` fills.
+        // Same five groups `apply_reload` extends, in the same order
+        // (config, mod alias, `modules.default`, `[time]`, keymap), so
+        // the section reads the same whichever path filled it. The first
+        // three are pure over `&Config` and recomputed here; the keymap
+        // diagnostics are not — `build_keymap` needs the startup
+        // registry — so they ride on `ShellServices::keymap_diagnostics`,
+        // which `main.rs` fills.
         let startup_diagnostics = {
             let cfg = &services.config;
             let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
             diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags.extend(clock_diags.iter().cloned());
             diags.extend(services.keymap_diagnostics.iter().cloned());
             diags
         };
@@ -1673,7 +1693,7 @@ impl ShellView {
             pending_config_write: None,
             config_write_seq: 0,
             config_write_error: None,
-            today: chrono::Local::now().date_naive(),
+            today: clock.today(chrono::Utc::now()),
         }
     }
 
@@ -1931,6 +1951,11 @@ impl ShellView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn picker(&self) -> Option<&picker::PickerState> {
         self.picker.as_ref()
+    }
+
+    /// The configured clock (`AppClock`), for the shell's own painters.
+    pub fn clock(&self, cx: &gpui::App) -> geode_core::clock::Clock {
+        cx.global::<crate::clock::AppClock>().0
     }
 
     /// The dialogs' shared filter field (Task 3, `asof_view`'s calendar

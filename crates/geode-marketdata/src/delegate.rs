@@ -67,7 +67,7 @@ pub(crate) const LABEL_COL: usize = 0;
 /// through the same `render_editor` a value cell's editor uses, so the
 /// two arms cannot drift. `MarketDataTile::begin_label_edit` opens it on
 /// `o`/`shift+o` for a `RowIdentity::Typed` axis — CVI's `term`, a
-/// `Date` — landing on today's local date; `commit_row_label` renames
+/// `Date` — landing on today's date on the trader's clock; `commit_row_label` renames
 /// the provisional row and opens its first cell) and what to paint
 /// there — the text `Input`, or the segmented date field's prepared
 /// segments plus the focus handle its keys route through.

@@ -1494,18 +1494,18 @@ fn rebuild_saved_scopes_prints_only_when_asked() {
 /// from the clock once per ~500ms reload-poll tick (alongside the flip
 /// sweep and the dirty-session flush), not on every paint. A stale value
 /// set directly here stands in for "yesterday" — the test executor's
-/// virtual clock (what `advance_clock` moves) never touches the real
-/// `chrono::Local::now()` this reads, the same limitation `shell::
-/// tests::flip`'s own reload-poll-tick test documents — so this proves
-/// the tick corrects a wrong value rather than proving a date rollover
-/// specifically.
+/// virtual clock (what `advance_clock` moves) never touches the
+/// `AppClock` global (the machine's zone unless `[time] zone` is set)
+/// this reads, the same limitation `shell::tests::flip`'s own
+/// reload-poll-tick test documents — so this proves the tick corrects a
+/// wrong value rather than proving a date rollover specifically.
 #[gpui::test]
 fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
 
-    let real_today = chrono::Local::now().date_naive();
+    let real_today = shell.read_with(&vcx, |s, cx| s.clock(cx).today(chrono::Utc::now()));
     let stale = real_today - chrono::Duration::days(1);
     shell.update(&mut vcx, |s, _cx| s.today = stale);
     assert_eq!(shell.read_with(&vcx, |s, _| s.today), stale);
@@ -1600,4 +1600,45 @@ fn a_dropped_fragment_bindings_diagnostic_survives_a_reload(cx: &mut gpui::TestA
         "the fragment diagnostic must still be in the config section: {:?}",
         diagnostics.read_with(&vcx, |d, _| d.config.clone())
     );
+}
+
+/// `[time] zone` is live (as-of dialog spec §6.1): a reload with a new
+/// zone re-publishes `AppClock`, and nothing requeries — the frame's
+/// data and as-of versions are untouched.
+#[gpui::test]
+fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    let before = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
+    let versions_before = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
+
+    // Final review, Minor 4: `before` is the MACHINE's zone (no `[time]`
+    // section yet), which fails unmutated on a Tokyo machine if this
+    // hardcodes "Asia/Tokyo" as the target — pick a zone that can never
+    // equal `before`'s.
+    let target = if before.zone_name() == "Asia/Tokyo" {
+        "Europe/London"
+    } else {
+        "Asia/Tokyo"
+    };
+    std::fs::write(
+        dir.path().join("app.toml"),
+        format!("config_version = 1\n[time]\nzone = \"{target}\"\n"),
+    )
+    .unwrap();
+    let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
+    let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    let after = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
+    assert_ne!(before, after);
+    assert_eq!(after.zone_name(), target);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.today),
+        after.today(chrono::Utc::now())
+    );
+    let versions_after = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
+    assert_eq!(versions_before.data, versions_after.data);
+    assert_eq!(versions_before.as_of, versions_after.as_of);
 }

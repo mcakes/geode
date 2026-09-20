@@ -551,6 +551,14 @@ pub struct MarketDataTile {
     /// `spec.title` and `key`, replaced only in `set_key`, never
     /// `format!`-ed in `title()` itself.
     title: SharedString,
+    /// The `AppClock` global (as-of dialog spec §6.1), read once at
+    /// construction and refreshed by an `observe_global::<AppClock>`
+    /// handler — carried here, not read fresh from every formatting
+    /// site, so `HeaderModel::prepare` stays a pure function of its
+    /// `HeaderInputs` and `menu::rows` of its own arguments. `pub(crate)`
+    /// so tests read it directly (`t.clock`) rather than reaching for the
+    /// global themselves.
+    pub(crate) clock: geode_core::clock::Clock,
 }
 
 impl MarketDataTile {
@@ -772,6 +780,20 @@ impl MarketDataTile {
             cx.notify();
         })
         .detach();
+        // `AppClock` (as-of dialog spec §6.1): refresh the tile's own
+        // reading and re-prepare the header — the field the header's
+        // freshness/`Behind` text and the `⋯` menu's "Rebase onto …" row
+        // all read — then notify, the same shape every other mutation
+        // that reaches `rebuild_chrome` follows (`changed`, just above).
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.clock = cx
+                .try_global::<geode_shell::clock::AppClock>()
+                .map(|c| c.0)
+                .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
+            this.rebuild_chrome();
+            cx.notify();
+        })
+        .detach();
 
         let mut this = MarketDataTile {
             id,
@@ -818,6 +840,10 @@ impl MarketDataTile {
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
             state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
             stack: None,
+            clock: cx
+                .try_global::<geode_shell::clock::AppClock>()
+                .map(|c| c.0)
+                .unwrap_or_else(|| geode_core::clock::Clock::machine().0),
         };
         this.rebuild_chrome();
         // The delegate starts with the model this tile starts with (review
@@ -1154,7 +1180,10 @@ impl MarketDataTile {
                     let phrase = draft.count_phrase();
                     draft.revert();
                     // `Behind` implies `on_delivered` ran with `Some`.
-                    let when = as_of.as_deref().map(local_hhmm).unwrap_or_default();
+                    let when = as_of
+                        .as_deref()
+                        .map(|t| local_hhmm(t, self.clock))
+                        .unwrap_or_default();
                     notice = Some(format!("update {when} replaced {phrase}").into());
                 }
             }
@@ -1623,6 +1652,7 @@ impl MarketDataTile {
             notice: self.notice.as_ref(),
             source_at: self.source_at,
             incomplete: self.draft.incomplete_rows(self.spec, &self.model.columns),
+            clock: self.clock,
         });
     }
 
@@ -2058,10 +2088,10 @@ impl MarketDataTile {
             // A `Date` attribute or cell opens the segmented field (header
             // spec §5.2, 2026-09-19; spec §4.4), seeded with the painted
             // date — or, when that does not parse (a NULL painted empty,
-            // say), today's local date, so the field always opens on
-            // something a step or a digit can act on.
+            // say), today's date on the trader's clock, so the field
+            // always opens on something a step or a digit can act on.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
-                .unwrap_or_else(|_| chrono::Local::now().date_naive());
+                .unwrap_or_else(|_| self.clock.today(chrono::Utc::now()));
             let field = DateTimeField::open(
                 date.and_hms_opt(0, 0, 0).expect("midnight exists"),
                 Precision::Date,
@@ -2777,7 +2807,7 @@ impl MarketDataTile {
     /// `new-<n>` against the rows on screen and opens the first CELL's
     /// editor at once; a `Typed` axis opens the row-label editor on the
     /// minted row instead — the segmented date field for a `Date` axis
-    /// (opening on today's local date, the strip's own landing), the text
+    /// (opening on today's date on the trader's clock, the strip's own landing), the text
     /// `Input` for any other type — whose commit renames the row and then
     /// opens the first cell (`commit_row_label`), and whose cancel drops
     /// the row (`close_editor`).
@@ -2839,7 +2869,7 @@ impl MarketDataTile {
 
     /// Open the row-label editor on the provisional row at `row` (spec
     /// §5.3): `begin_edit`'s two forms, seeded EMPTY — a `Date` axis's
-    /// field on today's local date, since there is no painted text to
+    /// field on today's date on the trader's clock, since there is no painted text to
     /// open on, and any other type's text `Input` blank — with the
     /// keyboard, so the shell's insert branch hands it every bare key.
     fn begin_label_edit(
@@ -2852,8 +2882,8 @@ impl MarketDataTile {
     ) {
         let state = if ty == ColumnType::Date {
             let field = DateTimeField::open(
-                chrono::Local::now()
-                    .date_naive()
+                self.clock
+                    .today(chrono::Utc::now())
                     .and_hms_opt(0, 0, 0)
                     .expect("midnight exists"),
                 Precision::Date,
@@ -2929,16 +2959,19 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        let rows = menu::rows(&MenuInputs {
-            badge: self.draft.badge(),
-            // Upload is Part 4; every build before it greys the row with
-            // `not built yet` (spec §6.2's table) rather than pretending
-            // the panel can send anything anywhere.
-            upload_built: false,
-            policy: self.policy,
-            kind_title: self.spec.title,
-            kind_actions: self.spec.actions,
-        });
+        let rows = menu::rows(
+            &MenuInputs {
+                badge: self.draft.badge(),
+                // Upload is Part 4; every build before it greys the row with
+                // `not built yet` (spec §6.2's table) rather than pretending
+                // the panel can send anything anywhere.
+                upload_built: false,
+                policy: self.policy,
+                kind_title: self.spec.title,
+                kind_actions: self.spec.actions,
+            },
+            self.clock,
+        );
         let highlighted = menu::first_enabled(&rows);
         self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
         cx.notify();
@@ -5577,11 +5610,8 @@ mod tests {
             chips.iter().any(|c| c == "spot 5000"),
             "each header attribute: {chips:?}"
         );
-        let local = chrono::DateTime::parse_from_rfc3339(BASE)
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M:%S")
-            .to_string();
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hms(chrono::DateTime::parse_from_rfc3339(BASE).unwrap().to_utc());
         // Exact, at an injected clock one second past `BASE`: not stale,
         // so the chip is the time alone (the staleness marker has its own
         // test below).
@@ -5648,11 +5678,8 @@ mod tests {
     fn the_time_chip_says_stale_past_stale_after(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
-        let local = chrono::DateTime::parse_from_rfc3339(BASE)
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M:%S")
-            .to_string();
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hms(chrono::DateTime::parse_from_rfc3339(BASE).unwrap().to_utc());
         let stale_after = 15 * 60;
         let fresh = h
             .tile
@@ -5674,6 +5701,43 @@ mod tests {
         assert!(
             stale.iter().any(|c| c == &format!("{local} stale")),
             "stale one second past stale_after: {stale:?}"
+        );
+    }
+
+    /// Review finding (Task 7): no test installed `AppClock` before this
+    /// fix, so a tile that hard-coded `Clock::machine()` — or whose
+    /// `observe_global` handler were deleted — would have passed
+    /// everything else. `BASE` is `"2026-09-12T14:00:00Z"`: Tokyo is
+    /// UTC+9, so the header's source time reads `23:00:00` there and
+    /// `14:00:00` once the global switches to UTC — both spelled by
+    /// hand, not derived through `Clock` (the thing under test).
+    #[gpui::test]
+    fn the_header_time_reads_the_installed_app_clock_and_follows_a_later_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(geode_shell::clock::AppClock(
+                geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+            ))
+        });
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let before = h.tile.read_with(&vcx, |t, _| t.header.time.clone());
+        assert_eq!(
+            before.as_deref(),
+            Some("23:00:00"),
+            "Tokyo is UTC+9 on the BASE instant 14:00:00Z: {before:?}"
+        );
+
+        vcx.update(|_, cx| {
+            cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc()))
+        });
+        vcx.run_until_parked();
+        let after = h.tile.read_with(&vcx, |t, _| t.header.time.clone());
+        assert_eq!(
+            after.as_deref(),
+            Some("14:00:00"),
+            "the observer refreshed the tile's clock and repainted: {after:?}"
         );
     }
 
@@ -6148,11 +6212,10 @@ mod tests {
             "held, not replaced, on the first delivery after a restore — got {state:?}"
         );
         assert_eq!(len, 1, "the edit survives, parked at its label");
-        let local = chrono::DateTime::parse_from_rfc3339(NEWER)
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hm(chrono::DateTime::parse_from_rfc3339(NEWER)
             .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M")
-            .to_string();
+            .to_utc());
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
@@ -8372,11 +8435,10 @@ deleted = true
         assert_eq!(rows, 2, "still the base generation's two terms");
         assert_eq!(cell.text.to_string(), "0.50", "the edit is still on screen");
         assert!(cell.edited);
-        let local = chrono::DateTime::parse_from_rfc3339(NEWER)
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hm(chrono::DateTime::parse_from_rfc3339(NEWER)
             .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M")
-            .to_string();
+            .to_utc());
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
@@ -8426,11 +8488,10 @@ deleted = true
         );
         assert_eq!(rows, 2, "still the ORIGINAL base generation's two terms");
         assert_eq!(cell.text.to_string(), "0.50", "the edit is untouched");
-        let local = chrono::DateTime::parse_from_rfc3339(NEWEST)
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let local = clock.hm(chrono::DateTime::parse_from_rfc3339(NEWEST)
             .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%H:%M")
-            .to_string();
+            .to_utc());
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
@@ -10689,11 +10750,12 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(source.as_deref(), Some(NEWER));
         assert_eq!(rows, 1, "the newer document is painted");
         assert!(!cell.edited);
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
         assert_eq!(
             notice,
             Some(format!(
                 "update {} replaced 2 cells, spot_ref",
-                local_hhmm(NEWER)
+                local_hhmm(NEWER, clock)
             ))
         );
         let chips = h.tile.read_with(&vcx, |t, _| t.header_texts());
@@ -11042,9 +11104,13 @@ edits = [["2026-11-20", "-1", 9.5]]
             "replaced on the next new generation: {draft:?}"
         );
         assert_eq!(source.as_deref(), Some(NEWEST));
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
         assert_eq!(
             notice,
-            Some(format!("update {} replaced 1 cell", local_hhmm(NEWEST)))
+            Some(format!(
+                "update {} replaced 1 cell",
+                local_hhmm(NEWEST, clock)
+            ))
         );
     }
 
@@ -11132,7 +11198,8 @@ edits = [["2026-11-20", "-1", 9.5]]
             Some("0.6"),
             "the editor is untouched"
         );
-        let expected = format!("update {} replaced 1 cell", local_hhmm(NEWER));
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let expected = format!("update {} replaced 1 cell", local_hhmm(NEWER, clock));
         let (draft, notice) = h.tile.read_with(&vcx, |t, _| {
             (t.draft().clone(), t.notice().map(str::to_string))
         });

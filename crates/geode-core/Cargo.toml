@@ -42,6 +42,14 @@ toml = { version = "1.1.4", features = ["preserve_order"] }
 # `cargo tree -p geode-data -i arrow` before bumping.
 arrow = "58.4.0"
 chrono = "0.4.42"
+# The IANA zone database, for `[time] zone` (as-of dialog spec §3): the
+# one crate in the workspace that names a `Tz`; everything else reaches
+# a zone through `clock::Clock`.
+chrono-tz = "0.10"
+# The machine's own zone NAME (chrono uses this crate internally for
+# `Local`, which `clock::Clock::machine` replaces — `Local` is banned
+# workspace-wide by `clock::tests::no_crate_uses_chrono_local`).
+iana-time-zone = "0.1"
 # `source_config::SourceSpec::batch_of`/`from_doc` compile and apply the
 # user-supplied `batch_pattern` (spec §4.3). Same version geode-data used
 # before this reader moved here (Phase 4c §2.2).

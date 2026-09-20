@@ -191,7 +191,7 @@ const CRASH_FILES_KEPT: usize = 10;
 /// (`main.rs::install_logging`'s own MIN-7 note), so a crash file's name
 /// sorts and reads consistently against the log file it landed beside,
 /// even though every *displayed* time elsewhere in this app is the
-/// trader's local clock (Phase 4a's ruling).
+/// trader's configured clock (Phase 4a's ruling; as-of dialog Part 2).
 ///
 /// Millisecond resolution, opened with `create_new` rather than
 /// `std::fs::write` (fix round 1, MAJ-1): two panics inside one second

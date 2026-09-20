@@ -7,7 +7,7 @@
 
 use crate::scope::Scope;
 use crate::snapshot::Snapshot;
-use chrono::{DateTime, Local, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -230,56 +230,46 @@ pub const END_OF_DAY: NaiveTime = match NaiveTime::from_hms_micro_opt(23, 59, 59
     None => unreachable!(),
 };
 
-/// `HH:MM` or `HH:MM:SS` means today at that time on the trader's LOCAL
-/// clock (the modal's presets, its preview, the scope bar and the status
-/// segment all display local time — one clock throughout, spec §3.6);
-/// `YYYY-MM-DD` means the end of that local day ([`END_OF_DAY`]);
+/// `HH:MM` or `HH:MM:SS` means today at that time on the trader's
+/// CONFIGURED clock (`clock`; one clock throughout, as-of dialog spec
+/// §6); `YYYY-MM-DD` means the end of that day ([`END_OF_DAY`]);
 /// `YYYY-MM-DD HH:MM` or `YYYY-MM-DD HH:MM:SS` means that local instant;
-/// anything else must be RFC 3339. `now` stays UTC so callers and tests
-/// keep their shape; it is converted to the local date internally and
-/// is not consulted at all by the date-carrying forms. A local time that
-/// does not exist or is ambiguous (a DST gap or overlap) is an `Err`
-/// naming the time.
-pub fn parse_as_of(text: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
-    let today_local = now.with_timezone(&Local).date_naive();
+/// anything else must be RFC 3339. `now` stays UTC; the date-carrying
+/// forms never consult it. A local time that does not exist or is
+/// ambiguous (a DST gap or overlap) is an `Err` naming the time.
+pub fn parse_as_of(
+    text: &str,
+    now: DateTime<Utc>,
+    clock: &crate::clock::Clock,
+) -> Result<DateTime<Utc>, String> {
+    let today = clock.today(now);
+    let resolve = |date: chrono::NaiveDate, time: NaiveTime| {
+        clock.resolve_local(date, time).map_err(|e| e.to_string())
+    };
     if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
-        return resolve_local(today_local, t, text);
+        return resolve(today, t);
     }
     if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M:%S") {
-        return resolve_local(today_local, t, text);
+        return resolve(today, t);
     }
     if let Ok(d) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
-        return resolve_local(d, END_OF_DAY, text);
+        return resolve(d, END_OF_DAY);
     }
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M") {
-        return resolve_local(dt.date(), dt.time(), text);
+        return resolve(dt.date(), dt.time());
     }
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S") {
-        return resolve_local(dt.date(), dt.time(), text);
+        return resolve(dt.date(), dt.time());
     }
     DateTime::parse_from_rfc3339(text)
         .map(|t| t.with_timezone(&Utc))
         .map_err(|_| format!("'{text}' is not HH:MM, YYYY-MM-DD[ HH:MM[:SS]] or an RFC 3339 time"))
 }
 
-/// Resolve `date` + `time` as a LOCAL instant and map it to UTC. `text`
-/// is only for the error message when the local time does not exist or
-/// is ambiguous (a DST gap or overlap).
-fn resolve_local(
-    date: chrono::NaiveDate,
-    time: NaiveTime,
-    text: &str,
-) -> Result<DateTime<Utc>, String> {
-    Local
-        .from_local_datetime(&date.and_time(time))
-        .single()
-        .map(|local| local.to_utc())
-        .ok_or_else(|| format!("'{text}' does not name a valid local time (a DST gap or overlap)"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn live_is_live_and_an_instant_is_not() {
@@ -301,24 +291,17 @@ mod tests {
         assert!(QueryKey(3) < QueryKey(4));
     }
 
-    /// The same instant [`parse_as_of`] should produce for `time` on
-    /// `now`'s LOCAL date, computed independently of the parser under
-    /// test so the assertion holds on any machine's zone.
-    fn expect_local(now: DateTime<Utc>, time: NaiveTime) -> DateTime<Utc> {
-        let today_local = now.with_timezone(&Local).date_naive();
-        Local
-            .from_local_datetime(&today_local.and_time(time))
-            .unwrap()
-            .to_utc()
+    fn ny() -> crate::clock::Clock {
+        crate::clock::Clock::in_zone(chrono_tz::America::New_York)
     }
 
     /// The instant `parse_as_of` should produce for `date` + `time` in
-    /// the machine's LOCAL zone, computed independently of the parser.
-    fn expect_local_on(date: chrono::NaiveDate, time: NaiveTime) -> DateTime<Utc> {
-        Local
+    /// New York, computed independently of the parser.
+    fn expect_ny(date: chrono::NaiveDate, time: NaiveTime) -> DateTime<Utc> {
+        chrono_tz::America::New_York
             .from_local_datetime(&date.and_time(time))
             .single()
-            .expect("test picks a time that exists in every zone")
+            .expect("test picks a time that exists")
             .to_utc()
     }
 
@@ -329,8 +312,8 @@ mod tests {
             .with_timezone(&Utc);
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
         assert_eq!(
-            parse_as_of("2026-09-08", now).unwrap(),
-            expect_local_on(date, END_OF_DAY)
+            parse_as_of("2026-09-08", now, &ny()).unwrap(),
+            expect_ny(date, END_OF_DAY)
         );
         assert_eq!(
             END_OF_DAY,
@@ -345,12 +328,12 @@ mod tests {
             .with_timezone(&Utc);
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
         assert_eq!(
-            parse_as_of("2026-09-08 14:05", now).unwrap(),
-            expect_local_on(date, NaiveTime::from_hms_opt(14, 5, 0).unwrap())
+            parse_as_of("2026-09-08 14:05", now, &ny()).unwrap(),
+            expect_ny(date, NaiveTime::from_hms_opt(14, 5, 0).unwrap())
         );
         assert_eq!(
-            parse_as_of("2026-09-08 14:05:30", now).unwrap(),
-            expect_local_on(date, NaiveTime::from_hms_opt(14, 5, 30).unwrap())
+            parse_as_of("2026-09-08 14:05:30", now, &ny()).unwrap(),
+            expect_ny(date, NaiveTime::from_hms_opt(14, 5, 30).unwrap())
         );
     }
 
@@ -364,17 +347,17 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            parse_as_of("2026-09-08 09:30", a),
-            parse_as_of("2026-09-08 09:30", b)
+            parse_as_of("2026-09-08 09:30", a, &ny()),
+            parse_as_of("2026-09-08 09:30", b, &ny())
         );
     }
 
     #[test]
     fn an_impossible_date_or_a_slashed_one_is_an_error_naming_the_forms() {
         let now = Utc::now();
-        let err = parse_as_of("2026-02-30", now).unwrap_err();
+        let err = parse_as_of("2026-02-30", now, &ny()).unwrap_err();
         assert!(err.contains("YYYY-MM-DD"), "{err}");
-        let err = parse_as_of("2026/09/08", now).unwrap_err();
+        let err = parse_as_of("2026/09/08", now, &ny()).unwrap_err();
         assert!(err.contains("YYYY-MM-DD"), "{err}");
         assert!(err.contains("HH:MM"), "{err}");
     }
@@ -384,10 +367,10 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-09-18T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        assert!(parse_as_of("14:05", now).is_ok());
-        assert!(parse_as_of("14:05:30", now).is_ok());
-        assert!(parse_as_of("2026-09-08T14:05:00Z", now).is_ok());
-        assert!(parse_as_of("2026-09-08T14:05:00+01:00", now).is_ok());
+        assert!(parse_as_of("14:05", now, &ny()).is_ok());
+        assert!(parse_as_of("14:05:30", now, &ny()).is_ok());
+        assert!(parse_as_of("2026-09-08T14:05:00Z", now, &ny()).is_ok());
+        assert!(parse_as_of("2026-09-08T14:05:00+01:00", now, &ny()).is_ok());
     }
 
     #[test]
@@ -395,18 +378,22 @@ mod tests {
         use chrono::TimeZone;
         let now = Utc.with_ymd_and_hms(2026, 9, 3, 16, 0, 0).unwrap();
         assert_eq!(
-            parse_as_of("14:05", now),
-            Ok(expect_local(
-                now,
+            parse_as_of("14:05", now, &ny()),
+            Ok(expect_ny(
+                ny().today(now),
                 NaiveTime::from_hms_opt(14, 5, 0).unwrap()
             ))
         );
         assert_eq!(
-            parse_as_of("2026-09-01T07:00:00Z", now),
+            parse_as_of("2026-09-01T07:00:00Z", now, &ny()),
             Ok(Utc.with_ymd_and_hms(2026, 9, 1, 7, 0, 0).unwrap())
         );
-        assert!(parse_as_of("25:00", now).is_err());
-        assert!(parse_as_of("yesterday", now).unwrap_err().contains("HH:MM"));
+        assert!(parse_as_of("25:00", now, &ny()).is_err());
+        assert!(
+            parse_as_of("yesterday", now, &ny())
+                .unwrap_err()
+                .contains("HH:MM")
+        );
     }
 
     #[test]
@@ -414,30 +401,31 @@ mod tests {
         use chrono::TimeZone;
         let now = Utc.with_ymd_and_hms(2026, 9, 3, 16, 0, 0).unwrap();
         assert_eq!(
-            parse_as_of("14:05:30", now),
-            Ok(expect_local(
-                now,
+            parse_as_of("14:05:30", now, &ny()),
+            Ok(expect_ny(
+                ny().today(now),
                 NaiveTime::from_hms_opt(14, 5, 30).unwrap()
             ))
         );
     }
 
     /// Pins the behaviour F1 fixed: `HH:MM`/`HH:MM:SS` resolve on the
-    /// LOCAL date, not UTC's — computed independently of the machine's
-    /// zone so this test catches a regression to `.and_utc()` (the old
-    /// UTC-resolving behaviour) on any machine, not just ones offset
-    /// from UTC. Harness: mutate `resolve_local`'s callers back to
-    /// `now.date_naive().and_time(t).and_utc()`.
+    /// CLOCK's date, not UTC's — computed independently of the parser
+    /// under test. Harness: mutate `parse_as_of`'s `today` derivation
+    /// back to `now.date_naive()` (the old UTC-resolving behaviour).
     #[test]
-    fn as_of_resolves_on_the_local_date_not_utcs() {
+    fn as_of_resolves_on_the_clocks_date_not_utcs() {
         use chrono::TimeZone;
-        let now = Utc.with_ymd_and_hms(2026, 9, 3, 16, 0, 0).unwrap();
+        // 01:00 UTC on the 4th is 21:00 on the 3rd in New York: "14:05"
+        // must mean the 3rd, not the 4th.
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 1, 0, 0).unwrap();
         let t = NaiveTime::from_hms_opt(14, 5, 0).unwrap();
-        let today_local = now.with_timezone(&Local).date_naive();
-        let expected = Local
-            .from_local_datetime(&today_local.and_time(t))
-            .unwrap()
-            .to_utc();
-        assert_eq!(parse_as_of("14:05", now), Ok(expected));
+        assert_eq!(
+            parse_as_of("14:05", now, &ny()),
+            Ok(expect_ny(
+                chrono::NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
+                t
+            ))
+        );
     }
 }

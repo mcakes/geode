@@ -6,7 +6,6 @@
 
 use crate::core::sheet::{LineState, Sheet};
 use crate::core::shorthand::{render_barrier_kind, render_expiry, render_strike};
-use chrono::Local;
 use geode_core::format::format_number;
 use geode_core::pricing::{Instrument, OptionKind};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
@@ -243,8 +242,17 @@ fn number(
     }
 }
 
-/// The text and state of one cell (spec §6.5, §8.2).
-pub fn cell_text(sheet: &Sheet, row: usize, def: &ColumnDef, format: &ColumnFormat) -> CellText {
+/// The text and state of one cell (spec §6.5, §8.2). `clock` is the
+/// trader's configured clock (`[time] zone`, as-of dialog Part 2) — Part
+/// 3's tile reads it off the `AppClock` global and hands it in here,
+/// since this crate is pure core with no gpui and no global of its own.
+pub fn cell_text(
+    sheet: &Sheet,
+    row: usize,
+    def: &ColumnDef,
+    format: &ColumnFormat,
+    clock: geode_core::clock::Clock,
+) -> CellText {
     let instrument: Option<&Instrument> = sheet.instrument(row);
     let applies = match def.applies_to {
         Applies::EveryRow => true,
@@ -290,8 +298,9 @@ pub fn cell_text(sheet: &Sheet, row: usize, def: &ColumnDef, format: &ColumnForm
         ColumnKind::Theta => number(sheet, row, |r| r.theta, format),
         ColumnKind::Rho => number(sheet, row, |r| r.rho, format),
         ColumnKind::PricedAt => match sheet.priced_at(row) {
-            // The trader's local clock, like every displayed time (Phase 4a ruling).
-            Some(t) => own(t.with_timezone(&Local).format("%H:%M:%S").to_string()),
+            // The trader's configured clock, like every displayed time
+            // (Phase 4a ruling, as-of dialog Part 2).
+            Some(t) => own(clock.hms(t)),
             None => blank(),
         },
         ColumnKind::Status => match sheet.state(row) {
@@ -329,7 +338,13 @@ mod tests {
 
     fn cell(sheet: &Sheet, row: usize, name: &str) -> CellText {
         let def = column(name).unwrap_or_else(|| panic!("no column {name}"));
-        cell_text(sheet, row, def, &def.default_format)
+        cell_text(
+            sheet,
+            row,
+            def,
+            &def.default_format,
+            geode_core::clock::Clock::utc(),
+        )
     }
 
     #[test]
@@ -644,6 +659,9 @@ mod tests {
             precision: 4,
             ..def.default_format.clone()
         };
-        assert_eq!(cell_text(&s, 1, def, &precise).text, "-120.0000");
+        assert_eq!(
+            cell_text(&s, 1, def, &precise, geode_core::clock::Clock::utc()).text,
+            "-120.0000"
+        );
     }
 }

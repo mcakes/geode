@@ -29,7 +29,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use chrono::{DateTime, Local, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Pixels, Window, div,
@@ -37,6 +37,7 @@ use gpui::{
 use gpui_component::calendar::Calendar;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
+use geode_core::clock::Clock;
 use geode_core::query::{AsOf, parse_as_of};
 
 use crate::frame::Frame;
@@ -57,8 +58,11 @@ use super::scale;
 /// `"14:05:12 · risk / EOD · 3 books"` label.
 type PresetRow = (DateTime<Utc>, String);
 /// [`AsOfState::presets_cache`]'s value type — named so clippy's
-/// `type_complexity` lint doesn't fire on the field declaration.
-type PresetsCache = RefCell<Option<(u64, Rc<Vec<PresetRow>>)>>;
+/// `type_complexity` lint doesn't fire on the field declaration. Keyed
+/// on `(data version, clock)` (as-of dialog spec §6.1 added `clock`): a
+/// `[time]` reload must re-format every `HH:MM:SS` label even with the
+/// data version unchanged.
+type PresetsCache = RefCell<Option<(u64, Clock, Rc<Vec<PresetRow>>)>>;
 
 /// Persistent state for one open as-of dialog session — the
 /// `picker`/`keybindings`/`settings` fields' own contract: no `gpui`
@@ -93,8 +97,8 @@ pub struct AsOfState {
 
 /// The frame's recent publishes as as-of presets (spec §3.6): newest
 /// first (`Frame::recent_publishes` is already ordered that way), each
-/// labelled `"14:05:12 · risk / EOD · 3 books"` in local time.
-fn presets(frame: &Frame) -> Vec<PresetRow> {
+/// labelled `"14:05:12 · risk / EOD · 3 books"` on `clock`.
+fn presets(frame: &Frame, clock: Clock) -> Vec<PresetRow> {
     #[cfg(test)]
     tests::PRESETS_CALLS.with(|c| c.set(c.get() + 1));
     frame
@@ -105,7 +109,7 @@ fn presets(frame: &Frame) -> Vec<PresetRow> {
                 p.at,
                 format!(
                     "{} · {} / {} · {} book{}",
-                    p.at.with_timezone(&Local).format("%H:%M:%S"),
+                    clock.hms(p.at),
                     p.dataset,
                     p.batch,
                     p.books,
@@ -117,34 +121,36 @@ fn presets(frame: &Frame) -> Vec<PresetRow> {
 }
 
 /// [`presets`], cached on `state.presets_cache` (Phase 4b M9): a call
-/// with `frame`'s data version unchanged since the last one returns the
-/// exact same `Rc` — a refcount bump, no fresh allocation — rather than
-/// rebuilding the whole list. Every call site in this module that used
-/// to call `presets` directly from a render/key-handling path (`build`,
-/// `handle_key`'s enter/up-down arms) goes through this instead.
-fn cached_presets(state: &AsOfState, frame: &Frame) -> Rc<Vec<PresetRow>> {
+/// with `frame`'s data version AND `clock` unchanged since the last one
+/// returns the exact same `Rc` — a refcount bump, no fresh allocation —
+/// rather than rebuilding the whole list. Every call site in this module
+/// that used to call `presets` directly from a render/key-handling path
+/// (`build`, `handle_key`'s enter/up-down arms) goes through this
+/// instead.
+fn cached_presets(state: &AsOfState, frame: &Frame, clock: Clock) -> Rc<Vec<PresetRow>> {
     let v = frame.versions().data;
-    if let Some((cached_v, cached)) = state.presets_cache.borrow().as_ref()
+    if let Some((cached_v, cached_clock, cached)) = state.presets_cache.borrow().as_ref()
         && *cached_v == v
+        && *cached_clock == clock
     {
         return Rc::clone(cached);
     }
-    let built = Rc::new(presets(frame));
-    *state.presets_cache.borrow_mut() = Some((v, Rc::clone(&built)));
+    let built = Rc::new(presets(frame, clock));
+    *state.presets_cache.borrow_mut() = Some((v, clock, Rc::clone(&built)));
     built
 }
 
 /// Resolve the as-of field's raw text (spec §3.6): `"live"` (any case)
 /// resolves to [`AsOf::Live`]; anything else delegates to
-/// [`parse_as_of`] (`HH:MM`, `HH:MM:SS`, `YYYY-MM-DD`, `YYYY-MM-DD
-/// HH:MM[:SS]`, or RFC 3339) — an `Err` carries that parser's own
-/// message, shown verbatim under the field.
-pub fn resolve_input(text: &str, now: DateTime<Utc>) -> Result<AsOf, String> {
+/// [`parse_as_of`] on `clock` (`HH:MM`, `HH:MM:SS`, `YYYY-MM-DD`,
+/// `YYYY-MM-DD HH:MM[:SS]`, or RFC 3339) — an `Err` carries that
+/// parser's own message, shown verbatim under the field.
+pub fn resolve_input(text: &str, now: DateTime<Utc>, clock: Clock) -> Result<AsOf, String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("live") {
         return Ok(AsOf::Live);
     }
-    parse_as_of(trimmed, now).map(AsOf::At)
+    parse_as_of(trimmed, now, &clock).map(AsOf::At)
 }
 
 /// The `InputEvent::Change` handler's pure half (shared dialog-input
@@ -152,13 +158,13 @@ pub fn resolve_input(text: &str, now: DateTime<Utc>) -> Result<AsOf, String> {
 /// text and store the outcome for [`build`] to show. A blank field
 /// (nothing typed, or whitespace only) clears both `error` and
 /// `resolved` — see [`AsOfState`]'s own doc comment for why.
-pub fn on_query_changed(state: &mut AsOfState, text: &str, now: DateTime<Utc>) {
+pub fn on_query_changed(state: &mut AsOfState, text: &str, now: DateTime<Utc>, clock: Clock) {
     if text.trim().is_empty() {
         state.error = None;
         state.resolved = None;
         return;
     }
-    match resolve_input(text, now) {
+    match resolve_input(text, now, clock) {
         Ok(AsOf::Live) => {
             state.error = None;
             state.resolved = None;
@@ -191,14 +197,10 @@ pub fn compose_with_date(text: &str, date: NaiveDate) -> String {
     }
 }
 
-/// The day the calendar highlights: the field's resolved instant on the
-/// trader's local clock, else today (local).
-pub fn calendar_date(state: &AsOfState, now: DateTime<Utc>) -> NaiveDate {
-    state
-        .resolved
-        .unwrap_or(now)
-        .with_timezone(&Local)
-        .date_naive()
+/// The day the calendar highlights: the field's resolved instant on
+/// `clock`, else today on `clock`.
+pub fn calendar_date(state: &AsOfState, now: DateTime<Utc>, clock: Clock) -> NaiveDate {
+    clock.today(state.resolved.unwrap_or(now))
 }
 
 /// The calendar is hidden while the field reads `live` — there is no
@@ -229,9 +231,10 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     // picker does not leave the next open showing that picker (the
     // slice-2 final review's finding 8, built once `gpui-base` became a
     // direct dependency for `CalendarView`, user ruling 2026-09-19).
+    let today = view.clock(cx).today(Utc::now());
     view.as_of_calendar.update(cx, |c, cx| {
         c.set_view(gpui_base::CalendarView::Day);
-        c.set_date(chrono::Local::now().date_naive(), window, cx)
+        c.set_date(today, window, cx)
     });
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
@@ -292,8 +295,9 @@ pub(crate) fn on_calendar_selected(
     let current = input.read(cx).value().to_string();
     let next = compose_with_date(&current, date);
     input.update(cx, |i, cx| i.set_value(next.clone(), window, cx));
+    let clock = view.clock(cx);
     if let Some(state) = view.as_of_dialog.as_mut() {
-        on_query_changed(state, &next, chrono::Utc::now());
+        on_query_changed(state, &next, chrono::Utc::now(), clock);
     }
     input.read(cx).focus_handle(cx).focus(window, cx);
     cx.notify();
@@ -321,6 +325,7 @@ fn handle_key(
     if ks.mods == Modifiers::NONE && ks.key == "enter" {
         let text = shell.dialog_input.read(cx).value().to_string();
         let trimmed = text.trim();
+        let clock = shell.clock(cx);
         if trimmed.is_empty() {
             // Phase 4b Task 1 fix round 1, MIN-11: one borrow of
             // `as_of_dialog`, not two — `selected` used to be read off a
@@ -328,7 +333,7 @@ fn handle_key(
             // default outside the `and_then`, which `state.selected`
             // gives for free from inside the single borrow below.
             let at = shell.as_of_dialog.as_ref().and_then(|state| {
-                cached_presets(state, shell.frame.read(cx))
+                cached_presets(state, shell.frame.read(cx), clock)
                     .get(state.selected)
                     .map(|(at, _)| *at)
             });
@@ -337,7 +342,7 @@ fn handle_key(
             }
             return true;
         }
-        match resolve_input(trimmed, Utc::now()) {
+        match resolve_input(trimmed, Utc::now(), clock) {
             Ok(AsOf::Live) => commit_live(shell, window, cx),
             Ok(AsOf::At(t)) => commit_at(shell, t, window, cx),
             Err(msg) => {
@@ -351,10 +356,11 @@ fn handle_key(
         return true;
     }
     if let Some(cmd) = listfilter::nav_command(ks) {
+        let clock = shell.clock(cx);
         let len = shell
             .as_of_dialog
             .as_ref()
-            .map(|state| cached_presets(state, shell.frame.read(cx)).len())
+            .map(|state| cached_presets(state, shell.frame.read(cx), clock).len())
             .unwrap_or(0);
         if let Some(state) = shell.as_of_dialog.as_mut() {
             state.selected = vimnav::apply(state.selected, len, cmd);
@@ -385,6 +391,7 @@ fn build(
     // fix round 1).
     let danger = chip::chip_paint(theme, chip::Tone::DangerText).text;
     let radius = theme.radius;
+    let clock = shell.clock(cx);
 
     let mut column = v_flex()
         .gap_2()
@@ -397,10 +404,7 @@ fn build(
                 .text_sm()
                 .text_color(muted)
                 .debug_selector(|| "as-of-resolved".to_string())
-                .child(format!(
-                    "→ {}",
-                    t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S %Z")
-                )),
+                .child(format!("→ {}", clock.full(t))),
         );
     }
     if let Some(err) = &state.error {
@@ -413,7 +417,7 @@ fn build(
         );
     }
 
-    let presets_list = cached_presets(state, shell.frame.read(cx));
+    let presets_list = cached_presets(state, shell.frame.read(cx), clock);
     let list = build_presets(
         &presets_list,
         state.selected,
@@ -558,23 +562,18 @@ mod tests {
         f.note_published(publish("risk", "EOD", 1, t1));
         f.note_published(publish("greeks", "INTRADAY", 5, t2));
 
-        let p = presets(&f);
+        let clock = geode_core::clock::Clock::utc();
+        let p = presets(&f, clock);
         assert_eq!(p.len(), 3, "newest first, one row per publish");
         assert_eq!(p[0].0, t2);
         assert_eq!(
             p[0].1,
-            format!(
-                "{} · greeks / INTRADAY · 5 books",
-                t2.with_timezone(&Local).format("%H:%M:%S")
-            )
+            format!("{} · greeks / INTRADAY · 5 books", clock.hms(t2))
         );
         assert_eq!(p[1].0, t1);
         assert_eq!(
             p[1].1,
-            format!(
-                "{} · risk / EOD · 1 book",
-                t1.with_timezone(&Local).format("%H:%M:%S")
-            ),
+            format!("{} · risk / EOD · 1 book", clock.hms(t1)),
             "a single book is singular, not '1 books'"
         );
         assert_eq!(p[2].0, t0);
@@ -593,10 +592,11 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 9, 6, 14, 5, 12).unwrap(),
         ));
         let state = AsOfState::default();
+        let clock = geode_core::clock::Clock::utc();
 
         PRESETS_CALLS.with(|c| c.set(0));
-        let a = cached_presets(&state, &f);
-        let b = cached_presets(&state, &f);
+        let a = cached_presets(&state, &f, clock);
+        let b = cached_presets(&state, &f, clock);
         assert!(Rc::ptr_eq(&a, &b), "the second call must hit the cache");
         assert_eq!(
             PRESETS_CALLS.with(|c| c.get()),
@@ -610,44 +610,54 @@ mod tests {
             4,
             Utc.with_ymd_and_hms(2026, 9, 6, 14, 6, 0).unwrap(),
         ));
-        let c = cached_presets(&state, &f);
+        let c = cached_presets(&state, &f, clock);
         assert!(
             !Rc::ptr_eq(&a, &c),
             "a new publish must invalidate the cache"
         );
         assert_eq!(PRESETS_CALLS.with(|c| c.get()), 2);
+
+        // A different clock must also invalidate the cache (Task 6: a
+        // `[time]` zone change re-formats every `HH:MM:SS` label even
+        // with the data version unchanged).
+        let other_clock = geode_core::clock::Clock::in_zone_named("America/New_York");
+        let d = cached_presets(&state, &f, other_clock);
+        assert!(
+            !Rc::ptr_eq(&c, &d),
+            "a different clock must invalidate the cache too"
+        );
+        assert_eq!(PRESETS_CALLS.with(|c| c.get()), 3);
     }
 
     #[test]
     fn resolve_input_delegates_to_parse_as_of_for_a_clock_time() {
-        let now = Utc.with_ymd_and_hms(2026, 9, 6, 16, 0, 0).unwrap();
-        // F1 (final fix wave): `HH:MM` resolves on the LOCAL date (spec
-        // §3.6, "one clock throughout") — computed independently of
-        // `resolve_input`/`parse_as_of` so this holds on any machine's
-        // zone, the same pattern `geode_core::query`'s own pinning test
-        // uses.
-        let today_local = now.with_timezone(&Local).date_naive();
-        let expected = Local
-            .from_local_datetime(
-                &today_local.and_time(chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap()),
-            )
-            .unwrap()
-            .to_utc();
-        assert_eq!(resolve_input("14:05", now), Ok(AsOf::At(expected)));
+        // F1 (final fix wave): `HH:MM` resolves on the CLOCK's date (spec
+        // §3.6, "one clock throughout"), not UTC's — a non-UTC clock and
+        // an expectation computed BY HAND (not through the same `Clock`
+        // methods the code under test uses) so this actually proves the
+        // date/zone math, not just that the two call sites agree with
+        // each other. `now` = 2026-09-04 01:00 UTC is 2026-09-03 21:00
+        // EDT, so "14:05" must mean 14:05 on the 3rd in New York — EDT is
+        // UTC-4, so 2026-09-03 18:05 UTC.
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 1, 0, 0).unwrap();
+        let clock = geode_core::clock::Clock::in_zone_named("America/New_York");
+        let expected = Utc.with_ymd_and_hms(2026, 9, 3, 18, 5, 0).unwrap();
+        assert_eq!(resolve_input("14:05", now, clock), Ok(AsOf::At(expected)));
     }
 
     #[test]
     fn resolve_input_live_is_case_insensitive() {
         let now = Utc::now();
-        assert_eq!(resolve_input("live", now), Ok(AsOf::Live));
-        assert_eq!(resolve_input("LIVE", now), Ok(AsOf::Live));
-        assert_eq!(resolve_input(" Live ", now), Ok(AsOf::Live));
+        let clock = geode_core::clock::Clock::utc();
+        assert_eq!(resolve_input("live", now, clock), Ok(AsOf::Live));
+        assert_eq!(resolve_input("LIVE", now, clock), Ok(AsOf::Live));
+        assert_eq!(resolve_input(" Live ", now, clock), Ok(AsOf::Live));
     }
 
     #[test]
     fn resolve_input_garbage_returns_the_parsers_message() {
         let now = Utc::now();
-        let err = resolve_input("nope", now).unwrap_err();
+        let err = resolve_input("nope", now, geode_core::clock::Clock::utc()).unwrap_err();
         assert!(err.contains("HH:MM"), "{err}");
     }
 
@@ -660,7 +670,7 @@ mod tests {
             resolved: Some(now),
             ..AsOfState::default()
         };
-        on_query_changed(&mut state, "   ", now);
+        on_query_changed(&mut state, "   ", now, geode_core::clock::Clock::utc());
         assert!(state.error.is_none());
         assert!(state.resolved.is_none());
     }
@@ -668,21 +678,21 @@ mod tests {
     #[test]
     fn on_query_changed_sets_resolved_on_success_and_error_on_failure() {
         let now = Utc.with_ymd_and_hms(2026, 9, 6, 16, 0, 0).unwrap();
+        let clock = geode_core::clock::Clock::utc();
         let mut state = AsOfState::default();
-        on_query_changed(&mut state, "14:05", now);
-        // F1 (final fix wave): local date, not UTC's — see the sibling
-        // test's comment above.
-        let today_local = now.with_timezone(&Local).date_naive();
-        let expected = Local
-            .from_local_datetime(
-                &today_local.and_time(chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap()),
+        on_query_changed(&mut state, "14:05", now, clock);
+        // F1 (final fix wave): the clock's date, not UTC's — see the
+        // sibling test's comment above.
+        let expected = clock
+            .resolve_local(
+                clock.today(now),
+                chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
             )
-            .unwrap()
-            .to_utc();
+            .unwrap();
         assert_eq!(state.resolved, Some(expected));
         assert!(state.error.is_none());
 
-        on_query_changed(&mut state, "not a time", now);
+        on_query_changed(&mut state, "not a time", now, clock);
         assert!(state.error.is_some());
         assert!(state.resolved.is_none(), "error and resolved are exclusive");
     }
@@ -718,18 +728,13 @@ mod tests {
     #[test]
     fn calendar_date_follows_the_resolved_instant_else_today() {
         let now = Utc::now();
+        let clock = geode_core::clock::Clock::utc();
         let mut state = AsOfState::default();
-        assert_eq!(
-            calendar_date(&state, now),
-            now.with_timezone(&Local).date_naive()
-        );
-        on_query_changed(&mut state, "2026-09-08 14:05", now);
-        assert_eq!(calendar_date(&state, now), d(2026, 9, 8));
-        on_query_changed(&mut state, "live", now);
-        assert_eq!(
-            calendar_date(&state, now),
-            now.with_timezone(&Local).date_naive()
-        );
+        assert_eq!(calendar_date(&state, now, clock), clock.today(now));
+        on_query_changed(&mut state, "2026-09-08 14:05", now, clock);
+        assert_eq!(calendar_date(&state, now, clock), d(2026, 9, 8));
+        on_query_changed(&mut state, "live", now, clock);
+        assert_eq!(calendar_date(&state, now, clock), clock.today(now));
     }
 
     #[test]
