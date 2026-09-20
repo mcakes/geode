@@ -345,8 +345,8 @@ fn worker(
         // already superseded. Holding the lock across the sink call cannot
         // deadlock — provided the sink does not block and does not call
         // back into this pool (`submit`/`cancel` take the same lock; std
-        // `Mutex` is not re-entrant). The sink in use here, an unbounded
-        // `std::sync::mpsc::Sender::send`, satisfies that.
+        // `Mutex` is not re-entrant). The app sink records pending state and
+        // signals its receiver without waiting for the UI to process it.
         let (lock, _) = &*queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
         if q.running.get(&req.key).is_some_and(|(rid, _)| *rid == id) {

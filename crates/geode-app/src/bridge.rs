@@ -205,9 +205,9 @@ fn make_sink(tx: crate::events::Sender, dropped: Arc<AtomicU64>) -> EventSink {
     let warned_closed = Arc::new(AtomicBool::new(false));
     Arc::new(move |e| match tx.try_send(e) {
         Ok(()) => true,
-        Err(err) => {
+        Err(_) => {
             dropped.fetch_add(1, Ordering::Relaxed);
-            if err.is_closed() && !warned_closed.swap(true, Ordering::Relaxed) {
+            if !warned_closed.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
                     target: "geode::shell",
                     "the data event receiver is gone; further events are dropped",
@@ -317,7 +317,7 @@ pub fn start(
 }
 
 /// Route events into the shell and forward reloads. Wakes on arrival:
-/// `async_channel::Receiver::recv` is a future gpui's executor polls, so
+/// The mailbox receiver returns a future gpui's executor polls, so
 /// delivery latency is a frame, not a poll interval.
 pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let rx = bridge.events.clone();

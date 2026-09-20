@@ -61,6 +61,9 @@ struct Pending {
     order: VecDeque<Key>,
 }
 
+#[derive(Debug)]
+pub(crate) struct Closed;
+
 pub(crate) struct Sender {
     pending: Arc<Mutex<Pending>>,
     wake: async_channel::Sender<()>,
@@ -85,13 +88,10 @@ pub(crate) fn channel() -> (Sender, Receiver) {
 }
 
 impl Sender {
-    pub(crate) fn try_send(
-        &self,
-        mut event: DataEvent,
-    ) -> Result<(), async_channel::TrySendError<()>> {
+    pub(crate) fn try_send(&self, mut event: DataEvent) -> Result<(), Closed> {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if self.wake.is_closed() {
-            return Err(async_channel::TrySendError::Closed(()));
+            return Err(Closed);
         }
         let key = key(&event);
         if let Key::Fetched(source, identity, true) = &key {
@@ -143,10 +143,14 @@ impl Sender {
                 .saturating_sub(geode_shell::diagnostics::DATA_DIAGNOSTICS_CAP);
             diags.drain(..excess);
         }
-        pending.events.insert(key, event);
+        let replaced = pending.events.insert(key, event);
         // A full channel already promises a wakeup. The pending state is
         // installed before signalling, so the reader cannot miss an update.
         let _ = self.wake.try_send(());
+        drop(pending);
+        // Releasing a displaced Arrow snapshot can be expensive. Do it after
+        // unlocking so the UI can take the next event immediately.
+        drop(replaced);
         Ok(())
     }
 }

@@ -3228,13 +3228,12 @@ run_mutation "bridge: every source is resolved as a directory source" \
   geode-app \
   source_shapes_names_each_of_the_three_shapes
 
-run_mutation "bridge: dropped_events counted on a refused try_send" \
+run_mutation 'bridge: dropped_events counted on a refused try_send' \
   crates/geode-app/src/bridge.rs \
   '            dropped.fetch_add(1, Ordering::Relaxed);
-            if err.is_closed()' \
-  '            if err.is_closed()' \
-  geode-app \
-  a_refused_event_is_counted_as_dropped_rather_than_lost_silently
+            if !warned_closed' \
+  '            if !warned_closed' \
+  geode-app a_closed_receiver_is_counted_as_dropped_rather_than_lost_silently
 
 run_mutation "bridge: db_path precedence — config wins over demo and the platform dir" \
   crates/geode-app/src/bridge.rs \
@@ -6527,17 +6526,13 @@ run_mutation "scheduler: a poll sends its result even when its health report was
                         && sink(SchedulerEvent::Polled {' \
   geode-data a_refused_health_does_not_swallow_that_polls_result
 
-run_mutation "bridge: a gone receiver is logged once per sink, not once per event" \
+run_mutation 'bridge: a gone receiver is logged once per sink, not once per event' \
   crates/geode-app/src/bridge.rs \
-  '            if err.is_closed() && !warned_closed.swap(true, Ordering::Relaxed) {' \
-  '            if err.is_closed() && true {' \
+  '            if !warned_closed.swap(true, Ordering::Relaxed) {' \
+  '            if true {' \
   geode-app a_closed_channel_is_counted_and_logged_once
 
-run_mutation "bridge: only a CLOSED channel is logged as a gone receiver, never a full one" \
-  crates/geode-app/src/bridge.rs \
-  '            if err.is_closed() && !warned_closed.swap(true, Ordering::Relaxed) {' \
-  '            if !warned_closed.swap(true, Ordering::Relaxed) {' \
-  geode-app a_full_channel_is_counted_but_not_reported_as_a_gone_receiver
+# The mailbox returns only Closed; capacity is coalescing, covered by consistency: tests.
 
 run_mutation "service: open seeds the health load lane from the catalog" \
   crates/geode-data/src/service.rs \
@@ -9071,28 +9066,11 @@ run_mutation "document query: the wrong family is refused" \
   '    if false {' \
   geode-data the_wrong_family_or_arity_or_dataset_is_a_compile_error
 
-run_mutation "handle: a document compile error is that key's outcome" \
-  crates/geode-data/src/handle.rs \
-  '                    // `Document` shares `Query`'"'"'s outcome shape (there is
-                    // no `DataEvent::Document`), so a failed compile goes
-                    // out as `DataEvent::Query` exactly as `Request::
-                    // Query`'"'"'s own error arm does.
-                    sink(DataEvent::Query(QueryOutcome {
-                        key: params.key,
-                        tag: params.tag,
-                        snapshot: Err(e.to_string()),
-                        submitted: params.submitted,
-                    }));' \
-  '                    // `Document` shares `Query`'"'"'s outcome shape (there is
-                    // no `DataEvent::Document`), so a failed compile goes
-                    // out as `DataEvent::Query` exactly as `Request::
-                    // Query`'"'"'s own error arm does.
-                    let _ = DataEvent::Query(QueryOutcome {
-                        key: params.key,
-                        tag: params.tag,
-                        snapshot: Err(e.to_string()),
-                        submitted: params.submitted,
-                    });' \
+run_mutation 'worker: a document compile error is that key'"'"'s outcome' \
+  crates/geode-data/src/query/pool.rs \
+  '        let delivered = sink(QueryResult {' \
+  '        if outcome.is_err() { continue; }
+        let delivered = sink(QueryResult {' \
   geode-data a_document_compile_error_is_that_keys_outcome_on_the_real_service
 
 # ---- Task 8 review (Important #1, #2): the document request, round 2
@@ -16291,7 +16269,7 @@ run_mutation 'consistency: full request queue retains a view reload' \
 run_mutation 'consistency: terminal outcomes survive a UI burst' \
   crates/geode-app/src/events.rs \
   '        let key = key(&event);' \
-  '        if pending.events.len() == 1 { return Err(async_channel::TrySendError::Full(())); }
+  '        if pending.events.len() == 1 { return Err(Closed); }
         let key = key(&event);' \
   geode-app a_burst_retains_terminal_results_and_all_publication_books
 
