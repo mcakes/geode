@@ -229,6 +229,17 @@ impl TimeseriesTile {
             // publish bumps `data` for datasets this chart never reads —
             // neither may cost a series round trip.
             if !this.model.slots().is_empty() && this.follows_changed(now) {
+                // An as-of moves the span's LEFT edge as well as its
+                // right — `AsOf::At(t)` resolves to `(t − preset, t)`,
+                // and live fetching never covered anything before
+                // `now − preset` — so the gaps are asked for before the
+                // points are (review round 1, I-1). The explicit clear
+                // is load-bearing: `fetch_pending` drops the in-flight
+                // set only when the RANGE moved, and an as-of change
+                // leaves `Range` identical.
+                this.in_flight.clear();
+                this.model.mark_all_fetching();
+                this.fetch_pending(cx);
                 // The barrier is answered on delivery instead, under the
                 // versions this request was made with.
                 this.requery(cx);
@@ -440,6 +451,13 @@ impl TimeseriesTile {
         result: Result<u64, String>,
         cx: &mut Context<Self>,
     ) {
+        // ABOVE the early return (review round 1, I-2): a pair this tile
+        // no longer holds answers `NONE`, and leaving its entry behind
+        // would make the set claim a fetch is still out for a pair that
+        // could be re-added a moment later — which `fetch_pending` would
+        // then skip, leaving a `Fetching` chip with nothing coming.
+        self.in_flight
+            .remove(&(source.to_string(), identity.to_string()));
         let state = match &result {
             Ok(_) => SlotState::Idle,
             Err(why) => SlotState::Failed(why.clone()),
@@ -448,8 +466,6 @@ impl TimeseriesTile {
         if changed.is_none() {
             return;
         }
-        self.in_flight
-            .remove(&(source.to_string(), identity.to_string()));
         if result.is_ok() && self.visible {
             self.requery(cx);
         }
@@ -649,7 +665,11 @@ impl TimeseriesTile {
             Command::Density(d) => self.model.set_density(d)?,
             Command::YAxis(n, a) => self.model.set_axis(n, a)?,
             Command::Split(s) => self.model.set_split(s)?,
-            Command::Clear => self.model.clear(),
+            Command::Clear => {
+                let changed = self.model.clear();
+                self.prune_in_flight();
+                changed
+            }
         };
         self.apply_changed(changed, cx);
         Ok(())
@@ -790,6 +810,19 @@ impl TimeseriesTile {
     /// charts never supersede each other. The stats ride over the
     /// VISIBLE window and the points over the whole range, which is what
     /// `request::params` builds from the current result's buckets.
+    /// Drop every in-flight entry for a pair the model no longer holds
+    /// (review round 1, I-2). Called wherever slots LEAVE — `remove`
+    /// (which takes an operand's dependants with it) and `:clear` —
+    /// because an answer for a pair the tile has dropped never clears
+    /// its own entry through the model, and a stale entry is
+    /// indistinguishable from a live fetch: the same pair, re-added,
+    /// would be skipped for the tile's whole life.
+    fn prune_in_flight(&mut self) {
+        let model = &self.model;
+        self.in_flight
+            .retain(|(source, identity)| model.holds_pair(source, identity));
+    }
+
     fn requery(&mut self, cx: &mut Context<Self>) {
         // A fresh question supersedes whatever was staged for the old
         // one, whether or not `promote`'s own version check would have
@@ -974,6 +1007,7 @@ impl TimeseriesTile {
     /// operand removes every expression that reads it).
     fn remove(&mut self, number: u8) -> Result<Changed, String> {
         let removal = self.model.remove(number)?;
+        self.prune_in_flight();
         if removal.removed.len() > 1 {
             let rest = removal.removed[1..]
                 .iter()
@@ -1056,6 +1090,14 @@ impl TimeseriesTile {
     #[cfg(test)]
     pub(crate) fn chart(&self) -> &Arc<ChartModel> {
         &self.chart
+    }
+
+    /// The versions the request in flight was made under — what an open
+    /// barrier is keyed by, and so what a test asking "did that delivery
+    /// arrive?" has to hand `barrier_wants`.
+    #[cfg(test)]
+    pub(crate) fn acted(&self) -> Option<FrameVersions> {
+        self.acted
     }
 }
 
@@ -1245,9 +1287,11 @@ mod tests {
         diagnostics: Entity<Diagnostics>,
         factory: Rc<TimeseriesFactory>,
         /// Every `Request` the tile submitted, in order. Held for the
-        /// whole harness's life: dropping the receiver would close the
-        /// channel and `DataHandle::send` would start answering `false`.
-        rx: Receiver<Request>,
+        /// whole harness's life: dropping the receiver closes the
+        /// channel and `DataHandle::send` starts answering `false` —
+        /// which is exactly what [`Harness::close_channel`] does on
+        /// purpose, and why this is an `Option`.
+        rx: RefCell<Option<Receiver<Request>>>,
     }
 
     /// A `Box<dyn ModuleFactory>` over the harness's own `Rc` — the
@@ -1439,7 +1483,7 @@ mod tests {
                 frame: built.frame,
                 diagnostics: built.diagnostics,
                 factory,
-                rx,
+                rx: RefCell::new(Some(rx)),
             },
             vcx,
         )
@@ -1456,9 +1500,18 @@ mod tests {
         fn visible(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
             vcx.update(|_, cx| self.content.set_visible(visible, cx));
         }
+        /// Drop the receiver, which is how `DataHandle::send` is made to
+        /// refuse: it answers `false` on a `Disconnected` channel
+        /// exactly as it does on a full one.
+        fn close_channel(&self) {
+            self.rx.borrow_mut().take();
+        }
         /// Everything submitted since the last drain, `Cancel` included.
         fn raw_requests(&self) -> Vec<Request> {
-            self.rx.try_iter().collect()
+            match self.rx.borrow().as_ref() {
+                Some(rx) => rx.try_iter().collect(),
+                None => Vec::new(),
+            }
         }
         /// Everything submitted since the last drain except a `Cancel` —
         /// what a test asserting on ORDER reads, since a hide's cancel is
@@ -1474,7 +1527,9 @@ mod tests {
         /// was sent, which is a claim tests make as often as its
         /// opposite.
         fn fetch_request(&self) -> Option<geode_data::FetchParams> {
-            while let Ok(request) = self.rx.try_recv() {
+            let rx = self.rx.borrow();
+            let rx = rx.as_ref()?;
+            while let Ok(request) = rx.try_recv() {
                 if let Request::Fetch(params) = request {
                     return Some(params);
                 }
@@ -1483,7 +1538,9 @@ mod tests {
         }
         /// [`Self::fetch_request`]'s twin for a series query.
         fn series_request(&self) -> Option<geode_core::series::SeriesParams> {
-            while let Ok(request) = self.rx.try_recv() {
+            let rx = self.rx.borrow();
+            let rx = rx.as_ref()?;
+            while let Ok(request) = rx.try_recv() {
                 if let Request::Series(params) = request {
                     return Some(params);
                 }
@@ -1538,6 +1595,16 @@ mod tests {
         }
         fn chart(&self, vcx: &gpui::VisualTestContext) -> std::sync::Arc<ChartModel> {
             self.tile.read_with(vcx, |t, _| t.chart().clone())
+        }
+        fn acted(
+            &self,
+            vcx: &gpui::VisualTestContext,
+        ) -> Option<geode_shell::frame::FrameVersions> {
+            self.tile.read_with(vcx, |t, _| t.acted())
+        }
+        fn barrier_wants(&self, vcx: &gpui::VisualTestContext, versions: FrameVersions) -> bool {
+            self.frame
+                .read_with(vcx, |f, _| f.barrier_wants(QueryKey(TILE), versions))
         }
         fn title(&self, vcx: &mut gpui::VisualTestContext) -> SharedString {
             vcx.update(|_, cx| self.content.title(cx))
@@ -1917,7 +1984,7 @@ mod tests {
         assert!(h2.painted_text(&mut vcx2).contains("s1 / s2"));
     }
 
-    // ---- the data flow (Task 7) --------------------------------------
+    // ---- the data flow -----------------------------------------------
 
     #[gpui::test]
     fn an_add_fetches_the_resolved_range_when_visible_and_defers_while_hidden(
@@ -1990,6 +2057,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_range_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        let first = h.fetch_request().expect("the add's own fetch");
+        // Deliberately unanswered: the pair is still in flight, and the
+        // new range is a DIFFERENT span, so the in-flight set must not
+        // suppress it (`in_flight_range`).
+        h.command(&mut vcx, "range 1w").unwrap();
+        let second = h
+            .fetch_request()
+            .expect("the new span is asked for, answered or not");
+        assert_eq!(second.identity, "SPX.close");
+        assert!(second.from > first.from, "a narrower span");
+    }
+
+    #[gpui::test]
+    fn a_removed_pair_leaves_no_ghost_and_a_re_add_fetches_again(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.requests();
+        h.command(&mut vcx, "remove s1").unwrap();
+        // The answer lands for a pair this tile no longer holds — the
+        // one path that used to leave an entry behind for ever.
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        let f = h
+            .fetch_request()
+            .expect("a re-added pair is fetched again, not skipped as in flight");
+        assert_eq!(f.identity, "SPX.close");
+        // The same, with `:clear` doing the removing and no answer at
+        // all in between.
+        h.command(&mut vcx, "clear").unwrap();
+        h.requests();
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        assert!(
+            h.fetch_request().is_some(),
+            "`:clear` drops the in-flight set with the slots"
+        );
+    }
+
+    #[gpui::test]
     fn a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -2010,13 +2120,65 @@ mod tests {
         );
         h.deliver_series(&mut vcx, tag - 1, result_with(&[1], 50));
         assert_eq!(h.chart(&vcx).buckets.len(), 5, "stale");
+        // A stale tag is dropped AND does not arrive (review round 1,
+        // MIN-2): the barrier is waiting for the NEWER request's own
+        // answer, and an early arrival would release it — the second key
+        // keeps it open so a real arrival is visibly different from
+        // this.
+        let at = chrono::Utc::now() - chrono::Duration::days(30);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), QueryKey(99)], at);
+        let fresh = h.series_request().expect("the as-of change requeried").tag;
+        let acted = h.acted(&vcx).expect("the request recorded its versions");
+        assert!(h.barrier_wants(&vcx, acted), "the barrier is open over it");
+        h.deliver_series(&mut vcx, fresh - 1, result_with(&[1], 50));
+        assert_eq!(h.chart(&vcx).buckets.len(), 5, "still stale");
+        assert!(
+            h.barrier_wants(&vcx, acted),
+            "a stale delivery must not arrive: the answer it would stand in for is still in flight"
+        );
         h.deliver_series_err(
             &mut vcx,
-            tag,
+            fresh,
             "1m over 3y is 1,170,000 points; the cap is 500,000",
         );
         assert_eq!(h.chart(&vcx).buckets.len(), 5, "last good stays");
         assert!(h.notice(&vcx).unwrap().contains("the cap is 500,000"));
+        assert!(
+            !h.barrier_wants(&vcx, acted),
+            "a FAILED outcome does arrive — one broken tile must not hold the rest to the deadline"
+        );
+    }
+
+    #[gpui::test]
+    fn a_refused_submit_notices_and_still_answers_the_barrier(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.requests();
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+        h.requests();
+        // The data service is gone: every submit from here answers
+        // `false`.
+        h.close_channel();
+        let at = chrono::Utc::now() - chrono::Duration::days(30);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
+        assert!(
+            h.notice(&vcx)
+                .unwrap()
+                .starts_with("series request refused"),
+            "the refusal is named, not swallowed: {:?}",
+            h.notice(&vcx)
+        );
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "nothing is coming, so the tile arrives at once rather than \
+             holding every other tile to the 250 ms deadline"
+        );
+        assert_eq!(
+            h.acted(&vcx),
+            None,
+            "and it forgets it asked, so the next frame change retries"
+        );
     }
 
     #[gpui::test]
@@ -2097,7 +2259,28 @@ mod tests {
         // An as-of change opens a barrier over this tile and requeries.
         let at = chrono::Utc::now() - chrono::Duration::days(30);
         open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
-        let q = h.series_request().expect("as-of is followed");
+        let reqs = h.requests();
+        // The as-of moves the span's LEFT edge too, and live fetching
+        // never covered anything before `now − preset` (review round 1,
+        // I-1): the gaps are asked for before the points are.
+        let Request::Fetch(f) = &reqs[0] else {
+            panic!("an as-of change refetches first: {reqs:?}");
+        };
+        assert_eq!(
+            (f.source.as_str(), f.identity.as_str()),
+            ("demo_kdb", "SPX.close")
+        );
+        assert!(f.to <= at, "over the as-of's own span");
+        assert_eq!(
+            reqs.iter()
+                .filter(|r| matches!(r, Request::Fetch(_)))
+                .count(),
+            1,
+            "one fetch per pair"
+        );
+        let Some(Request::Series(q)) = reqs.into_iter().nth(1) else {
+            panic!("…and then asks");
+        };
         assert_eq!(q.as_of, AsOf::At(at));
         assert!(q.range.1 <= at, "the as-of clips the visible end");
         h.deliver_series(&mut vcx, q.tag, result_with(&[1], 3));
