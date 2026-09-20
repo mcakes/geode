@@ -21,7 +21,10 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::sync::Arc;
 
-/// `(identity, level, drift per day, daily vol)`.
+/// `(identity, level, drift per day, daily vol)`, where `level` is the
+/// identity's level at the open of [`ANCHOR`] — not at [`EPOCH`]. The
+/// walk still starts at `EPOCH`; [`open_level`] simply starts it low
+/// enough that the drift has compounded back to `level` by `ANCHOR`.
 pub const IDENTITIES: [(&str, f64, f64, f64); 24] = [
     ("SPX.close", 5600.0, 0.0003, 0.010),
     ("SPX.vol_1m", 14.0, 0.0, 0.060),
@@ -54,6 +57,15 @@ const EPOCH: NaiveDate = match NaiveDate::from_ymd_opt(2020, 1, 6) {
     Some(d) => d,
     None => unreachable!(),
 };
+
+/// A Monday, and the day [`IDENTITIES`]' `level` describes. The walk is
+/// anchored here rather than at `EPOCH` because six years of compounding
+/// `drift` between the two would otherwise put `SPX.close` near 10,000 on
+/// a trader's screen today.
+const ANCHOR: NaiveDate = match NaiveDate::from_ymd_opt(2026, 1, 5) {
+    Some(d) => d,
+    None => unreachable!(),
+};
 const OPEN_MINUTE: i64 = 14 * 60 + 30;
 const BARS_PER_DAY: i64 = 390;
 
@@ -76,12 +88,38 @@ fn is_weekday(d: NaiveDate) -> bool {
     !matches!(d.weekday(), Weekday::Sat | Weekday::Sun)
 }
 
+/// Weekdays in `[from, to)` — exactly the days [`open_level`]'s walk
+/// applies `drift` on when it reaches `to`. Whole weeks are counted
+/// arithmetically and only the ragged tail is stepped.
+fn weekdays_between(from: NaiveDate, to: NaiveDate) -> i64 {
+    if to <= from {
+        return 0;
+    }
+    let weeks = (to - from).num_days() / 7;
+    let mut count = weeks * 5;
+    let mut d = from + Duration::days(weeks * 7);
+    while d < to {
+        if is_weekday(d) {
+            count += 1;
+        }
+        d += Duration::days(1);
+    }
+    count
+}
+
 /// The level at the open of `day`, walked from `EPOCH` one weekday at a
 /// time with a per-(seed, identity) rng, so it depends on nothing but
 /// the calendar day.
+///
+/// The walk starts from `level.ln()` less the drift it will accumulate
+/// between `EPOCH` and [`ANCHOR`], so `level` is the identity's level on
+/// the ANCHOR day rather than six years before it. Only the drift term is
+/// subtracted — the random term's expectation is zero — so the ANCHOR-day
+/// open is `level` up to the walk's own noise, which is the point of a
+/// random walk and is not corrected for.
 fn open_level(seed: u64, identity: &str, level: f64, drift: f64, vol: f64, day: NaiveDate) -> f64 {
     let mut rng = StdRng::seed_from_u64(fnv(seed, identity, -1));
-    let mut x = level.ln();
+    let mut x = level.ln() - drift * weekdays_between(EPOCH, ANCHOR) as f64;
     let mut d = EPOCH;
     while d < day {
         if is_weekday(d) {
@@ -102,7 +140,11 @@ pub fn bars(
     let mut rows = SeriesRows::default();
     let intraday_vol = vol / (BARS_PER_DAY as f64).sqrt();
     let mut day = from.date_naive();
-    let last = to.date_naive();
+    // The last day whose session can intersect `[from, to)`. `to`'s own
+    // date is excluded when `to` is exactly midnight: that day's bars all
+    // start at 14:30, so visiting it would pay a full `open_level` walk
+    // (one step per weekday since `EPOCH`) to emit nothing.
+    let last = (to - Duration::microseconds(1)).date_naive();
     while day <= last {
         if is_weekday(day) && day >= EPOCH {
             let mut rng = StdRng::seed_from_u64(fnv(seed, identity, day.num_days_from_ce() as i64));
@@ -188,18 +230,20 @@ mod tests {
     /// every --demo chart looks different — update the values
     /// deliberately, never to make a refactor pass.
     ///
-    /// The sanity band below is wider than a naive "close to the
-    /// identity's level" guess: `EPOCH` is 2020-01-06 and this pins
-    /// 2026-01-05, about 1,565 weekdays later, and `SPX.close`'s own
-    /// `drift` (0.0003/weekday) alone compounds that gap to
-    /// `exp(1565 * 0.0003) ≈ 1.6×` the level (5600.0) before the random
-    /// walk contributes anything — so a tight ±20% band would fail on
-    /// correct code. What a wide-but-real band still catches: a swapped
-    /// `drift`/`vol` (`SPX.close`'s `vol` is 0.010; used as a per-day
-    /// drift it compounds to `exp(1565 * 0.010) ≈ e^15.65`, many orders
-    /// of magnitude off) or a dropped `sqrt(BARS_PER_DAY)` divisor on the
-    /// intraday step (which would blow up every bar-to-bar move, not
-    /// just this one bar's level).
+    /// The span pinned here starts on `ANCHOR` itself, the day
+    /// `IDENTITIES`' `level` describes, so the band is now a tight one:
+    /// `open_level` subtracts the drift accumulated since `EPOCH`, and
+    /// the only thing left between `level` (5600.0) and this bar is the
+    /// random walk's own noise — about 1,565 weekday steps of
+    /// `vol = 0.010`, a standard deviation of `sqrt(1565) * 0.010 ≈ 0.40`
+    /// in log space, so 0.5×–2.0× is a couple of sigma either side and
+    /// 3.0× is no longer needed to accommodate the drift. What it still
+    /// catches: a swapped `drift`/`vol` (used as a per-day drift, 0.010
+    /// compounds to `exp(1565 * 0.010) ≈ e^15.65`, many orders of
+    /// magnitude off), a dropped `sqrt(BARS_PER_DAY)` divisor on the
+    /// intraday step, and now also an anchor that drifts away from
+    /// `level` — the defect this replaced, where six years of compounding
+    /// put `SPX.close` near 10,000.
     #[test]
     fn the_first_bars_of_spx_for_seed_42_are_pinned() {
         let rows = bars(
@@ -210,8 +254,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rows.ts[0], t("2026-01-05T14:30:00Z"));
-        let expected_v0 = 10138.916524726075_f64;
-        let expected_v1 = 10142.944253043792_f64;
+        let expected_v0 = 6340.015041033459_f64;
+        let expected_v1 = 6342.533639352445_f64;
         assert!(
             (rows.value[0] - expected_v0).abs() < 1e-6,
             "v0 = {}",
@@ -225,12 +269,50 @@ mod tests {
         let level = 5600.0_f64;
         for v in [rows.value[0], rows.value[1]] {
             assert!(
-                (0.5 * level..3.0 * level).contains(&v),
+                (0.5 * level..2.0 * level).contains(&v),
                 "SPX.close bar {v} is not within a sane multiple of its level {level} — \
-                 a magnitude bug (a swapped drift/vol, a dropped sqrt divisor) would fail \
-                 this; six years of legitimate compounding drift would not"
+                 a magnitude bug (a swapped drift/vol, a dropped sqrt divisor, a walk no \
+                 longer anchored on ANCHOR) would fail this; the random walk's own noise \
+                 would not"
             );
         }
+    }
+
+    /// `to` at exactly midnight excludes `to`'s own day: every bar of a
+    /// session starts at 14:30, so that day can contribute nothing, and
+    /// visiting it costs a full `open_level` walk. The counts below are
+    /// the contract — the day is skipped, not merely emitted empty — and
+    /// a `to` inside a session still visits its day.
+    #[test]
+    fn a_midnight_to_does_not_walk_the_excluded_day() {
+        let to_midnight = bars(
+            42,
+            "SPX.close",
+            t("2026-01-05T00:00:00Z"),
+            t("2026-01-06T00:00:00Z"),
+        )
+        .unwrap();
+        let before_the_close = bars(
+            42,
+            "SPX.close",
+            t("2026-01-05T00:00:00Z"),
+            t("2026-01-05T21:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(to_midnight.len(), before_the_close.len());
+        assert_eq!(to_midnight.len(), 390, "one weekday of one-minute bars");
+        let into_the_next_session = bars(
+            42,
+            "SPX.close",
+            t("2026-01-05T00:00:00Z"),
+            t("2026-01-06T14:31:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            into_the_next_session.len(),
+            391,
+            "the 6th's day is visited: its 14:30 bar is inside the span"
+        );
     }
 
     #[test]
