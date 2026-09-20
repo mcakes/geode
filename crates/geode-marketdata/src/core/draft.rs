@@ -295,6 +295,11 @@ impl Draft {
     /// already `Deleted` answers `Already` rather than being marked
     /// twice (marking it again would not be wrong, but the caller's
     /// notice needs to say which happened).
+    ///
+    /// Dropping an inserted row hands every row anchored on it to ITS
+    /// anchor (spec §5.3): `d d` on the middle of a chain `D1 → new-2 →
+    /// new-1` leaves `new-1` under `D1`, where the trader put the chain,
+    /// rather than at the top where a vanished anchor lands.
     pub fn delete_row(&mut self, label: &str, base: &str) -> RowDelete {
         if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
@@ -303,8 +308,16 @@ impl Draft {
             self.state = DraftState::Editing;
         }
         let result = match self.rows.get(label) {
-            Some(RowEdit::Inserted { .. }) => {
+            Some(RowEdit::Inserted { after, .. }) => {
+                let after = after.clone();
                 self.rows.remove(label);
+                for edit in self.rows.values_mut() {
+                    if let RowEdit::Inserted { after: anchor, .. } = edit
+                        && anchor.as_deref() == Some(label)
+                    {
+                        *anchor = after.clone();
+                    }
+                }
                 RowDelete::Dropped
             }
             Some(RowEdit::Deleted) => RowDelete::Already,
@@ -362,6 +375,22 @@ impl Draft {
         let edit = self.rows.remove(from).expect("checked above");
         self.rows.insert(to.to_string(), edit);
         true
+    }
+
+    /// Move an `Inserted` row under a different anchor — `shift+o` on an
+    /// inserted row (spec §5.3, controller ruling 2026-09-19): the new
+    /// row takes this one's anchor and this one is re-anchored onto the
+    /// new row, so the pair paints new-above-old under the same document
+    /// row. Answers `false` for anything but an `Inserted` row — a
+    /// document row's place is the document's, not the draft's to move.
+    pub fn reanchor_row(&mut self, label: &str, after: Option<String>) -> bool {
+        match self.rows.get_mut(label) {
+            Some(RowEdit::Inserted { after: anchor, .. }) => {
+                *anchor = after;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The row edit at `label`, if any.
@@ -1736,6 +1765,50 @@ mod tests {
         assert!(d.row_state("2027-01-15").is_some());
         assert!(!d.rename_row("new-2", "2027-01-15"));
         assert!(!d.rename_row("D1", "x"), "only an inserted row renames");
+    }
+
+    /// Dropping the middle of a chain hands its followers to its own
+    /// anchor: `D1 → new-2 → new-1`, drop `new-2`, and `new-1` sits
+    /// under `D1` — never at the top as a vanished anchor would land it.
+    #[test]
+    fn dropping_an_inserted_row_hands_its_followers_to_its_anchor() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("new-2".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-3".into(), Some("D2".into()), "t0");
+        assert_eq!(d.delete_row("new-2", "t0"), RowDelete::Dropped);
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D1"
+        ));
+        assert!(
+            matches!(
+                d.row_state("new-3"),
+                Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D2"
+            ),
+            "a row anchored elsewhere is untouched"
+        );
+    }
+
+    /// `shift+o` on an inserted row: the new row takes the old anchor and
+    /// the old row hangs off the new one, so the model paints
+    /// `D1, new-2, new-1` — a chain the splice resolves transitively.
+    #[test]
+    fn reanchor_row_moves_an_inserted_row_under_a_new_anchor() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        assert!(d.reanchor_row("new-1", Some("new-2".into())));
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "new-2"
+        ));
+        assert!(
+            !d.reanchor_row("D1", None),
+            "only an inserted row re-anchors"
+        );
+        d.delete_row("D3", "t0");
+        assert!(!d.reanchor_row("D3", None), "a deleted row has no anchor");
     }
 
     /// §5.1: rebase carries rows by label — a deleted row whose label vanished is dropped and named,

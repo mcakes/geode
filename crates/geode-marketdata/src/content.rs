@@ -60,6 +60,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     // own `space`/`shift+space`, brought to a grid cell.
     ("marketdata::step", "Step value"),
     ("marketdata::step_back", "Step value back"),
+    // The row verbs (dividend spec §5.3): vim's own `o`/`O`/`dd`.
+    ("marketdata::insert_below", "Insert row below"),
+    ("marketdata::insert_above", "Insert row above"),
+    ("marketdata::delete_row", "Delete row"),
     ("marketdata::upload", "Upload"),
     ("marketdata::revert", "Revert edits"),
     ("marketdata::rebase", "Rebase"),
@@ -144,6 +148,9 @@ context = "marketdata && mode == normal"
 "u" = "marketdata::load_underlying"
 "space" = "marketdata::step"
 "shift+space" = "marketdata::step_back"
+"o" = "marketdata::insert_below"
+"shift+o" = "marketdata::insert_above"
+"d d" = "marketdata::delete_row"
 
 [[bindings]]
 context = "marketdata && mode == insert"

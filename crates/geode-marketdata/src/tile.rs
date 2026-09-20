@@ -51,12 +51,13 @@
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
-use crate::core::draft::local_hhmm;
+use crate::core::draft::{RowDelete, RowEdit, local_hhmm};
 use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
+use crate::core::spec::RowIdentity;
 use crate::core::{
     Cell, CellKind, Columns, DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment,
-    UpdatePolicy, parse_attr, parse_cell,
+    UpdatePolicy, attr_text, parse_attr, parse_cell,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -233,6 +234,16 @@ pub(crate) const DELETED_REFUSED: &str = "row is deleted — :revert restores it
 /// "newer" document to move onto or fall back to.
 const NOT_BEHIND: &str = "nothing to rebase — the draft is on the live document";
 
+/// What the row verbs (`o`, `shift+o`, `d d`; dividend spec §5.3) answer
+/// with the cursor in the attribute strip: an attribute is not a row, so
+/// there is nothing to insert beside or delete.
+const NOT_A_ROW: &str = "not a row";
+
+/// What `d d` answers on a row already marked `Deleted` (spec §5.3): the
+/// mark is idempotent, so the notice names the door back rather than
+/// pretending a second mark did something.
+const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
+
 /// One cell a `:bump` writes: where it is, the labels that make the edit
 /// portable across generations, and the value being added to — the shape
 /// [`Draft::bump`] consumes.
@@ -343,6 +354,21 @@ enum EditTarget {
         /// against the model at commit time exactly as a cell's labels
         /// are (a header attribute's own "did the grid move" rule).
         column: SharedString,
+    },
+    /// The row-label editor a `Typed` axis opens on `o`/`shift+o`
+    /// (dividend spec §5.3): a provisional row the draft holds under its
+    /// minted `label`, painted in the row-label column, whose commit
+    /// RENAMES it to what the trader typed.
+    RowLabel {
+        /// The row's model index when the editor opened — the paint-time
+        /// position, checked against `label` at commit as a cell's
+        /// labels are.
+        row: usize,
+        /// The minted label the row is filed under in the draft — its
+        /// identity until the commit renames it, and what
+        /// [`MarketDataTile::close_editor`] drops if the editor closes
+        /// with the row still provisional.
+        label: SharedString,
     },
 }
 
@@ -1412,8 +1438,13 @@ impl MarketDataTile {
     /// paints itself (`render`), and `None` with nothing open.
     fn delegate_editor(&self) -> Option<DelegateEditor> {
         let e = self.editor.as_ref()?;
-        let EditTarget::Cell { cell, .. } = &e.target else {
-            return None;
+        // A row-label editor sits in the row-label column (`col: None`),
+        // which `render_td`'s label arm paints through the same
+        // `render_editor` a cell's uses.
+        let (row, col) = match &e.target {
+            EditTarget::Cell { cell, .. } => (cell.0, Some(cell.1)),
+            EditTarget::RowLabel { row, .. } => (*row, None),
+            EditTarget::Attr { .. } => return None,
         };
         let paint = match &e.state {
             EditorState::Text(state) => DelegateEditorPaint::Text(state.clone()),
@@ -1422,11 +1453,7 @@ impl MarketDataTile {
                 focus: focus.clone(),
             },
         };
-        Some(DelegateEditor {
-            row: cell.0,
-            col: Some(cell.1),
-            paint,
-        })
+        Some(DelegateEditor { row, col, paint })
     }
 
     /// The open choice popup as the delegate paints it (dividend spec
@@ -1823,6 +1850,22 @@ impl MarketDataTile {
                 }
                 true
             }
+            // The row verbs (dividend spec §5.3): `o`/`shift+o` insert a
+            // row below/above the cursor row, `d d` deletes it. Every
+            // one touches what the header paints — the dirty dot, the
+            // incomplete chip, or a refusal.
+            "insert_below" | "insert_above" => {
+                if let Err(e) = self.insert_row(verb == "insert_below", window, cx) {
+                    self.notice = Some(e.into());
+                }
+                true
+            }
+            "delete_row" => {
+                if let Err(e) = self.delete_row(window, cx) {
+                    self.notice = Some(e.into());
+                }
+                true
+            }
             // The menu's `On new document` rows and the palette's
             // `Auto: …` actions. Nothing the header paints reads the
             // policy, so no chrome rebuild.
@@ -2167,7 +2210,90 @@ impl MarketDataTile {
                 let value = Value::Date(field.value());
                 self.commit_cell_value(cell, labels, value, window, cx)
             }
+            (EditorState::Text(state), EditTarget::RowLabel { row, label }) => {
+                // A typed row label (dividend spec §5.3) is parsed by the
+                // axis's own type — `parse_attr`, the attribute rule —
+                // and its canonical spelling (`attr_text`) is the label,
+                // so `2027-1-5` on a `Date` axis and `2027-01-05` name
+                // the same row. A `Minted` axis never opens this editor;
+                // refused as a moved grid rather than declared
+                // impossible.
+                let RowIdentity::Typed(ty) = self.spec.rows.identity else {
+                    self.close_editor(window, cx);
+                    self.notice = Some(CELL_MOVED.into());
+                    return true;
+                };
+                let text = state.read(cx).value().to_string();
+                let new = match parse_attr(&text, ty) {
+                    Ok(value) => attr_text(&value),
+                    Err(e) => {
+                        // Refused inline, the editor open with the text
+                        // as typed (the cell rule).
+                        self.notice = Some(e.into());
+                        return true;
+                    }
+                };
+                self.commit_row_label(row, label, new, window, cx)
+            }
+            (EditorState::Date { field, paint, .. }, EditTarget::RowLabel { row, label }) => {
+                // A `Date` axis's label editor: the strip's own two steps
+                // — finish a waiting digit or refuse naming the segment
+                // — then the field's date in the ISO spelling a document
+                // row label paints.
+                if let Err(segment) = field.complete_pending() {
+                    self.notice =
+                        Some(format!("finish the {} or backspace", segment.name()).into());
+                    return true;
+                }
+                *paint = DateFieldPaint::of(field);
+                let new = field.value().format("%Y-%m-%d").to_string();
+                self.commit_row_label(row, label, new, window, cx)
+            }
         }
+    }
+
+    /// The row-label editor's commit (dividend spec §5.3): `new` is
+    /// already the canonical label. The row must still be where the
+    /// editor opened (the grid-moved rule), the label must not already
+    /// name a row on screen — a document row, a deleted one or another
+    /// insert alike — and the draft must still hold the provisional row;
+    /// then the row is renamed, the editor closed (the rename is what
+    /// keeps `close_editor` from dropping the row as provisional), the
+    /// grid rebuilt with the cursor on the renamed row, and the FIRST
+    /// cell's editor opened, since a row with a name and no values is
+    /// the next thing to fill.
+    fn commit_row_label(
+        &mut self,
+        row: usize,
+        label: SharedString,
+        new: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.model.rows.get(row).map(|r| &r.label) != Some(&label) {
+            self.close_editor(window, cx);
+            self.notice = Some(CELL_MOVED.into());
+            return true;
+        }
+        if self.model.rows.iter().any(|r| r.label.as_ref() == new) {
+            // Refused with the editor open: the trader retypes, or
+            // escapes to drop the provisional row.
+            self.notice = Some(format!("'{new}' is already a row").into());
+            return true;
+        }
+        if !self.draft.rename_row(label.as_ref(), &new) {
+            self.close_editor(window, cx);
+            self.notice = Some(CELL_MOVED.into());
+            return true;
+        }
+        self.close_editor(window, cx);
+        self.notice = None;
+        self.rebuild_model(cx);
+        if let Some(at) = self.model.rows.iter().position(|r| r.label.as_ref() == new) {
+            self.cursor = Cursor::Cell { row: at, col: 0 };
+            self.begin_edit(window, cx);
+        }
+        true
     }
 
     /// `marketdata::insert_up`/`insert_down` (and `_big`) with the editor
@@ -2239,6 +2365,17 @@ impl MarketDataTile {
                 };
                 (attr.ty, None)
             }
+            // A typed row label steps by its axis type at the places its
+            // text paints — an attribute's own rule; a `Minted` axis
+            // never opens this editor (unreachable, refused rather than
+            // declared impossible).
+            EditTarget::RowLabel { .. } => match self.spec.rows.identity {
+                RowIdentity::Typed(ty) => (ty, None),
+                RowIdentity::Minted => {
+                    self.notice = Some("not a numeric cell".into());
+                    return true;
+                }
+            },
         };
         match crate::core::nudge_text(&text, ty, precision, steps) {
             Ok(next) => {
@@ -2536,13 +2673,186 @@ impl MarketDataTile {
     /// conditional on the editor's own field holding focus, for
     /// `close_popup_with_window`'s reason: an editor orphaned by `mod+l`
     /// and closed from a `:` line must not blur the command line.
+    ///
+    /// A ROW-LABEL editor closing on a row still provisional — the draft
+    /// holds its minted label as an `Inserted` row with no cell filled —
+    /// drops that row (dividend spec §5.3): a row nobody named and
+    /// nothing was typed into is not unsent work, and leaving `new-1`
+    /// behind on a `Typed` axis would paint a row the axis's own type
+    /// cannot name. A commit renames the row BEFORE closing, so the
+    /// minted label is gone from the draft by the time this looks.
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(e) = &self.editor
             && e.state.is_focused(window, cx)
         {
             window.blur(cx);
         }
-        self.editor = None;
+        let Some(Editing {
+            target: EditTarget::RowLabel { label, .. },
+            ..
+        }) = self.editor.take()
+        else {
+            return;
+        };
+        let provisional = matches!(
+            self.draft.row_state(label.as_ref()),
+            Some(RowEdit::Inserted { cells, .. }) if cells.is_empty()
+        );
+        if provisional {
+            let base = self.model.source_time.clone().unwrap_or_default();
+            self.draft.delete_row(label.as_ref(), &base);
+            self.rebuild_model(cx);
+        }
+    }
+
+    // ---- the row verbs (dividend spec §5.3) ---------------------------
+
+    /// The cursor row a row verb acts on, with every refusal the three
+    /// share: an open editor is cancelled first (a row verb is
+    /// navigation, never a commit — `set_key`'s own rule), a `Behind`
+    /// draft refuses (`BEHIND_REFUSED`), the strip refuses (`NOT_A_ROW`),
+    /// and an empty grid refuses (`NO_DOCUMENT`, through `edit_base`,
+    /// which also answers the generation the edit is stamped against).
+    fn row_verb_target(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(usize, String), String> {
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        if self.draft.is_behind() {
+            return Err(BEHIND_REFUSED.to_string());
+        }
+        let Cursor::Cell { row, .. } = self.cursor else {
+            return Err(NOT_A_ROW.to_string());
+        };
+        let base = self.edit_base()?;
+        Ok((row, base))
+    }
+
+    /// `o`/`shift+o` (`marketdata::insert_below`/`insert_above`): insert a
+    /// row beside the cursor row and start filling it.
+    ///
+    /// WHERE it lands is the anchor (controller ruling 2026-09-19). `o`
+    /// anchors on the cursor row itself, document or inserted alike.
+    /// `shift+o` on a DOCUMENT row anchors on the row painted above it
+    /// (`None` at the top) — which may itself be an inserted row; on an
+    /// INSERTED row the new row takes that row's own anchor and the row
+    /// is re-anchored onto the new one (`Draft::reanchor_row`), so the
+    /// chain paints new-above-old and survives a rebase as a chain.
+    ///
+    /// WHO names it is the axis (`RowIdentity`): a `Minted` axis mints
+    /// `new-<n>` against the rows on screen and opens the first CELL's
+    /// editor at once; a `Typed` axis opens the row-label editor on the
+    /// minted row instead — the segmented date field for a `Date` axis
+    /// (opening on today's local date, the strip's own landing), the text
+    /// `Input` for any other type — whose commit renames the row and then
+    /// opens the first cell (`commit_row_label`), and whose cancel drops
+    /// the row (`close_editor`).
+    fn insert_row(
+        &mut self,
+        below: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let (row, base) = self.row_verb_target(window, cx)?;
+        let cursor_label = self.model.rows[row].label.to_string();
+        let label = self
+            .draft
+            .mint_label(|l| self.model.rows.iter().any(|r| r.label.as_ref() == l));
+        // The anchor, and — on `shift+o` over an inserted row — the row
+        // to hang off the new one afterwards.
+        let (anchor, rehang) = if below {
+            (Some(cursor_label), None)
+        } else if self.model.rows[row].state == RowState::Inserted {
+            let inherited = match self.draft.row_state(&cursor_label) {
+                Some(RowEdit::Inserted { after, .. }) => after.clone(),
+                _ => None,
+            };
+            (inherited, Some(cursor_label))
+        } else {
+            (
+                row.checked_sub(1)
+                    .map(|above| self.model.rows[above].label.to_string()),
+                None,
+            )
+        };
+        self.draft.insert_row(label.clone(), anchor, &base);
+        if let Some(old) = rehang {
+            self.draft.reanchor_row(&old, Some(label.clone()));
+        }
+        self.rebuild_model(cx);
+        let Some(at) = self
+            .model
+            .rows
+            .iter()
+            .position(|r| r.label.as_ref() == label)
+        else {
+            // The rebuild refused the grid (its notice says why); the
+            // draft still carries the row for the next build to place.
+            return Ok(());
+        };
+        self.cursor = Cursor::Cell { row: at, col: 0 };
+        self.notice = None;
+        match self.spec.rows.identity {
+            RowIdentity::Minted => self.begin_edit(window, cx),
+            RowIdentity::Typed(ty) => self.begin_label_edit(at, label.into(), ty, window, cx),
+        }
+        Ok(())
+    }
+
+    /// Open the row-label editor on the provisional row at `row` (spec
+    /// §5.3): `begin_edit`'s two forms, seeded EMPTY — a `Date` axis's
+    /// field on today's local date, since there is no painted text to
+    /// open on, and any other type's text `Input` blank — with the
+    /// keyboard, so the shell's insert branch hands it every bare key.
+    fn begin_label_edit(
+        &mut self,
+        row: usize,
+        label: SharedString,
+        ty: ColumnType,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = if ty == ColumnType::Date {
+            let field = DateField::open(chrono::Local::now().date_naive());
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            let paint = DateFieldPaint::of(&field);
+            EditorState::Date {
+                field,
+                focus,
+                paint,
+            }
+        } else {
+            let state = cx.new(|cx| InputState::new(window, cx));
+            state.read(cx).focus_handle(cx).focus(window, cx);
+            EditorState::Text(state)
+        };
+        self.editor = Some(Editing {
+            state,
+            target: EditTarget::RowLabel { row, label },
+        });
+    }
+
+    /// `d d` (`marketdata::delete_row`): delete the cursor row through
+    /// `Draft::delete_row` — an inserted row is dropped outright and the
+    /// grid rebuilt (the cursor clamps onto whatever now sits there), a
+    /// document row is marked `Deleted` and stays painted struck through,
+    /// and a row already marked answers `ALREADY_DELETED` rather than
+    /// marking it twice.
+    fn delete_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let (row, base) = self.row_verb_target(window, cx)?;
+        let label = self.model.rows[row].label.to_string();
+        match self.draft.delete_row(&label, &base) {
+            RowDelete::Dropped | RowDelete::Marked => {
+                self.notice = None;
+                self.rebuild_model(cx);
+                Ok(())
+            }
+            RowDelete::Already => Err(ALREADY_DELETED.to_string()),
+        }
     }
 
     // ---- the action list ---------------------------------------------
@@ -3776,6 +4086,19 @@ impl MarketDataTile {
         })
     }
 
+    /// Whether the open editor is the ROW-LABEL editor (dividend spec
+    /// §5.3) — in either form.
+    #[cfg(test)]
+    pub(crate) fn label_editor_open(&self) -> bool {
+        matches!(
+            self.editor,
+            Some(Editing {
+                target: EditTarget::RowLabel { .. },
+                ..
+            })
+        )
+    }
+
     /// The open date field's own focus handle.
     #[cfg(test)]
     pub(crate) fn date_field_focus(&self) -> Option<FocusHandle> {
@@ -4024,7 +4347,7 @@ impl gpui::Render for MarketDataTile {
                     EditorState::Date { paint, focus, .. } => EditorPaint::Date { paint, focus },
                 },
             )),
-            EditTarget::Cell { .. } => None,
+            EditTarget::Cell { .. } | EditTarget::RowLabel { .. } => None,
         });
         let menu_open = matches!(self.popup, Some(Popup::Menu(_)));
         let header = header::render(
@@ -4101,6 +4424,7 @@ mod tests {
     use crate::core::spec::{RowAxis, RowIdentity, ValueColumn};
     use crate::core::test_fixtures;
     use crate::core::{CVI, DraftState};
+    use crate::delegate::LABEL_COL;
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::groupings::GroupingSlots;
     use geode_core::log::LogLevels;
@@ -10718,5 +11042,334 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(cells[1].edited);
         assert_eq!(notice, None, "the commit clears the notice");
         assert!(h.editor_value(&vcx).is_none());
+    }
+
+    // ---- row verbs: o / shift+o / d d (dividend spec §5.3) ------------
+
+    /// The model's row labels in painted order.
+    fn row_labels(h: &Harness, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        h.tile.read_with(vcx, |t, _| {
+            t.model().rows.iter().map(|r| r.label.to_string()).collect()
+        })
+    }
+
+    fn notice_of(h: &Harness, vcx: &gpui::VisualTestContext) -> Option<String> {
+        h.tile.read_with(vcx, |t, _| t.notice().map(str::to_string))
+    }
+
+    /// §5.3 on a `Minted` axis: `o` inserts `new-1` below the cursor row
+    /// and lands the cursor on its first cell in insert mode; `shift+o`
+    /// on that inserted row chains a new row ABOVE it (the new row takes
+    /// `new-1`'s anchor, `new-1` re-anchors onto it — controller ruling);
+    /// `d d` on the inserted row drops it outright, on a document row
+    /// marks it `Deleted`, and a second `d d` there says so.
+    #[gpui::test]
+    fn o_inserts_a_minted_row_and_dd_deletes(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx); // rows D1, D2
+        h.dispatch(&mut vcx, "insert_below", None);
+        vcx.run_until_parked();
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-1", "D2"]);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.date_field().is_some()),
+            "the first cell (ex, a Date) opened its editor"
+        );
+        assert_eq!(h.mode(&vcx), "insert");
+        draw(&mut vcx);
+        type_keys(&mut vcx, "escape");
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            row_labels(&h, &vcx),
+            ["D1", "new-1", "D2"],
+            "escape on a minted row's cell keeps the row"
+        );
+        h.dispatch(&mut vcx, "insert_above", None);
+        vcx.run_until_parked();
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-2", "new-1", "D2"]);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        let anchors = h.tile.read_with(&vcx, |t, _| {
+            let d = t.draft();
+            let after = |l: &str| match d.row_state(l) {
+                Some(RowEdit::Inserted { after, .. }) => after.clone(),
+                _ => None,
+            };
+            (after("new-2"), after("new-1"))
+        });
+        assert_eq!(
+            anchors,
+            (Some("D1".to_string()), Some("new-2".to_string())),
+            "new-2 took new-1's anchor and new-1 re-anchored onto new-2"
+        );
+        draw(&mut vcx);
+        type_keys(&mut vcx, "escape");
+        h.dispatch(&mut vcx, "delete_row", None);
+        vcx.run_until_parked();
+        assert_eq!(
+            row_labels(&h, &vcx),
+            ["D1", "new-1", "D2"],
+            "an inserted row is dropped outright"
+        );
+        h.tile.update(&mut vcx, |t, cx| {
+            t.cursor_to(2, Some(0), cx);
+        });
+        h.dispatch(&mut vcx, "delete_row", None);
+        vcx.run_until_parked();
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.row_state_at(2)),
+            Some(RowState::Deleted)
+        );
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-1", "D2"]);
+        h.dispatch(&mut vcx, "delete_row", None);
+        assert_eq!(
+            notice_of(&h, &vcx).as_deref(),
+            Some("row is already deleted — :revert restores it")
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.header_dirty()));
+    }
+
+    /// §5.3 on a `Typed(Date)` axis (CVI): `o` inserts a provisional row
+    /// and opens the ROW-LABEL editor on it — the segmented date field,
+    /// painted in the row-label column; `enter` with a new term renames
+    /// the row and opens the first cell; a term already present is
+    /// refused with the editor open; `escape` drops the provisional row.
+    #[gpui::test]
+    fn o_on_a_typed_axis_opens_the_label_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx); // terms 2026-10-16, 2026-11-20
+        h.dispatch(&mut vcx, "insert_below", None);
+        draw(&mut vcx);
+        assert!(h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.date_field().is_some()),
+            "a Date axis opens the segmented field"
+        );
+        assert_eq!(h.mode(&vcx), "insert");
+        assert!(
+            vcx.debug_bounds(Box::leak(
+                format!("marketdata-editor-1-{LABEL_COL}").into_boxed_str()
+            ))
+            .is_some(),
+            "painted in the row-label column of the new row"
+        );
+        assert!(
+            vcx.debug_bounds(Box::leak(
+                format!("marketdata-date-{TILE}").into_boxed_str()
+            ))
+            .is_some(),
+            "the field is painted"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        // Type an existing term into the field (year, month, day digits —
+        // the field's own `digit` grammar; it opens on the DAY segment).
+        type_keys(&mut vcx, "left left 2 0 2 6 1 0 1 6");
+        type_keys(&mut vcx, "enter");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.label_editor_open()),
+            "refused, still open"
+        );
+        assert_eq!(
+            notice_of(&h, &vcx).as_deref(),
+            Some("'2026-10-16' is already a row")
+        );
+        type_keys(&mut vcx, "left left 2 0 2 7 0 1 1 5");
+        type_keys(&mut vcx, "enter");
+        assert_eq!(
+            row_labels(&h, &vcx),
+            ["2026-10-16", "2027-01-15", "2026-11-20"],
+            "renamed in place, under the row o was pressed on"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t
+                .model()
+                .rows
+                .iter()
+                .filter(|r| r.state == RowState::Inserted)
+                .count()),
+            1
+        );
+        assert!(
+            !h.tile.read_with(&vcx, |t, _| t.label_editor_open()),
+            "the label editor closed"
+        );
+        assert_eq!(
+            h.editor_value(&vcx).as_deref(),
+            Some("·"),
+            "and the first cell's editor opened on the renamed row"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 1, col: 0 }
+        );
+        h.dispatch(&mut vcx, "cancel", None);
+        h.dispatch(&mut vcx, "insert_below", None);
+        draw(&mut vcx);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows_added()), 2);
+        type_keys(&mut vcx, "escape");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().rows_added()),
+            1,
+            "escape dropped the provisional row"
+        );
+        assert_eq!(
+            row_labels(&h, &vcx),
+            ["2026-10-16", "2027-01-15", "2026-11-20"]
+        );
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_none()),
+            "the field gave the keyboard up"
+        );
+    }
+
+    /// The three verbs are refused while `Behind` (with the standing
+    /// notice) and in the strip ("not a row"), writing nothing.
+    #[gpui::test]
+    fn row_verbs_are_refused_while_behind_and_in_the_strip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let tag = h.with_document_tagged(&mut vcx);
+        h.dispatch(&mut vcx, "up", None); // Attr(0)
+        for verb in ["insert_below", "insert_above", "delete_row"] {
+            h.dispatch(&mut vcx, verb, None);
+            assert_eq!(notice_of(&h, &vcx).as_deref(), Some("not a row"), "{verb}");
+            assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+            assert!(h.editor_value(&vcx).is_none());
+        }
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        for verb in ["insert_below", "insert_above", "delete_row"] {
+            h.dispatch(&mut vcx, verb, None);
+            assert_eq!(
+                notice_of(&h, &vcx).as_deref(),
+                Some(BEHIND_REFUSED),
+                "{verb}"
+            );
+            assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows.len()), 0);
+            assert!(!h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
+        }
+        assert_eq!(h.rows(&vcx), 2);
+    }
+
+    /// With no document (`:underlying` never named), the row verbs answer
+    /// `NO_DOCUMENT` and open nothing.
+    #[gpui::test]
+    fn row_verbs_are_refused_without_a_document(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        for verb in ["insert_below", "insert_above", "delete_row"] {
+            h.dispatch(&mut vcx, verb, None);
+            assert_eq!(notice_of(&h, &vcx).as_deref(), Some(NO_DOCUMENT), "{verb}");
+            assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+            assert_eq!(h.mode(&vcx), "normal");
+        }
+    }
+
+    /// `o` with a cell editor open cancels it first (a row insert is
+    /// navigation, never a commit — `set_key`'s own rule), and the new
+    /// row's own editor is the one left open.
+    #[gpui::test]
+    fn o_cancels_an_open_editor_before_inserting(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "right", None); // amount
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "insert_below", None);
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-1", "D2"]);
+        assert_eq!(
+            h.cell(&vcx, 0, 1),
+            ("1.2500".to_string(), false),
+            "the abandoned edit was never committed"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.date_field().is_some()),
+            "the new row's first cell (a Date) is the open editor"
+        );
+    }
+
+    /// Row edits ride the session under `[drafts.<key>]` and the parked
+    /// map like any other unsent work (spec §8.5): `o`, fill a cell,
+    /// serialize → `[drafts."SPX.Z".rows.new-1]`; restore → `rows_added`
+    /// 1 with the cell in place; a key switch parks the rows and a switch
+    /// back restores them. `yy` on the inserted row yanks its cells as
+    /// painted.
+    #[gpui::test]
+    fn row_edits_ride_the_session_and_the_parked_map(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "insert_below", None);
+        draw(&mut vcx);
+        // The first cell's date field is open: commit today's date, then
+        // fill the amount.
+        type_keys(&mut vcx, "enter");
+        assert_eq!(h.mode(&vcx), "normal");
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "2.5");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 1, 1), ("2.5000".to_string(), true));
+        h.dispatch(&mut vcx, "yank_row", None);
+        let yanked = clipboard(&mut vcx).expect("a yank");
+        assert!(
+            yanked.starts_with("new-1\t") && yanked.ends_with("\t2.5000\t·"),
+            "{yanked:?}"
+        );
+
+        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let rows = written["drafts"]["SPX.Z"]["rows"]
+            .as_table()
+            .expect("a rows table");
+        assert_eq!(rows["new-1"]["after"].as_str(), Some("D1"));
+        assert_eq!(rows["new-1"]["cells"]["amount"].as_float(), Some(2.5));
+
+        // A key switch parks the rows; a switch back restores them on the
+        // next delivery.
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        let _nky = h.document_request().expect("NKY's own request");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.parked()),
+            vec![("SPX.Z".to_string(), "1 row added".to_string())]
+        );
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows_added()), 0);
+        h.command(&mut vcx, "underlying SPX.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "estimated"),
+            ])),
+        );
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-1", "D2"]);
+        assert_eq!(h.cell(&vcx, 1, 1), ("2.5000".to_string(), true));
+
+        // A restart from the written session.
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::SCHEDULE, Some(written));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "estimated"),
+            ])),
+        );
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows_added()), 1);
+        assert_eq!(row_labels(&h, &vcx), ["D1", "new-1", "D2"]);
+        assert_eq!(h.cell(&vcx, 1, 1), ("2.5000".to_string(), true));
     }
 }

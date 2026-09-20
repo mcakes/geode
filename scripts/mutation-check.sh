@@ -13746,6 +13746,58 @@ run_mutation "draft: rebase keeps an anchor on a surviving inserted row" \
   '            |anchor: &str| rows.contains_key(anchor);' \
   geode-marketdata rebase_keeps_a_chain_anchored_on_a_surviving_inserted_row
 
+# Task 8 — the row verbs (spec §5.3).
+#
+# `o` anchors the new row on the CURSOR row. Mutated to anchor on the
+# top (`None`), `o` on `D1` paints `new-1` above `D1` rather than under
+# it — every row present, every count right, the row in the wrong
+# place.
+run_mutation "tile: o inserts after the cursor row" \
+  crates/geode-marketdata/src/tile.rs \
+  '            (Some(cursor_label), None)' \
+  '            (None, None)' \
+  geode-marketdata o_inserts_a_minted_row_and_dd_deletes
+
+# `shift+o` on an INSERTED row takes that row's own anchor and re-anchors
+# it onto the new row (controller ruling 2026-09-19), so the chain paints
+# new-above-old. Mutated to treat every row as a document row, `shift+o`
+# on `new-1` anchors `new-2` on `D1` beside it and label order paints
+# `new-1` first — above where the trader asked for the new row.
+run_mutation "tile: shift+o on an inserted row takes its anchor" \
+  crates/geode-marketdata/src/tile.rs \
+  '        } else if self.model.rows[row].state == RowState::Inserted {' \
+  '        } else if false {' \
+  geode-marketdata o_inserts_a_minted_row_and_dd_deletes
+
+# A typed label already on screen is refused with the editor open, never
+# renamed onto. Mutated away, `enter` on a term the document carries
+# renames the provisional row to a duplicate label and closes the
+# editor.
+run_mutation "tile: a duplicate typed label is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.model.rows.iter().any(|r| r.label.as_ref() == new) {' \
+  '        if false {' \
+  geode-marketdata o_on_a_typed_axis_opens_the_label_editor
+
+# `escape` on the row-label editor drops the provisional row: a row
+# nobody named is not unsent work. Mutated to keep it, `new-N` stays in
+# the draft on a `Typed` axis — `rows_added` reads one too many.
+run_mutation "tile: escape drops a provisional row" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if provisional {' \
+  '        if false {' \
+  geode-marketdata o_on_a_typed_axis_opens_the_label_editor
+
+# Dropping an inserted row hands its followers to its own anchor.
+# Mutated to leave them pointing at the dropped label, a chain's tail
+# lands at the top of the grid (the vanished-anchor rule) on the very
+# `d d` that was meant to take one row out of the middle of it.
+run_mutation "draft: dropping an inserted row hands its followers to its anchor" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                        *anchor = after.clone();' \
+  '                        *anchor = Some(label.to_string());' \
+  geode-marketdata dropping_an_inserted_row_hands_its_followers_to_its_anchor
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
