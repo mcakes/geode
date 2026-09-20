@@ -27,10 +27,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use geode_chart::core::palette::Palette;
-use geode_chart::{ChartElement, ChartModel};
+use geode_chart::{Axis, AxisMode, ChartElement, ChartModel};
 use geode_core::colour::NamedColours;
 use geode_core::query::AsOf;
-use geode_core::series::{SeriesOutcome, SeriesResult};
+use geode_core::series::{Frequency, SeriesOutcome, SeriesResult};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
@@ -52,6 +52,51 @@ use crate::core::{chart, resolve, session};
 use crate::header::{self, HeaderModel};
 use crate::popup::Popup;
 
+/// Exactly what [`chart::build`] reads, and nothing else — the memo key
+/// that decides whether a chrome rebuild also rebuilds the chart model
+/// (review round 1, I-2).
+///
+/// It exists because a chart model is EXPENSIVE and most chrome changes
+/// do not touch one: `chart::build` clones every slot's `values` and the
+/// whole bucket vector, so at the 500,000-point cap a `tab`, a chip
+/// click, a `set_visible` or a finished fetch would each copy several
+/// megabytes and — through the `version` bump — throw away every path
+/// `geode-chart` has cached, for a model identical to the one it
+/// replaced. Comparing this instead costs a handful of small clones per
+/// slot.
+///
+/// **A field `chart::build` reads must appear here**, or a change to it
+/// paints stale — the same rule `shell::colours::theme_signature`
+/// carries, for the same reason. Note what is deliberately absent: a
+/// source slot's `source`/`identity` (its LABEL is read, but a slot
+/// number is never reused for the tile's life, so `number` pins the
+/// pair), its `rule` and the model's `percentiles` (neither reaches the
+/// chart model — they shape the REQUEST, and the answer arrives as a new
+/// `result`), and the view (the element takes it beside the model).
+#[derive(Clone, PartialEq)]
+struct ChartKey {
+    /// The result's identity. A pointer, not the data: a `SeriesResult`
+    /// is installed whole and never mutated in place, so a new pointer
+    /// is exactly "new data". `0` for no result.
+    result: usize,
+    /// Per slot: everything `chart::build` copies out of it.
+    slots: Vec<(u8, Colour, Axis, bool, Option<String>)>,
+    frequency: Frequency,
+    axis_mode: AxisMode,
+    /// Bit pattern, because `f32` is not `Eq` and a split is compared,
+    /// never arithmetic'd, here.
+    split: u32,
+    density: bool,
+    /// Read by `Model::label` for a slot whose source is not the default.
+    default_source: Option<String>,
+    /// The two inputs to `colour_fn`: a slot's colour is resolved INTO
+    /// the chart model, so a theme change or a reloaded `colours.toml`
+    /// (a fresh `Arc`, which is what `set_colours` swaps in) is a chart
+    /// change.
+    theme: [Hsla; 28],
+    colours: usize,
+}
+
 pub struct TimeseriesTile {
     id: TileId,
     frame: Entity<Frame>,
@@ -70,6 +115,9 @@ pub struct TimeseriesTile {
     result: Option<Arc<SeriesResult>>,
     chart: Arc<ChartModel>,
     chart_version: u64,
+    /// What [`Self::chart`] was built from. `rebuild_chrome` rebuilds the
+    /// chart model only when this differs — see [`ChartKey`].
+    last_chart_key: Option<ChartKey>,
     /// Rebuild the chrome on the next render if the theme moved — the
     /// chips' swatches and the chart model's line colours are both
     /// resolved against it.
@@ -154,6 +202,7 @@ impl TimeseriesTile {
         // model's line colours — they are the same five colours, and
         // building the wheel twice is the thing `rebuild_chrome` exists
         // to avoid.
+        let colours_ptr = Arc::as_ptr(&colours.borrow()) as usize;
         let colour_of = colour_fn(Arc::clone(&colours.borrow()), cx.theme());
         let header = HeaderModel::prepare(&model, settings.default_source.as_deref(), &colour_of);
         let title = header::title_text(&model);
@@ -165,6 +214,13 @@ impl TimeseriesTile {
             &colour_of,
             settings.default_source.as_deref(),
         ));
+        let last_chart_key = Some(chart_key(
+            &model,
+            None,
+            settings.default_source.clone(),
+            theme_signature(cx.theme()),
+            colours_ptr,
+        ));
         TimeseriesTile {
             id,
             frame,
@@ -175,6 +231,7 @@ impl TimeseriesTile {
             result: None,
             chart,
             chart_version: 1,
+            last_chart_key,
             theme_key: None,
             tag: 0,
             acted: None,
@@ -288,9 +345,14 @@ impl TimeseriesTile {
         let Some(verb) = action.0.strip_prefix("timeseries::") else {
             return false;
         };
-        // A notice belongs to the LAST action: the next verb clears it
-        // before it can set one of its own.
-        self.notice = None;
+        // A notice belongs to the last action that ACTED (review round
+        // 1, MIN-3): the next handled verb clears it before it can set
+        // one of its own, but a verb this tile does NOT handle — every
+        // popup verb until Tasks 8–10, and anything unrecognised — must
+        // leave the text still on screen alone, or the state says
+        // "cleared" while the trader reads the old line. So it is taken
+        // here and put back on the two unhandled paths.
+        let previous = self.notice.take();
         let n = count.unwrap_or(1).max(1) as usize;
         // Task 8: a popup closes first unless the verb is its own.
         let (now, as_of) = self.now_and_as_of(cx);
@@ -337,9 +399,18 @@ impl TimeseriesTile {
             // Tasks 8–10; `false` until then.
             "add" | "expr" | "edit" | "list" | "range" | "list_down" | "list_up" | "list_close"
             | "commit" | "cancel" | "insert_up" | "insert_down" => {
-                return self.popup_verb(verb, n, window, cx);
+                let handled = self.popup_verb(verb, n, window, cx);
+                // `e` on a source slot sets its own; anything else did
+                // nothing and gives the standing notice back.
+                if !handled && self.notice.is_none() {
+                    self.notice = previous;
+                }
+                return handled;
             }
-            _ => return false,
+            _ => {
+                self.notice = previous;
+                return false;
+            }
         };
         if view_move {
             self.view_moved(changed, cx);
@@ -537,23 +608,37 @@ impl TimeseriesTile {
         Ok(removal.changed)
     }
 
-    /// Re-prepare everything painted from the model: the header, the
-    /// title, and the chart model. The ONE door, so the colour wheel is
+    /// Re-prepare everything painted from the model: the header and the
+    /// title always, the chart model only when [`ChartKey`] says one of
+    /// its own inputs moved. The ONE door, so the colour wheel is
     /// derived once per change and the chips agree with the lines by
     /// construction rather than by two call sites keeping step.
     ///
     /// The chart model is immutable input the element caches against, so
     /// it is built here and never in `render`; every field the element's
     /// caches do not key on (`axis_mode`, `step_us`) rides on `version`,
-    /// which is why the bump comes first.
+    /// which is why an actual rebuild bumps it — and why a skipped one
+    /// must not (a bump with no new model is a cache flush for nothing).
     fn rebuild_chrome(&mut self, cx: &mut Context<Self>) {
-        self.chart_version += 1;
         let default_source = cx
             .try_global::<SeriesSettings>()
             .and_then(|s| s.default_source.clone());
+        let theme = theme_signature(cx.theme());
+        let colours_ptr = Arc::as_ptr(&self.colours.borrow()) as usize;
         let colour_of = colour_fn(Arc::clone(&self.colours.borrow()), cx.theme());
         self.header = HeaderModel::prepare(&self.model, default_source.as_deref(), &colour_of);
         self.title = header::title_text(&self.model);
+        let key = chart_key(
+            &self.model,
+            self.result.as_ref(),
+            default_source.clone(),
+            theme,
+            colours_ptr,
+        );
+        if self.last_chart_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.chart_version += 1;
         let empty = SeriesResult::default();
         let result = self.result.as_deref().unwrap_or(&empty);
         let chart = chart::build(
@@ -565,6 +650,7 @@ impl TimeseriesTile {
             default_source.as_deref(),
         );
         self.chart = Arc::new(chart);
+        self.last_chart_key = Some(key);
     }
 
     fn now_and_as_of(&self, cx: &App) -> (DateTime<Utc>, AsOf) {
@@ -605,8 +691,20 @@ impl Render for TimeseriesTile {
         // rule): anything less and a theme that moves only an anchor
         // paints stale. On the steady path this is 28 `Hsla` copies and
         // 28 compares, and nothing else.
+        //
+        // The named colours are checked beside it, against the pointer
+        // the last chart model was built from: `TimeseriesFactory::
+        // set_colours` swaps a fresh `Arc` into the cell this tile
+        // shares, and nothing else would ever tell an OPEN tile that a
+        // reloaded `colours.toml` redefined a name it paints (review
+        // round 1, MIN-4).
         let signature = theme_signature(cx.theme());
-        if self.theme_key != Some(signature) {
+        let colours_ptr = Arc::as_ptr(&self.colours.borrow()) as usize;
+        let colours_moved = self
+            .last_chart_key
+            .as_ref()
+            .is_none_or(|k| k.colours != colours_ptr);
+        if self.theme_key != Some(signature) || colours_moved {
             self.theme_key = Some(signature);
             self.rebuild_chrome(cx);
         }
@@ -646,6 +744,41 @@ impl Render for TimeseriesTile {
             .child(body)
             .child(header::render_footer(self.footer.clone(), theme))
         // Tasks 8–10 add the popup layer here.
+    }
+}
+
+/// Build a [`ChartKey`] from everything `chart::build` will read. A free
+/// function, not a method, so the constructor — which has no `Self` yet
+/// — records the same key the first model was built from.
+fn chart_key(
+    model: &Model,
+    result: Option<&Arc<SeriesResult>>,
+    default_source: Option<String>,
+    theme: [Hsla; 28],
+    colours: usize,
+) -> ChartKey {
+    ChartKey {
+        result: result.map(|r| Arc::as_ptr(r) as usize).unwrap_or(0),
+        slots: model
+            .slots()
+            .iter()
+            .map(|s| {
+                (
+                    s.number,
+                    s.colour.clone(),
+                    s.axis,
+                    s.visible,
+                    s.text.clone(),
+                )
+            })
+            .collect(),
+        frequency: model.frequency(),
+        axis_mode: model.axis_mode(),
+        split: model.split().to_bits(),
+        density: model.density().is_some(),
+        default_source,
+        theme,
+        colours,
     }
 }
 
@@ -770,6 +903,18 @@ mod tests {
         }
     }
 
+    /// A `colours.toml` holding one name, `spx`, at `degrees` on the
+    /// wheel — what `:colour s1 spx` resolves against, and what a
+    /// reload redefines.
+    fn named_colours(degrees: f32) -> NamedColours {
+        let mut c = NamedColours::default();
+        c.insert(
+            "spx".to_string(),
+            geode_core::colour::Definition::hue(degrees, geode_core::colour::Tone::Normal),
+        );
+        c
+    }
+
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
         open_full(cx, None, Some("demo_kdb"))
     }
@@ -811,7 +956,7 @@ mod tests {
             })
         });
         let (data, rx) = DataHandle::for_tests();
-        let factory = Rc::new(TimeseriesFactory::new(data, NamedColours::default()));
+        let factory = Rc::new(TimeseriesFactory::new(data, named_colours(0.0)));
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
         let window = cx
             .update(|cx| {
@@ -927,6 +1072,16 @@ mod tests {
         }
         fn factory_handle(&self) -> Box<dyn ModuleFactory> {
             Box::new(Handle(self.factory.clone()))
+        }
+        /// The first chip's resolved swatch — what a colour reload has
+        /// to move.
+        fn swatch(&self, vcx: &gpui::VisualTestContext) -> gpui::Hsla {
+            self.tile.read_with(vcx, |t, _| t.header().chips[0].swatch)
+        }
+        fn draw(&self, vcx: &mut gpui::VisualTestContext) {
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
         }
     }
 
@@ -1120,6 +1275,70 @@ mod tests {
         h.command(&mut vcx, "add SPX.close").unwrap();
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
+        // A verb this tile does not handle leaves the notice on screen:
+        // clearing it in state while the old text is still painted is a
+        // lie (review round 1, MIN-3).
+        h.dispatch(&mut vcx, "add", None);
+        h.dispatch(&mut vcx, "list", None);
+        assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
+        // A handled one takes it away and speaks for itself.
+        h.dispatch(&mut vcx, "next", None);
+        assert_eq!(h.notice(&vcx), None);
+    }
+
+    #[gpui::test]
+    fn only_a_change_the_chart_model_reads_rebuilds_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.command(&mut vcx, "add VIX").unwrap();
+        let v = h.chart(&vcx).version;
+        // A cursor move, a chip click, a visibility change and a
+        // finished fetch all touch the HEADER and nothing the chart
+        // model carries — rebuilding one would clone every slot's
+        // points and flush `geode-chart`'s path cache for an identical
+        // model (review round 1, I-2).
+        h.dispatch(&mut vcx, "next", None);
+        h.dispatch(&mut vcx, "prev", None);
+        assert_eq!(h.chart(&vcx).version, v, "a cursor move");
+        vcx.update(|_, cx| h.content.set_visible(true, cx));
+        assert_eq!(h.chart(&vcx).version, v, "a visibility change");
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Err("no route".into()));
+        assert_eq!(h.chart(&vcx).version, v, "a fetch failure");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.header().chips[0].tone),
+            geode_shell::shell::chip::Tone::Danger,
+            "the header still moved"
+        );
+        // Everything the chart model DOES read still bumps it.
+        h.dispatch(&mut vcx, "axis_next", None);
+        let after_axis = h.chart(&vcx).version;
+        assert!(after_axis > v, "an axis change");
+        h.dispatch(&mut vcx, "colour", None);
+        assert!(h.chart(&vcx).version > after_axis, "a colour change");
+    }
+
+    #[gpui::test]
+    fn a_reloaded_colours_doc_reaches_an_open_tile(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.command(&mut vcx, "colour s1 spx").unwrap();
+        h.draw(&mut vcx);
+        let before = h.swatch(&vcx);
+        let version = h.chart(&vcx).version;
+        // The factory's own door, as the app's bridge calls it on a
+        // `ConfigReloaded`: it swaps a fresh `Arc` into the cell every
+        // open tile shares, and the next frame is what notices.
+        h.factory.set_colours(named_colours(180.0));
+        h.draw(&mut vcx);
+        assert_ne!(h.swatch(&vcx), before, "the chip's swatch follows");
+        assert!(
+            h.chart(&vcx).version > version,
+            "and so does the line's colour, which lives in the chart model"
+        );
+        // The frame after that changes nothing.
+        let settled = h.chart(&vcx).version;
+        h.draw(&mut vcx);
+        assert_eq!(h.chart(&vcx).version, settled);
     }
 
     #[gpui::test]

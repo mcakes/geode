@@ -213,13 +213,19 @@ pub(crate) fn render_header(
 
     // 3. One chip per slot.
     for (index, chip) in h.chips.iter().enumerate() {
-        // An unfilled chip is a BARE control: `for_chip` reads the fill
-        // to pick the hover token, so clearing it here is what makes a
-        // quiet chip's hover borrow `accent` rather than the secondary
-        // button's fill.
+        // An unfilled chip is a BARE control, and it drops the TEXT
+        // with the fill: `for_chip` reads the fill to pick the hover
+        // token, so clearing it is what makes a quiet chip's hover
+        // borrow `accent` rather than the secondary button's; and
+        // `Tone::Neutral`'s own 3:1 guarantee is measured over its fill,
+        // so `secondary_foreground` painted straight on the tile
+        // background is covered by no sweep at all (review round 1,
+        // I-1). `muted_foreground` on `background` is the bare pairing
+        // `control::shipped()` already carries.
         let mut paint = chip_paint(theme, chip.tone);
         if !chip.filled {
             paint.fill = None;
+            paint.text = theme.muted_foreground;
         }
         let states = control::for_chip(theme, &paint, theme.background);
         let number = chip.number;
