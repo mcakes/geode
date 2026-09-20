@@ -12172,10 +12172,10 @@ run_mutation "mdheader: a session written with key still restores" \
 run_mutation "mddraft: an attribute edit counts in the draft" \
   crates/geode-marketdata/src/core/draft.rs \
   '    pub fn is_empty(&self) -> bool {
-        self.edits.is_empty() && self.attrs.is_empty()
+        self.edits.is_empty() && self.attrs.is_empty() && self.rows.is_empty()
     }' \
   '    pub fn is_empty(&self) -> bool {
-        self.edits.is_empty()
+        self.edits.is_empty() && self.rows.is_empty()
     }' \
   geode-marketdata \
   an_attribute_edit_is_part_of_the_same_draft
@@ -13647,6 +13647,34 @@ run_mutation "tile: i on a choice cell opens the popup" \
                     return;
                 }' \
   geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
+
+# ---- Draft row insert/delete (spec §5.1, §5.4, 2026-09-19) ---------------
+
+# `rebase`'s Inserted arm drops a row whose label the newer document now
+# carries — upstream got there first. Mutated to never see the conflict,
+# the draft's own insert survives alongside the real row it collides
+# with, unreported.
+run_mutation "draft: an inserted row the document now carries is dropped on rebase" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                RowEdit::Inserted { after, cells } => {
+                    if rows.contains_key(label.as_str()) {
+                        dropped.push((label, "row (the document now carries it)".to_string()));
+                    } else {' \
+  '                RowEdit::Inserted { after, cells } => {
+                    if false {
+                        dropped.push((label, "row (the document now carries it)".to_string()));
+                    } else {' \
+  geode-marketdata rebase_carries_rows_by_label
+
+# `mint_label` refuses a label already in `rows`, not just one the
+# caller's own `taken` closure names. Mutated to drop that lookup, a
+# second insert on a `Minted` axis re-mints the very label the first
+# insert already holds.
+run_mutation "draft: mint_label never reuses a label" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            if !taken(&candidate) && !self.rows.contains_key(&candidate) {' \
+  '            if !taken(&candidate) {' \
+  geode-marketdata mint_label_takes_the_smallest_unused_number
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
