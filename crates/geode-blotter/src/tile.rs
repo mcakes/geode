@@ -25,6 +25,7 @@ use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::chip::{self, Tone};
+use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
@@ -1369,6 +1370,9 @@ impl gpui::Render for BlotterTile {
                     .rounded(theme.radius_tokens().sm)
                     .debug_selector(|| format!("stack-marker-{}", self.tile.0))
                     .child(stack.text.clone())
+                    // A clickable chip on the tile surface: pointer states through
+                    // the control door (`control::for_chip`), hover and pressed.
+                    .pointer_states(control::for_chip(theme, &neutral_chip, theme.background))
                     .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                         cx.stop_propagation();
                         open.open_list(window, cx);

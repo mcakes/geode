@@ -28,6 +28,7 @@ use gpui_component::status_bar::StatusBar;
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, progress::Progress};
 
 use super::chip;
+use super::control::{self, PointerStates as _};
 use super::scale;
 use crate::diagnostics::IngestActivity;
 use crate::fonts;
@@ -172,9 +173,20 @@ pub fn status_bar(
     }
     if let Some(message) = diagnostics_summary {
         bar = bar.left(
+            // The one clickable segment on the bar takes pointer states
+            // (`control::PointerStates`, a bare glyph's) with a little
+            // horizontal padding so the hover box has a shape.
             div()
                 .id("diagnostics-summary")
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
                 .text_color(theme.warning)
+                .pointer_states(control::paint(
+                    theme,
+                    control::Rest::Bare,
+                    theme.status_bar,
+                    theme.warning,
+                ))
                 .debug_selector(|| "diagnostics-summary".to_string())
                 .child(message.to_string())
                 .tooltip(crate::tips::tip(

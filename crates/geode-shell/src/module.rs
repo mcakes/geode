@@ -14,6 +14,7 @@ use crate::diagnostics::Diagnostics;
 use crate::frame::Frame;
 use crate::keymap::KeyContext;
 use crate::keymap::fragments;
+use crate::shell::control::{self, PointerStates as _};
 use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
 use geode_core::query::{QueryKey, QueryOutcome};
@@ -373,6 +374,9 @@ pub mod placeholder {
                         .font_family(fonts::MONO)
                         .debug_selector(|| format!("stack-marker-{}", self.tile.0))
                         .child(stack.text.clone())
+                        // A clickable chip on the tile surface: pointer states through
+                        // the control door (`control::for_chip`), hover and pressed.
+                        .pointer_states(control::for_chip(theme, &neutral_chip, theme.background))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             cx.stop_propagation();
                             open.open_list(window, cx);

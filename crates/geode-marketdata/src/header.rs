@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use geode_shell::fonts;
 use geode_shell::module::StackHandle;
 use geode_shell::shell::chip;
+use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tips;
 use gpui::prelude::*;
@@ -330,6 +331,9 @@ pub(crate) fn render(
                 .font_family(fonts::MONO)
                 .debug_selector(move || format!("stack-marker-{tile_id}"))
                 .child(stack.text.clone())
+                // A clickable chip on the tile surface: pointer states through
+                // the control door (`control::for_chip`), hover and pressed.
+                .pointer_states(control::for_chip(theme, &neutral_chip, theme.background))
                 .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                     cx.stop_propagation();
                     open.open_list(window, cx);
@@ -524,6 +528,20 @@ pub(crate) fn render(
             .border_color(theme.border)
             .when(menu_open, |d| d.bg(theme.secondary))
             .text_color(muted)
+            // A bare control's pointer states (`control::PointerStates`)
+            // while CLOSED; open, the button keeps its persistent fill
+            // above and answers the pointer with nothing, as the guide
+            // asks of a button that owns a popup (and as gpui-component's
+            // own `Button` does while `selected`). The header sits on the
+            // tile surface, the window background.
+            .when(!menu_open, |d| {
+                d.pointer_states(control::paint(
+                    theme,
+                    control::Rest::Bare,
+                    theme.background,
+                    muted,
+                ))
+            })
             .child("⋯")
             .debug_selector(move || format!("marketdata-menu-button-{tile_id}"))
             .capture_any_mouse_down({

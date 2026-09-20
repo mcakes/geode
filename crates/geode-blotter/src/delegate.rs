@@ -18,6 +18,7 @@ use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{LineNumbers, gutter_digits, gutter_number};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
+use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, SharedString, Stateful,
@@ -130,6 +131,15 @@ pub struct BlotterDelegate {
     /// which is what keeps the lazy read: a blotter naming no colour
     /// never builds it at all. See [`BlotterDelegate::ensure_theme_inputs`].
     theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
+    /// The chevron's pointer states, memoised behind every colour the
+    /// derivation reads (`control::ControlInputs` is that key by
+    /// construction). `control_paint` costs three `Hsla -> Rgb`
+    /// conversions and five contrast checks when nothing needs moving,
+    /// and an OKLab bisection when a text does — on 19 bundled themes it
+    /// does — so per visible row per frame it would break the steady
+    /// path `ensure_theme_inputs` documents. See
+    /// [`BlotterDelegate::chevron_states`].
+    chevron: Option<(control::ControlInputs, control::ControlPaint)>,
 }
 
 /// The name column `col_ix` carries a `Colour::Named` of, if it does.
@@ -178,6 +188,7 @@ impl BlotterDelegate {
             colours: Arc::new(NamedColours::default()),
             colour_cache: ColourCache::new(),
             theme_inputs: None,
+            chevron: None,
         }
     }
 
@@ -258,6 +269,28 @@ impl BlotterDelegate {
                     anchors_from_theme(theme),
                     tokens_from_theme(theme),
                 ));
+            }
+        }
+    }
+
+    /// The chevron's pointer states for `theme`, re-derived only when one
+    /// of the colours they read has moved: the steady path is one
+    /// `ControlInputs` build (seven `Hsla` copies) and one compare per
+    /// chevron per frame. A blotter cell sits on `table`, the component's
+    /// row fill, which is the surface the text is floored against.
+    fn chevron_states(&mut self, theme: &Theme) -> control::ControlPaint {
+        let inputs = control::ControlInputs::new(
+            theme,
+            control::Rest::Bare,
+            theme.table,
+            theme.muted_foreground,
+        );
+        match &self.chevron {
+            Some((have, paint)) if *have == inputs => *paint,
+            _ => {
+                let paint = control::control_paint(&inputs);
+                self.chevron = Some((inputs, paint));
+                paint
             }
         }
     }
@@ -942,6 +975,7 @@ impl TableDelegate for BlotterDelegate {
                 .copied()
                 .unwrap_or("·");
             let indent = px(depth as f32 * INDENT);
+            let chevron_states = self.chevron_states(theme);
             // The line-number gutter (`[ui] line_numbers`, user ruling
             // 2026-09-11) sits at the cell's leading edge, before the
             // indent, right-aligned in a slot sized to the row total's
@@ -993,7 +1027,13 @@ impl TableDelegate for BlotterDelegate {
                 div()
                     .id(("chevron", row_ix))
                     .w(px(14.))
+                    .rounded(theme.radius_tokens().sm)
                     .text_color(theme.muted_foreground)
+                    // The one clickable glyph in a blotter cell takes a
+                    // bare control's pointer states (the design guide's
+                    // hover and pressed rows; cursor stays the arrow),
+                    // memoised per theme, not derived per row.
+                    .pointer_states(chevron_states)
                     .debug_selector(|| format!("blotter-chevron-{row_ix}"))
                     .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
                         cx.stop_propagation();

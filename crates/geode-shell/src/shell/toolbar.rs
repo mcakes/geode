@@ -31,6 +31,7 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
 use super::chip;
+use super::control::{self, PointerStates as _};
 use super::scale;
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
@@ -90,7 +91,9 @@ fn icon_chip(
         .rounded(radius)
         .bg(bg)
         .text_color(fg)
-        .child(icon.text_color(fg))
+        // The icon inherits `fg` from the box rather than pinning it, so a
+        // hover recolours glyph and box together (`control::PointerStates`).
+        .child(icon)
         .debug_selector(selector)
 }
 
@@ -109,6 +112,17 @@ pub fn toolbar(
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
+    // Pointer states for the chips that are clickable (the selection
+    // chips, `+`, save) and for the bare `×` glyph; the text, expression
+    // and contradiction chips have no listener and take none — a hover
+    // fill promises a click (design guide, interaction states).
+    let chip_states = control::paint(
+        theme,
+        control::Rest::Filled(chip_bg),
+        theme.title_bar,
+        chip_fg,
+    );
+    let glyph_states = control::paint(theme, control::Rest::Bare, theme.title_bar, chip_fg);
 
     let mut chips_row = h_flex().gap_1().items_center();
     for (i, c) in model.chips.iter().enumerate() {
@@ -155,6 +169,7 @@ pub fn toolbar(
                         Some("frame::pick"),
                         Some(SharedString::new_static("click: pick values")),
                     ))
+                    .pointer_states(chip_states)
                     .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                         on_open(&open_column, window, cx)
                     }),
@@ -165,8 +180,11 @@ pub fn toolbar(
                             SharedString::new_static("scope-chip-close"),
                             i as u64,
                         ))
-                        .child(Icon::new(IconName::Close).text_color(chip_fg))
+                        .rounded(theme.radius_tokens().sm)
+                        .text_color(chip_fg)
+                        .child(Icon::new(IconName::Close))
                         .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                        .pointer_states(glyph_states)
                         .tooltip(tips::tip_with(
                             c.close_selector.clone(),
                             c.close_title.clone(),
@@ -234,6 +252,7 @@ pub fn toolbar(
             Some("frame::pick"),
             None,
         ))
+        .pointer_states(chip_states)
         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
             on_pick(window, cx)
         }),
@@ -264,6 +283,7 @@ pub fn toolbar(
                 Some("scope::save_current"),
                 None,
             ))
+            .pointer_states(chip_states)
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 on_save(window, cx)
             }),

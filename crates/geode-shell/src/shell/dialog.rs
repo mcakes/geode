@@ -70,6 +70,7 @@ use gpui_component::{
 };
 
 use super::ShellView;
+use super::control::{ControlPaint, PointerStates as _};
 use super::scale;
 use crate::dialogmode::{self, DialogMode, FocusTarget};
 use crate::footer::{self, Hint};
@@ -1415,27 +1416,40 @@ pub type StepHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 /// `stop_propagation` so the row's own select does not also run; the
 /// handler itself ends in [`sync_dialog_text`] at the caller, since it
 /// mutates the dialog off the key path (§17.1 rule 3).
+///
+/// A steppable chip is a control and takes `states`
+/// (`control::PointerStates`: hover and pressed fills); its `selector`
+/// doubles as its element id, which the pressed state needs. The inert
+/// form takes neither — a hover fill promises a click.
 pub(crate) fn value_chip(
     text: String,
     selector: String,
     fg: Hsla,
     bg: Hsla,
     radius: Pixels,
+    states: ControlPaint,
     on_step: Option<StepHandler>,
 ) -> AnyElement {
+    let selector: SharedString = selector.into();
     let base = div()
         .font_family(crate::fonts::MONO)
         .text_sm()
-        .flex_shrink_0()
-        .debug_selector(move || selector.clone());
+        .flex_shrink_0();
     match on_step {
-        None => base.text_color(fg).child(text).into_any_element(),
+        None => base
+            .debug_selector(move || selector.to_string())
+            .text_color(fg)
+            .child(text)
+            .into_any_element(),
         Some(on_step) => base
+            .id(selector.clone())
+            .debug_selector(move || selector.to_string())
             .px_1p5()
             .py_0p5()
             .rounded(radius)
             .bg(bg)
             .text_color(fg)
+            .pointer_states(states)
             .child(text)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 cx.stop_propagation();
