@@ -537,3 +537,54 @@ fn reopening_the_dialog_returns_the_calendar_to_the_day_grid(cx: &mut gpui::Test
         "a reopen must paint the day grid, not the picker it was closed from"
     );
 }
+
+/// Toolbar restyle (2026-09-19, option A): the AS OF chip leads the bar
+/// as its own segment — the warning tint is on the chip alone, not
+/// across the whole readout — with a hairline after it, and clicking it
+/// opens the as-of selector, the mouse form of `frame::as_of`.
+#[gpui::test]
+fn the_as_of_chip_leads_the_bar_and_opens_the_selector(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let at = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .single()
+        .expect("noon exists in every zone")
+        .to_utc();
+    frame.update(&mut vcx, |f, cx| {
+        if f.set_as_of(AsOf::At(at)) {
+            cx.notify();
+        }
+    });
+    vcx.run_until_parked();
+
+    let badge = vcx.debug_bounds("scope-asof").expect("badge painted");
+    let divider = vcx
+        .debug_bounds("scope-divider-asof")
+        .expect("the as-of segment's divider is painted");
+    let readout = vcx.debug_bounds("scope-grouping").expect("readout painted");
+    assert!(
+        badge.right() <= divider.left() && divider.right() <= readout.left(),
+        "AS OF {badge:?} | divider {divider:?} | readout {readout:?}"
+    );
+
+    vcx.simulate_click(badge.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.as_of_dialog.is_some()),
+        "the chip opens the as-of selector"
+    );
+    // A mouse-opened dialog's test types after the click (CLAUDE.md's
+    // `open_shell_dialog` gotcha): the `+` chip's dialog once opened
+    // deaf while its test asserted only `Some`.
+    vcx.simulate_input("12");
+    let typed = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(
+        typed, "12",
+        "the selector's field takes the keys after the click"
+    );
+}

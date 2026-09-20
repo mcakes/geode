@@ -1945,6 +1945,254 @@ git commit -m "shell: Delivery::Price routed by key; every occupant names it (li
 
 ---
 
+### Task 7b: `MarketOverrides` and `Pricer::set_overrides`, batch-scoped in the worker
+
+Added mid-execution (user ruling 2026-09-19, spec ruling 1 amended): the real library takes a `PricingDataSource` instance the app may override (spot levels now, CVI and dividend documents later), and overrides are STATEFUL on the library's instance: `set_overrides` then `price`. The worker makes the pair batch-scoped.
+
+**Files:**
+- Modify: `crates/geode-core/src/pricing.rs` (`MarketOverrides`, the trait method, `PriceParams.overrides`)
+- Modify: `crates/geode-pricing/src/lib.rs` (`MockPricer` holds the last overrides; the reference-spot rule; the refusal)
+- Modify: `crates/geode-data/src/pricing/worker.rs` (`run`: set once per batch under the boundary; whole-batch failure; `FakePricer` records overrides; `params` helper gains the field)
+- Modify: `crates/geode-data/src/service.rs` (only if a `PriceParams` literal exists outside the `params` helper — the refusal answer in `DataService::price` builds a `PriceOutcome`, not params, so probably nothing)
+- Test: all three files' `mod tests`
+
+**Interfaces:**
+- Consumes: Task 1's vocabulary, Task 2's mock, Task 5's worker.
+- Produces (in `geode_core::pricing`):
+```rust
+/// What the app overrides in the library's `PricingDataSource` (spec ruling 1):
+/// spot levels by underlying now; CVI and dividend documents are later fields.
+/// Plain data — the library interprets it, the app never does.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MarketOverrides { pub spot: BTreeMap<String, f64> }
+pub trait Pricer: Send + Sync {
+    fn name(&self) -> &str;
+    /// Replace the overridable market data for every `price` call that follows,
+    /// until the next call here. Stateful on purpose (spec ruling 1); the worker
+    /// calls it once per batch, so a batch's lines all see the same overrides and
+    /// no other batch's.
+    fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError>;
+    fn price(&self, req: &PriceRequest) -> Result<PriceResult, PricingError>;
+}
+pub struct PriceParams { pub key: QueryKey, pub tag: u64, pub submitted: Instant, pub overrides: MarketOverrides, pub lines: Vec<PriceLine> }
+```
+- The worker rule: before a batch's first line, `set_overrides(&params.overrides)` runs under `catch_unwind(AssertUnwindSafe(|| contained(|| …)))`; an `Err(e)` or a panic fails EVERY line of the batch with `format!("overrides refused: {reason}")` (the panic message for a panic) and prices none; the outcome is still emitted with every line's `(id, revision, Err)`. With `pricer: None` the missing-reason rule applies as before (no `set_overrides` call).
+- The mock: `MockPricer { delay, overrides: Mutex<MarketOverrides> }`; `set_overrides` refuses any spot that is not a positive finite number with `PricingError("spot override must be a positive finite number")` and otherwise stores a clone; `price` adds `delta * (override - reference)` to the price when `overrides.spot` has the line's underlying, where `reference` is the absolute strike or `100.0` for a percent strike.
+
+- [ ] **Step 1: Write the failing tests**
+
+`crates/geode-core/src/pricing.rs` `mod tests`, add:
+
+```rust
+    #[test]
+    fn overrides_default_to_none_and_compare_by_value() {
+        let a = MarketOverrides::default();
+        assert!(a.spot.is_empty());
+        let mut b = MarketOverrides::default();
+        b.spot.insert("SPX".into(), 5000.0);
+        assert_ne!(a, b);
+        assert_eq!(b.clone(), b);
+    }
+```
+
+`crates/geode-pricing/src/lib.rs` `mod tests`, add (reuse the file's `vanilla`/`req` helpers):
+
+```rust
+    fn overrides(pairs: &[(&str, f64)]) -> MarketOverrides {
+        let mut o = MarketOverrides::default();
+        for (u, s) in pairs {
+            o.spot.insert(u.to_string(), *s);
+        }
+        o
+    }
+
+    #[test]
+    fn a_spot_override_moves_the_price_in_deltas_sign_from_the_reference_spot() {
+        let p = MockPricer::new();
+        for kind in [OptionKind::Call, OptionKind::Put] {
+            let r = req(vanilla("SPX", kind, 5000.0), 0.0, 0.0);
+            p.set_overrides(&MarketOverrides::default()).unwrap();
+            let base = p.price(&r).unwrap();
+            p.set_overrides(&overrides(&[("SPX", 5200.0)])).unwrap();
+            let up = p.price(&r).unwrap();
+            assert_eq!((up.price - base.price).signum(), base.delta.signum(), "{kind:?}");
+            p.set_overrides(&overrides(&[("SPX", 4800.0)])).unwrap();
+            let down = p.price(&r).unwrap();
+            assert_eq!((down.price - base.price).signum(), -base.delta.signum(), "{kind:?}");
+            // An override for another underlying changes nothing.
+            p.set_overrides(&overrides(&[("NDX", 20000.0)])).unwrap();
+            assert_eq!(p.price(&r).unwrap(), base);
+        }
+    }
+
+    #[test]
+    fn a_percent_strike_uses_one_hundred_as_its_reference_spot() {
+        let p = MockPricer::new();
+        let r = PriceRequest {
+            instrument: Instrument::Vanilla(Vanilla {
+                underlying: "SPX".into(),
+                expiry: Expiry::Tenor("3m".into()),
+                strike: Strike::Percent(95.0),
+                kind: OptionKind::Call,
+            }),
+            shifts: Shifts::default(),
+        };
+        p.set_overrides(&MarketOverrides::default()).unwrap();
+        let base = p.price(&r).unwrap();
+        p.set_overrides(&overrides(&[("SPX", 100.0)])).unwrap();
+        assert_eq!(p.price(&r).unwrap(), base, "an override AT the reference moves nothing");
+        p.set_overrides(&overrides(&[("SPX", 101.0)])).unwrap();
+        assert!(p.price(&r).unwrap().price > base.price);
+    }
+
+    #[test]
+    fn a_non_positive_or_non_finite_spot_override_is_refused_and_the_previous_one_stays() {
+        let p = MockPricer::new();
+        let r = req(vanilla("SPX", OptionKind::Call, 5000.0), 0.0, 0.0);
+        p.set_overrides(&overrides(&[("SPX", 5200.0)])).unwrap();
+        let with = p.price(&r).unwrap();
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let err = p.set_overrides(&overrides(&[("SPX", bad)])).unwrap_err();
+            assert_eq!(err.0, "spot override must be a positive finite number");
+        }
+        assert_eq!(p.price(&r).unwrap(), with, "a refused set leaves the previous overrides in place");
+    }
+```
+
+`crates/geode-data/src/pricing/worker.rs` `pub(crate) mod tests`: extend `FakePricer` with `pub(crate) overrides_seen: Arc<Mutex<Vec<MarketOverrides>>>` (every existing constructor site in this file and in `service.rs` gains `overrides_seen: Default::default()`), implement `set_overrides` on it to push a clone and refuse when the map contains the key `"REFUSE"` (`Err(PricingError("refused overrides".into()))`); `params` gains `overrides: MarketOverrides::default()`; add a `params_with_overrides(key, tag, underlyings, overrides)` helper; then add:
+
+```rust
+    #[test]
+    fn overrides_are_set_once_per_batch_before_its_first_line() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = channel();
+        let sink: PriceSink = Arc::new(move |o| tx.send(o).is_ok());
+        let w = PricingWorker::spawn(
+            PricerConfig::with(Arc::new(FakePricer { asked: asked.clone(), delay: Duration::ZERO, overrides_seen: seen.clone() })),
+            sink,
+        );
+        let mut o = MarketOverrides::default();
+        o.spot.insert("SPX".into(), 5000.0);
+        assert!(w.request(params_with_overrides(1, 1, &["SPX", "NDX"], o.clone())));
+        assert!(w.request(params_with_overrides(2, 1, &["SPX"], MarketOverrides::default())));
+        next(&rx);
+        next(&rx);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "once per batch, not per line: {seen:?}");
+        assert_eq!(seen[0], o);
+        assert_eq!(seen[1], MarketOverrides::default());
+        w.shutdown();
+    }
+
+    #[test]
+    fn refused_overrides_fail_every_line_of_the_batch_and_price_none() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = channel();
+        let sink: PriceSink = Arc::new(move |o| tx.send(o).is_ok());
+        let w = PricingWorker::spawn(
+            PricerConfig::with(Arc::new(FakePricer { asked: asked.clone(), delay: Duration::ZERO, overrides_seen: Default::default() })),
+            sink,
+        );
+        let mut bad = MarketOverrides::default();
+        bad.spot.insert("REFUSE".into(), 1.0);
+        assert!(w.request(params_with_overrides(3, 1, &["SPX", "NDX"], bad)));
+        let o = next(&rx);
+        assert_eq!(o.results.len(), 2);
+        for (_, _, r) in &o.results {
+            assert_eq!(r.as_ref().unwrap_err(), "overrides refused: refused overrides");
+        }
+        assert!(asked.lock().unwrap().is_empty(), "no line was priced against the wrong data source");
+        assert!(w.request(params(3, 2, &["SPX"])), "the worker is still alive");
+        assert!(next(&rx).results[0].2.is_ok());
+        w.shutdown();
+    }
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `cargo test -p geode-core pricing:: && cargo test -p geode-pricing && cargo test -p geode-data pricing::`
+Expected: compile errors — `MarketOverrides`, `set_overrides`, `overrides` field.
+
+- [ ] **Step 3: Implement**
+
+`geode-core/src/pricing.rs`: add `use std::collections::BTreeMap;`, the `MarketOverrides` struct and the trait method as in **Interfaces**, and `pub overrides: MarketOverrides,` on `PriceParams` between `submitted` and `lines`, with the doc line "The sheet's overrides for this batch; the worker sets them once before the first line (spec §5.3)."
+
+`geode-pricing/src/lib.rs`:
+```rust
+pub struct MockPricer {
+    delay: Duration,
+    /// The last `set_overrides`, as the real library's `PricingDataSource` would hold it.
+    overrides: Mutex<MarketOverrides>,
+}
+```
+(`new`/`with_delay` initialise it to `Mutex::new(MarketOverrides::default())`; drop `#[derive(Clone)]` if `Mutex` refuses it, or implement `Clone` by hand cloning the inner value — `Debug` stays derived.)
+```rust
+    fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError> {
+        if overrides.spot.values().any(|s| !(s.is_finite() && *s > 0.0)) {
+            return Err(PricingError("spot override must be a positive finite number".to_string()));
+        }
+        *self.overrides.lock().unwrap_or_else(|e| e.into_inner()) = overrides.clone();
+        Ok(())
+    }
+```
+and in `price`, after `price` is computed:
+```rust
+        // A spot override moves the price from the mock's reference spot —
+        // the absolute strike, or 100 for a percent strike — in delta's
+        // sign, so a higher spot raises a call and lowers a put. Not a
+        // model; plausible motion for a trader typing `:spot`.
+        let overrides = self.overrides.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(spot) = overrides.spot.get(req.instrument.underlying()) {
+            let reference = match req.instrument.strike() {
+                Strike::Absolute(k) => k,
+                Strike::Percent(_) => 100.0,
+            };
+            price += delta * (spot - reference);
+        }
+```
+`Instrument::strike(&self) -> Strike` does not exist yet: add it to `geode_core::pricing::Instrument` beside `underlying`/`kind` (`self.vanilla().strike`, `Strike` is `Copy`).
+
+`geode-data/src/pricing/worker.rs`, in `run`, after `let mut failures = 0usize;` and before the line loop:
+```rust
+        // Spec §5.3 "Overrides once per batch": a refusal or a panic here
+        // fails the whole batch — a line priced against the wrong data
+        // source is worse than no price.
+        let overrides_failed: Option<String> = match &config.pricer {
+            None => None,
+            Some(pricer) => {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    geode_core::panic::contained(|| pricer.set_overrides(&params.overrides))
+                }));
+                match outcome {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(format!("overrides refused: {}", e.0)),
+                    Err(payload) => {
+                        let message = panic_message(&payload);
+                        tracing::warn!(target: "geode::pricing", "set_overrides panicked for key {}: {message}", params.key.0);
+                        Some(format!("overrides refused: pricer panicked: {message}"))
+                    }
+                }
+            }
+        };
+```
+then at the top of the line loop body (after the cancel check), `if let Some(reason) = &overrides_failed { failures += 1; results.push((line.id, line.revision, Err(reason.clone()))); continue; }`. Factor the existing payload-downcast chain into `fn panic_message(payload: &Box<dyn Any + Send>) -> String` so both sites share it.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cargo test -p geode-core pricing:: && cargo test -p geode-pricing && cargo test -p geode-data && cargo test --workspace`
+Expected: green (the service and handle tests build `params` through the helper and need no change; if a `PriceParams` literal exists elsewhere the compiler names it — add `overrides: MarketOverrides::default()`).
+
+- [ ] **Step 5: Format, lint, commit**
+
+```bash
+cargo fmt && cargo clippy --workspace --all-targets -- -D warnings
+git add -A crates
+git commit -m "pricing: MarketOverrides and Pricer::set_overrides, batch-scoped in the worker (line-pricer ruling 1)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
 ### Task 8: `geode-app` wiring — the registry, `[pricing] adapter`, the `Price` arm, the local gate
 
 **Files:**

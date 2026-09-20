@@ -228,6 +228,17 @@ Rc<ScopeBarModel>` cached on `Frame::versions()` exactly as
 `Frame::readout` is today, and `readout` is deleted. `render` reads the
 cache; a cache hit is a refcount bump.
 
+**Amended 2026-09-19 (toolbar segments, user ruling on mockups):** the
+readout is three segments parted by inset hairlines — AS OF, grouping,
+scope. The warning tint is on the AS OF chip alone, no longer across
+the whole bar (the window stripe and status segment keep the state
+unmissable), and the chip is clickable (opens the as-of selector). The
+`text "…"` chip is gone: the field shows the frame's text while
+unfocused and clears it with its own clear glyph. A dimension chip's
+close glyph is inside the chip's frame. The `+` pick door and the save
+door are bare glyphs, not chips. `docs/phase-history.md` has the
+as-built detail.
+
 ### 3.2 The text field
 
 Typing sets `Frame.scope.text` on every keystroke. Each change bumps the

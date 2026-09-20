@@ -8,6 +8,7 @@ members = [
     "crates/geode-marketdata",
     "crates/geode-diagnostics",
     "crates/geode-documents",
+    "crates/geode-pricing",
     "crates/geode-demo-data",
     "crates/geode-app",
 ]
@@ -20,6 +21,7 @@ publish = false
 [workspace.dependencies]
 geode-core = { path = "crates/geode-core" }
 geode-shell = { path = "crates/geode-shell" }
+geode-pricing = { path = "crates/geode-pricing" }
 
 # Phase 4b: the tracing foundation (`geode_core::log`). Versions pinned to
 # what gpui already resolves `tracing`/`tracing-subscriber` to in

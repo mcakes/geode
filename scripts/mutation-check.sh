@@ -7592,6 +7592,50 @@ run_mutation "scope-save: the toolbar only paints the save chip while savable" \
   geode-shell \
   the_save_chip_only_paints_with_a_savable_scope_and_opens_naming
 
+# Toolbar restyle (2026-09-19): the `×` sits INSIDE the chip whose body
+# opens the picker. `occlude()` on the glyph is the ONE mechanism that
+# keeps a click on it from also reaching the body's mouse-down (gpui
+# gates every mouse listener on `hitbox.is_hovered`, and an occluding
+# child's hitbox hides the parent's from the hit test). There is
+# deliberately no `stop_propagation` beside it; without the occlude the
+# drop still happens AND the picker opens.
+run_mutation "toolbar: the × occludes the chip body so a drop does not open the picker" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .occlude()' \
+  '                    .flex_shrink_0()' \
+  geode-shell \
+  the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker
+
+# The AS OF chip is its own segment, parted from the grouping readout
+# by a hairline. Dropping the divider leaves the chip and the readout
+# in one run, the segmentation the restyle exists to paint.
+run_mutation "toolbar: the as-of segment paints its divider" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                .child(divider("scope-divider-asof", theme.title_bar_border))' \
+  '                .child(div())' \
+  geode-shell \
+  the_as_of_chip_leads_the_bar_and_opens_the_selector
+
+# The grouping readout reads "open" (pressed fill, chevron up) only
+# while the grouping picker is up. Pinning the branch to rest leaves a
+# trigger that never shows its popup is open.
+run_mutation "toolbar: the readout's open state follows the grouping picker" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .child(if grouping_open {' \
+  '        .child(if false {' \
+  geode-shell \
+  the_readout_paints_a_chevron_and_reads_open_while_the_picker_is_up
+
+# The text layer's only mouse drop is the field's own clear glyph (the
+# `text "…"` chip is gone). Without `cleanable` the click lands on the
+# field itself and the text stays.
+run_mutation "toolbar: the field's clear glyph drops the text layer" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                        .cleanable(true)' \
+  '                        .cleanable(false)' \
+  geode-shell \
+  the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it
+
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
 # to normal mode, which keeps the query applied) must still be emptied
@@ -8753,10 +8797,10 @@ run_mutation "schema/document: measure vocabulary is dropped per column" \
   crates/geode-core/src/schema/mod.rs \
   '    ds.columns.retain(|c| !foreign.contains(&c.name));
 
-    // A value is a number: it feeds the numeric cell of the document' \
+    // A value is a per-row fact that is not identity (spec 2026-09-19' \
   '    let _ = &foreign;
 
-    // A value is a number: it feeds the numeric cell of the document' \
+    // A value is a per-row fact that is not identity (spec 2026-09-19' \
   geode-core measure_vocabulary_on_a_document_dataset_is_refused_per_column
 
 run_mutation "schema/measures: document vocabulary is dropped per column" \
@@ -9141,15 +9185,15 @@ run_mutation "schema/document: an empty axes list drops the dataset" \
   '    if false {' \
   geode-core a_document_dataset_needs_a_non_empty_key_and_axes
 
-# Minor 8: the non-numeric value DROP, not just its diagnostic. A test
+# Minor 8: the unsupported value DROP, not just its diagnostic. A test
 # asserting on the diagnostic alone cannot see a column that was reported
-# and kept -- and a kept utf8 value reaches the DDL as a VARCHAR the
-# blotter would then read through `f64_at`.
-run_mutation "schema/document: a non-numeric value column is really dropped" \
+# and kept -- and a kept bool value reaches the DDL as a column type the
+# blotter's f64/i64/date/utf8 reads cannot handle.
+run_mutation "schema/document: an unsupported value column is really dropped" \
   crates/geode-core/src/schema/mod.rs \
-  '    ds.columns.retain(|c| !non_numeric.contains(&c.name));' \
-  '    let _ = &non_numeric;' \
-  geode-core a_non_numeric_value_column_is_dropped_and_the_dataset_kept
+  '    ds.columns.retain(|c| !non_value.contains(&c.name));' \
+  '    let _ = &non_value;' \
+  geode-core an_unsupported_value_column_is_dropped_and_the_dataset_kept
 
 # Minor 8: "at least one value", anchored on the RULE rather than on the
 # push guard the existing entry mutates. A document dataset with no value
@@ -9160,6 +9204,14 @@ run_mutation "schema/document: the at-least-one-value rule itself" \
   '    if !ds.columns.iter().any(|c| c.role == ColumnRole::Value) {' \
   '    if false {' \
   geode-core a_document_dataset_declares_at_least_one_value
+
+# Spec 2026-09-19 §4.1: a document value may be a date or text. Mutated
+# back to the numeric-only rule, a dividend's ex date is dropped at load.
+run_mutation "schema: a document value may be a date or text" \
+  crates/geode-core/src/schema/mod.rs \
+  '                    ColumnType::F64 | ColumnType::I64 | ColumnType::Date | ColumnType::Utf8' \
+  '                    ColumnType::F64 | ColumnType::I64' \
+  geode-core a_document_value_may_be_a_date_or_text
 
 # Minor 7: a declared-but-absent axis column is a message, not a panic --
 # and not a silently skipped check either. `continue` would let a document
@@ -9765,6 +9817,62 @@ run_mutation "cvi: write refuses a hole in the grid" \
   '        if false {' \
   geode-documents write_refuses_rows_that_are_not_a_full_grid
 
+# dividend: an upstream id beginning `new-` is refused on the way in
+# (design spec §5.3), because that prefix is reserved for a row a
+# trader's insert mints locally — accepting one silently would let a
+# fed id collide with a minted one, corrupting the draft's own
+# uniqueness invariant with no marker to show it.
+run_mutation "dividend: a new- id is refused" \
+  crates/geode-documents/src/dividend.rs \
+  '                                if trimmed.starts_with(MINTED_PREFIX) {' \
+  '                                if false {' \
+  geode-documents a_new_prefixed_id_is_refused
+
+# dividend: a `status` outside the closed four-word set is refused on
+# parse, not passed through as an uncategorised value the panel would
+# have nowhere honest to paint.
+run_mutation "dividend: an unknown status is refused" \
+  crates/geode-documents/src/dividend.rs \
+  '                                if !STATUSES.contains(&trimmed) {' \
+  '                                if false {' \
+  geode-documents an_unknown_status_is_refused_naming_it
+
+# dividend: `write` refuses to emit a status outside the closed set — the
+# document form has no way to spell one (an XSD enumeration would refuse
+# it on the wire), so writing it anyway would produce a document a
+# conformant reader could not parse back.
+run_mutation "dividend: write refuses an unknown status" \
+  crates/geode-documents/src/dividend.rs \
+  '    if let Some(bad) = statuses.iter().find(|s| !STATUSES.contains(&s.as_str())) {' \
+  '    if let Some(bad) = statuses.iter().find(|_s| false) {' \
+  geode-documents write_refuses_an_unknown_status
+
+# demo dividend: an index underlying (SPX/NDX/RUT) always forces two or
+# three same-ex-date pairs into its schedule (Task 10 brief) — the id
+# axis's own reason to exist, since a schedule with no repeated ex date
+# never exercises picking one row of several sharing a key. Forcing the
+# pair count to zero leaves the row count untouched (only the shape a
+# trader would actually see collapses), so only the same-day-pairs
+# assertion can catch it.
+run_mutation "demo dividend: an index schedule carries same-day pairs" \
+  crates/geode-demo-data/src/documents.rs \
+  '            let pairs = rng.random_range(2..=3);' \
+  '            let pairs = 0;' \
+  geode-demo-data an_index_schedule_has_same_day_pairs
+
+# demo dividend: creation applies the full three-way status rule (past
+# -> paid, within 30 days -> declared, else estimated), not just
+# past-vs-not (review ruling, 2026-09-19) — a schedule's first document
+# must never show `estimated` on a row within the window. Collapsing
+# the threshold to zero widens "far" to swallow every row that isn't
+# exactly today, so a near-dated row reads `estimated` again — exactly
+# the bug the ruling fixed.
+run_mutation "demo dividend: a near row is declared on the first document" \
+  crates/geode-demo-data/src/documents.rs \
+  '    const NEAR_DAYS: i64 = 30;' \
+  '    const NEAR_DAYS: i64 = 0;' \
+  geode-demo-data near_rows_are_declared_on_the_first_document
+
 # ---- sources.toml grows an adapter (market-data-documents plan, Task 5) ----
 
 # A subscribed source (`adapter != "csv_dir"`) with no `topics` is
@@ -10163,13 +10271,21 @@ run_mutation "subscribe: a subscription's refusal count reads zero rather than i
 
 run_mutation "demo bus: publishes every key once at start" \
   crates/geode-app/src/demo_bus.rs \
-  '    // Every key once, immediately: the first thing a freshly opened
-    // panel sees.
-    for key in &underlyings {
-        if stop.load(Ordering::Relaxed) {
-            return;
+  '    for producer in producers.iter_mut() {
+        let keys = producer.keys.clone();
+        for key in &keys {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            publish_one(
+                &feed,
+                &producer.kind,
+                producer.topic_prefix,
+                producer.next.as_mut(),
+                key,
+                &mut warned_full,
+            );
         }
-        publish_one(&feed, kind, generator, key, &mut warned_full);
     }
 ' \
   '' \
@@ -10177,7 +10293,7 @@ run_mutation "demo bus: publishes every key once at start" \
 
 run_mutation "demo bus: the topic format" \
   crates/geode-app/src/demo_bus.rs \
-  'let topic = format!("marketdata/cvi/{key}");' \
+  'let topic = format!("{topic_prefix}{key}");' \
   'let topic = format!("marketdata/wrong/{key}");' \
   geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
 
@@ -10195,6 +10311,22 @@ run_mutation "demo bus: the demo layer's [cvi] source" \
 ' \
   '' \
   geode-app the_demo_layer_declares_the_cvi_source
+
+run_mutation "demo bus: the demo layer's [dividend] source" \
+  crates/geode-app/src/demo.rs \
+  '         [dividend]\nadapter = \"demo_bus\"\ndataset = \"dividend_schedule\"\n\
+         document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/>\"]\n\
+         coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
+' \
+  '' \
+  geode-app the_demo_layer_declares_the_dividend_source
+
+run_mutation "demo bus: publishes round-robin across producers" \
+  crates/geode-app/src/demo_bus.rs \
+  '    let schedule = round_robin_schedule(&producers);' \
+  '    let schedule: Vec<(usize, String)> =
+        producers.first().into_iter().flat_map(|p| p.keys.iter().cloned().map(|k| (0, k))).collect();' \
+  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
 
 
 # ---- final fix wave: repeated known elements must not merge into duplicate rows ----
@@ -10268,7 +10400,7 @@ run_mutation "colour: both hue and token is refused" \
   '                    refuse_both(&mut diags, &at, name);
                     continue;' \
   '                    let _ = &at;
-                    Definition::Token(Token::Danger)' \
+                    Base::Token(Token::Danger)' \
   geode-core \
   reads_hue_tone_and_token_and_refuses_both_or_neither
 
@@ -10594,6 +10726,91 @@ run_mutation "blotter: the theme-input memo re-derives on a changed theme" \
   'Some((_have, ..)) if true => {}' \
   geode-blotter \
   the_theme_input_memo_re_derives_only_when_a_theme_colour_moves
+
+# tint_sign (2026-09-20): a positive number moves the hue toward the cool
+# pole, a negative one toward the warm pole — never the other way round.
+run_mutation "tint: positive is cooler, negative warmer" \
+  crates/geode-core/src/colour/mod.rs \
+  '        Sign::Positive => COOL_POLE_DEGREES,
+        Sign::Negative => WARM_POLE_DEGREES,' \
+  '        Sign::Positive => WARM_POLE_DEGREES,
+        Sign::Negative => COOL_POLE_DEGREES,' \
+  geode-core \
+  tint_rotates_positive_toward_the_cool_pole_and_negative_toward_the_warm_pole
+
+# tint_sign: the rotation stops at the pole rather than overshooting it,
+# which is what keeps a colour near a pole from tinting past it.
+run_mutation "tint: the rotation stops at the pole" \
+  crates/geode-core/src/colour/mod.rs \
+  '    let step = TINT_DEGREES.to_radians().min(to_pole.abs());' \
+  '    let step = TINT_DEGREES.to_radians();' \
+  geode-core \
+  tint_stops_at_the_pole_it_is_moving_toward
+
+# tint_sign: a definition without it resolves to the base for every sign.
+run_mutation "tint: an untinted definition ignores the sign" \
+  crates/geode-core/src/colour/mod.rs \
+  '    if !def.tint_sign {
+        return base;
+    }' \
+  '    if false {
+        return base;
+    }' \
+  geode-core \
+  resolve_signed_is_the_base_unless_the_definition_tints_and_the_sign_is_nonzero
+
+# tint_sign: a tinted colour is a generated triad and every one of its
+# three goes through the readability floor — the zero/header colour
+# included — even when its base is a token `resolve` leaves unfloored.
+run_mutation "tint: a tinted triad is floored" \
+  crates/geode-core/src/colour/mod.rs \
+  '    readable_on(tint(base, sign), tokens.background, tokens.foreground)' \
+  '    tint(base, sign)' \
+  geode-core \
+  a_tinted_token_is_floored_as_a_whole_triad_but_an_untinted_one_is_not
+
+# tint_sign: the key is read beside either base, not only under hue.
+run_mutation "colour: tint_sign is read from the doc" \
+  crates/geode-core/src/colour/mod.rs \
+  '            let tint_sign = match table.get("tint_sign") {' \
+  '            let tint_sign = match None::<&toml::Value> {' \
+  geode-core \
+  reads_tint_sign_beside_a_hue_or_a_token_and_warns_on_a_non_bool
+
+# tint_sign: the dialog writes the key only when on — an explicit
+# false is a no-op key the reader defaults anyway.
+run_mutation "colours: tint_sign is written only when on" \
+  crates/geode-shell/src/shell/objectdialog/colours.rs \
+  '    if tint_sign_of(draft) {
+        table["tint_sign"] = toml_edit::value(true);
+    }' \
+  '    table["tint_sign"] = toml_edit::value(tint_sign_of(draft));' \
+  geode-shell \
+  tint_sign_is_a_bool_row_written_only_when_true
+
+# tint_sign: the edit header's triad appears with the tick, not always.
+run_mutation "colours: the swatch triad follows tint_sign" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                .when(def.tint_sign, |el| {
+                    el.child(dialog::swatch(
+                        variant(geode_core::colour::Sign::Negative),' \
+  '                .when(false, |el| {
+                    el.child(dialog::swatch(
+                        variant(geode_core::colour::Sign::Negative),' \
+  geode-shell \
+  ticking_tint_by_sign_paints_the_two_variant_swatches
+
+# tint_sign: the blotter's cache resolves each variant under its own sign
+# — a base served as the positive variant would paint no tint at all.
+# The per-cell pick in `render_td` (`for_sign(sign)`) and the header's
+# `.base` are NOT entries: a rendered `text_color` is not observable in a
+# TestAppContext, so a mutation there would survive by construction.
+run_mutation "blotter: the colour cache resolves the sign variants" \
+  crates/geode-blotter/src/colour_cache.rs \
+  '            positive: to_hsla(resolve_signed(def, Sign::Positive, anchors, tokens)),' \
+  '            positive: to_hsla(resolve_signed(def, Sign::Zero, anchors, tokens)),' \
+  geode-blotter \
+  a_tinted_definition_resolves_three_variants_and_an_untinted_one_three_of_the_base
 
 run_mutation "objectdialog: d and r are refused in the column stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
@@ -11139,7 +11356,7 @@ run_mutation "matrix: a hole in the pivot is an error, not a zero" \
   '                None => {
                     return Err(format!(
                         "the document has no cell for {}='"'"'{row_label}'"'"' {axis}='"'"'{col_label}'"'"'",
-                        spec.rows
+                        spec.rows.column
                     ));
                 }' \
   '                None => cells.push(Cell {
@@ -11171,8 +11388,8 @@ run_mutation "matrix: the pivot keeps the document's own axis order" \
 # and the work disagree with nothing to say so.
 run_mutation "matrix: an edited cell paints the draft's value" \
   crates/geode-marketdata/src/core/matrix.rs \
-  '    if let Some(&edited) = draft.edits.get(&cell_ref) {' \
-  '    if let Some(&edited) = None::<&f64> {' \
+  '    if let Some(edited) = draft.edits.get(&cell_ref) {' \
+  '    if let Some(edited) = None::<&Value> {' \
   geode-marketdata \
   an_edited_cell_paints_the_drafts_value_not_the_documents
 
@@ -11224,7 +11441,7 @@ run_mutation "matrix: flatten refuses a repeated row label" \
             return Err(format!(
                 "the document repeats {}='"'"'{label}'"'"' (rows {previous} and {row}): a row \
                  label identifies an edit, so it must name one row",
-                spec.rows
+                spec.rows.column
             ));
         }' \
   '        seen.insert(label.clone(), row);' \
@@ -11500,8 +11717,8 @@ run_mutation "mdtile: a delivery under an open barrier is staged" \
 # asserts the number itself.
 run_mutation "mdedit: a commit parses the typed text before writing it" \
   crates/geode-marketdata/src/tile.rs \
-  '        let value = match parse_cell(text, self.spec.value_type) {' \
-  '        let value = match Ok::<f64, String>(0.0) {' \
+  '                match parse_cell(text, ty) {' \
+  '                match Ok::<f64, String>(0.0) {' \
   geode-marketdata \
   edit_commit_paints_the_cell_as_edited_and_the_header_counts_it
 
@@ -11520,8 +11737,8 @@ run_mutation "mdedit: the editor gives up focus before it is dropped" \
         {
             window.blur(cx);
         }
-        self.editor = None;' \
-  '        self.editor = None;' \
+        let Some(Editing {' \
+  '        let Some(Editing {' \
   geode-marketdata \
   the_editor_gives_up_focus_before_it_is_dropped
 
@@ -11532,16 +11749,17 @@ run_mutation "mdedit: the editor gives up focus before it is dropped" \
 # matching. Anchored on the `&base,\n);` two lines above (Task 5 gave the
 # attribute arm its own identical-looking `close_editor` +
 # `notice = None` pair, so the bare two lines alone are ambiguous —
-# `&base,` is `commit_cell_edit`'s own `draft.set` call ending, not
-# `commit_attr_edit`'s `draft.set_attr`).
+# the closing `}` pair is the row-state match that `commit_cell_value`
+# alone has since Task 7; `commit_attr_edit`'s pair follows a
+# `set_attr` call, not a match).
 run_mutation "mdedit: a committed edit closes the editor" \
   crates/geode-marketdata/src/tile.rs \
-  '            &base,
-        );
+  '            }
+        }
         self.close_editor(window, cx);
         self.notice = None;' \
-  '            &base,
-        );
+  '            }
+        }
         self.notice = None;' \
   geode-marketdata \
   key_context_reports_insert_while_the_editor_exists
@@ -11558,22 +11776,31 @@ run_mutation "mdedit: a committed edit closes the editor" \
 # is the tile half, which is what Task 7 built.
 run_mutation "mdedit: bump walks the cursor's row by default" \
   crates/geode-marketdata/src/tile.rs \
-  '            BumpAxis::Row => self.model.rows[row]
-                .cells
-                .iter()
-                .enumerate()
-                .skip(self.model.slice_columns)
-                .filter_map(|(ci, cell)| cell.value.map(|v| ((row, ci), v)))
-                .collect(),' \
+  '            BumpAxis::Row => {
+                let r = &self.model.rows[row];
+                r.cells
+                    .iter()
+                    .enumerate()
+                    .skip(self.model.slice_columns)
+                    .filter_map(|(ci, cell)| {
+                        if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
+                            skipped += 1;
+                            return None;
+                        }
+                        numeric_value(r.state, cell).map(|v| ((row, ci), v))
+                    })
+                    .collect()
+            }' \
   '            BumpAxis::Row => self
                 .model
                 .rows
                 .iter()
                 .enumerate()
+                .filter(|(_, r)| r.state != RowState::Deleted)
                 .filter_map(|(ri, r)| {
                     r.cells
                         .get(col)
-                        .and_then(|cell| cell.value)
+                        .and_then(|cell| numeric_value(r.state, cell))
                         .map(|v| ((ri, col), v))
                 })
                 .collect(),' \
@@ -12200,6 +12427,7 @@ run_mutation "mdpaint: an edited or sent cell's text is the theme foreground" \
   '    CellPaint {
         fill,
         text: theme.foreground,
+        strike: false,
     }' \
   '    CellPaint {
         fill,
@@ -12210,6 +12438,7 @@ run_mutation "mdpaint: an edited or sent cell's text is the theme foreground" \
         } else {
             theme.foreground
         },
+        strike: false,
     }' \
   geode-marketdata \
   dirty_and_sent_cells_are_readable_on_every_bundled_theme
@@ -12543,17 +12772,18 @@ run_mutation "mdheader: a session written with key still restores" \
 
 # ---- Panel header: one draft (spec 2026-09-14 §4) -----------------------
 
-# `is_empty` must answer for BOTH maps: mutated to `edits` alone, a draft
-# holding only an attribute edit (no cell touched at all) reads empty —
-# `set_key` would let a trader navigate away with unsent work uncounted,
-# and a restart would never think to serialise it.
+# `is_empty` must answer for all three maps: mutated to drop the `attrs`
+# conjunct (edits and rows alone), a draft holding only an attribute edit
+# (no cell or row touched at all) reads empty — `set_key` would let a
+# trader navigate away with unsent work uncounted, and a restart would
+# never think to serialise it.
 run_mutation "mddraft: an attribute edit counts in the draft" \
   crates/geode-marketdata/src/core/draft.rs \
   '    pub fn is_empty(&self) -> bool {
-        self.edits.is_empty() && self.attrs.is_empty()
+        self.edits.is_empty() && self.attrs.is_empty() && self.rows.is_empty()
     }' \
   '    pub fn is_empty(&self) -> bool {
-        self.edits.is_empty()
+        self.edits.is_empty() && self.rows.is_empty()
     }' \
   geode-marketdata \
   an_attribute_edit_is_part_of_the_same_draft
@@ -12671,12 +12901,14 @@ run_mutation "mdattr: the strip clears the table selection" \
                 let d = t.delegate_mut();
                 d.cursor = None;
                 d.editor = editor;
+                d.choice = choice;
                 t.clear_selection(cx);
             }),' \
   '            Cursor::Attr(_) => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = None;
                 d.editor = editor;
+                d.choice = choice;
             }),' \
   geode-marketdata k_from_the_top_row_enters_the_strip_and_i_edits_the_attribute
 
@@ -12802,14 +13034,10 @@ run_mutation "mdpark: the menu's load row stays live on a dirty draft" \
 # (`render`'s `focused(cx).is_none()`) never fires.
 run_mutation "mdpicker: closing the picker blurs before dropping" \
   crates/geode-marketdata/src/tile.rs \
-  '        if let Some(Popup::Picker(p)) = &self.popup
-            && p.input.read(cx).focus_handle(cx).is_focused(window)
-        {
+  '        if own_field_focused {
             window.blur(cx);
         }' \
-  '        if let Some(Popup::Picker(p)) = &self.popup
-            && p.input.read(cx).focus_handle(cx).is_focused(window)
-        {
+  '        if own_field_focused {
         }' \
   geode-marketdata escape_closes_the_picker_and_gives_focus_up
 
@@ -12821,14 +13049,16 @@ run_mutation "mdpicker: closing the picker blurs before dropping" \
 # command line, and the trader's find dies after one character.
 run_mutation "mdmenu: closing an orphaned picker never blurs a foreign field" \
   crates/geode-marketdata/src/tile.rs \
-  '        if let Some(Popup::Picker(p)) = &self.popup
-            && p.input.read(cx).focus_handle(cx).is_focused(window)
-        {
-            window.blur(cx);
-        }' \
-  '        if matches!(self.popup, Some(Popup::Picker(_))) {
-            window.blur(cx);
-        }' \
+  '            Some(Popup::Picker(p)) => p.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Choice(c)) => c.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Menu(_)) | None => false,
+        };
+        if own_field_focused {' \
+  '            Some(Popup::Picker(_)) => true,
+            Some(Popup::Choice(c)) => c.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Menu(_)) | None => false,
+        };
+        if own_field_focused {' \
   geode-marketdata a_find_keystroke_with_an_orphaned_picker_keeps_the_foreign_focus
 
 # Review fix round 1, CRITICAL's harness half (the finding that the
@@ -13050,8 +13280,8 @@ run_mutation "mdedit: a double-click on an attribute opens its editor" \
 # `1`.
 run_mutation "mdnudge: up steps one unit of the painted precision" \
   crates/geode-marketdata/src/tile.rs \
-  '                    .map_or(self.spec.format.precision, |s| s.format.precision);' \
-  '                    .map_or(0, |s| s.format.precision);' \
+  '                    Some(CellKind::Number(format)) => Some(usize::from(format.precision)),' \
+  '                    Some(CellKind::Number(_)) => Some(0),' \
   geode-marketdata up_steps_a_cell_one_unit_of_its_precision_and_shift_ten
 
 # `shift+up` is ten units. Mutated to one, the two nudges land on
@@ -13062,12 +13292,14 @@ run_mutation "mdnudge: shift is ten steps" \
   '                        let magnitude = if verb.ends_with("_big") { 1 } else { 1 };' \
   geode-marketdata up_steps_a_cell_one_unit_of_its_precision_and_shift_ten
 
-# A slice column (`fwd`, two places) carries its own precision. Mutated
-# to never look one up, `fwd` steps at the panel's four places.
+# A slice column (`fwd`, two places) carries its own precision, baked
+# into its own `CellKind::Number` at model-build time. Mutated to give
+# every slice column the panel's own format instead of its own, `fwd`
+# steps (and paints) at the panel's four places rather than its own two.
 run_mutation "mdnudge: a slice column steps at its own precision" \
-  crates/geode-marketdata/src/tile.rs \
-  '                    .filter(|_| *col < self.model.slice_columns)' \
-  '                    .filter(|_| false)' \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        .map(|(sv, _)| CellKind::Number(sv.format.clone()))' \
+  '        .map(|_| CellKind::Number(spec.format.clone()))' \
   geode-marketdata a_slice_column_nudges_at_its_own_precision
 
 # ---- The segmented date field (header spec §5.2, 2026-09-19) -----------
@@ -13160,9 +13392,22 @@ run_mutation "mddate: insert_up steps a date field" \
 # — the trader sees the edit land with the day they typed gone.
 run_mutation "mddate: enter completes an unambiguous pending digit, never commits the old date" \
   crates/geode-marketdata/src/tile.rs \
-  '                if let Err(segment) = field.complete_pending() {' \
-  '                if let Err(segment) = Ok::<(), Segment>(()) {' \
+  '                // `commit`) come through here, so they cannot disagree.
+                if let Err(segment) = field.complete_pending() {' \
+  '                // `commit`) come through here, so they cannot disagree.
+                if let Err(segment) = Ok::<(), Segment>(()) {' \
   geode-marketdata enter_completes_a_pending_digit_rather_than_committing_the_old_date
+
+# Task 4 (spec §4.4): a date CELL's `enter` is the same two steps as the
+# attribute's, in its own arm. Mutated to skip the completion, `2` then
+# `commit` on `ex` writes the 18th the cell had, marked edited.
+run_mutation "mddate: a date cell's enter completes a pending digit too" \
+  crates/geode-marketdata/src/tile.rs \
+  '                // the value door. Both `enter`s land here.
+                if let Err(segment) = field.complete_pending() {' \
+  '                // the value door. Both `enter`s land here.
+                if let Err(segment) = Ok::<(), Segment>(()) {' \
+  geode-marketdata a_date_cell_commits_and_cancels_through_the_fragments_verbs
 
 # `escape` in the field CANCELS: the painted date comes back and the draft
 # is untouched. Mutated to commit instead, every abandoned edit is written
@@ -13788,6 +14033,616 @@ run_mutation "mdpark: the picker opens while the draft has edits" \
         }' \
   geode-marketdata \
   the_picker_opens_while_the_draft_has_edits
+
+# Task 3 — typed cells.
+#
+# §4.2: an undeclared flat value column is refused, never painted.
+run_mutation "matrix: an undeclared flat value column is refused" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        if is_value(snapshot, idx) && spec.value_column(&name).is_none() {' \
+  '        if is_value(snapshot, idx) && spec.value_column(&name).is_none() && false {' \
+  geode-marketdata a_flat_model_refuses_a_value_column_the_spec_does_not_list
+
+# §4.3: a cell edit round-trips typed; mutated to tag a date as text, the
+# restored edit reads back as text.
+run_mutation "draft: a date edit is tagged in the session" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        Value::Date(d) => tagged("date", d.format("%Y-%m-%d").to_string()),' \
+  '        Value::Date(d) => tagged("text", d.format("%Y-%m-%d").to_string()),' \
+  geode-marketdata typed_edits_round_trip_through_toml_with_a_type_tag
+
+# §4.3 (review fix, 2026-09-19): `:bump`'s row walk skips a cell whose
+# COLUMN is not `Number`-kind — not merely one whose current value happens
+# not to be a number, which a NULL-amount row shares regardless. Mutated
+# away, the outcome of an ordinary row bump is unchanged (a `Date`/`Choice`
+# cell's own VALUE already fails `numeric_value`'s match), so only a row
+# whose lone `Number` column is itself NULL tells the two skip reasons
+# apart, in the refusal's own wording.
+run_mutation "tile: bump skips a non-numeric cell" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {' \
+  '                    if false {' \
+  geode-marketdata a_flat_panels_row_bump_names_the_kind_skipped_count
+
+# `declared_type` answers `None` for a non-`Number` kind — the one gate
+# `nudge` refuses a `Text` cell's arrow through (since Task 4 a `Text`
+# commit is a real commit, so `nudge` is the only reader that can see this
+# answer). Mutated to treat any kind as numeric, `insert_up` on `status`
+# falls through to `nudge_text`'s own (differently worded) refusal
+# instead of this one.
+run_mutation "tile: declared_type answers None off a non-numeric kind" \
+  crates/geode-marketdata/src/tile.rs \
+  '        CellKind::Number(_) => Some(match &spec.columns {' \
+  '        _ => Some(match &spec.columns {' \
+  geode-marketdata a_flat_panels_nudge_on_a_non_numeric_cell_is_refused
+
+# `nudge`'s own numeric-kind refusal, at its call site: a `Text` cell's
+# editor is the plain text `Input`, so the arrow is reachable there.
+# Mutated to force `Number` regardless of the cell's real kind,
+# `insert_up` on `status` falls through into `nudge_text`'s own
+# (differently worded) refusal instead of never reaching it.
+run_mutation "tile: a nudge on a non-numeric cell is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '                let Some(ty) = declared_type(self.spec, &self.model, *col) else {' \
+  '                let Some(ty) = Some(ColumnType::F64) else {' \
+  geode-marketdata a_flat_panels_nudge_on_a_non_numeric_cell_is_refused
+
+# The flat `Columns::Values` success arm: a cell's declared type is its
+# OWN `ValueColumn::ty`, not the panel's `value_type` guessed instead.
+# Mutated away, an `I64` column's commit lands as `Value::F64` — still a
+# valid parse of the same text, so only checking the RESULT's variant
+# (not merely that it committed) catches it.
+run_mutation "tile: a flat commit parses by the column's declared type" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Columns::Values(cols) => cols.get(col).map_or(spec.value_type, |vc| vc.ty),' \
+  '            Columns::Values(cols) => cols.get(col).map_or(spec.value_type, |_| spec.value_type),' \
+  geode-marketdata a_flat_panels_commit_on_an_i64_column_parses_by_its_declared_type
+
+# Task 4 — editing by cell kind (spec §4.4) and the one-cell patch (§4.5).
+#
+# §4.5: a commit patches the one cell to exactly what a rebuild would
+# paint. Mutated to compute the cell and throw it away, the patched model
+# still holds the document's own value under an edit the draft records —
+# the screen and the draft disagree with nothing to say so.
+run_mutation "matrix: patch_cell re-prepares the cell" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        self.rows[row].cells[col] = cell_of(value, (doc_row, col), kind, draft);' \
+  '        let _ = cell_of(value, (doc_row, col), kind, draft);' \
+  geode-marketdata patch_cell_matches_a_rebuild
+
+# §4.4: a `Text` cell commits its trimmed text verbatim. Mutated back to
+# Task 3's refusal, `paid` on `status` answers a notice, stays in insert
+# mode and drafts nothing.
+run_mutation "tile: a text cell commits verbatim" \
+  crates/geode-marketdata/src/tile.rs \
+  '                Value::Utf8(trimmed.to_string())' \
+  '                {
+                    self.notice = Some("not a numeric cell".into());
+                    return true;
+                }' \
+  geode-marketdata a_text_cell_commits_verbatim_and_a_date_cell_opens_the_date_field
+
+# §4.4: a `Date` cell opens the segmented field, never the text input.
+# Mutated to never want the field, `i` on `ex` opens a text `Input`
+# seeded with the ISO date — typeable, but not the editor the spec names,
+# and `up` then edits nothing.
+run_mutation "tile: a date cell opens the date field" \
+  crates/geode-marketdata/src/tile.rs \
+  '                let wants_date = matches!(self.model.kind_of(col), Some(CellKind::Date));' \
+  '                let wants_date = false;' \
+  geode-marketdata a_text_cell_commits_verbatim_and_a_date_cell_opens_the_date_field
+
+# An empty `Text` commit is refused on a `required` column. Mutated to
+# never refuse, blank `status` lands as an empty string the schedule's
+# writer will one day refuse — a wrong value drafted rather than a
+# notice.
+run_mutation "tile: an empty text commit is refused where the column is required" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if trimmed.is_empty() && self.column_required(cell.1) {' \
+  '                if trimmed.is_empty() && false {' \
+  geode-marketdata an_empty_required_text_commit_is_refused
+
+# And allowed where it is not: an optional note may honestly be cleared.
+# Mutated to refuse every empty, the optional half of the test cannot
+# commit a blank.
+run_mutation "tile: an empty text commit is allowed where the column is optional" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if trimmed.is_empty() && self.column_required(cell.1) {' \
+  '                if trimmed.is_empty() {' \
+  geode-marketdata an_empty_required_text_commit_is_refused
+
+# §4.5: the delegate's `Rc` clone is taken back BEFORE `Rc::make_mut`,
+# so the patch lands in the model the tile already holds. Mutated to
+# leave the clone alive, `make_mut` copies every row to patch one — the
+# result paints the same and the `Rc` is a fresh allocation, which only a
+# pointer comparison sees.
+run_mutation "tile: a commit patches the model in place" \
+  crates/geode-marketdata/src/tile.rs \
+  '            t.delegate_mut().model = Rc::new(MatrixModel::default());' \
+  '            let _ = t.delegate_mut();' \
+  geode-marketdata a_cell_commit_patches_the_model_in_place
+
+# Dividend spec §4.4 (Task 5): `space`/`shift+space` step a choice cell
+# through its options, wrapping. Mutated to never advance, every step
+# re-writes the option already painted — the draft is dirtied with the
+# same value and the cell never reads `paid`.
+run_mutation "tile: space steps a choice cell" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Some(i) => (i as isize + delta).rem_euclid(len),' \
+  '            Some(i) => i as isize,' \
+  geode-marketdata space_steps_a_choice_cell_and_refuses_elsewhere
+
+# A NULL choice cell has no current option: a step back lands on the
+# LAST option. Mutated to land on the first either way, `shift+space`
+# on a hole reads `estimated` where the trader asked for the end of the
+# vocabulary.
+run_mutation "tile: a step back on a null choice cell lands on the last option" \
+  crates/geode-marketdata/src/tile.rs \
+  '            None if delta > 0 => 0,
+            None => len - 1,' \
+  '            None => 0,' \
+  geode-marketdata a_step_on_a_null_choice_cell_lands_on_the_first_or_last_option
+
+# `enter` in the choice popup writes the LIT option. Mutated to always
+# pick option 0, typing `can` then `enter` commits `estimated` — the
+# rank ran, the highlight moved, and the wrong option was written.
+run_mutation "tile: enter in the choice popup picks the lit option" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let Some(i) = c.list.pick() else {
+            self.notice = Some("no option matches".into());
+            return true;
+        };
+        let option = c.list.options()[i].clone();' \
+  '        let Some(_i) = c.list.pick() else {
+            self.notice = Some("no option matches".into());
+            return true;
+        };
+        let option = c.list.options()[0].clone();' \
+  geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
+
+# `commit_choice` re-ranks from the field's LIVE text before picking
+# (`set_value` emits no `Change`). Mutated to trust the last ranking, a
+# field seeded with `zzz` still picks `declared` — the highlight of a
+# rank that was never run against what the field holds.
+run_mutation "tile: the choice popup re-ranks from the live text at commit" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let query = c.input.read(cx).value().to_string();
+        if c.list.set_query(&query) {
+            c.prepare();
+        }
+        let Some(i) = c.list.pick() else {' \
+  '        let Some(i) = c.list.pick() else {' \
+  geode-marketdata the_choice_popup_ranks_from_the_live_text_and_escape_writes_nothing
+
+# A keystroke in the popup's field re-mirrors the delegate's paint on
+# the same keystroke. Mutated to rank without re-mirroring, the tile's
+# list narrows to `cancelled` while the delegate keeps painting the
+# whole vocabulary under the cell.
+run_mutation "tile: typing in the choice popup re-mirrors the delegate" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    c.prepare();
+                    this.sync_editor(cx);
+                }
+                cx.notify();' \
+  '                }
+                cx.notify();' \
+  geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
+
+# A close from the popup's own mouse door (`on_mouse_down_out`) ends in
+# no `dispatch` tail, so `close_popup_with_window` re-mirrors itself.
+# Mutated not to, the delegate keeps painting the popup under the cell
+# after a click elsewhere closed it.
+run_mutation "tile: closing the choice popup re-mirrors the delegate" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if was_choice {
+            self.sync_editor(cx);
+        }' \
+  '        if was_choice {
+        }' \
+  geode-marketdata the_choice_popup_hangs_under_its_cell_and_a_row_click_picks
+
+# `i` on a `Choice` cell opens the popup, never the text input. Mutated
+# to fall through to the text editor, `edit` on `status` opens an
+# `Input` seeded with `declared` and no popup at all.
+run_mutation "tile: i on a choice cell opens the popup" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if let Some(CellKind::Choice(options)) = self.model.kind_of(col) {
+                    self.open_choice(cell, labels, &text, options, window, cx);
+                    return;
+                }' \
+  '                if let Some(CellKind::Choice(options)) = None::<&CellKind> {
+                    self.open_choice(cell, labels, &text, options, window, cx);
+                    return;
+                }' \
+  geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
+
+# ---- Draft row insert/delete (spec §5.1, §5.4, 2026-09-19) ---------------
+
+# `rebase`'s Inserted arm drops a row whose label the newer document now
+# carries — upstream got there first. Mutated to never see the conflict,
+# the draft's own insert survives alongside the real row it collides
+# with, unreported.
+run_mutation "draft: an inserted row the document now carries is dropped on rebase" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                RowEdit::Inserted { after, cells } => {
+                    if rows.contains_key(label.as_str()) {
+                        dropped.push((label, "row (the document now carries it)".to_string()));
+                    } else {' \
+  '                RowEdit::Inserted { after, cells } => {
+                    if false {
+                        dropped.push((label, "row (the document now carries it)".to_string()));
+                    } else {' \
+  geode-marketdata rebase_carries_rows_by_label
+
+# `mint_label` refuses a label already in `rows`, not just one the
+# caller's own `taken` closure names. Mutated to drop that lookup, a
+# second insert on a `Minted` axis re-mints the very label the first
+# insert already holds.
+run_mutation "draft: mint_label never reuses a label" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            if !taken(&candidate) && !self.rows.contains_key(&candidate) {' \
+  '            if !taken(&candidate) {' \
+  geode-marketdata mint_label_takes_the_smallest_unused_number
+
+# `delete_row`'s unconditional base/state bump (the same rule `set`
+# follows) runs ahead of knowing whether this call empties the draft.
+# Mutated away, dropping the draft's only `Inserted` row (insert, then
+# delete it right back) leaves `base` `Some` and `state` `Editing` over
+# an empty draft — `badge()` reads `Dirty` with nothing behind it, and a
+# later `on_delivered` pushes a draft with no content into `Behind`.
+run_mutation "draft: dropping the last row leaves the draft clean" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        if self.is_empty() {
+            self.base = None;
+            self.state = DraftState::Clean;
+        }
+        result
+    }' \
+  '        if false {
+            self.base = None;
+            self.state = DraftState::Clean;
+        }
+        result
+    }' \
+  geode-marketdata dropping_the_only_inserted_row_leaves_a_clean_draft
+
+# Task 7 — rows in the model (spec §5.2).
+#
+# An inserted row is spliced in AFTER its anchor: the document loop pulls
+# the row's own followers out and emits them right behind it. Mutated to
+# pull nothing, every anchored row falls through to the cycle sweep and
+# is appended at the END of the grid, in label order — every row still
+# present, every count still right, and `new-1` painted under `D3`
+# rather than under the `D1` the trader put it below.
+run_mutation "matrix: an inserted row lands after its anchor" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        let group = splicer.followers.remove(row.label.as_ref());' \
+  '        let group: Option<Vec<&str>> = None;' \
+  geode-marketdata inserted_rows_splice_after_their_anchor_and_deleted_rows_stay_marked
+
+# A deleted row is MARKED, never removed (ruling 6): it stays laid out,
+# struck through, so a trader sees what is going and `:revert` has a row
+# to put back. Mutated into a removal, the grid is one row short with
+# nothing to say why, and a cursor on that row lands on its neighbour.
+run_mutation "matrix: a deleted row stays painted" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        if matches!(draft.rows.get(row.label.as_ref()), Some(RowEdit::Deleted)) {
+            row.state = RowState::Deleted;
+        }' \
+  '        if matches!(draft.rows.get(row.label.as_ref()), Some(RowEdit::Deleted)) {
+            continue;
+        }' \
+  geode-marketdata inserted_rows_splice_after_their_anchor_and_deleted_rows_stay_marked
+
+# `rebase` resolves an inserted row's anchor against the newer document's
+# rows OR this draft's own surviving inserted rows — a chain (`shift+o`
+# on an inserted row) hangs off the latter, and the newer model, being
+# the document's own grid, never carries one. Mutated to the document's
+# rows alone, every rebase path (restore-resolve, `:rebase`, `:auto
+# rebase`) flattens the chain: the chained row moves to the top and is
+# named dropped when nothing was.
+run_mutation "draft: rebase keeps an anchor on a surviving inserted row" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            |anchor: &str| rows.contains_key(anchor) || surviving.contains(anchor);' \
+  '            |anchor: &str| rows.contains_key(anchor);' \
+  geode-marketdata rebase_keeps_a_chain_anchored_on_a_surviving_inserted_row
+
+# Task 8 — the row verbs (spec §5.3).
+#
+# `o` anchors the new row on the CURSOR row. Mutated to anchor on the
+# top (`None`), `o` on `D1` paints `new-1` above `D1` rather than under
+# it — every row present, every count right, the row in the wrong
+# place.
+run_mutation "tile: o inserts after the cursor row" \
+  crates/geode-marketdata/src/tile.rs \
+  '            (Some(cursor_label), None)' \
+  '            (None, None)' \
+  geode-marketdata o_inserts_a_minted_row_and_dd_deletes
+
+# `shift+o` on an INSERTED row takes that row's own anchor and re-anchors
+# it onto the new row (controller ruling 2026-09-19), so the chain paints
+# new-above-old. Mutated to treat every row as a document row, `shift+o`
+# on `new-1` anchors `new-2` on `D1` beside it and label order paints
+# `new-1` first — above where the trader asked for the new row.
+run_mutation "tile: shift+o on an inserted row takes its anchor" \
+  crates/geode-marketdata/src/tile.rs \
+  '        } else if self.model.rows[row].state == RowState::Inserted {' \
+  '        } else if false {' \
+  geode-marketdata o_inserts_a_minted_row_and_dd_deletes
+
+# A typed label already on screen is refused with the editor open, never
+# renamed onto. Mutated away, `enter` on a term the document carries
+# renames the provisional row to a duplicate label and closes the
+# editor.
+run_mutation "tile: a duplicate typed label is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.model.rows.iter().any(|r| r.label.as_ref() == new) {' \
+  '        if false {' \
+  geode-marketdata o_on_a_typed_axis_opens_the_label_editor
+
+# `escape` on the row-label editor drops the provisional row: a row
+# nobody named is not unsent work. Mutated to keep it, `new-N` stays in
+# the draft on a `Typed` axis — `rows_added` reads one too many.
+run_mutation "tile: escape drops a provisional row" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if provisional {' \
+  '        if false {' \
+  geode-marketdata o_on_a_typed_axis_opens_the_label_editor
+
+# Dropping an inserted row hands its followers to its own anchor.
+# Mutated to leave them pointing at the dropped label, a chain's tail
+# lands at the top of the grid (the vanished-anchor rule) on the very
+# `d d` that was meant to take one row out of the middle of it.
+run_mutation "draft: dropping an inserted row hands its followers to its anchor" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                self.rehang_followers(Some(label), after);' \
+  '                self.rehang_followers(Some(label), Some(label.to_string()));' \
+  geode-marketdata dropping_an_inserted_row_hands_its_followers_to_its_anchor
+
+# A rename carries the row's followers with it (final review's
+# Critical): the tile anchors a chain on the MINTED label before
+# `commit_row_label` renames it. Mutated away, a follower keeps the dead
+# label, `splice_rows` cannot resolve it, and a second `o` on the same
+# document row paints the first typed row at the TOP of the grid.
+run_mutation "draft: rename_row re-hangs followers" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        self.rehang_followers(Some(from), Some(to.to_string()));' \
+  '        let _ = (from, to);' \
+  geode-marketdata rename_row_rehangs_its_followers
+
+# `o` on a row that already has a follower re-hangs that follower onto
+# the NEW row (Task 8's review), so the new row sits immediately below
+# the cursor row. Mutated away, the two hang off the same anchor as
+# siblings and label order paints `D1, new-1, new-2` — the new row one
+# below where it was asked for, and a later rename of either re-sorts
+# the pair on commit.
+run_mutation "tile: o re-hangs the existing follower onto the new row" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.draft
+                .rehang_followers(Some(&cursor_label), Some(label.clone()));' \
+  '            let _ = &label;' \
+  geode-marketdata o_rehangs_the_existing_follower_onto_the_new_row
+
+# A typed text label is the CANONICAL spelling of what was parsed
+# (`parse_attr` → `attr_text`), never the trimmed text as typed. Mutated
+# to keep the text, `" 007 "` on an integer axis names the row `007`
+# rather than `7` — a label the document itself would spell `7`, so the
+# same strike would exist twice under two spellings.
+run_mutation "tile: a typed text label commits through parse_attr" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    Ok(value) => attr_text(&value),' \
+  '                    Ok(_) => text.trim().to_string(),' \
+  geode-marketdata o_on_an_integer_axis_opens_the_text_label_editor
+
+# ---- Task 12: DIVIDEND spec and the second factory ----
+
+# Mutated to keep shipping the fragment: `without_keymap` would no
+# longer do anything, so a second document kind's factory would splice
+# its own byte-identical `<module:{kind}>` layer beside the first's —
+# `keymap_fragments()` over both factories must yield exactly one doc.
+run_mutation "factory: the second panel ships no second fragment" \
+  crates/geode-marketdata/src/content.rs \
+  '        self.ships_keymap = false;' \
+  '        self.ships_keymap = true;' \
+  geode-app the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row
+# --- Line pricer Part 1 (2026-09-19): the seam, the worker, the local
+# publish gate, the frame bump and the restart stripe (line-pricer spec
+# §5.3, §5.5, §7.2). ---
+
+run_mutation "pricing: a replacement for a queued key takes a new slot" \
+  crates/geode-data/src/pricing/worker.rs \
+  '        if let Some(slot) = q.pending.get_mut(&key) {
+            *slot = params;
+        } else {' \
+  '        if false {
+        } else {' \
+  geode-data the_queue_is_bounded_by_distinct_keys_and_a_stopped_worker_refuses
+
+run_mutation "pricing: cancel stops a running batch at the line boundary" \
+  crates/geode-data/src/pricing/worker.rs \
+  '                if q.cancel_running || q.shutdown {
+                    break;
+                }' \
+  '                if q.shutdown {
+                    break;
+                }' \
+  geode-data cancel_drops_a_queued_batch_and_stops_a_running_one_at_the_line_boundary
+
+run_mutation "pricing: a panic is contained per line" \
+  crates/geode-data/src/pricing/worker.rs \
+  '                        Err(payload) => {' \
+  '                        Err(payload) => std::panic::resume_unwind(payload),
+                        #[allow(unreachable_patterns)]
+                        Err(payload) => {' \
+  geode-data a_panicking_line_is_that_lines_error_and_the_next_line_prices
+
+run_mutation "pricing: no pricer names the configured one" \
+  crates/geode-data/src/pricing/mod.rs \
+  '            format!("pricer \"{}\" is not built into this binary", self.name)' \
+  '            "no pricer is configured".to_string()' \
+  geode-data no_pricer_answers_every_line_with_the_configured_name
+
+run_mutation "service: a publish to a non-local dataset is written" \
+  crates/geode-data/src/service.rs \
+  '            .is_some_and(|d| d.local);
+        if !local {' \
+  '            .is_some_and(|d| d.local);
+        if false {' \
+  geode-data a_publish_to_a_dataset_that_is_not_local_is_refused_unwritten
+
+run_mutation "service: a local publish reports health for a source nobody declared" \
+  crates/geode-data/src/service.rs \
+  '                    if source == LOCAL_SOURCE {
+                        let _ = sink(DataEvent::LoadEnded);
+                        return delivered;
+                    }' \
+  '' \
+  geode-data a_local_publish_emits_no_health_event_and_a_load_ended
+
+run_mutation "core: local is accepted on a measure dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.local && !ds.is_document() {' \
+  '    if false {' \
+  geode-core local_on_a_measure_dataset_is_an_error_and_cleared
+
+run_mutation "core: a source may feed a local dataset" \
+  crates/geode-core/src/source_config.rs \
+  '                Some(d) if schema.dataset(d).is_some_and(|ds| ds.local) => {' \
+  '                Some(d) if false && schema.dataset(d).is_some_and(|ds| ds.local) => {' \
+  geode-core a_source_naming_a_local_dataset_is_refused
+
+run_mutation "bridge: a local publish bumps the frame" \
+  crates/geode-app/src/bridge.rs \
+  '                        if local_datasets.contains(&dataset) {' \
+  '                        if false {' \
+  geode-app a_local_publish_does_not_bump_the_frames_data_version_but_a_normal_one_does
+
+run_mutation "shell: a Price delivery is routed to the wrong key" \
+  crates/geode-shell/src/module.rs \
+  '            Delivery::Price(outcome) => outcome.key,' \
+  '            Delivery::Price(outcome) => QueryKey(outcome.key.0 + 1),' \
+  geode-shell a_price_delivery_is_routed_by_key_like_a_query
+
+run_mutation "shell: a pricing change needs no restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            if new_config.get("app", "pricing.adapter").cloned() != self.pricing_baseline {' \
+  '            if false {' \
+  geode-shell a_pricing_change_requires_a_restart_and_a_revert_clears_it
+
+# Final-review fix wave: the baseline is narrowed to `pricing.adapter`
+# alone (`refresh` is a live sheet setting from Part 3 onward and must
+# not demand a restart) — reintroducing the whole-`[pricing]`-table read
+# must be caught by the sibling test that adds `refresh` with no
+# `adapter` key.
+run_mutation "shell: a pricing refresh change asks for a restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '"pricing.adapter"' \
+  '"pricing"' \
+  geode-shell a_pricing_refresh_change_needs_no_restart
+
+# Final-review fix wave: a local publish must never blink the ingest
+# progress strip — the runner's document arm skips `Started` (and so
+# `DataEvent::Loading`) when `job.source == LOCAL_SOURCE`. Reinstating
+# the emit must be caught by the extended service-level test.
+run_mutation "runner: a local publish reports Loading" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                if job.source == LOCAL_SOURCE {' \
+  '                if false && job.source == LOCAL_SOURCE {' \
+  geode-data a_local_publish_emits_no_health_event_and_a_load_ended
+
+# Overrides (Task 7b, ruling 1 amended): stateful, batch-scoped. A no-op
+# `set_overrides` proves the worker actually calls the pricer's real
+# method rather than assuming a plain `Ok`, which is what "once per
+# batch, before the first line" (`overrides_are_set_once_per_batch_
+# before_its_first_line`) is really pinning: the seen-list stays empty.
+run_mutation "pricing: overrides are never set" \
+  crates/geode-data/src/pricing/worker.rs \
+  '                    geode_core::panic::contained(|| pricer.set_overrides(&params.overrides))' \
+  '                    geode_core::panic::contained(|| Ok::<(), geode_core::pricing::PricingError>(()))' \
+  geode-data overrides_are_set_once_per_batch_before_its_first_line
+
+run_mutation "pricing: refused overrides still price the batch" \
+  crates/geode-data/src/pricing/worker.rs \
+  '            if let Some(reason) = &overrides_failed {' \
+  '            if let Some(reason) = &overrides_failed && false {' \
+  geode-data refused_overrides_fail_every_line_of_the_batch_and_price_none
+
+run_mutation "mock: a refused override is stored anyway" \
+  crates/geode-pricing/src/lib.rs \
+  '    fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError> {
+        if overrides
+            .spot
+            .values()
+            .any(|s| !(s.is_finite() && *s > 0.0))
+        {
+            return Err(PricingError(
+                "spot override must be a positive finite number".to_string(),
+            ));
+        }
+        *self.overrides.lock().unwrap_or_else(|e| e.into_inner()) = overrides.clone();
+        Ok(())
+    }' \
+  '    fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError> {
+        *self.overrides.lock().unwrap_or_else(|e| e.into_inner()) = overrides.clone();
+        if overrides
+            .spot
+            .values()
+            .any(|s| !(s.is_finite() && *s > 0.0))
+        {
+            return Err(PricingError(
+                "spot override must be a positive finite number".to_string(),
+            ));
+        }
+        Ok(())
+    }' \
+  geode-pricing a_non_positive_or_non_finite_spot_override_is_refused_and_the_previous_one_stays
+
+run_mutation "mock: a percent strike uses the strike as its reference spot" \
+  crates/geode-pricing/src/lib.rs \
+  'Strike::Percent(_) => 100.0,' \
+  'Strike::Percent(p) => p,' \
+  geode-pricing a_percent_strike_uses_one_hundred_as_its_reference_spot
+
+run_mutation "service: a refused pricing batch is dropped silently" \
+  crates/geode-data/src/service.rs \
+  '        let _ = (self.sink)(DataEvent::Price(PriceOutcome {
+            key,
+            tag,
+            submitted,
+            results,
+        }));' \
+  '        if false {
+        let _ = (self.sink)(DataEvent::Price(PriceOutcome {
+            key,
+            tag,
+            submitted,
+            results,
+        }));
+        }' \
+  geode-data a_full_pricing_queue_answers_the_refused_batch_with_an_error_per_line
+
+# Review fix (Important 2a): the message text itself is pinned by an
+# exact-equality assertion now, not a `contains`, so a drift in the
+# wording — not just the outcome being dropped — is its own finding.
+run_mutation "service: the queue-full message drifts" \
+  crates/geode-data/src/service.rs \
+  '                    Err("the pricing queue is full; resubmit".to_string()),' \
+  '                    Err("the pricing queue is full".to_string()),' \
+  geode-data a_full_pricing_queue_answers_the_refused_batch_with_an_error_per_line
+
+run_mutation "service: a failed local publish reports health" \
+  crates/geode-data/src/service.rs \
+  '                    if source == LOCAL_SOURCE {
+                        let delivered = sink(DataEvent::Diagnostics(vec![Diagnostic {' \
+  '                    if false && source == LOCAL_SOURCE {
+                        let delivered = sink(DataEvent::Diagnostics(vec![Diagnostic {' \
+  geode-data a_failed_local_publish_is_a_diagnostics_error_and_a_load_ended_with_no_health
+
+run_mutation "service: cancel does not reach the pricing worker" \
+  crates/geode-data/src/service.rs \
+  '        self.pricing.cancel(key);' \
+  '' \
+  geode-data a_price_request_reaches_the_sink_as_a_price_event_and_cancel_reaches_the_worker
 
 # ---- tile stacks (spec 2026-09-19-geode-tile-stacks-design.md)
 #

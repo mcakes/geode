@@ -7,10 +7,12 @@ pub mod documents;
 pub mod handle;
 pub mod health;
 pub mod ingest;
+pub mod pricing;
 pub mod query;
 pub mod service;
 pub mod source;
 pub mod store;
 
 pub use handle::{DataHandle, REQUEST_BOUND, Request};
+pub use pricing::{PricerConfig, PricerRegistry};
 pub use service::{DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams};

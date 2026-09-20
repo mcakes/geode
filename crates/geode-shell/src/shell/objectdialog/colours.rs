@@ -4,18 +4,19 @@
 //! colour: a `hue` on the canonical wheel (with its `tone`), or a
 //! `token` naming one of the active theme's own semantic colours.
 //!
-//! ## Only three keys, never four
+//! ## Only the keys in force
 //!
 //! `hue`+`tone` and `token` are mutually exclusive in the reader
 //! (`NamedColours::from_doc`'s own `refuse_both` diagnostic) — a colour
 //! is one or the other, never both. [`to_table`] keeps that true on
-//! every write by removing all three keys first and then writing back
+//! every write by removing all four keys first and then writing back
 //! only the ones the current choice is actually made of: `token` alone
 //! when it is not `"none"`, otherwise `hue` and — only when the tone is
-//! `light` — `tone`. There is no third state to represent: a hue whose
-//! tone is `normal` never writes `tone` at all, since `normal` is the
-//! reader's own default and an explicit `tone = "normal"` would be a
-//! silent no-op key nobody asked for.
+//! `light` — `tone`; and beside either, `tint_sign` only when ticked.
+//! There is no third state to represent: a hue whose tone is `normal`
+//! never writes `tone` at all, since `normal` is the reader's own
+//! default and an explicit `tone = "normal"` would be a silent no-op key
+//! nobody asked for; `tint_sign = false` is the same no-op.
 //!
 //! ## Reserved names refused before they reach a write
 //!
@@ -30,7 +31,7 @@
 //!
 //! ## The live swatch
 //!
-//! [`definition_of`] reads the draft's three fields back into a
+//! [`definition_of`] reads the draft's four fields back into a
 //! [`geode_core::colour::Definition`] — the same shape [`fields`] built
 //! them from — so `render.rs`'s edit-header swatch can resolve it
 //! against the active theme without re-parsing `draft.source`. The
@@ -69,12 +70,12 @@ pub fn summary(value: &toml::Value) -> String {
         .unwrap_or_else(|| "invalid".to_string())
 }
 
-/// The three fields of one colour, or of no colour at all when `object`
+/// The four fields of one colour, or of no colour at all when `object`
 /// names nothing (`n`'s empty draft, and the schema `n` opens into
 /// before a name is even typed): `hue` defaults to `0`, `tone` to
-/// `normal`, `token` to `none` — exactly
-/// [`geode_core::colour::Definition::Hue`] `{ degrees: 0.0, tone: Normal
-/// }`, the default [`definition_of`] reads back from a fresh draft
+/// `normal`, `token` to `none`, `tint_sign` to off — exactly
+/// [`geode_core::colour::Definition::hue`]`(0.0, Normal)`, the default
+/// [`definition_of`] reads back from a fresh draft
 /// (pinned by `reserved_names_are_taken`'s own `fresh` assertion).
 ///
 /// `hue` reads either an integer or a float off the raw table — the
@@ -94,6 +95,10 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         table.and_then(|t| t.get("tone")).and_then(|v| v.as_str()),
         Some("light")
     );
+    let tint_sign = table
+        .and_then(|t| t.get("tint_sign"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let token = table
         .and_then(|t| t.get("token"))
         .and_then(|v| v.as_str())
@@ -149,10 +154,12 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                 selected: token_selected,
             },
         ),
+        // Last, after both bases: it applies to either.
+        field("tint_sign", "Tint by sign", FieldKind::Bool(tint_sign)),
     ]
 }
 
-/// The draft's three fields read back as a [`Definition`] — the same
+/// The draft's four fields read back as a [`Definition`] — the same
 /// shape a saved colour resolves to, for `render.rs`'s edit-header
 /// swatch. `None` only if the draft somehow lacks its `hue` row, which
 /// [`fields`] never produces.
@@ -161,25 +168,33 @@ pub fn definition_of(draft: &Draft) -> Option<Definition> {
         (key, FieldKind::Number { value, .. }) if key == "hue" => Some(*value),
         _ => None,
     })?;
+    let tint_sign = tint_sign_of(draft);
     let token = draft.choice("token")?;
-    if token != "none" {
-        return Token::parse(token).map(Definition::Token);
-    }
-    let tone = if draft.choice("tone") == Some("light") {
-        Tone::Light
+    let base = if token != "none" {
+        Definition::token(Token::parse(token)?)
     } else {
-        Tone::Normal
+        let tone = if draft.choice("tone") == Some("light") {
+            Tone::Light
+        } else {
+            Tone::Normal
+        };
+        Definition::hue(value as f32, tone)
     };
-    Some(Definition::Hue {
-        degrees: value as f32,
-        tone,
-    })
+    Some(if tint_sign { base.tinted() } else { base })
+}
+
+/// The `tint_sign` row's tick; `false` if the draft somehow lacks it.
+fn tint_sign_of(draft: &Draft) -> bool {
+    draft
+        .fields
+        .iter()
+        .any(|f| f.key == "tint_sign" && matches!(f.kind, FieldKind::Bool(true)))
 }
 
 /// The draft as `colours.toml` holds it: `draft.source` with every key
-/// the field vocabulary owns (`hue`, `tone`, `token`) removed and then
+/// the field vocabulary owns (`hue`, `tone`, `token`, `tint_sign`) removed and then
 /// rewritten from the current choice alone — this module's own doc
-/// comment has the "only three keys, never four" reasoning. Anything
+/// comment has the "only the keys in force" reasoning. Anything
 /// the vocabulary does not model survives untouched, the same
 /// "preserve what we don't own" rule every other adapter's `to_table`
 /// follows — and so does a `hue` the vocabulary DOES model but this
@@ -198,6 +213,7 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     let saved_hue = table.remove("hue");
     table.remove("tone");
     table.remove("token");
+    table.remove("tint_sign");
     match draft.choice("token") {
         Some(token) if token != "none" => {
             table["token"] = toml_edit::value(token);
@@ -223,6 +239,11 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
                 table["tone"] = toml_edit::value("light");
             }
         }
+    }
+    // Beside either base: `false` is the reader's default and is never
+    // written, the same rule `tone = "normal"` follows.
+    if tint_sign_of(draft) {
+        table["tint_sign"] = toml_edit::value(true);
     }
     toml_edit::Item::Table(table)
 }
@@ -267,6 +288,9 @@ pub fn help(key: &str) -> &'static str {
             "Hue on a 0–360 wheel — red 0, yellow 60, green 120, cyan 180, blue 240, magenta 300"
         }
         "tone" => "normal, or light for the theme's tint of the same hue",
+        "tint_sign" => {
+            "Positive numbers shift the hue toward cool, negative toward warm — a hint of sign"
+        }
         "token" => {
             "A theme colour by role — a token replaces the hue in the file; none uses the hue"
         }
@@ -328,7 +352,7 @@ mod tests {
         );
         assert_eq!(
             definition_of(&draft),
-            Some(Definition::Token(Token::Bullish))
+            Some(Definition::token(Token::Bullish))
         );
 
         // The mutation `pnl` alone cannot pin: its `source` never held a
@@ -409,10 +433,83 @@ mod tests {
         let draft = Domain::Colours.new_draft(&config, "fresh");
         assert_eq!(
             definition_of(&draft),
-            Some(Definition::Hue {
-                degrees: 0.0,
-                tone: Tone::Normal
-            })
+            Some(Definition::hue(0.0, Tone::Normal))
         );
+    }
+
+    /// The fourth row, `tint_sign`: seeded from the file, read back by
+    /// `definition_of` beside either a hue or a token, and written only
+    /// when true — an explicit `tint_sign = false` is the reader's own
+    /// default and would be a no-op key nobody asked for, the same rule
+    /// `tone = "normal"` follows.
+    #[test]
+    fn tint_sign_is_a_bool_row_written_only_when_true() {
+        let config = config_with_colours(
+            "[delta]\nhue = 240\ntint_sign = true\n[pnl]\ntoken = \"chart.3\"\n",
+        );
+        let draft = Domain::Colours.draft(&config, "delta");
+        let keys: Vec<&str> = draft.fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, vec!["hue", "tone", "token", "tint_sign"]);
+        assert!(matches!(
+            draft
+                .fields
+                .iter()
+                .find(|f| f.key == "tint_sign")
+                .unwrap()
+                .kind,
+            FieldKind::Bool(true)
+        ));
+        assert_eq!(
+            definition_of(&draft),
+            Some(Definition::hue(240.0, Tone::Normal).tinted())
+        );
+
+        // Untick: the key leaves the file, the hue stays.
+        let mut draft = Domain::Colours.draft(&config, "delta");
+        let row = draft
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "tint_sign")
+            .unwrap();
+        row.kind = FieldKind::Bool(false);
+        let text = super::super::object_text("delta", to_table(&draft, Destination::Doc));
+        assert!(
+            text.contains("hue = 240") && !text.contains("tint_sign"),
+            "{text}"
+        );
+        assert_eq!(
+            definition_of(&draft),
+            Some(Definition::hue(240.0, Tone::Normal))
+        );
+
+        // Tick on a token: written beside the token, no hue in sight.
+        let mut draft = Domain::Colours.draft(&config, "pnl");
+        assert!(matches!(
+            draft
+                .fields
+                .iter()
+                .find(|f| f.key == "tint_sign")
+                .unwrap()
+                .kind,
+            FieldKind::Bool(false)
+        ));
+        let row = draft
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "tint_sign")
+            .unwrap();
+        row.kind = FieldKind::Bool(true);
+        let text = super::super::object_text("pnl", to_table(&draft, Destination::Doc));
+        assert!(
+            text.contains("token = \"chart.3\"")
+                && text.contains("tint_sign = true")
+                && !text.contains("hue"),
+            "{text}"
+        );
+        assert_eq!(
+            definition_of(&draft),
+            Some(Definition::token(Token::Chart(3)).tinted())
+        );
+        assert!(!help("tint_sign").is_empty(), "the row has a help line");
     }
 }

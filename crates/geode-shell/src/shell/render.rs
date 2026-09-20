@@ -26,8 +26,8 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, choicedialog, commandline_view, dialog, objectdialog, perf_overlay, picker, sidebar,
-    stacklist, status, toolbar, whichkey,
+    ShellView, asof_view, choicedialog, commandline_view, dialog, objectdialog, perf_overlay,
+    picker, sidebar, stacklist, status, toolbar, whichkey,
 };
 
 /// gpui hover-group name shared by every divider strip (drag-splitters
@@ -1014,7 +1014,7 @@ impl Render for ShellView {
                 picker::open(view, Some(column), window, cx);
             });
         };
-        // The scope bar's `+` pick chip (scope-save spec's amendment) —
+        // The scope bar's `+` pick glyph (scope-save spec's amendment) —
         // the mouse form of `mod+p`, opened on the column-choice stage
         // exactly as `frame::pick` is. Same `cx.entity()`-captured shape
         // as `on_chip_open` just above.
@@ -1024,7 +1024,7 @@ impl Render for ShellView {
                 picker::open(view, None, window, cx);
             });
         };
-        // The scope bar's `save` chip — the mouse form of
+        // The scope bar's save glyph — the mouse form of
         // `scope::save_current`, through the same door `input.rs`'s
         // dispatch arm uses.
         let save_chip_entity = cx.entity();
@@ -1042,14 +1042,33 @@ impl Render for ShellView {
                 choicedialog::open_grouping(view, window, cx);
             });
         };
+        // The AS OF chip's click (toolbar restyle 2026-09-19) — the mouse
+        // form of `frame::as_of`/`mod+t`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let as_of_entity = cx.entity();
+        let on_as_of = move |window: &mut Window, cx: &mut App| {
+            as_of_entity.update(cx, |view, cx| {
+                asof_view::open(view, window, cx);
+            });
+        };
+        // Whether the grouping picker is up: the readout holds its pressed
+        // fill for exactly as long as it is (design guide: a control that
+        // owns a popup stays visibly pressed until the popup closes). The
+        // tile picker shares the choice dialog and must not light it.
+        let grouping_open = matches!(
+            self.choice_dialog.as_ref().map(|d| &d.target),
+            Some(choicedialog::Target::Grouping { .. })
+        );
         let toolbar = toolbar::toolbar(
             &self.filter_input,
             &bar_model,
+            grouping_open,
             on_chip_close,
             on_chip_open,
             on_pick,
             on_save,
             on_grouping,
+            on_as_of,
             cx,
         );
 

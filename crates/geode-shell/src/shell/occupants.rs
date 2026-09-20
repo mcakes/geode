@@ -98,7 +98,7 @@ impl ShellView {
             }
             // Every keyed variant, named: a new variant fails to compile
             // here rather than falling into a wildcard and being dropped.
-            keyed @ (Delivery::Query(_) | Delivery::Series(_)) => {
+            keyed @ (Delivery::Query(_) | Delivery::Series(_) | Delivery::Price(_)) => {
                 if let Some(key) = keyed.key()
                     && let Some(o) = self.occupants.get(&TileId(key.0))
                 {

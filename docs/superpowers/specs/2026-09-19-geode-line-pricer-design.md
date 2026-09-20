@@ -77,10 +77,19 @@ library linked into the binary:
 Decided in the 2026-09-19 brainstorm; binding on the plan.
 
 1. **The pricing library is called per instrument, synchronously,
-   and is self-contained.** It fetches or is handed its own market
-   data; Geode assembles no surface, resolves no percent strike and no
-   tenor. `Strike::Percent` and `Expiry::Tenor` pass through the seam
-   untouched.
+   and is self-contained, with an overridable data source.** It
+   fetches its own market data through a `PricingDataSource` instance
+   the library provides and the app may override — spot levels now,
+   CVI and dividend documents later (user ruling 2026-09-19, during
+   Part 1). Geode assembles no surface, resolves no percent strike and
+   no tenor. `Strike::Percent` and `Expiry::Tenor` pass through the
+   seam untouched. **Overrides are stateful on the library's instance**
+   (a second user ruling the same day, over a per-request field):
+   `Pricer::set_overrides(&MarketOverrides)` then `price`, and the
+   worker makes the pair batch-scoped — set once per batch, then every
+   line of that batch — so two tiles sharing the worker can never see
+   each other's overrides, since the worker prices one batch at a
+   time.
 2. **A pricing request is a data-tier request answered through the
    one delivery door.** `DataHandle::price` → a pricing worker inside
    `DataService` → `DataEvent::Price` → `Delivery::Price`, routed by
@@ -189,8 +198,17 @@ pub struct Shifts { pub spot_pct: f64, pub vol_pts: f64 }
 pub struct PriceRequest { pub instrument: Instrument, pub shifts: Shifts }
 pub struct PriceResult { pub price: f64, pub delta: f64, pub gamma: f64, pub vega: f64, pub theta: f64, pub rho: f64 }
 pub struct PricingError(pub String);
+/// What the app overrides in the library's `PricingDataSource` (ruling 1):
+/// spot levels by underlying now; CVI and dividend documents are later
+/// fields. Plain data — the library interprets it, the app never does.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MarketOverrides { pub spot: BTreeMap<String, f64> }
 pub trait Pricer: Send + Sync {
     fn name(&self) -> &str;
+    /// Replace the overridable market data for every `price` call that
+    /// follows, until the next call here. Stateful on purpose (ruling 1);
+    /// the worker calls it once per batch.
+    fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError>;
     fn price(&self, req: &PriceRequest) -> Result<PriceResult, PricingError>;
 }
 ```
@@ -211,7 +229,14 @@ positive; theta is negative. Nothing here is a model, and the doc
 comment says so. Two test hooks, set at construction: a fixed per-call
 `delay: Duration` (default zero) and a refusal rule — an instrument
 whose underlying is `FAIL` returns `PricingError("refused by the
-mock")`. `name()` is `"mock"`.
+mock")`. `name()` is `"mock"`. Overrides: the mock keeps the last
+`MarketOverrides` it was given behind a `Mutex`; a spot override for
+a line's underlying moves the price by `delta × (override − reference)`
+where the reference spot is the absolute strike, or `100` for a
+percent strike, so a higher spot raises a call and lowers a put.
+`set_overrides` refuses a spot that is not a positive finite number
+(`PricingError("spot override must be a positive finite number")`),
+which is the testable failure path for the worker's whole-batch rule.
 
 ### 5.3 The data-tier seam (`geode-data`)
 
@@ -221,8 +246,8 @@ Two new requests and two new events.
 // handle.rs
 Request::Price(PriceParams)            // DataHandle::price(params) -> bool
 Request::Publish(LocalPublish)         // DataHandle::publish(local) -> bool
-// geode_core::query
-pub struct PriceParams  { pub key: QueryKey, pub tag: u64, pub submitted: Instant, pub lines: Vec<PriceLine> }
+// geode_core::pricing
+pub struct PriceParams  { pub key: QueryKey, pub tag: u64, pub submitted: Instant, pub overrides: MarketOverrides, pub lines: Vec<PriceLine> }
 pub struct PriceLine    { pub id: u64, pub revision: u64, pub request: PriceRequest }
 pub struct PriceOutcome { pub key: QueryKey, pub tag: u64, pub submitted: Instant,
                           pub results: Vec<(u64, u64, Result<PriceResult, String>)> }  // (id, revision, result)
@@ -247,6 +272,12 @@ from the DuckDB query pool, draining its own bounded queue. Rules:
   `geode_core::panic::contained`; a panic is that line's `Err` with
   the message, and the worker continues. The worker never dies; a
   shutdown request ends it.
+- **Overrides once per batch.** Before a batch's first line the
+  worker calls `set_overrides(&params.overrides)` under the same
+  boundary; a refusal or a panic there fails EVERY line of the batch
+  with `overrides refused: <reason>` and prices none of them (a line
+  priced against the wrong data source is worse than no price). The
+  next batch sets its own.
 - **No pricer configured** (`pricer` is `None`): every line answers
   `Err("pricer \"<name>\" is not built into this binary")`, where
   `<name>` is the configured name (§8.3).
@@ -305,6 +336,7 @@ pub struct Sheet {
     pub name: String,
     pub view: String,
     pub sheet_shift: OwnShifts,          // both fields Option<f64>
+    pub overrides: MarketOverrides,      // sheet-wide, by underlying: spot levels now (ruling 1)
     pub refresh: Option<Duration>,       // None = the app default
     // per row, in sheet order; a package's legs follow it contiguously
     ids: Vec<LineId>,                    // per-sheet monotonic u64, never reused
@@ -346,6 +378,7 @@ pub enum Edit {
     Group { first: usize, count: usize, template: Template },
     Ungroup { row: usize },
     SetSheetShift(OwnShifts),
+    SetSpotOverride { underlying: String, level: Option<f64> },   // None clears
 }
 pub fn apply(&mut self, edit: Edit) -> Result<Undo, EditError>;  // Undo wraps the inverse Edit(s) and the removed rows' ids
 ```
@@ -548,10 +581,10 @@ three store rules and how the sheet meets them:
   dataset through its own document request. A test in `geode-app`
   pins that a local publish leaves `FrameVersions.data` unchanged.
 
-A local dataset cannot name a source (`validate_dataset` refuses
-`local = true` on a dataset any `[sources]` entry feeds), and the
-document family's own rules (utf8 key, dimensions in key, no `book`)
-hold unchanged.
+A local dataset cannot name a source (`SourceSpec::from_doc` refuses
+a `[sources]` entry naming a dataset with `local = true`, at the
+source's own `dataset` key), and the document family's own rules
+(utf8 key, dimensions in key, no `book`) hold unchanged.
 
 ### 7.3 Write-behind
 
@@ -701,6 +734,7 @@ Every action is registered by the factory, so the palette lists it.
 :rm <sheet>                 remove a sheet no tile has open, confirmed (see §7.4's deferral)
 :shift spot <n>|clear       sheet-wide spot shift, inherited by lines with no own value
 :shift vol <n>|clear        sheet-wide vol shift
+:spot <underlying> <level>|clear   sheet-wide spot override for one underlying (ruling 1); `:spot clear` drops all
 :price                      reprice every line now
 :refresh <dur>|off|default  periodic reprice for this sheet
 :group  :ungroup            the key verbs, for the palette and menu
@@ -735,7 +769,10 @@ dropped whole, the query rule. A delivery for another key is ignored.
 
 `Sheet::request(row)` compared before and after an `apply`. So: an
 instrument field, an own shift, a sheet-wide shift on a line that
-inherits it. Not: `qty`, `Move`, `Group`, `Ungroup`, a view switch, a
+inherits it, a spot override on the line's underlying (overrides ride
+in `PriceParams`, not in the line's request, so `Sheet::request` is
+unchanged and the tile marks every line on that underlying stale
+itself). Not: `qty`, `Move`, `Group`, `Ungroup`, a view switch, a
 rename. Undo of a `Remove` reinstates results with the row, so it
 requests nothing; undo of a `SetInstrument` restores the old
 instrument, which is a request change, so it re-requests (the old
@@ -879,3 +916,62 @@ shifts) is its own spec against this one.
   time when the real one exposes it; `PriceResult` gains a field then.
 - The `:rm` path (§7.4): a store-level "forget batch" is the cleanest
   answer and is deferred to its own task.
+
+## 16. As built (Part 1, 2026-09-19)
+
+- The vocabulary, the `Pricer` trait and `PriceParams`/`PriceOutcome`/
+  `LocalPublish` live in `geode_core::pricing`, not `geode-pricing`:
+  the shell names `PriceOutcome` in `Delivery` and must not depend on
+  a calculation crate (§2.1). `geode-pricing` holds `MockPricer` and
+  is where vendor crates go. §4 and §5.1 read with that substitution.
+- `PricerConfig` (`geode_data::pricing`) carries the configured name
+  beside the optional pricer so a missing one names itself; an empty
+  name says "no pricer is configured".
+- The worker's queue is bounded by distinct keys (`PRICE_BOUND` = 64);
+  a replacement for a queued key always fits.
+- A local publish's ingest-sink arms emit no `Health` (no declared
+  source has a lane); a failed one is an error `Diagnostics` event
+  plus `LoadEnded`.
+- Retention for local datasets is NOT wired in Part 1 (nor is the
+  sweeper for anything else); §7.2's "keep_generations = 200" is
+  Part 4's.
+- Overrides (Task 7b, ruling 1 amended): the real library takes an
+  overridable `PricingDataSource`, so overrides are STATEFUL
+  (`Pricer::set_overrides` then `price`), batch-scoped by the worker —
+  set once per batch before its first line; a refusal or a panic
+  fails every line of the batch with `overrides refused: <reason>`
+  and prices none of them. `MarketOverrides { spot: BTreeMap<String,
+  f64> }`, `PriceParams.overrides`, and `Instrument::strike()` were
+  added for it. The mock's reference spot is the absolute strike, or
+  100 for a percent strike; it refuses a non-positive or non-finite
+  spot with `spot override must be a positive finite number` and
+  keeps the previous overrides in place.
+- A worker-refused batch is answered, not dropped (Task 6):
+  `DataService::price` returns `()`; when the worker's own bounded
+  queue refuses a batch, the service emits `DataEvent::Price` itself
+  with every line `Err("the pricing queue is full; resubmit")` and
+  logs a warning naming the key and tag. `DataHandle::price`'s `false`
+  means only that the request channel itself refused — a batch that
+  reaches the service always gets an outcome.
+- The `[pricing]` unknown-adapter diagnostic reads `pricer "<name>"
+  ([pricing] adapter) is not built into this binary (have: <names>);
+  every priced line will say so` (Task 8).
+- The worker's undelivered-outcome warning reads "a price outcome for
+  key {} was not delivered; further refusals are not logged" (Task 5)
+  — there is no counter, so only the first is logged.
+- `LogLevels` stores suffix keys (`"pricing"`, not `"geode::pricing"`)
+  like every other target; this is the existing, correct shape, not a
+  Part 1 gap.
+- Final-review fix wave: the `[pricing]` restart baseline is narrowed
+  to the `adapter` key alone (`ShellView::pricing_baseline`,
+  `hot_reload::apply_reload`) — `refresh` is a live sheet setting from
+  Part 3 onward and must never demand a restart, so only the adapter
+  choice, which really is baked into the running data engine, gates
+  it.
+- Final-review fix wave: a local publish's document arm in the ingest
+  runner emits no `IngestEvent::Started` (and so no `DataEvent::
+  Loading`) when `job.source == LOCAL_SOURCE` — a sheet autosave must
+  never blink the ingest progress strip. The unconditional `LoadEnded`
+  after every publish is untouched; the strip tolerates a `LoadEnded`
+  with no matching `Started`.
+- Unverified on a real window: nothing in Part 1 paints.

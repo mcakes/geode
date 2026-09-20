@@ -5,7 +5,7 @@
 
 use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
-use geode_core::config::{Config, Diagnostic, load_views};
+use geode_core::config::{Config, Diagnostic, Severity, load_views};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
@@ -14,9 +14,11 @@ use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
 use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
-use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink};
+use geode_data::{
+    DataEvent, DataHandle, DataService, DataServiceConfig, EventSink, PricerConfig, PricerRegistry,
+};
 use geode_marketdata::MarketDataFactory;
-use geode_marketdata::core::CVI;
+use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_shell::diagnostics::SourceSummary;
 use geode_shell::module::Delivery;
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
@@ -24,6 +26,7 @@ use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, WindowHandle};
 use gpui_component::Root;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -57,6 +60,12 @@ pub struct DataSetup {
     /// only place a malformed `colours.toml` is ever reported.
     pub colours: NamedColours,
     pub diagnostics: Vec<Diagnostic>,
+    /// Every dataset whose spec is `local` (line-pricer spec §7.2): a
+    /// sheet autosave publish for one of these must not bump the
+    /// frame's `data` version — a tile reading it follows through its
+    /// own document request instead. `start` copies this into
+    /// `Bridge.local_datasets` for the drain task to read.
+    pub local_datasets: HashSet<String>,
 }
 
 /// `None` when there is nothing to serve: no datasets or no views.
@@ -73,6 +82,7 @@ pub fn data_setup(
     config: &Config,
     db_path: PathBuf,
     adapters: AdapterRegistry,
+    pricers: PricerRegistry,
 ) -> Option<DataSetup> {
     let datasets = config.doc("datasets")?;
     // Presence only: the views themselves come from `load_views`, which
@@ -100,6 +110,37 @@ pub fn data_setup(
         .map(NamedColours::from_doc)
         .unwrap_or_default();
     diagnostics.extend(colour_diags);
+    // `[pricing] adapter` (line-pricer spec §5.5): defaults to the mock
+    // every build registers; an unknown name never fails startup — it
+    // becomes a `PricerConfig::missing` (every priced line says so) plus
+    // a warning naming what this binary actually has.
+    let pricer_name = config
+        .get("app", "pricing.adapter")
+        .and_then(|v| v.as_str())
+        .unwrap_or(geode_pricing::MOCK_PRICER)
+        .to_string();
+    let pricer = match pricers.get(&pricer_name) {
+        Some(p) => PricerConfig::with(p),
+        None => {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                layer: config.explain("app", "pricing.adapter"),
+                file: None,
+                message: format!(
+                    "pricer \"{pricer_name}\" ([pricing] adapter) is not built into this binary (have: {}); every priced line will say so",
+                    pricers.names().join(", ")
+                ),
+                path: Some("app.pricing.adapter".to_string()),
+            });
+            PricerConfig::missing(&pricer_name)
+        }
+    };
+    let local_datasets: HashSet<String> = schema
+        .datasets
+        .iter()
+        .filter(|d| d.local)
+        .map(|d| d.name.clone())
+        .collect();
     Some(DataSetup {
         config: DataServiceConfig {
             db_path,
@@ -116,11 +157,13 @@ pub fn data_setup(
                 }
                 documents
             },
+            pricer,
         },
         views,
         dimensions,
         colours,
         diagnostics,
+        local_datasets,
     })
 }
 
@@ -203,6 +246,13 @@ pub struct Bridge {
     /// refresh `stale_after` on. One factory per panel spec — a second
     /// document kind's panel is a second field here, not a second crate.
     pub marketdata: Rc<MarketDataFactory>,
+    /// The dividend schedule panel's factory (spec §6.5) — the second
+    /// document kind, built `.without_keymap()`
+    /// (`MarketDataFactory::without_keymap`): both factories share the
+    /// one `marketdata` context and its `DEFAULT_KEYMAP`, so only
+    /// `marketdata` above ships the fragment; this one still registers
+    /// its own actions and reads its own reloaded `stale_after`.
+    pub dividend: Rc<MarketDataFactory>,
     events: async_channel::Receiver<DataEvent>,
     dropped: Arc<AtomicU64>,
     /// The sources the running service was actually built from (Phase 4b
@@ -213,6 +263,10 @@ pub struct Bridge {
     /// `dimensions` two lines up; the shape is resolved here, against
     /// that same schema, because no tile downstream holds one.
     sources: Vec<(SourceSpec, SourceShape)>,
+    /// Copied from `DataSetup.local_datasets` (line-pricer spec §7.2):
+    /// the `Published` arm in `attach`'s drain task reads this to skip
+    /// the frame's `data` version bump for a local dataset's publish.
+    pub local_datasets: Rc<HashSet<String>>,
 }
 
 /// Each source paired with the shape it rides (timeseries spec §5.1),
@@ -246,6 +300,7 @@ pub fn start(
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
     let sources = source_shapes(&setup.config.sources, &schema);
+    let local_datasets = Rc::new(setup.local_datasets);
     let handle = DataService::spawn(setup.config, sink);
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
@@ -265,11 +320,18 @@ pub fn start(
             // keys for one idea would be two things to keep in step.
             stale_after,
         )),
+        // The second document kind, over the same shared `marketdata`
+        // context: `.without_keymap()` is what keeps `keymap_fragments`
+        // from splicing a second, identical `<module:{kind}>` layer.
+        dividend: Rc::new(
+            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after).without_keymap(),
+        ),
         handle,
         factory,
         events: rx,
         dropped,
         sources,
+        local_datasets,
     }
 }
 
@@ -282,6 +344,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let handle = bridge.handle.clone();
     let factory = bridge.factory.clone();
     let marketdata = bridge.marketdata.clone();
+    let dividend = bridge.dividend.clone();
 
     let shell = window
         .read(cx)
@@ -374,6 +437,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let handle = handle.clone();
         let factory = factory.clone();
         let marketdata = marketdata.clone();
+        let dividend = dividend.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
@@ -447,6 +511,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // so this can only ever drift as far as the next
                 // views/dimensions reload.
                 marketdata.set_stale_after(stale_after);
+                // The second document kind reads the same key too, and
+                // is refreshed the same way `marketdata`'s is — the two
+                // factories differ only in which one ships the fragment.
+                dividend.set_stale_after(stale_after);
                 // `:filter`/`:scope` validation (Phase 4a §3.7): the
                 // `datasets` doc is re-read here too — `ConfigReloaded`
                 // doesn't fire for a `datasets`-only edit (that instead
@@ -512,6 +580,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
 
     let diagnostics_for_drain = diagnostics.clone();
     let catalog_tag_for_drain = catalog_tag.clone();
+    // Line-pricer spec §7.2: read once, up front, so the `Published` arm
+    // below can decide without touching `bridge` — `attach` only borrows
+    // it (`&Bridge`), and that borrow ends when `attach` returns, well
+    // before the drain task below ever runs, so the `Rc` is cloned here
+    // rather than captured by reference.
+    let local_datasets = Rc::clone(&bridge.local_datasets);
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
         let catalog_tag = catalog_tag_for_drain;
@@ -587,20 +661,27 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             d.note_published(&dataset);
                             cx.notify();
                         });
-                        let frame = shell.read(cx).frame().clone();
-                        // The event carries no timestamp of its own; the
-                        // arrival instant is what a "recent publishes"
-                        // preset needs (Phase 4a §3.12).
-                        let publish = geode_shell::frame::Publish {
-                            dataset,
-                            batch,
-                            books: books.len(),
-                            at: chrono::Utc::now(),
-                        };
-                        frame.update(cx, |f, cx| {
-                            f.note_published(publish);
-                            cx.notify();
-                        });
+                        if local_datasets.contains(&dataset) {
+                            // Line-pricer spec §7.2: a sheet autosave is
+                            // not a data change for the workspace; a
+                            // tile reading sheets follows the dataset
+                            // through its own document request.
+                        } else {
+                            let frame = shell.read(cx).frame().clone();
+                            // The event carries no timestamp of its own;
+                            // the arrival instant is what a "recent
+                            // publishes" preset needs (Phase 4a §3.12).
+                            let publish = geode_shell::frame::Publish {
+                                dataset,
+                                batch,
+                                books: books.len(),
+                                at: chrono::Utc::now(),
+                            };
+                            frame.update(cx, |f, cx| {
+                                f.note_published(publish);
+                                cx.notify();
+                            });
+                        }
                     }
                     DataEvent::Health {
                         source,
@@ -752,6 +833,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
+                    // Line-pricer spec §5.4: routed to the shell exactly
+                    // like `Query` — `ShellView::deliver`'s own router
+                    // (Task 7) drops it when the key names no live
+                    // occupant.
+                    DataEvent::Price(outcome) => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(Delivery::Price(outcome), window, cx)
+                        });
+                    }
                 }
             });
             if handled.is_err() {
@@ -768,18 +858,20 @@ mod tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
     use geode_core::log::Ring;
-    use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot};
+    use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot, QueryKey};
     use geode_data::source::SourceSpec;
     use geode_diagnostics::DiagnosticsFactory;
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use geode_shell::keymap::build_keymap;
+    use geode_shell::module::recording::{Recorded, RecordingFactory};
     use geode_shell::module::{ModuleFactory, ModuleRoster};
     use geode_shell::session::TileRecords;
     use geode_shell::shell::ShellServices;
     use geode_shell::tiling::{TileId, Workspaces};
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
+    use std::cell::RefCell;
 
     /// The bridge is the one place a source's shape is resolved, and
     /// every diagnostics row about a source is painted from the answer.
@@ -1000,6 +1092,55 @@ role = "key"
         }
     }
 
+    /// [`test_shell_services`] with one `RecordingFactory` of kind "rec"
+    /// in the roster (`geode_shell::module::recording`, `test-support`
+    /// feature) — the neighbour the `Price` delivery test below opens
+    /// through `ShellView::open_module` so it has a real, focused,
+    /// non-placeholder tile whose id it can read back and whose log it
+    /// can inspect (the view type behind a roster's `&dyn ModuleFactory`
+    /// is private, so the recording factory's own `log` is the only
+    /// window into what a delivery actually did). No add actions are
+    /// registered for "rec" — `open_module` calls `ShellView::add_tile`
+    /// directly rather than through action dispatch, so nothing here
+    /// needs a keymap binding or a registry entry for the kind.
+    fn test_shell_services_with_rec_roster() -> (ShellServices, Rc<RefCell<Vec<Recorded>>>) {
+        let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
+        let mut registry = ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        let mod_alias = default_mod();
+        let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let (theme, warnings) = theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let recorder = RecordingFactory::new("rec");
+        let log = recorder.log.clone();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(recorder));
+        let services = ShellServices {
+            config,
+            builtin,
+            registry,
+            keymap,
+            mod_alias,
+            workspaces: Workspaces::new(),
+            theme,
+            session_path: None,
+            roster,
+            restored_tiles: TileRecords::new(),
+            restored_frame: None,
+            restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
+            log: None,
+            action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+                geode_shell::diagnostics::ActionTail::new(),
+            )),
+            keymap_diagnostics: Vec::new(),
+            keymap_fragments: Vec::new(),
+            keymap_fragment_diagnostics: Vec::new(),
+        };
+        (services, log)
+    }
+
     fn open_test_window(
         cx: &mut gpui::TestAppContext,
         services: ShellServices,
@@ -1012,6 +1153,320 @@ role = "key"
             })
         })
         .unwrap()
+    }
+
+    /// Line-pricer spec §5.5: `[pricing] adapter` (default `"mock"`)
+    /// resolves through the caller's `PricerRegistry`, and an unknown
+    /// name is a warning diagnostic naming both the requested and the
+    /// registered pricers — never a startup failure.
+    ///
+    /// `data_setup` also requires a `views` doc (`config.doc("views")?`)
+    /// to return `Some` at all, so — unlike the brief's first sketch,
+    /// which built the config from a bare, empty `datasets` doc via
+    /// `config_from` and got `None` back — this builds a minimal but
+    /// real one-dataset schema plus one view, the same shape
+    /// `data_setup_needs_datasets_and_views_and_carries_sources` (below)
+    /// already proves produces no diagnostics of its own.
+    #[test]
+    fn pricing_adapter_resolves_through_the_registry_and_an_unknown_name_is_a_diagnostic() {
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let dir = tempfile::tempdir().unwrap();
+
+        let config_with_app = |app_text: &str| {
+            let mut builtin = vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                    .unwrap(),
+            ];
+            if !app_text.is_empty() {
+                builtin.push(LayerDoc::builtin("app", app_text).unwrap());
+            }
+            Config::load(&ConfigSources {
+                builtin,
+                ..ConfigSources::default()
+            })
+        };
+
+        // The default: no [pricing] section at all.
+        let config = config_with_app("");
+        let setup = data_setup(
+            &config,
+            dir.path().join("a.duckdb"),
+            AdapterRegistry::default(),
+            pricers.clone(),
+        )
+        .unwrap();
+        assert_eq!(setup.config.pricer.name, "mock");
+        assert!(setup.config.pricer.pricer.is_some());
+        assert!(
+            !setup
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("pricer"))
+        );
+        // Review finding, Important 2: this config declares no `local`
+        // dataset, so `DataSetup.local_datasets` must come back empty —
+        // `data_setup_names_every_local_dataset_and_only_those` (below)
+        // is where the non-empty case is pinned.
+        assert!(
+            setup.local_datasets.is_empty(),
+            "{:?}",
+            setup.local_datasets
+        );
+
+        let config = config_with_app("[pricing]\nadapter = \"vendor\"\n");
+        let setup = data_setup(
+            &config,
+            dir.path().join("b.duckdb"),
+            AdapterRegistry::default(),
+            pricers,
+        )
+        .unwrap();
+        assert_eq!(setup.config.pricer.name, "vendor");
+        assert!(setup.config.pricer.pricer.is_none());
+        let d = setup
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("pricer"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(
+            d.message,
+            "pricer \"vendor\" ([pricing] adapter) is not built into this binary \
+             (have: mock); every priced line will say so"
+        );
+    }
+
+    /// Line-pricer spec §7.2 (review finding, Important 2):
+    /// `DataSetup.local_datasets` must name every dataset whose spec is
+    /// `local` — and only those, so a non-local dataset (`risk`, here)
+    /// beside it isn't swept in by accident. `sheets` is the exact
+    /// document-family shape `local_is_read_on_a_document_dataset_and_
+    /// defaults_to_false` in `geode-core/src/schema/mod.rs` already
+    /// proves `SchemaSpec::from_doc` reads `local` correctly for; this
+    /// pins that `data_setup` carries that flag through to the field the
+    /// bridge's local-publish gate actually reads
+    /// (`a_local_publish_does_not_bump_the_frames_data_version_but_a_
+    /// normal_one_does`, below, which hand-picks its own dataset name
+    /// and so would not have caught a `local_datasets` that came back
+    /// empty, wrong, or as every dataset regardless of `local`).
+    #[test]
+    fn data_setup_names_every_local_dataset_and_only_those() {
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                     [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                     [sheets]\n\
+                     family = \"document\"\n\
+                     local = true\n\
+                     key = [\"sheet\"]\n\
+                     axes = [\"line\"]\n\
+                     [sheets.columns.sheet]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                     [sheets.columns.line]\ntype = \"i64\"\nrole = \"axis\"\n\
+                     [sheets.columns.qty]\ntype = \"i64\"\nrole = \"value\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                    .unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let setup = data_setup(
+            &config,
+            dir.path().join("c.duckdb"),
+            AdapterRegistry::default(),
+            pricers,
+        )
+        .unwrap();
+        assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
+        assert_eq!(
+            setup.local_datasets,
+            ["sheets".to_string()].into_iter().collect()
+        );
+        assert!(setup.config.schema.dataset("sheets").unwrap().local);
+        assert!(!setup.config.schema.dataset("risk").unwrap().local);
+    }
+
+    /// Line-pricer spec §7.2: a `local` dataset's publish must not bump
+    /// the frame's `data` version (a tile reading it follows through its
+    /// own document request instead), but it must still reach
+    /// `Diagnostics::note_published` — modelled line for line on
+    /// `loading_and_load_ended_reach_the_diagnostics_entity`'s
+    /// `Bridge`/`attach` setup, above.
+    #[gpui::test]
+    fn a_local_publish_does_not_bump_the_frames_data_version_but_a_normal_one_does(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = open_test_window(cx, test_shell_services());
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
+            handle,
+            factory,
+            events: rx,
+            dropped: dropped.clone(),
+            sources: Vec::new(),
+            local_datasets: Rc::new(["pricer_sheets".to_string()].into_iter().collect()),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        let before = frame.read_with(&vcx, |f, _| f.versions().data);
+
+        tx.try_send(DataEvent::Published {
+            dataset: "pricer_sheets".into(),
+            batch: "untitled-1".into(),
+            gen_id: 1,
+            books: vec![None],
+        })
+        .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            frame.read_with(&vcx, |f, _| f.versions().data),
+            before,
+            "a local publish is not a data change"
+        );
+        // `Diagnostics::last_published` doesn't exist; `note_published`
+        // is observable through the `datasets` map it inserts into.
+        assert!(
+            diagnostics.read_with(&vcx, |d, _| d.datasets.contains_key("pricer_sheets")),
+            "diagnostics still saw it"
+        );
+
+        tx.try_send(DataEvent::Published {
+            dataset: "risk_snapshot".into(),
+            batch: "EOD".into(),
+            gen_id: 2,
+            books: vec![Some("BK1".into())],
+        })
+        .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(frame.read_with(&vcx, |f, _| f.versions().data), before + 1);
+    }
+
+    /// Line-pricer spec §5.4: the bridge's `DataEvent::Price` arm must
+    /// actually reach the occupant, not merely fail to panic — a
+    /// reverted arm (the Task 6 placeholder `DataEvent::Price(_outcome)
+    /// => {}`) would leave a test that only sends-and-parks green too
+    /// (review finding, Important 1). A `RecordingFactory` tile is the
+    /// route: its `TileContent::deliver` pushes `Recorded::Priced(tile,
+    /// tag)` on a `Delivery::Price` (`crates/geode-shell/src/module.rs`),
+    /// and the factory's `log` is the one window a test outside
+    /// `geode-shell` has onto what a delivery actually did (the view
+    /// type behind a roster's `&dyn ModuleFactory` is private).
+    #[gpui::test]
+    fn a_price_event_is_delivered_to_the_shell_as_delivery_price(cx: &mut gpui::TestAppContext) {
+        let (services, log) = test_shell_services_with_rec_roster();
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+
+        // A fresh `Workspaces::new()` has no tiles at all yet (its tree
+        // is empty, not a lone placeholder); `open_module` finds nothing
+        // of kind "rec" and falls through to `add_tile`'s "empty region"
+        // branch, which splits the empty tree and hands the new root
+        // tile straight to the factory — no add action or keymap
+        // binding needed, since this calls the method directly rather
+        // than dispatching. `Workspaces::split_active`'s `next_tile`
+        // counter starts at 0 and is pre-incremented, so the very first
+        // tile a fresh workspace ever creates is deterministically
+        // `TileId(1)` (the same assumption every low-level tiling-tree
+        // test in `geode-shell` already makes); `occupant_kind` — the
+        // one tile accessor this crate can actually reach (`current_
+        // tiles` is `pub(super)`) — confirms it rather than trusting it
+        // blindly.
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| {
+                s.open_module("rec", window, cx);
+            });
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = TileId(1);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
+            Some("rec"),
+            "open_module(\"rec\", ..) must have created a tile at TileId(1)"
+        );
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+            local_datasets: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+        tx.try_send(DataEvent::Price(geode_core::pricing::PriceOutcome {
+            key: QueryKey(tile.0),
+            tag: 5,
+            submitted: std::time::Instant::now(),
+            results: Vec::new(),
+        }))
+        .unwrap();
+        vcx.run_until_parked();
+        assert!(
+            log.borrow().contains(&Recorded::Priced(tile, 5)),
+            "the Price delivery must reach the tile's occupant: {:?}",
+            log.borrow()
+        );
     }
 
     /// Finding 1 (fix round 1): every branch of the drain loop must
@@ -1057,11 +1512,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: dropped.clone(),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
 
         cx.update(|cx| attach(&bridge, window, cx));
@@ -1178,11 +1638,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1235,11 +1700,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1290,11 +1760,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: dropped.clone(),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
 
         cx.update(|cx| attach(&bridge, window, cx));
@@ -1359,11 +1834,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1432,11 +1912,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
@@ -1495,11 +1980,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory: factory.clone(),
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
@@ -1552,11 +2042,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1647,11 +2142,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1714,11 +2214,16 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1809,6 +2314,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1820,6 +2329,7 @@ role = "key"
                 },
                 SourceShape::Directory,
             )],
+            local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1892,7 +2402,15 @@ role = "key"
     #[test]
     fn data_setup_needs_datasets_and_views_and_carries_sources() {
         let none = Config::load(&ConfigSources::default());
-        assert!(data_setup(&none, "/tmp/x.duckdb".into(), AdapterRegistry::default()).is_none());
+        assert!(
+            data_setup(
+                &none,
+                "/tmp/x.duckdb".into(),
+                AdapterRegistry::default(),
+                PricerRegistry::default()
+            )
+            .is_none()
+        );
         let config = Config::load(&ConfigSources {
             builtin: vec![
                 LayerDoc::builtin(
@@ -1905,8 +2423,13 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup =
-            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
+        let setup = data_setup(
+            &config,
+            "/tmp/x.duckdb".into(),
+            AdapterRegistry::default(),
+            PricerRegistry::default(),
+        )
+        .unwrap();
         assert_eq!(setup.config.sources.len(), 1);
         assert_eq!(setup.views.len(), 1);
         assert_eq!(setup.config.query_workers, 4);
@@ -1944,8 +2467,13 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup =
-            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
+        let setup = data_setup(
+            &config,
+            "/tmp/x.duckdb".into(),
+            AdapterRegistry::default(),
+            PricerRegistry::default(),
+        )
+        .unwrap();
         let view = &setup.views[0];
         let names: Vec<&str> = view.columns.iter().map(|c| c.name()).collect();
         assert_eq!(names, vec!["npv", "book"], "presentation order applied");
@@ -1982,8 +2510,13 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup =
-            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
+        let setup = data_setup(
+            &config,
+            "/tmp/x.duckdb".into(),
+            AdapterRegistry::default(),
+            PricerRegistry::default(),
+        )
+        .unwrap();
         let v = setup.views.iter().find(|v| v.name == "v").unwrap();
         let w = setup.views.iter().find(|v| v.name == "w").unwrap();
         assert_eq!(v.presentation_of("npv").label.as_deref(), Some("NPV"));
@@ -2019,8 +2552,13 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup =
-            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
+        let setup = data_setup(
+            &config,
+            "/tmp/x.duckdb".into(),
+            AdapterRegistry::default(),
+            PricerRegistry::default(),
+        )
+        .unwrap();
         assert!(
             setup.colours.get("delta").is_some(),
             "the good definition must reach the factory"

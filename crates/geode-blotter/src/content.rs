@@ -124,6 +124,8 @@ impl TileContent for BlotterContent {
     fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
         match delivery {
             Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
+            // This tile never prices; an outcome addressed here is a routing bug.
+            Delivery::Price(_) => {}
             // This tile asks no series query and holds no
             // `(identity, source)` pair.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}

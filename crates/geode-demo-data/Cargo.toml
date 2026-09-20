@@ -35,6 +35,10 @@ tempfile = "3.27.0"
 name = "generate"
 harness = false
 
+[[bench]]
+name = "dividend"
+harness = false
+
 # Workspace invariant (CLAUDE.md): every target opts out of the built-in
 # libtest harness so `cargo bench` runs criterion cleanly.
 [[example]]

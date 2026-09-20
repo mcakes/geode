@@ -375,6 +375,18 @@ impl SourceSpec {
             };
 
             let dataset = match table.get("dataset").and_then(|v| v.as_str()) {
+                Some(d) if schema.dataset(d).is_some_and(|ds| ds.local) => {
+                    diags.push(diag(
+                        Severity::Error,
+                        name,
+                        Some("dataset"),
+                        format!(
+                            "'{d}' is a local dataset: the app is its only writer and no \
+                             source may feed it"
+                        ),
+                    ));
+                    continue;
+                }
                 Some(d) if schema.dataset(d).is_some() => d.to_string(),
                 Some(d) => {
                     diags.push(diag(
@@ -1171,6 +1183,49 @@ paths = ["/tmp/*.csv"]
                 .any(|d| d.path.as_deref() == Some("sources.cvi.document")
                     && d.severity == Severity::Error)
         );
+    }
+
+    #[test]
+    fn a_source_naming_a_local_dataset_is_refused() {
+        let text = r#"
+[sheets]
+family = "document"
+local = true
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let schema = SchemaSpec::from_doc(&doc).0;
+
+        let sources_doc = merge_docs(
+            "sources",
+            &[LayerDoc::builtin(
+                "sources",
+                r#"
+[feed]
+dataset = "sheets"
+paths = ["/x/*.csv"]
+"#,
+            )
+            .unwrap()],
+        );
+        let (sources, diags) = SourceSpec::from_doc(&sources_doc, &schema);
+        assert!(sources.is_empty());
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.feed.dataset"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("local"), "{}", d.message);
     }
 
     /// Part 2 residual: each `topics` entry is validated at load against

@@ -58,6 +58,14 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::insert_up_big", "Insert: up (big)"),
     ("marketdata::insert_down_big", "Insert: down (big)"),
     ("marketdata::load_underlying", "Load underlying…"),
+    // A `Choice` cell's in-place step (dividend spec §4.4): the dialogs'
+    // own `space`/`shift+space`, brought to a grid cell.
+    ("marketdata::step", "Step value"),
+    ("marketdata::step_back", "Step value back"),
+    // The row verbs (dividend spec §5.3): vim's own `o`/`O`/`dd`.
+    ("marketdata::insert_below", "Insert row below"),
+    ("marketdata::insert_above", "Insert row above"),
+    ("marketdata::delete_row", "Delete row"),
     ("marketdata::upload", "Upload"),
     ("marketdata::revert", "Revert edits"),
     ("marketdata::rebase", "Rebase"),
@@ -140,6 +148,11 @@ context = "marketdata && mode == normal"
 "escape" = "marketdata::escape"
 "." = "marketdata::menu"
 "u" = "marketdata::load_underlying"
+"space" = "marketdata::step"
+"shift+space" = "marketdata::step_back"
+"o" = "marketdata::insert_below"
+"shift+o" = "marketdata::insert_above"
+"d d" = "marketdata::delete_row"
 
 [[bindings]]
 context = "marketdata && mode == insert"
@@ -202,6 +215,8 @@ impl TileContent for MarketDataContent {
     fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
         match delivery {
             Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
+            // This tile never prices; an outcome addressed here is a routing bug.
+            Delivery::Price(_) => {}
             // This tile asks no series query and holds no
             // `(identity, source)` pair.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
@@ -234,6 +249,11 @@ pub struct MarketDataFactory {
     /// this factory has built exactly as `BlotterFactory`'s is, so a
     /// config reload reaches them all without recreating any.
     stale_after: Rc<Cell<Duration>>,
+    /// Whether [`default_keymap`](ModuleFactory::default_keymap) answers
+    /// [`DEFAULT_KEYMAP`] or `None` (see [`Self::without_keymap`]).
+    /// `true` by default: the first, and ordinarily the only, factory
+    /// over this crate's one shared `marketdata` context ships it.
+    ships_keymap: bool,
 }
 
 impl MarketDataFactory {
@@ -246,7 +266,24 @@ impl MarketDataFactory {
             data,
             spec,
             stale_after: Rc::new(Cell::new(stale_after)),
+            ships_keymap: true,
         }
+    }
+
+    /// A second document kind's factory over the same shared
+    /// `marketdata` context (CLAUDE.md's market-data documents section,
+    /// "the second panel ships no second fragment"): every panel's
+    /// [`DEFAULT_KEYMAP`] is the identical vocabulary — one `marketdata`
+    /// context, not one per kind — so a second factory that also shipped
+    /// it would splice a second, byte-identical `<module:{kind}>` layer
+    /// binding the same keys in the same context a second time. One
+    /// factory ships the fragment; every later one built through this
+    /// door ships only its own actions (`register_actions` is already
+    /// tolerant of the resulting duplicate `marketdata::*` ids) and, for
+    /// [`PanelSpec::actions`], its own kind-specific ones.
+    pub fn without_keymap(mut self) -> MarketDataFactory {
+        self.ships_keymap = false;
+        self
     }
 
     /// A reloaded staleness threshold: every open tile picks it up
@@ -277,7 +314,7 @@ impl ModuleFactory for MarketDataFactory {
     }
 
     fn default_keymap(&self) -> Option<&'static str> {
-        Some(DEFAULT_KEYMAP)
+        self.ships_keymap.then_some(DEFAULT_KEYMAP)
     }
 
     /// Registered once per factory. `let _ =`: a second panel spec would
@@ -339,7 +376,7 @@ impl ModuleFactory for MarketDataFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::CVI;
+    use crate::core::{CVI, DIVIDEND};
     use geode_data::DataHandle;
     use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
     use geode_shell::defaults::default_mod;
@@ -445,6 +482,32 @@ mod tests {
         assert_eq!(factory.kind(), "cvi");
         assert_eq!(factory.contexts(), vec!["marketdata"]);
         assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
+    }
+
+    /// A second document kind's factory (CLAUDE.md's "the second panel
+    /// ships no second fragment"): `without_keymap` answers `None` from
+    /// `default_keymap` — so `ModuleRoster::keymap_fragments` produces
+    /// no `<module:dividend>` doc at all — while leaving `kind()` and
+    /// `contexts()` untouched and `register_actions` still populating
+    /// the registry: the actions belong to the shared vocabulary, not to
+    /// whichever factory happens to ship the fragment.
+    #[test]
+    fn without_keymap_ships_no_fragment_and_still_registers_actions() {
+        let (data, _rx) = DataHandle::for_tests();
+        let factory =
+            MarketDataFactory::new(data, &DIVIDEND, Duration::from_secs(60)).without_keymap();
+        assert_eq!(factory.kind(), "dividend");
+        assert_eq!(factory.contexts(), vec!["marketdata"]);
+        assert_eq!(factory.default_keymap(), None);
+
+        let mut reg = ActionRegistry::default();
+        factory.register_actions(&mut reg);
+        for (id, _) in ACTIONS {
+            assert!(
+                reg.get(&ActionId(id.to_string())).is_some(),
+                "{id} must still be registered with no fragment shipped"
+            );
+        }
     }
 
     /// `^`/`$` are the column extremes, exactly the blotter's pair (the

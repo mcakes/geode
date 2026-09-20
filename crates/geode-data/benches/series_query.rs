@@ -28,6 +28,7 @@ use geode_core::schema::SchemaSpec;
 use geode_core::series::expr::{Ast, Op};
 use geode_core::series::{BucketRule, Frequency, SeriesParams, SeriesSpec, SlotKind};
 use geode_data::adapter::SeriesRows;
+use geode_data::pricing::PricerConfig;
 use geode_data::service::{DataEvent, DataService, DataServiceConfig};
 use geode_data::store::series::{SeriesAppendRequest, append_series};
 use geode_data::store::{Catalog, Store};
@@ -102,6 +103,7 @@ fn service() -> (
         sources: Vec::new(),
         adapters: Default::default(),
         documents: Default::default(),
+        pricer: PricerConfig::default(),
     })
     .unwrap();
     (dir, service, rx, start)

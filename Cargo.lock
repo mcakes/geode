@@ -2501,6 +2501,7 @@ dependencies = [
  "geode-diagnostics",
  "geode-documents",
  "geode-marketdata",
+ "geode-pricing",
  "geode-shell",
  "gpui-base",
  "gpui-component",
@@ -2615,6 +2616,13 @@ dependencies = [
  "gpui-pre",
  "proptest",
  "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
+name = "geode-pricing"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
 ]
 
 [[package]]

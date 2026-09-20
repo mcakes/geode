@@ -18,6 +18,7 @@ use crate::keymap::fragments;
 use crate::shell::control::{self, PointerStates as _};
 use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
+use geode_core::pricing::PriceOutcome;
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_core::series::SeriesOutcome;
 use gpui::{AnyView, App, Entity, SharedString, Window};
@@ -31,19 +32,21 @@ pub enum FindEvent {
     Cancelled,
 }
 
-/// What the shell routes to a tile (market-data spec §8.6) — by its id
-/// where the delivery names one, to every visible tile where it does
-/// not. Part 4 adds `Upload(UploadOutcome)` for a document upload's own
-/// outcome, carried through this same door. An enum rather than a
-/// second `TileContent` method: every existing `match` on `Delivery`
-/// then refuses to compile the instant a new variant lands, until the
-/// occupant it belongs to grows an arm for it — an occupant cannot
-/// silently ignore a delivery kind it was never taught about, the way an
-/// unmatched second method could be forgotten and no compiler would say
-/// a word.
+/// What the shell routes to a tile (market-data spec §8.6, line-pricer
+/// spec §5.4) — by its id where the delivery names one, to every visible
+/// tile where it does not. Part 4 adds `Upload(UploadOutcome)` for a
+/// document upload's own outcome, carried through this same door. An
+/// enum rather than a second `TileContent` method: every existing
+/// `match` on `Delivery` then refuses to compile the instant a new
+/// variant lands, until the occupant it belongs to grows an arm for it
+/// — an occupant cannot silently ignore a delivery kind it was never
+/// taught about, the way an unmatched second method could be forgotten
+/// and no compiler would say a word. One variant per outcome kind, no
+/// wildcard arms anywhere.
 #[derive(Debug)]
 pub enum Delivery {
     Query(QueryOutcome),
+    Price(PriceOutcome),
     /// A series query's answer (timeseries spec §6.4), routed by the
     /// tile's key like a `Query`.
     Series(SeriesOutcome),
@@ -69,6 +72,7 @@ impl Delivery {
     pub fn key(&self) -> Option<QueryKey> {
         match self {
             Delivery::Query(outcome) => Some(outcome.key),
+            Delivery::Price(outcome) => Some(outcome.key),
             Delivery::Series(outcome) => Some(outcome.key),
             Delivery::SeriesFetched { .. } => None,
         }
@@ -462,7 +466,10 @@ pub mod placeholder {
         fn find(&self, _: FindEvent, _: &mut Window, _: &mut App) {}
         fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
             match delivery {
+                // This tile has no module; nothing is ever addressed here.
                 Delivery::Query(_) => {}
+                // This tile has no module; nothing is ever addressed here.
+                Delivery::Price(_) => {}
                 // This tile asks no series query and holds no
                 // `(identity, source)` pair.
                 Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
@@ -526,6 +533,7 @@ pub mod recording {
         Find(TileId, FindEvent),
         Visible(TileId, bool),
         Delivered(TileId, u64),
+        Priced(TileId, u64),
         /// A key-less [`Delivery::SeriesFetched`] this tile was handed,
         /// as `"{identity}@{source}"` — the pair spelled the way a
         /// timeseries slot names it, so a broadcast test can assert on
@@ -750,6 +758,11 @@ pub mod recording {
                     self.log
                         .borrow_mut()
                         .push(Recorded::Delivered(self.tile, outcome.tag));
+                }
+                Delivery::Price(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Priced(self.tile, outcome.tag));
                 }
                 // A series outcome is routed by key exactly as a query's
                 // is, so it is recorded the same way — the tag is what

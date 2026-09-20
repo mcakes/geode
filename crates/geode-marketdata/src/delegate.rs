@@ -4,7 +4,8 @@
 //!
 //! It owns nothing the tile does not already have: the prepared
 //! [`MatrixModel`] as an `Rc` swapped wholesale on every rebuild, a mirror
-//! of the tile's cursor, and a mirror of the open cell editor. **The
+//! of the tile's cursor, and mirrors of the open cell editor and of a
+//! choice cell's open typeahead (painted under its cell). **The
 //! tile's own cursor stays the truth** — this is a paint-time copy, kept
 //! in step by `MarketDataTile::sync_cursor`, so nothing here decides
 //! anything a keystroke, a yank or a commit reads back.
@@ -17,10 +18,16 @@
 //! saturating to 0 — a click there moves the cursor's row and leaves its
 //! column alone.
 
+use crate::core::matrix::RowState;
 use crate::core::{MatrixModel, PanelSpec};
+use crate::header;
+use crate::popup::{ChoicePaint, render_choice};
+use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
 use geode_shell::fonts;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Hsla, SharedString, TextAlign, Window, div, px};
+use gpui::{
+    App, Context, Entity, FocusHandle, Hsla, SharedString, TextAlign, WeakEntity, Window, div, px,
+};
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
@@ -50,6 +57,55 @@ const CELL_WIDTH: f32 = 84.0;
 /// row's identity must stay readable however far right the values scroll.
 pub(crate) const LABEL_COL: usize = 0;
 
+/// What the tile's open editor looks like from the delegate: which cell it
+/// sits in (`col: None` is the row-label column, Task 8's row-label
+/// editor — built into the type and painted by `render_td`'s label arm
+/// through the same `render_editor` a value cell's editor uses, so the
+/// two arms cannot drift. `MarketDataTile::begin_label_edit` opens it on
+/// `o`/`shift+o` for a `RowIdentity::Typed` axis — CVI's `term`, a
+/// `Date` — landing on today's local date; `commit_row_label` renames
+/// the provisional row and opens its first cell) and what to paint
+/// there — the text `Input`, or the segmented date field's prepared
+/// segments plus the focus handle its keys route through.
+///
+/// A paint-time COPY, like the cursor mirror beside it: the tile's
+/// `Editing` is the truth, and `MarketDataTile::sync_cursor`/`sync_editor`
+/// re-mirror it on every change (a date field's segments change on every
+/// keystroke, which is why the field's own key path re-mirrors too).
+#[derive(Clone)]
+pub(crate) struct DelegateEditor {
+    pub row: usize,
+    pub col: Option<usize>,
+    pub paint: DelegateEditorPaint,
+}
+
+/// The two forms an editor paints in a cell — the tile's `EditorState`,
+/// with the date form reduced to what `render_td` needs: the pure
+/// `DateField` itself stays on the tile, since only the tile's key path
+/// ever steps it.
+#[derive(Clone)]
+pub(crate) enum DelegateEditorPaint {
+    Text(Entity<InputState>),
+    Date {
+        paint: DateFieldPaint,
+        focus: FocusHandle,
+    },
+}
+
+/// The open `Choice` cell's typeahead as the delegate paints it (dividend
+/// spec §4.4): the cell it hangs under, in model coordinates, and the
+/// prepared rows. A paint-time COPY like [`DelegateEditor`] — the tile's
+/// `Popup::Choice` is the truth, re-mirrored on every change through
+/// `MarketDataTile::sync_editor`; the `Rc` is the tile's own prepared
+/// paint, so a re-mirror is a refcount bump and `render_td` reads
+/// prepared strings.
+#[derive(Clone)]
+pub(crate) struct DelegateChoice {
+    pub row: usize,
+    pub col: usize,
+    pub paint: Rc<ChoicePaint>,
+}
+
 /// Every field is `pub(crate)`, never `pub` (review Minor 4): a model swap
 /// is only correct when it is paired with a `TableState::refresh`, and
 /// `MarketDataTile::install_model` is the one place that pairs them. Crate
@@ -69,19 +125,89 @@ pub struct MatrixDelegate {
     /// clears the table's own selection for that case).
     pub(crate) cursor: Option<(usize, usize)>,
     /// The open cell editor, mirrored from the tile: the cell it was
-    /// opened on (again in model coordinates) and its `InputState`.
+    /// opened on (again in model coordinates) and what to paint there.
     /// Painted IN that cell, which is what makes it typeable at all
     /// (`MarketDataTile`'s `Editing::state`).
-    pub(crate) editor: Option<((usize, usize), Entity<InputState>)>,
+    pub(crate) editor: Option<DelegateEditor>,
+    /// The open choice popup, mirrored from the tile: painted hanging
+    /// under its cell (`render_td`'s value arm), the one place the popup
+    /// can know where that cell is.
+    pub(crate) choice: Option<DelegateChoice>,
+    /// The tile, for the date field's key and click routing
+    /// (`header::render_date_field` takes the entity, and the field's
+    /// `on_key_down` runs `MarketDataTile::date_field_key` through it).
+    /// Weak: the table is owned by the tile, and a strong handle here
+    /// would be a cycle neither side could ever drop.
+    pub(crate) tile: WeakEntity<MarketDataTile>,
+    /// The tile's id, for the field's debug selectors — the same
+    /// `marketdata-date-{id}` the strip paints, so a test finds the field
+    /// wherever it is painted.
+    pub(crate) tile_id: u64,
+    /// The floored tones the date field paints its active segment through
+    /// (`FlooredTones::primary_text`). The delegate's own copy, refreshed
+    /// at the one paint that reads it — `render_td`'s date arm, one cell
+    /// per frame at most — exactly as the tile refreshes its own at the
+    /// top of `render`: a compare per painted editor, a derivation only
+    /// when the theme moved.
+    pub(crate) tones: FlooredTones,
 }
 
 impl MatrixDelegate {
-    pub fn new(spec: &'static PanelSpec) -> MatrixDelegate {
+    pub(crate) fn new(
+        spec: &'static PanelSpec,
+        tile: WeakEntity<MarketDataTile>,
+        tile_id: u64,
+        tones: FlooredTones,
+    ) -> MatrixDelegate {
         MatrixDelegate {
             model: Rc::new(MatrixModel::default()),
-            row_axis: SharedString::from(spec.rows),
+            row_axis: SharedString::from(spec.rows.column),
             cursor: Some((0, 0)),
             editor: None,
+            choice: None,
+            tile,
+            tile_id,
+            tones,
+        }
+    }
+
+    /// The editor to paint in table cell (`row_ix`, `col_ix`), if the
+    /// open one sits there — `col: None` is the row-label column (table
+    /// column [`LABEL_COL`]), a model column is every other.
+    fn editor_at(&self, row_ix: usize, col_ix: usize) -> Option<&DelegateEditor> {
+        self.editor
+            .as_ref()
+            .filter(|e| e.row == row_ix && e.col == Self::model_col(col_ix))
+    }
+
+    /// One editor's element, painted in whichever cell it belongs to:
+    /// the text `Input`, or the strip's own segmented date field
+    /// (`header::render_date_field`, shared so a date cell and a date
+    /// attribute cannot paint or route keys differently). A tile that
+    /// has been dropped paints nothing — the caller falls back to the
+    /// cell's own text — since there is nothing left to route a key to.
+    fn render_editor(
+        &mut self,
+        editor: &DelegateEditor,
+        theme: &Theme,
+    ) -> Option<gpui::AnyElement> {
+        match &editor.paint {
+            DelegateEditorPaint::Text(state) => Some(Input::new(state).into_any_element()),
+            DelegateEditorPaint::Date { paint, focus } => {
+                let tile = self.tile.upgrade()?;
+                self.tones.refresh(theme);
+                Some(
+                    header::render_date_field(
+                        paint,
+                        focus,
+                        theme,
+                        &self.tones,
+                        &tile,
+                        self.tile_id,
+                    )
+                    .into_any_element(),
+                )
+            }
         }
     }
 
@@ -206,32 +332,61 @@ impl TableDelegate for MatrixDelegate {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let Some(model_col) = Self::model_col(col_ix) else {
-            // The row-label column: the label in the data face, in the
-            // full foreground — it is what identifies the row.
-            let label = self
+            // The row-label column: the label in the data face — it is
+            // what identifies the row — painted in the ROW's own state
+            // (spec §5.2): an inserted row's label takes the same tint
+            // its cells do and a deleted row's is struck through with
+            // them, so the row reads as one thing across the pinned
+            // column and the scrolling ones. The editor slot is here too
+            // (Task 8's row-label editor opens into it; nothing does
+            // yet), so the label arm and the value arm paint an editor
+            // through the one `render_editor`.
+            let (label, state, sent) = self
                 .model
                 .rows
                 .get(row_ix)
-                .map(|r| r.label.clone())
-                .unwrap_or_default();
-            return div()
+                .map(|r| {
+                    (
+                        r.label.clone(),
+                        r.state,
+                        // Every cell of an inserted row shares the
+                        // draft's `sent`; a document row's cells vary,
+                        // and its label carries no fill of its own.
+                        r.state == RowState::Inserted && r.cells.first().is_some_and(|c| c.sent),
+                    )
+                })
+                .unwrap_or((SharedString::default(), RowState::Document, false));
+            let editor = self
+                .editor_at(row_ix, col_ix)
+                .cloned()
+                .and_then(|e| self.render_editor(&e, theme));
+            let CellPaint { fill, text, strike } = cell_paint(theme, sent, false, state);
+            let el = div()
                 .size_full()
                 .flex()
                 .items_center()
                 .font_family(fonts::MONO)
-                .text_color(theme.foreground)
+                .text_color(text)
+                .when_some(fill, |el, fill| el.bg(fill))
+                .when(strike, |el| el.line_through())
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_ellipsis()
-                .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"))
-                .child(label);
+                .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"));
+            return match editor {
+                Some(editor) => el.child(
+                    div()
+                        .flex_1()
+                        .debug_selector(|| format!("marketdata-editor-{row_ix}-{col_ix}"))
+                        .child(editor),
+                ),
+                None => el.child(label),
+            };
         };
         let at_cursor = self.cursor == Some((row_ix, model_col));
-        let cell = self
-            .model
-            .rows
-            .get(row_ix)
-            .and_then(|r| r.cells.get(model_col));
+        let row = self.model.rows.get(row_ix);
+        let state = row.map_or(RowState::Document, |r| r.state);
+        let cell = row.and_then(|r| r.cells.get(model_col));
         let mut el = div()
             .size_full()
             .flex()
@@ -260,26 +415,60 @@ impl TableDelegate for MatrixDelegate {
         let Some(cell) = cell else {
             return el;
         };
-        let CellPaint { fill, text } = cell_paint(theme, cell.sent, cell.edited);
-        el = el.when_some(fill, |el, fill| el.bg(fill)).text_color(text);
-        match &self.editor {
-            Some((at, state)) if *at == (row_ix, model_col) => el.child(
+        let CellPaint { fill, text, strike } = cell_paint(theme, cell.sent, cell.edited, state);
+        el = el
+            .when_some(fill, |el, fill| el.bg(fill))
+            .text_color(text)
+            .when(strike, |el| el.line_through());
+        // The editor is cloned out (three refcounts at most) because
+        // `render_editor` needs `&mut self` for the tones refresh while
+        // `editor_at` borrows `self.editor`; the cell's own text is what
+        // paints when there is no editor here, or no tile left to route
+        // its keys to.
+        let text = cell.text.clone();
+        let editor = self
+            .editor_at(row_ix, col_ix)
+            .cloned()
+            .and_then(|e| self.render_editor(&e, theme));
+        // The choice popup hangs under THIS cell when it is the one being
+        // edited (dividend spec §4.4): a zero-size absolute child at the
+        // cell's bottom-left is the anchor `render_choice`'s `TopLeft`
+        // positions against — the header popups' own arrangement, with
+        // the cell as the anchor's frame instead of the header. Painted
+        // through `deferred`, so the table's clip never cuts it. A tile
+        // that has been dropped paints nothing, as `render_editor` does.
+        let choice = self
+            .choice
+            .as_ref()
+            .filter(|c| c.row == row_ix && c.col == model_col)
+            .map(|c| Rc::clone(&c.paint))
+            .and_then(|paint| {
+                let tile = self.tile.upgrade()?;
+                Some(render_choice(&paint, &tile, self.tile_id, cx).into_any_element())
+            });
+        let el = match editor {
+            Some(editor) => el.child(
                 div()
                     .flex_1()
                     .debug_selector(|| format!("marketdata-editor-{row_ix}-{col_ix}"))
-                    .child(Input::new(state)),
+                    .child(editor),
             ),
-            _ => el.child(cell.text.clone()),
-        }
+            None => el.child(text),
+        };
+        el.when_some(choice, |el, popup| {
+            el.relative()
+                .child(div().absolute().left_0().bottom_0().child(popup))
+        })
     }
 }
 
-/// How a value cell paints in one draft state: an optional fill and the
-/// text colour over it.
+/// How a value cell paints in one draft state: an optional fill, the
+/// text colour over it, and whether the text is struck through.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CellPaint {
     pub fill: Option<Hsla>,
     pub text: Hsla,
+    pub strike: bool,
 }
 
 /// The one answer to "what colour is a cell in this state", read by
@@ -296,12 +485,31 @@ pub(crate) struct CellPaint {
 /// one colour every theme author made readable on their own background,
 /// which a translucent tint or the muted band barely moves.
 ///
-/// `sent` is checked first: a sent cell is also an edited one (the draft
-/// keeps its edits until the echo clears them, spec §9.4), and what it
-/// needs to say is that it is out the door.
-pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool) -> CellPaint {
+/// The ROW's state decides ahead of the cell's own flags (spec §5.2). A
+/// `Deleted` row's cells are struck through in the theme's own secondary
+/// text with no fill — the row is going, whatever edit a cell carries,
+/// and this is the one place `muted_foreground` is right: it is on the
+/// bare ground, the pairing the theme author made (unfloored, as every
+/// `Tone::Plain` run is). Then `sent`: a sent cell is also an edited one
+/// (the draft keeps its edits until the echo clears them, spec §9.4), and
+/// what it needs to say is that it is out the door — an inserted row's
+/// cells included. Then an `Inserted` row, every cell of which is
+/// `edited`: the `success` family at an 18% tint, so a new row reads as
+/// new rather than as a row full of changed numbers. The bundled-theme
+/// sweep holds `foreground` over that tint to the same 3:1 floor as the
+/// warning one; no theme needed flooring.
+pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool, state: RowState) -> CellPaint {
+    if state == RowState::Deleted {
+        return CellPaint {
+            fill: None,
+            text: theme.muted_foreground,
+            strike: true,
+        };
+    }
     let fill = if sent {
         Some(theme.muted)
+    } else if state == RowState::Inserted {
+        Some(theme.success.opacity(0.18))
     } else if edited {
         Some(theme.warning.opacity(0.25))
     } else {
@@ -310,6 +518,7 @@ pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool) -> CellPaint {
     CellPaint {
         fill,
         text: theme.foreground,
+        strike: false,
     }
 }
 
@@ -356,14 +565,29 @@ pub(crate) mod tests {
             cx.update(|cx| {
                 Theme::global_mut(cx).apply_config(&entry);
                 let theme = cx.theme();
-                for (state, sent, edited) in [("edited", false, true), ("sent", true, false)] {
-                    let paint = cell_paint(theme, sent, edited);
-                    let fill = paint.fill.expect("both marked states carry a fill");
+                for (state, sent, edited, row) in [
+                    ("edited", false, true, RowState::Document),
+                    ("sent", true, false, RowState::Document),
+                    ("inserted", false, true, RowState::Inserted),
+                ] {
+                    let paint = cell_paint(theme, sent, edited, row);
+                    let fill = paint.fill.expect("every marked state carries a fill");
                     let ratio = contrast_ratio(to_rgb(paint.text), over(fill, ground(theme)));
                     if ratio < READABLE_RATIO {
                         failures.push(format!("{name}: {state} text at {ratio:.2}:1"));
                     }
                 }
+                // A deleted row's text is the theme's OWN secondary text
+                // on its own ground — exactly the pairing `Tone::Plain`
+                // paints every quiet header run in, unfloored (CLAUDE.md
+                // records nine themes ship it under 3:1; a theme-authoring
+                // matter). Asserted as "the same colour `Plain` uses" and
+                // nothing more: this sweep is about the fills this crate
+                // invents, not the theme's own pairs.
+                let deleted = cell_paint(theme, false, false, RowState::Deleted);
+                assert_eq!(deleted.fill, None, "{name}: a deleted row has no fill");
+                assert_eq!(deleted.text, theme.muted_foreground, "{name}");
+                assert!(deleted.strike, "{name}: a deleted row is struck through");
             });
         }
         assert!(
@@ -371,6 +595,33 @@ pub(crate) mod tests {
             "unreadable cells:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// The row state decides ahead of the cell's own flags: a deleted
+    /// row's cells strike through whatever edit they carry (the row is
+    /// going), a sent inserted row reads as out the door like any sent
+    /// cell, and an inserted row's cells — every one of which is
+    /// `edited` — take the `success` tint, never the warning one.
+    #[gpui::test]
+    fn the_row_state_decides_a_cells_paint_ahead_of_its_flags(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            let theme = cx.theme();
+            let plain = cell_paint(theme, false, false, RowState::Document);
+            assert_eq!(plain.fill, None);
+            assert!(!plain.strike);
+            let edited = cell_paint(theme, false, true, RowState::Document);
+            assert_eq!(edited.fill, Some(theme.warning.opacity(0.25)));
+            let inserted = cell_paint(theme, false, true, RowState::Inserted);
+            assert_eq!(inserted.fill, Some(theme.success.opacity(0.18)));
+            assert!(!inserted.strike);
+            let inserted_sent = cell_paint(theme, true, true, RowState::Inserted);
+            assert_eq!(inserted_sent.fill, Some(theme.muted));
+            let deleted_edited = cell_paint(theme, false, true, RowState::Deleted);
+            assert_eq!(deleted_edited.fill, None);
+            assert!(deleted_edited.strike);
+            assert_eq!(deleted_edited.text, theme.muted_foreground);
+        });
     }
 
     /// The label column is index 0 and every value column sits one to its
@@ -388,12 +639,18 @@ pub(crate) mod tests {
     /// A fresh delegate paints the row axis's name and nothing else: one
     /// column, no rows. The panel's header says why (`no document
     /// received for <key>`), so an empty grid needs no invented row.
-    #[test]
-    fn an_empty_model_still_names_its_row_axis() {
-        let d = MatrixDelegate::new(&CVI);
+    /// A `gpui::test` only for the theme the tones derive from; the tile
+    /// handle is never upgraded here.
+    #[gpui::test]
+    fn an_empty_model_still_names_its_row_axis(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let tones = cx.update(|cx| FlooredTones::derive(cx.theme()));
+        let d = MatrixDelegate::new(&CVI, WeakEntity::new_invalid(), 7, tones);
         assert_eq!(d.row_axis.as_ref(), "term");
         assert!(d.model.rows.is_empty());
         assert!(d.editor.is_none());
         assert_eq!(d.cursor, Some((0, 0)));
+        assert_eq!(d.tile_id, 7);
+        assert!(d.tile.upgrade().is_none());
     }
 }

@@ -1429,16 +1429,71 @@ it already produced.
 | `marketdata_core/model_build_values_10000x5` (a broad-index dividend schedule, `Columns::Values`) | 8.18 ms |
 | `marketdata_core/draft_rebase_1000_edits` (onto the 10,000×5 model) | 297 µs |
 
-CVI, the only panel that exists, costs 285 µs per build and is nowhere
-near the budget. The 10,000×5 flat build at 8.18 ms is the number to
-watch: it is the whole of the §7.1 8 ms pure-UI budget on its own, and
-it is not only a delivery-path cost — `commit_edit` and `:bump` both
-call `rebuild_model` on the committing keystroke, so a hypothetical
-schedule-shaped panel at that size would blow the keystroke budget on
-every edit. **The rule for such a panel (roadmap slice 2): patch the
-touched cells in place rather than call `MatrixModel::build` wholesale
-on every draft change** — `build` stays the delivery path, since
-nothing today needs a second one and an unused patch path would rot.
+CVI, the only panel that exists at Part 3, costs 285 µs per build and
+is nowhere near the budget. The 10,000×5 flat build at 8.18 ms is the
+number that mattered: it is the whole of the §7.1 8 ms pure-UI budget
+on its own, and at Part 3 it was not only a delivery-path cost —
+`commit_edit` called `rebuild_model` on the committing keystroke, so a
+schedule-shaped panel at that size would have blown the keystroke
+budget on every cell edit.
+
+**The dividend-schedule plan (2026-09-19, spec §4.5/§5.2/§8) built the
+rule above for a CELL commit only: `MarketDataTile::commit_cell_value`
+now calls `MatrixModel::patch_cell` — re-preparing that one cell —
+instead of `rebuild_model`.** `DIVIDEND` is the schedule-shaped panel
+this closes the gap for. `patch_cell` has exactly one production call
+site (`commit_cell_value`, which `step_choice`'s `space`/`shift+space`
+also commits through); every other path still calls `build`/
+`rebuild_model` wholesale: a delivery, a draft restore, row
+insert/delete (`o`/`shift+o`/`d d`, since splicing a row shifts every
+row below it and `patch_cell` only re-prepares one already-positioned
+cell) — **and `:bump`, on purpose (controller ruling): a row or column
+bump touches many cells at once, `Draft::bump` and the model rebuild
+together in one call, and patching each touched cell individually is a
+perf follow-up, not built here.** A column `:bump` on a 10,000-row
+schedule therefore still pays the full flat-build cost below, exactly
+as a delivery does — only a single cell's own commit is cheap now.
+
+| Benchmark | Result |
+|---|---|
+| `marketdata_core/patch_cell_pivot_20x30` (a committed cell, CVI's shape) | 92 ns |
+| `marketdata_core/patch_cell_values_10000x5` (a committed cell, the flat shape) | 116 ns |
+| `marketdata_core/model_build_values_10000x5_100_rows_spliced` (`build`, 100 rows inserted — the cost `o`/`shift+o`/`d d`, a delivery, or a column `:bump` all still pay at this size) | 6.09 ms |
+| `marketdata_core/draft_rebase_1000_edits_100_rows` (`Draft::rebase`, 1,000 cell edits + 100 row inserts) | 233 µs |
+
+`patch_cell` costs low hundreds of nanoseconds at both shapes — four to
+five orders of magnitude under the 8 ms budget — because it re-prepares
+exactly one cell's text, value and state rather than the whole grid; a
+trader typing into a 10,000-row schedule now pays that near-zero cost
+per keystroke on the cell they are actually editing, the same as CVI's
+own 20×30 grid always did. `:bump`, row insert/delete and a delivery
+all still call `build`/`rebuild_model`, so
+`model_build_values_10000x5_100_rows_spliced` is the number that bounds
+all three at 10,000 rows — inside the §7.1 8 ms budget but not by a
+wide margin, as the un-spliced flat build already was not (the same
+pass's own `model_build_values_10000x5` reading, for a direct same-run
+comparison, was 5.94 ms — 100 spliced rows costing about 2.5% more over
+10,000 document rows, the expected direction). Likewise
+`draft_rebase_1000_edits_100_rows` (233 µs) cost about 8% more than the
+same pass's own plain-cell `draft_rebase_1000_edits` reading (216 µs) —
+rows resolve by label through the same kind of map lookup cells do, so
+100 more rows add a little, not a lot.
+
+**A caveat this session's own numbers earn, named rather than hidden:**
+an earlier pass through these same four benchmarks read the two
+"more work" variants FASTER than their own same-session baselines —
+`model_build_values_10000x5` at 9.83 ms against
+`…_100_rows_spliced` at 6.66 ms, and `draft_rebase_1000_edits` at
+400 µs against `…_100_rows` at 216 µs — which cannot be a real
+speed-up from doing more work and is host contention, not signal (this
+session's host ran a shared load average that swung from ~20 to ~85
+across reruns of these same, otherwise-unchanged benchmarks). The
+numbers above are a later re-run where the baseline and its "more
+work" variant finally read in the expected direction, but they are
+**still not a trustworthy point estimate on their own** — read every
+figure in this section as an order-of-magnitude reading taken on a
+busy shared machine, and re-measure on a quiet host before relying on
+any of it for a real regression check.
 
 **Paint at 10,000 rows — not yet measured on a display.** The
 implementation sandbox has no window; the display recipe below is the

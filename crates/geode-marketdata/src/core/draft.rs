@@ -12,8 +12,10 @@
 //! the draft goes `Behind` rather than being clobbered (roadmap ruling 9).
 
 use crate::core::matrix::MatrixModel;
+use crate::core::spec::{Columns, PanelSpec};
 use geode_core::document::Value;
 use geode_core::schema::ColumnType;
+use gpui::SharedString;
 use std::collections::{BTreeMap, HashMap};
 
 /// Where the draft stands against the document on screen.
@@ -96,6 +98,39 @@ impl UpdatePolicy {
     }
 }
 
+/// One row-level edit (spec §5.1): `Inserted` is a whole new row, its own
+/// cells keyed by COLUMN LABEL rather than grid index — an inserted row's
+/// index is the model's business, not the draft's — and `Deleted` marks a
+/// document row for removal without saying anything about its cells,
+/// which still paint from the document until the row is actually gone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RowEdit {
+    /// `after` is the label of the document row this one sits under,
+    /// `None` meaning the top. `cells` are the values typed into it so
+    /// far, keyed by the column's own label — the same identity a cell
+    /// edit's `labels` side map already uses, so a row that moves
+    /// columns (a reordered ladder) is not a row that loses its edits.
+    Inserted {
+        after: Option<String>,
+        cells: BTreeMap<String, Value>,
+    },
+    /// A document row marked for removal. The row itself is not gone
+    /// from `rows` — the model still lays it out, struck through
+    /// (§5.2) — until upload or a rebase drops it outright.
+    Deleted,
+}
+
+/// What [`Draft::delete_row`] did, so a caller can say so: `Dropped` is an
+/// `Inserted` row removed outright (there was nothing to send in the
+/// first place), `Marked` is a document row now `Deleted`, `Already` is a
+/// document row that already was.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RowDelete {
+    Dropped,
+    Marked,
+    Already,
+}
+
 /// Edits keyed by grid cell, with the labels that make them portable, plus
 /// document-level attribute edits keyed by column name.
 ///
@@ -113,16 +148,25 @@ impl UpdatePolicy {
 /// A header attribute needs no such indexing — its column NAME is its
 /// identity, the same name every generation of one document carries it
 /// under — so `attrs` is keyed directly, with no `labels`-style side map.
+///
+/// A row-level edit ([`RowEdit`], §5.1) is a third kind of unsent work,
+/// keyed by the row's own label directly — a row has no grid index of its
+/// own to key by until a model places it, unlike a cell edit, which is
+/// always made against a row that already has one.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Draft {
     /// The source time of the generation every edit was made against,
     /// RFC 3339. `None` exactly when there are no edits.
     pub base: Option<String>,
-    pub edits: BTreeMap<(usize, usize), f64>,
+    pub edits: BTreeMap<(usize, usize), Value>,
     /// Document-level attribute edits, keyed by column name. Part of the
     /// same draft as `edits` (one base, one state) because both are unsent
     /// work against the same document generation.
     pub attrs: BTreeMap<String, Value>,
+    /// Row insert/delete, keyed by row label. Part of the same draft as
+    /// `edits`/`attrs` for the same reason: one base, one state, one
+    /// `len()`, one `revert`.
+    pub rows: BTreeMap<String, RowEdit>,
     pub state: DraftState,
     /// (row label, column label) per edited cell. Private because it must
     /// never drift from `edits`: every door that writes one writes both.
@@ -153,14 +197,14 @@ impl Draft {
         self.attrs.len()
     }
 
-    /// Cells and attributes together — the one number that answers
+    /// Cells, attributes and rows together — the one number that answers
     /// "is there unsent work".
     pub fn len(&self) -> usize {
-        self.edits.len() + self.attrs.len()
+        self.edits.len() + self.attrs.len() + self.rows.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.edits.is_empty() && self.attrs.is_empty()
+        self.edits.is_empty() && self.attrs.is_empty() && self.rows.is_empty()
     }
 
     pub fn is_sent(&self) -> bool {
@@ -175,7 +219,13 @@ impl Draft {
     /// screen; it is stored only while the draft is empty, because every
     /// edit in one draft is against one generation and a later keystroke
     /// must never quietly restamp the set.
-    pub fn set(&mut self, cell: (usize, usize), labels: (String, String), value: f64, base: &str) {
+    pub fn set(
+        &mut self,
+        cell: (usize, usize),
+        labels: (String, String),
+        value: Value,
+        base: &str,
+    ) {
         if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
         }
@@ -186,6 +236,24 @@ impl Draft {
         // `Sent` does not — the draft no longer matches what was sent.
         if matches!(self.state, DraftState::Clean | DraftState::Sent) {
             self.state = DraftState::Editing;
+        }
+    }
+
+    /// A cell edit's numeric reading — `F64`/`I64` widened to `f64`,
+    /// `None` for a `Date`/`Utf8` edit or no edit at all. `:bump`'s own
+    /// door onto an EXISTING edit — `MarketDataTile::bump`'s
+    /// `numeric_value` reads a cell's current value through here first,
+    /// falling back to the model's own painted one when there is no edit
+    /// yet — so a second bump composes with the first rather than reading
+    /// through to the document underneath it. Which COLUMNS are ever
+    /// bumped at all is `CellKind::Number`'s decision, made by the
+    /// caller (this crate has no `MatrixModel` to consult here); this is
+    /// only the "what number is already there" half of that.
+    pub fn numeric_edit(&self, cell: (usize, usize)) -> Option<f64> {
+        match self.edits.get(&cell)? {
+            Value::F64(v) => Some(*v),
+            Value::I64(v) => Some(*v as f64),
+            Value::Utf8(_) | Value::Date(_) => None,
         }
     }
 
@@ -200,14 +268,229 @@ impl Draft {
         }
     }
 
-    /// Drop every edit and attribute, answering how many there were in
-    /// total. The draft is `Clean` afterwards and carries no base, since a
-    /// base describes a set of edits.
+    /// Insert a new row, empty of cells, sitting under `after` (`None` =
+    /// top) — the same base rule as `set`. `label` is the row's own
+    /// identity; a caller inserting on a `Minted` axis mints one first
+    /// through [`Self::mint_label`], while a `Typed` axis's row-label
+    /// editor supplies one directly (spec §5.3).
+    pub fn insert_row(&mut self, label: String, after: Option<String>, base: &str) {
+        if self.is_empty() || self.base.is_none() {
+            self.base = Some(base.to_string());
+        }
+        self.rows.insert(
+            label,
+            RowEdit::Inserted {
+                after,
+                cells: BTreeMap::new(),
+            },
+        );
+        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+            self.state = DraftState::Editing;
+        }
+    }
+
+    /// Delete a row by label — the same base rule as `set`. An `Inserted`
+    /// row is dropped outright (there was never anything to send), a
+    /// document row not already marked becomes `Deleted`, and a row
+    /// already `Deleted` answers `Already` rather than being marked
+    /// twice (marking it again would not be wrong, but the caller's
+    /// notice needs to say which happened).
+    ///
+    /// Dropping an inserted row hands every row anchored on it to ITS
+    /// anchor ([`Self::rehang_followers`], spec §5.3): `d d` on the
+    /// middle of a chain `D1 → new-2 → new-1` leaves `new-1` under `D1`,
+    /// where the trader put the chain, rather than at the top where a
+    /// vanished anchor lands.
+    pub fn delete_row(&mut self, label: &str, base: &str) -> RowDelete {
+        if self.is_empty() || self.base.is_none() {
+            self.base = Some(base.to_string());
+        }
+        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+            self.state = DraftState::Editing;
+        }
+        let result = match self.rows.get(label) {
+            Some(RowEdit::Inserted { after, .. }) => {
+                let after = after.clone();
+                self.rows.remove(label);
+                self.rehang_followers(Some(label), after);
+                RowDelete::Dropped
+            }
+            Some(RowEdit::Deleted) => RowDelete::Already,
+            None => {
+                self.rows.insert(label.to_string(), RowEdit::Deleted);
+                RowDelete::Marked
+            }
+        };
+        // Dropping the draft's only `Inserted` row (insert, then delete
+        // the same row right back, nothing else pending) can leave every
+        // map empty again — the invariant `revert` and `rebase`'s own
+        // tail both keep, `base` is `None` exactly when there is no
+        // unsent work, is not automatic here the way it is there: the
+        // base/state bump above runs unconditionally, ahead of knowing
+        // whether this call will end up removing the draft's only
+        // content. Left unchecked, an insert-then-undo leaves `state`
+        // `Editing` and `base` `Some` over an empty draft — `badge()`
+        // would say `Dirty` and a later `on_delivered` would push a
+        // draft with nothing in it into `Behind`.
+        if self.is_empty() {
+            self.base = None;
+            self.state = DraftState::Clean;
+        }
+        result
+    }
+
+    /// Write one cell of an `Inserted` row, keyed by the column's own
+    /// label. Answers `false` for anything else — a document row (even a
+    /// `Deleted` one) or a label with no row edit at all — since a cell
+    /// edit on a row the draft did not insert belongs in `Draft::set`
+    /// against the model's own grid index, not here.
+    pub fn set_row_cell(&mut self, label: &str, column_label: &str, value: Value) -> bool {
+        match self.rows.get_mut(label) {
+            Some(RowEdit::Inserted { cells, .. }) => {
+                cells.insert(column_label.to_string(), value);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Move an `Inserted` row to a new label — the row-label editor
+    /// committing a typed label onto a minted or blank one (spec §5.3).
+    /// Answers `false` when `from` is not an `Inserted` row (a document
+    /// row's label is not the draft's to rename) or `to` already names a
+    /// row in this draft, so a caller never silently overwrites one edit
+    /// with another.
+    ///
+    /// The row's followers move with it ([`Self::rehang_followers`],
+    /// final review's Critical): the tile anchors a chain on the MINTED
+    /// label before the rename lands, so a follower left saying
+    /// `after: new-2` would name a label no row holds — unresolvable by
+    /// the splice, painted at the top, and written to the session as a
+    /// dangling anchor.
+    pub fn rename_row(&mut self, from: &str, to: &str) -> bool {
+        if !matches!(self.rows.get(from), Some(RowEdit::Inserted { .. })) {
+            return false;
+        }
+        if self.rows.contains_key(to) {
+            return false;
+        }
+        let edit = self.rows.remove(from).expect("checked above");
+        self.rows.insert(to.to_string(), edit);
+        self.rehang_followers(Some(from), Some(to.to_string()));
+        true
+    }
+
+    /// Move an `Inserted` row under a different anchor — `shift+o` on an
+    /// inserted row (spec §5.3, controller ruling 2026-09-19): the new
+    /// row takes this one's anchor and this one is re-anchored onto the
+    /// new row, so the pair paints new-above-old under the same document
+    /// row. Answers `false` for anything but an `Inserted` row — a
+    /// document row's place is the document's, not the draft's to move.
+    pub fn reanchor_row(&mut self, label: &str, after: Option<String>) -> bool {
+        match self.rows.get_mut(label) {
+            Some(RowEdit::Inserted { after: anchor, .. }) => {
+                *anchor = after;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Move every `Inserted` row anchored on `from` onto `to` — the one
+    /// spelling of a follower move (review of Task 8): `o` on a row that
+    /// already has a follower hangs that follower off the NEW row, so the
+    /// new row sits immediately below the cursor row rather than beside
+    /// its earlier sibling in label order (which would re-sort the pair
+    /// on a later rename); and dropping an inserted row hands its
+    /// followers to its own anchor. With both moves through here every
+    /// anchor has at most one direct follower by construction — a
+    /// rebase's vanished-anchor → `None` is the one remaining source of
+    /// siblings.
+    pub fn rehang_followers(&mut self, from: Option<&str>, to: Option<String>) {
+        for edit in self.rows.values_mut() {
+            if let RowEdit::Inserted { after, .. } = edit
+                && after.as_deref() == from
+            {
+                *after = to.clone();
+            }
+        }
+    }
+
+    /// The row edit at `label`, if any.
+    pub fn row_state(&self, label: &str) -> Option<&RowEdit> {
+        self.rows.get(label)
+    }
+
+    /// How many rows this draft inserts.
+    pub fn rows_added(&self) -> usize {
+        self.rows
+            .values()
+            .filter(|e| matches!(e, RowEdit::Inserted { .. }))
+            .count()
+    }
+
+    /// How many rows this draft marks deleted.
+    pub fn rows_removed(&self) -> usize {
+        self.rows
+            .values()
+            .filter(|e| matches!(e, RowEdit::Deleted))
+            .count()
+    }
+
+    /// How many inserted rows still lack a required cell (spec §5.2) —
+    /// the header's `N rows incomplete`, and what Part 4's upload will
+    /// refuse on. Under `Columns::Values` a cell is required when its
+    /// [`ValueColumn::required`](crate::core::spec::ValueColumn) says so;
+    /// under `Columns::Axis` EVERY column is — the ladder and the slice
+    /// values alike, since a term with a node missing is not a term the
+    /// desk can price. `columns` is the model's own column labels, the
+    /// ladder being the document's and not the spec's to know; a flat
+    /// spec's required labels are checked against it too, so a column
+    /// the spec requires but the model does not carry never counts.
+    pub fn incomplete_rows(&self, spec: &PanelSpec, columns: &[SharedString]) -> usize {
+        let required = |label: &str| match &spec.columns {
+            Columns::Axis(_) => true,
+            Columns::Values(cols) => cols.iter().any(|c| c.label == label && c.required),
+        };
+        self.rows
+            .values()
+            .filter(|e| match e {
+                RowEdit::Inserted { cells, .. } => columns
+                    .iter()
+                    .any(|c| required(c.as_ref()) && !cells.contains_key(c.as_ref())),
+                RowEdit::Deleted => false,
+            })
+            .count()
+    }
+
+    /// The smallest `new-<n>` (`n` starting at 1) that `taken` (the
+    /// model's own rows, or whatever else a caller wants to avoid) does
+    /// not name and that is not CURRENTLY a key of this draft's own
+    /// `rows` — so a mint never collides with a row already on screen or
+    /// already pending in this very draft. A number freed by renaming or
+    /// dropping the row that first took it CAN be re-minted: that is
+    /// harmless, since by then it is minting a fresh row with no history
+    /// of its own, not reusing one still live.
+    pub fn mint_label(&self, taken: impl Fn(&str) -> bool) -> String {
+        let mut n = 1usize;
+        loop {
+            let candidate = format!("new-{n}");
+            if !taken(&candidate) && !self.rows.contains_key(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Drop every edit, attribute and row, answering how many there were
+    /// in total. The draft is `Clean` afterwards and carries no base,
+    /// since a base describes a set of edits.
     pub fn revert(&mut self) -> usize {
         let n = self.len();
         self.edits.clear();
         self.labels.clear();
         self.attrs.clear();
+        self.rows.clear();
         self.base = None;
         self.state = DraftState::Clean;
         n
@@ -220,6 +503,15 @@ impl Draft {
     /// painting, which is the draft's own value where one exists — so that
     /// `:bump` composes with an edit already made rather than reading
     /// through to the document underneath it.
+    ///
+    /// **Number cells only, by construction of the caller, not this
+    /// function**: `:bump` is a per-cell arithmetic op, so a caller (the
+    /// tile) reads each candidate cell's [`CellKind`] through
+    /// [`MatrixModel::kind_of`] and passes only the `Number` ones —
+    /// exactly the same door `f64_at`-vs-`display_at` reading in
+    /// `matrix::cell_of` decides by. A bumped cell always lands as
+    /// [`Value::F64`]: `delta` is itself an `f64`, and preserving an
+    /// `I64` cell's own type through a bump is not this slice's problem.
     pub fn bump(
         &mut self,
         cells: impl Iterator<Item = ((usize, usize), (String, String), f64)>,
@@ -228,7 +520,7 @@ impl Draft {
     ) -> usize {
         let mut n = 0;
         for (cell, labels, current) in cells {
-            self.set(cell, labels, current + delta, base);
+            self.set(cell, labels, Value::F64(current + delta), base);
             n += 1;
         }
         n
@@ -294,6 +586,15 @@ impl Draft {
     /// rather than by index is the whole point: a term that moved from row
     /// 3 to row 2 is the same term, and an edit left at index 3 would be
     /// silently reassigned to a different expiry.
+    ///
+    /// `model_of_newer` must be the DOCUMENT's own grid — built with
+    /// `Draft::default()`, never with this draft. A model built with the
+    /// draft carries its inserted rows spliced in (§5.2), so every one of
+    /// them would read here as a row the document now carries and be
+    /// dropped as a conflict, and a document row below an insert would
+    /// resolve to its painted position rather than the document position
+    /// `edits` is keyed by. Every caller in the tile builds a clean model
+    /// for this.
     pub fn rebase(&mut self, model_of_newer: &MatrixModel) -> (usize, Vec<(String, String)>) {
         // The two axes are indexed separately — O(R + C), not the R × C
         // every cell pair would cost, which at a 10,000-row schedule is
@@ -331,7 +632,7 @@ impl Draft {
                 .map(|(&ri, &ci)| (ri, ci));
             match target {
                 Some(new_cell) => {
-                    edits.insert(new_cell, *value);
+                    edits.insert(new_cell, value.clone());
                     labels.insert(new_cell, (row_label.clone(), col_label.clone()));
                 }
                 None => dropped.push((row_label.clone(), col_label.clone())),
@@ -360,6 +661,71 @@ impl Draft {
         }
         self.attrs = attrs;
 
+        // A row edit's identity is its own label — the same `rows` index
+        // built above for cell edits, since a row that exists in the
+        // newer model is exactly a label that index carries (§5.1).
+        //
+        // An anchor can be a document row OR one of this draft's own
+        // inserted rows (`shift+o` on an inserted row chains the new row
+        // on it), and `model_of_newer` is the document's grid alone, so
+        // the second kind is never in `rows`. The inserted labels that
+        // SURVIVE this rebase are precomputed here rather than read off
+        // `rows_out` as it fills: label order visits `new-1` before the
+        // `new-2` it hangs off, so an as-you-go check would flatten every
+        // chain whose anchor sorts later. An anchor on an inserted row
+        // that this very rebase drops (upstream now carries its label) is
+        // a vanished anchor like a document row's.
+        // Owned labels, since the loop below takes `self.rows` by value.
+        let surviving: std::collections::HashSet<String> = self
+            .rows
+            .iter()
+            .filter(|(label, edit)| {
+                matches!(edit, RowEdit::Inserted { .. }) && !rows.contains_key(label.as_str())
+            })
+            .map(|(label, _)| label.clone())
+            .collect();
+        let anchor_survives =
+            |anchor: &str| rows.contains_key(anchor) || surviving.contains(anchor);
+        let mut rows_out = BTreeMap::new();
+        for (label, edit) in std::mem::take(&mut self.rows) {
+            match edit {
+                // Deleted, and the newer document still has it: keep
+                // marking it deleted. Deleted, and the newer document
+                // dropped the row itself: there is nothing left to
+                // delete, so the edit is dropped and named.
+                RowEdit::Deleted => {
+                    if rows.contains_key(label.as_str()) {
+                        rows_out.insert(label, RowEdit::Deleted);
+                    } else {
+                        dropped.push((label, "row".to_string()));
+                    }
+                }
+                // Inserted, and the newer document now carries a row
+                // under this very label: upstream got there first, so
+                // this draft's own insert is dropped and named as a
+                // conflict rather than silently shadowing the real row.
+                // Otherwise it survives, but its anchor might not have:
+                // an `after` label that is neither a row of the newer
+                // document nor a surviving inserted row re-anchors to the
+                // top and is named too.
+                RowEdit::Inserted { after, cells } => {
+                    if rows.contains_key(label.as_str()) {
+                        dropped.push((label, "row (the document now carries it)".to_string()));
+                    } else {
+                        let after = match after {
+                            Some(anchor) if !anchor_survives(&anchor) => {
+                                dropped.push((label.clone(), format!("anchor '{anchor}'")));
+                                None
+                            }
+                            other => other,
+                        };
+                        rows_out.insert(label, RowEdit::Inserted { after, cells });
+                    }
+                }
+            }
+        }
+        self.rows = rows_out;
+
         self.base = model_of_newer.source_time.clone();
         self.state = if self.is_empty() {
             DraftState::Clean
@@ -384,16 +750,27 @@ impl Draft {
         }
     }
 
-    /// "3 cells, spot_ref" / "1 cell" / "anchor_date, spot_ref" — the
-    /// unsent work named for a notice or a confirm, cells first (a count,
-    /// since a cell has no name worth showing) and then every edited
-    /// attribute's own column name.
+    /// "3 cells, 1 row added, 1 row removed, spot_ref" — the unsent work
+    /// named for a notice or a confirm, in that fixed order: cells (a
+    /// count, since a cell has no name worth showing), rows added, rows
+    /// removed, then every edited attribute's own column name. Each part
+    /// appears only when non-zero.
     pub fn count_phrase(&self) -> String {
         let mut parts = Vec::new();
         match self.edits.len() {
             0 => {}
             1 => parts.push("1 cell".to_string()),
             n => parts.push(format!("{n} cells")),
+        }
+        match self.rows_added() {
+            0 => {}
+            1 => parts.push("1 row added".to_string()),
+            n => parts.push(format!("{n} rows added")),
+        }
+        match self.rows_removed() {
+            0 => {}
+            1 => parts.push("1 row removed".to_string()),
+            n => parts.push(format!("{n} rows removed")),
         }
         parts.extend(self.attrs.keys().cloned());
         parts.join(", ")
@@ -415,7 +792,7 @@ impl Draft {
                 Some(toml::Value::Array(vec![
                     toml::Value::String(row_label.clone()),
                     toml::Value::String(col_label.clone()),
-                    toml::Value::Float(*value),
+                    value_to_toml(value),
                 ]))
             })
             .collect();
@@ -435,6 +812,29 @@ impl Draft {
             }
             table.insert("attrs".into(), toml::Value::Table(attrs));
         }
+        if !self.rows.is_empty() {
+            let mut rows = toml::Table::new();
+            for (label, edit) in &self.rows {
+                let mut row = toml::Table::new();
+                match edit {
+                    RowEdit::Inserted { after, cells } => {
+                        if let Some(after) = after {
+                            row.insert("after".into(), toml::Value::String(after.clone()));
+                        }
+                        let mut cells_table = toml::Table::new();
+                        for (column_label, value) in cells {
+                            cells_table.insert(column_label.clone(), value_to_toml(value));
+                        }
+                        row.insert("cells".into(), toml::Value::Table(cells_table));
+                    }
+                    RowEdit::Deleted => {
+                        row.insert("deleted".into(), toml::Value::Boolean(true));
+                    }
+                }
+                rows.insert(label.clone(), toml::Value::Table(row));
+            }
+            table.insert("rows".into(), toml::Value::Table(rows));
+        }
         table
     }
 
@@ -444,11 +844,15 @@ impl Draft {
     /// than taking the whole draft with it (unsent work is worth more than
     /// tidiness).
     ///
-    /// An attribute's `String` is read back as a [`Value::Date`] when it
-    /// parses `%Y-%m-%d` and a [`Value::Utf8`] otherwise: a date string is
+    /// A cell edit's value is read through [`value_from_toml`] — a bare
+    /// number or a tagged date/text, never a guess. An attribute's
+    /// `String` is read back as a [`Value::Date`] when it parses
+    /// `%Y-%m-%d` and a [`Value::Utf8`] otherwise: a date string is
     /// unambiguous (`to_toml` writes no other string in that exact shape),
     /// and a free-text attribute never happens to look like one — so the
-    /// direction of the guess costs nothing either way.
+    /// direction of the guess costs nothing either way. The two spellings
+    /// differ on purpose (§4.3's ruling): `attrs` predates typed cells and
+    /// nothing forces its shape to change to match.
     pub fn from_toml(t: &toml::Table) -> Draft {
         let base = t.get("base").and_then(|v| v.as_str()).map(str::to_string);
         let mut edits = BTreeMap::new();
@@ -466,9 +870,11 @@ impl Draft {
             if triple.len() != 3 {
                 continue;
             }
-            let (Some(row_label), Some(col_label), Some(value)) =
-                (triple[0].as_str(), triple[1].as_str(), as_f64(&triple[2]))
-            else {
+            let (Some(row_label), Some(col_label), Some(value)) = (
+                triple[0].as_str(),
+                triple[1].as_str(),
+                value_from_toml(&triple[2]),
+            ) else {
                 continue;
             };
             let cell = (i, UNRESOLVED_COLUMN);
@@ -494,7 +900,36 @@ impl Draft {
                 attrs.insert(column.clone(), value);
             }
         }
-        let state = if edits.is_empty() && attrs.is_empty() {
+        // Named `row_edits`, not `rows` — this function's `rows` above is
+        // already the (oddly named) top-level `edits` array.
+        let mut row_edits = BTreeMap::new();
+        if let Some(toml::Value::Table(rows_table)) = t.get("rows") {
+            for (label, entry) in rows_table {
+                let Some(row) = entry.as_table() else {
+                    continue;
+                };
+                if row.get("deleted").and_then(|v| v.as_bool()) == Some(true) {
+                    row_edits.insert(label.clone(), RowEdit::Deleted);
+                    continue;
+                }
+                let after = row
+                    .get("after")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let mut cells = BTreeMap::new();
+                if let Some(toml::Value::Table(cells_table)) = row.get("cells") {
+                    for (column_label, value) in cells_table {
+                        // A malformed cell is skipped, the same rule the
+                        // top-level `edits` loop above follows.
+                        if let Some(value) = value_from_toml(value) {
+                            cells.insert(column_label.clone(), value);
+                        }
+                    }
+                }
+                row_edits.insert(label.clone(), RowEdit::Inserted { after, cells });
+            }
+        }
+        let state = if edits.is_empty() && attrs.is_empty() && row_edits.is_empty() {
             DraftState::Clean
         } else {
             DraftState::Editing
@@ -503,18 +938,61 @@ impl Draft {
             base,
             edits,
             attrs,
+            rows: row_edits,
             state,
             labels,
         }
     }
 }
 
-fn as_f64(value: &toml::Value) -> Option<f64> {
-    // A whole number round-trips through TOML as an integer, so a draft
-    // written as `1.0` reads back as `1` and must still be a value.
-    value
-        .as_float()
-        .or_else(|| value.as_integer().map(|i| i as f64))
+/// A cell edit's value on the wire: a number bare (`toml::Value::Float`/
+/// `Integer`, matching whichever `to_toml` wrote), a date or text edit
+/// TAGGED — see [`tagged`] — so a restored `2026-12-18` cannot be
+/// confused with the text edit `"2026-12-18"` a trader might just as
+/// well have typed into a `Utf8` cell.
+fn value_to_toml(value: &Value) -> toml::Value {
+    match value {
+        Value::F64(f) => toml::Value::Float(*f),
+        Value::I64(i) => toml::Value::Integer(*i),
+        Value::Date(d) => tagged("date", d.format("%Y-%m-%d").to_string()),
+        Value::Utf8(s) => tagged("text", s.clone()),
+    }
+}
+
+/// `{ type = "<ty>", value = "<value>" }` — a date and a text edit are
+/// both strings on the wire, and only a tag keeps a restored
+/// `2026-12-18` from reading back as text.
+fn tagged(ty: &str, value: String) -> toml::Value {
+    let mut t = toml::Table::new();
+    t.insert("type".into(), toml::Value::String(ty.to_string()));
+    t.insert("value".into(), toml::Value::String(value));
+    toml::Value::Table(t)
+}
+
+/// The inverse of [`value_to_toml`]: a bare `Float`/`Integer` reads back
+/// as the matching numeric variant, a `{ type, value }` table as the
+/// date or text it tags. A bare `String` — the shape [`attr_text`]'s
+/// sibling below writes for an attribute, never a cell edit — is refused
+/// rather than guessed: a cell edit's date or text is only ever spelled
+/// tagged, so an untagged string here is malformed, skipped the same as
+/// any other unreadable entry.
+fn value_from_toml(value: &toml::Value) -> Option<Value> {
+    match value {
+        toml::Value::Float(f) => Some(Value::F64(*f)),
+        toml::Value::Integer(i) => Some(Value::I64(*i)),
+        toml::Value::Table(t) => {
+            let ty = t.get("type")?.as_str()?;
+            let text = t.get("value")?.as_str()?;
+            match ty {
+                "date" => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                    .ok()
+                    .map(Value::Date),
+                "text" => Some(Value::Utf8(text.to_string())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Local, like every other displayed time in this codebase (Phase 4a's
@@ -527,15 +1005,18 @@ pub(crate) fn local_hhmm(rfc3339: &str) -> String {
     }
 }
 
-/// Parse a typed cell to the number a document holds.
+/// Parse a typed NUMERIC cell to the number a document holds.
 ///
-/// Only `f64` and `i64` columns are editable — a document's values are
-/// declared one of those two (spec §3.2) and an axis is read-only in
-/// slice 1 (a header attribute is editable too, but through
-/// [`parse_attr`], which parses its own broader vocabulary of types) — so
-/// anything else is refused by type rather than coerced. Every message
-/// names the text it refused, because the inline notice appears beside a
-/// field the trader can no longer see the whole of.
+/// This is the `CellKind::Number` parser alone: every caller dispatches
+/// on the cell's kind first (`commit_cell_edit`, and [`parse_attr`]'s
+/// numeric arms), and a `Text`, `Choice` or `Date` cell commits through
+/// its own arm there (dividend spec §3.3) rather than through this
+/// function. The non-numeric `ColumnType` arm below is therefore a belt
+/// behind that dispatch, not a rule about which cells are editable —
+/// refused by type rather than coerced, so a caller that forgets the
+/// dispatch gets a notice and not a number. Every message names the
+/// text it refused, because the inline notice appears beside a field
+/// the trader can no longer see the whole of.
 pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
     let trimmed = text.trim();
     match ty {
@@ -553,7 +1034,7 @@ pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
             .map(|v| v as f64)
             .map_err(|_| format!("'{text}' is not a whole number")),
         ColumnType::Utf8 | ColumnType::Date | ColumnType::Timestamp | ColumnType::Bool => Err(
-            format!("'{text}' cannot be entered here — only numeric cells are editable"),
+            format!("'{text}' cannot be entered here — not a numeric cell"),
         ),
     }
 }
@@ -600,7 +1081,7 @@ pub fn attr_text(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::matrix::{Cell, HeaderCell, MatrixModel, RowModel};
+    use crate::core::matrix::{Cell, HeaderCell, MatrixModel, RowModel, RowState};
     use chrono::NaiveDate;
     use geode_core::document::Value;
     use geode_core::schema::ColumnType;
@@ -612,6 +1093,29 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    /// Same as `d`, spelled out — the row tests below bind `d` to a
+    /// `Draft` and need a date constructor `d` would shadow.
+    fn date(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    /// A flat model naming only the given row labels, no columns and no
+    /// header — `rebase`'s row handling reads a newer model's row labels
+    /// alone (see [`Draft::rebase`]'s doc comment).
+    fn flat_model_with_rows(labels: &[&str]) -> MatrixModel {
+        MatrixModel {
+            rows: labels
+                .iter()
+                .map(|label| RowModel {
+                    label: SharedString::from(*label),
+                    cells: Vec::new(),
+                    state: RowState::Document,
+                })
+                .collect(),
+            ..MatrixModel::default()
+        }
     }
 
     /// A model whose header names the given `(column, label)` pairs and
@@ -644,6 +1148,9 @@ mod tests {
             source_time: Some(source_time.to_string()),
             header: Vec::new(),
             slice_columns: 0,
+            // `rebase` never reads a column's `CellKind` — only its label
+            // — so an empty vec here is honest, not a shortcut.
+            column_kinds: Vec::new(),
             columns: cols
                 .iter()
                 .map(|c| SharedString::from(c.to_string()))
@@ -662,8 +1169,10 @@ mod tests {
                             cell_ref: (r, c),
                         })
                         .collect(),
+                    state: RowState::Document,
                 })
                 .collect(),
+            pivot_index: None,
         }
     }
 
@@ -671,12 +1180,12 @@ mod tests {
     fn the_first_edit_records_the_base_and_a_second_edit_on_one_cell_keeps_the_latest() {
         let mut draft = Draft::default();
         assert_eq!(draft.state, DraftState::Clean);
-        draft.set((0, 1), pair("T1", "-1"), 0.5, BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.5), BASE);
         assert_eq!(draft.state, DraftState::Editing);
         assert_eq!(draft.base.as_deref(), Some(BASE));
-        draft.set((0, 1), pair("T1", "-1"), 0.7, BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.7), BASE);
         assert_eq!(draft.edits.len(), 1);
-        assert_eq!(draft.edits.get(&(0, 1)), Some(&0.7));
+        assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(0.7)));
         assert_eq!(
             draft.base.as_deref(),
             Some(BASE),
@@ -687,7 +1196,7 @@ mod tests {
     #[test]
     fn on_delivered_stays_editing_on_the_same_generation_and_goes_behind_on_a_newer_one() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
 
         assert!(
             !draft.on_delivered(BASE),
@@ -703,7 +1212,7 @@ mod tests {
             }
         );
         assert_eq!(draft.edits.len(), 1, "a newer document never clobbers work");
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&1.0));
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.0)));
         assert_eq!(
             draft.base.as_deref(),
             Some(BASE),
@@ -724,7 +1233,7 @@ mod tests {
     #[test]
     fn the_base_generation_redelivered_brings_a_behind_draft_back_to_editing() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
         let older = "2026-09-12T09:00:00Z";
 
         assert!(draft.on_delivered(older), "an as-of step back is Behind");
@@ -741,7 +1250,7 @@ mod tests {
         );
         assert_eq!(draft.state, DraftState::Editing);
         assert_eq!(draft.edits.len(), 1, "the edits are untouched");
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&1.0));
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.0)));
         assert_eq!(draft.base.as_deref(), Some(BASE));
         assert!(
             !draft.on_delivered(BASE),
@@ -760,8 +1269,8 @@ mod tests {
     fn rebase_moves_an_edit_to_its_new_index_by_label_and_reports_a_dropped_one() {
         let mut draft = Draft::default();
         // Two edits on a document whose rows were [T_b, T_a].
-        draft.set((1, 1), pair("T_a", "-1"), 0.5, BASE);
-        draft.set((0, 0), pair("T_b", "-20"), 0.25, BASE);
+        draft.set((1, 1), pair("T_a", "-1"), Value::F64(0.5), BASE);
+        draft.set((0, 0), pair("T_b", "-20"), Value::F64(0.25), BASE);
         draft.on_delivered(NEWER);
 
         // The new document dropped T_b and so lists T_a first: the kept
@@ -774,7 +1283,7 @@ mod tests {
         assert_eq!(draft.edits.len(), 1);
         assert_eq!(
             draft.edits.get(&(0, 1)),
-            Some(&0.5),
+            Some(&Value::F64(0.5)),
             "T_a × -1 is cell (0,1) in the new document"
         );
         assert_eq!(draft.state, DraftState::Editing);
@@ -788,7 +1297,7 @@ mod tests {
     #[test]
     fn rebase_onto_a_document_that_lost_every_label_is_clean_again() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T_a", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T_a", "-20"), Value::F64(1.0), BASE);
         draft.on_delivered(NEWER);
         let (kept, dropped) = draft.rebase(&model(&["T_z"], &["-20"], NEWER));
         assert_eq!(kept, 0);
@@ -800,8 +1309,8 @@ mod tests {
     #[test]
     fn revert_clears_the_edits_and_counts_them() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
-        draft.set((0, 1), pair("T1", "-1"), 2.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(2.0), BASE);
         assert_eq!(draft.revert(), 2);
         assert_eq!(draft.state, DraftState::Clean);
         assert!(draft.edits.is_empty());
@@ -812,7 +1321,7 @@ mod tests {
     #[test]
     fn revert_clears_everything_including_the_behind_state() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
         draft.on_delivered(NEWER);
         draft.revert();
         assert!(draft.edits.is_empty());
@@ -829,14 +1338,36 @@ mod tests {
             ((0, 1), pair("T1", "-1"), 2.5),
         ];
         assert_eq!(draft.bump(cells.into_iter(), 0.5, BASE), 2);
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&1.5));
-        assert_eq!(draft.edits.get(&(0, 1)), Some(&3.0));
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.5)));
+        assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(3.0)));
         assert_eq!(draft.state, DraftState::Editing);
         // Bumping again reads the caller's *current* value, which is the
         // draft's own by then — the tile passes what the model paints.
         let again = vec![((0, 0), pair("T1", "-20"), 1.5)];
         assert_eq!(draft.bump(again.into_iter(), 0.5, BASE), 1);
-        assert_eq!(draft.edits.get(&(0, 0)), Some(&2.0));
+        assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
+    }
+
+    /// `:bump` only ever reaches a `Number` cell — the tile decides that
+    /// through `MatrixModel::kind_of`, before it ever builds the iterator
+    /// `bump` takes — and `numeric_edit` is the door `MarketDataTile::bump`
+    /// reads an existing edit's CURRENT value through: `F64`/`I64` widen
+    /// to `f64`, a `Date`/`Utf8` edit (or no edit at all) answers `None`
+    /// rather than being coerced.
+    #[test]
+    fn numeric_edit_reads_f64_and_i64_and_ignores_other_kinds() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.5), BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::I64(7), BASE);
+        draft.set((0, 2), pair("T1", "0"), Value::Utf8("x".into()), BASE);
+        assert_eq!(draft.numeric_edit((0, 0)), Some(1.5));
+        assert_eq!(draft.numeric_edit((0, 1)), Some(7.0));
+        assert_eq!(
+            draft.numeric_edit((0, 2)),
+            None,
+            "a text edit is not numeric"
+        );
+        assert_eq!(draft.numeric_edit((9, 9)), None, "no edit at all");
     }
 
     #[test]
@@ -845,12 +1376,12 @@ mod tests {
         assert_eq!(draft.badge(), DraftBadge::Clean);
         assert_eq!(draft.count_phrase(), "");
 
-        draft.set((0, 0), pair("T1", "-20"), 1.0, BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
         assert_eq!(draft.badge(), DraftBadge::Dirty);
         assert_eq!(draft.count_phrase(), "1 cell");
 
-        draft.set((0, 1), pair("T1", "-1"), 1.0, BASE);
-        draft.set((1, 1), pair("T2", "-1"), 1.0, BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(1.0), BASE);
+        draft.set((1, 1), pair("T2", "-1"), Value::F64(1.0), BASE);
         assert_eq!(draft.count_phrase(), "3 cells");
 
         draft.state = DraftState::Sent;
@@ -890,8 +1421,8 @@ mod tests {
     #[test]
     fn to_toml_and_from_toml_round_trip_the_edits_by_label_and_the_base() {
         let mut draft = Draft::default();
-        draft.set((0, 1), pair("T1", "-1"), 0.5, BASE);
-        draft.set((1, 0), pair("T2", "-20"), 0.25, BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.5), BASE);
+        draft.set((1, 0), pair("T2", "-20"), Value::F64(0.25), BASE);
 
         let table = draft.to_toml();
         assert_eq!(table.get("base").and_then(|v| v.as_str()), Some(BASE));
@@ -924,8 +1455,16 @@ mod tests {
         let (kept, dropped) = {
             let mut restored = restored;
             let resolved = restored.rebase(&model(&["T2", "T1"], &["-20", "-1"], BASE));
-            assert_eq!(restored.edits.get(&(1, 1)), Some(&0.5), "T1 × -1");
-            assert_eq!(restored.edits.get(&(0, 0)), Some(&0.25), "T2 × -20");
+            assert_eq!(
+                restored.edits.get(&(1, 1)),
+                Some(&Value::F64(0.5)),
+                "T1 × -1"
+            );
+            assert_eq!(
+                restored.edits.get(&(0, 0)),
+                Some(&Value::F64(0.25)),
+                "T2 × -20"
+            );
             resolved
         };
         assert_eq!(kept, 2);
@@ -953,7 +1492,56 @@ mod tests {
         );
         let draft = Draft::from_toml(&table);
         assert_eq!(draft.edits.len(), 1, "the readable edit survives");
-        assert_eq!(draft.edits.values().next(), Some(&3.0));
+        assert_eq!(draft.edits.values().next(), Some(&Value::I64(3)));
+    }
+
+    /// §4.3: a date or text cell edit is spelled `{ type, value }` on the
+    /// wire, never a bare string — the same tag `to_toml` writes and the
+    /// only shape `from_toml` accepts for either, so a stray untagged
+    /// string (however it got into the file) is refused like any other
+    /// malformed entry rather than guessed at.
+    #[test]
+    fn typed_edits_round_trip_through_toml_with_a_type_tag() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), pair("D1", "ex"), Value::Date(d(2026, 12, 20)), BASE);
+        draft.set((0, 1), pair("D1", "amount"), Value::F64(1.5), BASE);
+        draft.set(
+            (0, 2),
+            pair("D1", "status"),
+            Value::Utf8("paid".into()),
+            BASE,
+        );
+
+        let table = draft.to_toml();
+        let back = Draft::from_toml(&table);
+        let values: Vec<_> = back.edits.values().cloned().collect();
+        assert!(values.contains(&Value::Date(d(2026, 12, 20))));
+        assert!(values.contains(&Value::F64(1.5)));
+        assert!(values.contains(&Value::Utf8("paid".into())));
+
+        // A date is a tagged table, never a bare string a text edit
+        // could be confused with.
+        let text = toml::to_string(&table).unwrap();
+        assert!(text.contains("type = \"date\""), "{text}");
+        assert!(text.contains("type = \"text\""), "{text}");
+    }
+
+    /// A bare, untagged string in a cell edit's value slot — the shape a
+    /// hand-edited file, or a session written by a future mistake, might
+    /// carry — is refused rather than guessed as text or a date.
+    #[test]
+    fn an_untagged_string_cell_edit_is_skipped_not_guessed() {
+        let mut table = toml::Table::new();
+        table.insert(
+            "edits".into(),
+            toml::Value::Array(vec![toml::Value::Array(vec![
+                toml::Value::String("T1".into()),
+                toml::Value::String("-1".into()),
+                toml::Value::String("paid".into()),
+            ])]),
+        );
+        let draft = Draft::from_toml(&table);
+        assert!(draft.edits.is_empty(), "an untagged string is malformed");
     }
 
     #[test]
@@ -970,7 +1558,8 @@ mod tests {
         assert!(!err.is_empty());
         let err = parse_cell("1e400", ColumnType::F64).expect_err("infinity is not a value");
         assert!(err.contains("1e400"), "{err}");
-        let err = parse_cell("2026-10-16", ColumnType::Date).expect_err("dates are read-only");
+        let err = parse_cell("2026-10-16", ColumnType::Date)
+            .expect_err("the belt behind the kind dispatch refuses a non-numeric type");
         assert!(err.contains("2026-10-16"), "{err}");
     }
 
@@ -1104,12 +1693,12 @@ mod tests {
     #[test]
     fn count_phrase_names_cells_and_attributes() {
         let mut draft = Draft::default();
-        draft.set((0, 0), ("1M".into(), "-20".into()), 0.1, "t0");
-        draft.set((0, 1), ("1M".into(), "-10".into()), 0.1, "t0");
+        draft.set((0, 0), ("1M".into(), "-20".into()), Value::F64(0.1), "t0");
+        draft.set((0, 1), ("1M".into(), "-10".into()), Value::F64(0.1), "t0");
         draft.set_attr("spot_ref", Value::F64(1.0), "t0");
         assert_eq!(draft.count_phrase(), "2 cells, spot_ref");
         let mut one = Draft::default();
-        one.set((0, 0), ("1M".into(), "-20".into()), 0.1, "t0");
+        one.set((0, 0), ("1M".into(), "-20".into()), Value::F64(0.1), "t0");
         assert_eq!(one.count_phrase(), "1 cell");
     }
 
@@ -1138,5 +1727,262 @@ mod tests {
             let back = Draft::from_toml(&draft.to_toml());
             prop_assert_eq!(back.attrs, draft.attrs);
         }
+    }
+
+    #[test]
+    fn inserting_and_deleting_rows_is_counted_and_phrased() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        assert!(d.set_row_cell("new-1", "amount", Value::F64(1.0)));
+        assert!(
+            !d.set_row_cell("D1", "amount", Value::F64(1.0)),
+            "not an inserted row"
+        );
+        assert_eq!(d.delete_row("D2", "t0"), RowDelete::Marked);
+        assert_eq!(d.delete_row("D2", "t0"), RowDelete::Already);
+        assert_eq!(d.rows_added(), 1);
+        assert_eq!(d.rows_removed(), 1);
+        assert_eq!(d.count_phrase(), "1 row added, 1 row removed");
+        assert_eq!(d.delete_row("new-1", "t0"), RowDelete::Dropped);
+        assert_eq!(d.rows_added(), 0);
+        assert_eq!(d.revert(), 1);
+        assert!(d.rows.is_empty());
+    }
+
+    /// The review finding: `delete_row`'s base/state bump runs
+    /// unconditionally, ahead of the match, so dropping the draft's ONLY
+    /// `Inserted` row (insert, then delete it right back, nothing else
+    /// pending) must not leave `base`/`state` claiming unsent work that
+    /// no longer exists — the same invariant `revert` and `rebase`'s own
+    /// tail keep. Reachable in exactly two calls, with nothing else in
+    /// the draft.
+    #[test]
+    fn dropping_the_only_inserted_row_leaves_a_clean_draft() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), None, "t0");
+        assert_eq!(d.delete_row("new-1", "t0"), RowDelete::Dropped);
+        assert!(d.is_empty());
+        assert!(d.base.is_none());
+        assert_eq!(d.badge(), DraftBadge::Clean);
+        assert!(
+            !d.on_delivered("t9"),
+            "a clean draft with nothing pending never goes Behind"
+        );
+    }
+
+    #[test]
+    fn mint_label_takes_the_smallest_unused_number() {
+        let mut d = Draft::default();
+        assert_eq!(d.mint_label(|_| false), "new-1");
+        d.insert_row("new-1".into(), None, "t0");
+        assert_eq!(d.mint_label(|_| false), "new-2");
+        assert_eq!(
+            d.mint_label(|l| l == "new-2"),
+            "new-3",
+            "a label the model already has is skipped"
+        );
+    }
+
+    #[test]
+    fn rename_row_moves_an_inserted_row_and_refuses_a_collision() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), None, "t0");
+        d.insert_row("new-2".into(), None, "t0");
+        assert!(d.rename_row("new-1", "2027-01-15"));
+        assert!(d.row_state("2027-01-15").is_some());
+        assert!(!d.rename_row("new-2", "2027-01-15"));
+        assert!(!d.rename_row("D1", "x"), "only an inserted row renames");
+    }
+
+    /// A rename carries the row's followers with it (final review,
+    /// Critical): the tile anchors a chain on the MINTED label — `o` on a
+    /// row re-hangs its follower onto `new-2` before `commit_row_label`
+    /// renames `new-2 → 2027-02-15` — so a follower still saying
+    /// `after: new-2` names a label no row holds, `splice_rows` cannot
+    /// resolve it, and the row lands at the top with a dangling anchor
+    /// written to the session.
+    #[test]
+    fn rename_row_rehangs_its_followers() {
+        let mut d = Draft::default();
+        d.insert_row("2027-01-15".into(), Some("new-2".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-3".into(), Some("D2".into()), "t0");
+        assert!(d.rename_row("new-2", "2027-02-15"));
+        assert!(
+            matches!(
+                d.row_state("2027-01-15"),
+                Some(RowEdit::Inserted { after: Some(a), .. }) if a == "2027-02-15"
+            ),
+            "the follower hangs off the renamed label"
+        );
+        assert!(
+            matches!(
+                d.row_state("new-3"),
+                Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D2"
+            ),
+            "a row anchored elsewhere is untouched"
+        );
+    }
+
+    /// Dropping the middle of a chain hands its followers to its own
+    /// anchor: `D1 → new-2 → new-1`, drop `new-2`, and `new-1` sits
+    /// under `D1` — never at the top as a vanished anchor would land it.
+    #[test]
+    fn dropping_an_inserted_row_hands_its_followers_to_its_anchor() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("new-2".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-3".into(), Some("D2".into()), "t0");
+        assert_eq!(d.delete_row("new-2", "t0"), RowDelete::Dropped);
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D1"
+        ));
+        assert!(
+            matches!(
+                d.row_state("new-3"),
+                Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D2"
+            ),
+            "a row anchored elsewhere is untouched"
+        );
+    }
+
+    /// `rehang_followers` moves exactly the rows anchored on `from` —
+    /// several at once, a `None` anchor included — and nothing anchored
+    /// elsewhere.
+    #[test]
+    fn rehang_followers_moves_every_row_anchored_on_from() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-3".into(), None, "t0");
+        d.insert_row("new-4".into(), Some("D2".into()), "t0");
+        d.delete_row("D1", "t0");
+        d.rehang_followers(Some("D1"), Some("new-9".into()));
+        fn after(d: &Draft, l: &str) -> Option<String> {
+            match d.row_state(l) {
+                Some(RowEdit::Inserted { after, .. }) => after.clone(),
+                _ => None,
+            }
+        }
+        assert_eq!(after(&d, "new-1").as_deref(), Some("new-9"));
+        assert_eq!(after(&d, "new-2").as_deref(), Some("new-9"));
+        assert_eq!(after(&d, "new-3"), None, "a top row is not anchored on D1");
+        assert_eq!(after(&d, "new-4").as_deref(), Some("D2"));
+        assert!(
+            matches!(d.row_state("D1"), Some(RowEdit::Deleted)),
+            "a deleted row is not a follower"
+        );
+        d.rehang_followers(None, Some("D2".into()));
+        assert_eq!(
+            after(&d, "new-3").as_deref(),
+            Some("D2"),
+            "the top group moves too"
+        );
+    }
+
+    /// `shift+o` on an inserted row: the new row takes the old anchor and
+    /// the old row hangs off the new one, so the model paints
+    /// `D1, new-2, new-1` — a chain the splice resolves transitively.
+    #[test]
+    fn reanchor_row_moves_an_inserted_row_under_a_new_anchor() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        assert!(d.reanchor_row("new-1", Some("new-2".into())));
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "new-2"
+        ));
+        assert!(
+            !d.reanchor_row("D1", None),
+            "only an inserted row re-anchors"
+        );
+        d.delete_row("D3", "t0");
+        assert!(!d.reanchor_row("D3", None), "a deleted row has no anchor");
+    }
+
+    /// §5.1: rebase carries rows by label — a deleted row whose label vanished is dropped and named,
+    /// an inserted row whose label the newer document now carries is dropped and named, a vanished
+    /// anchor re-anchors to the top and is named.
+    #[test]
+    fn rebase_carries_rows_by_label() {
+        let mut d = Draft::default();
+        d.delete_row("GONE", "t0");
+        d.delete_row("D1", "t0");
+        d.insert_row("D9".into(), Some("D1".into()), "t0"); // upstream will carry D9
+        d.insert_row("new-1".into(), Some("GONE".into()), "t0"); // anchor vanishes
+        let newer = flat_model_with_rows(&["D1", "D2", "D9"]);
+        let (_, dropped) = d.rebase(&newer);
+        assert!(matches!(d.row_state("D1"), Some(RowEdit::Deleted)));
+        assert!(d.row_state("GONE").is_none());
+        assert!(d.row_state("D9").is_none(), "upstream got there first");
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: None, .. })
+        ));
+        assert!(dropped.contains(&("GONE".into(), "row".into())));
+        assert!(dropped.contains(&("D9".into(), "row (the document now carries it)".into())));
+        assert!(dropped.contains(&("new-1".into(), "anchor 'GONE'".into())));
+    }
+
+    /// A chain — `D1 → new-2 → new-1`, the shape `shift+o` on an inserted
+    /// row builds — survives a rebase whole: `new-1`'s anchor is an
+    /// INSERTED row the newer model (the document's own grid) never
+    /// carries, and that is not a vanished anchor. Both rows kept, the
+    /// anchor untouched, nothing named dropped. The anchor's survival
+    /// must be decided from a precomputed set, since label order visits
+    /// `new-1` before the `new-2` it hangs off. An anchor on an inserted
+    /// row that the rebase DROPS as a conflict still resolves — the row is
+    /// dropped precisely because the document now carries that label, so
+    /// the chained row lands under the real row instead.
+    #[test]
+    fn rebase_keeps_a_chain_anchored_on_a_surviving_inserted_row() {
+        let mut d = Draft::default();
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("new-2".into()), "t0");
+        let (kept, dropped) = d.rebase(&flat_model_with_rows(&["D1"]));
+        assert_eq!(kept, 2);
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert!(matches!(
+            d.row_state("new-2"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D1"
+        ));
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "new-2"
+        ));
+
+        // The anchor itself dropped as a conflict: the document now
+        // carries `D7`, so the chained row hangs off the real one and
+        // only the conflict is named.
+        let mut d = Draft::default();
+        d.insert_row("D7".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("D7".into()), "t0");
+        let (_, dropped) = d.rebase(&flat_model_with_rows(&["D1", "D7"]));
+        assert!(d.row_state("D7").is_none());
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D7"
+        ));
+        assert_eq!(
+            dropped,
+            [(
+                "D7".to_string(),
+                "row (the document now carries it)".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn rows_round_trip_through_toml() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.set_row_cell("new-1", "ex", Value::Date(date(2027, 1, 15)));
+        d.set_row_cell("new-1", "status", Value::Utf8("estimated".into()));
+        d.delete_row("D2", "t0");
+        let back = Draft::from_toml(&d.to_toml());
+        assert_eq!(back.rows, d.rows);
+        assert_eq!(back.base, d.base);
     }
 }

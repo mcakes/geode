@@ -185,7 +185,9 @@ slice 3 the third; slice 4 the fourth.
 - **G. Pricer.** A local dataset of typed lines, an upstream price
   request whose response is ingested, scenario output. The charter
   bites here: pricing is upstream, the app only sends and shows. Needs
-  A, B, C, E. Slice 4.
+  A, B, C, E. Slice 4. Part 1 (seam and data tier) built 2026-09-19,
+  see the line-pricer spec; the local publish is the roadmap §3
+  "local" shape.
 - **H. Watchlists.** A named list of underlyings is a saved scope with
   one dimension selection; the scopes dialog exists and the TODO's
   "duplicate and edit" is the missing piece. Any gap.
@@ -211,11 +213,24 @@ disagree) and built in two parts, each with the slice that needs it.
    demo bus) are done, 2026-09-13; Part 3 (the panel: `geode-marketdata`,
    `MarketDataTile`, insert mode, keymap fragments, the draft's `Behind`/
    `:rebase`/`:discard` states) is done, 2026-09-14; Part 4 (egress)
-   remains.
+   remains. **Dividends: done 2026-09-19** — sub-project D's second
+   document kind and panel (`DIVIDEND`, registered `.without_keymap()`
+   beside `CVI`'s factory), governed by
+   `docs/superpowers/specs/2026-09-19-geode-dividend-schedule-and-choice-design.md`
+   §4–§6: the document family's `value` role widened to `date`/`utf8`,
+   `PanelSpec` naming its flat columns and row-axis identity explicitly,
+   typed grid cells (`CellKind::{Number, Date, Text, Choice}`), row
+   insert/delete on both panels (CVI's row is a term slice), and the
+   `DividendGenerator` + two-producer demo bus. Reused Phase 1's
+   `geode_shell::choice::ChoiceList` for the panel's own `status` cell
+   rather than building a second typeahead. Part 4 (egress) remains for
+   both panels.
 2. **Scenario panel** — axes on measures, link groups, launch context,
    the pivot grid with its cell-count measurement.
 3. **Vol viewers** — fetch, cache datasets, charts.
-4. **Pricer.**
+4. **Pricer.** Part 1 (seam and data tier) built 2026-09-19, see the
+   line-pricer spec; the local publish is the roadmap §3 "local"
+   shape.
 5. **Watchlists** whenever there is a gap.
 
 ## 7. Not decided here

@@ -40,11 +40,13 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// plus a `sources` doc over `source_dir` polled every two seconds so a
 /// file dropped into it shows up while you watch, a `[cvi]` source
 /// subscribing to `geode_app::demo_bus`'s CVI documents (market-data-
-/// documents plan, Task 10) — a subscribed source, so none of the
-/// directory-only keys `[demo]` carries apply to it — and two fetch
-/// sources, `demo_kdb` and `demo_rest`, over the timeseries demo's
-/// `series` dataset (Task 9: `geode_app::demo_series::DemoSeries`), one
-/// with a catalogue and one without.
+/// documents plan, Task 10), a `[dividend]` source subscribing to its
+/// dividend-schedule documents (dividend-schedule plan, Task 11) — both
+/// subscribed sources, so none of the directory-only keys `[demo]` carries
+/// applies to either — and two fetch sources, `demo_kdb` and `demo_rest`,
+/// over the timeseries demo's `series` dataset (Task 9:
+/// `geode_app::demo_series::DemoSeries`), one with a catalogue and one
+/// without.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
@@ -53,6 +55,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
          topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
          priority = \"latest_other\"\n\
+         [dividend]\nadapter = \"demo_bus\"\ndataset = \"dividend_schedule\"\n\
+         document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/>\"]\n\
+         coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
          [demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
          [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n",
         source_dir.join("*.csv").to_string_lossy()
@@ -142,7 +147,40 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 4);
+        assert_eq!(sources.len(), 5);
+    }
+
+    /// Task 11 (the demo bus's second producer): the `[dividend]` source
+    /// is declared with every field a subscribed source needs, alongside
+    /// `[demo]` and `[cvi]` — same shape as
+    /// `the_demo_layer_declares_the_cvi_source`, over the dividend
+    /// vocabulary.
+    #[test]
+    fn the_demo_layer_declares_the_dividend_source() {
+        let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
+        let sources = docs.iter().find(|d| d.name == "sources").unwrap();
+        let dividend = &sources.table["dividend"];
+        assert_eq!(dividend["adapter"].as_str(), Some("demo_bus"));
+        assert_eq!(dividend["dataset"].as_str(), Some("dividend_schedule"));
+        assert_eq!(dividend["document"].as_str(), Some("dividend_schedule"));
+        assert_eq!(
+            dividend["topics"].as_array().unwrap()[0].as_str(),
+            Some("marketdata/dividend/>")
+        );
+        assert_eq!(dividend["coalesce"].as_str(), Some("500ms"));
+        assert_eq!(dividend["priority"].as_str(), Some("latest_other"));
+
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(sources.len(), 5, "demo, cvi, dividend, demo_kdb, demo_rest");
+        assert!(sources.iter().any(|s| s.name == "dividend"));
     }
 
     /// Task 9 (the demo adapter): `demo_kdb` and `demo_rest` are declared
@@ -184,6 +222,7 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
+        assert_eq!(sources.len(), 5);
         let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
         let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
         assert_eq!(
@@ -217,6 +256,17 @@ mod demo_config_integration {
     use super::*;
     use geode_core::config::{Config, ConfigSources};
 
+    /// A registry holding the mock pricer, matching what `main.rs`
+    /// builds before calling `data_setup` — without it, the demo
+    /// config's implicit `[pricing] adapter = "mock"` default would
+    /// resolve to nothing and every fixture below would gain a spurious
+    /// "pricer" diagnostic.
+    fn test_pricers() -> geode_data::PricerRegistry {
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
+        pricers
+    }
+
     /// Self-review / headless verification (Task 8): the demo layer's
     /// docs are not just individually well-formed TOML (`layer` already
     /// panics otherwise) — merged through the real `Config` loader and
@@ -244,6 +294,7 @@ mod demo_config_integration {
             &config,
             "/tmp/geode-demo/100000-42/geode.duckdb".into(),
             geode_data::adapter::AdapterRegistry::default(),
+            test_pricers(),
         )
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -252,12 +303,22 @@ mod demo_config_integration {
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "spec §6.6's 100-column view");
         // [demo] (a csv_dir source over risk_snapshot), [cvi] (a
-        // subscribed source over cvi_params, Task 10), and the two fetch
-        // sources [demo_kdb]/[demo_rest] over series (Task 9) — all four
-        // parse with no diagnostics, per this same fixture's own
-        // the_demo_layer_declares_the_cvi_source and
+        // subscribed source over cvi_params, Task 10) and [dividend] (a
+        // subscribed source over cvi_params, Task 10), [dividend] (a
+        // subscribed source over dividend_schedule, Task 11), and the two
+        // fetch sources [demo_kdb]/[demo_rest] over series (Task 9) — all
+        // five parse with no diagnostics, per this same fixture's own
+        // the_demo_layer_declares_the_cvi_source,
+        // the_demo_layer_declares_the_dividend_source and
         // the_demo_layer_declares_the_two_fetch_sources.
-        assert_eq!(setup.config.sources.len(), 4);
+        assert_eq!(setup.config.sources.len(), 5);
+        // The demo schema's own `cvi_params` and `dividend_schedule`
+        // datasets must each agree with their built-in kind's column set
+        // (spec §6.4) — the same check `DataService::open` runs per
+        // subscribed source at open time, pinned here so a demo-config
+        // edit that drifts the two apart fails this fixture rather than
+        // only ever failing silently as a discovery-lane `Failed` a
+        // trader has to notice at runtime.
         // Task 11 carry-in: the demo schema's own `cvi_params` dataset
         // must agree with the built-in `CviKind`'s column set (spec
         // §6.4) — the same check `DataService::open` runs per subscribed
@@ -268,6 +329,11 @@ mod demo_config_integration {
         geode_core::document::check_kind_against(
             &geode_documents::CviKind,
             setup.config.schema.dataset("cvi_params").unwrap(),
+        )
+        .unwrap();
+        geode_core::document::check_kind_against(
+            &geode_documents::DividendKind,
+            setup.config.schema.dataset("dividend_schedule").unwrap(),
         )
         .unwrap();
     }
@@ -289,6 +355,7 @@ mod demo_config_integration {
             &config,
             "/tmp/geode-demo/100000-42/geode.duckdb".into(),
             geode_data::adapter::AdapterRegistry::default(),
+            test_pricers(),
         )
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
