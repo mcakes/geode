@@ -270,6 +270,17 @@ impl SeriesRows {
 /// the reason [`Subscription`] is — one fetch worker thread owns it, and
 /// `&mut self` is what lets a vendor client keep a connection inside it
 /// with no lock. Called on that thread, so blocking is fine there.
+///
+/// **A shim must bound its own `fetch` with a deadline** — the vendor
+/// client's own timeout where it has one, otherwise a deadline the shim
+/// enforces itself. There is no deadline on this side of the door and no
+/// cancellation: `ingest::fetch::FetchWorker::shutdown` drops its sender
+/// and JOINS the worker thread, so the call in flight (and every span
+/// still queued behind it) runs to completion before the app can exit. A
+/// vendor call that hangs for two minutes holds the window shut for two
+/// minutes, and one that never returns never lets the app close at all.
+/// The demo adapter needs none: it is pure CPU over a seeded walk and
+/// returns in microseconds.
 pub trait Fetch: Send {
     fn fetch(&mut self, req: &FetchRequest) -> Result<SeriesRows, AdapterError>;
 

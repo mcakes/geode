@@ -364,6 +364,11 @@ differs from the sections above, the code is the specification now.
   `CatalogSnapshot::identities` as `(source, identities)` pairs. A
   source that cannot enumerate is not a failure — the picker simply
   has no typeahead for it.
+- **A `Fetch` shim owes its own deadline (clarifies §5.2).** The
+  worker's shutdown drops its sender and joins the thread, with no
+  cancellation, so an unbounded vendor call holds app exit for its whole
+  duration; the `Fetch` trait doc states the contract, and the demo
+  adapter (pure CPU) needs no deadline.
 - **`FetchWorker` hands an outcome to a service-built sink, which
   submits to the ingest runner (clarifies §5.4).** The worker owns the
   adapter and nothing else: rows become a `SeriesJob` on the runner's
