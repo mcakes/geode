@@ -4545,6 +4545,8 @@ mod tests {
             "group lhu",
             "group slot 1",
             "unpin",
+            // "unscoped" twice on purpose: toggle on, then toggle back
+            // off, so every line after it still runs scoped.
             "unscoped",
             "unscoped",
             "filter lhu = 'L1'",

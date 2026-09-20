@@ -449,6 +449,10 @@ impl Domain {
     /// this dialog's own copy shipped: refusing only at the dialog left
     /// `:scope save save_current` free to write an unfixable
     /// `scopes.toml` entry that panicked the app at the next start.
+    /// That route closed on 2026-09-20 (command-line locality spec §5):
+    /// `:scope` is a refusal on every tile now, and the palette's
+    /// `Scope: Save current as…` is the one door onto `Frame::
+    /// save_scope`.
     /// Empty for every other domain, which has no such collision.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {

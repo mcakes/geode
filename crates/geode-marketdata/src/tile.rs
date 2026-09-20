@@ -8936,4 +8936,45 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(notice, None, "the commit clears the notice");
         assert!(h.editor_value(&vcx).is_none());
     }
+
+    /// The rule (command-line locality spec §2): every `:` verb the panel
+    /// accepts changes only the panel — never the frame or the app.
+    #[gpui::test]
+    fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let lines = [
+            "underlying SPX",
+            "revert",
+            "bump 0.5",
+            "rebase",
+            "upload",
+            "set spot 100",
+            "auto hold",
+            "menu",
+        ];
+        for word in crate::commands::VERBS {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.split_whitespace().next() == Some(word)),
+                "no sweep line for `:{word}`"
+            );
+        }
+        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        for line in lines {
+            let _ = vcx.update(|window, cx| h.content.command(line, window, cx));
+            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            assert_eq!(
+                (after.scope, after.grouping, after.as_of),
+                (before.scope, before.grouping, before.as_of),
+                "`:{line}` moved the frame"
+            );
+            let (level, overlay) = h.diagnostics.update(&mut vcx, |d, _| {
+                (d.take_pending_level(), d.take_pending_overlay_toggle())
+            });
+            assert!(level.is_none() && !overlay, "`:{line}` reached the app");
+            // Any per-line outcome is fine (a refused key, nothing to
+            // revert); the rule is about what it did NOT touch.
+        }
+    }
 }

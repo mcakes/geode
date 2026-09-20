@@ -353,3 +353,42 @@ Run `--anchors-only` before merge as always.
   its reverse.
 - Any change to what `ctrl+k` dispatches; the palette's global-or-local
   reading is already right.
+
+## 10. As built (2026-09-20)
+
+- §2's sweep checks `Frame::take_pending_persist` and the `Diagnostics`
+  entity's pending level/overlay rather than diffing a user directory:
+  those two are the only channels a module has onto a config write (the
+  shell performs the write), so they are the honest check at module
+  level.
+- §7's `asof-pin:chip` entry became `asof-pin: the pinned chip paints`
+  and `asof-pin: the frame chip hides while pinned`: a `TestAppContext`
+  can see whether a chip paints, not its colour; the tone rides the
+  existing `every_chip_tone_is_readable_on_every_bundled_theme` sweep.
+- §5's refusal for `:asof undo` names the palette title as it is,
+  `Swap to the previous as of`; `:group save N` names `Edit groupings…`.
+- The status bar's as-of segment read `:live to return`; it now reads
+  `Return to live in the palette`.
+- The expression chip's tooltip had said `:filter <expr> sets it` (the
+  tile layer); it names `frame::scope_expression` now.
+- The pinned chip's cached `AS OF HH:MM` text is rebuilt lazily in
+  `render` when the local date changes (`asof_chip_date`,
+  `refresh_asof_chip`), so the elided form never outlives its day
+  (review finding on Task 3).
+- The harness entry for the expression commit is titled `expr-dialog:
+  enter commits the parsed expression to the frame` (the
+  `set_scope_in_session` mutation the spec's table implied would have
+  survived: that method pushes undo identically; the entry defends the
+  commit, and the undo half is the test's own last assertion).
+- The parse-error text in the expression dialog AND the as-of dialog now
+  paints through `chip_paint(theme, Tone::DangerText)` (a raw
+  `theme.danger` bypassed the 3:1 floor); three other raw `theme.danger`
+  text sites (status.rs message strip, commandline_view.rs error,
+  toolbar.rs contradiction fallback) are pre-existing and left for a
+  follow-up.
+- Task 5 kept one renamed completion test
+  (`completions_offer_sections_after_the_section_word`) that pins
+  `["section"]` → the five section names.
+- The harness lost the stale `commands: scope drop needs a dimension`
+  entry (its anchored line was deleted with `:scope`).
+- Display checks pending: §8's list.

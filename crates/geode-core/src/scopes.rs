@@ -26,7 +26,10 @@ pub type SavedScopes = BTreeMap<String, Scope>;
 /// (`ActionRegistry::register`'s `.expect("builtin action ids are
 /// unique by construction")`) — a config value on disk that crashes the
 /// app at every launch, unfixable by a trader who cannot even open the
-/// dialog that would tell them why. `register_scope_actions` itself
+/// dialog that would tell them why. That route closed on 2026-09-20
+/// (command-line locality spec §5): `:scope` is a refusal on every
+/// tile now, and the palette's `Scope: Save current as…` is the one
+/// door onto `Frame::save_scope`. `register_scope_actions` itself
 /// (`geode-shell/src/defaults.rs`) is the second, independent backstop:
 /// even a scope named some OTHER already-registered id (a future
 /// action, or a name collision this list has not yet learned about)
