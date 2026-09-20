@@ -3017,6 +3017,17 @@ run_mutation "delegate: the chevron stops the row's own click from double-toggli
 
 # ---- geode-app: the data bridge, the roster, --demo (Phase 3 §5.1, §5.4, §7.1)
 
+# The bridge is the last place a `SchemaSpec` and the source list are
+# both in hand, so it is the one place a source's shape is resolved.
+# Mutated to answer `Directory` for every source, the diagnostics rows
+# describe a fetch or a subscribed source as a directory of CSVs.
+run_mutation "bridge: every source is resolved as a directory source" \
+  crates/geode-app/src/bridge.rs \
+  '        .map(|s| (s.clone(), s.shape(schema)))' \
+  '        .map(|s| (s.clone(), SourceShape::Directory))' \
+  geode-app \
+  source_shapes_names_each_of_the_three_shapes
+
 run_mutation "bridge: dropped_events counted on a refused try_send" \
   crates/geode-app/src/bridge.rs \
   '            dropped.fetch_add(1, Ordering::Relaxed);
@@ -14192,6 +14203,16 @@ run_mutation "tilepicker: the empty-tree hint's double-click opens the picker" \
   '                            let _ = (event, window, cx);' \
   geode-shell \
   double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tree
+# A `retention`/`history` window whose microseconds exceed `i64::MAX`
+# reaches `store::series::cutoff` as unrepresentable and sweeps NOTHING.
+# Mutated so the range check never fires, the dataset is accepted
+# silently and a trader's `retention = "300000000y"` bounds nothing.
+run_mutation "core: an out-of-range window is accepted silently" \
+  crates/geode-core/src/schema/mod.rs \
+  '                        if i64::try_from(d.as_micros()).is_ok() {' \
+  '                        if true {' \
+  geode-core \
+  an_out_of_range_window_is_an_error_and_unbounded
 
 # An empty dock's click focuses it as the region (user ruling
 # 2026-09-19), so the double-click's pick lands THERE — without the
