@@ -9,6 +9,7 @@ pub mod core;
 pub mod element;
 pub mod model;
 
+pub use crate::core::MAX_DENSITY_QUADS;
 pub use crate::core::axis::{Axis, AxisMode, Pane, Side};
 pub use crate::core::view::View;
 pub use element::{ChartElement, chrome_rebuilds, density_quads, rebuilds};

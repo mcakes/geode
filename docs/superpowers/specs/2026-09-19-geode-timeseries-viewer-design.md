@@ -900,7 +900,8 @@ bounds)`, then that slot's percentile lines as dashed segment paths
 (gpui's `PathBuilder` has no dash style; `DASH` design px on, `GAP`
 off, one path per line), then the pane's density bars as `paint_quad`
 (at most `bins × slots`, a few hundred, under the spike's 5,000-quad
-cliff). Then, once, the shared x-axis under the lowest pane and the
+cliff — as built, capped at `MAX_DENSITY_QUADS` = 2,000 per frame,
+§8.5). Then, once, the shared x-axis under the lowest pane and the
 crosshair, which spans both panes at one x with the readout listing
 every visible slot from either pane, through the component's
 tooltip. Labels `p5 p50 p95` are painted at the right end of each
@@ -908,8 +909,10 @@ line in the slot's colour through `prepaint`'s child elements. A
 slot's percentiles and bins are drawn in its own pane against its
 own axis.
 
-A frame with an unchanged key pushes cached paths and allocates
-nothing; the cache invalidates on model version, view or bounds.
+A frame with an unchanged key pushes cached paths and rebuilds
+nothing on the data path (as built: one `Path` clone per painted path
+per frame is the pinned `paint_path` API's price, §8.5); the cache
+invalidates on model version, view or bounds.
 
 ### 8.4 Budget
 
