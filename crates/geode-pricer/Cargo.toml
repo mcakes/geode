@@ -9,14 +9,14 @@ bench = false
 
 # Part 2 (line-pricer spec §14): the pure core alone. `geode-core` for the
 # pricing vocabulary, `ColumnFormat`/`format_number`, `DocumentRows` and
-# the config model; `chrono` for the third-Friday rule and `priced_at`;
-# `toml` for the views doc. Part 3 adds `geode-shell` and gpui with the
-# tile. Never `geode-pricing`: a module reaches the pricer only through
-# the data tier's request door (PHILOSOPHY §1, "In-process calculation").
+# the config model — the views doc is read through `geode_core::config`,
+# so this crate names no `toml` of its own; `chrono` for the third-Friday
+# rule and `priced_at`. Part 3 adds `geode-shell` and gpui with the tile.
+# Never `geode-pricing`: a module reaches the pricer only through the
+# data tier's request door (PHILOSOPHY §1, "In-process calculation").
 [dependencies]
 geode-core.workspace = true
 chrono = "0.4.42"
-toml = "1.1.4"
 
 # Dev-dependencies ask for the same geode-* features `--workspace`
 # resolves (test-feature parity, 2026-09-19), or this crate builds a

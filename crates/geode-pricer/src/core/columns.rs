@@ -275,12 +275,14 @@ pub fn cell_text(sheet: &Sheet, row: usize, def: &ColumnDef, format: &ColumnForm
         },
         ColumnKind::SpotShift => shift_cell(
             sheet.shift(row).spot_pct,
-            sheet.sheet_shift.spot_pct,
+            sheet.sheet_shift().spot_pct,
             format,
         ),
-        ColumnKind::VolShift => {
-            shift_cell(sheet.shift(row).vol_pts, sheet.sheet_shift.vol_pts, format)
-        }
+        ColumnKind::VolShift => shift_cell(
+            sheet.shift(row).vol_pts,
+            sheet.sheet_shift().vol_pts,
+            format,
+        ),
         ColumnKind::Price => number(sheet, row, |r| r.price, format),
         ColumnKind::Delta => number(sheet, row, |r| r.delta, format),
         ColumnKind::Gamma => number(sheet, row, |r| r.gamma, format),

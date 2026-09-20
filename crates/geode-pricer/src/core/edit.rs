@@ -358,6 +358,12 @@ impl Sheet {
         })
     }
 
+    /// Each record's `state` and `revision` are TRUSTED: they are
+    /// reinstated as stored, which is what makes undo of a removal
+    /// re-request nothing. That is safe only under Part 3's strictly
+    /// LIFO undo stack — a `Restore` replayed after an intervening
+    /// request-changing edit would paint a stale result as `Fresh` at a
+    /// revision the sheet has moved past.
     fn restore(&mut self, at: usize, rows: Vec<RowRecord>) -> Result<Undo, EditError> {
         if rows.is_empty() {
             return Err(EditError::EmptyInsert);
@@ -792,7 +798,7 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(
-            s.sheet_shift,
+            s.sheet_shift(),
             OwnShifts {
                 spot_pct: Some(2.0),
                 vol_pts: None
@@ -842,7 +848,7 @@ mod tests {
                 level: Some(5100.0),
             })
             .unwrap();
-        assert_eq!(s.overrides.spot.get("SPX"), Some(&5100.0));
+        assert_eq!(s.overrides().spot.get("SPX"), Some(&5100.0));
         assert_eq!(
             s.stale_lines().collect::<Vec<_>>(),
             vec![0, 3, 4],
@@ -874,7 +880,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s.stale_lines().count(), 0);
-        assert!(!s.overrides.spot.contains_key("RTY"));
+        assert!(!s.overrides().spot.contains_key("RTY"));
         // Clearing SPX stales SPX again and the inverse carries the old level.
         let undo = s
             .apply(Edit::SetSpotOverride {
@@ -896,7 +902,7 @@ mod tests {
             level: Some(1.0),
         })
         .unwrap();
-        assert_eq!(s.overrides.spot.get("NDX"), Some(&1.0));
+        assert_eq!(s.overrides().spot.get("NDX"), Some(&1.0));
         assert_eq!(s.state(1), &LineState::Stale);
     }
 
@@ -1259,8 +1265,8 @@ mod tests {
         fn snapshot(s: &Sheet) -> (Vec<RowRecord>, OwnShifts, Vec<(String, f64)>) {
             (
                 (0..s.len()).map(|r| s.record(r)).collect(),
-                s.sheet_shift,
-                s.overrides
+                s.sheet_shift(),
+                s.overrides()
                     .spot
                     .iter()
                     .map(|(k, v)| (k.clone(), *v))
