@@ -2669,7 +2669,7 @@ dependencies = [
  "criterion",
  "geode-core",
  "geode-shell",
- "gpui-base",
+ "geode-widgets",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",

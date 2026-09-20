@@ -25,17 +25,16 @@ test-support = []
 geode-core.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
-# For `CalendarView` alone: `gpui-component` re-exports `CalendarState`
-# but not the enum its `set_view` takes, and the as-of dialog resets the
-# calendar to the day grid on every open (`asof_view::open`). The pin is
-# the root's `=0.6.2`; nothing else from the unstyled layer is used here.
-gpui-base.workspace = true
 # For the scope bar's save chip alone: `Save` is not one of the 101 icons
 # `gpui_component::IconName` names, so the chip names it through the
 # shared catalog (`gpui_kit_assets::IconName`, which `Icon::new` accepts
 # directly). The bytes are embedded by `geode-app`'s asset source, not
 # here — an `IconName` is only a path. Same pin as the root's `=0.6.2`.
 gpui-kit-assets.workspace = true
+# For the as-of dialog's Custom row alone: `geode_shell::shell::asof_rows`
+# seeds and reads a `geode_widgets::datefield::DateTimeField`, the same
+# pure segmented-field core the market-data panel's header already uses.
+geode-widgets.workspace = true
 toml = "1.1.4"
 serde_json = "1.0.151"
 toml_edit = "0.25.13"

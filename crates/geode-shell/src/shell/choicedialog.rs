@@ -491,8 +491,9 @@ fn handle_key(
             // A filter-only dialog keeps its own field (spec §16.4 —
             // `sync_dialog_text` serves the mode-carrying dialogs), so
             // the completed text is written here, the way the as-of
-            // dialog's calendar writes its date: `set_value` emits no
-            // `Change`, and the list already holds the new query.
+            // dialog's own `sync_dialog_text` arm writes its query back
+            // to the shared field: `set_value` emits no `Change`, and
+            // the list already holds the new query.
             let text = shell.choice_dialog.as_mut().and_then(|state| {
                 state
                     .list

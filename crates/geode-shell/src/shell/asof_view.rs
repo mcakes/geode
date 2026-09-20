@@ -1,241 +1,80 @@
-//! The as-of selector (Phase 4a §3.6): a keyed modal in
-//! [`keybindings_view`](super::keybindings_view)'s mould — the shared
-//! dialog filter field (`ShellView::dialog_input`) doubles as the as-of
-//! text field here rather than a query filter, and a list of recent
-//! generation times sits underneath it as honest presets: as-of resolves
-//! to "the newest generation at or before T", so a generation's own
-//! instant is exactly the value that changes what a query sees.
+//! The as-of selector (as-of dialog spec 2026-09-20 §5): a filter-first
+//! modal over [`AsOfState`]'s ranked rows — `Current`/`Live` while pinned,
+//! the business-day presets, the `Custom` row holding the segmented
+//! date-time field, the recent publishes — each painted with the instant
+//! it resolves to on the configured clock. The pure model is
+//! `asof_rows`; this file is the gpui half: `open`, the modal key
+//! handler and `build`.
 //!
-//! ## Architecture
-//!
-//! [`AsOfState`] — `selected`, `error`, `resolved` — is pure (no `gpui`),
-//! stored on `ShellView` as `as_of_dialog: Option<AsOfState>`, exactly
-//! like `picker`/`keybindings`/`settings`. Unlike those three, this
-//! dialog carries no `query` string of its own to mirror the field into:
-//! the field's raw text IS the value being edited, not a filter over
-//! something else, so [`on_query_changed`] re-resolves it on every
-//! `InputEvent::Change` (the same shared subscription arm those other
-//! dialogs use, `shell/mod.rs`) and stores only the *outcome* —
-//! `resolved` (a successful parse's instant, for the "→ ..." preview) or
-//! `error` (a failed parse's message, shown inline) — for [`build`] to
-//! show. The two are mutually exclusive and both `None` while the field
-//! is blank (spec: a blank field means "browsing presets", not "typing
-//! an instant").
-//!
-//! [`open`] is the only entry point (`frame::as_of`, `mod+t`) and the
-//! only place an `AsOfState` is constructed — nothing survives a
-//! close/reopen, the same contract every other modal here keeps.
+//! Keys (§5.2): `listfilter::nav_command` moves; `1`–`5` on an EMPTY
+//! field jump to a preset; `enter` commits the highlighted row; `tab`
+//! opens the Custom field (and leaves it); while the field is open every
+//! bare key goes through `geode_widgets::datefield::route` — `enter`
+//! commits the field's value, `escape` closes the field, a chord is not
+//! the field's (a modal owns the keyboard). A second `escape` closes
+//! the dialog through `handle_key_down`'s own modal branch.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Pixels, Window, div,
-};
-use gpui_component::calendar::Calendar;
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui::{AnyElement, App, Context, Entity, Hsla, MouseButton, SharedString, Window, div};
+use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
 
-use geode_core::clock::Clock;
-use geode_core::query::{AsOf, parse_as_of};
+use geode_core::colour::{Rgb, contrast_ratio, readable_on};
+use geode_core::query::AsOf;
+use geode_widgets::datefield::{FieldKey, SegmentPaint, route};
 
-use crate::frame::Frame;
+use crate::footer::{Hint, HintRow};
 use crate::keymap::{Keystroke, Modifiers};
-use crate::{listfilter, vimnav};
+use crate::listfilter;
 
-use super::ShellView;
-use super::chip;
-use super::dialog;
-use super::listrow::RowPaint;
-use super::scale;
+use super::asof_rows::{self, AsOfState, Commit, Row, Section};
+use super::colours::{over, to_hsla, to_rgb};
+use super::{ShellView, dialog, scale};
 
-// ---------------------------------------------------------------------
-// Pure core — no gpui.
-// ---------------------------------------------------------------------
-
-/// One formatted preset row: the publish's instant, and its
-/// `"14:05:12 · risk / EOD · 3 books"` label.
-type PresetRow = (DateTime<Utc>, String);
-/// [`AsOfState::presets_cache`]'s value type — named so clippy's
-/// `type_complexity` lint doesn't fire on the field declaration. Keyed
-/// on `(data version, clock)` (as-of dialog spec §6.1 added `clock`): a
-/// `[time]` reload must re-format every `HH:MM:SS` label even with the
-/// data version unchanged.
-type PresetsCache = RefCell<Option<(u64, Clock, Rc<Vec<PresetRow>>)>>;
-
-/// Persistent state for one open as-of dialog session — the
-/// `picker`/`keybindings`/`settings` fields' own contract: no `gpui`
-/// types, so every transition here is unit-testable without a window.
-#[derive(Debug, Clone, Default)]
-pub struct AsOfState {
-    /// Index into [`presets`]' own list (the palette's own convention) —
-    /// moved by up/down, applied by a bare `enter` when the field is
-    /// empty.
-    pub selected: usize,
-    /// The field's most recent parse failure, or `None` — set by
-    /// [`on_query_changed`] (the `InputEvent::Change` subscription) and,
-    /// redundantly but harmlessly, by [`handle_key`]'s own `enter` arm on
-    /// a failed commit. Mutually exclusive with `resolved`.
-    pub error: Option<String>,
-    /// The field's most recent successful resolution to an instant —
-    /// never set for `"live"`, which has no instant to preview. Mutually
-    /// exclusive with `error`.
-    pub resolved: Option<DateTime<Utc>>,
-    /// Lazy cache for [`cached_presets`] (Phase 4b M9), keyed on
-    /// `Frame::versions().data` — the only counter a fresh publish bumps,
-    /// and publishes are exactly what `Frame::recent_publishes` (and so
-    /// [`presets`]) reflects; every other frame mutation (scope, grouping,
-    /// as-of, config) leaves the preset list untouched. `build` (the
-    /// render path) used to call `presets` fresh on every paint, allocating
-    /// a `Vec` of formatted `String`s for a value that almost always
-    /// matches the previous paint's — the same `RefCell<Option<(key,
-    /// Rc<..>)>>` shape `Frame::bar_cache` already uses, for the same
-    /// reason.
-    presets_cache: PresetsCache,
-}
-
-/// The frame's recent publishes as as-of presets (spec §3.6): newest
-/// first (`Frame::recent_publishes` is already ordered that way), each
-/// labelled `"14:05:12 · risk / EOD · 3 books"` on `clock`.
-fn presets(frame: &Frame, clock: Clock) -> Vec<PresetRow> {
-    #[cfg(test)]
-    tests::PRESETS_CALLS.with(|c| c.set(c.get() + 1));
-    frame
-        .recent_publishes()
-        .iter()
-        .map(|p| {
-            (
-                p.at,
-                format!(
-                    "{} · {} / {} · {} book{}",
-                    clock.hms(p.at),
-                    p.dataset,
-                    p.batch,
-                    p.books,
-                    if p.books == 1 { "" } else { "s" }
-                ),
-            )
-        })
-        .collect()
-}
-
-/// [`presets`], cached on `state.presets_cache` (Phase 4b M9): a call
-/// with `frame`'s data version AND `clock` unchanged since the last one
-/// returns the exact same `Rc` — a refcount bump, no fresh allocation —
-/// rather than rebuilding the whole list. Every call site in this module
-/// that used to call `presets` directly from a render/key-handling path
-/// (`build`, `handle_key`'s enter/up-down arms) goes through this
-/// instead.
-fn cached_presets(state: &AsOfState, frame: &Frame, clock: Clock) -> Rc<Vec<PresetRow>> {
-    let v = frame.versions().data;
-    if let Some((cached_v, cached_clock, cached)) = state.presets_cache.borrow().as_ref()
-        && *cached_v == v
-        && *cached_clock == clock
-    {
-        return Rc::clone(cached);
-    }
-    let built = Rc::new(presets(frame, clock));
-    *state.presets_cache.borrow_mut() = Some((v, clock, Rc::clone(&built)));
-    built
-}
-
-/// Resolve the as-of field's raw text (spec §3.6): `"live"` (any case)
-/// resolves to [`AsOf::Live`]; anything else delegates to
-/// [`parse_as_of`] on `clock` (`HH:MM`, `HH:MM:SS`, `YYYY-MM-DD`,
-/// `YYYY-MM-DD HH:MM[:SS]`, or RFC 3339) — an `Err` carries that
-/// parser's own message, shown verbatim under the field.
-pub fn resolve_input(text: &str, now: DateTime<Utc>, clock: Clock) -> Result<AsOf, String> {
-    let trimmed = text.trim();
-    if trimmed.eq_ignore_ascii_case("live") {
-        return Ok(AsOf::Live);
-    }
-    parse_as_of(trimmed, now, &clock).map(AsOf::At)
-}
-
-/// The `InputEvent::Change` handler's pure half (shared dialog-input
-/// subscription arm, `shell/mod.rs`): re-resolve the field's current
-/// text and store the outcome for [`build`] to show. A blank field
-/// (nothing typed, or whitespace only) clears both `error` and
-/// `resolved` — see [`AsOfState`]'s own doc comment for why.
-pub fn on_query_changed(state: &mut AsOfState, text: &str, now: DateTime<Utc>, clock: Clock) {
-    if text.trim().is_empty() {
-        state.error = None;
-        state.resolved = None;
-        return;
-    }
-    match resolve_input(text, now, clock) {
-        Ok(AsOf::Live) => {
-            state.error = None;
-            state.resolved = None;
-        }
-        Ok(AsOf::At(t)) => {
-            state.error = None;
-            state.resolved = Some(t);
-        }
-        Err(e) => {
-            state.error = Some(e);
-            state.resolved = None;
-        }
-    }
-}
-
-/// The field text a calendar day click yields (spec §5.2, §17 mouse
-/// parity): a typed time — `HH:MM` or `HH:MM:SS`, alone or after a date
-/// — is kept and the date part becomes `date`; anything else (blank,
-/// `live`, an RFC 3339 instant, garbage) becomes the bare date, which
-/// [`parse_as_of`] reads as the end of that day.
-pub fn compose_with_date(text: &str, date: NaiveDate) -> String {
-    let trimmed = text.trim();
-    let time_part = trimmed.rsplit_once(' ').map(|(_, t)| t).unwrap_or(trimmed);
-    let keeps_time = NaiveTime::parse_from_str(time_part, "%H:%M").is_ok()
-        || NaiveTime::parse_from_str(time_part, "%H:%M:%S").is_ok();
-    if keeps_time {
-        format!("{} {time_part}", date.format("%Y-%m-%d"))
-    } else {
-        date.format("%Y-%m-%d").to_string()
-    }
-}
-
-/// The day the calendar highlights: the field's resolved instant on
-/// `clock`, else today on `clock`.
-pub fn calendar_date(state: &AsOfState, now: DateTime<Utc>, clock: Clock) -> NaiveDate {
-    clock.today(state.resolved.unwrap_or(now))
-}
-
-/// The calendar is hidden while the field reads `live` — there is no
-/// day to pick for "now".
-pub fn shows_calendar(text: &str) -> bool {
-    !text.trim().eq_ignore_ascii_case("live")
-}
-
-// ---------------------------------------------------------------------
-// gpui shell.
-// ---------------------------------------------------------------------
-
-/// Target dialog content width in pixels — widened from the picker's own
-/// `WIDTH` (`shell::picker`, 480) to fit the preset list beside the
-/// calendar pane (Task 3, spec §5.2) side by side rather than cramped.
+/// Dialog content width at the design rem (the picker's 480 was too
+/// narrow for a label and a dated right column side by side).
 const WIDTH: f32 = 640.0;
 
-/// Open the as-of dialog (`frame::as_of`, `mod+t`). A no-op if a modal is
-/// already open, mirroring every other `open` here.
+/// A row's height at the design rem — the same 28 the picker's
+/// `choice_rows` and the palette's own row list use — and how many the
+/// `as-of-rows` viewport shows before it scrolls (review round 2,
+/// finding 3): without an explicit bound here `overflow_y_scroll` has
+/// nothing to overflow against (the list just grows to fit every row),
+/// so `ScrollHandle::scroll_to_item` would have nothing to do — the cap
+/// is what makes the list an actual independently-scrollable viewport,
+/// distinct from the dialog's header/footer, the same shape
+/// `dialog::choice_rows` already gives the choice dialogs.
+const ROW_HEIGHT: f32 = 28.0;
+const VISIBLE_ROWS: usize = crate::choice::DEFAULT_CAP;
+
+/// Open the dialog (`frame::as_of`, `mod+t`, the toolbar chip). A no-op
+/// if a modal is already open, like every other `open` here. The state is
+/// built fresh from the frame, the clock and `now` — nothing survives a
+/// close/reopen.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.modal.is_some() {
         return;
     }
-    view.as_of_dialog = Some(AsOfState::default());
-    // The field opens blank, so seed the calendar to today rather than
-    // leaving it on whatever day the last open (or the default) left it —
-    // and put it back on the DAY grid, so closing from the month or year
-    // picker does not leave the next open showing that picker (the
-    // slice-2 final review's finding 8, built once `gpui-base` became a
-    // direct dependency for `CalendarView`, user ruling 2026-09-19).
-    let today = view.clock(cx).today(Utc::now());
-    view.as_of_calendar.update(cx, |c, cx| {
-        c.set_view(gpui_base::CalendarView::Day);
-        c.set_date(today, window, cx)
-    });
+    let clock = view.clock(cx);
+    let frame = view.frame.read(cx);
+    let publishes: Vec<_> = frame.recent_publishes().iter().cloned().collect();
+    // Review round 2 (re-review), finding 3: `AsOfState::build` always
+    // highlights row 0, and `as_of_scroll` lives on `ShellView` — it
+    // keeps whatever offset a PREVIOUS open scrolled it to, so a fresh
+    // open must reset it back to the top rather than opening mid-scroll
+    // (the `choicedialog::open`/`choice_dialog_scroll` precedent).
+    view.as_of_scroll.scroll_to_item(0);
+    view.as_of_dialog = Some(AsOfState::build(
+        frame.as_of(),
+        &publishes,
+        clock,
+        chrono::Utc::now(),
+    ));
+    // Review round 2, finding 5: the `data` version `on_frame_changed`
+    // compares against to decide whether a later notify is a publish
+    // landing while this dialog is open.
+    view.as_of_data_version = frame.versions().data;
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
@@ -248,132 +87,206 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     );
 }
 
-/// Replace the frame's as-of with `at` and close the dialog — the enter
-/// arm's and a preset row click's shared commit path.
-fn commit_at(
+/// The `InputEvent::Change` arm's pure half (`shell/mod.rs`): the field's
+/// text is the query. Answers whether the ranking changed.
+pub fn on_query_changed(state: &mut AsOfState, text: &str) -> bool {
+    state.set_query(text)
+}
+
+fn apply_commit(
     shell: &mut ShellView,
-    at: DateTime<Utc>,
+    commit: Commit,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
     shell.frame.update(cx, |f, cx| {
-        if f.set_as_of(AsOf::At(at)) {
+        let next = match commit {
+            Commit::At(t) => AsOf::At(t),
+            Commit::Live => AsOf::Live,
+        };
+        if f.set_as_of(next) {
             cx.notify();
         }
     });
     shell.close_modal(window, cx);
 }
 
-/// Return to live and close the dialog — the `"live"` text arm's own
-/// commit path.
-fn commit_live(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    shell.frame.update(cx, |f, cx| {
-        if f.set_as_of(AsOf::Live) {
-            cx.notify();
-        }
-    });
-    shell.close_modal(window, cx);
-}
-
-/// A calendar day was clicked (the `CalendarEvent::Selected` subscription,
-/// `shell/mod.rs`): rewrite the field's DATE PART through the one door
-/// this dialog has for writing the shared `Input` — [`compose_with_date`]
-/// keeps a typed time — then re-resolve at once, because
-/// `InputState::set_value` emits no `Change` (the trap `sync_dialog_text`
-/// documents), and hand focus back to the field: the calendar is the
-/// mouse form of typing a date, never a focus owner (spec §5.2, §17).
-pub(crate) fn on_calendar_selected(
-    view: &mut ShellView,
-    date: NaiveDate,
-    window: &mut Window,
-    cx: &mut Context<ShellView>,
-) {
-    if view.as_of_dialog.is_none() {
-        return;
-    }
-    let input = view.dialog_input.clone();
-    let current = input.read(cx).value().to_string();
-    let next = compose_with_date(&current, date);
-    input.update(cx, |i, cx| i.set_value(next.clone(), window, cx));
-    let clock = view.clock(cx);
-    if let Some(state) = view.as_of_dialog.as_mut() {
-        on_query_changed(state, &next, chrono::Utc::now(), clock);
-    }
-    input.read(cx).focus_handle(cx).focus(window, cx);
-    cx.notify();
-}
-
-/// The [`dialog::ModalKeyHandler`] for this modal.
-///
-/// `enter`: an empty field commits the preset at `selected`, if any (a
-/// silent no-op when the preset list is empty); otherwise
-/// [`resolve_input`] on the field's text — `Ok(AsOf::Live)`/`Ok(AsOf::
-/// At(t))` commit and close, `Err` stores the message on `state.error`
-/// (the modal stays open, same "enter does nothing" contract the field's
-/// own inline error already promises).
-///
-/// Every `listfilter::nav_command` key moves `selected` through
-/// `vimnav::apply` (spec §20.5); `escape` claims nothing (falls through to
-/// `handle_key_down`'s own modal-closes-on-escape branch), exactly like
-/// every other dialog here.
+/// The [`dialog::ModalKeyHandler`] for this modal. Every arm is a pure
+/// mutation of [`AsOfState`] plus, on a commit, `apply_commit`; the
+/// shared field's text is reconciled by the as-of arm `sync_dialog_text`
+/// grew for it (review round 2, finding 1 — this dialog is filter-only
+/// and had none before) on every return from this handler, through the
+/// key-path seam `handle_key_down` already runs unconditionally after
+/// the modal's own key handler (`input.rs`), so a query the field's own
+/// mutations clear (`open_field`) or set (`set_query`) always reaches
+/// the shared `Input` back. Final whole-branch review, finding M-8: the
+/// `enter` arm USED to re-feed that same live text into `set_query`
+/// before trusting the highlight, which is what made this guarantee true
+/// in the first place — now that the guarantee holds on every return
+/// from this handler (not just this one arm), the re-feed is gone and a
+/// `debug_assert_eq!` stands in its place instead, since re-feeding on
+/// divergence would be actively wrong (`set_query` re-ranks and resets
+/// the highlight to 0).
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
-    if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        let text = shell.dialog_input.read(cx).value().to_string();
-        let trimmed = text.trim();
-        let clock = shell.clock(cx);
-        if trimmed.is_empty() {
-            // Phase 4b Task 1 fix round 1, MIN-11: one borrow of
-            // `as_of_dialog`, not two — `selected` used to be read off a
-            // separate `as_ref()` call purely to have a fallback-to-0
-            // default outside the `and_then`, which `state.selected`
-            // gives for free from inside the single borrow below.
-            let at = shell.as_of_dialog.as_ref().and_then(|state| {
-                cached_presets(state, shell.frame.read(cx), clock)
-                    .get(state.selected)
-                    .map(|(at, _)| *at)
-            });
-            if let Some(at) = at {
-                commit_at(shell, at, window, cx);
-            }
+    let Some(state) = shell.as_of_dialog.as_mut() else {
+        return false;
+    };
+    // The field owns every key while it is open (§5.2) but a chord,
+    // which is never the field's own — `route` answers `None` for one
+    // too, but the check here comes FIRST so a chord is not the
+    // field's even while it is open (review round 2, finding 2); a
+    // modal owns the keyboard, so it goes where every modal chord
+    // goes — never to the matcher. Anything else non-chord is claimed
+    // regardless of whether `route` recognizes it: an unclaimed key
+    // would otherwise reach the shared `Input` as typing (`input.rs`'s
+    // key-path seam), re-filtering the list and hiding the Custom row
+    // out from under its own open field.
+    if state.field().is_some() {
+        if ks.mods.is_chord() {
+            return false;
+        }
+        if ks.key == "tab" {
+            // Bare `tab` AND `shift+tab` leave the field — `route` never
+            // claims "tab" (it is not a field key), so both spellings
+            // land here the same way.
+            state.close_field();
+            cx.notify();
             return true;
         }
-        match resolve_input(trimmed, Utc::now(), clock) {
-            Ok(AsOf::Live) => commit_live(shell, window, cx),
-            Ok(AsOf::At(t)) => commit_at(shell, t, window, cx),
-            Err(msg) => {
-                if let Some(state) = shell.as_of_dialog.as_mut() {
-                    state.error = Some(msg);
-                    state.resolved = None;
+        match route(&ks.key, ks.mods.shift, false) {
+            Some(FieldKey::Commit) => match state.commit() {
+                Ok(commit) => apply_commit(shell, commit, window, cx),
+                Err(_) => cx.notify(),
+            },
+            Some(FieldKey::Cancel) => {
+                state.close_field();
+                cx.notify();
+            }
+            Some(other) => {
+                if let Some(field) = state.field_mut() {
+                    field.apply(other);
                 }
                 cx.notify();
             }
+            // An unrouted, non-chord key belongs to nobody but this
+            // modal — swallowed, not left to fall through.
+            None => {}
         }
         return true;
     }
-    if let Some(cmd) = listfilter::nav_command(ks) {
-        let clock = shell.clock(cx);
-        let len = shell
-            .as_of_dialog
-            .as_ref()
-            .map(|state| cached_presets(state, shell.frame.read(cx), clock).len())
-            .unwrap_or(0);
-        if let Some(state) = shell.as_of_dialog.as_mut() {
-            state.selected = vimnav::apply(state.selected, len, cmd);
+    if ks.mods == Modifiers::NONE {
+        match ks.key.as_str() {
+            "enter" => {
+                let live = shell.dialog_input.read(cx).value().to_string();
+                let Some(state) = shell.as_of_dialog.as_mut() else {
+                    return false;
+                };
+                // The re-feed this used to do here (`state.set_query(
+                // &live)`) is now redundant: `sync_dialog_text`'s as-of
+                // arm (this function's own doc comment) keeps the shared
+                // `Input` and `AsOfState::query` equal on every return
+                // from this handler, so by the time a later keystroke
+                // reaches here the two can never have diverged. Final
+                // whole-branch review, finding M-8: re-feeding anyway
+                // would be worse than redundant if they ever DID diverge
+                // — `set_query` re-ranks and resets the highlight to 0
+                // (review round 2's Critical all over again), silently
+                // committing row 0 instead of whatever the trader is
+                // actually looking at. The assert is the tripwire.
+                debug_assert_eq!(
+                    state.query(),
+                    live.as_str(),
+                    "the sync arm keeps the field and the model equal"
+                );
+                match state.commit() {
+                    Ok(commit) => apply_commit(shell, commit, window, cx),
+                    Err(_) => cx.notify(),
+                }
+                return true;
+            }
+            "tab" => {
+                state.open_field();
+                shell.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+                    state.painted(),
+                    state.highlighted(),
+                ));
+                cx.notify();
+                return true;
+            }
+            key => {
+                if let Some(commit) = state.jump_digit(key) {
+                    apply_commit(shell, commit, window, cx);
+                    return true;
+                }
+            }
         }
+    }
+    if let Some(cmd) = listfilter::nav_command(ks) {
+        state.nav(cmd);
+        shell.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+            state.painted(),
+            state.highlighted(),
+        ));
         cx.notify();
         return true;
     }
     false
 }
 
-/// The `Values`-stage-less body: the shared filter field doubling as the
-/// as-of text field, the resolved preview or inline error under it, then
-/// the preset list.
+/// The Custom row's segment colours over the popover: the active segment
+/// on `primary` in `primary_foreground` floored to the readable ratio
+/// against it, a typing segment on `accent` in `accent_foreground`
+/// floored the same way, the rest bare in `foreground`. The sweep
+/// `segment_colours_are_readable_on_every_bundled_theme` checks all
+/// three on every theme.
+pub fn segment_paint(theme: &Theme) -> SegmentPaint {
+    let popover = to_rgb(theme.popover);
+    let black = Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    };
+    let white = Rgb {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+    };
+    // Moved toward pure black or pure white, whichever contrasts more
+    // with the fill itself — not toward `theme.foreground`, which on
+    // several bundled light themes (a light `foreground` sitting close
+    // in lightness to a light `primary`) is itself under 3:1 against the
+    // fill, leaving `readable_on` no `t` that clears. Every colour
+    // clears 3:1 against one of black and white, so this floor always
+    // lands — the same fix `geode-marketdata`'s `FlooredTones::
+    // primary_text` already made for the identical `primary_foreground`
+    // over `primary` pairing.
+    let floored = |text: Hsla, fill: Hsla| -> Hsla {
+        let ground = over(fill, popover);
+        let toward = if contrast_ratio(black, ground) >= contrast_ratio(white, ground) {
+            black
+        } else {
+            white
+        };
+        to_hsla(readable_on(to_rgb(text), ground, toward))
+    };
+    SegmentPaint {
+        rest_text: theme.foreground,
+        rest_fill: None,
+        active_text: floored(theme.primary_foreground, theme.primary),
+        active_fill: theme.primary,
+        typing_text: floored(theme.accent_foreground, theme.accent),
+        typing_fill: theme.accent,
+        separator: theme.muted_foreground,
+        suffix: theme.muted_foreground,
+        radius: theme.radius_tokens().sm,
+    }
+}
+
 fn build(
     shell: &ShellView,
     entity: &Entity<ShellView>,
@@ -384,365 +297,271 @@ fn build(
         return div().into_any_element();
     };
     let theme = cx.theme();
+    let paint = super::listrow::row_paint(theme);
     let muted = theme.muted_foreground;
-    // Through the chip door (`shell::chip`): a raw `theme.danger` bypasses
-    // the readability floor, and the parse error is the single thing in
-    // this dialog a trader must be able to read (review finding, Task 6
-    // fix round 1).
-    let danger = chip::chip_paint(theme, chip::Tone::DangerText).text;
+    let danger = theme.danger;
     let radius = theme.radius;
-    let clock = shell.clock(cx);
+    let segment_paint = segment_paint(theme);
+    let clock = state.clock();
 
-    let mut column = v_flex()
-        .gap_2()
-        .w(scale::design(WIDTH))
-        .child(dialog::filter_row(&shell.dialog_input, None, cx));
-
-    if let Some(t) = state.resolved {
-        column = column.child(
+    let mut list = v_flex()
+        .id("as-of-rows")
+        .w_full()
+        .gap_0p5()
+        .max_h(scale::design(VISIBLE_ROWS as f32 * ROW_HEIGHT))
+        .overflow_y_scroll()
+        .track_scroll(&shell.as_of_scroll)
+        .debug_selector(|| "as-of-rows".to_string());
+    if state.painted().is_empty() {
+        list = list.child(
             div()
+                .px_2()
+                .py_1()
                 .text_sm()
                 .text_color(muted)
-                .debug_selector(|| "as-of-resolved".to_string())
-                .child(format!("→ {}", clock.full(t))),
+                .child("nothing matches — edit the filter"),
         );
     }
-    if let Some(err) = &state.error {
-        column = column.child(
-            div()
-                .text_sm()
-                .text_color(danger)
-                .debug_selector(|| "as-of-error".to_string())
-                .child(err.clone()),
-        );
-    }
-
-    let presets_list = cached_presets(state, shell.frame.read(cx), clock);
-    let list = build_presets(
-        &presets_list,
-        state.selected,
-        entity,
-        super::listrow::row_paint(theme),
-        muted,
-        radius,
-    );
-    // Borrowed, not `.to_string()`'d — `SharedString` derefs to `str`, and
-    // `shows_calendar` takes `&str`, so this costs nothing beyond the
-    // `value()` call itself (the dialog already allocates per paint on a
-    // keystroke: `err.clone()` above, the preview `format!`).
-    let text = shell.dialog_input.read(cx).value();
-    let body = if shows_calendar(&text) {
-        h_flex()
-            .gap_3()
-            .items_start()
-            .child(div().flex_1().min_w_0().child(list))
-            .child(
-                div()
-                    .flex_none()
-                    .debug_selector(|| "as-of-calendar".to_string())
-                    // Display check 2026-09-19: the pane must OCCLUDE — a
-                    // plain div does not, so gpui hit-tests whatever sits
-                    // behind it too, and a day click also fired a preset
-                    // row's own `on_mouse_down` (`commit_at`, which closes
-                    // the dialog). The list no longer runs under the pane
-                    // (`build_presets` takes its slot's width, not
-                    // `WIDTH`), and this keeps that true whatever is
-                    // painted behind it later.
-                    .occlude()
-                    // Final review, finding 1: any click on the calendar's
-                    // own chrome (‹/›, the month/year toggles, the pane's
-                    // padding — everything but a day cell, which
-                    // `on_calendar_selected` already refocuses the field
-                    // after) would otherwise take keyboard focus and never
-                    // give it back. gpui focuses a `track_focus`ed
-                    // element's handle on BUBBLE-phase mouse-down unless
-                    // `window.prevent_default()` was called during an
-                    // earlier phase; calling it here, in the CAPTURE phase,
-                    // stops that focus grab while leaving the click itself
-                    // untouched (the pending-click recorder that resolves
-                    // a chrome button's own `on_click` ignores
-                    // `default_prevented`).
-                    .capture_any_mouse_down(|_, window, _| window.prevent_default())
-                    .child(Calendar::new(&shell.as_of_calendar).small()),
-            )
-            .into_any_element()
-    } else {
-        list.into_any_element()
-    };
-    column.child(body).into_any_element()
-}
-
-/// The preset list: each row `"14:05:12 · risk / EOD · 3 books"`, the
-/// selected row highlighted — the palette's own row styling. A row click
-/// commits that instant directly ([`commit_at`]), same as the spec's
-/// "selecting one sets as-of to that instant".
-fn build_presets(
-    presets: &[(DateTime<Utc>, String)],
-    selected: usize,
-    entity: &Entity<ShellView>,
-    row_paint: RowPaint,
-    muted: Hsla,
-    radius: Pixels,
-) -> AnyElement {
-    if presets.is_empty() {
-        return div()
+    let mut last_section: Option<Section> = None;
+    for (position, row) in state.painted().iter().enumerate() {
+        if last_section != Some(row.section) {
+            if let Some(eyebrow) = row.section.eyebrow() {
+                list = list.child(
+                    div()
+                        .flex_shrink_0()
+                        .px_2()
+                        .pt_2()
+                        .pb_0p5()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(eyebrow.to_uppercase()),
+                );
+            }
+            last_section = Some(row.section);
+        }
+        let is_highlighted = position == state.highlighted();
+        let mut el = h_flex()
+            .w_full()
+            .h(scale::design(ROW_HEIGHT))
+            .flex_shrink_0()
             .px_2()
-            .py_1()
+            .items_center()
+            .gap_2()
             .text_sm()
-            .text_color(muted)
-            .child("no recent publishes")
-            .into_any_element();
+            .rounded(radius)
+            .debug_selector(move || format!("as-of-row-{position}"));
+        if is_highlighted {
+            el = el.bg(paint.active).text_color(paint.text);
+        } else {
+            el = el.hover(move |s| s.bg(paint.hover));
+        }
+        let entity_for_click = entity.clone();
+        let is_custom = matches!(row.row, Row::Custom);
+        el = el.child(super::keybindings_view::highlighted_text(
+            &row.label,
+            &row.indices,
+            paint.accent,
+        ));
+        if is_custom {
+            if let Some(field) = state.field() {
+                let segments = field.segments();
+                let suffix: SharedString = clock.abbreviation(state.now()).into();
+                let seg_entity = entity.clone();
+                el = el.child(div().font_family(crate::fonts::MONO).child(
+                    geode_widgets::datefield::paint(
+                        &segments,
+                        Some(suffix),
+                        segment_paint,
+                        "as-of-custom-seg".into(),
+                        move |segment, window, cx| {
+                            seg_entity.update(cx, |shell, cx| {
+                                if let Some(f) =
+                                    shell.as_of_dialog.as_mut().and_then(|s| s.field_mut())
+                                {
+                                    f.select(segment);
+                                }
+                                // Final whole-branch review, finding I-1:
+                                // every OTHER seam that mutates `AsOfState`
+                                // reconciles the shared `Input` through
+                                // this same call (this function's own doc
+                                // comment names the key-path seam; the
+                                // row-click arm below already did it on
+                                // its own opening click) — a segment
+                                // select had no seam of its own. Belt and
+                                // braces today (`render_modal`'s panel
+                                // already stops this mouse-down's
+                                // propagation before it could reach the
+                                // shell root's own default focus grab —
+                                // verified empirically, not assumed — so
+                                // nothing observable currently regresses
+                                // without this call), but the one thing
+                                // every mutation of the field is supposed
+                                // to do unconditionally, and cheap enough
+                                // that skipping it here was the outlier,
+                                // not a deliberate exception.
+                                dialog::sync_dialog_text(shell, window, cx);
+                                cx.notify();
+                            });
+                        },
+                    ),
+                ));
+                if let Some(refusal) = state.field_refusal() {
+                    el = el.child(
+                        div()
+                            .ml_auto()
+                            .text_xs()
+                            .text_color(danger)
+                            .debug_selector(|| "as-of-custom-refusal".to_string())
+                            .child(refusal.to_string()),
+                    );
+                }
+            } else {
+                el = el.child(
+                    div()
+                        .ml_auto()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("tab edits"),
+                );
+            }
+        } else {
+            el = el.child(
+                div()
+                    .ml_auto()
+                    .font_family(crate::fonts::MONO)
+                    .text_xs()
+                    .text_color(if is_highlighted { paint.text } else { muted })
+                    .child(row.right.clone()),
+            );
+        }
+        el = el.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            entity_for_click.update(cx, |shell, cx| {
+                let Some(state) = shell.as_of_dialog.as_mut() else {
+                    return;
+                };
+                if is_custom {
+                    // A click on the Custom row's body (not a segment —
+                    // the painter stops propagation there) opens the
+                    // field, like `tab`. `sync_dialog_text` is hoisted
+                    // OUT of the `field().is_none()` arm (final
+                    // whole-branch review, finding I-1): every arm that
+                    // mutates `AsOfState` reconciles the shared `Input`
+                    // through this call, and a body click on an
+                    // ALREADY-open Custom row is exactly such a mutation
+                    // (it still runs `set_highlighted`-equivalent work
+                    // via the highlight move to the Custom row on open,
+                    // and is symmetric with the segment click beside it),
+                    // so it belongs here whether or not THIS particular
+                    // click is the one that opened the field, the same
+                    // "every seam, not just the ones that happened to
+                    // need it" reasoning the segment click's own call
+                    // just above follows.
+                    if state.field().is_none() {
+                        state.open_field();
+                    }
+                    dialog::sync_dialog_text(shell, window, cx);
+                    cx.notify();
+                    return;
+                }
+                if state.field().is_some() {
+                    state.close_field();
+                }
+                if state.set_highlighted(position) {
+                    match state.commit() {
+                        Ok(commit) => apply_commit(shell, commit, window, cx),
+                        Err(_) => cx.notify(),
+                    }
+                }
+            });
+        });
+        list = list.child(el);
     }
-    // `w_full`, not `w(px(WIDTH))`: the list sits in a `flex_1` column
-    // beside the calendar and must take that column's width — at the
-    // dialog's full width it ran on under the pane, its covered rows
-    // still hit-tested (display check 2026-09-19).
-    let mut list = v_flex()
-        .id("as-of-presets")
+
+    let hints: Vec<Hint> = if state.field().is_some() {
+        vec![
+            Hint::new(HintRow::Move, &["left", "right"], "segment"),
+            Hint::new(HintRow::Move, &["up", "down"], "step").selector("as-of-hint-step"),
+            Hint::new(HintRow::Move, &["shift+up"], "×10"),
+            Hint::range(HintRow::Edit, "0", "9", "type"),
+            Hint::new(HintRow::Edit, &["backspace"], "clear segment"),
+            Hint::new(HintRow::Go, &["enter"], "set as-of"),
+            Hint::new(HintRow::Go, &["escape"], "back to list"),
+        ]
+    } else {
+        vec![
+            Hint::prose(HintRow::Move, "type to filter"),
+            Hint::new(HintRow::Move, &["up", "down"], "row"),
+            Hint::range(HintRow::Move, "1", "5", "preset"),
+            Hint::new(HintRow::Edit, &["tab"], "custom time").selector("as-of-hint-tab"),
+            Hint::new(HintRow::Go, &["enter"], "set as-of"),
+            Hint::new(HintRow::Go, &["escape"], "close"),
+        ]
+    };
+    let footer = v_flex()
         .w_full()
         .gap_1()
-        .debug_selector(|| "as-of-presets".to_string());
-    for (position, (at, label)) in presets.iter().enumerate() {
-        let is_selected = position == selected;
-        let mut row = h_flex().w_full().px_2().py_1().rounded(radius);
-        if is_selected {
-            row = row.bg(row_paint.active).text_color(row_paint.text);
-        } else {
-            row = row.hover(|s| s.bg(row_paint.hover));
-        }
-        let at = *at;
-        let entity = entity.clone();
-        row = row
-            .child(label.clone())
-            .debug_selector(move || format!("as-of-preset-{position}"))
-            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                entity.update(cx, |shell, cx| {
-                    commit_at(shell, at, window, cx);
-                });
-            });
-        list = list.child(row);
-    }
-    list.into_any_element()
+        .pt_2()
+        .border_t_1()
+        .border_color(theme.border)
+        .child(dialog::hint_rows(
+            &hints,
+            theme.muted_foreground,
+            theme.muted,
+            theme.radius,
+        ));
+
+    v_flex()
+        .gap_2()
+        .w(scale::design(WIDTH))
+        .child(dialog::filter_row(&shell.dialog_input, None, cx))
+        .child(list)
+        .child(footer)
+        .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::Publish;
-    use chrono::TimeZone;
-    use std::cell::Cell;
+    use geode_core::colour::READABLE_RATIO;
 
-    // Phase 4b M9: counts real `presets` calls so a test can prove
-    // `cached_presets` actually skips rebuilding when nothing relevant
-    // changed, rather than only checking the returned value (which would
-    // look identical whether or not the cache did its job).
-    thread_local! {
-        pub(super) static PRESETS_CALLS: Cell<u32> = const { Cell::new(0) };
-    }
-
-    fn publish(dataset: &str, batch: &str, books: usize, at: DateTime<Utc>) -> Publish {
-        Publish {
-            dataset: dataset.to_string(),
-            batch: batch.to_string(),
-            books,
-            at,
+    /// The three segment states over the popover on every bundled theme,
+    /// no exception list — the same floor `chip_paint` and `row_paint`
+    /// keep.
+    #[gpui::test]
+    fn segment_colours_are_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (service, _) = crate::theme::load_bundled();
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                let p = segment_paint(theme);
+                let popover = to_rgb(theme.popover);
+                for (state, text, fill) in [
+                    ("rest", p.rest_text, None),
+                    ("active", p.active_text, Some(p.active_fill)),
+                    ("typing", p.typing_text, Some(p.typing_fill)),
+                ] {
+                    checked += 1;
+                    let ground = fill.map(|f| over(f, popover)).unwrap_or(popover);
+                    let ratio = contrast_ratio(to_rgb(text), ground);
+                    if ratio < READABLE_RATIO {
+                        failures.push(format!("{name}: {state} at {ratio:.2}:1"));
+                    }
+                }
+            });
         }
-    }
-
-    #[test]
-    fn presets_are_labeled_and_newest_first() {
-        use geode_core::groupings::GroupingSlots;
-        use geode_core::scopes::SavedScopes;
-
-        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
-        let t0 = Utc.with_ymd_and_hms(2026, 9, 6, 14, 5, 12).unwrap();
-        let t1 = t0 + chrono::Duration::seconds(5);
-        let t2 = t1 + chrono::Duration::seconds(5);
-        f.note_published(publish("risk", "EOD", 3, t0));
-        f.note_published(publish("risk", "EOD", 1, t1));
-        f.note_published(publish("greeks", "INTRADAY", 5, t2));
-
-        let clock = geode_core::clock::Clock::utc();
-        let p = presets(&f, clock);
-        assert_eq!(p.len(), 3, "newest first, one row per publish");
-        assert_eq!(p[0].0, t2);
-        assert_eq!(
-            p[0].1,
-            format!("{} · greeks / INTRADAY · 5 books", clock.hms(t2))
-        );
-        assert_eq!(p[1].0, t1);
-        assert_eq!(
-            p[1].1,
-            format!("{} · risk / EOD · 1 book", clock.hms(t1)),
-            "a single book is singular, not '1 books'"
-        );
-        assert_eq!(p[2].0, t0);
-    }
-
-    #[test]
-    fn cached_presets_rebuilds_only_when_the_frames_data_version_changes() {
-        use geode_core::groupings::GroupingSlots;
-        use geode_core::scopes::SavedScopes;
-
-        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
-        f.note_published(publish(
-            "risk",
-            "EOD",
-            3,
-            Utc.with_ymd_and_hms(2026, 9, 6, 14, 5, 12).unwrap(),
-        ));
-        let state = AsOfState::default();
-        let clock = geode_core::clock::Clock::utc();
-
-        PRESETS_CALLS.with(|c| c.set(0));
-        let a = cached_presets(&state, &f, clock);
-        let b = cached_presets(&state, &f, clock);
-        assert!(Rc::ptr_eq(&a, &b), "the second call must hit the cache");
-        assert_eq!(
-            PRESETS_CALLS.with(|c| c.get()),
-            1,
-            "two calls with the frame's data version unchanged must build the list once"
-        );
-
-        f.note_published(publish(
-            "risk",
-            "EOD",
-            4,
-            Utc.with_ymd_and_hms(2026, 9, 6, 14, 6, 0).unwrap(),
-        ));
-        let c = cached_presets(&state, &f, clock);
         assert!(
-            !Rc::ptr_eq(&a, &c),
-            "a new publish must invalidate the cache"
+            checked >= 3 * 40,
+            "the sweep saw {checked} checks — bundled themes missing?"
         );
-        assert_eq!(PRESETS_CALLS.with(|c| c.get()), 2);
-
-        // A different clock must also invalidate the cache (Task 6: a
-        // `[time]` zone change re-formats every `HH:MM:SS` label even
-        // with the data version unchanged).
-        let other_clock = geode_core::clock::Clock::in_zone_named("America/New_York");
-        let d = cached_presets(&state, &f, other_clock);
         assert!(
-            !Rc::ptr_eq(&c, &d),
-            "a different clock must invalidate the cache too"
+            failures.is_empty(),
+            "unreadable segments:\n{}",
+            failures.join("\n")
         );
-        assert_eq!(PRESETS_CALLS.with(|c| c.get()), 3);
-    }
-
-    #[test]
-    fn resolve_input_delegates_to_parse_as_of_for_a_clock_time() {
-        // F1 (final fix wave): `HH:MM` resolves on the CLOCK's date (spec
-        // §3.6, "one clock throughout"), not UTC's — a non-UTC clock and
-        // an expectation computed BY HAND (not through the same `Clock`
-        // methods the code under test uses) so this actually proves the
-        // date/zone math, not just that the two call sites agree with
-        // each other. `now` = 2026-09-04 01:00 UTC is 2026-09-03 21:00
-        // EDT, so "14:05" must mean 14:05 on the 3rd in New York — EDT is
-        // UTC-4, so 2026-09-03 18:05 UTC.
-        let now = Utc.with_ymd_and_hms(2026, 9, 4, 1, 0, 0).unwrap();
-        let clock = geode_core::clock::Clock::in_zone_named("America/New_York");
-        let expected = Utc.with_ymd_and_hms(2026, 9, 3, 18, 5, 0).unwrap();
-        assert_eq!(resolve_input("14:05", now, clock), Ok(AsOf::At(expected)));
-    }
-
-    #[test]
-    fn resolve_input_live_is_case_insensitive() {
-        let now = Utc::now();
-        let clock = geode_core::clock::Clock::utc();
-        assert_eq!(resolve_input("live", now, clock), Ok(AsOf::Live));
-        assert_eq!(resolve_input("LIVE", now, clock), Ok(AsOf::Live));
-        assert_eq!(resolve_input(" Live ", now, clock), Ok(AsOf::Live));
-    }
-
-    #[test]
-    fn resolve_input_garbage_returns_the_parsers_message() {
-        let now = Utc::now();
-        let err = resolve_input("nope", now, geode_core::clock::Clock::utc()).unwrap_err();
-        assert!(err.contains("HH:MM"), "{err}");
-    }
-
-    #[test]
-    fn on_query_changed_clears_both_fields_for_a_blank_query() {
-        let now = Utc::now();
-        let mut state = AsOfState {
-            selected: 0,
-            error: Some("stale".into()),
-            resolved: Some(now),
-            ..AsOfState::default()
-        };
-        on_query_changed(&mut state, "   ", now, geode_core::clock::Clock::utc());
-        assert!(state.error.is_none());
-        assert!(state.resolved.is_none());
-    }
-
-    #[test]
-    fn on_query_changed_sets_resolved_on_success_and_error_on_failure() {
-        let now = Utc.with_ymd_and_hms(2026, 9, 6, 16, 0, 0).unwrap();
-        let clock = geode_core::clock::Clock::utc();
-        let mut state = AsOfState::default();
-        on_query_changed(&mut state, "14:05", now, clock);
-        // F1 (final fix wave): the clock's date, not UTC's — see the
-        // sibling test's comment above.
-        let expected = clock
-            .resolve_local(
-                clock.today(now),
-                chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap(),
-            )
-            .unwrap();
-        assert_eq!(state.resolved, Some(expected));
-        assert!(state.error.is_none());
-
-        on_query_changed(&mut state, "not a time", now, clock);
-        assert!(state.error.is_some());
-        assert!(state.resolved.is_none(), "error and resolved are exclusive");
-    }
-
-    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, day).unwrap()
-    }
-
-    #[test]
-    fn compose_keeps_a_typed_time_and_replaces_or_adds_the_date() {
-        let day = d(2026, 9, 8);
-        assert_eq!(compose_with_date("", day), "2026-09-08");
-        assert_eq!(compose_with_date("   ", day), "2026-09-08");
-        assert_eq!(compose_with_date("14:05", day), "2026-09-08 14:05");
-        assert_eq!(compose_with_date("14:05:30", day), "2026-09-08 14:05:30");
-        assert_eq!(
-            compose_with_date("2026-01-01 09:30", day),
-            "2026-09-08 09:30"
-        );
-        assert_eq!(compose_with_date("2026-01-01", day), "2026-09-08");
-    }
-
-    #[test]
-    fn compose_drops_text_that_is_neither_a_time_nor_a_date() {
-        let day = d(2026, 9, 8);
-        // Garbage, `live`, or an RFC 3339 instant: the click means "this
-        // day", so the field becomes the bare date.
-        assert_eq!(compose_with_date("nonsense", day), "2026-09-08");
-        assert_eq!(compose_with_date("live", day), "2026-09-08");
-        assert_eq!(compose_with_date("2026-01-01T09:30:00Z", day), "2026-09-08");
-    }
-
-    #[test]
-    fn calendar_date_follows_the_resolved_instant_else_today() {
-        let now = Utc::now();
-        let clock = geode_core::clock::Clock::utc();
-        let mut state = AsOfState::default();
-        assert_eq!(calendar_date(&state, now, clock), clock.today(now));
-        on_query_changed(&mut state, "2026-09-08 14:05", now, clock);
-        assert_eq!(calendar_date(&state, now, clock), d(2026, 9, 8));
-        on_query_changed(&mut state, "live", now, clock);
-        assert_eq!(calendar_date(&state, now, clock), clock.today(now));
-    }
-
-    #[test]
-    fn the_calendar_hides_only_under_live() {
-        assert!(shows_calendar(""));
-        assert!(shows_calendar("14:05"));
-        assert!(shows_calendar("nonsense"));
-        assert!(!shows_calendar("live"));
-        assert!(!shows_calendar(" LIVE "));
     }
 }
