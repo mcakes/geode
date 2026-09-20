@@ -550,6 +550,8 @@ query time, which is the wrong place and the wrong severity.
 
 ### 3.6 The as-of selector
 
+> **Amended 2026-09-20** (command-line locality spec §3, §5): `:asof <time>` pins the tile, `:asof undo` and `:live` are refusals; the frame's as-of is set only through this selector, `frame::live` and `frame::as_of_undo`.
+
 `frame::as_of` (`mod+t`) opens a modal with a text field and a list:
 
 - The field accepts `HH:MM` and `HH:MM:SS` (today, local time, as
@@ -606,6 +608,8 @@ An `unscoped` tile still applies its own filter; unscoped means
 ignoring the frame, not ignoring itself.
 
 ### 3.8 Undo and redo
+
+> **Amended 2026-09-20** (command-line locality spec §4.1, §5): the `:scope` forms are refusals; the frame's expression is typed through `frame::scope_expression` ("Set scope expression…") and the scope bar's expression chip.
 
 ```rust
 pub struct Frame {
@@ -1192,6 +1196,8 @@ than a wildcard, so a future `DataEvent` variant still fails to compile
 unhandled.
 
 ### 4.6 The module
+
+> **Amended 2026-09-20** (command-line locality spec §4.2, §5): `:level` and `:overlay` are refusals; `log::level` ("Set log level…") and `perf::toggle_overlay` are their doors.
 
 `geode-diagnostics` exposes a `ModuleFactory` of kind `diagnostics`.
 `diagnostics::open` (`mod+shift+d`, the chord the deleted probe held)

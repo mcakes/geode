@@ -2,7 +2,7 @@
 //! submits keyed queries through `DataHandle`, applies outcomes, records
 //! timing, and paints the header strip, the table, and the footer.
 
-use crate::core::commands::{Command, Vocabulary, completions, parse, parse_as_of};
+use crate::core::commands::{AsOfArg, Command, Vocabulary, completions, parse, parse_as_of};
 use crate::core::cursor::{Mode, selection};
 use crate::core::find::FindState;
 use crate::core::flatten::{SortOrder, SortSpec};
@@ -92,6 +92,18 @@ pub enum Pin {
     Slot(u8),
 }
 
+/// The tile's as-of (command-line locality spec §3): the third override
+/// beside [`Pin`] (grouping) and `tile_scope`/`unscoped` (scope). A
+/// pinned tile queries at its own instant and does not follow the
+/// frame's `as_of` counter; `:asof clear` returns it to `Follow`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TileAsOf {
+    /// Query at the frame's as-of; requery when it changes.
+    Follow,
+    /// Query at this instant regardless of the frame.
+    Pinned(AsOf),
+}
+
 pub struct BlotterTile {
     tile: TileId,
     frame: Entity<Frame>,
@@ -122,6 +134,25 @@ pub struct BlotterTile {
     /// unscoped-{id}"`), built once here since it depends only on the
     /// tile id, never per render.
     unscoped_tip_selector: SharedString,
+    /// The as-of override (spec §3.1); `Follow` on a fresh tile. Tests
+    /// read it directly, the way they read `pin`.
+    pub(crate) tile_as_of: TileAsOf,
+    /// The pinned chip's text and tooltip title, cached when
+    /// `tile_as_of` changes (`set_tile_as_of`) so `render` clones two
+    /// `SharedString`s rather than formatting — the `filter_tip` rule.
+    /// Both empty while `Follow`.
+    asof_chip: SharedString,
+    asof_tip: SharedString,
+    /// The LOCAL date `asof_chip`/`asof_tip` were built for (review round
+    /// 1, Important: the date-elided `AS OF HH:MM` form must not outlive
+    /// its day). `render` compares this against today before painting and
+    /// rebuilds through `refresh_asof_chip` on a mismatch, so a session
+    /// pinned across local midnight does not keep claiming "today" for an
+    /// instant that no longer is. Meaningless while `Follow` (never read
+    /// then — the chip strings are empty and nothing paints).
+    pub(crate) asof_chip_date: chrono::NaiveDate,
+    /// `"tip-blotter-asof-{id}"`, built once.
+    asof_tip_selector: SharedString,
     tile_scope: Scope,
     /// [`filter_summary`] of `tile_scope`, cached so the `filtered`
     /// pill's tooltip clones a `SharedString` at paint time rather than
@@ -260,6 +291,31 @@ impl BlotterTile {
                 Some(scope)
             })
             .unwrap_or_default();
+        // `as_of` (command-line locality spec §3.5): `"live"`, an RFC 3339
+        // instant, or absent (following). A value that is neither follows
+        // the frame, logged like a restored `filter.expr` that no longer
+        // parses.
+        let tile_as_of = match restored
+            .and_then(|t| t.get("as_of"))
+            .and_then(|v| v.as_str())
+        {
+            None => TileAsOf::Follow,
+            Some("live") => TileAsOf::Pinned(AsOf::Live),
+            Some(text) => match chrono::DateTime::parse_from_rfc3339(text) {
+                Ok(at) => TileAsOf::Pinned(AsOf::At(at.with_timezone(&chrono::Utc))),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "tile {}: restored as_of '{text}' is not RFC 3339 ({e}) — following the frame",
+                        tile.0
+                    );
+                    TileAsOf::Follow
+                }
+            },
+        };
+        let (asof_chip, asof_tip) = Self::asof_chip_strings(&tile_as_of);
+        let asof_chip_date = chrono::Local::now().date_naive();
+        let asof_tip_selector: SharedString = format!("tip-blotter-asof-{}", tile.0).into();
         let unscoped_tip_selector: SharedString = format!("tip-blotter-unscoped-{}", tile.0).into();
         let filter_tip_selector: SharedString = format!("tip-blotter-filtered-{}", tile.0).into();
         let filter_tip: SharedString = filter_summary(&tile_scope).into();
@@ -324,6 +380,11 @@ impl BlotterTile {
             pin,
             unscoped,
             unscoped_tip_selector,
+            tile_as_of,
+            asof_chip,
+            asof_tip,
+            asof_chip_date,
+            asof_tip_selector,
             tile_scope,
             filter_tip,
             filter_tip_selector,
@@ -360,10 +421,14 @@ impl BlotterTile {
 
     /// `:filter` narrows the tile's own scope layer, so it must be valid
     /// against this tile's dataset (spec §10.1) the same way the frame's
-    /// `:scope` is validated in the shell — an unknown column or a bad
-    /// operator on a derived dimension is a user error reported at the
-    /// caret/column, not a silent no-op or a compiler error surfaced far
-    /// downstream. `Ok(())` when the view or its dataset isn't resolvable
+    /// own scope expression is validated in the shell's
+    /// `shell::scope_expr_view` (the `Set scope expression…` dialog; a
+    /// tile's `:scope` word reached a frame-wide version of the same
+    /// check until command-line locality closed that route 2026-09-20)
+    /// — an unknown column or a bad operator on a derived dimension is a
+    /// user error reported at the caret/column, not a silent no-op or a
+    /// compiler error surfaced far downstream. `Ok(())` when the view or
+    /// its dataset isn't resolvable
     /// (nothing to validate against yet — `requery`'s own "view is not
     /// configured" error already covers that case).
     fn validate_tile_scope(&self, scope: &Scope) -> Result<(), String> {
@@ -392,6 +457,47 @@ impl BlotterTile {
     fn set_tile_scope(&mut self, scope: Scope) {
         self.filter_tip = filter_summary(&scope).into();
         self.tile_scope = scope;
+    }
+
+    /// The chip text and tooltip title for `as_of` (spec §3.4).
+    fn asof_chip_strings(as_of: &TileAsOf) -> (SharedString, SharedString) {
+        match as_of {
+            TileAsOf::Follow => (SharedString::default(), SharedString::default()),
+            TileAsOf::Pinned(AsOf::Live) => ("LIVE".into(), "Pinned to live".into()),
+            TileAsOf::Pinned(AsOf::At(at)) => (
+                pinned_chip_text(*at, chrono::Utc::now()).into(),
+                format!(
+                    "Pinned to {}",
+                    at.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S %Z")
+                )
+                .into(),
+            ),
+        }
+    }
+
+    /// Rebuilds `asof_chip`/`asof_tip`/`asof_chip_date` from `tile_as_of`
+    /// — the one door: called whenever `tile_as_of` changes
+    /// (`set_tile_as_of`) and lazily by `render` when the local date has
+    /// rolled over since the cache was last built (review round 1,
+    /// Important: the date-elided `AS OF HH:MM` form must not outlive its
+    /// day).
+    fn refresh_asof_chip(&mut self) {
+        let (chip, tip) = Self::asof_chip_strings(&self.tile_as_of);
+        self.asof_chip = chip;
+        self.asof_tip = tip;
+        self.asof_chip_date = chrono::Local::now().date_naive();
+    }
+
+    /// Change the as-of override; `true` when it changed. The one door,
+    /// so Task 3's chip cache cannot go stale.
+    fn set_tile_as_of(&mut self, next: TileAsOf) -> bool {
+        if self.tile_as_of == next {
+            return false;
+        }
+        self.tile_as_of = next;
+        self.refresh_asof_chip();
+        true
     }
 
     fn grouping(&self, frame: &Frame, view: &ViewSpec) -> Vec<String> {
@@ -423,7 +529,8 @@ impl BlotterTile {
 
     /// Whether `versions` and `now` disagree on any counter THIS tile
     /// follows — `scope` unless it is unscoped, `grouping` unless it is
-    /// pinned, and always `as_of`/`data`/`config`. The one comparison
+    /// pinned, `as_of` unless the tile's own as-of is pinned (spec
+    /// §3.3), and always `data`/`config`. The one comparison
     /// [`Self::follows_changed`] and [`Self::promote`]'s gate both go
     /// through (I-1, final whole-branch review), so "what this tile
     /// requeries for" and "what invalidates something it has already
@@ -431,7 +538,7 @@ impl BlotterTile {
     fn differs_on_followed(&self, versions: FrameVersions, now: FrameVersions) -> bool {
         (!self.unscoped && versions.scope != now.scope)
             || (self.pin == Pin::None && versions.grouping != now.grouping)
-            || versions.as_of != now.as_of
+            || (matches!(self.tile_as_of, TileAsOf::Follow) && versions.as_of != now.as_of)
             || versions.data != now.data
             || versions.config != now.config
     }
@@ -556,7 +663,11 @@ impl BlotterTile {
             } else {
                 frame.effective_scope(&self.tile_scope)
             };
-            (grouping, scope, frame.as_of().clone(), frame.versions())
+            let as_of = match &self.tile_as_of {
+                TileAsOf::Follow => frame.as_of().clone(),
+                TileAsOf::Pinned(pinned) => pinned.clone(),
+            };
+            (grouping, scope, as_of, frame.versions())
         };
         let max_depth = self.table.update(cx, |t, _| {
             let d = t.delegate_mut();
@@ -936,18 +1047,6 @@ impl BlotterTile {
                 self.pin = Pin::Slot(n);
                 self.requery(cx);
             }
-            Command::GroupSave(n) => {
-                let grouping = self.last_grouping.clone();
-                if grouping.is_empty() {
-                    return Err("nothing grouped yet".into());
-                }
-                let result = self.frame.update(cx, |f, cx| {
-                    let r = f.save_slot(n, grouping);
-                    cx.notify();
-                    r
-                });
-                result?;
-            }
             Command::Unpin => {
                 self.pin = Pin::None;
                 self.requery(cx);
@@ -975,103 +1074,18 @@ impl BlotterTile {
                 self.set_tile_scope(Scope::default());
                 self.requery(cx);
             }
-            Command::ScopeExpr(text) => {
-                let expr = parse_expr(&text)
-                    .map_err(|e| format!("{} at column {}", e.message, e.caret + 1))?;
-                self.frame.update(cx, |f, cx| {
-                    let mut scope = f.scope().clone();
-                    scope.expression = Some(expr);
-                    if f.set_scope(scope) {
-                        cx.notify();
+            Command::Refused(message) => return Err(message.to_string()),
+            Command::AsOf(arg) => {
+                let next = match arg {
+                    AsOfArg::At(text) => {
+                        TileAsOf::Pinned(AsOf::At(parse_as_of(&text, chrono::Utc::now())?))
                     }
-                });
-            }
-            Command::ScopeText(words) => {
-                self.frame.update(cx, |f, cx| {
-                    let mut scope = f.scope().clone();
-                    scope.text = (!words.is_empty()).then_some(words);
-                    if f.set_scope(scope) {
-                        cx.notify();
-                    }
-                });
-            }
-            Command::ScopeClear => {
-                self.frame.update(cx, |f, cx| {
-                    if f.clear_scope() {
-                        cx.notify();
-                    }
-                });
-            }
-            Command::ScopeUndo => {
-                let undone = self.frame.update(cx, |f, cx| {
-                    let r = f.undo_scope();
-                    cx.notify();
-                    r
-                });
-                if !undone {
-                    return Err("nothing to undo".into());
+                    AsOfArg::Live => TileAsOf::Pinned(AsOf::Live),
+                    AsOfArg::Clear => TileAsOf::Follow,
+                };
+                if self.set_tile_as_of(next) {
+                    self.requery(cx);
                 }
-            }
-            Command::ScopeRedo => {
-                let redone = self.frame.update(cx, |f, cx| {
-                    let r = f.redo_scope();
-                    cx.notify();
-                    r
-                });
-                if !redone {
-                    return Err("nothing to redo".into());
-                }
-            }
-            Command::ScopeDrop(d) => {
-                let dropped = self.frame.update(cx, |f, cx| {
-                    let r = f.drop_dimension(&d);
-                    if r {
-                        cx.notify();
-                    }
-                    r
-                });
-                if !dropped {
-                    return Err(format!("no selection on '{d}'"));
-                }
-            }
-            Command::ScopeSave(name) => {
-                self.frame.update(cx, |f, cx| {
-                    let r = f.save_scope(&name);
-                    cx.notify();
-                    r
-                })?;
-            }
-            Command::ScopeLoad(name) => {
-                self.frame.update(cx, |f, cx| {
-                    let r = f.load_scope(&name);
-                    cx.notify();
-                    r
-                })?;
-            }
-            Command::AsOf(text) => {
-                let at = parse_as_of(&text, chrono::Utc::now())?;
-                self.frame.update(cx, |f, cx| {
-                    if f.set_as_of(AsOf::At(at)) {
-                        cx.notify();
-                    }
-                });
-            }
-            Command::AsOfUndo => {
-                let undone = self.frame.update(cx, |f, cx| {
-                    let r = f.undo_as_of();
-                    cx.notify();
-                    r
-                });
-                if !undone {
-                    return Err("no previous as-of".into());
-                }
-            }
-            Command::Live => {
-                self.frame.update(cx, |f, cx| {
-                    if f.set_as_of(AsOf::Live) {
-                        cx.notify();
-                    }
-                });
             }
             Command::View(name) => {
                 if !self.views.borrow().iter().any(|v| v.name == name) {
@@ -1143,8 +1157,8 @@ impl BlotterTile {
         // that carries it, so this can no longer be read off the column
         // plan/view above, which only ever lists what's *displayed*),
         // plus every derived dimension — `columns` is what `sort` can
-        // rank; `dimensions` is what `group`/`scope drop`/`scope`/
-        // `filter` complete from (`core::commands::completions`).
+        // rank; `dimensions` is what `group`/`filter` complete from
+        // (`core::commands::completions`).
         let mut dimensions: Vec<String> = match self.view() {
             Some(v) => {
                 let schema = self.schema.borrow();
@@ -1169,7 +1183,6 @@ impl BlotterTile {
             }
         }
         let views = self.views.borrow().iter().map(|v| v.name.clone()).collect();
-        let scopes = self.frame.read(cx).saved_scopes().keys().cloned().collect();
         completions(
             line,
             cursor,
@@ -1177,7 +1190,6 @@ impl BlotterTile {
                 columns,
                 dimensions,
                 views,
-                scopes,
             },
         )
     }
@@ -1258,6 +1270,9 @@ impl BlotterTile {
             }
         }
         t.insert("unscoped".into(), toml::Value::Boolean(self.unscoped));
+        if let Some(v) = self.as_of_record() {
+            t.insert("as_of".into(), v);
+        }
         if !self.tile_scope.is_empty() {
             let mut filter = toml::Table::new();
             if let Some(expr) = &self.tile_scope.expression {
@@ -1269,6 +1284,18 @@ impl BlotterTile {
             t.insert("filter".into(), toml::Value::Table(filter));
         }
         t
+    }
+
+    /// The session record's `as_of` value (spec §3.5): `None` while
+    /// following, `"live"`, or the pinned instant in RFC 3339 (UTC).
+    fn as_of_record(&self) -> Option<toml::Value> {
+        match &self.tile_as_of {
+            TileAsOf::Follow => None,
+            TileAsOf::Pinned(AsOf::Live) => Some(toml::Value::String("live".into())),
+            TileAsOf::Pinned(AsOf::At(at)) => Some(toml::Value::String(
+                at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            )),
+        }
     }
 
     /// Whether a per-dataset freshness reading (§6.5) is old enough to
@@ -1296,6 +1323,22 @@ impl BlotterTile {
 /// render thread down with it.
 fn short_time(t: &str) -> &str {
     t.get(11..16.min(t.len())).unwrap_or(t)
+}
+
+/// The pinned chip's text (spec §3.4): `AS OF HH:MM` when `at` falls on
+/// today's LOCAL date, `AS OF YYYY-MM-DD HH:MM` otherwise — the same rule
+/// the toolbar's readout uses. Local because every displayed time is the
+/// trader's clock (Phase 4a ruling).
+pub(crate) fn pinned_chip_text(
+    at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let local = at.with_timezone(&chrono::Local);
+    if local.date_naive() == now.with_timezone(&chrono::Local).date_naive() {
+        format!("AS OF {}", local.format("%H:%M"))
+    } else {
+        format!("AS OF {}", local.format("%Y-%m-%d %H:%M"))
+    }
 }
 
 /// One line for the `filtered` pill's tooltip: the tile's own filter
@@ -1326,6 +1369,16 @@ impl gpui::Render for BlotterTile {
             let micros = at.elapsed().as_micros() as u64;
             self.frame
                 .update(cx, |f, _| f.requery.record_snapshot_to_paint(micros));
+        }
+        // Midnight rollover (review round 1, Important): a tile pinned to
+        // a today-instant that stays open past local midnight must not
+        // keep painting the date-elided `AS OF HH:MM` form as if it were
+        // still today — one date read per render, an allocation only on
+        // the day it actually rolls over.
+        if matches!(self.tile_as_of, TileAsOf::Pinned(AsOf::At(_)))
+            && chrono::Local::now().date_naive() != self.asof_chip_date
+        {
+            self.refresh_asof_chip();
         }
         let theme = cx.theme();
         let delegate = self.table.read(cx).delegate();
@@ -1420,6 +1473,31 @@ impl gpui::Render for BlotterTile {
                     )),
             );
         }
+        // The as-of override's chip (spec §3.4): neutral, like `pinned`
+        // and `filtered` — a state the trader chose. Painted from the
+        // tile's own state, so it is right from the keystroke, not from
+        // the next delivery.
+        if let TileAsOf::Pinned(_) = &self.tile_as_of {
+            header = header.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("blotter-asof"),
+                        self.tile.0,
+                    ))
+                    .text_color(neutral_chip.text)
+                    .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .debug_selector(|| format!("blotter-asof-{}", self.tile.0))
+                    .child(self.asof_chip.clone())
+                    .tooltip(tips::tip_with(
+                        self.asof_tip_selector.clone(),
+                        self.asof_tip.clone(),
+                        None,
+                        Some(SharedString::new_static(":asof clear follows the frame")),
+                    )),
+            );
+        }
         if let Some(snapshot) = &snapshot {
             let p = snapshot.provenance();
             let mut datasets: Vec<_> = p.datasets.iter().collect();
@@ -1433,13 +1511,19 @@ impl gpui::Render for BlotterTile {
                 let stale = self.is_stale(f.as_of.as_deref(), now);
                 header = header.child(div().when(stale, |el| el.text_color(warn_text)).child(text));
             }
-            if let Some(req) = &p.as_of_request {
+            // The frame's historical warning (inherited danger) — only
+            // while FOLLOWING; a pinned tile's request always carries its
+            // pin and the neutral chip above already says so.
+            if matches!(self.tile_as_of, TileAsOf::Follow)
+                && let Some(req) = &p.as_of_request
+            {
                 header = header.child(
                     div()
                         .text_color(warn_chip.text)
                         .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                         .px_1()
                         .rounded(theme.radius_tokens().sm)
+                        .debug_selector(|| format!("blotter-asof-frame-{}", self.tile.0))
                         .child(format!("AS OF {}", &req[..16.min(req.len())])),
                 );
             }
@@ -1600,49 +1684,70 @@ mod tests {
         assert_eq!(filter_summary(&Scope::default()), "");
     }
 
-    /// Root; L1, L2; L1/SPX. Trading PnL is NonAttributable at depth 2.
-    fn snapshot() -> Arc<Snapshot> {
+    /// The column shape `snapshot` builds — factored out so
+    /// `snapshot_with_as_of_request` can reuse it with a different
+    /// `Provenance` rather than duplicating the columns.
+    fn snapshot_columns() -> Vec<(ColumnMeta, TestColumn)> {
         let meta = |n: &str, by_depth: Vec<Attribution>| ColumnMeta {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
         };
-        Arc::new(Snapshot::for_tests(
-            vec![
-                (
-                    meta("lhu", vec![Attribution::Additive; 3]),
-                    TestColumn::Dict(vec![
-                        None,
-                        Some("L1".into()),
-                        Some("L2".into()),
-                        Some("L1".into()),
-                    ]),
+        vec![
+            (
+                meta("lhu", vec![Attribution::Additive; 3]),
+                TestColumn::Dict(vec![
+                    None,
+                    Some("L1".into()),
+                    Some("L2".into()),
+                    Some("L1".into()),
+                ]),
+            ),
+            (
+                meta("underlying_ref", vec![Attribution::Additive; 3]),
+                TestColumn::Dict(vec![None, None, None, Some("SPX".into())]),
+            ),
+            (
+                meta("row_depth", vec![Attribution::Additive; 3]),
+                TestColumn::I32(vec![0, 1, 1, 2]),
+            ),
+            (
+                meta("delta01", vec![Attribution::Additive; 3]),
+                TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0), Some(5.0)]),
+            ),
+            (
+                meta(
+                    "daily_trading_pnl",
+                    vec![
+                        Attribution::Additive,
+                        Attribution::Additive,
+                        Attribution::NonAttributable,
+                    ],
                 ),
-                (
-                    meta("underlying_ref", vec![Attribution::Additive; 3]),
-                    TestColumn::Dict(vec![None, None, None, Some("SPX".into())]),
-                ),
-                (
-                    meta("row_depth", vec![Attribution::Additive; 3]),
-                    TestColumn::I32(vec![0, 1, 1, 2]),
-                ),
-                (
-                    meta("delta01", vec![Attribution::Additive; 3]),
-                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0), Some(5.0)]),
-                ),
-                (
-                    meta(
-                        "daily_trading_pnl",
-                        vec![
-                            Attribution::Additive,
-                            Attribution::Additive,
-                            Attribution::NonAttributable,
-                        ],
-                    ),
-                    TestColumn::F64(vec![Some(7.0), Some(7.0), Some(7.0), None]),
-                ),
-            ],
+                TestColumn::F64(vec![Some(7.0), Some(7.0), Some(7.0), None]),
+            ),
+        ]
+    }
+
+    /// Root; L1, L2; L1/SPX. Trading PnL is NonAttributable at depth 2.
+    fn snapshot() -> Arc<Snapshot> {
+        Arc::new(Snapshot::for_tests(snapshot_columns(), 2))
+    }
+
+    /// Same shape as `snapshot`, but with a provenance carrying an
+    /// `as_of_request` — the archive-read marker the frame's historical
+    /// warning chip reads (`blotter-asof-frame-…`). `snapshot`'s default
+    /// provenance never sets this, so a test asserting that chip stays
+    /// hidden while pinned needs this fixture to be a real check rather
+    /// than one where the guard's `&&` right-hand side is already false.
+    fn snapshot_with_as_of_request(req: &str) -> Arc<Snapshot> {
+        Arc::new(Snapshot::for_tests_with_provenance(
+            snapshot_columns(),
             2,
+            geode_core::snapshot::Provenance {
+                datasets: vec![],
+                as_of_request: Some(req.into()),
+            },
         ))
     }
 
@@ -2391,30 +2496,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn scope_asof_and_sort_commands_and_completions(cx: &mut gpui::TestAppContext) {
+    fn asof_and_sort_commands_and_completions(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests);
-        h.tile
-            .update(&mut cx, |t, cx| t.command("scope lhu = 'L1'", cx).unwrap());
-        let p = next_query(&h.requests);
-        assert!(p.scope.expression.is_some());
-        let err = h
-            .tile
-            .update(&mut cx, |t, cx| t.command("scope lhu = ", cx))
-            .unwrap_err();
-        assert!(err.contains("at column"), "{err}");
         h.tile
             .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
         let p = next_query(&h.requests);
         assert!(matches!(p.as_of, geode_core::query::AsOf::At(_)));
         h.tile
-            .update(&mut cx, |t, cx| t.command("live", cx).unwrap());
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
         let p = next_query(&h.requests);
         assert!(p.as_of.is_live());
-        h.tile
-            .update(&mut cx, |t, cx| t.command("scope undo", cx).unwrap());
-        let _ = next_query(&h.requests);
 
         let err = h
             .tile
@@ -2798,6 +2891,329 @@ mod tests {
         assert!(
             p.scope.dimensions.is_empty(),
             "no frame dimensions leaked in"
+        );
+    }
+
+    /// Command-line locality spec §3: `:asof <time>` pins THIS tile, the
+    /// frame's own as-of untouched; `:asof live` pins it to live under a
+    /// historical frame; `:asof clear` follows again. Spec §7's own
+    /// case opens the test: pinning the frame's OWN current (live)
+    /// value still stops following it — a real transition, so it
+    /// requeries once, but the frame moving on afterward requeries
+    /// nothing out of the now-pinned tile.
+    #[gpui::test]
+    fn asof_pins_the_tile_and_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+
+        // Spec §7: pinning the frame's own value still stops following.
+        // The frame is live and the tile follows; `:asof live` pins the
+        // tile to that same (live) value — a real transition
+        // (Follow → Pinned(Live)) — so it requeries once.
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert!(
+            p.as_of.is_live(),
+            "pinning to the frame's own live value still requeries once"
+        );
+        // The frame moves on to a new (historical) instant; a tile
+        // pinned to the frame's own former value does not track it.
+        h.frame.update(&mut cx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            cx.notify();
+        });
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a tile pinned to the frame's own value still does not follow it"
+        );
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        let _ = next_query(&h.requests);
+
+        let frame_as_of_version = h.frame.read_with(&cx, |f, _| f.versions().as_of);
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert!(
+            matches!(p.as_of, AsOf::At(_)),
+            "the request carries the pin"
+        );
+        assert!(
+            !h.frame.read_with(&cx, |f, _| f.as_of().is_live()),
+            "the frame stayed at the historical instant the prelude moved it to"
+        );
+        assert_eq!(
+            h.frame.read_with(&cx, |f, _| f.versions().as_of),
+            frame_as_of_version,
+            "the frame's as-of counter did not move"
+        );
+        assert!(matches!(
+            h.tile.read_with(&cx, |t, _| t.tile_as_of.clone()),
+            TileAsOf::Pinned(AsOf::At(_))
+        ));
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert!(
+            matches!(p.as_of, AsOf::At(_)),
+            "following again queries at the frame's (now historical) as-of"
+        );
+
+        // Pinning the same value again is a no-op: no requery.
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "clearing an already-following tile requeries nothing"
+        );
+
+        // Live under a historical frame.
+        h.frame.update(&mut cx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            cx.notify();
+        });
+        let p = next_query(&h.requests);
+        assert!(matches!(p.as_of, AsOf::At(_)), "a following tile follows");
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert!(p.as_of.is_live(), "pinned to live under a historical frame");
+        assert!(
+            matches!(
+                h.frame.read_with(&cx, |f, _| f.as_of().clone()),
+                AsOf::At(_)
+            ),
+            "the frame stayed historical"
+        );
+    }
+
+    /// A pinned tile does not follow the frame's as-of (spec §3.3): a
+    /// frame change neither requeries it nor holds the barrier for it —
+    /// the tile self-arrives through `Frame::arrived`, as a pinned-
+    /// grouping tile does.
+    #[gpui::test]
+    fn a_pinned_tile_ignores_the_frames_as_of_and_answers_the_barrier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        h.frame.update(&mut cx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.open_flip([QueryKey(7)], std::time::Instant::now());
+            cx.notify();
+        });
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a pinned tile does not requery on a frame as-of change"
+        );
+        assert!(
+            !h.frame.read_with(&cx, |f, _| f.barrier_open()),
+            "and it answered the barrier without a query"
+        );
+    }
+
+    /// The pinned chip reads `AS OF HH:MM` for today in the trader's
+    /// local clock and carries the date otherwise (spec §3.4).
+    #[test]
+    fn pinned_chip_text_elides_todays_date() {
+        let now = chrono::Utc::now();
+        let today = pinned_chip_text(now, now);
+        assert!(today.starts_with("AS OF "), "{today}");
+        assert_eq!(today.len(), "AS OF HH:MM".len(), "{today}");
+        let old = now - chrono::Duration::days(3);
+        let past = pinned_chip_text(old, now);
+        assert_eq!(past.len(), "AS OF YYYY-MM-DD HH:MM".len(), "{past}");
+    }
+
+    /// The pinned chip paints from the tile's own state the moment the
+    /// line runs, in place of the provenance-driven warning chip; a
+    /// following tile under a historical frame paints only the latter.
+    #[gpui::test]
+    fn a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-asof-7").is_none(),
+            "following, live: no chip"
+        );
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        let p = next_query(&h.requests);
+        // A provenance carrying `as_of_request` — otherwise the frame
+        // chip's `&& let Some(req) = &p.as_of_request` is already false
+        // and the assertion below would pass whether or not the pinned
+        // guard ahead of it does its job.
+        deliver(
+            &h,
+            &mut cx,
+            p.tag,
+            Ok(snapshot_with_as_of_request("2026-01-01T00:00:00Z")),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-asof-7").is_some(),
+            "pinned: the chip paints"
+        );
+        assert!(
+            cx.debug_bounds("blotter-asof-frame-7").is_none(),
+            "the provenance chip is suppressed while pinned"
+        );
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        let _ = next_query(&h.requests);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-asof-7").is_none(),
+            "cleared: no chip"
+        );
+    }
+
+    /// Session (spec §3.5): `as_of` is written only while pinned, as
+    /// `"live"` or RFC 3339, restored to the same pin, and a malformed
+    /// value restores to `Follow`.
+    #[gpui::test]
+    fn as_of_round_trips_through_the_session_record(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        assert!(state.get("as_of").is_none(), "following writes nothing");
+
+        h.tile
+            .update(&mut vcx, |t, cx| t.command("asof live", cx).unwrap());
+        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        assert_eq!(state["as_of"].as_str(), Some("live"));
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("asof 2026-09-20 14:05", cx).unwrap()
+        });
+        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = state["as_of"].as_str().unwrap().to_string();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&written).is_ok(),
+            "{written}"
+        );
+
+        let mut record = toml::Table::new();
+        record.insert("as_of".into(), toml::Value::String(written.clone()));
+        let (h2, mut vcx2) = open_with(cx, Some(&record));
+        assert!(matches!(
+            h2.tile.read_with(&vcx2, |t, _| t.tile_as_of.clone()),
+            TileAsOf::Pinned(AsOf::At(_))
+        ));
+        h2.tile.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h2.requests);
+        assert!(
+            matches!(p.as_of, AsOf::At(_)),
+            "the first request carries the restored pin"
+        );
+
+        let mut record = toml::Table::new();
+        record.insert("as_of".into(), toml::Value::String("live".into()));
+        let (h3, vcx3) = open_with(cx, Some(&record));
+        assert_eq!(
+            h3.tile.read_with(&vcx3, |t, _| t.tile_as_of.clone()),
+            TileAsOf::Pinned(AsOf::Live)
+        );
+
+        let mut record = toml::Table::new();
+        record.insert("as_of".into(), toml::Value::String("yesterday-ish".into()));
+        let (h4, vcx4) = open_with(cx, Some(&record));
+        assert_eq!(
+            h4.tile.read_with(&vcx4, |t, _| t.tile_as_of.clone()),
+            TileAsOf::Follow,
+            "a malformed value follows the frame"
+        );
+    }
+
+    /// The pinned chip is a per-render date guard, not just a per-
+    /// mutation cache (review round 1, Important): a stale
+    /// `asof_chip_date` (as if the cache was last built yesterday) is
+    /// corrected on the very next draw, so the elided `AS OF HH:MM` form
+    /// cannot survive into a day it no longer describes.
+    #[gpui::test]
+    fn the_pinned_chip_is_rebuilt_when_the_local_date_rolls_over(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let at = h.tile.read_with(&cx, |t, _| match &t.tile_as_of {
+            TileAsOf::Pinned(AsOf::At(at)) => *at,
+            other => panic!("expected a pinned instant, got {other:?}"),
+        });
+
+        // Back-date the cache as if it were last built yesterday — the
+        // guard must notice on the very next render.
+        h.tile.update(&mut cx, |t, _| {
+            t.asof_chip_date = t.asof_chip_date.pred_opt().unwrap();
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let today = chrono::Local::now().date_naive();
+        h.tile.read_with(&cx, |t, _| {
+            assert_eq!(t.asof_chip_date, today, "the guard rebuilt today's date");
+            assert_eq!(
+                t.asof_chip.to_string(),
+                pinned_chip_text(at, chrono::Utc::now()),
+                "and the chip text with it"
+            );
+        });
+    }
+
+    /// The refusals (spec §5) reach the trader as the parser's message,
+    /// and touch nothing.
+    #[gpui::test]
+    fn refused_words_error_inline_with_the_doors_name(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        for (line, expected) in [
+            ("scope lhu = 'L1'", crate::core::commands::REFUSED_SCOPE),
+            ("asof undo", crate::core::commands::REFUSED_ASOF_UNDO),
+            ("live", crate::core::commands::REFUSED_LIVE),
+            ("group save 2", crate::core::commands::REFUSED_GROUP_SAVE),
+        ] {
+            let err = h
+                .tile
+                .update(&mut cx, |t, cx| t.command(line, cx))
+                .unwrap_err();
+            assert_eq!(err, expected, "`:{line}`");
+        }
+        assert!(
+            h.requests.try_recv().is_err(),
+            "a refusal requeries nothing"
         );
     }
 
@@ -4064,11 +4480,11 @@ mod tests {
 
     /// Regression: `BlotterTile::completions` used to build its
     /// `Vocabulary` from the column plan/view alone (what's
-    /// *displayed*), so `:group `/`:scope drop `/`:filter ` never
-    /// offered a dimension the current view does not show —
-    /// `model_code` here (`schema()`'s carried dimension, `grain =
-    /// "instrument"`) is exactly that shape. `delta01`/`daily_trading_
-    /// pnl` are measures and must never appear for `group`.
+    /// *displayed*), so `:group `/`:filter ` never offered a dimension
+    /// the current view does not show — `model_code` here (`schema()`'s
+    /// carried dimension, `grain = "instrument"`) is exactly that shape.
+    /// `delta01`/`daily_trading_pnl` are measures and must never appear
+    /// for `group`.
     #[gpui::test]
     fn completions_offer_dataset_dimensions_not_just_displayed_columns(
         cx: &mut gpui::TestAppContext,
@@ -4086,11 +4502,6 @@ mod tests {
             !group.contains(&"delta01".to_string()),
             "a measure must not complete `group`: {group:?}"
         );
-        let drop = h
-            .tile
-            .read_with(&vcx, |t, cx| t.completions("scope drop ", 11, cx));
-        assert!(drop.contains(&"model_code".to_string()));
-        assert!(!drop.contains(&"daily_trading_pnl".to_string()));
     }
 
     /// 2c §6.2: the definitions travel from the factory's shared cell to
@@ -4106,7 +4517,7 @@ mod tests {
         let mut colours = NamedColours::default();
         colours.insert(
             "delta".into(),
-            geode_core::colour::Definition::Token(geode_core::colour::Token::Danger),
+            geode_core::colour::Definition::token(geode_core::colour::Token::Danger),
         );
         let (h, mut cx) =
             open_with_views_and_colours(cx, None, ViewSpec::from_doc(&doc).0, colours);
@@ -4149,8 +4560,86 @@ mod tests {
         });
         assert_eq!(
             resolved,
-            Some(geode_shell::shell::colours::to_hsla(danger)),
+            Some(crate::colour_cache::Resolved::plain(
+                geode_shell::shell::colours::to_hsla(danger)
+            )),
             "the tile's own colours must reach the delegate with the plan"
         );
+    }
+
+    /// The rule (command-line locality spec §2): a `:` line changes only
+    /// this tile. Every word the parser accepts — with a valid argument
+    /// where one is needed — plus every refusal, runs against a tile
+    /// while the frame's scope/grouping/as-of counters, its slot set and
+    /// its pending slot persist are watched. `COMMANDS` is read so a word
+    /// added there without a line here fails.
+    #[gpui::test]
+    fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        let lines = [
+            "group lhu",
+            "group slot 1",
+            "unpin",
+            // "unscoped" twice on purpose: toggle on, then toggle back
+            // off, so every line after it still runs scoped.
+            "unscoped",
+            "unscoped",
+            "filter lhu = 'L1'",
+            "filter text spx",
+            "filter clear",
+            "asof 14:05",
+            "asof live",
+            "asof clear",
+            "view wide",
+            "sort delta01 desc",
+            "sort clear",
+            // The refusals.
+            "scope lhu = 'L1'",
+            "scope clear",
+            "scope undo",
+            "asof undo",
+            "live",
+            "group save 1",
+        ];
+        for word in crate::core::commands::COMMANDS {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.split_whitespace().next() == Some(word)),
+                "no sweep line for `:{word}`"
+            );
+        }
+        let read = |cx: &gpui::VisualTestContext| {
+            h.frame.read_with(cx, |f, _| {
+                (
+                    f.versions().scope,
+                    f.versions().grouping,
+                    f.versions().as_of,
+                    f.slots().clone(),
+                    f.scope().clone(),
+                    f.as_of().clone(),
+                )
+            })
+        };
+        let before = read(&cx);
+        for line in lines {
+            let _ = h.tile.update(&mut cx, |t, cx| t.command(line, cx));
+            while h.requests.try_recv().is_ok() {}
+            assert_eq!(read(&cx), before, "`:{line}` reached the frame");
+            assert!(
+                h.frame
+                    .update(&mut cx, |f, _| f.take_pending_persist())
+                    .is_none(),
+                "`:{line}` queued a slot write"
+            );
+            assert!(
+                h.frame
+                    .update(&mut cx, |f, _| f.take_pending_scope_persist())
+                    .is_none(),
+                "`:{line}` queued a scope write"
+            );
+        }
     }
 }

@@ -68,6 +68,9 @@ mod watching {
                 Delivery::Query(_) => {}
                 // This tile never prices — nothing addressed here.
                 Delivery::Price(_) => {}
+                // This tile asks no series query and holds no
+                // `(identity, source)` pair.
+                Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
             }
         }
         fn set_visible(&self, visible: bool, cx: &mut App) {
@@ -1520,6 +1523,152 @@ fn a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other(cx: &mut gpui::
         "the other tile must not be delivered to: {:?}",
         log.borrow()
     );
+}
+
+/// A shell with `count` recording tiles on the active workspace, all
+/// writing into the one log — the fixture the two delivery-routing
+/// tests below share. Hands the `VisualTestContext` back with it: a
+/// delivery is driven through `cx.update`, which needs the window.
+fn shell_with_recording_tiles(
+    cx: &mut gpui::TestAppContext,
+    count: usize,
+) -> (
+    Entity<ShellView>,
+    gpui::VisualTestContext,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+) {
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    for _ in 0..count {
+        dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    }
+    (shell, cx, log)
+}
+
+/// One more recording tile, on workspace 2, with workspace 1 left
+/// active again: a live occupant (`ensure_occupants` walks every
+/// workspace) that nothing on screen can see. Answers its `TileId`.
+fn add_recording_tile_on_workspace_two(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+) -> TileId {
+    dispatch_and_draw(shell, cx, "workspace::switch_2");
+    dispatch_and_draw(shell, cx, "tile::add_rec");
+    let hidden = shell.read_with(cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(shell, cx, "workspace::switch_1");
+    hidden
+}
+
+/// Timeseries spec §5.4: a `SeriesFetched` is keyed by the `(identity,
+/// source)` pair, not by a tile, so `Delivery::key()` answers `None`
+/// and `ShellView::deliver` hands a copy to every occupant of a VISIBLE
+/// tile — and to no other. A hidden tile holds no subscription and
+/// requeries on `set_visible(true)`; telling it here would be work
+/// nobody can see.
+#[gpui::test]
+fn a_key_less_delivery_reaches_every_visible_occupant_and_no_hidden_one(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::module::Delivery;
+    use crate::module::recording::Recorded;
+
+    let (shell, mut cx, log) = shell_with_recording_tiles(cx, 2);
+    let hidden = add_recording_tile_on_workspace_two(&shell, &mut cx);
+    let visible: Vec<TileId> = shell.read_with(&cx, |s, _| {
+        let mut keys = Vec::new();
+        s.visible_tile_keys(&mut keys);
+        keys.into_iter().map(|k| TileId(k.0)).collect()
+    });
+    assert_eq!(visible.len(), 2, "sanity: two tiles are on screen");
+    assert!(
+        !visible.contains(&hidden),
+        "sanity: the workspace-2 tile is not on screen"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(hidden)),
+        Some("rec"),
+        "sanity: the hidden tile has a live occupant that COULD be told"
+    );
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::SeriesFetched {
+                    source: "demo_kdb".into(),
+                    identity: "SPX.close".into(),
+                    result: Ok(3),
+                },
+                window,
+                cx,
+            );
+        });
+    });
+
+    let mut seen: Vec<TileId> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::SeriesFetched(tile, pair) if pair == "SPX.close@demo_kdb" => Some(*tile),
+            _ => None,
+        })
+        .collect();
+    seen.sort();
+    let mut expected = visible.clone();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "exactly the two visible tiles, once each, and no other"
+    );
+    assert!(
+        !seen.contains(&hidden),
+        "a tile on a switched-away workspace is not told: {seen:?}"
+    );
+}
+
+/// The other half of the same routing rule: a `Series` outcome carries
+/// a key like a `Query` does, so it reaches that one tile and no other
+/// — the broadcast arm must not swallow it.
+#[gpui::test]
+fn a_series_outcome_is_routed_to_its_key_alone(cx: &mut gpui::TestAppContext) {
+    use crate::module::Delivery;
+    use crate::module::recording::Recorded;
+    use geode_core::query::QueryKey;
+    use geode_core::series::{SeriesOutcome, SeriesResult};
+    use std::time::Instant;
+
+    let (shell, mut cx, log) = shell_with_recording_tiles(cx, 2);
+    let live: Vec<TileId> =
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(live.len(), 2, "sanity: two distinct tiles are live");
+    let target = live[0];
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::Series(SeriesOutcome {
+                    key: QueryKey(target.0),
+                    tag: 42,
+                    submitted: Instant::now(),
+                    result: Ok(SeriesResult::default()),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+
+    let delivered: Vec<(TileId, u64)> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Delivered(t, tag) => Some((*t, *tag)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(delivered, vec![(target, 42)]);
 }
 
 /// `Delivery::Price` (line-pricer spec §5.4) rides the same router:

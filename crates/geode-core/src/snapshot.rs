@@ -707,6 +707,14 @@ pub enum TestColumn {
     /// values, UInt16 above — so a fixture that crosses the cliff
     /// exercises what a real underlying list does.
     Dict(Vec<Option<String>>),
+    /// A real `Date32` column — DuckDB's own encoding for a `date`
+    /// column (spec §3.6), which `display_in` reads through
+    /// `Date32Array::value_as_date`. Most fixtures spell a date as ISO
+    /// text through `Dict`/`Str` instead, since what a reader gets off an
+    /// axis is its label either way — this variant exists for a fixture
+    /// that must exercise the real column type, such as a typed
+    /// `Value::Date` cell.
+    Date(Vec<Option<chrono::NaiveDate>>),
 }
 
 /// Build a dictionary column the way DuckDB would: distinct values in
@@ -820,6 +828,14 @@ impl Snapshot {
                     ),
                     TestColumn::Str(v) => (DataType::Utf8, Arc::new(StringArray::from(v.clone()))),
                     TestColumn::Dict(v) => dictionary_fixture(v),
+                    TestColumn::Date(v) => (
+                        DataType::Date32,
+                        Arc::new(arrow::array::Date32Array::from(
+                            v.iter()
+                                .map(|d| d.map(arrow::datatypes::Date32Type::from_naive_date))
+                                .collect::<Vec<_>>(),
+                        )),
+                    ),
                 };
                 (Field::new(&meta.name, ty, true), array)
             })

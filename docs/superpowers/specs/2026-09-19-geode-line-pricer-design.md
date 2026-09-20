@@ -1026,15 +1026,18 @@ the fifteen decisions above:
   rows: [its record] }`, not `Group { count: 0 }` (which `apply`
   refuses); `Sheet::undo` is documented as NOT atomic — an inverse
   refused mid-batch leaves earlier inverses applied.
-- `geode_core::schema::validate_document`'s numeric-only VALUE-column
-  rule now exempts `local` document datasets (f64/i64/utf8/date, the
-  axis/attribute set): spec §7.2 declares utf8 per-row values and the
-  numeric rule was written for feed documents. `local` is forced
-  `false` outside the document family, so the gate is unreachable
-  elsewhere. **Part 4 must verify the DuckDB publish path binds a
-  utf8 VALUE column and quotes `order`/`kind`/`parent`/`template` as
-  identifiers** — if it cannot, the row shape needs re-encoding and
-  this exemption reverts.
+- The pricer's row shape needs utf8 VALUE columns, and
+  `geode_core::schema::validate_document` refused them for every
+  document (its rule was numeric-only, written for the CVI feed). Part 2
+  first exempted `local` datasets; the dividend work merged to main the
+  same day widened the rule for EVERY document to f64/i64/utf8/date
+  (dividend-schedule spec §4.1, ruling 7), so the exemption, its two
+  tests and its harness entry were dropped at the merge in favour of
+  main's general rule. Part 4 still owes a check that the DuckDB publish
+  path quotes `order`/`kind`/`parent`/`template` as identifiers (the
+  whole-branch review traced `create_document_table_sql`, the staging
+  DDL and `compile_document` and found all three quote; `cell()` binds
+  `Column::Utf8`).
 - `Sheet` derives `Debug`; the unused `set_kind` helper was deleted
   rather than kept behind `allow(dead_code)`; no `allow(dead_code)`
   remains in the crate. The parser checks the expiry count BEFORE the
@@ -1046,15 +1049,13 @@ the fifteen decisions above:
   UO DI DO)` (it reads as a mistyped `BARRIER level` pair), alone it
   is `unexpected token 'X'`.
 
-Fourteen harness entries cover it: the eleven the Part 2 plan named
+Thirteen harness entries cover it: the eleven the Part 2 plan named
 (an old revision's delivery, a package's signed sum, a failed leg's
 sum, undo of a remove, an inherited sheet shift, `SetQty`'s untouched
 request, a spot override's stale sweep, `Group`'s contiguous-roots
 check, the third-Friday resolution, the unknown-column diagnostic's
-severity, and the empty-sheet storage refusal), one in `geode-core`
-pinning the `local` VALUE-column exemption's own boundary (a
-bool/timestamp value still drops), and two from the final review's
-fixes (a template quantity overflowing silently, and legs that need
+severity, and the empty-sheet storage refusal) and two from the final
+review's fixes (a template quantity overflowing silently, and legs that need
 not follow their package contiguously).
 
 `cargo bench -p geode-pricer` at 1,000 lines (criterion medians,

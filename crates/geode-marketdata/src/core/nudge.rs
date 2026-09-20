@@ -4,7 +4,7 @@
 //! and writes the answer back into its `Input`. Nothing here commits:
 //! `enter` still commits and `escape` still cancels. A `Date` attribute
 //! no longer opens a text editor at all (2026-09-19): the segmented
-//! [`crate::core::DateField`] owns dates, and its own `step` is the
+//! [`crate::core::DateTimeField`] owns dates, and its own `step` is the
 //! arithmetic there.
 
 use geode_core::schema::ColumnType;

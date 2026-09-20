@@ -346,12 +346,15 @@ impl ShellView {
             }
 
             // Phase 4b §4.3: an `[log]` change applies through the same
-            // `LevelControl` door `:level` (a later task) uses, and
-            // updates the entity so the diagnostics tile's own log
-            // section reflects it — never re-persisted here (this
-            // *picked up* a change already on disk; re-writing it back
-            // would be pointless, and `Diagnostics::set_levels` is
-            // deliberately the no-persist twin of `request_level`).
+            // `LevelControl` door the palette's `Set log level…`
+            // (`log::level`) uses — `:level` on a tile's command line
+            // used the same door until command-line locality closed
+            // that route 2026-09-20 — and updates the entity so the
+            // diagnostics tile's own log section reflects it — never
+            // re-persisted here (this *picked up* a change already on
+            // disk; re-writing it back would be pointless, and
+            // `Diagnostics::set_levels` is deliberately the no-persist
+            // twin of `request_level`).
             if changed("app") {
                 let (new_levels, log_diags) = LogLevels::from_doc(&new_config);
                 for d in &log_diags {
@@ -490,7 +493,8 @@ impl ShellView {
             // own config-refresh subscription) and must bump on every
             // applied reload, including an `[log]`- or `[theme]`-only
             // edit that leaves `views`/`dimensions` untouched — otherwise
-            // exactly the reload `:level`'s own persist write causes
+            // exactly the reload the palette's `Set log level…`'s own
+            // persist write causes
             // never refreshes the one tile whose job is to show it.
             // `BlotterTile::follows_changed` also reads this counter (a
             // requery on config != data change), so this does mean a

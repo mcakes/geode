@@ -4,6 +4,7 @@ members = [
     "crates/geode-core",
     "crates/geode-data",
     "crates/geode-shell",
+    "crates/geode-widgets",
     "crates/geode-blotter",
     "crates/geode-marketdata",
     "crates/geode-diagnostics",
@@ -22,6 +23,7 @@ publish = false
 [workspace.dependencies]
 geode-core = { path = "crates/geode-core" }
 geode-shell = { path = "crates/geode-shell" }
+geode-widgets = { path = "crates/geode-widgets" }
 geode-pricing = { path = "crates/geode-pricing" }
 
 # Phase 4b: the tracing foundation (`geode_core::log`). Versions pinned to

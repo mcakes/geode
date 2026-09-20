@@ -126,6 +126,9 @@ impl TileContent for BlotterContent {
             Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
             // This tile never prices; an outcome addressed here is a routing bug.
             Delivery::Price(_) => {}
+            // This tile asks no series query and holds no
+            // `(identity, source)` pair.
+            Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
@@ -152,9 +155,10 @@ pub struct BlotterFactory {
     /// its delegate, where a pointer compare is what tells "same
     /// definitions" from "reloaded" without a deep compare per snapshot.
     colours: Rc<RefCell<Arc<NamedColours>>>,
-    /// The schema and derived dimensions `:filter`/`:scope` validate
-    /// against (Phase 4a §3.7) — set alongside `views` and refreshed the
-    /// same way on `ConfigReloaded`.
+    /// The schema and derived dimensions `:filter` validates against
+    /// (Phase 4a §3.7; `:scope` validated against the same schema until
+    /// command-line locality closed that route 2026-09-20) — set
+    /// alongside `views` and refreshed the same way on `ConfigReloaded`.
     schema: Rc<RefCell<SchemaSpec>>,
     dims: Rc<RefCell<DerivedDimensions>>,
     find_style: Rc<Cell<FindStyle>>,
@@ -205,8 +209,9 @@ impl BlotterFactory {
     }
 
     /// A reloaded `datasets` doc (Phase 4a §3.7): every open tile's next
-    /// `:filter`/`:scope` validates against the new schema, same sharing
-    /// as `set_views`.
+    /// `:filter` validates against the new schema, same sharing as
+    /// `set_views` (`:scope` validated against it too until command-line
+    /// locality closed that route 2026-09-20).
     pub fn set_schema(&self, schema: SchemaSpec) {
         *self.schema.borrow_mut() = schema;
     }

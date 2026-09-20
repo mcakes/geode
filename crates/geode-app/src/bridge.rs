@@ -18,7 +18,7 @@ use geode_data::{
     DataEvent, DataHandle, DataService, DataServiceConfig, EventSink, PricerConfig, PricerRegistry,
 };
 use geode_marketdata::MarketDataFactory;
-use geode_marketdata::core::CVI;
+use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_shell::diagnostics::SourceSummary;
 use geode_shell::module::Delivery;
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
@@ -49,7 +49,7 @@ pub struct DataSetup {
     /// `DataSetup` in hand (rather than reaching into `config`) has it
     /// directly — mirrors `views` being both `config.views` and its own
     /// field for the same reason. `start` now reads this too (Phase 4a
-    /// §3.7): the blotter factory validates `:filter`/`:scope` against
+    /// §3.7): the blotter factory validates `:filter` (and, until 2026-09-20, `:scope`) against
     /// the same schema and dimensions the service itself runs on.
     pub dimensions: DerivedDimensions,
     /// `colours.toml` (Part 2c §6.2): the definitions a view column's
@@ -246,6 +246,13 @@ pub struct Bridge {
     /// refresh `stale_after` on. One factory per panel spec — a second
     /// document kind's panel is a second field here, not a second crate.
     pub marketdata: Rc<MarketDataFactory>,
+    /// The dividend schedule panel's factory (spec §6.5) — the second
+    /// document kind, built `.without_keymap()`
+    /// (`MarketDataFactory::without_keymap`): both factories share the
+    /// one `marketdata` context and its `DEFAULT_KEYMAP`, so only
+    /// `marketdata` above ships the fragment; this one still registers
+    /// its own actions and reads its own reloaded `stale_after`.
+    pub dividend: Rc<MarketDataFactory>,
     events: async_channel::Receiver<DataEvent>,
     dropped: Arc<AtomicU64>,
     /// The sources the running service was actually built from (Phase 4b
@@ -288,7 +295,7 @@ pub fn start(
     let dropped = Arc::new(AtomicU64::new(0));
     let sink = make_sink(tx, dropped.clone());
     // Cloned before the move into `DataService::spawn` below — the
-    // factory validates `:filter`/`:scope` against the same schema and
+    // factory validates `:filter` (and, until 2026-09-20, `:scope`) against the same schema and
     // dimensions the service itself was built from (spec §3.7).
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
@@ -313,6 +320,12 @@ pub fn start(
             // keys for one idea would be two things to keep in step.
             stale_after,
         )),
+        // The second document kind, over the same shared `marketdata`
+        // context: `.without_keymap()` is what keeps `keymap_fragments`
+        // from splicing a second, identical `<module:{kind}>` layer.
+        dividend: Rc::new(
+            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after).without_keymap(),
+        ),
         handle,
         factory,
         events: rx,
@@ -331,6 +344,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let handle = bridge.handle.clone();
     let factory = bridge.factory.clone();
     let marketdata = bridge.marketdata.clone();
+    let dividend = bridge.dividend.clone();
 
     let shell = window
         .read(cx)
@@ -423,6 +437,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let handle = handle.clone();
         let factory = factory.clone();
         let marketdata = marketdata.clone();
+        let dividend = dividend.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
@@ -496,7 +511,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // so this can only ever drift as far as the next
                 // views/dimensions reload.
                 marketdata.set_stale_after(stale_after);
-                // `:filter`/`:scope` validation (Phase 4a §3.7): the
+                // The second document kind reads the same key too, and
+                // is refreshed the same way `marketdata`'s is — the two
+                // factories differ only in which one ships the fragment.
+                dividend.set_stale_after(stale_after);
+                // `:filter` validation (Phase 4a §3.7; `:scope` too until
+                // 2026-09-20): the
                 // `datasets` doc is re-read here too — `ConfigReloaded`
                 // doesn't fire for a `datasets`-only edit (that instead
                 // sets `restart_required`, since the data engine itself
@@ -599,6 +619,14 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     DataEvent::Query(outcome) => {
                         shell.update(cx, |s, cx| {
                             s.deliver(Delivery::Query(outcome), window, cx)
+                        });
+                    }
+                    // Timeseries spec §6.4: addressed to the tile that
+                    // asked, exactly as a `Query` is, so it takes the
+                    // same one-line route.
+                    DataEvent::Series(outcome) => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(Delivery::Series(outcome), window, cx)
                         });
                     }
                     DataEvent::Published {
@@ -765,6 +793,30 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             cx.notify();
                         });
                     }
+                    // Timeseries spec §5.4: keyed by the `(identity,
+                    // source)` pair rather than by the tile that asked,
+                    // so it goes to the shell key-less and
+                    // `ShellView::deliver` hands a copy to every
+                    // visible occupant. Nothing is logged here: the
+                    // data crate's own line at `info` is the record,
+                    // and this whole match runs on the UI thread.
+                    DataEvent::SeriesFetched {
+                        source,
+                        identity,
+                        result,
+                    } => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(
+                                Delivery::SeriesFetched {
+                                    source,
+                                    identity,
+                                    result,
+                                },
+                                window,
+                                cx,
+                            )
+                        });
+                    }
                     // Carries no `source` (finding 2, 2026-09-19 final
                     // review): one ingest runner draining one FIFO queue
                     // means loads are strictly sequential, so the load
@@ -773,11 +825,6 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     // when nothing is — including the extra copy the
                     // queue drain now sends after every `Published`/
                     // `Failed`'s own.
-                    // Timeseries spec §5.4: routed to the timeseries tiles in
-                    // Part 2 (`Delivery::SeriesFetched`). Until then the data
-                    // crate's own log line at `info` is the record; nothing
-                    // here logs, per the UI-thread level constraint.
-                    DataEvent::SeriesFetched { .. } => {}
                     DataEvent::LoadEnded => {
                         diagnostics.update(cx, |d, cx| {
                             let before = d.version();
@@ -1280,6 +1327,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1392,6 +1443,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1458,6 +1513,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1502,6 +1561,181 @@ role = "key"
         );
     }
 
+    /// [`test_shell_services`] with the shell's own recording module in
+    /// the roster and one tile of that kind restored into workspace 1.
+    /// `ModuleRoster::default()` holds no factory at all, so the plain
+    /// fixture's shell has nothing a broadcast could reach; this one has
+    /// exactly one live, visible occupant, and hands back the log it
+    /// writes every delivery into.
+    fn test_shell_services_with_a_recording_tile() -> (
+        ShellServices,
+        Rc<std::cell::RefCell<Vec<geode_shell::module::recording::Recorded>>>,
+    ) {
+        let mut services = test_shell_services();
+        let factory = geode_shell::module::recording::RecordingFactory::new("rec");
+        let log = factory.log.clone();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(factory));
+        roster.register_actions(&mut services.registry);
+        services.roster = roster;
+
+        // The one public door onto a workspace holding a tile — the same
+        // route `geode-shell`'s own occupant tests restore through.
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::palette_usage::PaletteUsage::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "rec"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        (services, log)
+    }
+
+    /// Timeseries spec §5.4: a fetch outcome is keyed by the `(identity,
+    /// source)` pair rather than by the tile that asked, so the bridge
+    /// hands it to the shell as a key-less `Delivery::SeriesFetched` and
+    /// `ShellView::deliver` broadcasts it to every visible occupant. An
+    /// `Err` is carried through the same door as an `Ok` — the tile marks
+    /// its slot rather than requerying.
+    #[gpui::test]
+    fn a_series_fetched_event_is_broadcast_to_the_shell(cx: &mut gpui::TestAppContext) {
+        let (services, log) = test_shell_services_with_a_recording_tile();
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+            local_datasets: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        tx.try_send(DataEvent::SeriesFetched {
+            source: "demo_kdb".into(),
+            identity: "VIX".into(),
+            result: Err("no such symbol".into()),
+        })
+        .unwrap();
+        vcx.run_until_parked();
+
+        assert!(
+            log.borrow().iter().any(|r| matches!(
+                r,
+                geode_shell::module::recording::Recorded::SeriesFetched(_, pair)
+                    if pair == "VIX@demo_kdb"
+            )),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    /// Timeseries spec §6.4: a series outcome is keyed by the asking
+    /// tile, exactly as a `Query` is, so the bridge hands it to the
+    /// shell as `Delivery::Series` and `ShellView::deliver` routes it to
+    /// that one tile.
+    #[gpui::test]
+    fn a_series_outcome_is_routed_to_its_tile(cx: &mut gpui::TestAppContext) {
+        let (services, log) = test_shell_services_with_a_recording_tile();
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+            local_datasets: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        // The restored workspace's one tile is id 1, so that is the key
+        // this outcome is addressed to.
+        tx.try_send(DataEvent::Series(geode_core::series::SeriesOutcome {
+            key: geode_core::query::QueryKey(1),
+            tag: 11,
+            submitted: std::time::Instant::now(),
+            result: Ok(geode_core::series::SeriesResult::default()),
+        }))
+        .unwrap();
+        vcx.run_until_parked();
+
+        assert!(
+            log.borrow().iter().any(|r| matches!(
+                r,
+                geode_shell::module::recording::Recorded::Delivered(tile, tag)
+                    if tile.0 == 1 && *tag == 11
+            )),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
     /// Task 3 (ingest progress, spec 2026-09-17 §5.3): the bridge routes
     /// `DataEvent::Loading`/`LoadEnded` into the diagnostics entity's
     /// `ingest` field.
@@ -1527,6 +1761,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1597,6 +1835,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1671,6 +1913,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1735,6 +1981,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory: factory.clone(),
             events: rx,
@@ -1793,6 +2043,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1889,6 +2143,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -1957,6 +2215,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,
@@ -2053,6 +2315,10 @@ role = "key"
                 &CVI,
                 Duration::from_secs(900),
             )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
             handle,
             factory,
             events: rx,

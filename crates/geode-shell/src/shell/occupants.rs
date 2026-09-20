@@ -58,12 +58,53 @@ impl ShellView {
         self.occupants.get(&tile).map(|o| o.kind)
     }
 
-    /// Route a delivery to the tile whose id is `delivery.key()` (§5.1).
-    /// The app bridge calls this; a delivery for a tile that no longer
-    /// exists is dropped.
+    /// Route a delivery (§5.1): one with a key to the tile whose id it
+    /// is, dropped if that tile is gone; one without
+    /// (`SeriesFetched`, timeseries spec §5.4) to every occupant of a
+    /// tile on screen, each handed its own copy, since `Delivery` is not
+    /// `Clone` (`QueryOutcome` is not) and an occupant takes it by
+    /// value. Hidden tiles are skipped on purpose: they hold no
+    /// subscription and requery on `set_visible(true)`. The app bridge
+    /// calls this.
     pub fn deliver(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(o) = self.occupants.get(&TileId(delivery.key().0)) {
-            o.content.deliver(delivery, window, cx);
+        // Matched on the VARIANT, not on `key()`, and with every keyed
+        // variant named rather than a wildcard: a new variant — keyed
+        // or not — fails to compile here until it is given an arm, the
+        // same rule every occupant's `deliver` follows.
+        match delivery {
+            Delivery::SeriesFetched {
+                source,
+                identity,
+                result,
+            } => {
+                // `visible_tile_keys` already filters placeholders and
+                // covers visible docks — the same visible set the flip
+                // barrier waits on.
+                let mut keys = Vec::new();
+                self.visible_tile_keys(&mut keys);
+                for key in keys {
+                    if let Some(o) = self.occupants.get(&TileId(key.0)) {
+                        o.content.deliver(
+                            Delivery::SeriesFetched {
+                                source: source.clone(),
+                                identity: identity.clone(),
+                                result: result.clone(),
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                }
+            }
+            // Every keyed variant, named: a new variant fails to compile
+            // here rather than falling into a wildcard and being dropped.
+            keyed @ (Delivery::Query(_) | Delivery::Series(_) | Delivery::Price(_)) => {
+                if let Some(key) = keyed.key()
+                    && let Some(o) = self.occupants.get(&TileId(key.0))
+                {
+                    o.content.deliver(keyed, window, cx);
+                }
+            }
         }
     }
 

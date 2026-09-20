@@ -30,7 +30,12 @@ pub use as_of::{AsOf, generation_predicate, resolve_generations};
 pub mod document;
 pub mod pool;
 
-pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId};
+pub use pool::{
+    Payload, QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId, Work,
+};
 pub mod catalog;
 
 pub use catalog::build_catalog;
+pub mod series;
+
+pub use series::{SeriesPlan, Statement, compile_series, run_series};

@@ -64,10 +64,11 @@ fn hovering_the_status_as_of_segment_names_the_selector_chord(cx: &mut gpui::Tes
             || vcx.debug_bounds("tip-status-as-of-chord-alt+t").is_some()
     );
     // Final review, spec §5.1: the title is the full resolved timestamp
-    // (`ScopeBarModel::as_of_full`), not the elided `"AS OF … · :live to
-    // return"` segment text — the width comparison lives on the scope-bar
-    // badge's own test below, since the segment's OWN text is longer than
-    // the bare timestamp and so is not the shorter side here.
+    // (`ScopeBarModel::as_of_full`), not the elided `"AS OF … · Return to
+    // live in the palette"` segment text — the width comparison lives on
+    // the scope-bar badge's own test below, since the segment's OWN text
+    // is longer than the bare timestamp and so is not the shorter side
+    // here.
     assert!(vcx.debug_bounds("tip-status-as-of-title").is_some());
 }
 

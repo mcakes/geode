@@ -343,9 +343,12 @@ impl LogLevels {
     }
 }
 
-/// Runtime control over the installed subscriber's level filter — `:level`
-/// (a later task) goes through this rather than touching the subscriber
-/// directly, so the shell never names `tracing_subscriber::reload` itself.
+/// Runtime control over the installed subscriber's level filter — the
+/// palette's `Set log level…` (`:level` on a tile's command line
+/// reached the same control until command-line locality closed that
+/// route 2026-09-20) goes through this rather than touching the
+/// subscriber directly, so the shell never names
+/// `tracing_subscriber::reload` itself.
 pub trait LevelControl: Send + Sync {
     fn set(&self, levels: &LogLevels) -> Result<(), String>;
 }

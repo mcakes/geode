@@ -150,6 +150,14 @@ set to the offending key:
 - Every axis column has `role = "axis"`; every `role = "axis"` column
   is listed in `axes`. Error, dataset dropped.
 - Every value column is `f64` or `i64`. Error, column dropped.
+  **Amended by the dividend-schedule design (2026-09-19), ruling 7: a
+  value may also be `date` or `utf8`** — a value is "a per-row fact
+  that is not identity", and storage, selection and attribution already
+  treat every value alike whatever its type; `timestamp`/`bool` stay
+  refused, since `geode_core::document::Column`/`Value` do not carry
+  them (§4.5's "already held to the stricter f64/i64 rule" sentence no
+  longer applies — the rule is f64/i64/date/utf8 now, checked in one
+  place, `validate_document`).
 - `grain = …` on any column, or a `measure` or `key` role, is an error
   on a document dataset: the column is dropped and the diagnostic
   names the family. `axis` and `value` on a measure dataset are the
@@ -255,12 +263,16 @@ records the archive growth rate at the demo cadence.
   `bool` on an axis or an attribute (error at
   `{ds}.columns.{name}.type`, column dropped — dropping an axis leaves
   `axes` naming an undeclared column, so the dataset goes too; a *value*
-  is already held to the stricter f64/i64 rule and is not reported
-  twice), and requires every key column to be `utf8` (error at
+  is held to the same f64/i64/date/utf8 rule and is not reported
+  twice — **widened from f64/i64 alone by the dividend-schedule design
+  (2026-09-19, ruling 7): a value's own type check moved to cover
+  `date`/`utf8` too, since `Column`/`Value` already carried them and a
+  schedule's ex date, announced date, pay date and status all needed
+  it**), and requires every key column to be `utf8` (error at
   `{ds}.key`, dataset dropped: the key is joined into the `batch
   VARCHAR` column by `join_key` and bound back as `Value::Text`, so any
-  other declared type compiles and selects nothing). Widen the refusal
-  when — and only when — Part 2 widens `Column`/`Value`.
+  other declared type compiles and selects nothing). Widen it only when
+  `Column`/`Value` gain a type.
 - The catalog's `live_rows`/`archive_rows` are summed over
   `store::ddl::table_pairs(ds)`, not `ds.grains()`: a document dataset
   has no grain and reported 0 rows beside a real list of live
@@ -743,6 +755,37 @@ pub struct PanelSpec {
 }
 ```
 
+**Amended by the dividend-schedule design (2026-09-19, §4.2 and §6.5):**
+a second `Columns::Values` panel (the dividend schedule's five date/
+number/text columns) showed `value_type`/`format` and a bare `rows:
+&'static str` could not carry a per-column type, format or editor, or
+say whether the row axis is minted or read off a real document column.
+`PanelSpec.rows` is now a `RowAxis { column, identity:
+RowIdentity::{Typed(ColumnType), Minted} }`, and `Columns::Values`
+carries an explicit column list rather than a bare column-name slice:
+
+```rust
+pub struct ValueColumn {
+    pub column: &'static str,
+    pub label: &'static str,
+    pub ty: ColumnType,                            // F64 | I64 | Date | Utf8
+    pub format: ColumnFormat,                       // numbers only; ignored otherwise
+    pub choices: Option<&'static [&'static str]>,   // Utf8 closed set
+    pub required: bool,                             // an inserted row must fill it
+}
+pub enum Columns {
+    Axis(&'static str),
+    Values(&'static [ValueColumn]),   // paint order
+}
+```
+
+`header: &'static [HeaderAttr]` (a label and a `ColumnType` per
+attribute, gained in Part 3's own header work) is unchanged by this
+amendment. `CVI` and `DIVIDEND` are the two `PanelSpec` instances that
+exist; see the dividend-schedule design's own §4–§6 for the model
+change this enables (`MatrixModel.column_kinds: Vec<CellKind>`) and its
+"As built" note for what shipped versus what was drafted here.
+
 ### 8.2 What it paints
 
 A header row: key, each header attribute, the generation's source
@@ -1043,6 +1086,27 @@ underlying at all. Tests: `parked_drafts_ride_the_session`,
     patch the touched cells in place rather than call `build`
     wholesale; CVI itself, the only panel that exists, is unaffected
     at 285 µs. See `docs/perf.md`'s "Market-data panel" section.
+    **Amended by the dividend-schedule design (2026-09-19, §4.5/§8):**
+    the "must patch" note above is now built, not a to-do — a cell
+    commit calls `MatrixModel::patch_cell(row, col, snapshot, spec,
+    draft)`, which re-prepares that ONE cell's text, value and state
+    (identical to what a rebuild would paint there, on both shapes;
+    `patch_cell_matches_a_rebuild`/`_under_a_pivot`/`_with_rows_spliced`
+    prove it) instead of calling `rebuild_model` — but **only for a
+    cell commit** (`MarketDataTile::commit_cell_value`, `patch_cell`'s
+    one production call site). `:bump` still calls `rebuild_model`
+    unconditionally (controller ruling: a row or column bump touches
+    many cells at once, so `Draft::bump` and one model rebuild together
+    in a single call is what shipped here — patching each touched cell
+    individually is a perf follow-up, not this plan's), and so do row
+    insert/delete and a delivery, as before. So the flat build's 8.18 ms
+    is no longer a per-CELL-COMMIT cost, but it is still a per-`:bump`,
+    per-row-edit and per-delivery one — a column `:bump` on a
+    10,000-row schedule pays the full flat-build cost exactly as a
+    delivery does. The dividend-schedule design's own `docs/perf.md`
+    numbers for `patch_cell` at both shapes, and for `build` with 100
+    rows spliced in, are what replaces the "not yet built" reading
+    here.
 14. **`MarketDataTile` answers the flip barrier honestly, in the
     blotter's own shape**, which §8.2/§8.6 did not specify:
     `self_arrive` on a change it does not requery for, staging a

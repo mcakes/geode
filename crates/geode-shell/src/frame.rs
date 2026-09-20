@@ -458,9 +458,14 @@ impl Frame {
         true
     }
 
-    /// `:group save N`: set the slot in memory. The caller persists with
-    /// [`persist_slot_to_user_config`] off the UI thread — see
-    /// `take_pending_persist`.
+    /// Until 2026-09-20, `:group save N` reached this to set the slot in
+    /// memory, with the caller persisting via
+    /// [`persist_slot_to_user_config`] off the UI thread (see
+    /// `take_pending_persist`); that route closed 2026-09-20
+    /// (command-line locality) in favour of the Groupings dialog, which
+    /// writes a slot through `config_write` directly. Kept as the seam
+    /// the locality sweep tests watch — no production caller reaches it
+    /// any more.
     pub fn save_slot(&mut self, slot: u8, grouping: Vec<String>) -> Result<(), String> {
         let persisted = grouping.clone();
         if !self.slots.set(slot, grouping) {
@@ -550,11 +555,15 @@ impl Frame {
     /// [`geode_core::scopes::RESERVED_NAMES`] (`save_current`, the
     /// `scope::save_current` palette action's own id) — the same list
     /// and the same wording `shell::objectdialog::Domain::Scopes::
-    /// reserved_names` refuses with, checked here too because this is
-    /// the door `:scope save <name>` on a tile's command line reaches
-    /// directly, with no dialog in between to catch it: a saved scope
-    /// literally named `save_current` used to reach `scopes.toml`
-    /// unrefused and panic `register_scope_actions` at the next start
+    /// reserved_names` refuses with, checked here too because this was
+    /// the door `:scope save <name>` on a tile's command line reached
+    /// directly, with no dialog in between to catch it, until that
+    /// route closed 2026-09-20 (command-line locality) in favour of the
+    /// Scopes dialog's `Scope: Save current as…` action
+    /// (`open_save_scope`, `NameSeed::FromFrame`), which writes through
+    /// `config_write`: a saved scope literally named `save_current`
+    /// used to reach `scopes.toml` unrefused and panic
+    /// `register_scope_actions` at the next start
     /// (`ActionRegistry::register`'s "ids are unique by construction"),
     /// a config value on disk that crashed the app at every launch.
     pub fn save_scope(&mut self, name: &str) -> Result<(), String> {
