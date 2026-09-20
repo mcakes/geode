@@ -11207,8 +11207,8 @@ run_mutation "mdedit: the editor gives up focus before it is dropped" \
         {
             window.blur(cx);
         }
-        self.editor = None;' \
-  '        self.editor = None;' \
+        let Some(Editing {' \
+  '        let Some(Editing {' \
   geode-marketdata \
   the_editor_gives_up_focus_before_it_is_dropped
 
