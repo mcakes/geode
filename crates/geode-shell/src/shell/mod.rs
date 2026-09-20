@@ -1820,8 +1820,8 @@ impl ShellView {
         }
         // Reflect the frame's text back into the field (Task 4, spec
         // §3.11): an unfocused field always shows the frame's truth — a
-        // scope set elsewhere (a saved-scope load, a module's own
-        // `:scope` command) must show up here even though this field
+        // scope set elsewhere (a saved-scope load, the expression dialog —
+        // `:scope` was a tile command until 2026-09-20) must show up here even though this field
         // never had focus. Skipped while the field IS focused: the user's
         // own typing is the truth then, and `set_value` would stomp the
         // caret/selection mid-edit. Reading the value is a `SharedString`
