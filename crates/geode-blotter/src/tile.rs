@@ -1355,27 +1355,11 @@ impl gpui::Render for BlotterTile {
             .border_b_1()
             .border_color(theme.border)
             .debug_selector(|| format!("blotter-header-{}", self.tile.0));
-        if let Some(stack) = self.stack.as_ref().filter(|s| s.len > 1) {
-            let open = stack.clone();
-            header = header.child(
-                div()
-                    .id(ElementId::NamedInteger(
-                        SharedString::new_static("stack-marker"),
-                        self.tile.0,
-                    ))
-                    .text_color(neutral_chip.text)
-                    .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
-                    .px_1()
-                    .rounded(theme.radius_tokens().sm)
-                    .debug_selector(|| format!("stack-marker-{}", self.tile.0))
-                    .child(stack.text.clone())
-                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                        cx.stop_propagation();
-                        open.open_list(window, cx);
-                    }),
-            );
-        }
+        // The stack marker paints first, through the one builder every
+        // module uses (`StackHandle::marker`, spec §5.1) — `None` while
+        // the tile is not a member of a stack of two or more.
         header = header
+            .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
             .child(
                 div()
                     .text_color(theme.foreground)

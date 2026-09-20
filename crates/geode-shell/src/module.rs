@@ -90,6 +90,48 @@ impl StackHandle {
     pub fn open_list(&self, window: &mut Window, cx: &mut App) {
         (self.open)(window, cx)
     }
+
+    /// The marker chip every module paints FIRST in its header strip
+    /// (spec §5.1) — `2/4` in the mono face, `Tone::Neutral` through
+    /// `chip_paint` (a state the trader chose, like `pinned`), the
+    /// theme's small radius, id `("stack-marker", tile)`, selector
+    /// `stack-marker-{tile}`, and a mouse-down that stops propagation and
+    /// opens the list. `None` while the stack has one member or fewer,
+    /// so the gate lives here and not at four call sites: a caller
+    /// writes `.children(stack.as_ref().and_then(|s| s.marker(theme,
+    /// tile)))` and gets the same chip the other modules paint. The
+    /// text is `self.text`, prepared once — nothing here formats per
+    /// frame.
+    pub fn marker(
+        &self,
+        theme: &gpui_component::Theme,
+        tile: TileId,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        use gpui::prelude::*;
+        if self.len <= 1 {
+            return None;
+        }
+        let neutral = crate::shell::chip::chip_paint(theme, crate::shell::chip::Tone::Neutral);
+        let open = self.clone();
+        Some(
+            gpui::div()
+                .id(gpui::ElementId::NamedInteger(
+                    SharedString::new_static("stack-marker"),
+                    tile.0,
+                ))
+                .text_color(neutral.text)
+                .when_some(neutral.fill, |el, fill| el.bg(fill))
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .font_family(crate::fonts::MONO)
+                .debug_selector(move || format!("stack-marker-{}", tile.0))
+                .child(self.text.clone())
+                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    open.open_list(window, cx);
+                }),
+        )
+    }
 }
 
 impl std::fmt::Debug for StackHandle {
@@ -329,10 +371,8 @@ impl ModuleRoster {
 /// the palette; never a blank, never a panic.
 pub mod placeholder {
     use super::*;
-    use crate::fonts;
-    use crate::shell::chip;
     use gpui::prelude::*;
-    use gpui::{Context, ElementId, MouseButton, Render, div};
+    use gpui::{Context, Render, div};
     use gpui_component::{ActiveTheme as _, v_flex};
 
     /// The kind string a placeholder occupant's `TileOccupant::kind`
@@ -356,30 +396,14 @@ pub mod placeholder {
     impl Render for PlaceholderView {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = cx.theme();
-            let mut content = v_flex().items_center().justify_center().gap_1();
-            if let Some(stack) = self.stack.as_ref().filter(|s| s.len > 1) {
-                let neutral_chip = chip::chip_paint(theme, chip::Tone::Neutral);
-                let open = stack.clone();
-                content = content.child(
-                    div()
-                        .id(ElementId::NamedInteger(
-                            SharedString::new_static("stack-marker"),
-                            self.tile.0,
-                        ))
-                        .text_color(neutral_chip.text)
-                        .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
-                        .px_1()
-                        .rounded(theme.radius_tokens().sm)
-                        .font_family(fonts::MONO)
-                        .debug_selector(|| format!("stack-marker-{}", self.tile.0))
-                        .child(stack.text.clone())
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            cx.stop_propagation();
-                            open.open_list(window, cx);
-                        }),
-                );
-            }
-            content = content.child("ctrl+k → Add a tile");
+            // The marker rides above the hint through the one builder
+            // every module uses (`StackHandle::marker`, spec §5.1).
+            let content = v_flex()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
+                .child("ctrl+k → Add a tile");
             div()
                 .size_full()
                 .flex()

@@ -11,8 +11,8 @@ use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, dis
 use chrono::{DateTime, Utc};
 use geode_shell::fonts;
 use geode_shell::module::StackHandle;
-use geode_shell::shell::chip;
 use geode_shell::shell::scale;
+use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
 use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div};
@@ -310,32 +310,11 @@ pub(crate) fn render(
         .border_color(theme.border)
         .debug_selector(move || format!("marketdata-header-{tile_id}"));
 
-    // 0. The stack marker (tile-stacks spec §5.1), first in the strip —
-    // identical to the blotter's and the diagnostics tile's own, since a
-    // trader reading the chip should not have to learn a second shape
-    // per module.
-    if let Some(stack) = stack.filter(|s| s.len > 1) {
-        let neutral_chip = chip::chip_paint(theme, chip::Tone::Neutral);
-        let open = stack.clone();
-        row = row.child(
-            div()
-                .id(ElementId::NamedInteger(
-                    SharedString::new_static("stack-marker"),
-                    tile_id,
-                ))
-                .text_color(neutral_chip.text)
-                .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
-                .px_1()
-                .rounded(theme.radius_tokens().sm)
-                .font_family(fonts::MONO)
-                .debug_selector(move || format!("stack-marker-{tile_id}"))
-                .child(stack.text.clone())
-                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                    cx.stop_propagation();
-                    open.open_list(window, cx);
-                }),
-        );
-    }
+    // 0. The stack marker (tile-stacks spec §5.1), first in the strip,
+    //    through the one builder every module uses (`StackHandle::marker`)
+    //    — a trader reading the chip never learns a second shape per
+    //    module.
+    row = row.children(stack.and_then(|s| s.marker(theme, TileId(tile_id))));
 
     // 1. Kind badge.
     row = row.child(
