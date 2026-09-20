@@ -546,6 +546,14 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::Query(outcome), window, cx)
                         });
                     }
+                    // Timeseries spec §6.4: addressed to the tile that
+                    // asked, exactly as a `Query` is, so it takes the
+                    // same one-line route.
+                    DataEvent::Series(outcome) => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(Delivery::Series(outcome), window, cx)
+                        });
+                    }
                     DataEvent::Published {
                         dataset,
                         batch,
@@ -1191,6 +1199,66 @@ role = "key"
                 r,
                 geode_shell::module::recording::Recorded::SeriesFetched(_, pair)
                     if pair == "VIX@demo_kdb"
+            )),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    /// Timeseries spec §6.4: a series outcome is keyed by the asking
+    /// tile, exactly as a `Query` is, so the bridge hands it to the
+    /// shell as `Delivery::Series` and `ShellView::deliver` routes it to
+    /// that one tile.
+    #[gpui::test]
+    fn a_series_outcome_is_routed_to_its_tile(cx: &mut gpui::TestAppContext) {
+        let (services, log) = test_shell_services_with_a_recording_tile();
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        // The restored workspace's one tile is id 1, so that is the key
+        // this outcome is addressed to.
+        tx.try_send(DataEvent::Series(geode_core::series::SeriesOutcome {
+            key: geode_core::query::QueryKey(1),
+            tag: 11,
+            submitted: std::time::Instant::now(),
+            result: Ok(geode_core::series::SeriesResult::default()),
+        }))
+        .unwrap();
+        vcx.run_until_parked();
+
+        assert!(
+            log.borrow().iter().any(|r| matches!(
+                r,
+                geode_shell::module::recording::Recorded::Delivered(tile, tag)
+                    if tile.0 == 1 && *tag == 11
             )),
             "{:?}",
             log.borrow()

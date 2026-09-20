@@ -13,6 +13,7 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{
     CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey, QueryOutcome,
 };
+use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::view::ViewSpec;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -32,6 +33,9 @@ pub enum Request {
     /// The document request (market-data spec §7): one document by key,
     /// live or as-of — see `DataService::document`.
     Document(DocumentParams),
+    /// The timeseries viewer's series query (timeseries spec §6): one
+    /// round trip per tile, answered as `DataEvent::Series`.
+    Series(SeriesParams),
     /// The diagnostics tile's "what does the database hold" request
     /// (Phase 4b §4.5). Answered synchronously on the service thread,
     /// not through the query pool — see `DataService::catalog`.
@@ -148,6 +152,15 @@ impl DataHandle {
     /// an ordinary `DataEvent::Query`, keyed and tagged as asked.
     pub fn document(&self, params: DocumentParams) -> bool {
         self.send(Request::Document(params))
+    }
+
+    /// Queue the timeseries viewer's series query (timeseries spec §6).
+    /// `false` means it was not queued; the result, when it comes,
+    /// arrives on the sink as `DataEvent::Series`, keyed and tagged as
+    /// asked — a cap or compile refusal included, so the asking tile
+    /// always hears back.
+    pub fn series(&self, params: SeriesParams) -> bool {
+        self.send(Request::Series(params))
     }
 
     /// Queue the diagnostics tile's catalog request (spec §4.5). `false`
@@ -302,6 +315,18 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
                     }));
                 }
             }
+            Request::Series(params) => {
+                if let Err(e) = service.series(&params) {
+                    // Same rule as `Query`: a cap or compile failure is
+                    // this key's outcome, not a lost request.
+                    sink(DataEvent::Series(SeriesOutcome {
+                        key: params.key,
+                        tag: params.tag,
+                        submitted: params.submitted,
+                        result: Err(e.to_string()),
+                    }));
+                }
+            }
             Request::Catalog(params) => {
                 sink(DataEvent::Catalog(service.catalog(&params)));
             }
@@ -417,6 +442,42 @@ mod tests {
         assert!(handle.identities("k"));
         assert!(matches!(rx.recv().unwrap(), Request::Fetch(p) if p.identity == "SPX"));
         assert!(matches!(rx.recv().unwrap(), Request::Identities { source } if source == "k"));
+    }
+
+    /// Timeseries spec §6: the series query rides the same queue as
+    /// every other request, carrying its params untouched.
+    #[test]
+    fn a_series_request_is_queued_as_a_request() {
+        use geode_core::series::{BucketRule, Frequency, SeriesParams, SeriesSpec, SlotKind};
+        let (handle, rx) = DataHandle::for_tests();
+        assert!(handle.series(SeriesParams {
+            key: QueryKey(3),
+            tag: 5,
+            submitted: Instant::now(),
+            dataset: "series".into(),
+            range: (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+            window: (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+            as_of: AsOf::Live,
+            frequency: Frequency::D1,
+            series: vec![SeriesSpec {
+                slot: 1,
+                kind: SlotKind::Source {
+                    source: "k".into(),
+                    identity: "SPX".into(),
+                    rule: BucketRule::Last,
+                },
+            }],
+            percentiles: Vec::new(),
+            bins: None,
+        }));
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Request::Series(p) => {
+                assert_eq!(p.key, QueryKey(3));
+                assert_eq!(p.tag, 5);
+                assert_eq!(p.dataset, "series");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

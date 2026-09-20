@@ -20,6 +20,7 @@ use crate::query::document::compile_document;
 use crate::query::pool::{
     Payload, QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId, Work,
 };
+use crate::query::series::compile_series;
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
 use crate::store::{Catalog, Store, StoreError};
@@ -33,6 +34,7 @@ use geode_core::query::{
 };
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
+use geode_core::series::{SERIES_POINT_CAP, SeriesOutcome, SeriesParams, SlotKind, cap_message};
 use geode_core::snapshot::{Freshness, Provenance};
 use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
@@ -67,6 +69,9 @@ pub struct DataServiceConfig {
 #[derive(Debug)]
 pub enum DataEvent {
     Query(QueryOutcome),
+    /// A series query's answer (timeseries spec §6.4), routed by the
+    /// tile's key like `Query`.
+    Series(SeriesOutcome),
     /// The picker's distinct-values result (spec §3.4).
     Distinct(DistinctOutcome),
     /// The diagnostics tile's "what does the database hold" result
@@ -639,6 +644,22 @@ impl HealthTracker {
         );
         lanes.offer(emit)
     }
+
+    /// The load lane's current word for one batch — what a series
+    /// outcome carries per slot (timeseries spec §6.4). `None` when
+    /// nothing was ever reported for it, which is the same as clean.
+    ///
+    /// A read, not a report: it neither stamps nor offers, so asking it
+    /// on every series result cannot disturb the transition bookkeeping
+    /// the two `report_*_and_emit` doors own.
+    pub(crate) fn load_lane(&self, source: &str, batch: &str) -> Option<Health> {
+        let sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        sources
+            .get(source)?
+            .load
+            .get(batch)
+            .map(|v| v.health.clone())
+    }
 }
 
 pub struct DataService {
@@ -860,6 +881,10 @@ impl DataService {
 
         let result_sink: ResultSink = {
             let sink = Arc::clone(&sink);
+            // The tracker rides into the sink so a series result can
+            // carry each pair's load-lane word (timeseries spec §6.4)
+            // without a second trip through the service thread.
+            let health_tracker = Arc::clone(&health_tracker);
             Arc::new(move |r: QueryResult| match r.kind {
                 RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
                     key: r.key,
@@ -881,8 +906,39 @@ impl DataService {
                             .collect()
                     }),
                 })),
-                // Task 7 maps this to `DataEvent::Series`.
-                RequestKind::Series { .. } => true,
+                // Timeseries spec §6.4. The `pairs` the request carried
+                // are matched to the result's slots BY SLOT NUMBER, not
+                // by position: `SeriesResult::slots` holds every slot,
+                // expressions included, while `pairs` holds only the
+                // source ones, so the two lists differ in length the
+                // moment a request has an expression slot.
+                RequestKind::Series { pairs } => {
+                    let result = match r.payload {
+                        Ok(Payload::Series(mut res)) => {
+                            for (slot, source, identity) in &pairs {
+                                let key = format!("{identity}@{source}");
+                                if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {
+                                    s.provenance.health = health_tracker.load_lane(source, &key);
+                                }
+                            }
+                            Ok(res)
+                        }
+                        // A routing defect, not data — reported as this
+                        // key's failure rather than unwrapped, the same
+                        // rule `view_snapshot` applies the other way
+                        // round (spec §10.1).
+                        Ok(Payload::Snapshot(_)) => {
+                            Err("internal: a series request answered with a snapshot".to_string())
+                        }
+                        Err(e) => Err(e),
+                    };
+                    sink(DataEvent::Series(SeriesOutcome {
+                        key: r.key,
+                        tag: r.tag,
+                        submitted: r.submitted,
+                        result,
+                    }))
+                }
             })
         };
         let pool = QueryPool::spawn_with_sink(&store, config.query_workers.max(1), result_sink)?;
@@ -1776,6 +1832,52 @@ impl DataService {
         }))
     }
 
+    /// The series query (timeseries spec §6): capped, compiled, and
+    /// submitted like a view query, so it shares the pool's cancellation
+    /// and per-key coalescing and comes back as `DataEvent::Series`.
+    ///
+    /// The cap is checked BEFORE `compile_series` (§6.3): a request no
+    /// chart could paint costs nothing but the arithmetic, and the
+    /// refusal names the frequency and the span rather than a SQL error.
+    pub fn series(&self, params: &SeriesParams) -> Result<QueryId, StoreError> {
+        let points = params.frequency.buckets_in(params.range.0, params.range.1);
+        if points > SERIES_POINT_CAP {
+            return Err(StoreError::Series(cap_message(
+                params.frequency,
+                params.range.0,
+                params.range.1,
+                points,
+            )));
+        }
+        let plan = compile_series(&self.config.schema, params)?;
+        // Only the SOURCE slots: an expression slot has no pair and so
+        // no load lane of its own. Carried on the request so the result
+        // sink attaches each one's health without re-reading the plan.
+        let pairs = params
+            .series
+            .iter()
+            .filter_map(|s| match &s.kind {
+                SlotKind::Source {
+                    source, identity, ..
+                } => Some((s.slot, source.clone(), identity.clone())),
+                SlotKind::Expr(_) => None,
+            })
+            .collect();
+        Ok(self.pool.submit(QueryRequest {
+            key: params.key,
+            tag: params.tag,
+            submitted: params.submitted,
+            view: ViewId(format!("series:{}", params.dataset)),
+            work: Work::Series(Box::new(plan)),
+            // A series has no tree and no grouping (spec §6.4), and its
+            // provenance is per SLOT rather than per dataset — carried
+            // on `SlotResult::provenance`, not here.
+            grouping: Vec::new(),
+            provenance: Provenance::default(),
+            kind: RequestKind::Series { pairs },
+        }))
+    }
+
     pub fn cancel(&self, key: QueryKey) {
         self.pool.cancel(key);
     }
@@ -2387,6 +2489,149 @@ mod tests {
             from: ts(from),
             to: ts(to),
         }
+    }
+
+    fn next_series(rx: &std::sync::mpsc::Receiver<DataEvent>) -> geode_core::series::SeriesOutcome {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Series(o) => return o,
+                _ => continue,
+            }
+        }
+    }
+
+    fn series_params(identity: &str) -> geode_core::series::SeriesParams {
+        use geode_core::series::*;
+        SeriesParams {
+            key: QueryKey(7),
+            tag: 5,
+            submitted: Instant::now(),
+            dataset: "series".into(),
+            range: (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+            window: (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+            as_of: AsOf::Live,
+            frequency: Frequency::D1,
+            series: vec![SeriesSpec {
+                slot: 1,
+                kind: SlotKind::Source {
+                    source: "kdb_hist".into(),
+                    identity: identity.into(),
+                    rule: BucketRule::Last,
+                },
+            }],
+            percentiles: vec![0.5],
+            bins: None,
+        }
+    }
+
+    /// Timeseries spec §6.4: the pool's `SeriesResult` reaches the sink
+    /// as `DataEvent::Series`, keyed and tagged as asked, with each
+    /// source slot's load-lane word attached by the `pairs` the request
+    /// carried.
+    #[test]
+    fn a_series_request_answers_with_the_bucketed_values_and_the_pairs_health() {
+        let (_d, _calls, service, rx) = fetch_service(None);
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let _ = next_series_fetched(&rx);
+        service.series(&series_params("SPX.close")).unwrap();
+        let o = next_series(&rx);
+        assert_eq!((o.key, o.tag), (QueryKey(7), 5));
+        let r = o.result.unwrap();
+        assert_eq!(r.buckets.len(), 1);
+        // The `pairs` round trip: one slot came back, under the number
+        // the request gave it, and its health was filed against that
+        // number rather than a positional guess.
+        assert_eq!(r.slots.len(), 1);
+        assert_eq!(r.slots[0].slot, 1);
+        assert_eq!(
+            r.slots[0].values,
+            vec![2.0],
+            "the FakeFetch's three bars are 0, NaN (dropped), 2; last wins"
+        );
+        assert_eq!(r.slots[0].percentiles, vec![(0.5, 2.0)]);
+        assert_eq!(
+            r.slots[0].provenance.health,
+            Some(Health::Ok),
+            "the load lane's word rides the outcome"
+        );
+        assert!(r.slots[0].provenance.loaded.is_some());
+    }
+
+    /// The same door carries a failure: the pair's load lane is what a
+    /// slot reports, so a fetch that failed marks the slot it belongs to
+    /// rather than the whole request.
+    #[test]
+    fn a_failed_pairs_health_rides_its_slot() {
+        let (_d, _calls, service, rx) = fetch_service(None);
+        service.fetch(&fetch_params(
+            "broken",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let _ = next_series_fetched(&rx);
+        service.series(&series_params("broken")).unwrap();
+        let o = next_series(&rx);
+        let r = o.result.unwrap();
+        assert!(r.buckets.is_empty());
+        assert!(
+            matches!(r.slots[0].provenance.health, Some(Health::Failed { .. })),
+            "{:?}",
+            r.slots[0].provenance
+        );
+    }
+
+    /// Spec §6.3: the cap is checked BEFORE compilation, so a request no
+    /// one could paint never reaches the compiler or the pool.
+    #[test]
+    fn a_capped_request_is_refused_before_compilation() {
+        let (_d, _calls, service, _rx) = fetch_service(None);
+        let mut p = series_params("SPX.close");
+        p.frequency = geode_core::series::Frequency::M1;
+        p.range = (ts("2026-01-05T00:00:00Z"), ts("2029-01-05T00:00:00Z"));
+        p.window = p.range;
+        let e = service.series(&p).unwrap_err().to_string();
+        assert!(
+            e.contains("1m over 3y is ") && e.contains("; the cap is 500,000"),
+            "{e}"
+        );
+    }
+
+    /// Through `DataService::spawn` so the serve loop's error arm is what
+    /// answers: a compile failure is this key's own outcome, never a lost
+    /// request (§10.1).
+    #[test]
+    fn a_compile_error_is_the_requests_own_outcome_through_the_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut schema = SchemaSpec::default();
+        schema
+            .datasets
+            .push(crate::store::ddl::tests_support::series_dataset());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.path().join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters: Default::default(),
+                documents: Default::default(),
+            },
+            sink,
+        );
+        let mut p = series_params("X");
+        p.dataset = "nope".into();
+        assert!(handle.series(p));
+        let o = next_series(&rx);
+        assert_eq!((o.key, o.tag), (QueryKey(7), 5));
+        assert!(o.result.unwrap_err().contains("unknown dataset 'nope'"));
+        handle.shutdown();
     }
 
     #[test]
