@@ -2,6 +2,7 @@
 //! and performance utilities. See docs/superpowers/specs/ §2.
 
 pub mod attribution;
+pub mod clock;
 pub mod colour;
 pub mod config;
 pub mod dimensions;
