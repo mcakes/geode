@@ -59,6 +59,12 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     let clock = view.clock(cx);
     let frame = view.frame.read(cx);
     let publishes: Vec<_> = frame.recent_publishes().iter().cloned().collect();
+    // Review round 2 (re-review), finding 3: `AsOfState::build` always
+    // highlights row 0, and `as_of_scroll` lives on `ShellView` — it
+    // keeps whatever offset a PREVIOUS open scrolled it to, so a fresh
+    // open must reset it back to the top rather than opening mid-scroll
+    // (the `choicedialog::open`/`choice_dialog_scroll` precedent).
+    view.as_of_scroll.scroll_to_item(0);
     view.as_of_dialog = Some(AsOfState::build(
         frame.as_of(),
         &publishes,

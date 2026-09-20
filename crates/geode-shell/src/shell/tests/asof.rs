@@ -427,6 +427,68 @@ fn nav_past_the_visible_rows_scrolls_the_highlight_into_view(cx: &mut gpui::Test
          viewport {list_bounds:?}, not left below it with only its index \
          having changed"
     );
+
+    // Review round 2 re-review, finding 3a: `as_of_scroll` lives on
+    // `ShellView` and keeps its offset across close/reopen — a fresh
+    // open must reset it to the top, not silently keep whatever the
+    // last session scrolled to.
+    vcx.simulate_keystrokes("escape");
+    vcx.simulate_keystrokes("alt-t");
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+    let reopened = shell.read_with(&vcx, |s, _| s.as_of_scroll.offset());
+    assert_eq!(
+        reopened,
+        gpui::Point::default(),
+        "reopening the dialog must reset the scroll to the top, not keep \
+         the previous session's offset"
+    );
+
+    // Review round 2 re-review, finding 3b: typing a filter re-ranks and
+    // resets the highlight to 0 (`AsOfState::rerank`) — the scroll must
+    // follow it back to the top too, the same seam the sibling dialogs'
+    // query-change arms already drive their own scroll handles from.
+    vcx.simulate_keystrokes(&vec!["ctrl-d"; 15].join(" "));
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+    let scrolled_again = shell.read_with(&vcx, |s, _| s.as_of_scroll.offset());
+    assert_ne!(
+        scrolled_again,
+        gpui::Point::default(),
+        "sanity: scrolled down again before typing"
+    );
+
+    vcx.simulate_input("eod");
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+    let after_filter = shell.read_with(&vcx, |s, _| s.as_of_scroll.offset());
+    // Not necessarily exactly `(0, 0)`: `scroll_to_item`'s default
+    // strategy brings the target minimally into view rather than
+    // top-aligning it, and the re-ranked highlight (painted row 0) sits
+    // just after its section's own eyebrow — but it must have moved
+    // substantially back up from where 15 `ctrl-d`s left it, and row 0
+    // must now actually be visible.
+    assert!(
+        f32::from(after_filter.y.abs()) < f32::from(scrolled_again.y.abs()),
+        "typing a filter after scrolling down must scroll back up toward \
+         the re-ranked highlight, not stay near the bottom: before \
+         {scrolled_again:?}, after {after_filter:?}"
+    );
+    let list_bounds_now = vcx.debug_bounds("as-of-rows").expect("list painted");
+    let first_row_bounds = vcx
+        .debug_bounds("as-of-row-0")
+        .expect("the re-ranked first row is painted");
+    assert!(
+        list_bounds_now.intersects(&first_row_bounds),
+        "the re-ranked highlight (row 0) must be scrolled into view: \
+         row {first_row_bounds:?}, list {list_bounds_now:?}"
+    );
 }
 
 /// Review round 2, finding 5 (ruled in): a publish landing while the

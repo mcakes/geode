@@ -184,17 +184,21 @@ impl AsOfState {
     /// A publish landed (or the pin changed) while the dialog is open
     /// (spec §5.1, parity with the old `cached_presets`): rebuild the
     /// rows with the SAME query, keep the highlighted row by identity —
-    /// `(section, label)`, since a row's own index can shift when a new
-    /// publish is prepended — falling back to `0` when it no longer
-    /// exists, and leave an open Custom field's own edit state
+    /// `(section, label, right)`, since a row's own index can shift when
+    /// a new publish is prepended — falling back to `0` when it no
+    /// longer exists, and leave an open Custom field's own edit state
     /// untouched (`self.field` is never read or written here; the
     /// Custom row itself is always present, so its identity survives a
-    /// refresh the same way any other row's does).
+    /// refresh the same way any other row's does). `right` (the
+    /// formatted timestamp) joins `label` in the identity because two
+    /// publishes can share a label (`"risk / EOD · 12 books"` twice, at
+    /// different instants) — `label` alone would let the highlight hop
+    /// to whichever one now sorts first (review round 2 re-review).
     pub fn refresh(&mut self, as_of: &AsOf, publishes: &[Publish], now: DateTime<Utc>) {
         let previous = self
             .ranked
             .get(self.highlighted)
-            .map(|p| (p.section, p.label.clone()));
+            .map(|p| (p.section, p.label.clone(), p.right.clone()));
         let (entries, presets, instants, pinned) = Self::rebuild(as_of, publishes, self.clock, now);
         self.entries = entries;
         self.presets = presets;
@@ -202,11 +206,11 @@ impl AsOfState {
         self.pinned = pinned;
         self.now = now;
         self.rerank();
-        if let Some((section, label)) = previous
+        if let Some((section, label, right)) = previous
             && let Some(i) = self
                 .ranked
                 .iter()
-                .position(|p| p.section == section && p.label == label)
+                .position(|p| p.section == section && p.label == label && p.right == right)
         {
             self.highlighted = i;
         }
@@ -674,6 +678,64 @@ mod tests {
             "the new publish is painted: {:?}",
             s.painted()
         );
+    }
+
+    #[test]
+    fn refresh_identity_includes_right_so_same_labelled_publishes_dont_hop() {
+        // Two publishes with the IDENTICAL label (same dataset/batch/
+        // books) but different instants, so their `right` (formatted
+        // timestamp) columns differ. Listed later-first, matching
+        // `Frame::recent_publishes`' own newest-first order — with
+        // `label` alone as the identity, `refresh`'s `.position()` would
+        // always land on the FIRST painted match (`Row::Publish(0)`,
+        // the later one), hopping the highlight off whichever of the
+        // two was actually selected.
+        let earlier = now() - chrono::Duration::hours(2);
+        let later = now() - chrono::Duration::hours(1);
+        let pubs = [
+            publish("risk", "EOD", 12, later),
+            publish("risk", "EOD", 12, earlier),
+        ];
+        let mut s = state(AsOf::Live, &pubs);
+        let earlier_row = s
+            .painted()
+            .iter()
+            .position(|p| matches!(p.row, Row::Publish(1)))
+            .expect("the earlier (second) publish is painted");
+        s.set_highlighted(earlier_row);
+        let expected_right = s.painted()[earlier_row].right.clone();
+        let expected_label = s.painted()[earlier_row].label.clone();
+
+        // Refresh with the SAME two publishes (nothing actually
+        // changed) — a pure re-rank-and-restore, so any hop here is
+        // `refresh`'s own identity logic, not new data.
+        s.refresh(&AsOf::Live, &pubs, now());
+
+        let after = &s.painted()[s.highlighted()];
+        assert_eq!(after.label, expected_label);
+        assert_eq!(
+            after.right, expected_right,
+            "the highlight must stay on the EARLIER publish, not hop to \
+             the later same-labelled one"
+        );
+    }
+
+    #[test]
+    fn refresh_leaves_an_open_field_untouched() {
+        let mut s = state(AsOf::Live, &[]);
+        s.open_field();
+        s.field_mut().unwrap().step(1); // day +1, a deliberate edit
+        let edited = s.field().unwrap().value();
+
+        let pubs = [publish("risk", "EOD", 12, now())];
+        s.refresh(&AsOf::Live, &pubs, now());
+
+        assert_eq!(
+            s.field().unwrap().value(),
+            edited,
+            "a data refresh must not touch the Custom field's own in-progress edit"
+        );
+        assert_eq!(s.field_refusal(), None);
     }
 
     #[test]

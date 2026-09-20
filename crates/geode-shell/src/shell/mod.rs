@@ -1214,8 +1214,15 @@ impl ShellView {
                 view.choice_dialog_scroll
                     .scroll_to_item(state.list.ranked_highlighted());
             } else if let Some(state) = view.as_of_dialog.as_mut() {
-                // The field's text is the query (spec §5.1).
+                // The field's text is the query (spec §5.1); a re-rank
+                // resets the highlight to 0, so follow it the same way
+                // the sibling arms above do (review round 2 re-review,
+                // finding 3's second seam).
                 asof_view::on_query_changed(state, &query);
+                view.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+                    state.painted(),
+                    state.highlighted(),
+                ));
             } else if let Some(state) = view.scope_expr_dialog.as_mut() {
                 // The field IS the value (spec §4.1); typing clears the last
                 // failed commit's message.
