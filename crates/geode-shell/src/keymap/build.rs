@@ -23,6 +23,24 @@ pub struct Binding {
     /// exactly re-match the `[[bindings]]` entry a given effective binding
     /// actually came from — a `Predicate` alone can't do that.
     pub context_source: Option<String>,
+    /// The raw key spelling from the source doc (`"mod+h"`, not the
+    /// parsed keystrokes rendered back). A user-layer removal is
+    /// `keys.remove(spelling)` on the very document this was read from,
+    /// so it must name the key the way the file does — `render_binding`
+    /// of the parsed keystrokes says `alt+h` for a file that wrote
+    /// `mod+h`, and that removal finds nothing.
+    pub key_source: String,
+}
+
+/// One user-layer entry that overrides `action` — the unit
+/// [`user_overrides_for`] returns and `keymap_edit::apply_reset` removes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UserOverride {
+    /// The `[[bindings]]` entry's raw `context`, `None` for the no-context
+    /// entry — what `keymap_edit::keys_table_for` matches on.
+    pub context_source: Option<String>,
+    /// The key's spelling in the user document ([`Binding::key_source`]).
+    pub key: String,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +164,7 @@ pub fn build_keymap(
                     layer: doc.layer,
                     index,
                     context_source: context_source.clone(),
+                    key_source: spec.clone(),
                 });
                 index += 1;
             }
@@ -199,6 +218,52 @@ pub fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Opti
         .filter(|(_, b)| b.action == *action)
         .find(|(i, b)| !is_shadowed(bindings, *i, b))
         .map(|(_, b)| b)
+}
+
+/// Every user-layer entry that overrides `action` — what a reset of that
+/// action removes so the layers beneath show through again. Two kinds:
+///
+/// 1. a user binding whose action IS `action` (a rebind's new key, or a
+///    binding the user added themselves);
+/// 2. a user `"none"` shadow ([`UNBOUND_ACTION`]) on a keystroke that a
+///    lower layer binds to `action`, under a context that would apply
+///    whenever that lower binding's does — the same context-equality
+///    approximation [`effective_binding`] states (a no-context shadow
+///    silences everything; a contexted one only its own string).
+///
+/// A rebind of a builtin writes both kinds at once (`keymap_edit::
+/// apply_rebind`: the new key, then the `"none"` shadow over the old), and
+/// a reset that removed only the first left the action *unbound* rather
+/// than restored — the defect this function exists to close. Desk-layer
+/// entries are never returned: the app only ever writes the user layer.
+///
+/// Sorted by `(context_source, key)`, deduplicated, so the same shadow
+/// covering two lower bindings is one removal.
+pub fn user_overrides_for(bindings: &[Binding], action: &ActionId) -> Vec<UserOverride> {
+    let mut out: Vec<UserOverride> = Vec::new();
+    for b in bindings.iter().filter(|b| b.layer == Layer::User) {
+        let is_override = if b.action == *action {
+            true
+        } else if b.action.0 == UNBOUND_ACTION {
+            bindings.iter().any(|lower| {
+                lower.layer != Layer::User
+                    && lower.action == *action
+                    && lower.keystrokes == b.keystrokes
+                    && (b.context_source.is_none() || b.context_source == lower.context_source)
+            })
+        } else {
+            false
+        };
+        if is_override {
+            out.push(UserOverride {
+                context_source: b.context_source.clone(),
+                key: b.key_source.clone(),
+            });
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// True if some binding declared AFTER `bindings[index]` (`candidate`)
@@ -353,6 +418,120 @@ mod tests {
         assert_eq!(keymap.bindings().len(), 1);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    fn focus_left() -> ActionId {
+        ActionId("workspace::focus_left".to_string())
+    }
+
+    fn overrides(docs: &[LayerDoc], action: &ActionId) -> Vec<(Option<String>, String)> {
+        let (keymap, diags) = build_keymap(docs, Modifiers::ALT, &registry());
+        assert!(diags.is_empty(), "{diags:?}");
+        user_overrides_for(keymap.bindings(), action)
+            .into_iter()
+            .map(|o| (o.context_source, o.key))
+            .collect()
+    }
+
+    #[test]
+    fn a_rebind_of_a_builtin_yields_both_halves_of_the_pair() {
+        // `apply_rebind` on a builtin `mod+h` → `mod+j` writes the new
+        // binding AND a `"none"` shadow over the old key. Both are the
+        // user's override of this action; removing only the first (what
+        // `r` did before) leaves the action unbound instead of reset.
+        let builtin = doc(
+            Layer::Builtin,
+            "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",
+        );
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+j\" = \"workspace::focus_left\"\n\"mod+h\" = \"none\"\n",
+        );
+        let mut got = overrides(&[builtin, user], &focus_left());
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (Some("workspace".to_string()), "mod+h".to_string()),
+                (Some("workspace".to_string()), "mod+j".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_shadow_over_a_builtin_is_an_override_of_that_action() {
+        // A `d` on a builtin row: the row derives as unbound, but the
+        // `"none"` entry IS the user's override and reset must lift it.
+        let builtin = doc(
+            Layer::Builtin,
+            "[[bindings]]\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",
+        );
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\n[bindings.keys]\n\"mod+h\" = \"none\"\n",
+        );
+        assert_eq!(
+            overrides(&[builtin, user], &focus_left()),
+            vec![(None, "mod+h".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_shadow_over_another_actions_key_is_not_this_actions_override() {
+        let builtin = doc(
+            Layer::Builtin,
+            "[[bindings]]\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n\"mod+l\" = \"workspace::focus_right\"\n",
+        );
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\n[bindings.keys]\n\"mod+l\" = \"none\"\n",
+        );
+        assert!(overrides(&[builtin, user], &focus_left()).is_empty());
+    }
+
+    #[test]
+    fn a_shadow_in_a_different_context_is_not_this_actions_override() {
+        // The shadow only silences the builtin where its context applies;
+        // a shadow under another context string never reaches it, so it
+        // is not an override of this action (the same context-equality
+        // approximation `effective_binding` states).
+        let builtin = doc(
+            Layer::Builtin,
+            "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",
+        );
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\ncontext = \"blotter\"\n[bindings.keys]\n\"mod+h\" = \"none\"\n",
+        );
+        assert!(overrides(&[builtin, user], &focus_left()).is_empty());
+    }
+
+    #[test]
+    fn a_desk_override_is_never_the_users_to_remove() {
+        let builtin = doc(
+            Layer::Builtin,
+            "[[bindings]]\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",
+        );
+        let desk = doc(
+            Layer::Desk,
+            "[[bindings]]\n[bindings.keys]\n\"mod+j\" = \"workspace::focus_left\"\n\"mod+h\" = \"none\"\n",
+        );
+        assert!(overrides(&[builtin, desk], &focus_left()).is_empty());
+    }
+
+    #[test]
+    fn the_override_carries_the_files_own_key_spelling() {
+        // The removal is `keys.remove(spelling)` on the user document, so
+        // the spelling must be the file's, not a re-rendering of the
+        // parsed keystroke (`alt+h` here, which would miss `mod+h`).
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",
+        );
+        assert_eq!(
+            overrides(&[user], &focus_left()),
+            vec![(None, "mod+h".to_string())]
+        );
     }
 
     #[test]
