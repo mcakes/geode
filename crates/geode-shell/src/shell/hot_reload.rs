@@ -145,10 +145,12 @@ impl ShellView {
     /// doc replaces the frame's slots, a changed `views`/`dimensions` doc
     /// tells the frame a config reload happened and emits `ShellEvent::
     /// ConfigReloaded` for the app bridge to forward to the data thread,
-    /// and a `sources`/`datasets` doc that disagrees with
-    /// `sources_baseline`/`datasets_baseline` — the docs the data engine
-    /// was actually built from, not merely the previous reload's config —
-    /// sets `restart_required` and emits `ShellEvent::RestartRequired`;
+    /// and a `sources`/`datasets` doc — or the `[pricing]` table
+    /// (line-pricer §5.5) — that disagrees with
+    /// `sources_baseline`/`datasets_baseline`/`pricing_baseline` — the
+    /// docs (and table) the data engine was actually built from, not
+    /// merely the previous reload's config — sets `restart_required` and
+    /// emits `ShellEvent::RestartRequired`;
     /// once the docs agree with that baseline again (M8, 3b final review:
     /// e.g. the offending edit is reverted) the message is cleared. That
     /// restart is about the data engine, not the frame: a `datasets`

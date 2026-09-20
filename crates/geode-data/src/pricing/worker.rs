@@ -239,8 +239,9 @@ pub(crate) mod tests {
 
     /// Prices anything but "FAIL" (an error) and "BOOM" (a panic), after
     /// `delay`, and records every underlying it was asked. `set_overrides`
-    /// pushes a clone into `overrides_seen` and refuses when the map
-    /// contains the key `"REFUSE"`.
+    /// pushes a clone into `overrides_seen`, refuses when the map contains
+    /// the key `"REFUSE"`, and panics when it contains `"BOOM"` (mirroring
+    /// `price`).
     pub(crate) struct FakePricer {
         pub(crate) asked: Arc<Mutex<Vec<String>>>,
         pub(crate) delay: Duration,
@@ -252,6 +253,9 @@ pub(crate) mod tests {
         }
         fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError> {
             self.overrides_seen.lock().unwrap().push(overrides.clone());
+            if overrides.spot.contains_key("BOOM") {
+                panic!("the fake pricer's set_overrides exploded");
+            }
             if overrides.spot.contains_key("REFUSE") {
                 return Err(PricingError("refused overrides".into()));
             }
@@ -575,6 +579,45 @@ pub(crate) mod tests {
         );
         assert!(
             w.request(params(3, 2, &["SPX"])),
+            "the worker is still alive"
+        );
+        assert!(next(&rx).results[0].2.is_ok());
+        w.shutdown();
+    }
+
+    #[test]
+    fn a_panicking_set_overrides_fails_the_batch_and_the_worker_survives() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = channel();
+        let sink: PriceSink = Arc::new(move |o| tx.send(o).is_ok());
+        let w = PricingWorker::spawn(
+            PricerConfig::with(Arc::new(FakePricer {
+                asked: asked.clone(),
+                delay: Duration::ZERO,
+                overrides_seen: Default::default(),
+            })),
+            sink,
+        );
+        let mut boom = MarketOverrides::default();
+        boom.spot.insert("BOOM".into(), 1.0);
+        assert!(w.request(params_with_overrides(5, 1, &["SPX", "NDX"], boom)));
+        let o = next(&rx);
+        assert_eq!(o.results.len(), 2);
+        for (_, _, r) in &o.results {
+            assert!(
+                r.as_ref()
+                    .unwrap_err()
+                    .starts_with("overrides refused: pricer panicked"),
+                "{:?}",
+                r
+            );
+        }
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "no line was priced against the wrong data source"
+        );
+        assert!(
+            w.request(params(5, 2, &["SPX"])),
             "the worker is still alive"
         );
         assert!(next(&rx).results[0].2.is_ok());
