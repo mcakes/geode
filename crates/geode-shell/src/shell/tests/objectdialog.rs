@@ -2992,6 +2992,220 @@ fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
     );
 }
 
+// ---------------------------------------------------------------------
+// `scope::save_current` (scope-save spec's amendment): the palette
+// action / scope-bar `save`-chip door onto what pre-2026-09-19 `n` used
+// to do — open the naming prompt seeded from the frame's own scope.
+// ---------------------------------------------------------------------
+
+fn set_frame_book_scope(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, book: &str) {
+    shell.update(cx, |s, cx| {
+        s.frame.update(cx, |f, _| {
+            f.set_scope(Scope {
+                dimensions: vec![DimensionSelection {
+                    column: "book".to_string(),
+                    values: vec![book.to_string()],
+                }],
+                ..Scope::default()
+            });
+        });
+    });
+}
+
+/// `scope::save_current` over a non-empty frame scope opens the naming
+/// prompt seeded `FromFrame`; typing a new name and `enter` writes the
+/// frame's own selection under it and lands in its (new) edit stage —
+/// exactly what pre-2026-09-19 `n` used to do, now reached through the
+/// palette/chip door instead of the browse list's `n`.
+#[gpui::test]
+fn scope_save_current_seeds_naming_from_the_frame_and_creates_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    set_frame_book_scope(&shell, &mut cx, "BK009");
+
+    dispatch_action(&shell, "scope::save_current", &mut cx);
+    cx.run_until_parked();
+
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "scope::save_current should have opened a modal"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_seed.clone()),
+        objectdialog::NameSeed::FromFrame
+    );
+
+    cx.simulate_input("today");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(
+        written.contains("[today.dimensions]") && written.contains("BK009"),
+        "{written}"
+    );
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { ref object } if object == "today"
+    ));
+    assert!(edit_draft(&shell, &cx, |d| d.is_new));
+}
+
+/// An empty frame scope has nothing to save: `scope::save_current` opens
+/// the dialog in browse, with a notice, and never enters naming at all.
+#[gpui::test]
+fn scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    assert!(shell.read_with(&cx, |s, cx| s.frame.read(cx).scope().is_empty()));
+
+    dispatch_action(&shell, "scope::save_current", &mut cx);
+    cx.run_until_parked();
+
+    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "nothing to save — no naming prompt"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("the frame's scope is empty — nothing to save".to_string())
+    );
+    assert!(!dir.path().join("scopes.toml").exists());
+}
+
+/// `enter` on a name already taken is refused with the same notice
+/// `n`/`c` give — `scope::save_current` reaches `create_from_name`'s one
+/// name check like every other naming path.
+#[gpui::test]
+fn scope_save_current_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    set_frame_book_scope(&shell, &mut cx, "BK009");
+
+    dispatch_action(&shell, "scope::save_current", &mut cx);
+    cx.run_until_parked();
+    cx.simulate_input("mine"); // the fixture's own saved scope
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming,
+        "still naming — nothing was created"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("'mine' already exists — open it instead".to_string())
+    );
+    assert_eq!(
+        saved_scope_books(&shell, &cx),
+        Some(vec!["BK001".to_string()]),
+        "the existing saved scope must be untouched"
+    );
+}
+
+/// `save_current` itself cannot be used as a saved scope's name — it is
+/// the palette action's own id (`Domain::Scopes.reserved_names()`), and
+/// letting a scope claim it would shadow `input.rs`'s dispatch arm.
+#[gpui::test]
+fn scope_save_current_refuses_its_own_name_as_reserved(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    set_frame_book_scope(&shell, &mut cx, "BK009");
+
+    dispatch_action(&shell, "scope::save_current", &mut cx);
+    cx.run_until_parked();
+    cx.simulate_input("save_current");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("'save_current' is reserved".to_string())
+    );
+    let written_path = dir.path().join("scopes.toml");
+    if written_path.exists() {
+        let written = std::fs::read_to_string(&written_path).unwrap();
+        assert!(!written.contains("save_current"), "{written}");
+    }
+}
+
+/// `escape` from a `FromFrame` naming prompt cancels like any other:
+/// back to browse, nothing written.
+#[gpui::test]
+fn escape_from_save_current_naming_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    set_frame_book_scope(&shell, &mut cx, "BK009");
+
+    dispatch_action(&shell, "scope::save_current", &mut cx);
+    cx.run_until_parked();
+    cx.simulate_input("today");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_seed.clone()),
+        objectdialog::NameSeed::Empty,
+        "cancel_naming resets naming_seed like every other seed"
+    );
+    assert!(!dir.path().join("scopes.toml").exists());
+}
+
+/// Review finding: `render::open`'s own guard (`shell.modal.is_some()`)
+/// refuses to open a SECOND modal, but it returns silently — and
+/// `open_save_scope` used to run past that refusal anyway, mutating
+/// whatever `object_dialog` was already there. With a Views dialog open,
+/// `scope::save_current` must leave it exactly as it was: still Views,
+/// still browsing, `naming_seed` still `Empty` (a Scopes-only field on
+/// an unrelated domain's state that must never be touched at all).
+#[gpui::test]
+fn scope_save_current_does_not_touch_an_already_open_dialog(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    set_frame_book_scope(&shell, &mut cx, "BK009");
+
+    dispatch_action(&shell, "scope::save_current", &mut cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.domain),
+        objectdialog::Domain::Views,
+        "the open dialog must still be Views, not Scopes"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "still browsing — scope::save_current must not have entered naming"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_seed.clone()),
+        objectdialog::NameSeed::Empty
+    );
+}
+
 /// A `SCOPES_KEY` outcome reaches the Values stage; a `PICKER_KEY` one
 /// never does, and a stale tag or a different column is dropped.
 #[gpui::test]

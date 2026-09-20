@@ -17,8 +17,10 @@ use crate::tiling::Orientation;
 mod watching {
     use super::*;
     use crate::keymap::KeyContext;
-    use crate::module::{Delivery, FindEvent, ModuleFactory, TileContent, TileOccupant};
-    use gpui::{App, Context, FocusHandle, Render, div};
+    use crate::module::{
+        Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+    };
+    use gpui::{App, Context, FocusHandle, Render, SharedString, div};
 
     pub const WATCHING_KIND: &str = "watching";
 
@@ -62,7 +64,10 @@ mod watching {
         fn find(&self, _: FindEvent, _: &mut Window, _: &mut App) {}
         fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
             match delivery {
+                // This tile never queries — nothing addressed here.
                 Delivery::Query(_) => {}
+                // This tile never prices — nothing addressed here.
+                Delivery::Price(_) => {}
             }
         }
         fn set_visible(&self, visible: bool, cx: &mut App) {
@@ -78,6 +83,10 @@ mod watching {
                 }
                 cx.notify();
             });
+        }
+        fn set_stack(&self, _: Option<StackHandle>, _: &mut App) {}
+        fn title(&self, _: &App) -> SharedString {
+            "watching".into()
         }
         fn serialize(&self, _: &App) -> toml::Table {
             toml::Table::new()
@@ -1054,7 +1063,11 @@ fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
 /// Dispatch an action id straight into the shell and draw once — the
 /// add rows are palette rows, and `dispatch` is exactly what a palette
 /// `enter` calls (`palette_ctl::dispatch_palette_item`).
-fn dispatch_and_draw(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, id: &str) {
+pub(super) fn dispatch_and_draw(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+    id: &str,
+) {
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
             s.dispatch(&ActionId(id.to_string()), None, window, cx);
@@ -1506,6 +1519,55 @@ fn a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other(cx: &mut gpui::
         )),
         "the other tile must not be delivered to: {:?}",
         log.borrow()
+    );
+}
+
+/// `Delivery::Price` (line-pricer spec §5.4) rides the same router:
+/// keyed like a query, delivered to that tile alone.
+#[gpui::test]
+fn a_price_delivery_is_routed_by_key_like_a_query(cx: &mut gpui::TestAppContext) {
+    use crate::module::Delivery;
+    use geode_core::pricing::PriceOutcome;
+    use geode_core::query::QueryKey;
+    use std::time::Instant;
+
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let first = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let second = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::Price(PriceOutcome {
+                    key: QueryKey(second.0),
+                    tag: 7,
+                    submitted: Instant::now(),
+                    results: Vec::new(),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+
+    let log = log.borrow();
+    assert!(
+        log.iter()
+            .any(|r| matches!(r, crate::module::recording::Recorded::Priced(t, 7) if *t == second)),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|r| matches!(r, crate::module::recording::Recorded::Priced(t, _) if *t == first)),
+        "{log:?}"
     );
 }
 

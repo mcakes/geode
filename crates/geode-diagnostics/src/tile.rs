@@ -16,7 +16,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::FindEvent;
+use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::chip;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -78,6 +78,14 @@ fn diag_version_for_section(section: Section, v: geode_shell::diagnostics::DiagV
 /// on every paint.
 fn header_text_for(section: Section) -> SharedString {
     format!("diagnostics · {} · [ ] to switch", section.name()).into()
+}
+
+/// [`DiagnosticsTile::title`]'s text (whole-branch review, Minor 5) — a
+/// pure function of `section` alone, same shape as `header_text_for`
+/// beside it, cached rather than `format!`-ed on every render the tile
+/// list or stack marker is open.
+fn title_text_for(section: Section) -> SharedString {
+    format!("diagnostics · {}", section.name()).into()
 }
 
 pub struct DiagnosticsTile {
@@ -142,8 +150,15 @@ pub struct DiagnosticsTile {
     /// `format!()` this fresh on every single paint, not just this
     /// tile's own rebuilds.
     header_text: SharedString,
+    /// [`Self::title`]'s cache, same reasoning as `header_text` beside
+    /// it — replaced only in `set_section`, never `format!`-ed in
+    /// `title()` itself.
+    title: SharedString,
     visible: bool,
     scroll: UniformListScrollHandle,
+    /// This tile's place in its stack (tile-stacks spec §5.1), painted in
+    /// the header (Task 9); `None` while not a stack member.
+    stack: Option<StackHandle>,
     #[cfg(test)]
     rebuild_count: u32,
 }
@@ -282,8 +297,10 @@ impl DiagnosticsTile {
             last_diag_versions,
             last_frame_versions,
             header_text: header_text_for(section),
+            title: title_text_for(section),
             visible: false,
             scroll: UniformListScrollHandle::new(),
+            stack: None,
             #[cfg(test)]
             rebuild_count: 0,
         };
@@ -481,6 +498,7 @@ impl DiagnosticsTile {
         }
         self.section = section;
         self.header_text = header_text_for(section);
+        self.title = title_text_for(section);
         self.cursor = 0;
         self.rebuild(cx);
     }
@@ -647,6 +665,15 @@ impl DiagnosticsTile {
         }
     }
 
+    pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
+        self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
     pub fn serialize(&self) -> toml::Table {
         let mut t = toml::Table::new();
         t.insert(
@@ -682,7 +709,11 @@ impl gpui::Render for DiagnosticsTile {
             .text_color(theme.muted_foreground)
             .border_b_1()
             .border_color(theme.border)
-            .debug_selector(|| format!("diagnostics-header-{}", self.tile.0))
+            .debug_selector(|| format!("diagnostics-header-{}", self.tile.0));
+        // The stack marker paints first, through the one builder every
+        // module uses (`StackHandle::marker`, spec §5.1).
+        header = header
+            .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
             .child(self.header_text.clone());
         // MIN-11 (fix round 1): a tile restored from a session with a
         // saved `filter` used to paint a narrowed list with no on-screen
@@ -1311,6 +1342,56 @@ mod tests {
         assert!(
             notified.get(),
             "set_visible(false) must notify the entity itself"
+        );
+    }
+
+    #[gpui::test]
+    fn title_names_the_section(cx: &mut gpui::TestAppContext) {
+        let (h, vcx) = open(cx);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "diagnostics · sources"
+        );
+    }
+
+    /// Whole-branch review, Minor 7: the title's cache (`Self::title`,
+    /// `title_text_for`) must follow a real section change, not just
+    /// read correctly on the section a tile opens in.
+    #[gpui::test]
+    fn title_follows_a_section_change(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section perf", cx).unwrap();
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "diagnostics · perf"
+        );
+    }
+
+    /// The stack marker (tile-stacks spec §5.1) paints only while the
+    /// tile is a stack member with more than one member, first in the
+    /// header strip.
+    #[gpui::test]
+    fn the_stack_marker_paints_only_while_a_member(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert!(vcx.debug_bounds("stack-marker-9").is_none());
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_stack(Some(StackHandle::new(2, 4, |_, _| {})), cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let marker = vcx.debug_bounds("stack-marker-9").expect("painted");
+        let header = vcx.debug_bounds("diagnostics-header-9").unwrap();
+        assert!(
+            marker.left() - header.left() < gpui::px(20.0),
+            "first in the strip"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "diagnostics · sources"
         );
     }
 

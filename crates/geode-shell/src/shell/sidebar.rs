@@ -53,6 +53,7 @@ use gpui_component::{ActiveTheme as _, Sizable as _, v_flex};
 
 use crate::actions::ActionId;
 use crate::shell::ShellView;
+use crate::shell::control::{self, PointerStates as _};
 use crate::shell::scale;
 
 /// Width of the sidebar icon rail, in pixels at the design rem
@@ -125,6 +126,24 @@ const WORKSPACE_TITLE: [&str; 9] = [
 /// into `ShellView` through the normal `dispatch` chain.
 pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl IntoElement {
     let theme = cx.theme();
+    // Pointer states (design guide: every control owes a hover and a
+    // pressed state; the cursor stays the arrow). An inactive disc is a
+    // filled chip; the gear is a bare glyph in a box. The ACTIVE disc
+    // takes none: it is the selected tab, and "selected" must stay
+    // distinct from "hovered" (the guide's state table) — a click on it
+    // switches to the workspace already shown.
+    let disc_states = control::paint(
+        theme,
+        control::Rest::Filled(theme.secondary),
+        theme.sidebar,
+        theme.sidebar_foreground,
+    );
+    let gear_states = control::paint(
+        theme,
+        control::Rest::Bare,
+        theme.sidebar,
+        theme.sidebar_foreground,
+    );
 
     let mut indicators = v_flex().w_full().items_center().gap_2().pt_2();
     for n in 1..=9u8 {
@@ -169,6 +188,10 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                     // 1px `theme.border` ring, `text_xs` label) — see the
                     // module docs for why this is not a real `Avatar`.
                     div()
+                        .id(gpui::ElementId::NamedInteger(
+                            SharedString::new_static("sidebar-workspace-disc"),
+                            n as u64,
+                        ))
                         .size(scale::design(24.))
                         .flex()
                         .items_center()
@@ -187,6 +210,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                             theme.sidebar_foreground
                         })
                         .text_xs()
+                        .when(!is_active, |d| d.pointer_states(disc_states))
                         .child(n.to_string()),
                 ),
         );
@@ -213,7 +237,20 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                 cx.notify();
             }),
         )
-        .child(Avatar::new().small().text_color(theme.sidebar_foreground));
+        .child(
+            // The hover box around the avatar, the shape a ghost icon
+            // button has: the avatar keeps its own circle and glyph
+            // colour, the box behind it takes the pointer states.
+            div()
+                .id("sidebar-profile-box")
+                .size(scale::design(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radius)
+                .pointer_states(gear_states)
+                .child(Avatar::new().small().text_color(theme.sidebar_foreground)),
+        );
 
     v_flex()
         .flex_none()

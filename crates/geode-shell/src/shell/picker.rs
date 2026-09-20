@@ -949,7 +949,9 @@ fn build(
         .child(filter)
         .child(body)
         .child(hint_row(
-            &picker.stage,
+            hints(&picker.stage),
+            "picker-hints",
+            WIDTH,
             theme.muted_foreground,
             theme.muted,
             theme.border,
@@ -959,11 +961,22 @@ fn build(
 }
 
 /// The footer hint line — `settings_view::build`'s own footer, narrowed
-/// to one row: a top border, then [`hints`] rendered as key chips
+/// to one row: a top border, then `hints` rendered as key chips
 /// (`keybindings_view::key_chip`, so a key's spelling looks identical
-/// across every dialog here) interleaved with muted prose.
-fn hint_row(stage: &Stage, fg: Hsla, chip_bg: Hsla, border: Hsla, radius: Pixels) -> AnyElement {
-    let children: Vec<AnyElement> = hints(stage)
+/// across every dialog here) interleaved with muted prose. Shared with
+/// the grouping picker (`groupingpicker`), the other filter-only dialog
+/// with a one-line vocabulary: `selector` is the line's own id and debug
+/// selector, `width` the dialog's.
+pub(crate) fn hint_row(
+    hints: &[Hint],
+    selector: &'static str,
+    width: f32,
+    fg: Hsla,
+    chip_bg: Hsla,
+    border: Hsla,
+    radius: Pixels,
+) -> AnyElement {
+    let children: Vec<AnyElement> = hints
         .iter()
         .map(|hint| match hint {
             Hint::Key(spec) => {
@@ -975,14 +988,14 @@ fn hint_row(stage: &Stage, fg: Hsla, chip_bg: Hsla, border: Hsla, radius: Pixels
         })
         .collect();
     div()
-        .id("picker-hints")
-        .w(scale::design(WIDTH))
+        .id(selector)
+        .w(scale::design(width))
         .pt_2()
         .border_t_1()
         .border_color(border)
         .text_sm()
         .text_color(fg)
-        .debug_selector(|| "picker-hints".to_string())
+        .debug_selector(move || selector.to_string())
         .child(
             h_flex()
                 .gap_1()

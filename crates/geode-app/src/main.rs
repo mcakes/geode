@@ -2,10 +2,12 @@
 //! registry, keymap, and starting workspace state, then opens the window on
 //! `geode_shell::shell::ShellView` — the keyboard-driven shell root.
 
+mod assets;
 mod bridge;
 mod crash;
 mod demo;
 mod demo_bus;
+mod demo_series;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -89,7 +91,7 @@ fn main() {
     }
 
     gpui_platform::application()
-        .with_assets(gpui_kit_assets::Assets)
+        .with_assets(assets::AppAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
             // Reclaim `tab`/`shift-tab` (from gpui-component's `Root` focus
@@ -131,13 +133,30 @@ fn main() {
                 let (adapter, feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
                 let mut adapters = geode_data::adapter::AdapterRegistry::default();
                 adapters.register(adapter);
+                // The timeseries demo sources (timeseries spec §5.6): the
+                // same seed as the risk generator, one with a catalogue
+                // and one without.
+                adapters.register(demo_series::DemoSeries::new("demo_kdb", 42, true));
+                adapters.register(demo_series::DemoSeries::new("demo_rest", 42, false));
                 (Some(feed), adapters)
             } else {
                 (None, geode_data::adapter::AdapterRegistry::default())
             };
 
-            let (mut services, desk, user, bridge, diagnostics_factory) =
-                build_shell_services(demo_root.as_deref(), log_ring, log_control, adapters, cx);
+            // Every build has the mock (line-pricer spec §5.5); a vendor
+            // crate, when one exists, registers itself here behind its
+            // feature gate.
+            let mut pricers = geode_data::PricerRegistry::default();
+            pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+
+            let (mut services, desk, user, bridge, diagnostics_factory) = build_shell_services(
+                demo_root.as_deref(),
+                log_ring,
+                log_control,
+                adapters,
+                pricers,
+                cx,
+            );
 
             // The demo bus itself (Task 10; a second producer added by
             // Task 11): spawned once, right after the services it feeds
@@ -670,6 +689,7 @@ fn build_shell_services(
     log_ring: Arc<Ring>,
     log_control: Arc<dyn LevelControl>,
     adapters: geode_data::adapter::AdapterRegistry,
+    pricers: geode_data::PricerRegistry,
     cx: &mut App,
 ) -> (
     ShellServices,
@@ -766,7 +786,7 @@ fn build_shell_services(
         std::env::var("LOCALAPPDATA").ok(),
         std::env::var("HOME").ok(),
     );
-    let bridge = bridge::data_setup(&config, db, adapters).map(|setup| {
+    let bridge = bridge::data_setup(&config, db, adapters, pricers).map(|setup| {
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);

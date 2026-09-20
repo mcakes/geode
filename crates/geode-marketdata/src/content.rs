@@ -12,10 +12,12 @@ use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent, TileOccupant};
+use geode_shell::module::{
+    Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+};
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
-use gpui::{App, Entity, Window};
+use gpui::{App, Entity, SharedString, Window};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -213,10 +215,18 @@ impl TileContent for MarketDataContent {
     fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
         match delivery {
             Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
+            // This tile never prices; an outcome addressed here is a routing bug.
+            Delivery::Price(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
+    }
+    fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
+    }
+    fn title(&self, cx: &App) -> SharedString {
+        self.tile.read(cx).title()
     }
     fn serialize(&self, cx: &App) -> toml::Table {
         self.tile.read(cx).serialize()

@@ -70,6 +70,7 @@ use gpui_component::{
 };
 
 use super::ShellView;
+use super::control::{ControlPaint, PointerStates as _};
 use super::scale;
 use crate::dialogmode::{self, DialogMode, FocusTarget};
 use crate::footer::{self, Hint};
@@ -506,6 +507,24 @@ pub fn open_shell_dialog_with_key<F>(
         let handle = view.dialog_input.read(cx).focus_handle(cx);
         handle.focus(window, cx);
     }
+    // A dialog opened from a MOUSE-DOWN — the scope bar's chips and
+    // grouping readout, the sidebar's gear — keeps the focus it just
+    // took (grouping-picker work, 2026-09-19): gpui focuses the
+    // `track_focus`ed element under the pointer on the bubble phase of
+    // that same mouse-down unless `prevent_default` was called by an
+    // earlier listener, and the chip's own listener (this call) runs
+    // before the shell root's, so without this the root took the field's
+    // focus back a moment after the dialog opened and typing went
+    // nowhere (`the_pick_chip_is_always_present_and_opens_the_picker`
+    // pins it on the `+` chip). On a KEY dispatch the flag is inert for
+    // this shell: every dispatch resets it first, the only key-event
+    // readers are `div`'s enter/space keyboard-click emulation for a
+    // FOCUSED element with click listeners (nothing in the shell is
+    // one), and neither platform crate reads `DispatchEventResult::
+    // default_prevented` — so the key paths pay nothing for sharing the
+    // door. gpui-component's own `Button` does the same in its
+    // mouse-down ("avoid focus on mouse down").
+    window.prevent_default();
     // The open-door seam of [`sync_dialog_text`]'s five seam classes
     // (spec §16.1/§16.6, folded to five by §17.3): a no-op for the
     // mode-less dialogs the `focus_filter` branch above
@@ -1415,27 +1434,40 @@ pub type StepHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 /// `stop_propagation` so the row's own select does not also run; the
 /// handler itself ends in [`sync_dialog_text`] at the caller, since it
 /// mutates the dialog off the key path (§17.1 rule 3).
+///
+/// A steppable chip is a control and takes `states`
+/// (`control::PointerStates`: hover and pressed fills); its `selector`
+/// doubles as its element id, which the pressed state needs. The inert
+/// form takes neither — a hover fill promises a click.
 pub(crate) fn value_chip(
     text: String,
     selector: String,
     fg: Hsla,
     bg: Hsla,
     radius: Pixels,
+    states: ControlPaint,
     on_step: Option<StepHandler>,
 ) -> AnyElement {
+    let selector: SharedString = selector.into();
     let base = div()
         .font_family(crate::fonts::MONO)
         .text_sm()
-        .flex_shrink_0()
-        .debug_selector(move || selector.clone());
+        .flex_shrink_0();
     match on_step {
-        None => base.text_color(fg).child(text).into_any_element(),
+        None => base
+            .debug_selector(move || selector.to_string())
+            .text_color(fg)
+            .child(text)
+            .into_any_element(),
         Some(on_step) => base
+            .id(selector.clone())
+            .debug_selector(move || selector.to_string())
             .px_1p5()
             .py_0p5()
             .rounded(radius)
             .bg(bg)
             .text_color(fg)
+            .pointer_states(states)
             .child(text)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 cx.stop_propagation();

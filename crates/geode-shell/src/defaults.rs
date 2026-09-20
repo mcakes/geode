@@ -115,6 +115,8 @@ context = "workspace"
 "ctrl+[" = "dock::toggle_left"
 "ctrl+]" = "dock::toggle_right"
 "ctrl+/" = "dock::toggle_bottom"
+"mod+]" = "stack::next"
+"mod+[" = "stack::prev"
 "ctrl+{" = "dock::move_left"
 "ctrl+}" = "dock::move_right"
 "ctrl+?" = "dock::move_bottom"
@@ -141,6 +143,8 @@ context = "workspace"
 "mod+/" = "frame::focus_text"
 "mod+p" = "frame::pick"
 "mod+t" = "frame::as_of"
+"mod+g" = "frame::grouping"
+"mod+n" = "tile::add"
 
 [[bindings]]
 context = "tile"
@@ -231,6 +235,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "dock::move_left", "Move tile to left dock", "Dock");
     action(reg, "dock::move_right", "Move tile to right dock", "Dock");
     action(reg, "dock::move_bottom", "Move tile to bottom dock", "Dock");
+    // Tile stacks (spec 2026-09-19 §4): cycle the focused member, open the
+    // member list, pop the member out. `pick`/`unstack` are palette-only.
+    action(reg, "stack::next", "Stack: Next", "Workspace");
+    action(reg, "stack::prev", "Stack: Previous", "Workspace");
+    action(reg, "stack::pick", "Stack: Pick…", "Workspace");
+    action(reg, "stack::unstack", "Stack: Unstack", "Workspace");
     for i in 1..=9 {
         action(
             reg,
@@ -325,6 +335,17 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // chord because naming a colour is an occasional act of desk
     // configuration, not something reached for mid-session.
     action(reg, "config::colours", "Edit colours…", "Configuration");
+    // Open the user config directory in the OS file manager (Finder /
+    // Explorer) — the door to the files behind every `config::*` dialog,
+    // for the edits the dialogs do not cover. Palette-only like its
+    // siblings. No `…`: it opens a system window, not a dialog of
+    // Geode's own.
+    action(
+        reg,
+        "config::open_directory",
+        "Open config directory",
+        "Configuration",
+    );
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no
@@ -360,6 +381,14 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Tile",
     );
     action(reg, "tile::find", "Find in tile", "Tile");
+    // The tile picker (2026-09-19): `mod+n` lists the roster's kinds with
+    // typeahead — the choosing form of the `<Kind>: Split` rows
+    // `register_add_actions` registers, and what a bare double-click on
+    // a placeholder tile opens. Category "Tiles" beside those rows; `…`
+    // because it opens a dialog. NOT `tile::add_<kind>`-shaped, so
+    // `parse_add_action` never reads it as an add of an empty kind (its
+    // prefix is `tile::add_`, underscore included).
+    action(reg, "tile::add", "Add a tile…", "Tiles");
     // The nine grouping slots (Phase 3 §4.2): ctrl+1..9 activate a
     // configured slot (an empty one is ignored — see `Frame::
     // set_active_slot`), ctrl+0 returns every following tile to its
@@ -386,6 +415,25 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "frame::scope_undo", "Undo scope change", "Frame");
     action(reg, "frame::scope_redo", "Redo scope change", "Frame");
     action(reg, "frame::scope_clear", "Clear scope", "Frame");
+    // Save the frame's current scope as a new named one (scope-save
+    // spec's amendment to Part 2a's `Domain::Scopes`): opens the Scopes
+    // dialog straight onto the naming prompt, seeded from the frame
+    // (`objectdialog::render::open_save_scope`) — the palette door onto
+    // what pre-2026-09-19 `n` used to do. Category "Scope", matching
+    // `register_scope_actions`'s own per-scope rows, not "Frame" — this
+    // is the save half of the same vocabulary. Palette-only, like
+    // `frame::scope_clear` above: an occasional deliberate act. **Trap**
+    // (CLAUDE.md's Scopes bullet has the same warning): `input.rs`'s
+    // dispatch must match this id BEFORE its `strip_prefix("scope::")`
+    // arm, which would otherwise read `save_current` as the name of a
+    // saved scope to load — `Domain::Scopes.reserved_names()` refuses a
+    // saved scope named `save_current` for the same reason.
+    action(
+        reg,
+        "scope::save_current",
+        "Scope: Save current as…",
+        "Scope",
+    );
     // The dimension picker (Phase 4a §3.3), opened on the column-choice
     // stage — `mod+p`. The per-column `frame::pick_<column>` actions
     // (opening straight onto one column's values stage) are registered
@@ -394,6 +442,11 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // schema to enumerate at `register_builtin_actions`' own call site
     // (before any config is loaded).
     action(reg, "frame::pick", "Pick a dimension…", "Frame");
+    // The grouping picker (2026-09-19): `mod+g` lists the filled slots
+    // and the view default with typeahead — the choosing form of the
+    // nine `frame::slot_N` chords above, and what a click on the
+    // toolbar's grouping readout opens. `…` because it opens a dialog.
+    action(reg, "frame::grouping", "Pick a grouping…", "Frame");
     // The scope bar's live text field (Phase 4a §3.11): `mod+/` moves
     // focus into it from anywhere in the shell, the one keyboard route
     // in (typing itself, once focused, needs no action — the field's own
@@ -471,12 +524,29 @@ pub fn register_pick_actions(reg: &mut ActionRegistry, columns: &[crate::shell::
 /// path even when there is nothing to register.
 pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scopes::SavedScopes) {
     for name in saved.keys() {
-        action(
-            reg,
-            &format!("scope::{name}"),
-            &format!("Scope: {name}"),
-            "Scope",
-        );
+        let id = format!("scope::{name}");
+        // A config VALUE must never panic the app, however it reached
+        // disk — `Frame::save_scope` and this dialog's own naming prompt
+        // both refuse `geode_core::scopes::RESERVED_NAMES` (chiefly
+        // `save_current`, this crate's own `scope::save_current` action
+        // id), but that is belt, not suspenders: a hand-edited or
+        // desk-layer `scopes.toml` reaches this loop with no door to
+        // check it first, and `action`'s `.expect("builtin action ids
+        // are unique by construction")` used to take that literally,
+        // crashing at every launch with no in-app way for a trader to
+        // fix the file that caused it (the review finding this closes).
+        // Skipping and logging once is the whole fix: the saved scope
+        // still exists and loads fine through `:scope load`/`Frame::
+        // load_scope`, it simply gets no palette row of its own under a
+        // name something else already claimed.
+        if reg.contains(&ActionId(id.clone())) {
+            tracing::warn!(
+                target: "geode::config",
+                "scopes: '{name}' collides with an existing action id ({id}); no palette row for it"
+            );
+            continue;
+        }
+        action(reg, &id, &format!("Scope: {name}"), "Scope");
     }
 }
 
@@ -512,10 +582,19 @@ pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) {
             &format!("{title}: Split Vertical"),
             "Tiles",
         );
+        action(
+            reg,
+            &format!("tile::add_{kind}_stacked"),
+            &format!("{title}: Stack"),
+            "Tiles",
+        );
     }
 }
 
-fn capitalize(kind: &str) -> String {
+/// A kind's palette title (`blotter` → `Blotter`) — also the tile
+/// picker's row text (`shell::choicedialog`), so the two spell a kind
+/// the same way.
+pub fn capitalize(kind: &str) -> String {
     let mut chars = kind.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -523,22 +602,33 @@ fn capitalize(kind: &str) -> String {
     }
 }
 
+/// How an add row places its tile (spec 2026-09-08 §4.2, tile-stacks
+/// spec §6.1): a split in an explicit or setting-resolved direction, or
+/// stacked onto the focused tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddPlacement {
+    Split(Option<crate::tiling::Orientation>),
+    Stacked,
+}
+
 /// The inverse of [`register_add_actions`] for `ShellView::dispatch`:
-/// `(kind, explicit direction)` for a `tile::add_*` id, `None` for
-/// anything else. The suffix is peeled BEFORE the kind is read, so a
-/// kind can never be misparsed by a suffix of its own name, and an empty
-/// kind is not an add.
-pub fn parse_add_action(id: &str) -> Option<(&str, Option<crate::tiling::Orientation>)> {
+/// `(kind, placement)` for a `tile::add_*` id, `None` for anything else.
+/// The suffix is peeled BEFORE the kind is read, so a kind can never be
+/// misparsed by a suffix of its own name, and an empty kind is not an
+/// add.
+pub fn parse_add_action(id: &str) -> Option<(&str, AddPlacement)> {
     use crate::tiling::Orientation;
     let rest = id.strip_prefix("tile::add_")?;
-    let (kind, dir) = if let Some(k) = rest.strip_suffix("_horizontal") {
-        (k, Some(Orientation::Horizontal))
+    let (kind, placement) = if let Some(k) = rest.strip_suffix("_horizontal") {
+        (k, AddPlacement::Split(Some(Orientation::Horizontal)))
     } else if let Some(k) = rest.strip_suffix("_vertical") {
-        (k, Some(Orientation::Vertical))
+        (k, AddPlacement::Split(Some(Orientation::Vertical)))
+    } else if let Some(k) = rest.strip_suffix("_stacked") {
+        (k, AddPlacement::Stacked)
     } else {
-        (rest, None)
+        (rest, AddPlacement::Split(None))
     };
-    (!kind.is_empty()).then_some((kind, dir))
+    (!kind.is_empty()).then_some((kind, placement))
 }
 
 /// The default primary modifier (spec §3.1: Alt, remappable).
@@ -659,6 +749,60 @@ mod tests {
         }
     }
 
+    /// `config::open_directory` sits beside the six `Edit …` dialogs in
+    /// the palette's Configuration category, and its title carries no
+    /// `…` — it opens a system window, not a dialog of Geode's own (the
+    /// `…` rule in CLAUDE.md is "opens a dialog").
+    #[test]
+    fn open_config_directory_is_registered_under_configuration_without_ellipsis() {
+        use crate::actions::ActionId;
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        let def = reg
+            .get(&ActionId("config::open_directory".to_string()))
+            .expect("config::open_directory registered");
+        assert_eq!(def.category, "Configuration");
+        assert_eq!(def.title, "Open config directory");
+    }
+
+    /// Review finding: `Frame::save_scope`/`Domain::Scopes` reserve
+    /// `save_current`, but a `scopes.toml` written before that ruling
+    /// (or edited by hand, or landed at the desk layer where no dialog
+    /// runs the check) can still name a scope `save_current` — and
+    /// `register_scope_actions` used to hand that straight to `action`'s
+    /// `.expect("builtin action ids are unique by construction")`,
+    /// panicking the whole app at every launch. It must skip the
+    /// collision instead: the builtin `scope::save_current` action
+    /// (registered by `register_builtin_actions`, ahead of this call in
+    /// every real startup) keeps its own title, and an unrelated saved
+    /// scope alongside it still gets its own row.
+    #[test]
+    fn register_scope_actions_skips_a_collision_and_does_not_panic() {
+        use crate::actions::ActionId;
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        let mut saved = geode_core::scopes::SavedScopes::new();
+        saved.insert(
+            "save_current".to_string(),
+            geode_core::scope::Scope::default(),
+        );
+        saved.insert("eu".to_string(), geode_core::scope::Scope::default());
+
+        register_scope_actions(&mut reg, &saved); // must not panic
+
+        let builtin = reg
+            .get(&ActionId("scope::save_current".to_string()))
+            .expect("the builtin action must still be registered");
+        assert_eq!(
+            builtin.title, "Scope: Save current as…",
+            "the collision must not overwrite the builtin action's own title"
+        );
+        assert!(
+            reg.contains(&ActionId("scope::eu".to_string())),
+            "a saved scope with no colliding id still gets its own row"
+        );
+    }
+
     #[test]
     fn mod_alias_read_from_config_with_fallback() {
         let empty = Config::load(&ConfigSources::default());
@@ -761,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn register_add_actions_registers_three_rows_per_kind_in_the_tiles_category() {
+    fn register_add_actions_registers_four_rows_per_kind_in_the_tiles_category() {
         let mut reg = ActionRegistry::default();
         register_add_actions(&mut reg, &["blotter", "diagnostics"]);
         let expect = |id: &str, title: &str| {
@@ -775,8 +919,9 @@ mod tests {
         expect("tile::add_blotter", "Blotter: Split");
         expect("tile::add_blotter_horizontal", "Blotter: Split Horizontal");
         expect("tile::add_blotter_vertical", "Blotter: Split Vertical");
+        expect("tile::add_blotter_stacked", "Blotter: Stack");
         expect("tile::add_diagnostics", "Diagnostics: Split");
-        assert_eq!(reg.iter().count(), 6);
+        assert_eq!(reg.iter().count(), 8);
         let mut empty = ActionRegistry::default();
         register_add_actions(&mut empty, &[]);
         assert_eq!(empty.iter().count(), 0);
@@ -787,15 +932,22 @@ mod tests {
         use crate::tiling::Orientation;
         assert_eq!(
             parse_add_action("tile::add_blotter"),
-            Some(("blotter", None))
+            Some(("blotter", AddPlacement::Split(None)))
         );
         assert_eq!(
             parse_add_action("tile::add_blotter_horizontal"),
-            Some(("blotter", Some(Orientation::Horizontal)))
+            Some((
+                "blotter",
+                AddPlacement::Split(Some(Orientation::Horizontal))
+            ))
         );
         assert_eq!(
             parse_add_action("tile::add_blotter_vertical"),
-            Some(("blotter", Some(Orientation::Vertical)))
+            Some(("blotter", AddPlacement::Split(Some(Orientation::Vertical))))
+        );
+        assert_eq!(
+            parse_add_action("tile::add_blotter_stacked"),
+            Some(("blotter", AddPlacement::Stacked))
         );
         assert_eq!(parse_add_action("tile::add_"), None);
         assert_eq!(parse_add_action("tile::add__vertical"), None);

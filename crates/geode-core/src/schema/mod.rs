@@ -22,6 +22,10 @@ pub enum Family {
     #[default]
     Measures,
     Document,
+    /// Timeseries spec §4: a fixed five-column, bitemporal, append-only
+    /// table per dataset. Declares no columns; `SERIES_COLUMNS` implies
+    /// them.
+    Series,
 }
 
 impl Family {
@@ -29,10 +33,25 @@ impl Family {
         match s {
             "measures" => Some(Family::Measures),
             "document" => Some(Family::Document),
+            "series" => Some(Family::Series),
             _ => None,
         }
     }
 }
+
+/// The series family's two retention windows (timeseries spec §4.7).
+/// `retention` bounds superseded rows by `received_at`; `history`
+/// bounds every row by `ts`. `None` is unbounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SeriesRetention {
+    pub retention: Option<std::time::Duration>,
+    pub history: Option<std::time::Duration>,
+}
+
+/// The series family's storage and projection order (timeseries spec
+/// §4.3): the one list `store::series` DDL, `append_series` and Part 2's
+/// query compiler share, so no two can disagree about a column's position.
+pub const SERIES_COLUMNS: [&str; 5] = ["source", "series_id", "ts", "received_at", "value"];
 
 #[derive(Debug, Clone, Default)]
 pub struct DatasetSpec {
@@ -47,11 +66,30 @@ pub struct DatasetSpec {
     /// order — also the order a document request sorts by (spec §7).
     /// Empty for the measure family.
     pub axes: Vec<String>,
+    /// The app itself is this dataset's writer (`Request::Publish`); no
+    /// `[sources]` entry may feed it, and the bridge does not bump the
+    /// frame's data version when it publishes (line-pricer spec §7.2).
+    /// Document family only.
+    pub local: bool,
+    /// Series family only: its retention windows. `None` on every other
+    /// family, `Some` (possibly both unbounded) on a series dataset.
+    pub series_retention: Option<SeriesRetention>,
 }
 
 impl DatasetSpec {
     pub fn is_document(&self) -> bool {
         self.family == Family::Document
+    }
+
+    pub fn is_series(&self) -> bool {
+        self.family == Family::Series
+    }
+
+    /// The implied columns of a series dataset, in storage order. Answers
+    /// the same five names for any dataset; only a series dataset's
+    /// tables carry them.
+    pub fn series_columns(&self) -> &'static [&'static str] {
+        &SERIES_COLUMNS
     }
 
     pub fn column(&self, name: &str) -> Option<&ColumnSpec> {
@@ -129,6 +167,11 @@ impl DatasetSpec {
     /// and the one place it is spelled out — the Groupings dialog and the
     /// blotter's `:group` completion both read it.
     pub fn groupable_columns(&self) -> Vec<&str> {
+        if self.is_series() {
+            // Timeseries spec §4.3: no scope or grouping reaches a series;
+            // the series query takes no scope at all.
+            return Vec::new();
+        }
         if self.is_document() {
             // No grain carries anything here; the identity dimensions are
             // the whole grouping vocabulary and an axis is row identity
@@ -218,6 +261,24 @@ impl SchemaSpec {
                     }
                 },
             };
+            let local = match ds_value.get("local") {
+                None => false,
+                Some(v) => match v.as_bool() {
+                    Some(b) => b,
+                    None => {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            layer: None,
+                            file: None,
+                            message: format!(
+                                "dataset '{ds_name}': 'local' must be true or false; treated as false"
+                            ),
+                            path: Some(format!("datasets.{ds_name}.local")),
+                        });
+                        false
+                    }
+                },
+            };
             let string_list =
                 |field: &str, diags: &mut Vec<Diagnostic>| -> Result<Vec<String>, ()> {
                     match ds_value.get(field) {
@@ -271,7 +332,77 @@ impl SchemaSpec {
                 family,
                 key,
                 axes,
+                local,
+                series_retention: None,
             };
+            if family == Family::Series {
+                // Every way a declared window can fail to become one is an
+                // error diagnostic here and `None` (unbounded) in the spec,
+                // because both silent forms were reachable and neither is
+                // visible downstream. A non-string (`retention = 30`, an
+                // easy TOML mistake) read through `as_str()` alone is
+                // indistinguishable from an absent key; a value whose
+                // microseconds do not fit an `i64` (`parse_duration`
+                // accepts `y`, so `"300000000y"` parses) reaches
+                // `store::series::cutoff` as unrepresentable and sweeps
+                // NOTHING. With this check "an unrepresentable window
+                // sweeps nothing" is only reachable by a hand-built
+                // `DatasetSpec` (timeseries spec §4.10).
+                let mut window = |field: &str| -> Option<std::time::Duration> {
+                    let value = ds_value.get(field)?;
+                    let parsed = match value.as_str() {
+                        Some(raw) => crate::source_config::parse_duration(raw).ok_or_else(|| {
+                            format!(
+                                "dataset '{ds_name}': '{field}' must be a duration such as \
+                                 \"30d\", \"12h\" or \"5y\"; unbounded"
+                            )
+                        }),
+                        None => Err(format!(
+                            "dataset '{ds_name}': '{field}' must be a duration string such as \
+                             \"30d\" or \"5y\"; unbounded"
+                        )),
+                    }
+                    .and_then(|d| {
+                        if i64::try_from(d.as_micros()).is_ok() {
+                            Ok(d)
+                        } else {
+                            Err(format!(
+                                "dataset '{ds_name}': '{field}' is too large to apply (at most \
+                                 about 292,000 years); unbounded"
+                            ))
+                        }
+                    });
+                    match parsed {
+                        Ok(d) => Some(d),
+                        Err(message) => {
+                            diags.push(Diagnostic {
+                                severity: Severity::Error,
+                                layer: None,
+                                file: None,
+                                message,
+                                path: Some(format!("datasets.{ds_name}.{field}")),
+                            });
+                            None
+                        }
+                    }
+                };
+                dataset.series_retention = Some(SeriesRetention {
+                    retention: window("retention"),
+                    history: window("history"),
+                });
+            } else {
+                for field in ["retention", "history"] {
+                    if ds_value.get(field).is_some() {
+                        diags.push(note(
+                            format!("datasets.{ds_name}.{field}"),
+                            format!(
+                                "dataset '{ds_name}': '{field}' applies to the series family \
+                                 only; ignored"
+                            ),
+                        ));
+                    }
+                }
+            }
             // Both paths fall through to `validate_dataset` and the guard
             // below. An early `push`-and-`continue` here is what let a
             // document dataset with no `[columns]` table reach the schema
@@ -281,10 +412,14 @@ impl SchemaSpec {
             // neither stored nor queried, and it must be dropped by the
             // same rule that drops a refused one.
             match ds_value.get("columns").and_then(|v| v.as_table()) {
-                None => diags.push(note(
+                None if family != Family::Series => diags.push(note(
                     format!("datasets.{ds_name}"),
                     format!("dataset '{ds_name}': no [columns] table"),
                 )),
+                // The series family implies its columns (timeseries spec
+                // §4.3); declaring none is the correct, and only sane,
+                // shape, not an omission worth a diagnostic.
+                None => {}
                 Some(cols) => {
                     for (col_name, col_value) in cols {
                         match parse_column(ds_name, family, col_name, col_value) {
@@ -347,6 +482,25 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 ),
             ));
         }
+    }
+
+    if ds.local && !ds.is_document() {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: format!(
+                "dataset '{}': 'local' is accepted on the document family only",
+                ds.name
+            ),
+            path: Some(format!("datasets.{}.local", ds.name)),
+        });
+        ds.local = false;
+    }
+
+    if ds.is_series() {
+        diags.extend(validate_series(ds));
+        return diags;
     }
 
     if ds.is_document() {
@@ -800,6 +954,44 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     diags
 }
 
+/// The series family's load-time rules (timeseries spec §4.3): the
+/// family implies its columns, so any declared column is refused and
+/// dropped, and `key`/`axes` are refused and cleared. The dataset itself
+/// is always kept — there is nothing a trader can get wrong that makes
+/// its five-column table unbuildable.
+fn validate_series(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let name = ds.name.clone();
+    let err = |message: String, path: String| Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message,
+        path: Some(path),
+    };
+    for c in &ds.columns {
+        diags.push(err(
+            format!(
+                "dataset '{name}' column '{}': the series family implies its columns \
+                 (source, series_id, ts, received_at, value); column dropped",
+                c.name
+            ),
+            format!("datasets.{name}.columns.{}", c.name),
+        ));
+    }
+    ds.columns.clear();
+    for (field, list) in [("key", &mut ds.key), ("axes", &mut ds.axes)] {
+        if !list.is_empty() {
+            diags.push(err(
+                format!("dataset '{name}': '{field}' is not a series family key; ignored"),
+                format!("datasets.{name}.{field}"),
+            ));
+            list.clear();
+        }
+    }
+    diags
+}
+
 fn note(path: String, message: String) -> Diagnostic {
     Diagnostic {
         severity: Severity::Warning,
@@ -870,7 +1062,7 @@ fn parse_column(
         "attribute" => ColumnRole::Attribute {
             grain: match family {
                 Family::Measures => Some(grain_of(table)?),
-                Family::Document => None,
+                Family::Document | Family::Series => None,
             },
         },
         "axis" => ColumnRole::Axis,
@@ -1010,6 +1202,91 @@ required = false
             "required defaults true"
         );
         assert!(!ds.column("cross_gamma02").unwrap().required);
+    }
+
+    #[test]
+    fn local_is_read_on_a_document_dataset_and_defaults_to_false() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(r#"
+[sheets]
+family = "document"
+local = true
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+
+[cvi]
+family = "document"
+key = ["u"]
+axes = ["t"]
+[cvi.columns.u]
+type = "utf8"
+role = "dimension"
+[cvi.columns.t]
+type = "date"
+role = "axis"
+[cvi.columns.v]
+type = "f64"
+role = "value"
+"#));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(schema.dataset("sheets").unwrap().local);
+        assert!(!schema.dataset("cvi").unwrap().local);
+    }
+
+    #[test]
+    fn local_on_a_measure_dataset_is_an_error_and_cleared() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(r#"
+[risk]
+local = true
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+grain = "book"
+[risk.columns.npv]
+type = "f64"
+role = "measure"
+"#));
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("datasets.risk.local"))
+            .expect("a diagnostic at the key");
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("document family"), "{}", d.message);
+        assert!(!schema.dataset("risk").unwrap().local, "cleared");
+    }
+
+    #[test]
+    fn a_non_bool_local_is_a_warning_and_false() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(r#"
+[sheets]
+family = "document"
+local = "yes"
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+"#));
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("datasets.sheets.local"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert!(!schema.dataset("sheets").unwrap().local);
     }
 
     #[test]
@@ -1889,6 +2166,195 @@ role = "attribute"
         assert_eq!(
             diags[0].path.as_deref(),
             Some("datasets.risk.columns.npv.type"),
+            "{diags:?}"
+        );
+    }
+
+    // --- the series family (timeseries spec §4.2, §4.3) --------------------
+
+    fn series_schema(text: &str) -> (SchemaSpec, Vec<Diagnostic>) {
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc)
+    }
+
+    #[test]
+    fn a_series_dataset_declares_no_columns_and_implies_five() {
+        let (schema, diags) = series_schema(
+            r#"
+[series]
+family = "series"
+retention = "30d"
+history = "5y"
+"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("series").unwrap();
+        assert!(ds.is_series());
+        assert!(!ds.is_document());
+        assert!(ds.columns.is_empty());
+        assert_eq!(
+            ds.series_columns(),
+            &["source", "series_id", "ts", "received_at", "value"]
+        );
+        let r = ds.series_retention.as_ref().unwrap();
+        assert_eq!(
+            r.retention,
+            Some(std::time::Duration::from_secs(30 * 86_400))
+        );
+        assert_eq!(
+            r.history,
+            Some(std::time::Duration::from_secs(5 * 365 * 86_400))
+        );
+        assert!(
+            ds.groupable_columns().is_empty(),
+            "no scope reaches a series"
+        );
+    }
+
+    #[test]
+    fn retention_and_history_default_to_unbounded() {
+        let (schema, diags) = series_schema("[series]\nfamily = \"series\"\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        let r = schema
+            .dataset("series")
+            .unwrap()
+            .series_retention
+            .as_ref()
+            .unwrap();
+        assert_eq!((r.retention, r.history), (None, None));
+    }
+
+    #[test]
+    fn a_declared_column_on_a_series_dataset_is_an_error_and_dropped() {
+        let (schema, diags) = series_schema(
+            r#"
+[series]
+family = "series"
+[series.columns.value]
+type = "f64"
+role = "value"
+"#,
+        );
+        let ds = schema.dataset("series").unwrap();
+        assert!(
+            ds.columns.is_empty(),
+            "the column is dropped, the dataset kept"
+        );
+        assert!(
+            diags.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path.as_deref() == Some("datasets.series.columns.value")
+                    && d.message.contains("implies its columns")
+            }),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn key_axes_and_a_bad_duration_are_refused_on_a_series_dataset() {
+        let (schema, diags) = series_schema(
+            r#"
+[series]
+family = "series"
+key = ["x"]
+axes = ["y"]
+retention = "soon"
+"#,
+        );
+        let ds = schema.dataset("series").unwrap();
+        assert!(ds.key.is_empty() && ds.axes.is_empty());
+        assert_eq!(ds.series_retention.as_ref().unwrap().retention, None);
+        for path in [
+            "datasets.series.key",
+            "datasets.series.axes",
+            "datasets.series.retention",
+        ] {
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.severity == Severity::Error && d.path.as_deref() == Some(path)),
+                "missing error at {path}: {diags:?}"
+            );
+        }
+    }
+
+    /// A window that parses but whose microseconds exceed `i64::MAX`
+    /// (`parse_duration` accepts `y`) would reach `store::series::cutoff`
+    /// as an unrepresentable window and sweep NOTHING. The load-time
+    /// diagnostic is what keeps that from being a silent "unbounded".
+    #[test]
+    fn an_out_of_range_window_is_an_error_and_unbounded() {
+        let (schema, diags) = series_schema(
+            r#"
+[series]
+family = "series"
+retention = "300000000y"
+"#,
+        );
+        assert_eq!(
+            schema
+                .dataset("series")
+                .unwrap()
+                .series_retention
+                .as_ref()
+                .unwrap()
+                .retention,
+            None
+        );
+        assert!(
+            diags.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path.as_deref() == Some("datasets.series.retention")
+                    && d.message.contains("too large to apply")
+            }),
+            "{diags:?}"
+        );
+    }
+
+    /// `retention = 30` is an easy TOML mistake; `as_str()` alone turns it
+    /// into "absent", so it must be diagnosed rather than silently
+    /// unbounded.
+    #[test]
+    fn a_non_string_window_is_an_error_and_unbounded() {
+        let (schema, diags) = series_schema(
+            r#"
+[series]
+family = "series"
+retention = 30
+history = "5y"
+"#,
+        );
+        let r = schema.dataset("series").unwrap().series_retention.unwrap();
+        assert_eq!(r.retention, None);
+        assert_eq!(
+            r.history,
+            Some(std::time::Duration::from_secs(5 * 365 * 86_400)),
+            "the sibling window is unaffected"
+        );
+        assert!(
+            diags.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path.as_deref() == Some("datasets.series.retention")
+                    && d.message.contains("must be a duration string")
+            }),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn retention_on_a_measure_dataset_is_a_warning() {
+        let (_, diags) = series_schema(
+            r#"
+[risk]
+retention = "30d"
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+"#,
+        );
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Warning
+                && d.path.as_deref() == Some("datasets.risk.retention")),
             "{diags:?}"
         );
     }

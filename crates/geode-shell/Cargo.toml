@@ -30,6 +30,12 @@ gpui-component.workspace = true
 # calendar to the day grid on every open (`asof_view::open`). The pin is
 # the root's `=0.6.2`; nothing else from the unstyled layer is used here.
 gpui-base.workspace = true
+# For the scope bar's save chip alone: `Save` is not one of the 101 icons
+# `gpui_component::IconName` names, so the chip names it through the
+# shared catalog (`gpui_kit_assets::IconName`, which `Icon::new` accepts
+# directly). The bytes are embedded by `geode-app`'s asset source, not
+# here — an `IconName` is only a path. Same pin as the root's `=0.6.2`.
+gpui-kit-assets.workspace = true
 toml = "1.1.4"
 serde_json = "1.0.151"
 toml_edit = "0.25.13"
@@ -44,6 +50,15 @@ chrono = "0.4.42"
 tracing.workspace = true
 
 [dev-dependencies]
+# Test-feature parity (2026-09-19): the downstream crates' dev-dependencies
+# enable this crate's `test-support`, so `cargo test --workspace` compiles
+# geode-shell with it on — and `cargo test -p geode-shell` used to compile
+# a second, feature-less copy of the same 95k lines (and the mutation
+# harness a third, per entry). A self dev-dependency (cargo allows it for
+# exactly this; geode-core's is the precedent) makes the two graphs one.
+# Every `test-support` cfg is `any(test, feature = "test-support")`, so
+# nothing is defined twice with both on.
+geode-shell = { path = ".", features = ["test-support"] }
 tempfile = "3.27.0"
 # The Snapshot fixture builder, so probe tests never name an Arrow type.
 geode-core = { workspace = true, features = ["test-support"] }

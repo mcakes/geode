@@ -382,7 +382,7 @@ fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
 
 /// The default mod alias (Alt) held on a mouse event — matches the
 /// `alt-h`-style keystrokes the e2e tests already use for `mod+`.
-fn alt_held() -> gpui::Modifiers {
+pub(super) fn alt_held() -> gpui::Modifiers {
     gpui::Modifiers {
         alt: true,
         ..gpui::Modifiers::none()
@@ -393,7 +393,7 @@ fn alt_held() -> gpui::Modifiers {
 /// tile's laid-out rect — the same chrome-offset + dock-carve math
 /// `Render for ShellView` uses, so the tests track real geometry
 /// instead of duplicating guesses.
-fn main_tile_point(
+pub(super) fn main_tile_point(
     cx: &mut gpui::VisualTestContext,
     shell: &Entity<ShellView>,
     id: TileId,
@@ -451,6 +451,52 @@ fn dock_point(
             .into_iter()
             .find(|(s, _)| *s == side)
             .expect("dock visible in the layout")
+            .1;
+        gpui::point(
+            px(sidebar::width(window) + r.x + r.w * fx),
+            px(toolbar_height + r.y + r.h * fy),
+        )
+    })
+}
+
+/// Window-space point at fractional coordinates within a tile laid out
+/// inside a visible dock's own tree — the dock counterpart of
+/// [`main_tile_point`], laying `side`'s tree out inside the dock frame
+/// [`dock_layout`] carves rather than treating the whole frame as one
+/// drop target.
+pub(super) fn dock_tile_point(
+    cx: &mut gpui::VisualTestContext,
+    shell: &Entity<ShellView>,
+    side: DockSide,
+    id: TileId,
+    fx: f32,
+    fy: f32,
+) -> gpui::Point<gpui::Pixels> {
+    cx.update(|window, app| {
+        let viewport = window.viewport_size();
+        let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: (f32::from(viewport.width) - sidebar::width(window)).max(0.0),
+            h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
+        };
+        let shell = shell.read(app);
+        let workspace = shell.services.workspaces.active();
+        let (_, dock_rects) = crate::tiling::dock_layout(workspace.docks(), area);
+        let dock_rect = dock_rects
+            .into_iter()
+            .find(|(s, _)| *s == side)
+            .expect("dock visible in the layout")
+            .1;
+        let r = workspace
+            .docks()
+            .get(side)
+            .tree()
+            .layout(dock_rect)
+            .into_iter()
+            .find(|(t, _)| *t == id)
+            .expect("tile present in the dock layout")
             .1;
         gpui::point(
             px(sidebar::width(window) + r.x + r.w * fx),
@@ -617,11 +663,11 @@ fn a_below_threshold_mod_click_changes_nothing_at_all(cx: &mut gpui::TestAppCont
     );
 }
 
-/// End-to-end: a center drop swaps the two tiles in place (today's
-/// recorded keyboard-parity semantics), focus following the dragged
-/// tile into its new slot.
+/// End-to-end: a center drop stacks the dragged tile onto the target
+/// (tile-stacks spec §6.2, replacing the swap), focus following the
+/// dragged tile into the stack.
 #[gpui::test]
-fn mod_dragging_onto_a_tiles_center_swaps_the_pair(cx: &mut gpui::TestAppContext) {
+fn mod_dragging_onto_a_tiles_center_stacks_the_pair(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
 
     let grab = main_tile_point(&mut cx, &shell, left, 0.5, 0.5);
@@ -638,7 +684,16 @@ fn mod_dragging_onto_a_tiles_center_swaps_the_pair(cx: &mut gpui::TestAppContext
             .tree()
             .tiles()),
         vec![right, left],
-        "a center drop swaps the two tiles"
+        "a center drop adds the dragged tile after the target"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .workspaces
+            .active()
+            .stack_position(left)),
+        Some((2, 2)),
+        "the dragged tile lands as the stack's second member"
     );
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell
@@ -648,9 +703,13 @@ fn mod_dragging_onto_a_tiles_center_swaps_the_pair(cx: &mut gpui::TestAppContext
             .tree()
             .focused()),
         Some(left),
-        "focus follows the dragged tile to its new slot"
+        "focus follows the dragged tile into the stack"
     );
     assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+        "the finished drag is cleared"
+    );
 }
 
 /// End-to-end: dropping a tile on a visible (empty) dock's background

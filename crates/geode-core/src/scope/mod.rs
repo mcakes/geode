@@ -589,6 +589,8 @@ grain = "underlying"
             family: Family::Document,
             key: vec![column.into()],
             axes: vec![],
+            local: false,
+            series_retention: None,
         }
     }
 

@@ -545,11 +545,24 @@ impl Frame {
     /// Save the current scope under `name`, in memory immediately and
     /// queued for the user layer's `scopes.toml` (spec §3.9) — see
     /// [`take_pending_scope_persist`](Self::take_pending_scope_persist).
-    /// Rejects a name that couldn't round-trip through a TOML key or the
-    /// reserved `config_version` key.
+    /// Rejects a name that couldn't round-trip through a TOML key, the
+    /// reserved `config_version` key, or a name in
+    /// [`geode_core::scopes::RESERVED_NAMES`] (`save_current`, the
+    /// `scope::save_current` palette action's own id) — the same list
+    /// and the same wording `shell::objectdialog::Domain::Scopes::
+    /// reserved_names` refuses with, checked here too because this is
+    /// the door `:scope save <name>` on a tile's command line reaches
+    /// directly, with no dialog in between to catch it: a saved scope
+    /// literally named `save_current` used to reach `scopes.toml`
+    /// unrefused and panic `register_scope_actions` at the next start
+    /// (`ActionRegistry::register`'s "ids are unique by construction"),
+    /// a config value on disk that crashed the app at every launch.
     pub fn save_scope(&mut self, name: &str) -> Result<(), String> {
         let name = geode_core::config::check_object_name(name)
             .map_err(|_| format!("'{}' is not a usable scope name", name.trim()))?;
+        if geode_core::scopes::RESERVED_NAMES.contains(&name) {
+            return Err(format!("'{name}' is reserved"));
+        }
         self.saved_scopes
             .insert(name.to_string(), self.scope.clone());
         self.pending_scope_persist = Some((name.to_string(), self.scope.clone()));
@@ -1101,6 +1114,26 @@ mod tests {
         );
         assert_eq!(f.take_pending_scope_persist(), None);
         assert!(f.save_scope("").is_err());
+    }
+
+    /// Review finding: `:scope save save_current` on a tile's command
+    /// line reaches `Frame::save_scope` directly, with no dialog in
+    /// between to refuse it — before this ruling it persisted
+    /// `[save_current]` to `scopes.toml` unchecked, and the next startup
+    /// panicked in `register_scope_actions` (two actions claiming the
+    /// id `scope::save_current`). `save_scope` must refuse it with the
+    /// same wording the dialog uses, write nothing to `saved_scopes`,
+    /// and queue no pending persist.
+    #[test]
+    fn save_scope_refuses_the_reserved_save_current_name() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("BK001"));
+        assert_eq!(
+            f.save_scope("save_current"),
+            Err("'save_current' is reserved".to_string())
+        );
+        assert!(!f.saved_scopes().contains_key("save_current"));
+        assert_eq!(f.take_pending_scope_persist(), None);
     }
 
     #[test]

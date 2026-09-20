@@ -9,9 +9,11 @@
 mod add_tile;
 pub mod asof_view;
 pub mod chip;
+pub mod choicedialog;
 pub mod colours;
 mod commandline_ctl;
 pub mod commandline_view;
+pub mod control;
 pub mod dialog;
 mod drag;
 mod hot_reload;
@@ -31,6 +33,7 @@ pub mod scale;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;
+pub mod stacklist;
 pub mod status;
 pub mod toolbar;
 pub mod whichkey;
@@ -808,6 +811,27 @@ pub struct ShellView {
     /// The tiles painted last frame, to diff visibility without touching
     /// every occupant every frame.
     visible_tiles: HashSet<TileId>,
+    /// The last `(index, len)` `ensure_occupants` delivered to each tile
+    /// through `TileContent::set_stack` (tile-stacks spec §5.1) — a
+    /// missing entry means "unsent", so a fresh occupant always hears its
+    /// stack position once (`None` included) and a later render tells it
+    /// again only when the value actually changes. Retained to live tiles
+    /// at the end of every `ensure_occupants`, the same lifecycle
+    /// `pending_tiles`/`unplaced_records` follow.
+    stack_sent: HashMap<TileId, Option<(usize, usize)>>,
+    /// A stack verb's one-line refusal (tile-stacks spec §4: every verb
+    /// on a non-member is a no-op with `"not in a stack"`), cleared at
+    /// the top of the next `dispatch`. Painted by the status bar's
+    /// `shell-notice` segment.
+    notice: Option<&'static str>,
+    /// The transient stack-member list (tile-stacks spec §5.2), or
+    /// `None` when closed — `open_stack_list`'s own contract, the same
+    /// "nothing survives a close/reopen" shape `palette`/`command_line`
+    /// follow. Owns the keyboard while open (`handle_key_down`'s own
+    /// branch), closed by any dispatch (`dispatch`'s own top, beside
+    /// `notice`), and dropped by `render`'s generic staleness check when
+    /// its tile stops being the focused member.
+    stack_list: Option<stacklist::StackList>,
     /// Scratch storage for `ensure_occupants`'s per-frame tile-set diff
     /// (fix-round finding: `all_tiles`/`active_tiles` used to allocate a
     /// fresh `HashSet` every render). Always cleared and refilled there;
@@ -846,6 +870,17 @@ pub struct ShellView {
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
     /// the `datasets` doc.
     datasets_baseline: Vec<LayerDoc>,
+    /// The `[pricing] adapter` key (inside the `app` doc) the data
+    /// engine's pricer was actually chosen from at startup (line-pricer
+    /// §5.5, `crates/geode-app/src/bridge.rs::data_setup`) — same purpose
+    /// and lifecycle as [`sources_baseline`](Self::sources_baseline),
+    /// never re-seeded on reload. A reload whose `adapter` key no longer
+    /// matches this needs a restart, on the same terms `sources`/
+    /// `datasets` already follow. Narrowed to just this key (not the
+    /// whole `[pricing]` table) because `refresh` is a live sheet setting
+    /// (Part 3) the frame picks up without a restart — only the adapter
+    /// choice is baked into the running data engine.
+    pricing_baseline: Option<toml::Value>,
     /// Every column a dimension picker can open (Phase 4a §3.3),
     /// [`pickable_columns`] over the current config — computed once at
     /// construction and rebuilt by `hot_reload::apply_reload` whenever
@@ -902,6 +937,18 @@ pub struct ShellView {
     /// the dialog is open and the field does not read `live`; its
     /// selection mirrors the field.
     as_of_calendar: Entity<gpui_component::calendar::CalendarState>,
+    /// The open choice dialog's own pure state (2026-09-19: the grouping
+    /// picker — the toolbar readout's click and `frame::grouping` — and
+    /// the tile picker — a placeholder's double-click and `tile::add`),
+    /// or `None` when closed/never opened — the `picker`/`as_of_dialog`
+    /// fields' own contract. Set fresh by `choicedialog::open_grouping`/
+    /// `open_tile_kinds` each time and cleared by
+    /// [`close_modal`](Self::close_modal).
+    choice_dialog: Option<choicedialog::ChoiceDialogState>,
+    /// Scroll state for the choice dialog's row list
+    /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
+    /// one dialog over.
+    choice_dialog_scroll: ScrollHandle,
     /// The open config-object dialog's own pure state (Phase 4c: the
     /// shared scaffold every config domain's dialog is built on — see
     /// `objectdialog`'s module doc), or `None` when closed/never opened.
@@ -1137,6 +1184,12 @@ impl ShellView {
                 state.query = query;
                 state.selected = 0;
                 picker::sync_picker_scroll(view);
+            } else if let Some(state) = view.choice_dialog.as_mut() {
+                // A choice list re-ranks on every keystroke and the lit
+                // row is followed, as the settings dialog's choice does.
+                state.list.set_query(&query);
+                view.choice_dialog_scroll
+                    .scroll_to_item(state.list.ranked_highlighted());
             } else if let Some(state) = view.as_of_dialog.as_mut() {
                 // Unlike the three dialogs above, this field's raw text IS
                 // the value being edited (spec §3.6), not a filter over
@@ -1519,6 +1572,10 @@ impl ShellView {
         // `sources_baseline`'s field doc.
         let sources_baseline = services.config.layered_docs("sources").to_vec();
         let datasets_baseline = services.config.layered_docs("datasets").to_vec();
+        // Same reasoning, for the `[pricing] adapter` key the data
+        // engine's pricer was chosen from (line-pricer §5.5) — see
+        // `pricing_baseline`'s field doc.
+        let pricing_baseline = services.config.get("app", "pricing.adapter").cloned();
         // The dimension pickers' column list (Phase 4a §3.3) — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
@@ -1568,18 +1625,24 @@ impl ShellView {
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
+            stack_sent: HashMap::new(),
+            notice: None,
+            stack_list: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
             scratch_visible_keys: Vec::new(),
             restart_required: None,
             sources_baseline,
             datasets_baseline,
+            pricing_baseline,
             pickable,
             picker: None,
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             as_of_calendar,
+            choice_dialog: None,
+            choice_dialog_scroll: ScrollHandle::new(),
             object_dialog: None,
             object_dialog_scroll: ScrollHandle::new(),
             pending_config_write: None,
@@ -1611,6 +1674,7 @@ impl ShellView {
         self.keybindings = None;
         self.picker = None;
         self.as_of_dialog = None;
+        self.choice_dialog = None;
         self.object_dialog = None;
         self.return_focus_from_overlay(window, cx);
         cx.notify();

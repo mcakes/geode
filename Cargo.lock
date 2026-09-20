@@ -2501,6 +2501,7 @@ dependencies = [
  "geode-diagnostics",
  "geode-documents",
  "geode-marketdata",
+ "geode-pricing",
  "geode-shell",
  "gpui-base",
  "gpui-component",
@@ -2555,6 +2556,7 @@ dependencies = [
  "criterion",
  "duckdb",
  "geode-core",
+ "geode-data",
  "geode-demo-data",
  "glob",
  "proptest",
@@ -2617,14 +2619,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-pricing"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
+]
+
+[[package]]
 name = "geode-shell"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "criterion",
  "geode-core",
+ "geode-shell",
  "gpui-base",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "serde_json",
  "tempfile",

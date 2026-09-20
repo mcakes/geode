@@ -155,6 +155,11 @@ pub struct CatalogSnapshot {
     pub memory_bytes: u64,
     /// `current_setting('threads')`.
     pub threads: u64,
+    /// Each fetch source that answered a catalogue, with its identities
+    /// sorted, for the picker's typeahead (timeseries spec §5.5). Empty
+    /// for a source that cannot enumerate, and for a build with no fetch
+    /// source at all.
+    pub identities: Vec<(String, Vec<String>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -166,6 +171,23 @@ pub struct DatasetCatalog {
     pub live_rows: u64,
     /// The same, over the archive tables.
     pub archive_rows: u64,
+    /// Series family only: one row per `(identity, source)` pair, from
+    /// the coverage table (timeseries spec §4.6), never a data-table
+    /// scan. Empty on every other family.
+    pub series: Vec<SeriesCatalog>,
+}
+
+/// One series pair as the coverage table records it (timeseries spec
+/// §4.6): the hull of every span fetched for it, how many fetches wrote
+/// that coverage, and the newest `received_at` among them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeriesCatalog {
+    pub source: String,
+    pub identity: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub fetches: u64,
+    pub latest_received_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

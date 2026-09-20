@@ -145,10 +145,12 @@ impl ShellView {
     /// doc replaces the frame's slots, a changed `views`/`dimensions` doc
     /// tells the frame a config reload happened and emits `ShellEvent::
     /// ConfigReloaded` for the app bridge to forward to the data thread,
-    /// and a `sources`/`datasets` doc that disagrees with
-    /// `sources_baseline`/`datasets_baseline` — the docs the data engine
-    /// was actually built from, not merely the previous reload's config —
-    /// sets `restart_required` and emits `ShellEvent::RestartRequired`;
+    /// and a `sources`/`datasets` doc — or the `[pricing] adapter` key
+    /// (line-pricer §5.5) — that disagrees with
+    /// `sources_baseline`/`datasets_baseline`/`pricing_baseline` — the
+    /// docs (and key) the data engine was actually built from, not
+    /// merely the previous reload's config — sets `restart_required` and
+    /// emits `ShellEvent::RestartRequired`;
     /// once the docs agree with that baseline again (M8, 3b final review:
     /// e.g. the offending edit is reverted) the message is cleared. That
     /// restart is about the data engine, not the frame: a `datasets`
@@ -326,7 +328,7 @@ impl ShellView {
             // session (comparing against the previous reload instead would
             // report "changed" on the revert too, since the value differs
             // from what was there a moment ago).
-            let restart = [
+            let mut restart = [
                 ("sources", &self.sources_baseline),
                 ("datasets", &self.datasets_baseline),
             ]
@@ -334,6 +336,14 @@ impl ShellView {
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
+            // Same rule, for the `[pricing] adapter` key the data
+            // engine's pricer was chosen from at startup (line-pricer
+            // §5.5) — see `pricing_baseline`'s field doc. Narrowed to
+            // this one key: `refresh` is a live sheet setting (Part 3)
+            // and must not demand a restart.
+            if new_config.get("app", "pricing.adapter").cloned() != self.pricing_baseline {
+                restart.push("pricing");
+            }
 
             // Phase 4b §4.3: an `[log]` change applies through the same
             // `LevelControl` door `:level` (a later task) uses, and

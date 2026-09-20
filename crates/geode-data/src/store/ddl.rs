@@ -92,10 +92,20 @@ impl TablePair {
 }
 
 /// Every live/archive pair a dataset owns: one per grain for the measure
-/// family, exactly one for the document family. The single place the two
-/// families' table sets are named, so `apply_schema`, `history_of` and
-/// the sweep's reconciliation cannot drift apart on which tables exist.
+/// family, exactly one for the document family, and NONE for the series
+/// family — a series dataset's own two tables are named by
+/// `store::series` (timeseries spec §4.4) and answered empty here. The
+/// single place all three families' pair sets are named, so
+/// `apply_schema`, `history_of` and the sweep's reconciliation cannot
+/// drift apart on which pairs exist.
 pub fn table_pairs(ds: &DatasetSpec) -> Vec<TablePair> {
+    if ds.is_series() {
+        // A series dataset has no live/archive pair at all (timeseries
+        // spec §4.4): nothing to sweep by generation, nothing to
+        // reconcile, nothing in `history_of`. `store::series` names its
+        // tables.
+        return Vec::new();
+    }
     if ds.is_document() {
         vec![TablePair::for_document(&ds.name)]
     } else {
@@ -591,6 +601,74 @@ role = "attribute"
             .clone()
     }
 
+    /// A `local = true` document dataset for the publish tests
+    /// (line-pricer spec §7.2): one key, one axis, one value.
+    pub(crate) fn local_dataset() -> DatasetSpec {
+        let text = r#"
+[sheets]
+family = "document"
+local = true
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("sheets").unwrap().clone()
+    }
+
+    /// A `sheets` document: one row per `qty` value, `line` numbered
+    /// from one. An empty `qty` produces a zero-row document, which
+    /// `DocumentRows::validate`'s row floor refuses — the shape the
+    /// failed-local-publish test wants.
+    pub(crate) fn sheet_rows(sheet: &str, qty: &[i64]) -> DocumentRows {
+        DocumentRows {
+            key: vec![sheet.to_string()],
+            attributes: Vec::new(),
+            axes: vec![(
+                "line".to_string(),
+                Column::I64((1..=qty.len() as i64).collect()),
+            )],
+            values: vec![("qty".to_string(), Column::I64(qty.to_vec()))],
+        }
+    }
+
+    /// The timeseries spec's one series dataset (§4.2), parsed through
+    /// the real reader for the same reason `cvi_dataset` is.
+    pub(crate) fn series_dataset() -> DatasetSpec {
+        let text = "[series]\nfamily = \"series\"\nretention = \"30d\"\nhistory = \"5y\"\n";
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("series")
+            .unwrap()
+            .clone()
+    }
+
+    /// `minutes` one-minute bars from `start`, values `first`, `first + 1`, …
+    pub(crate) fn series_rows(
+        start: &str,
+        minutes: usize,
+        first: f64,
+    ) -> crate::adapter::SeriesRows {
+        let start = ts(start);
+        crate::adapter::SeriesRows {
+            ts: (0..minutes)
+                .map(|i| start + chrono::Duration::minutes(i as i64))
+                .collect(),
+            value: (0..minutes).map(|i| first + i as f64).collect(),
+        }
+    }
+
     pub(crate) fn ts(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
@@ -1045,6 +1123,13 @@ mod tests {
                 "cvi_params_document_live".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_series_dataset_has_no_live_archive_pair() {
+        let ds = tests_support::series_dataset();
+        assert!(table_pairs(&ds).is_empty());
+        assert!(history_of("series", &ds).is_empty());
     }
 
     /// `TablePair::for_document`'s safety claim, checked rather than

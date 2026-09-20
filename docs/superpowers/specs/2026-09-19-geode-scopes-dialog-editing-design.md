@@ -235,6 +235,35 @@ a refusal — the dataset may arrive later, and warnings do not block.
   `Copy of <name> · name` for `c`; the browse list keeps ranking by the
   typed name while naming, so a near-collision stays visible.
 
+**Amendment (2026-09-19, scope-save): two more doors onto the same
+naming prompt, seeded from the frame rather than empty or copied.**
+`NameSeed` gains a third variant, `FromFrame`, for what pre-2026-09-19
+`n` used to do before this spec's own §6 changed `n` to create an empty
+object — saving the frame's *current* scope under a new name is still a
+thing a trader wants, just no longer through the browse list's `n`. Two
+doors reach it instead: the palette action `scope::save_current`
+(`objectdialog::render::open_save_scope`, dispatched from `input.rs`
+*before* its `strip_prefix("scope::")` arm — that arm would otherwise
+read `save_current` as a saved scope's name to load, which is also why
+`Domain::Scopes.reserved_names()` now refuses a scope by that name) and
+the scope bar's own `save` chip (`shell::toolbar`, painted only while
+`ScopeBarModel::savable` — `!scope.is_empty()` — is true; the bar's `+`
+chip beside it is unconditional and opens the dimension picker, the
+mouse form of `mod+p`). Both open the Scopes dialog and, when the frame
+has something to save, enter `Stage::Naming` with `naming_seed =
+FromFrame` and the label `Save scope · name`; an empty frame scope opens
+the dialog in browse instead, with the notice "the frame's scope is
+empty — nothing to save" (`open_save_scope`'s own gate; the same
+condition is re-checked in `create_from_name`'s `FromFrame` arm on
+`enter`, since the scope can still empty out in between). `enter` there
+runs `scopes::overwrite_with` against the pending-aware config exactly
+as `o`'s confirmed overwrite does, then the same `enter_edit_stage` +
+`commit_create` path `n`/`c` already use — so the new object is `is_new`
+and carries the frame's dimensions, text and expression verbatim.
+`escape` cancels through the existing `cancel_naming`, which already
+resets any `naming_seed` to `Empty` without needing to know a third
+variant exists.
+
 ## 7. Gates, fork, diagnostics
 
 - `apply::blocking_diagnostic` is unaffected: `saved_scopes_from_doc`
