@@ -29,3 +29,7 @@ proptest = "1"
 [[bench]]
 name = "cvi"
 harness = false
+
+[[bench]]
+name = "dividend"
+harness = false

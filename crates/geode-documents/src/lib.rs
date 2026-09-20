@@ -6,8 +6,10 @@
 //! two functions later (roadmap ruling 8).
 
 pub mod cvi;
+pub mod dividend;
 
 pub use cvi::CviKind;
+pub use dividend::DividendKind;
 
 use geode_core::document::DocumentKind;
 use std::sync::Arc;
@@ -17,5 +19,5 @@ use std::sync::Arc;
 /// registry hands the same kind to several sources at once and the
 /// trait is the only thing `geode-data` sees.
 pub fn builtin_kinds() -> Vec<Arc<dyn DocumentKind>> {
-    vec![Arc::new(CviKind)]
+    vec![Arc::new(CviKind), Arc::new(DividendKind)]
 }
