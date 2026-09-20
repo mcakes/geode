@@ -151,7 +151,7 @@ impl ChoiceDialogState {
         slots.iter().find(|s| **s == Some(digit)).copied()
     }
 
-    /// The grouping-target convenience the tests and the digit jump read.
+    /// The grouping-target convenience the tests read.
     pub fn highlighted_slot(&self) -> Option<Option<u8>> {
         match self.highlighted_pick()? {
             Pick::Slot(slot) => Some(slot),

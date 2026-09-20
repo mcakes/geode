@@ -13918,6 +13918,31 @@ run_mutation "tilepicker: a kind pick adds the tile" \
   geode-shell \
   a_row_click_adds_that_kind
 
+# The door requires the placeholder to be the FOCUSED tile (review
+# finding): a lone second click on an unfocused one — the first landed
+# on an occluding divider or backdrop — would otherwise pick onto
+# whatever tile IS focused.
+run_mutation "tilepicker: the door requires the placeholder to be focused" \
+  crates/geode-shell/src/shell/drag.rs \
+  '            || self.services.workspaces.active().focused_tile() != Some(id)' \
+  '            || false' \
+  geode-shell \
+  a_second_click_on_an_unfocused_placeholder_is_a_plain_click
+
+# The DOCK listener calls the door too. Anchored through the dock
+# listener's own comment: its lines are indented four less than the
+# main-tree listener's, and a shorter-indented line is a SUBSTRING of
+# the longer one, so the bare line would match the main-tree site first.
+run_mutation "tilepicker: the dock listener calls the door" \
+  crates/geode-shell/src/shell/render.rs \
+  '                            // same gesture table.
+                            if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                || view.try_pick_tile_on_double_click(id, event, window, cx)' \
+  '                            // same gesture table.
+                            if view.try_fullscreen_on_double_click(id, event, window, cx)' \
+  geode-shell \
+  a_docked_placeholder_double_click_opens_the_picker_and_fills_it
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
