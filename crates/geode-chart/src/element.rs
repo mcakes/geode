@@ -2,23 +2,32 @@
 //!
 //! Per frame: solve the layout at a ZERO origin (`PathCache` translates
 //! every cached path to the frame's origin; quads and labels add
-//! `bounds.origin` themselves), derive each pane side's [`LinearScale`]
-//! from the VISIBLE values, then per pane — grid, axes, each visible
+//! `bounds.origin` themselves), then per pane — grid, axes, each visible
 //! slot's decimated polyline through `PathCaches("geode-chart-lines")`,
 //! its percentile lines as dashed paths through
 //! `PathCaches("geode-chart-percentiles")`, its density bars as quads —
 //! then the one shared x axis under the lowest pane and, through the
 //! component's own tooltip plumbing, the crosshair and its readout.
 //!
-//! The data path — the `xs` refill, decimation, tessellation — runs only
-//! when `(model.version, slot, pane, view, plot rect)` misses the path
-//! cache; [`rebuilds`] counts those misses so a test can pin "an
-//! unchanged frame rebuilds nothing". The reused buffers live in element
-//! state ([`Buffers`]), as do the x ticks, recomputed only on a chrome
-//! key miss. Axis tick and percentile labels go through the component's
-//! `PlotAxis`/`PlotLabel` and the grid through its `Grid`, which own a
-//! small `Vec` per axis per frame: the one per-frame allocation, shared
-//! with every chart the component ships.
+//! **Nothing that is O(the data) runs on a frame that changed nothing.**
+//! Two caches, both in element state ([`Buffers`]), stand between the
+//! model and the frame:
+//!
+//! * the **chrome**, behind `chrome_key` — the four sides' [`LinearScale`]s
+//!   (each a scan of every visible value on that side), their y ticks and
+//!   the tick LABELS, and the x ticks. [`chrome_rebuilds`] counts the
+//!   derivations;
+//! * the **paths**, behind gpui-component's own `PathCache` — the `xs`
+//!   refill, the decimation and the tessellation. [`rebuilds`] counts
+//!   the misses.
+//!
+//! Both keys are functions of exactly `(model.version, view, bounds
+//! size, rem)` — plus, for a path, its own slot and plot rect — so a
+//! repaint of an unchanged chart is a walk of prepared values and
+//! nothing else. What still allocates per frame is chrome the component
+//! owns: `Grid` takes its lines as `Vec`s, and `PlotAxis`/`PlotLabel`
+//! each collect a small `Vec` — the documented exception, shared with
+//! every chart gpui-component ships.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -35,7 +44,7 @@ use gpui_component::plot::{
     AxisLabelSide, AxisText, Grid, IntoPlot, PathCaches, Plot, PlotAxis, PlotLabel, ShapeKey,
 };
 
-use crate::core::axis::{Pane, Side};
+use crate::core::axis::{Axis, Pane, Side};
 use crate::core::decimate::decimate;
 use crate::core::layout::{Layout, PaneRects};
 use crate::core::scale::{LinearScale, axis_domain, fmt_tick, fmt_value};
@@ -51,6 +60,10 @@ thread_local! {
     /// Painting is a UI-thread act, so a thread-local is also the exact
     /// scope a caller means by "this window's rebuilds".
     static REBUILDS: Cell<usize> = const { Cell::new(0) };
+    /// The same, for the chrome derivation (the four side scales, their
+    /// ticks and labels, the x ticks) — the O(n) work that is invisible
+    /// to [`REBUILDS`] because it never touches a path.
+    static CHROME_REBUILDS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How many times a slot's polyline or percentile path was rebuilt on
@@ -59,8 +72,19 @@ pub fn rebuilds() -> usize {
     REBUILDS.with(|c| c.get())
 }
 
+/// How many times the chrome — the side scales, the y ticks and their
+/// labels, the x ticks — was derived on this thread since it started.
+/// A frame that changed nothing must not move this either.
+pub fn chrome_rebuilds() -> usize {
+    CHROME_REBUILDS.with(|c| c.get())
+}
+
 fn note_rebuild() {
     REBUILDS.with(|c| c.set(c.get() + 1));
+}
+
+fn note_chrome_rebuild() {
+    CHROME_REBUILDS.with(|c| c.set(c.get() + 1));
 }
 
 /// Element-state key of the reused buffers, within this element's scope.
@@ -83,23 +107,66 @@ const BAR_OPACITY: f32 = 0.45;
 const TAG_INSET: f32 = 2.0;
 const TAG_LIFT: f32 = 11.0;
 
-/// Element state kept across frames under the element id: the reused
-/// decimation buffers and the ticks of the last chrome key.
+/// One pane side's resolved y axis: the scale over that side's VISIBLE
+/// values and the ticks it paints, labels already formatted.
+///
+/// Every field is a function of the chrome key's inputs alone, so the
+/// whole thing is derived on a chrome miss and only then — the scale in
+/// particular is a scan of every visible value of every slot on the
+/// side, which at the 500,000-point cap is the one piece of O(n) work
+/// that could otherwise land on the render thread every frame.
+#[derive(Default, Clone)]
+struct SideAxis {
+    scale: Option<LinearScale>,
+    ticks: Vec<f64>,
+    labels: Vec<SharedString>,
+}
+
+impl SideAxis {
+    fn clear(&mut self) {
+        self.scale = None;
+        self.ticks.clear();
+        self.labels.clear();
+    }
+}
+
+/// The two `Vec`s the decimation path reuses: the plot-relative x of
+/// every visible bucket, and the decimated points it produces. Kept
+/// together so one `mem::take` moves both.
 #[derive(Default)]
-struct Buffers {
+struct Scratch {
     xs: Vec<f32>,
     pts: Vec<Point>,
+}
+
+/// Element state kept across frames under the element id: the reused
+/// decimation buffers, and the chrome of the last chrome key.
+#[derive(Default)]
+struct Buffers {
+    scratch: Scratch,
     chrome_key: Option<u64>,
     x_ticks: Vec<Tick>,
-    y_ticks: Vec<f64>,
+    /// Indexed by [`axis_index`]; `Axis::ALL` order.
+    sides: [SideAxis; 4],
 }
 
 /// The theme colours one frame paints its chrome in, read once.
 #[derive(Clone, Copy)]
-struct Chrome {
+struct Ink {
     line: Hsla,
     text: Hsla,
     strip: Hsla,
+}
+
+/// Everything one frame's painters share, so a pane's painter takes one
+/// reference rather than eight parameters.
+struct Paint<'a> {
+    bounds: Bounds<Pixels>,
+    scale: &'a TimeScale<'a>,
+    visible: (usize, usize),
+    x_ticks: &'a [Tick],
+    sides: &'a [SideAxis; 4],
+    ink: Ink,
 }
 
 #[derive(IntoPlot)]
@@ -134,7 +201,7 @@ impl ChartElement {
 
     /// The y scale for a pane's side over the VISIBLE values of the
     /// slots on it; `None` when no visible slot with a finite value
-    /// uses it.
+    /// uses it. O(visible values): a chrome-miss path only.
     fn side_scale(
         &self,
         pane: Pane,
@@ -160,19 +227,61 @@ impl ChartElement {
         (h / design_px(Y_TICK_GAP, self.rem_px)).max(2.0) as usize
     }
 
+    /// Derive the whole chrome for this layout: the x ticks and, per
+    /// pane side, the scale, its ticks and their labels. Called on a
+    /// chrome-key MISS only.
+    fn derive_chrome(
+        &self,
+        layout: &Layout,
+        scale: &TimeScale,
+        visible: (usize, usize),
+        x_ticks: &mut Vec<Tick>,
+        sides: &mut [SideAxis; 4],
+    ) {
+        note_chrome_rebuild();
+        ticks(
+            scale,
+            self.view,
+            layout.x_axis,
+            design_px(TICK_GAP, self.rem_px),
+            self.model.offset_secs,
+            x_ticks,
+        );
+        for (pane, rects) in [
+            (Pane::Upper, Some(layout.upper)),
+            (Pane::Lower, layout.lower),
+        ] {
+            for side in [Side::Left, Side::Right] {
+                let axis = &mut sides[axis_index(axis_of(pane, side))];
+                axis.clear();
+                let Some(rects) = rects else { continue };
+                let plot = rects.plot;
+                if plot.w <= 0.0 || plot.h <= 0.0 {
+                    continue;
+                }
+                let Some(s) = self.side_scale(pane, side, plot, visible) else {
+                    continue;
+                };
+                let hint = self.y_tick_hint(plot.h);
+                let step = s.step_for(hint);
+                s.ticks(hint, &mut axis.ticks);
+                for i in 0..axis.ticks.len() {
+                    let v = axis.ticks[i];
+                    axis.labels.push(SharedString::from(fmt_tick(v, step)));
+                }
+                axis.scale = Some(s);
+            }
+        }
+    }
+
     /// One pane: grid, its two axes, then per visible slot the polyline,
     /// the percentile lines and the density bars.
-    #[allow(clippy::too_many_arguments)]
     fn paint_pane(
         &self,
         pane: Pane,
         rects: &PaneRects,
-        bounds: Bounds<Pixels>,
-        scale: &TimeScale,
-        visible: (usize, usize),
-        x_ticks: &[Tick],
-        buf: (&mut Vec<f32>, &mut Vec<Point>, &mut Vec<f64>),
-        chrome: Chrome,
+        ctx: &Paint<'_>,
+        scratch: &mut Scratch,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -180,45 +289,42 @@ impl ChartElement {
         if plot.w <= 0.0 || plot.h <= 0.0 {
             return;
         }
-        let (xs, pts, y_ticks) = buf;
-        let left = self.side_scale(pane, Side::Left, plot, visible);
-        let right = self.side_scale(pane, Side::Right, plot, visible);
-        let hint = self.y_tick_hint(plot.h);
-        let plot_bounds = bounds_of(plot, bounds);
+        let bounds = ctx.bounds;
+        let left = &ctx.sides[axis_index(axis_of(pane, Side::Left))];
+        let right = &ctx.sides[axis_index(axis_of(pane, Side::Right))];
 
         // Grid: the x ticks of the shared axis, the y ticks of whichever
         // side the pane has (left wins when it has both — one grid, not
-        // two overlaid ones).
-        let grid_scale = left.or(right);
-        y_ticks.clear();
-        if let Some(s) = grid_scale.as_ref() {
-            s.ticks(hint, y_ticks);
-        }
-        let gx: Vec<Pixels> = x_ticks.iter().map(|t| px(t.x - plot.x)).collect();
-        let gy: Vec<Pixels> = grid_scale
-            .as_ref()
-            .map(|s| y_ticks.iter().map(|v| px(s.y(*v) - plot.y)).collect())
+        // two overlaid ones). `Grid` takes its lines as `Vec`s, so the
+        // two collects here are the component's own API, not work.
+        let grid = if left.scale.is_some() { left } else { right };
+        let gx: Vec<Pixels> = ctx.x_ticks.iter().map(|t| px(t.x - plot.x)).collect();
+        let gy: Vec<Pixels> = grid
+            .scale
+            .map(|s| grid.ticks.iter().map(|v| px(s.y(*v) - plot.y)).collect())
             .unwrap_or_default();
         Grid::new()
             .x(gx)
             .y(gy)
-            .stroke(chrome.line)
+            .stroke(ctx.ink.line)
             .dash_array(&[px(4.), px(2.)])
-            .paint(&plot_bounds, window);
+            .paint(&bounds_of(plot, bounds), window);
 
         // Axes. A left axis line sits at the RIGHT edge of its rect (the
         // plot's left edge) with its labels right-aligned inside it; a
         // right axis line at the left edge of its own rect, labels left.
-        if let (Some(r), Some(s)) = (rects.left_axis, left.as_ref()) {
-            self.paint_y_axis(r, s, Side::Left, hint, bounds, y_ticks, chrome, window, cx);
+        if let (Some(r), Some(s)) = (rects.left_axis, left.scale) {
+            paint_y_axis(r, &s, left, Side::Left, bounds, ctx.ink, window, cx);
         }
-        if let (Some(r), Some(s)) = (rects.right_axis, right.as_ref()) {
-            self.paint_y_axis(r, s, Side::Right, hint, bounds, y_ticks, chrome, window, cx);
+        if let (Some(r), Some(s)) = (rects.right_axis, right.scale) {
+            paint_y_axis(r, &s, right, Side::Right, bounds, ctx.ink, window, cx);
         }
 
         let model = &*self.model;
         let view = self.view;
         let pane_ix = pane_index(pane);
+        let scale = ctx.scale;
+        let visible = ctx.visible;
 
         // Polylines.
         let caches = PathCaches::for_paint((LINES, pane_ix), window, cx);
@@ -227,7 +333,7 @@ impl ChartElement {
                 if !slot.visible || slot.axis.pane() != pane {
                     continue;
                 }
-                let Some(y) = side_of(slot.axis.side(), &left, &right) else {
+                let Some(y) = side_scale_of(slot.axis.side(), left, right) else {
                     continue;
                 };
                 let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))
@@ -238,7 +344,7 @@ impl ChartElement {
                     .finish();
                 let path = caches.slot(k).get(key, bounds.origin, || {
                     note_rebuild();
-                    polyline(scale, view, plot, &y, &slot.values, visible, xs, pts)
+                    polyline(scale, view, plot, &y, &slot.values, visible, scratch)
                 });
                 if let Some(path) = path {
                     window.paint_path(path, slot.colour);
@@ -247,6 +353,16 @@ impl ChartElement {
         });
 
         // Percentile lines, then their tags in one label batch.
+        //
+        // A percentile is computed over the QUERY window while the side
+        // scale's domain comes from the VISIBLE slice, so a zoom into a
+        // quiet stretch can put p5 or p95 outside the pane entirely —
+        // and `paint_path` is masked to the whole element, not to the
+        // pane, so an unclamped line would paint across the other pane
+        // or the x-axis strip. A slot's percentiles draw in its own pane
+        // or not at all (spec §8.3), so one outside it is SKIPPED, line
+        // and tag together. Clamping instead would park it on the pane's
+        // edge and read as a real level at that value.
         let dash = design_px(DASH, self.rem_px);
         let gap = design_px(GAP, self.rem_px);
         let caches = PathCaches::for_paint((PERCENTILES, pane_ix), window, cx);
@@ -255,11 +371,14 @@ impl ChartElement {
                 if !slot.visible || slot.axis.pane() != pane {
                     continue;
                 }
-                let Some(scale_y) = side_of(slot.axis.side(), &left, &right) else {
+                let Some(scale_y) = side_scale_of(slot.axis.side(), left, right) else {
                     continue;
                 };
                 for (j, (_, value)) in slot.percentiles.iter().enumerate().take(MAX_PERCENTILES) {
                     let y = scale_y.y(*value);
+                    if !inside(y, plot) {
+                        continue;
+                    }
                     let key = ShapeKey::new((model.version, slot.number, j))
                         .f32(y)
                         .f32(plot.x)
@@ -282,13 +401,16 @@ impl ChartElement {
             .iter()
             .filter(|s| s.visible && s.axis.pane() == pane)
             .flat_map(|slot| {
-                let scale_y = side_of(slot.axis.side(), &left, &right);
+                let scale_y = side_scale_of(slot.axis.side(), left, right);
                 slot.percentiles
                     .iter()
                     .zip(slot.percentile_labels.iter())
                     .take(MAX_PERCENTILES)
                     .filter_map(move |((_, value), label)| {
                         let y = scale_y.as_ref()?.y(*value);
+                        if !inside(y, plot) {
+                            return None;
+                        }
                         Some(
                             Text::new(
                                 label.clone(),
@@ -306,12 +428,12 @@ impl ChartElement {
 
         // Density bars: one strip shared by the pane's visible slots.
         if let Some(strip) = rects.density {
-            window.paint_quad(fill(bounds_of(strip, bounds), chrome.strip));
+            window.paint_quad(fill(bounds_of(strip, bounds), ctx.ink.strip));
             for slot in model.slots.iter() {
                 if !slot.visible || slot.axis.pane() != pane || slot.bins.is_empty() {
                     continue;
                 }
-                let Some(scale_y) = side_of(slot.axis.side(), &left, &right) else {
+                let Some(scale_y) = side_scale_of(slot.axis.side(), left, right) else {
                     continue;
                 };
                 let max = slot.bins.iter().map(|(_, _, n)| *n).max().unwrap_or(0);
@@ -335,38 +457,6 @@ impl ChartElement {
                 }
             }
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn paint_y_axis(
-        &self,
-        r: Rect,
-        s: &LinearScale,
-        side: Side,
-        hint: usize,
-        bounds: Bounds<Pixels>,
-        y_ticks: &mut Vec<f64>,
-        chrome: Chrome,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let step = s.step_for(hint);
-        y_ticks.clear();
-        s.ticks(hint, y_ticks);
-        let (line_x, label_side, align) = match side {
-            Side::Left => (r.w, AxisLabelSide::Start, TextAlign::Right),
-            Side::Right => (0.0, AxisLabelSide::End, TextAlign::Left),
-        };
-        PlotAxis::new()
-            .x_axis(false)
-            .y_axis(true)
-            .y(px(line_x))
-            .y_label_side(label_side)
-            .y_label(y_ticks.iter().map(|v| {
-                AxisText::new(fmt_tick(*v, step), px(s.y(*v) - r.y), chrome.text).align(align)
-            }))
-            .stroke(chrome.line)
-            .paint(&bounds_of(r, bounds), window, cx);
     }
 
     /// Every visible slot, in slot order — the tooltip's readout rows.
@@ -393,19 +483,20 @@ impl Plot for ChartElement {
         let scale = self.model.time_scale();
         let view = self.view;
         let visible = scale.visible(view);
-        let chrome = {
+        let ink = {
             let theme = cx.theme();
-            Chrome {
+            Ink {
                 line: theme.border,
                 text: theme.muted_foreground,
                 strip: theme.background,
             }
         };
 
-        // The chrome key: everything the tick computation reads. A hit
-        // keeps the ticks of the last frame, so `core::time::ticks` —
-        // the one part of the core that allocates — runs on a change
-        // only, never per frame.
+        // The chrome key: everything the chrome derivation reads. A hit
+        // keeps the last frame's ticks, labels and side scales, so the
+        // two O(n) walks — `core::time::ticks` and the four
+        // `side_scale`s over every visible value — run on a change only,
+        // never per frame.
         let chrome_key = ShapeKey::new((
             self.model.version,
             view.key(),
@@ -419,56 +510,34 @@ impl Plot for ChartElement {
 
         // `Buffers` and the `PathCaches` are both entities, and two
         // `Entity::update`s cannot nest: take the buffers out for the
-        // duration of the frame and put them back at the end. Both are
-        // `Vec`s, so this moves no data.
+        // duration of the frame and put them back at the end. `Vec`s and
+        // an array of `Vec`s, so this moves no data.
         let buffers = window.use_keyed_state(BUFFERS, cx, |_, _| Buffers::default());
-        let (mut xs, mut pts, mut x_ticks, mut y_ticks, warm) = buffers.update(cx, |b, _| {
+        let (mut scratch, mut x_ticks, mut sides, warm) = buffers.update(cx, |b, _| {
             let warm = b.chrome_key == Some(chrome_key);
             b.chrome_key = Some(chrome_key);
             (
-                std::mem::take(&mut b.xs),
-                std::mem::take(&mut b.pts),
+                std::mem::take(&mut b.scratch),
                 std::mem::take(&mut b.x_ticks),
-                std::mem::take(&mut b.y_ticks),
+                std::mem::take(&mut b.sides),
                 warm,
             )
         });
         if !warm {
-            ticks(
-                &scale,
-                view,
-                layout.x_axis,
-                design_px(TICK_GAP, rem),
-                self.model.offset_secs,
-                &mut x_ticks,
-            );
+            self.derive_chrome(&layout, &scale, visible, &mut x_ticks, &mut sides);
         }
 
-        self.paint_pane(
-            Pane::Upper,
-            &layout.upper,
+        let ctx = Paint {
             bounds,
-            &scale,
+            scale: &scale,
             visible,
-            &x_ticks,
-            (&mut xs, &mut pts, &mut y_ticks),
-            chrome,
-            window,
-            cx,
-        );
+            x_ticks: &x_ticks,
+            sides: &sides,
+            ink,
+        };
+        self.paint_pane(Pane::Upper, &layout.upper, &ctx, &mut scratch, window, cx);
         if let Some(lower) = layout.lower.as_ref() {
-            self.paint_pane(
-                Pane::Lower,
-                lower,
-                bounds,
-                &scale,
-                visible,
-                &x_ticks,
-                (&mut xs, &mut pts, &mut y_ticks),
-                chrome,
-                window,
-                cx,
-            );
+            self.paint_pane(Pane::Lower, lower, &ctx, &mut scratch, window, cx);
         }
 
         // The one shared x axis, under the lowest pane. A tick's `x` is
@@ -478,17 +547,16 @@ impl Plot for ChartElement {
         PlotAxis::new()
             .x(px(0.))
             .x_label(x_ticks.iter().map(|t| {
-                AxisText::new(t.label.clone(), px(t.x - x_axis.x), chrome.text)
+                AxisText::new(t.label.clone(), px(t.x - x_axis.x), ink.text)
                     .align(TextAlign::Center)
             }))
-            .stroke(chrome.line)
+            .stroke(ink.line)
             .paint(&bounds_of(x_axis, bounds), window, cx);
 
         buffers.update(cx, |b, _| {
-            b.xs = xs;
-            b.pts = pts;
+            b.scratch = scratch;
             b.x_ticks = x_ticks;
-            b.y_ticks = y_ticks;
+            b.sides = sides;
         });
     }
 
@@ -545,6 +613,34 @@ impl Plot for ChartElement {
     }
 }
 
+/// One pane side's axis line and its prepared tick labels.
+#[allow(clippy::too_many_arguments)]
+fn paint_y_axis(
+    r: Rect,
+    s: &LinearScale,
+    axis: &SideAxis,
+    side: Side,
+    bounds: Bounds<Pixels>,
+    ink: Ink,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (line_x, label_side, align) = match side {
+        Side::Left => (r.w, AxisLabelSide::Start, TextAlign::Right),
+        Side::Right => (0.0, AxisLabelSide::End, TextAlign::Left),
+    };
+    PlotAxis::new()
+        .x_axis(false)
+        .y_axis(true)
+        .y(px(line_x))
+        .y_label_side(label_side)
+        .y_label(axis.ticks.iter().zip(axis.labels.iter()).map(|(v, label)| {
+            AxisText::new(label.clone(), px(s.y(*v) - r.y), ink.text).align(align)
+        }))
+        .stroke(ink.line)
+        .paint(&bounds_of(r, bounds), window, cx);
+}
+
 fn pane_index(pane: Pane) -> usize {
     match pane {
         Pane::Upper => 0,
@@ -552,15 +648,36 @@ fn pane_index(pane: Pane) -> usize {
     }
 }
 
-fn side_of(
-    side: Side,
-    left: &Option<LinearScale>,
-    right: &Option<LinearScale>,
-) -> Option<LinearScale> {
-    match side {
-        Side::Left => *left,
-        Side::Right => *right,
+/// The one [`Axis`] a `(pane, side)` pair names.
+fn axis_of(pane: Pane, side: Side) -> Axis {
+    match (pane, side) {
+        (Pane::Upper, Side::Left) => Axis::Left,
+        (Pane::Upper, Side::Right) => Axis::Right,
+        (Pane::Lower, Side::Left) => Axis::BottomLeft,
+        (Pane::Lower, Side::Right) => Axis::BottomRight,
     }
+}
+
+/// An axis's slot in [`Buffers::sides`] — its position in `Axis::ALL`.
+fn axis_index(axis: Axis) -> usize {
+    match axis {
+        Axis::Left => 0,
+        Axis::Right => 1,
+        Axis::BottomLeft => 2,
+        Axis::BottomRight => 3,
+    }
+}
+
+fn side_scale_of(side: Side, left: &SideAxis, right: &SideAxis) -> Option<LinearScale> {
+    match side {
+        Side::Left => left.scale,
+        Side::Right => right.scale,
+    }
+}
+
+/// Whether a y coordinate is inside a pane's plot rect, ends included.
+fn inside(y: f32, plot: Rect) -> bool {
+    y.is_finite() && y >= plot.y && y <= plot.bottom()
 }
 
 /// A layout rect (zero origin) as window bounds.
@@ -583,9 +700,9 @@ fn polyline(
     y: &LinearScale,
     values: &[f64],
     visible: (usize, usize),
-    xs: &mut Vec<f32>,
-    pts: &mut Vec<Point>,
+    scratch: &mut Scratch,
 ) -> Option<Path<Pixels>> {
+    let Scratch { xs, pts } = scratch;
     let end = visible.1.min(values.len());
     let start = visible.0.min(end);
     xs.clear();
@@ -660,7 +777,7 @@ fn dashed_horizontal(x0: f32, x1: f32, y: f32, dash: f32, gap: f32) -> Option<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::axis::{Axis, AxisMode};
+    use crate::core::axis::AxisMode;
     use crate::model::ChartSlot;
     use gpui::{Context, Entity, Render, div, prelude::*};
 
@@ -696,24 +813,41 @@ mod tests {
                 })
                 .collect()
         };
-        let slot = |number, axis, seed| ChartSlot {
-            number,
-            label: format!("s{number}").into(),
-            values: walk(seed),
-            colour: gpui::hsla(0.0, 0.8, 0.5, 1.0),
-            axis,
-            visible: true,
-            percentiles: vec![(0.05, 95.0), (0.5, 100.0), (0.95, 105.0)],
-            percentile_labels: vec!["p5".into(), "p50".into(), "p95".into()],
-            bins: (0..40)
-                .map(|b| {
-                    (
-                        90.0 + b as f64 * 0.5,
-                        90.5 + b as f64 * 0.5,
-                        (b % 7 + 1) as u32,
-                    )
-                })
-                .collect(),
+        let slot = |number, axis, seed| {
+            let values = walk(seed);
+            // Three values the slot itself takes at the CENTRE of the
+            // series. A percentile is only painted while it falls inside
+            // its pane, and the pane's domain comes from the VISIBLE
+            // slice — so a fixed level would drop in and out as the test
+            // zooms and the frame's path count would not be a constant.
+            // A centred zoom always keeps the centre visible, so these
+            // three are always inside the domain they came from.
+            let mid = values.len() / 2;
+            let pick = |i: usize| values.get(i).copied().unwrap_or(100.0);
+            let percentiles = vec![
+                (0.05, pick(mid.saturating_sub(1))),
+                (0.5, pick(mid)),
+                (0.95, pick(mid + 1)),
+            ];
+            ChartSlot {
+                number,
+                label: format!("s{number}").into(),
+                values,
+                colour: gpui::red(),
+                axis,
+                visible: true,
+                percentiles,
+                percentile_labels: vec!["p5".into(), "p50".into(), "p95".into()],
+                bins: (0..40)
+                    .map(|b| {
+                        (
+                            90.0 + b as f64 * 0.5,
+                            90.5 + b as f64 * 0.5,
+                            (b % 7 + 1) as u32,
+                        )
+                    })
+                    .collect(),
+            }
         };
         Arc::new(ChartModel {
             version: 1,
@@ -728,6 +862,38 @@ mod tests {
                 slot(2, Axis::Right, 11),
                 slot(3, Axis::BottomLeft, 13),
             ],
+        })
+    }
+
+    /// One upper-left slot climbing 100.00 → 101.96, so the pane's
+    /// domain is a known `[99.9, 102.06]` and a percentile can be placed
+    /// deliberately inside it or outside it.
+    fn one_slot(version: u64, percentiles: Vec<(f64, f64)>) -> Arc<ChartModel> {
+        let day = 86_400_000_000i64;
+        let n = 50usize;
+        let labels: Vec<SharedString> = percentiles
+            .iter()
+            .map(|(f, _)| ChartModel::percentile_label(*f))
+            .collect();
+        Arc::new(ChartModel {
+            version,
+            buckets: (0..n as i64).map(|i| i * day).collect(),
+            step_us: day,
+            axis_mode: AxisMode::Session,
+            offset_secs: 0,
+            split: 0.7,
+            density: false,
+            slots: vec![ChartSlot {
+                number: 1,
+                label: "s1".into(),
+                values: (0..n).map(|i| 100.0 + i as f64 * 0.04).collect(),
+                colour: gpui::red(),
+                axis: Axis::Left,
+                visible: true,
+                percentiles,
+                percentile_labels: labels,
+                bins: Vec::new(),
+            }],
         })
     }
 
@@ -763,9 +929,10 @@ mod tests {
     fn an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds(
         cx: &mut gpui::TestAppContext,
     ) {
-        // Opening the window paints its first frame, so the count that
-        // frame leaves behind is measured from BEFORE `open`.
+        // Opening the window paints its first frame, so the counts that
+        // frame leaves behind are measured from BEFORE `open`.
         let before = rebuilds();
+        let before_chrome = chrome_rebuilds();
         let (host, mut vcx) = open(cx, model(500));
         let first = rebuilds() - before;
         assert_eq!(
@@ -773,12 +940,22 @@ mod tests {
             3 + 9,
             "three polylines and nine percentile lines on the first frame"
         );
+        assert_eq!(
+            chrome_rebuilds() - before_chrome,
+            1,
+            "the side scales, their ticks and the x ticks were derived once"
+        );
         draw(&mut vcx);
         draw(&mut vcx);
         assert_eq!(
             rebuilds() - before,
             first,
             "an unchanged frame rebuilt nothing"
+        );
+        assert_eq!(
+            chrome_rebuilds() - before_chrome,
+            1,
+            "an unchanged frame re-derived no chrome either — no scan of the values, no tick label"
         );
         host.update(&mut vcx, |h, cx| {
             let full = h.model.full();
@@ -790,6 +967,43 @@ mod tests {
             rebuilds() - before,
             2 * first,
             "a moved view rebuilds every path once"
+        );
+        assert_eq!(
+            chrome_rebuilds() - before_chrome,
+            2,
+            "and re-derives the chrome once"
+        );
+    }
+
+    #[gpui::test]
+    fn a_percentile_outside_its_panes_domain_is_neither_built_nor_painted(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let before = rebuilds();
+        let (host, mut vcx) = open(
+            cx,
+            one_slot(1, vec![(0.05, 100.5), (0.5, 101.0), (0.95, 101.5)]),
+        );
+        assert_eq!(
+            rebuilds() - before,
+            1 + 3,
+            "the polyline and three percentile lines, all three inside the pane"
+        );
+
+        // The same values and the same view, so the pane's domain does
+        // not move; only p5 (below it) and p95 (above it) leave the pane.
+        let mark = rebuilds();
+        host.update(&mut vcx, |h, cx| {
+            h.model = one_slot(2, vec![(0.05, 50.0), (0.5, 101.0), (0.95, 500.0)]);
+            cx.notify();
+        });
+        draw(&mut vcx);
+        assert_eq!(
+            rebuilds() - mark,
+            1 + 1,
+            "the polyline and the one percentile still inside the pane; \
+             a line outside it is never built, so it is never painted across \
+             the other pane or the x-axis strip"
         );
     }
 
