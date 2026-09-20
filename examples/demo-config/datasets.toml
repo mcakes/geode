@@ -382,3 +382,9 @@ role = "attribute"                # document-level: constant within one document
 [cvi_params.columns.spot_ref]
 type = "f64"
 role = "attribute"
+
+# The timeseries viewer's cache (timeseries spec §4.2): every fetch source
+# in `sources` fills this one table. The family implies its columns.
+[series]
+family = "series"
+retention = "7d"
