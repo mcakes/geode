@@ -41,6 +41,7 @@ Everything below is merged unless the row says otherwise. Specs live in `docs/su
 | Toolbar segments (2026-09-19) | The title-bar readout is three segments parted by inset hairlines (`Separator`): AS OF (a clickable `Tone::Warning` chip, the tint on it alone), the grouping readout (chevron, pressed fill while its picker is up), the scope (chips with the `×` INSIDE the frame, then bare `+`/save glyphs). The `text "…"` chip is gone: the field mirrors the text and clears it (`Input::cleanable`). Three user rulings on the mockups. Display check done 2026-09-20 ("Looks fine"). | history |
 | Timeseries Part 1 (data tier) (2026-09-19) | The `series` family (bitemporal, append-only, no generation), the `Fetch` adapter shape, `Request::Fetch` with coverage subtraction and a history clip, per-pair retention inside the append, `SeriesCatalog` rows, `Request::Identities`, and the `demo_series` walk behind two demo fetch sources. No query, no tile — Part 2. | `2026-09-19-…timeseries-viewer` §4, §5 |
 | Timeseries Part 2 (series query) (2026-09-20) | `geode_core::series` (`Frequency`, `BucketRule`, `SeriesParams`/`SeriesOutcome`, the 500,000-point cap) and its arithmetic-only expression parser; `compile_series`/`run_series` — points over the union of the source buckets, stats per slot over the window, coverage per source slot; `Work::Series`/`Payload::Series` on the query pool; `DataService::series` and `DataEvent::Series`; `Delivery::Series`/`Delivery::SeriesFetched` in the shell. No chart (Part 3) and no tile (Part 4). | `2026-09-19-…timeseries-viewer` §6, §7 |
+| As-of dialog Part 1 (2026-09-20) | `geode-widgets`: `DateTimeField` (`Precision::{Date, DateTime}`, six segments, `route`/`FieldKey`/`apply`, `SegmentPaint` + `paint`); the market-data date field migrated, no visible change. Parts 2 (clock) and 3 (dialog) next. | `2026-09-20-…as-of-dialog-design` §4 |
 | **On hold** | Cold start: read `docs/ingest-cold-start-handoff.md` first — the 1.87× figure measures `read_csv` alone, and `staging_*` are fixed global table names. | — |
 
 Display checks on a real window are pending for most of the above (the implementation sandbox cannot paint one); each spec's "as built" section says which claims are pixel-unverified.
@@ -124,6 +125,7 @@ Each bullet is a rule the code depends on and a test or harness entry usually pi
 - Popups: `close_popup_with_window` is the ONE closer (a picker holds the keyboard; there must be no `Window`-less closer), and it and `close_editor` blur only when their own field `is_focused`. Any dispatched action outside the popup's own verbs closes it first. `commit_picker` re-ranks from the field's live text (`set_value` emits no `Change`); the picker's identity is the catalog key string, never a row index; there are no chords in the picker. The `⋯` button is a capture-phase listener WITHOUT `stop_propagation` (it ate click-to-focus); the menu row's stop is kept so a row click is not also a tile click. `KindAction`s (`cvi_reanchor`, `cvi_recalc_forward`) answer "not built yet"; a built one is an egress request, never in-app arithmetic.
 - Colours: state lives in the fill, text is `theme.foreground` (`cell_paint`); header chips use `FlooredTones` memoised behind a six-`Hsla` key refreshed at the top of `render`; the date field's active segment is `primary` under `primary_text`. Three bundled-theme sweeps pin it. `LABEL_WIDTH`/`CELL_WIDTH` are not on the rem scale (known gap: `TableDelegate::column` has no window).
 - CVI wire tag names are an assumption until the desk's XSD arrives; `SLICE_VALUES` in `geode-documents/src/cvi.rs` is the one place to change them.
+- The segmented date field is `geode_widgets::datefield` (2026-09-20): `route` is the ONE key table (a chord answers `None` and falls through to the shell), `DateTimeField::apply` performs every arm but `Commit`/`Cancel` (the host's), a time segment's step WRAPS without carrying, and `right` stops at the precision's last segment. The painter takes every colour as a `SegmentPaint` and never reads the theme; the panel's `render_date_field` keeps the container, focus handle and key listener and hands the crate its `FlooredTones`-derived colours.
 
 **Pricer (Part 1)**
 
@@ -150,7 +152,7 @@ cargo bench -p geode-shell                             # run criterion benchmark
 cargo bench -p geode-blotter                           # run criterion benchmarks (blotter pure core — see docs/perf.md)
 cargo bench -p geode-documents                         # run criterion benchmarks (CVI parse/write — see docs/perf.md)
 cargo bench -p geode-marketdata                        # run criterion benchmarks (panel matrix model + draft — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (1272 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (1276 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 zsh scripts/mutation-check.sh --anchors-only           # no cargo: stale or ambiguous anchors (<1 s, exits 1 on any) — run before every merge
@@ -165,6 +167,7 @@ Cargo workspace with strict layering, enforced by crate visibility:
 ```
 geode-app          the binary: wires shell + modules + services together
   ├─ geode-shell   tiling WM, workspaces, palette, keymap engine, scope/as-of state, theming
+  ├─ geode-widgets shared widgets: a pure core + colour-parameterised painter each (the date-time field); below the shell, depended on by shell and modules
   ├─ geode-blotter any view definition as a collapsible, keyboard-driven hierarchy (Phase 3)
   ├─ (modules)     future per-module crates: config editor, diagnostics…
   ├─ geode-data    DataService: sources, ingestion, DuckDB, archive, query API

@@ -13303,25 +13303,28 @@ run_mutation "mdnudge: a slice column steps at its own precision" \
   geode-marketdata a_slice_column_nudges_at_its_own_precision
 
 # ---- The segmented date field (header spec §5.2, 2026-09-19) -----------
-# A `Date` attribute opens the segmented field, not a text editor, and the
-# field opens on the DAY segment (user ruling 2026-09-19). Mutated to open
-# on the year, the first `up` a trader presses steps the year by one — a
-# whole year off, on the segment they change least, with nothing refused.
-run_mutation "mddate: the field opens on the day segment" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '            segment: Segment::Day,' \
-  '            segment: Segment::Year,' \
-  geode-marketdata i_on_a_date_attribute_opens_the_field_on_the_day_segment
+# Re-anchored 2026-09-20 (as-of dialog Part 1): the field's pure core
+# moved from `geode-marketdata/src/core/datefield.rs` (deleted) to
+# `geode-widgets/src/datefield/mod.rs`, generalised from a three-segment
+# `DateField` to a six-segment `DateTimeField` (`Precision::{Date,
+# DateTime}`). The entries below that tested code now inside
+# `geode-widgets` are re-anchored there with package `geode-widgets`;
+# the ones testing the PANEL's own use of the field stay on
+# `geode-marketdata`/`tile.rs`. The "field opens on the day segment"
+# entry is gone: `open` no longer hardcodes a segment default (the day is
+# now the CALLER's explicit choice), and the "marketdata: the date field
+# opens on the day segment" entry below (the widgets-migration section)
+# is its direct replacement.
 
 # A day step ROLLS into the next month (Sep 30 + 1 = Oct 1), the mockup's
 # own rule. Mutated to clamp at the month's end instead, `up` on the 30th
 # goes nowhere and a trader who wanted October has to reach the month
 # segment by hand — and nothing on screen says the step was swallowed.
 run_mutation "mddate: the day rolls over into the next month" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '            Segment::Day => Duration::try_days(n).and_then(|d| date.checked_add_signed(d)),' \
-  '            Segment::Day => NaiveDate::from_ymd_opt(date.year(), date.month(), (i64::from(date.day()) + n).clamp(1, i64::from(days_in_month(date))) as u32),' \
-  geode-marketdata a_day_step_rolls_over_into_the_next_month
+  crates/geode-widgets/src/datefield/mod.rs \
+  '                    Segment::Day => Duration::try_days(n).and_then(|d| date.checked_add_signed(d)),' \
+  '                    Segment::Day => NaiveDate::from_ymd_opt(date.year(), date.month(), (i64::from(date.day()) + n).clamp(1, i64::from(days_in_month(date))) as u32),' \
+  geode-widgets a_day_step_rolls_over_into_the_next_month
 
 # A month (or year, or typed month) step CLAMPS the day to the new month's
 # length — `clamped_ymd` is the one door. Mutated to keep the day as it
@@ -13329,51 +13332,57 @@ run_mutation "mddate: the day rolls over into the next month" \
 # lands the field on chrono's `NaiveDate::MAX` (year 262142): a valid date,
 # committable, and absurd.
 run_mutation "mddate: a month step clamps the day" \
-  crates/geode-marketdata/src/core/datefield.rs \
+  crates/geode-widgets/src/datefield/mod.rs \
   '    NaiveDate::from_ymd_opt(year, month, day.min(last))' \
   '    NaiveDate::from_ymd_opt(year, month, day)' \
-  geode-marketdata a_month_step_clamps_the_day_to_the_new_months_length
+  geode-widgets a_month_step_clamps_the_day_to_the_new_months_length
 
 # A first month digit of 2–9 completes at once as `0d` (only 0/1 can
-# still become a two-digit month). Mutated so no first digit completes,
-# `3` waits for a second digit that can never make a month under 13 with
-# it — the segment sits typing `3` until the trader backspaces.
+# still become a two-digit month). Mutated so no single first digit
+# completes at all, the segment sits typing whatever was pressed until
+# the trader backspaces or types a second digit that can never make a
+# valid month with it. Re-anchored 2026-09-20: `digit`'s per-segment
+# threshold and range are now one shared `(waits_below, max)` pair keyed
+# by `Segment` instead of a hardcoded condition per field; the month's
+# own pair is the anchor.
 run_mutation "mddate: a first month digit 2-9 completes at once" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '                    "" if d >= 2 => u32::from(d),' \
-  '                    "" if d >= 10 => u32::from(d),' \
-  geode-marketdata a_first_month_digit_two_to_nine_completes_at_once
+  crates/geode-widgets/src/datefield/mod.rs \
+  '            Segment::Month => (2, 12),' \
+  '            Segment::Month => (10, 12),' \
+  geode-widgets a_first_month_digit_two_to_nine_completes_at_once
 
 # A second month digit past twelve is refused and the first digit stays
 # for another try. Mutated to accept anything under 100, `1` then `9`
 # asks `clamped_ymd` for month 19 — no date — and the segment is silently
 # left as it was while the field claims a completed month by advancing.
 run_mutation "mddate: a second month digit past twelve is refused" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '                        if candidate == 0 || candidate > 12 {' \
-  '                        if candidate == 0 || candidate > 99 {' \
-  geode-marketdata a_second_month_digit_past_twelve_or_making_zero_is_refused
+  crates/geode-widgets/src/datefield/mod.rs \
+  '            Segment::Month => (2, 12),' \
+  '            Segment::Month => (2, 99),' \
+  geode-widgets a_second_month_digit_past_twelve_or_making_zero_is_refused
 
 # A second day digit past the month's length is refused (`31` in
-# September). Mutated to accept it, the same silent non-date as above.
+# September). Mutated to accept anything under 100, the same silent
+# non-date as above.
 run_mutation "mddate: a day the month lacks is refused" \
-  crates/geode-marketdata/src/core/datefield.rs \
-  '                        if candidate == 0 || candidate > days_in_month(self.date) {' \
-  '                        if candidate == 0 || candidate > 99 {' \
-  geode-marketdata day_typing_waits_on_zero_to_three_and_refuses_a_day_the_month_lacks
+  crates/geode-widgets/src/datefield/mod.rs \
+  '            Segment::Day => (4, days_in_month(self.value.date())),' \
+  '            Segment::Day => (4, 99),' \
+  geode-widgets day_typing_waits_on_zero_to_three_and_refuses_a_day_the_month_lacks
 
-# A chord is never the field's. Mutated to drop the gate, `ctrl+up` steps
-# the day and stops at the field instead of reaching the shell — and
-# every other shell chord on a key the field reads (`ctrl+k` is safe only
-# because `k` is not one) would be swallowed the same way.
+# A chord is never the field's — `route` itself gates it (see the
+# `widgets: a chord falls through route` entry), but the panel must
+# actually PASS its own computed `chord` through rather than a constant.
+# Re-anchored 2026-09-20 (Task 3's `date_field_key` rewrite routes
+# through the shared `route`/`FieldKey` table instead of matching key
+# strings inline): mutated to always claim "not a chord", `ctrl+up` would
+# step the day inside the field instead of reaching the shell, and every
+# other shell chord on a key the field reads would be swallowed the same
+# way.
 run_mutation "mddate: chords pass through the field to the shell" \
   crates/geode-marketdata/src/tile.rs \
-  '        if modifiers.control || modifiers.alt || modifiers.platform {
-            return false;
-        }' \
-  '        if false {
-            return false;
-        }' \
+  '        let Some(key) = route(event.keystroke.key.as_str(), modifiers.shift, chord) else {' \
+  '        let Some(key) = route(event.keystroke.key.as_str(), modifiers.shift, false) else {' \
   geode-marketdata a_chord_passes_through_the_field_to_the_shell
 
 # The shell-dispatched `insert_up`/`insert_down` (the fragment's own
@@ -13412,15 +13421,74 @@ run_mutation "mddate: a date cell's enter completes a pending digit too" \
 # `escape` in the field CANCELS: the painted date comes back and the draft
 # is untouched. Mutated to commit instead, every abandoned edit is written
 # — the one key the mockup promises "puts 2026-09-14 back untouched".
+# Re-anchored 2026-09-20: `date_field_key` now routes through the shared
+# `FieldKey` table (`route`/`apply`) instead of matching key strings
+# directly; `FieldKey::Cancel` is escape's arm.
 run_mutation "mddate: escape restores the painted date" \
   crates/geode-marketdata/src/tile.rs \
-  '            "escape" => {
+  '            FieldKey::Cancel => {
                 self.close_editor(window, cx);
                 self.sync_cursor(cx);' \
-  '            "escape" => {
+  '            FieldKey::Cancel => {
                 self.commit_edit(window, cx);
                 self.sync_cursor(cx);' \
   geode-marketdata escape_restores_the_painted_date_and_blurs_the_field
+
+# ---- As-of dialog Part 1 (2026-09-20): the shared date-time field ------
+# `right` past the precision's last segment must stay — a Date field that
+# stepped into a hidden hour would type into a segment nobody can see.
+run_mutation "widgets: right stops at the precision's last segment" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '        if next.fits(precision) { next } else { self }' \
+  '        next' \
+  geode-widgets \
+  a_reselect_of_the_active_segment_drops_partial_digits
+
+# An hour step wraps within the hour; carrying into the day would move
+# the date under a trader stepping the time alone.
+run_mutation "widgets: a time step wraps without carrying" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '                let next = (current + n.rem_euclid(modulus)).rem_euclid(modulus) as u32;' \
+  '                let next = ((current + n).clamp(0, modulus - 1)) as u32;' \
+  geode-widgets \
+  a_time_step_wraps_within_its_segment_without_carrying
+
+# `enter` is Commit, not Cancel — the host's two arms must stay distinct.
+run_mutation "widgets: enter routes to Commit" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '        "enter" => FieldKey::Commit,' \
+  '        "enter" => FieldKey::Cancel,' \
+  geode-widgets \
+  route_maps_every_field_key_and_lets_a_chord_through
+
+# A chord is never the field's: with this gate gone, `ctrl+d` inside an
+# open field would be swallowed as a non-key instead of reaching the
+# shell.
+run_mutation "widgets: a chord falls through route" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '    if chord {
+        return None;
+    }' \
+  '    let _ = chord;' \
+  geode-widgets \
+  route_maps_every_field_key_and_lets_a_chord_through
+
+# The panel's Date field still opens on the DAY segment through the
+# generalised core (user ruling 2026-09-19).
+run_mutation "marketdata: the date field opens on the day segment" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let field = DateTimeField::open(
+                date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            );' \
+  '            let field = DateTimeField::open(
+                date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+                Precision::Date,
+                Segment::Year,
+            );' \
+  geode-marketdata \
+  i_on_a_date_attribute_opens_the_field_on_the_day_segment
 
 run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
   crates/geode-shell/src/vimnav.rs \
