@@ -772,10 +772,11 @@ fn segment_paint(theme: &Theme, live: bool) -> SegmentPaint {
         rest_fill: None,
         // The dimmed field's own active segment still wears a fill
         // (`secondary`), so its text is that fill's own pair —
-        // `secondary_foreground`, a pairing `shell::control::shipped()`
-        // already sweeps on every bundled theme. `muted_foreground` is
-        // the colour of text on the SURFACE and read as low as 1.2:1 over
-        // `secondary` on several themes.
+        // `secondary_foreground`, which is exactly `Tone::Neutral`
+        // (`shell::chip::chip_paint`) and is swept on every bundled theme
+        // by `every_chip_tone_is_readable_on_every_bundled_theme`.
+        // `muted_foreground` is the colour of text on the SURFACE and is
+        // not floored against `secondary` anywhere.
         active_text: if live {
             theme.primary_foreground
         } else {

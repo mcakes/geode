@@ -94,13 +94,15 @@ context = "timeseries && mode == normal"
 "p" = "timeseries::percentiles"
 "h" = "timeseries::pan_left"
 "l" = "timeseries::pan_right"
+# `=` and `-` are the zoom keys, and there is no second spelling for
+# zoom in: the plus key cannot be bound here at all, because
+# `parse_keystroke` splits a binding on `+` (so a literal `"+"` is an
+# "empty segment" error) and `shift+=` would never match anything either
+# — both platforms deliver shift+punctuation as the shifted character
+# with the shift modifier CLEARED, so that key arrives as `+`, `shift:
+# false` (`geode_shell::defaults`' module doc, lines 31-46, verified
+# there against the pinned platform sources).
 "=" = "timeseries::zoom_in"
-# The plus key, spelled the way this keymap's own parser spells it:
-# `parse_keystroke` splits a binding on `+`, so a bare `"+"` is an
-# "empty segment" error and the binding never existed — an error
-# diagnostic on every startup, found on the first `--demo` boot after
-# the module was registered (Task 11).
-"shift+=" = "timeseries::zoom_in"
 "-" = "timeseries::zoom_out"
 "0" = "timeseries::reset_view"
 "g" = "timeseries::jump_start"

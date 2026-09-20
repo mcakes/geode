@@ -4070,11 +4070,6 @@ mod tests {
         );
     }
 
-    /// The keymap path and the listener path must agree about what an
-    /// arrow means: `timeseries::insert_up` (the `mode == insert`
-    /// fragment's `up`) and the listener's own `up`/`down` are the same
-    /// `FieldKey::Step`.
-    #[gpui::test]
     /// Task 10 review: `edited` is what turns the preset digits off, so
     /// only a keystroke that actually MOVED something may set it — a key
     /// that did nothing must leave the presets reachable. Two such keys,
@@ -4164,6 +4159,10 @@ mod tests {
         );
     }
 
+    /// The keymap path and the listener path must agree about what an
+    /// arrow means: `timeseries::insert_up` (the `mode == insert`
+    /// fragment's `up`) and the listener's own `up`/`down` are the same
+    /// `FieldKey::Step`.
     #[gpui::test]
     fn an_arrow_steps_the_active_segment_through_either_door(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
