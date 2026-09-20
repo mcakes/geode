@@ -3,11 +3,15 @@
 //! package templates, the column vocabulary, the views doc and the
 //! storage row shape. No gpui type appears here.
 
+pub mod columns;
 pub mod edit;
 pub mod sheet;
 pub mod shorthand;
 pub mod template;
 
+pub use columns::{
+    Applies, COLUMNS, CellState, CellText, ColumnDef, ColumnKind, cell_text, column,
+};
 pub use edit::{Edit, EditError, Undo};
 pub use sheet::{
     Delivered, LineId, LineSpec, LineState, OwnShifts, Place, Refresh, RowKind, RowRecord, RowSpec,
