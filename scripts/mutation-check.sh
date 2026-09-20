@@ -13733,6 +13733,19 @@ run_mutation "matrix: a deleted row stays painted" \
         }' \
   geode-marketdata inserted_rows_splice_after_their_anchor_and_deleted_rows_stay_marked
 
+# `rebase` resolves an inserted row's anchor against the newer document's
+# rows OR this draft's own surviving inserted rows — a chain (`shift+o`
+# on an inserted row) hangs off the latter, and the newer model, being
+# the document's own grid, never carries one. Mutated to the document's
+# rows alone, every rebase path (restore-resolve, `:rebase`, `:auto
+# rebase`) flattens the chain: the chained row moves to the top and is
+# named dropped when nothing was.
+run_mutation "draft: rebase keeps an anchor on a surviving inserted row" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            |anchor: &str| rows.contains_key(anchor) || surviving.contains(anchor);' \
+  '            |anchor: &str| rows.contains_key(anchor);' \
+  geode-marketdata rebase_keeps_a_chain_anchored_on_a_surviving_inserted_row
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
