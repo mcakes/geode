@@ -320,6 +320,17 @@ mod tests {
                 ),
                 "stack marker (Tone::Neutral on a tile header)",
             ),
+            (
+                // The toolbar's AS OF chip (2026-09-19): clickable since
+                // the restyle, a `Tone::Warning` chip on the title bar.
+                ControlInputs::new(
+                    theme,
+                    Rest::Filled(theme.warning.opacity(crate::shell::chip::FILL_ALPHA)),
+                    theme.title_bar,
+                    theme.foreground,
+                ),
+                "as-of chip (Tone::Warning on the title bar)",
+            ),
         ]
     }
 

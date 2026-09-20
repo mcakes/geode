@@ -53,16 +53,12 @@ pub struct ScopeBarModel {
     /// clones this rather than `format!`ing it fresh every paint.
     pub slot_label: String,
     pub chips: Vec<Chip>,
+    /// The scope's text layer, bare. The toolbar paints no chip for it
+    /// (toolbar restyle 2026-09-19): the field itself shows the frame's
+    /// text while unfocused (`ShellView::on_frame_changed`) and clears it
+    /// through its own clear glyph, so a `text "…"` chip only repeated
+    /// what sat a few hundred pixels to its right.
     pub text: Option<String>,
-    /// The scope bar's text chip, in its own display text (Phase 4b
-    /// Task 1 fix round 1, MAJ-2): `Some("text \"{t}\"")` when `text` is
-    /// `Some`, built here for the same reason as `slot_label`.
-    pub text_chip: Option<String>,
-    /// The raw, un-decorated text (fix round 1) — the text chip's
-    /// tooltip title; `text_chip` above is the painted `"text \"…\""`
-    /// label. `SharedString` for the same reason as `Chip`'s tooltip
-    /// fields: cloned into a `.tooltip(..)` attachment on every render.
-    pub text_tip: Option<SharedString>,
     /// Elided source text (≤ 40 chars + `…`), or `None` when the scope has
     /// no expression.
     pub expr: Option<String>,
@@ -169,8 +165,6 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         Some((n, label)) => format!("{n} · {label}"),
         None => "view default".to_string(),
     };
-    let text_chip = scope.text.as_ref().map(|t| format!("text \"{t}\""));
-    let text_tip: Option<SharedString> = scope.text.clone().map(Into::into);
     let as_of_badge: Option<SharedString> = as_of.as_ref().map(|t| format!("AS OF {t}").into());
     let savable = !scope.is_empty();
     ScopeBarModel {
@@ -178,8 +172,6 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         slot_label,
         chips,
         text: scope.text.clone(),
-        text_chip,
-        text_tip,
         expr,
         expr_full,
         impossible,
@@ -264,9 +256,9 @@ mod tests {
 
         let m = build_model(&f, today);
         assert_eq!(
-            m.text_chip.as_deref(),
-            Some("text \"spx\""),
-            "the text chip's own display string"
+            m.text.as_deref(),
+            Some("spx"),
+            "the text layer rides on the model bare; the field shows it (no text chip since 2026-09-19)"
         );
         assert_eq!(
             m.as_of_badge.as_deref(),
@@ -311,7 +303,7 @@ mod tests {
         let m = build_model(&f, chrono::Local::now().date_naive());
         assert_eq!(m.slot, None);
         assert_eq!(m.slot_label, "view default");
-        assert_eq!(m.text_chip, None);
+        assert_eq!(m.text, None);
         assert_eq!(m.as_of_badge, None);
         assert_eq!(m.as_of_full, None);
         assert!(!m.savable, "an empty scope has nothing to save");
