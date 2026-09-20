@@ -3646,7 +3646,7 @@ run_mutation "distinct: a derived dimension groups by its own labels, not the so
 # payload actually looks like.
 run_mutation "distinct: the sink maps a Distinct result to a Distinct event" \
   crates/geode-data/src/service.rs \
-  '                    values: r.snapshot.map(|s| {
+  '                    values: r.payload.and_then(view_snapshot).map(|s| {
                         let v = s.column_index("value").expect("distinct selects value");
                         let n = s.column_index("n").expect("distinct selects n");
                         (0..s.rows())
@@ -11210,10 +11210,19 @@ run_mutation "parked: the expiry ladder never skips a month whose third Friday a
   '        if false {' \
   geode-demo-data expiries_skip_a_month_whose_third_friday_has_already_passed
 
+# Re-anchored 2026-09-20 (final review): `deliver` matches the VARIANT
+# now, so the keyed arm is a let-chain over `keyed.key()` and the bare
+# `self.occupants.get(&TileId(key.0))` line appears twice in the
+# function — the two-line chain below is the unambiguous anchor.
 run_mutation "delivery: ShellView::deliver routes to the tile addressed by delivery.key(), not always tile 0" \
   crates/geode-shell/src/shell/occupants.rs \
-  'TileId(delivery.key().0)' \
-  'TileId(0)' \
+  '                if let Some(key) = keyed.key()
+                    && let Some(o) = self.occupants.get(&TileId(key.0))' \
+  '                if let Some(key) = keyed.key()
+                    && let Some(o) = self.occupants.get(&TileId({
+                        let _ = key;
+                        0
+                    }))' \
   geode-shell a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other
 
 # ---- Part 3 Task 3: keymap fragments (market-data documents §8.4) ----
@@ -14541,8 +14550,8 @@ run_mutation "bridge: a local publish bumps the frame" \
 
 run_mutation "shell: a Price delivery is routed to the wrong key" \
   crates/geode-shell/src/module.rs \
-  '            Delivery::Price(outcome) => outcome.key,' \
-  '            Delivery::Price(outcome) => QueryKey(outcome.key.0 + 1),' \
+  '            Delivery::Price(outcome) => Some(outcome.key),' \
+  '            Delivery::Price(outcome) => Some(QueryKey(outcome.key.0 + 1)),' \
   geode-shell a_price_delivery_is_routed_by_key_like_a_query
 
 run_mutation "shell: a pricing change needs no restart" \
@@ -15310,6 +15319,308 @@ run_mutation "tilepicker: the empty dock hint's double-click opens the picker" \
         }' \
   geode-shell \
   clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it
+
+# ---- timeseries Part 2 Task 6: the two `Delivery` variants and the broadcast ----
+
+# The whole point of the key-less arm (timeseries §5.4): a `SeriesFetched`
+# reaches the tiles a trader can SEE, not every occupant in the session.
+# Broadcasting over the occupant map itself is the shape the bug would
+# take — every switched-away workspace's tile told about a fetch it holds
+# no subscription for and will requery for on `set_visible(true)` anyway.
+run_mutation "hosting: a key-less delivery reaches only the visible occupants" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                let mut keys = Vec::new();
+                self.visible_tile_keys(&mut keys);' \
+  '                let mut keys: Vec<QueryKey> =
+                    self.occupants.keys().map(|t| QueryKey(t.0)).collect();
+                keys.sort();' \
+  geode-shell \
+  a_key_less_delivery_reaches_every_visible_occupant_and_no_hidden_one
+
+# The other half of the same routing rule: a `Series` outcome is
+# ADDRESSED, like a `Query`, so it must not fall into the broadcast arm.
+# The mutation makes `key()` answer `None` for it, which is exactly the
+# defect the name claims. `deliver` matches the VARIANT now (the final
+# review's Important: the `let … else unreachable!` is gone, so a future
+# key-less variant is dropped rather than aborting the app), so the
+# mutated outcome is silently dropped and the named test's routing
+# assertion — `delivered == vec![(target, 42)]` — fails on an empty log.
+# Caught by that assertion, not by a panic.
+run_mutation "hosting: a series outcome is routed by its key, not broadcast" \
+  crates/geode-shell/src/module.rs \
+  '            Delivery::Series(outcome) => Some(outcome.key),' \
+  '            Delivery::Series(_) => None,' \
+  geode-shell \
+  a_series_outcome_is_routed_to_its_key_alone
+
+# The bridge's own arm: a fetch outcome has to leave the drain loop at
+# all. This arm was empty until Task 6, so a revert to `=> {}` is the
+# live hazard — and it is silent: nothing here logs, by the UI-thread
+# level constraint.
+run_mutation "bridge: a SeriesFetched event reaches the shell" \
+  crates/geode-app/src/bridge.rs \
+  '                    DataEvent::SeriesFetched {
+                        source,
+                        identity,
+                        result,
+                    } => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(
+                                Delivery::SeriesFetched {
+                                    source,
+                                    identity,
+                                    result,
+                                },
+                                window,
+                                cx,
+                            )
+                        });
+                    }' \
+  '                    DataEvent::SeriesFetched { .. } => {}' \
+  geode-app \
+  a_series_fetched_event_is_broadcast_to_the_shell
+
+# ---- timeseries Part 2: the series query (spec §6) and its expressions (§7) ----
+#
+# The series compiler is the second query path in this crate and it has
+# the same failure mode as the first: a statement that reads plausibly
+# and answers wrongly. Every entry below breaks one clause of one
+# statement, and the tests that catch them are split on purpose between
+# the SQL-text assertions (what the compiler emits) and the end-to-end
+# ones (what DuckDB answers), because neither kind sees the other's
+# defects.
+
+# The inner collapse is what makes a CORRECTION replace its predecessor
+# rather than join it: one value per `ts`, the one with the greatest
+# `received_at`. `arg_min` there is the bitemporal read run backwards —
+# every live series would paint its oldest version, with no marker
+# anywhere saying so.
+run_mutation "series query: live is the oldest version, not the newest" \
+  crates/geode-data/src/query/series.rs \
+  'select ts, arg_max(value, received_at) as v\n    from {table}' \
+  'select ts, arg_min(value, received_at) as v\n    from {table}' \
+  geode-data \
+  an_as_of_before_a_correction_sees_the_original_value
+
+# An as-of is two predicates, not one: `received_at <= t` is what hides a
+# later correction, `ts <= t` what hides a later bar. Dropping the first
+# (spelled here as a second copy of the second, so the bound parameter
+# count is unchanged and the plan still runs) makes every as-of read
+# report today's corrected value under yesterday's date.
+run_mutation "series query: as-of drops the received_at filter" \
+  crates/geode-data/src/query/series.rs \
+  '" and received_at <= make_timestamp(?) and ts <= make_timestamp(?)".to_string()' \
+  '" and ts <= make_timestamp(?) and ts <= make_timestamp(?)".to_string()' \
+  geode-data \
+  an_as_of_before_a_correction_sees_the_original_value
+
+# An expression is an INNER join of its operands (spec §6.2): it exists
+# only in buckets where every operand does. This one is caught by the
+# SQL-TEXT test alone, and that was measured rather than assumed:
+# `the_bucket_set_is_the_union_and_a_missing_bucket_is_nan` passes with
+# `left join` in place, because arithmetic over a NULL is NULL either
+# way and the points statement left-joins the expression CTE from the
+# bucket set regardless — the values are identical. What changes is the
+# shape of the statement, and with it what a later reader may assume
+# about the CTE's rows; do not "fix" this entry onto a value test.
+run_mutation "series query: the expression CTE is emitted as an outer join" \
+  crates/geode-data/src/query/series.rs \
+  '.map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))' \
+  '.map(|d| format!(" left join s{d} on s{d}.b = s{anchor}.b"))' \
+  geode-data \
+  an_expression_is_an_inner_join_of_its_operands_with_a_guarded_division
+
+# The zero guard: a bucket whose denominator vanished is a gap, and the
+# `case when` is what makes it one. Removing it hands the answer to
+# DuckDB, which divides two DOUBLEs into `inf` rather than NULL —
+# measured, not assumed: the VALUE test is what catches this, and the
+# SQL-text assertion beside it would have "caught" it for the shape of
+# the statement rather than for the number a chart would draw.
+run_mutation "series query: division by zero is not guarded" \
+  crates/geode-data/src/query/series.rs \
+  'format!("(case when ({r}) = 0 then null else ({l}) / ({r}) end)")' \
+  'format!("(({l}) / ({r}))")' \
+  geode-data \
+  a_zero_denominator_is_a_gap_not_an_infinity
+
+# The bucket set is the union of the SOURCE slots' buckets alone. Let an
+# expression into it and a chart grows rows no source ever carried —
+# every one of them NaN across the board, which reads as a data gap
+# rather than as the request's own arithmetic.
+run_mutation "series query: an expression widens the bucket set" \
+  crates/geode-data/src/query/series.rs \
+  '        .filter(|s| matches!(s.kind, SlotKind::Source { .. }))
+        .map(|s| s.slot)
+        .collect();' \
+  '        .map(|s| s.slot)
+        .collect();' \
+  geode-data \
+  an_expression_is_an_inner_join_of_its_operands_with_a_guarded_division
+
+# Stats are computed over the WINDOW, the range's zoomed subset, not the
+# range: `and` there is the difference between a median of what a trader
+# is looking at and a median of everything fetched around it. `or` keeps
+# the statement valid and returns every bucket.
+run_mutation "series query: stats ignore the window" \
+  crates/geode-data/src/query/series.rs \
+  'select {cols} from s{n} where b >= make_timestamp(?) and b < make_timestamp(?)' \
+  'select {cols} from s{n} where b >= make_timestamp(?) or b < make_timestamp(?)' \
+  geode-data \
+  percentiles_and_bins_are_computed_over_the_window_only
+
+# The bin index is `width_bucket` spelled out, because the pinned DuckDB
+# has no such function. The `least(.., k)` is that definition's last
+# clause: the maximum itself lands in bin `k + 1` and the fold is what
+# puts it back in the top bin. Without it the reader's `1..=k` range
+# check silently DISCARDS the window's maximum — the histogram is short
+# by however many rows sit exactly on `hi`, with no error anywhere.
+run_mutation "series query: the top bin folds nothing" \
+  crates/geode-data/src/query/series.rs \
+  'cast(least(floor((w.v - m.lo) / (m.hi - m.lo) * {k}) + 1, {k}) as bigint) as k' \
+  'cast(floor((w.v - m.lo) / (m.hi - m.lo) * {k}) + 1 as bigint) as k' \
+  geode-data \
+  percentiles_and_bins_are_computed_over_the_window_only
+
+# A NULL value column is a bucket this slot has no point in, and the
+# dense `Vec<f64>` has to spell it somehow. `0.0` is the one spelling a
+# chart would draw as a line through zero and any later arithmetic would
+# absorb; NaN is the contract.
+run_mutation "series query: a null bucket is zero, not a gap" \
+  crates/geode-data/src/query/series.rs \
+  '    v.unwrap_or(f64::NAN)' \
+  '    v.unwrap_or(0.0)' \
+  geode-data \
+  the_bucket_set_is_the_union_and_a_missing_bucket_is_nan
+
+# A literal too big for an f64 is `Ok(inf)` from Rust's own parser, not
+# an error, so a pasted wall of digits reaches `lower` as `Num(inf)` and
+# `{x:?}` formats it into the statement as the bare word `inf`. The
+# check is the only thing between that and a DuckDB syntax error naming
+# an identifier the trader never typed.
+run_mutation "series query: a non-finite literal is formatted into SQL" \
+  crates/geode-data/src/query/series.rs \
+  '            if !x.is_finite() {' \
+  '            if false {' \
+  geode-data \
+  a_non_finite_literal_is_refused
+
+# Spec §6.3: the cap is checked BEFORE compilation, so a request no
+# chart could paint costs nothing but the arithmetic.
+run_mutation "series query: the cap is never checked" \
+  crates/geode-data/src/service.rs \
+  '        if points > SERIES_POINT_CAP {' \
+  '        if false {' \
+  geode-data \
+  a_capped_request_is_refused_before_compilation
+
+# The load lane's word is how a slot says its pair is stale or failed
+# (spec §6.4). Without it a failed fetch paints as an empty series and
+# nothing on the chart says why.
+run_mutation "series query: the pair's health is not attached" \
+  crates/geode-data/src/service.rs \
+  '                                    s.provenance.health = health_tracker.load_lane(source, &key);' \
+  '                                    let _ = (&key, &health_tracker, &mut s.provenance);' \
+  geode-data \
+  a_failed_pairs_health_rides_its_slot
+
+# ...and it is filed BY SLOT NUMBER. `SeriesResult::slots` holds every
+# slot, expressions included; `pairs` holds only the source ones, so the
+# two lists differ in length the moment a request has an expression. A
+# positional zip marks the wrong pane in both directions — the healthy
+# slot warned, the failed one clean — and every single-slot assertion
+# stays green through it.
+run_mutation "series query: health is filed by position, not slot" \
+  crates/geode-data/src/service.rs \
+  '                            for (slot, source, identity) in &pairs {
+                                let key = format!("{identity}@{source}");
+                                if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {' \
+  '                            for (i, (_slot, source, identity)) in pairs.iter().enumerate() {
+                                let key = format!("{identity}@{source}");
+                                if let Some(s) = res.slots.iter_mut().nth(i) {' \
+  geode-data \
+  health_is_attached_by_slot_number_not_position
+
+# ---- the expression parser (timeseries spec §7) ----
+
+# Precedence is the grammar's two tiers: `expr` over terms, `term` over
+# factors. Flatten the top tier onto factors and `s1 * s2 + s3` stops
+# parsing at the `*` — but `1 + 2 * 3` still parses correctly, which is
+# why the test that catches this asserts on a product on the LEFT.
+run_mutation "expr: precedence is flat" \
+  crates/geode-core/src/series/expr.rs \
+  '        let mut lhs = self.term()?;' \
+  '        let mut lhs = self.factor()?;' \
+  geode-core \
+  precedence_and_associativity
+
+# A slot whose expression reaches itself is a cycle, and the compiler's
+# emission order depends on there being none: a cycle reported as Ok
+# leaves the CTE list short an operand and DuckDB answers with a missing
+# table rather than the spec's message.
+run_mutation "expr: a cycle is not detected" \
+  crates/geode-core/src/series/expr.rs \
+  '            Mark::Visiting => return Err(exprs[i].0),' \
+  '            Mark::Visiting => return Ok(()),' \
+  geode-core \
+  expression_order_puts_operands_first_and_names_a_cycle
+
+# `max(s1, s2)` is not arithmetic, and the `(` right after a word is the
+# only place the tokenizer can say so in the trader's own words. Without
+# it the word becomes an identity and the parse fails later with
+# "unexpected token", pointing at a paren rather than at the boundary.
+run_mutation "expr: a function call is accepted" \
+  crates/geode-core/src/series/expr.rs \
+  '                if i < bytes.len() && bytes[i] == b'"'"'('"'"' {
+                    return Err(ParseError {
+                        position: i,
+                        message: ARITHMETIC_ONLY.into(),
+                    });
+                }' \
+  '                let _ = ();' \
+  geode-core \
+  foreign_tokens_are_refused_with_the_arithmetic_only_message
+
+# The final review's Important: `MAX_DEPTH` bounds NESTING, and
+# `expr`/`term` fold left-deep iteratively, so `1 + 1 + …` builds a tree
+# as deep as it is long while nesting nothing. The token bound is what
+# caps the node count, and hence `resolve`, `collect_slots`, the
+# compiler's `lower` and the `Box` drop glue — every one of which
+# recurses over that tree. Turn the check off and a pasted chain
+# overflows the stack: an abort, which `contained` cannot catch.
+run_mutation "expr: the token bound is off" \
+  crates/geode-core/src/series/expr.rs \
+  '    if toks.len() > MAX_TOKENS {' \
+  '    if false {' \
+  geode-core \
+  a_long_chain_is_refused_by_the_token_bound
+
+# A handle is `s` followed by digits and NOTHING else: `spx_1y` is an
+# identity a desk really uses, and `s999` is an identity too (past u8).
+# Take the filter away and every word beginning with s becomes a slot
+# handle — `spx_1y` would resolve to slot 0 and read some other pane's
+# series under the trader's own name.
+run_mutation "expr: the s-prefix filter accepts any word" \
+  crates/geode-core/src/series/expr.rs \
+  '                let handle = word
+                    .strip_prefix('"'"'s'"'"')
+                    .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|rest| rest.parse::<u8>().ok());' \
+  '                let handle = word
+                    .strip_prefix('"'"'s'"'"')
+                    .map(|rest| rest.parse::<u8>().unwrap_or(0));' \
+  geode-core \
+  unary_minus_parentheses_and_every_reference_form
+
+# The pool's second payload kind (spec §6.1): a series work item runs
+# `run_series`, not the view path. The arm answering an error is the
+# shape a mis-wired dispatch would take — the request comes back as this
+# key's own failure, which is exactly what makes it easy to miss.
+run_mutation "pool: a series work item runs the view path" \
+  crates/geode-data/src/query/pool.rs \
+  '        Work::Series(plan) => run_series(conn, plan).map(Payload::Series),' \
+  '        Work::Series(_) => Err(duckdb::Error::InvalidParameterName("series".into())),' \
+  geode-data \
+  a_series_request_rides_the_pool_and_delivers_a_series_payload
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

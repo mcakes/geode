@@ -340,7 +340,7 @@ fn meta(name: &str) -> CompiledColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::pool::{QueryRequest, RequestKind, ViewId, run_one};
+    use crate::query::pool::{Payload, QueryRequest, RequestKind, ViewId, Work, run_one};
     use crate::store::ddl::tests_support::ts;
     use chrono::{DateTime, Utc};
     use geode_core::config::{LayerDoc, merge_docs};
@@ -428,14 +428,17 @@ grain = "instrument"
                 tag: 0,
                 submitted: std::time::Instant::now(),
                 view: ViewId("distinct".into()),
-                compiled: compiled.clone(),
+                work: Work::Query(compiled.clone()),
                 grouping: Vec::new(),
                 provenance: Provenance::default(),
                 kind: RequestKind::Distinct {
                     column: String::new(),
                 },
             };
-            let snap = run_one(self.conn(), &req).unwrap();
+            let snap = match run_one(self.conn(), &req).unwrap() {
+                Payload::Snapshot(s) => s,
+                Payload::Series(_) => panic!("a distinct query answered with a series"),
+            };
             let v = snap.column_index("value").expect("distinct selects value");
             let n = snap.column_index("n").expect("distinct selects n");
             (0..snap.rows())

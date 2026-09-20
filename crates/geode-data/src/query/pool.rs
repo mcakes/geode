@@ -12,8 +12,10 @@
 //! the UI. `spawn` still builds a channel for callers that want one.
 
 use crate::query::compile::CompiledQuery;
+use crate::query::series::{SeriesPlan, run_series};
 use crate::store::Store;
 use geode_core::query::QueryKey;
+use geode_core::series::SeriesResult;
 use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +38,36 @@ pub type QueryId = u64;
 /// Called with the queue's own lock held (see the worker's delivery site),
 /// so a sink must not block and must not call back into this pool:
 /// `submit`/`cancel` take the same lock, and std `Mutex` is not re-entrant.
+/// The service's sink does take one other lock — the health tracker's,
+/// to attach a series slot's load-lane word (timeseries spec §6.4) — and
+/// that is a LEAF: nothing reachable from it takes a pool lock, so the
+/// order is queue lock → tracker lock and no sink may take any third one.
 pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
+
+/// What a worker produced (timeseries spec §6.4): a view or document
+/// query's `Snapshot`, or a series query's struct-of-arrays result. Two
+/// kinds rather than a series `Snapshot` because the chart wants arrays
+/// and a series has no tree, grouping or attribution to put in one.
+///
+/// Not boxed (`clippy::large_enum_variant`): the big variant is the
+/// common one — every view and document query answers with a `Snapshot`
+/// — so boxing it would add an allocation per query to shrink a value
+/// moved once, from the worker into the sink.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum Payload {
+    Snapshot(Snapshot),
+    Series(SeriesResult),
+}
+
+/// The work a request carries: a compiled statement that yields a
+/// `Snapshot`, or a series plan that yields a `SeriesResult`. The pool's
+/// coalescing, interruption and containment never look inside.
+#[derive(Debug)]
+pub enum Work {
+    Query(CompiledQuery),
+    Series(Box<SeriesPlan>),
+}
 
 /// What kind of request this is, carried through to the result so the
 /// service's sink can route it to the right `DataEvent` variant without
@@ -44,7 +75,15 @@ pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Query,
-    Distinct { column: String },
+    Distinct {
+        column: String,
+    },
+    Series {
+        /// The `(slot, source, identity)` of every source slot, carried
+        /// through so the service's sink can attach each pair's
+        /// load-lane health without re-reading the plan.
+        pairs: Vec<(u8, String, String)>,
+    },
 }
 
 pub struct QueryRequest {
@@ -54,7 +93,7 @@ pub struct QueryRequest {
     pub submitted: Instant,
     /// The view compiled, for messages. Not a coalescing key.
     pub view: ViewId,
-    pub compiled: CompiledQuery,
+    pub work: Work,
     /// The grouping columns in order; the snapshot builds its tree from
     /// them (spec §5.5).
     pub grouping: Vec<String>,
@@ -70,7 +109,7 @@ pub struct QueryResult {
     pub view: ViewId,
     /// `Err` carries the failure: a bad query degrades its own key and
     /// leaves the pool running (spec §10.1).
-    pub snapshot: Result<Snapshot, String>,
+    pub payload: Result<Payload, String>,
     pub kind: RequestKind,
 }
 
@@ -103,7 +142,7 @@ struct Queue {
 /// a direct call so a test can inject one that panics — there is no SQL
 /// that makes `run_one` panic, and panic-safety is the property most worth
 /// testing here.
-type RunFn = fn(&duckdb::Connection, &QueryRequest) -> Result<Snapshot, duckdb::Error>;
+type RunFn = fn(&duckdb::Connection, &QueryRequest) -> Result<Payload, duckdb::Error>;
 
 pub struct QueryPool {
     queue: Arc<(Mutex<Queue>, Condvar)>,
@@ -329,7 +368,7 @@ fn worker(
             tag: req.tag,
             submitted: req.submitted,
             view: req.view.clone(),
-            snapshot: outcome,
+            payload: outcome,
             kind: req.kind.clone(),
         });
         // The queue lock is released before logging: formatting a warning
@@ -374,23 +413,28 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 pub(crate) fn run_one(
     conn: &duckdb::Connection,
     req: &QueryRequest,
-) -> Result<Snapshot, duckdb::Error> {
-    let mut stmt = conn.prepare(&req.compiled.sql)?;
-    let batches: Vec<duckdb::arrow::record_batch::RecordBatch> = stmt
-        .query_arrow(duckdb::params_from_iter(req.compiled.params.iter()))?
-        .collect();
-    let meta: Vec<ColumnMeta> = req
-        .compiled
-        .columns
-        .iter()
-        .map(|c| ColumnMeta {
-            name: c.name.clone(),
-            attribution_by_depth: c.attribution_by_depth.clone(),
-            scope_semantics: c.scope_semantics.clone(),
-        })
-        .collect();
-    Snapshot::from_batches(batches, meta, req.grouping.clone(), req.provenance.clone())
-        .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string()))
+) -> Result<Payload, duckdb::Error> {
+    match &req.work {
+        Work::Series(plan) => run_series(conn, plan).map(Payload::Series),
+        Work::Query(compiled) => {
+            let mut stmt = conn.prepare(&compiled.sql)?;
+            let batches: Vec<duckdb::arrow::record_batch::RecordBatch> = stmt
+                .query_arrow(duckdb::params_from_iter(compiled.params.iter()))?
+                .collect();
+            let meta: Vec<ColumnMeta> = compiled
+                .columns
+                .iter()
+                .map(|c| ColumnMeta {
+                    name: c.name.clone(),
+                    attribution_by_depth: c.attribution_by_depth.clone(),
+                    scope_semantics: c.scope_semantics.clone(),
+                })
+                .collect();
+            Snapshot::from_batches(batches, meta, req.grouping.clone(), req.provenance.clone())
+                .map(Payload::Snapshot)
+                .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -442,11 +486,20 @@ mod tests {
             tag: key * 100,
             submitted: std::time::Instant::now(),
             view: ViewId(view.to_string()),
-            compiled: query(sql),
+            work: Work::Query(query(sql)),
             grouping: Vec::new(),
             provenance: Provenance::default(),
             kind: RequestKind::Query,
         }
+    }
+
+    /// The snapshot half of a result, for the tests written before a
+    /// second payload kind existed.
+    fn snapshot(r: QueryResult) -> Result<Snapshot, String> {
+        r.payload.map(|p| match p {
+            Payload::Snapshot(s) => s,
+            Payload::Series(_) => panic!("a view query answered with a series"),
+        })
     }
 
     /// A pool delivering into a channel, built on an injected `run` — for
@@ -465,7 +518,7 @@ mod tests {
         pool.submit(request(1, "v1", "select sum(v) as v from t"));
         let result = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(result.view, ViewId("v1".into()));
-        assert_eq!(result.snapshot.unwrap().rows(), 1);
+        assert_eq!(snapshot(result).unwrap().rows(), 1);
         pool.shutdown();
     }
 
@@ -656,7 +709,7 @@ mod tests {
         let mut views = Vec::new();
         for _ in 0..2 {
             if let Ok(r) = rx.recv_timeout(Duration::from_secs(30)) {
-                views.push((r.view, r.snapshot.is_ok()));
+                views.push((r.view.clone(), snapshot(r).is_ok()));
             }
         }
         pool.shutdown();
@@ -801,7 +854,7 @@ mod tests {
         // view again: the tile stopped updating, with no error and no
         // reason shown, for the rest of the session. The pool also lost a
         // worker each time, silently.
-        fn boom(_: &duckdb::Connection, _: &QueryRequest) -> Result<Snapshot, duckdb::Error> {
+        fn boom(_: &duckdb::Connection, _: &QueryRequest) -> Result<Payload, duckdb::Error> {
             panic!("injected panic");
         }
         let (_d, store) = fixture(100);
@@ -812,7 +865,8 @@ mod tests {
         pool.submit(request(1, "v1", "select sum(v) as v from t"));
         let first = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(first.view, ViewId("v1".into()));
-        let message = first.snapshot.unwrap_err();
+        let first_id = first.id;
+        let message = snapshot(first).unwrap_err();
         assert!(
             message.contains("panicked") && message.contains("injected panic"),
             "the panic must be reported as this view's failure: {message}"
@@ -822,7 +876,7 @@ mod tests {
         pool.submit(request(1, "v1", "select sum(v) as v from t"));
         let second = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(second.view, ViewId("v1".into()));
-        assert!(second.id > first.id);
+        assert!(second.id > first_id);
         pool.shutdown();
     }
 
@@ -837,7 +891,7 @@ mod tests {
         // as an error. It is this cancel's own doing, so delivering it
         // paints "query failed" on a tile the user merely navigated away
         // from.
-        fn gated(_: &duckdb::Connection, _: &QueryRequest) -> Result<Snapshot, duckdb::Error> {
+        fn gated(_: &duckdb::Connection, _: &QueryRequest) -> Result<Payload, duckdb::Error> {
             while !CANCEL_GATE.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -886,7 +940,7 @@ mod tests {
         // does, so its `Interrupted` is equally self-inflicted. It used to
         // be delivered: a query failure the pool caused while closing,
         // handed to whatever drains the channel on teardown.
-        fn gated(_: &duckdb::Connection, _: &QueryRequest) -> Result<Snapshot, duckdb::Error> {
+        fn gated(_: &duckdb::Connection, _: &QueryRequest) -> Result<Payload, duckdb::Error> {
             while !SHUTDOWN_GATE.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -952,6 +1006,88 @@ mod tests {
         let (_d, store) = fixture(100);
         let (pool, _rx) = QueryPool::spawn(&store, 2).unwrap();
         pool.shutdown();
+        pool.shutdown();
+    }
+
+    #[test]
+    fn a_series_request_rides_the_pool_and_delivers_a_series_payload() {
+        use crate::adapter::SeriesRows;
+        use crate::query::series::compile_series;
+        use crate::store::ddl::tests_support::{series_dataset, ts};
+        use crate::store::series::{SeriesAppendRequest, append_series};
+        use geode_core::query::AsOf;
+        use geode_core::schema::SchemaSpec;
+        use geode_core::series::{BucketRule, Frequency, SeriesParams, SeriesSpec, SlotKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = series_dataset();
+        store.apply_schema(&ds).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        let start = ts("2026-01-05T14:30:00Z");
+        append_series(
+            &store,
+            &SeriesAppendRequest {
+                dataset: &ds,
+                source: "demo_kdb",
+                identity: "A",
+                rows: &SeriesRows {
+                    ts: vec![start, start + chrono::Duration::minutes(1)],
+                    value: vec![1.0, 2.0],
+                },
+                span: (start, start + chrono::Duration::days(1)),
+                received_at: ts("2026-01-06T09:00:00Z"),
+            },
+        )
+        .unwrap();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let params = SeriesParams {
+            key: QueryKey(3),
+            tag: 9,
+            submitted: Instant::now(),
+            dataset: "series".into(),
+            range: (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+            window: (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+            as_of: AsOf::Live,
+            frequency: Frequency::D1,
+            series: vec![SeriesSpec {
+                slot: 1,
+                kind: SlotKind::Source {
+                    source: "demo_kdb".into(),
+                    identity: "A".into(),
+                    rule: BucketRule::Last,
+                },
+            }],
+            percentiles: Vec::new(),
+            bins: None,
+        };
+        let plan = compile_series(&schema, &params).unwrap();
+        let (pool, rx) = QueryPool::spawn(&store, 1).unwrap();
+        pool.submit(QueryRequest {
+            key: QueryKey(3),
+            tag: 9,
+            submitted: Instant::now(),
+            view: ViewId("series:series".into()),
+            work: Work::Series(Box::new(plan)),
+            grouping: Vec::new(),
+            provenance: Provenance::default(),
+            kind: RequestKind::Series {
+                pairs: vec![(1, "demo_kdb".into(), "A".into())],
+            },
+        });
+        let r = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        assert_eq!((r.key, r.tag), (QueryKey(3), 9));
+        assert!(matches!(r.kind, RequestKind::Series { .. }));
+        match r.payload.unwrap() {
+            Payload::Series(res) => {
+                assert_eq!(res.slots[0].values, vec![2.0]);
+                assert_eq!(res.buckets.len(), 1);
+            }
+            Payload::Snapshot(_) => panic!("a series request answered with a snapshot"),
+        }
         pool.shutdown();
     }
 }
