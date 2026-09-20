@@ -236,6 +236,7 @@ mod tests {
             layer,
             index,
             context_source: None,
+            key_source: keys.to_string(),
         }
     }
 

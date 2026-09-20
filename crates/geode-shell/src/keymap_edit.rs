@@ -103,6 +103,7 @@
 
 use std::path::Path;
 
+use crate::keymap::UserOverride;
 use geode_core::config::Layer;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, value};
 
@@ -271,6 +272,80 @@ pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, S
     Ok(UnbindOutcome { removed })
 }
 
+/// What [`apply_reset`]/[`apply_reset_all`] did: how many keys were
+/// actually removed. A reset that finds fewer than it was asked for is the
+/// same stale-belief case as [`UnbindOutcome::removed`] `false` — warned
+/// about, not failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetOutcome {
+    pub removed: usize,
+}
+
+/// Remove every key `overrides` names from `<user_dir>/keymap.toml` in one
+/// write — the reset of one action (`keybindings_view`'s `r`), whose
+/// override set is [`crate::keymap::user_overrides_for`]'s answer: a
+/// rebind's new key AND its `"none"` shadow over the old, or a bare shadow
+/// a `d` left. `Err` only ever means the file read/parse/write itself
+/// failed; the file is left untouched then, as every write here leaves it.
+///
+/// Unlike [`apply_unbind`], this never creates a `[[bindings]]` entry: a
+/// removal has nothing to write into a missing one, so a context with no
+/// entry is simply a key not found. Every entry whose `context` matches is
+/// searched (a hand-written file may spell the same context twice;
+/// `keys_table_for` stops at the first). Entries emptied by the removal
+/// are left in place — a hand-written entry's comments are its owner's.
+pub fn apply_reset(user_dir: &Path, overrides: &[UserOverride]) -> Result<ResetOutcome, String> {
+    let mut doc = open_doc_with_bindings(user_dir)?;
+    let bindings = doc["bindings"]
+        .as_array_of_tables_mut()
+        .expect("open_doc_with_bindings just ensured this");
+
+    let mut removed = 0;
+    for o in overrides {
+        for entry in bindings.iter_mut().filter(|entry| {
+            entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
+        }) {
+            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                continue;
+            };
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }
+    }
+
+    crate::config_write::write(user_dir, Layer::User, KEYMAP_DOC, &doc.to_string())?;
+    Ok(ResetOutcome { removed })
+}
+
+/// Drop every `[[bindings]]` entry from `<user_dir>/keymap.toml` — the
+/// user layer's whole say over key bindings, dialog-written and
+/// hand-written alike (there is no way to tell them apart, and the user
+/// ruling of 2026-09-19 was that "reset all" means all). Everything else
+/// in the file — `config_version`, the `mod` alias, comments outside the
+/// entries — is preserved; the desk and builtin layers are never touched
+/// by anything in this module. `removed` counts the keys that were bound
+/// in those entries. `Err` only ever means the file read/parse/write
+/// itself failed, with the file left untouched.
+pub fn apply_reset_all(user_dir: &Path) -> Result<ResetOutcome, String> {
+    let mut doc = open_doc_with_bindings(user_dir)?;
+    let removed = doc["bindings"]
+        .as_array_of_tables()
+        .expect("open_doc_with_bindings just ensured this")
+        .iter()
+        .map(|entry| {
+            entry
+                .get("keys")
+                .and_then(Item::as_table_like)
+                .map_or(0, TableLike::len)
+        })
+        .sum();
+    doc.remove("bindings");
+
+    crate::config_write::write(user_dir, Layer::User, KEYMAP_DOC, &doc.to_string())?;
+    Ok(ResetOutcome { removed })
+}
+
 /// Read `<user_dir>/keymap.toml` through [`crate::config_write::open`]
 /// (which reads it if it exists, or starts a fresh document stamped with
 /// `config_version = 1` when it doesn't, and refuses an unparseable one
@@ -376,7 +451,7 @@ mod tests {
     use toml_edit::DocumentMut as Doc;
 
     use crate::actions::{ActionDef, ActionId, ActionRegistry};
-    use crate::keymap::{Modifiers as KeymapModifiers, build_keymap};
+    use crate::keymap::{Modifiers as KeymapModifiers, UserOverride, build_keymap};
     use geode_core::config::{Layer, LayerDoc};
 
     fn read(dir: &Path) -> String {
@@ -1093,6 +1168,129 @@ context = \"workspace\"
         assert!(out.removed);
         let text = read(dir.path());
         assert!(!text.contains("ctrl+k"), "{text}");
+    }
+
+    fn user_override(context: Option<&str>, key: &str) -> UserOverride {
+        UserOverride {
+            context_source: context.map(str::to_string),
+            key: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn resetting_removes_every_named_key_in_one_write() {
+        // The rebind pair: the new key and the `"none"` shadow over the old
+        // one, both in the same entry. One reset removes both.
+        let dir = tempfile::tempdir().unwrap();
+        let original = "config_version = 1\n\n[[bindings]]\ncontext = \"workspace\"\n\n\
+             [bindings.keys]\n\"mod+j\" = \"workspace::focus_left\"\n\"mod+h\" = \"none\"\n\
+             \"mod+l\" = \"workspace::focus_right\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let outcome = apply_reset(
+            dir.path(),
+            &[
+                user_override(Some("workspace"), "mod+h"),
+                user_override(Some("workspace"), "mod+j"),
+            ],
+        )
+        .expect("write");
+        assert_eq!(outcome, ResetOutcome { removed: 2 });
+
+        let text = read(dir.path());
+        assert!(!text.contains("mod+j"), "{text}");
+        assert!(!text.contains("mod+h"), "{text}");
+        assert!(
+            text.contains(r#""mod+l" = "workspace::focus_right""#),
+            "an unrelated key in the same entry survives: {text}"
+        );
+    }
+
+    #[test]
+    fn resetting_a_key_that_is_not_there_counts_nothing_and_creates_no_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n\
+             \"mod+h\" = \"workspace::focus_left\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let outcome =
+            apply_reset(dir.path(), &[user_override(Some("blotter"), "mod+h")]).expect("write");
+        assert_eq!(outcome, ResetOutcome { removed: 0 });
+
+        let text = read(dir.path());
+        assert!(
+            !text.contains("blotter"),
+            "a reset must never create a [[bindings]] entry: {text}"
+        );
+        assert!(
+            text.contains(r#""mod+h" = "workspace::focus_left""#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn resetting_preserves_comments_and_the_files_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "# my keymap\nconfig_version = 1\nmod = \"alt\"\n\n[[bindings]]\n\n\
+             [bindings.keys]\n# left\n'mod+h' = \"workspace::focus_left\"\n\
+             \"mod+l\" = \"workspace::focus_right\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        apply_reset(dir.path(), &[user_override(None, "mod+h")]).expect("write");
+        let text = read(dir.path());
+        assert!(text.contains("# my keymap"), "{text}");
+        assert!(text.contains(r#"mod = "alt""#), "{text}");
+        assert!(!text.contains("'mod+h'"), "{text}");
+        assert!(
+            text.contains(r#""mod+l" = "workspace::focus_right""#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn reset_all_drops_every_bindings_entry_and_keeps_the_rest_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "# my keymap\nconfig_version = 1\nmod = \"alt\"\n\n\
+             [[bindings]]\ncontext = \"workspace\"\n\n[bindings.keys]\n\
+             \"mod+j\" = \"workspace::focus_left\"\n\"mod+h\" = \"none\"\n\n\
+             [[bindings]]\n\n[bindings.keys]\n\"ctrl+k\" = \"tile::close\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let outcome = apply_reset_all(dir.path()).expect("write");
+        assert_eq!(outcome, ResetOutcome { removed: 3 });
+
+        let text = read(dir.path());
+        assert!(text.contains("# my keymap"), "{text}");
+        assert!(text.contains(r#"mod = "alt""#), "{text}");
+        assert!(!text.contains("[[bindings]]"), "{text}");
+        assert!(!text.contains("tile::close"), "{text}");
+
+        // And the file still builds clean as a keymap with no bindings.
+        let (keymap, diags) = crate::keymap::build_keymap(
+            &[user_layer_doc(dir.path())],
+            KeymapModifiers::ALT,
+            &registry_with("tile::close"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(keymap.bindings().is_empty());
+    }
+
+    #[test]
+    fn reset_all_on_a_missing_file_removes_nothing_and_writes_a_fresh_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = apply_reset_all(dir.path()).expect("write");
+        assert_eq!(outcome, ResetOutcome { removed: 0 });
+        let text = read(dir.path());
+        assert!(text.contains("config_version = 1"), "{text}");
+    }
+
+    #[test]
+    fn reset_all_leaves_a_corrupt_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "this is = not [ toml\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+        assert!(apply_reset_all(dir.path()).is_err());
+        assert_eq!(read(dir.path()), original);
     }
 
     /// Overwriting an already-present key must preserve that key's own
