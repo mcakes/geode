@@ -507,6 +507,20 @@ pub fn open_shell_dialog_with_key<F>(
         let handle = view.dialog_input.read(cx).focus_handle(cx);
         handle.focus(window, cx);
     }
+    // A dialog opened from a MOUSE-DOWN — the scope bar's chips and
+    // grouping readout, the sidebar's gear — keeps the focus it just
+    // took (grouping-picker work, 2026-09-19): gpui focuses the
+    // `track_focus`ed element under the pointer on the bubble phase of
+    // that same mouse-down unless `prevent_default` was called by an
+    // earlier listener, and the chip's own listener (this call) runs
+    // before the shell root's, so without this the root took the field's
+    // focus back a moment after the dialog opened and typing went
+    // nowhere (`the_pick_chip_is_always_present_and_opens_the_picker`
+    // pins it on the `+` chip). Outside a mouse dispatch the flag is
+    // inert — only `div`'s mouse listeners read it, and every dispatch
+    // resets it first — so the key paths pay nothing for sharing the
+    // door.
+    window.prevent_default();
     // The open-door seam of [`sync_dialog_text`]'s five seam classes
     // (spec §16.1/§16.6, folded to five by §17.3): a no-op for the
     // mode-less dialogs the `focus_filter` branch above

@@ -21,7 +21,10 @@ use geode_core::query::AsOf;
 use super::keys::convert_keystroke;
 #[cfg(feature = "profiling")]
 use super::profiling_hook;
-use super::{ShellView, asof_view, dialog, keybindings_view, objectdialog, picker, settings_view};
+use super::{
+    ShellView, asof_view, dialog, groupingpicker, keybindings_view, objectdialog, picker,
+    settings_view,
+};
 
 /// A stack verb's refusal on a tile that is not a stack member
 /// (tile-stacks spec §4) — `ShellView::notice`'s value for the rest of
@@ -387,6 +390,10 @@ impl ShellView {
         } else if action.0 == "frame::as_of" {
             // mod+t (spec §3.6): the as-of selector modal.
             asof_view::open(self, window, cx);
+        } else if action.0 == "frame::grouping" {
+            // mod+g (2026-09-19): the grouping picker — the same door the
+            // toolbar readout's click takes.
+            groupingpicker::open(self, window, cx);
         } else if action.0 == "frame::live" {
             // Palette-only (spec §3.6, same reasoning as `frame::
             // scope_clear`): return to live, remembering the previous

@@ -3755,7 +3755,9 @@ run_mutation "picker: the values stage stops advertising tab" \
 run_mutation "picker: the footer hint never paints" \
   crates/geode-shell/src/shell/picker.rs \
   '        .child(hint_row(
-            &picker.stage,
+            hints(&picker.stage),
+            "picker-hints",
+            WIDTH,
             theme.muted_foreground,
             theme.muted,
             theme.border,
@@ -13743,6 +13745,89 @@ run_mutation "stacks: the marker is gated on len > 1" \
   '        if false {' \
   geode-blotter \
   the_stack_marker_paints_only_while_a_member
+
+# ---- grouping picker (2026-09-19): the toolbar readout's click and
+# `frame::grouping` / `mod+g` ---------------------------------------------
+
+# Only FILLED slots are rows: an empty slot listed would be a row that
+# visibly does nothing (`set_active_slot` ignores it).
+run_mutation "grouping: only filled slots are rows" \
+  crates/geode-shell/src/shell/groupingpicker.rs \
+  '        if let Some(label) = slots.label(n) {' \
+  '        if let Some(label) = Some(slots.label(n).unwrap_or_default()) {' \
+  geode-shell \
+  rows_are_the_view_default_then_every_filled_slot
+
+# The picker opens on the frame's ACTIVE slot, so a bare `enter` changes
+# nothing.
+run_mutation "grouping: the highlight opens on the active slot" \
+  crates/geode-shell/src/shell/groupingpicker.rs \
+  '        list.place(text.as_deref());' \
+  '        list.place(None);' \
+  geode-shell \
+  mod_g_opens_the_picker_on_the_active_slot
+
+# `enter` re-feeds the field's live text before trusting the highlight
+# (`set_value` emits no `Change`).
+run_mutation "grouping: enter picks the HIGHLIGHTED row, re-fed from the live text" \
+  crates/geode-shell/src/shell/groupingpicker.rs \
+  '                state.list.set_query(&live);
+                state.highlighted_slot()' \
+  '                let _ = &live;
+                state.highlighted_slot()' \
+  geode-shell \
+  clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot
+
+# A digit jumps only on an EMPTY field — typed after text it is text.
+run_mutation "grouping: the digit jump needs an empty field" \
+  crates/geode-shell/src/shell/groupingpicker.rs \
+  '        && shell.dialog_input.read(cx).text().len() == 0' \
+  '        && true' \
+  geode-shell \
+  a_digit_after_text_filters_rather_than_jumps
+
+# An unfilled slot's digit is claimed and dropped, never typed.
+run_mutation "grouping: an unfilled slot's digit is dropped, not typed" \
+  crates/geode-shell/src/shell/groupingpicker.rs \
+  '        if let Some(slot) = slot {
+            commit(shell, slot, window, cx);
+        }
+        return true;' \
+  '        if let Some(slot) = slot {
+            commit(shell, slot, window, cx);
+            return true;
+        }
+        return false;' \
+  geode-shell \
+  a_digit_jumps_to_a_filled_slot_and_zero_to_the_view_default
+
+# A row click resolves through the RANKED order (the click's index),
+# not the declared one — after a filter the two differ.
+run_mutation "grouping: a row click resolves through the ranked order" \
+  crates/geode-shell/src/shell/groupingpicker.rs \
+  '        self.list.ranked().get(ranked).map(|r| self.slots[r.row])' \
+  '        self.slots.get(ranked).copied()' \
+  geode-shell \
+  a_click_resolves_through_the_ranked_order
+
+# The toolbar readout's click goes through the same open door as `mod+g`.
+run_mutation "grouping: the readout click opens the picker" \
+  crates/geode-shell/src/shell/render.rs \
+  '                groupingpicker::open(view, window, cx);' \
+  '                let _ = (view, window, cx);' \
+  geode-shell \
+  clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot
+
+# `open_shell_dialog_with_key`'s `prevent_default`: without it the shell
+# root's bubble-phase focus grab takes the field's focus back on the same
+# mouse-down and typing after any chip click goes nowhere.
+run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    window.prevent_default();
+    // The open-door seam' \
+  '    // The open-door seam' \
+  geode-shell \
+  the_pick_chip_is_always_present_and_opens_the_picker
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

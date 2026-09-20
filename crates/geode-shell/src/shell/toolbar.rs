@@ -10,8 +10,10 @@
 //! putting content inside it via `TitleBar::new().child(...)`.
 //!
 //! Content: the app title left, the frame readout centered in the
-//! previously-reserved middle region (Task 6, spec §4.4 — slot, scope
-//! chips, and an unmissable AS OF badge when scoped to a snapshot), and a
+//! previously-reserved middle region (Task 6, spec §4.4 — the grouping
+//! readout, a click on which opens the grouping picker (2026-09-19),
+//! scope chips, and an unmissable AS OF badge when scoped to a
+//! snapshot), and a
 //! right-aligned scope text [`Input`] (Task 4, spec §3.1/§3.11) — every
 //! keystroke while it's focused feeds the frame's scope through
 //! `ShellView`'s own `InputEvent` subscription; this function only
@@ -97,6 +99,13 @@ fn icon_chip(
         .debug_selector(selector)
 }
 
+/// Five separate mouse doors rather than a bundling struct (clippy's
+/// `too_many_arguments`, `-D warnings`-enforced) — `status_bar`'s own
+/// reasoning: `render.rs`'s one call site builds each as its own
+/// `cx.entity()`-capturing closure, and this body hands each to exactly
+/// one element, so a struct would only move the assembly for no reader
+/// benefit.
+#[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
@@ -104,6 +113,7 @@ pub fn toolbar(
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_pick: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_grouping: impl Fn(&mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -373,9 +383,30 @@ pub fn toolbar(
                                 )
                         },
                     )
+                    // The grouping readout (2026-09-19) is a control: a
+                    // click opens the grouping picker, the mouse form of
+                    // `frame::grouping`/`mod+g`, so it takes the bare
+                    // glyph's pointer states (the same `(Bare, title_bar,
+                    // muted_foreground)` pairing the `×` glyph ships in
+                    // `control`'s sweep) and a tooltip naming the chord.
+                    // Padded and rounded so the hover fill has a shape.
                     .child(
                         div()
-                            .text_color(theme.muted_foreground)
+                            .id("scope-grouping")
+                            .px_1()
+                            .rounded(chip_radius)
+                            .text_color(chip_fg)
+                            .debug_selector(|| "scope-grouping".to_string())
+                            .tooltip(tips::tip(
+                                "tip-scope-grouping",
+                                "Pick a grouping",
+                                Some("frame::grouping"),
+                                None,
+                            ))
+                            .pointer_states(glyph_states)
+                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                on_grouping(window, cx)
+                            })
                             .child(model.slot_label.clone()),
                     )
                     .child(chips_row),

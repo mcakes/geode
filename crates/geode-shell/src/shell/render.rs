@@ -26,8 +26,8 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, commandline_view, dialog, objectdialog, perf_overlay, picker, sidebar, stacklist,
-    status, toolbar, whichkey,
+    ShellView, commandline_view, dialog, groupingpicker, objectdialog, perf_overlay, picker,
+    sidebar, stacklist, status, toolbar, whichkey,
 };
 
 /// gpui hover-group name shared by every divider strip (drag-splitters
@@ -1005,6 +1005,15 @@ impl Render for ShellView {
                 objectdialog::render::open_save_scope(view, window, cx);
             });
         };
+        // The grouping readout's click (2026-09-19) — the mouse form of
+        // `frame::grouping`/`mod+g`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let grouping_entity = cx.entity();
+        let on_grouping = move |window: &mut Window, cx: &mut App| {
+            grouping_entity.update(cx, |view, cx| {
+                groupingpicker::open(view, window, cx);
+            });
+        };
         let toolbar = toolbar::toolbar(
             &self.filter_input,
             &bar_model,
@@ -1012,6 +1021,7 @@ impl Render for ShellView {
             on_chip_open,
             on_pick,
             on_save,
+            on_grouping,
             cx,
         );
 

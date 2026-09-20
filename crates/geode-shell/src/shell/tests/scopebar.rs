@@ -303,7 +303,12 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
 
 /// The `+` pick chip paints regardless of the scope's own state — picking
 /// a dimension is how a scope starts — and its click opens the same
-/// picker `mod+p`/`frame::pick` does.
+/// picker `mod+p`/`frame::pick` does, with the filter field HOLDING the
+/// focus the open gave it (grouping-picker work, 2026-09-19): gpui's
+/// bubble-phase focus grab on the same mouse-down used to hand focus to
+/// the shell root a moment later, so typing after a chip click went
+/// nowhere. `open_shell_dialog_with_key`'s `prevent_default` is the fix,
+/// for every dialog a mouse-down opens.
 #[gpui::test]
 fn the_pick_chip_is_always_present_and_opens_the_picker(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -317,6 +322,21 @@ fn the_pick_chip_is_always_present_and_opens_the_picker(cx: &mut gpui::TestAppCo
     vcx.run_until_parked();
 
     assert!(shell.read_with(&vcx, |s, _| s.picker.is_some()));
+    let focused = vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(
+        focused,
+        "the picker's field must keep focus through the rest of the mouse-down"
+    );
+    vcx.simulate_input("bo");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.query.clone())),
+        Some("bo".to_string()),
+        "typing after the click reaches the filter"
+    );
 }
 
 /// A `[scopes]` doc with one entry, "eu" — no `[datasets]` doc at all,

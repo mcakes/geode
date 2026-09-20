@@ -143,6 +143,7 @@ context = "workspace"
 "mod+/" = "frame::focus_text"
 "mod+p" = "frame::pick"
 "mod+t" = "frame::as_of"
+"mod+g" = "frame::grouping"
 
 [[bindings]]
 context = "tile"
@@ -421,6 +422,11 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // schema to enumerate at `register_builtin_actions`' own call site
     // (before any config is loaded).
     action(reg, "frame::pick", "Pick a dimension…", "Frame");
+    // The grouping picker (2026-09-19): `mod+g` lists the filled slots
+    // and the view default with typeahead — the choosing form of the
+    // nine `frame::slot_N` chords above, and what a click on the
+    // toolbar's grouping readout opens. `…` because it opens a dialog.
+    action(reg, "frame::grouping", "Pick a grouping…", "Frame");
     // The scope bar's live text field (Phase 4a §3.11): `mod+/` moves
     // focus into it from anywhere in the shell, the one keyboard route
     // in (typing itself, once focused, needs no action — the field's own

@@ -15,6 +15,7 @@ pub mod commandline_view;
 pub mod control;
 pub mod dialog;
 mod drag;
+pub mod groupingpicker;
 mod hot_reload;
 mod input;
 pub mod keybindings_view;
@@ -925,6 +926,16 @@ pub struct ShellView {
     /// the dialog is open and the field does not read `live`; its
     /// selection mirrors the field.
     as_of_calendar: Entity<gpui_component::calendar::CalendarState>,
+    /// The open grouping picker's own pure state (2026-09-19: the
+    /// toolbar readout's click and `frame::grouping`), or `None` when
+    /// closed/never opened — the `picker`/`as_of_dialog` fields' own
+    /// contract. Set fresh by [`groupingpicker::open`] each time and
+    /// cleared by [`close_modal`](Self::close_modal).
+    grouping_picker: Option<groupingpicker::GroupingPickerState>,
+    /// Scroll state for the grouping picker's row list
+    /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
+    /// one dialog over.
+    grouping_picker_scroll: ScrollHandle,
     /// The open config-object dialog's own pure state (Phase 4c: the
     /// shared scaffold every config domain's dialog is built on — see
     /// `objectdialog`'s module doc), or `None` when closed/never opened.
@@ -1160,6 +1171,12 @@ impl ShellView {
                 state.query = query;
                 state.selected = 0;
                 picker::sync_picker_scroll(view);
+            } else if let Some(state) = view.grouping_picker.as_mut() {
+                // A choice list re-ranks on every keystroke and the lit
+                // row is followed, as the settings dialog's choice does.
+                state.list.set_query(&query);
+                view.grouping_picker_scroll
+                    .scroll_to_item(state.list.ranked_highlighted());
             } else if let Some(state) = view.as_of_dialog.as_mut() {
                 // Unlike the three dialogs above, this field's raw text IS
                 // the value being edited (spec §3.6), not a filter over
@@ -1606,6 +1623,8 @@ impl ShellView {
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             as_of_calendar,
+            grouping_picker: None,
+            grouping_picker_scroll: ScrollHandle::new(),
             object_dialog: None,
             object_dialog_scroll: ScrollHandle::new(),
             pending_config_write: None,
@@ -1637,6 +1656,7 @@ impl ShellView {
         self.keybindings = None;
         self.picker = None;
         self.as_of_dialog = None;
+        self.grouping_picker = None;
         self.object_dialog = None;
         self.return_focus_from_overlay(window, cx);
         cx.notify();

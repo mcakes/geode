@@ -628,6 +628,7 @@ mod diagnostics;
 mod dock;
 mod drag;
 mod flip;
+mod grouping;
 mod input;
 mod keybindings_dialog;
 mod objectdialog;
