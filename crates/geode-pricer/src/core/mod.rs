@@ -6,5 +6,8 @@
 pub mod shorthand;
 pub mod template;
 
-pub use shorthand::{LineSpec, OwnShifts, ParseError, RowSpec, parse};
+pub use shorthand::{
+    LineSpec, OwnShifts, ParseError, RowSpec, parse, render_expiry, render_line, render_package,
+    render_strike,
+};
 pub use template::{LegSpec, Template};

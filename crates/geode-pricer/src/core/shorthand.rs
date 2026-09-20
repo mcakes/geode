@@ -403,6 +403,141 @@ pub fn parse(text: &str) -> Result<RowSpec, ParseError> {
     Ok(RowSpec::Package { template, legs })
 }
 
+/// `Z26` when `date` is the third Friday of its month, else `None`.
+pub fn imm_code(date: NaiveDate) -> Option<String> {
+    if third_friday(date.year(), date.month()) != Some(date) {
+        return None;
+    }
+    let letter = IMM_MONTHS[date.month0() as usize];
+    Some(format!("{letter}{:02}", date.year() % 100))
+}
+
+/// A third Friday as its IMM code, any other date as `20DEC26`, a tenor
+/// as stored (spec §6.3).
+pub fn render_expiry(expiry: &Expiry) -> String {
+    match expiry {
+        Expiry::Date(d) => imm_code(*d).unwrap_or_else(|| {
+            format!(
+                "{:02}{}{:02}",
+                d.day(),
+                MONTH_NAMES[d.month0() as usize],
+                d.year() % 100
+            )
+        }),
+        Expiry::Tenor(t) => t.clone(),
+    }
+}
+
+/// `f64`'s own `Display` prints `5000.0` as `5000` and `4250.5` as
+/// `4250.5`: the shortest text that parses back to the same number.
+pub fn render_strike(strike: Strike) -> String {
+    match strike {
+        Strike::Absolute(k) => format!("{k}"),
+        Strike::Percent(p) => format!("{p}%"),
+    }
+}
+
+pub fn render_barrier_kind(kind: BarrierKind) -> &'static str {
+    match kind {
+        BarrierKind::UpIn => "UI",
+        BarrierKind::UpOut => "UO",
+        BarrierKind::DownIn => "DI",
+        BarrierKind::DownOut => "DO",
+    }
+}
+
+fn kind_token(kind: OptionKind) -> &'static str {
+    match kind {
+        OptionKind::Call => "C",
+        OptionKind::Put => "P",
+    }
+}
+
+fn qty_prefix(qty: i64) -> String {
+    if qty == 1 {
+        String::new()
+    } else {
+        format!("{qty} ")
+    }
+}
+
+/// One line back in the grammar. A qty of 1 is omitted, as the grammar
+/// defaults it.
+pub fn render_line(qty: i64, instrument: &Instrument) -> String {
+    let v = instrument.vanilla();
+    let mut out = format!(
+        "{}{} {} {} {}",
+        qty_prefix(qty),
+        v.underlying,
+        render_expiry(&v.expiry),
+        render_strike(v.strike),
+        kind_token(v.kind)
+    );
+    if let Instrument::Barrier(b) = instrument {
+        out.push_str(&format!(" {} {}", render_barrier_kind(b.barrier), b.level));
+    }
+    out
+}
+
+/// The template form (`-5 SPX Z26 95%/105% CS`) when `legs` still match
+/// `template`'s table: same count, every leg a vanilla on one
+/// underlying, each leg's qty the package qty times its weight, each
+/// leg's kind the table's, and one strike per strike index and one
+/// expiry per expiry index across the legs. `None` otherwise — the
+/// caller prints the legs one per line (planning decision 11).
+pub fn render_package(template: Template, legs: &[(i64, &Instrument)]) -> Option<String> {
+    let table = template.legs();
+    if table.is_empty() || table.len() != legs.len() {
+        return None;
+    }
+    let first = table[0];
+    let (q0, _) = legs[0];
+    if q0 % first.weight != 0 {
+        return None;
+    }
+    let qty = q0 / first.weight;
+    if qty == 0 {
+        return None;
+    }
+    let underlying = legs[0].1.underlying();
+    let mut strikes: Vec<Option<Strike>> = vec![None; template.strikes()];
+    let mut expiries: Vec<Option<&Expiry>> = vec![None; template.expiries()];
+    for (spec, (leg_qty, instrument)) in table.iter().zip(legs) {
+        let Instrument::Vanilla(v) = instrument else {
+            return None;
+        };
+        if *leg_qty != qty * spec.weight || v.kind != spec.kind || v.underlying != underlying {
+            return None;
+        }
+        match strikes[spec.strike] {
+            None => strikes[spec.strike] = Some(v.strike),
+            Some(k) if k == v.strike => {}
+            Some(_) => return None,
+        }
+        match expiries[spec.expiry] {
+            None => expiries[spec.expiry] = Some(&v.expiry),
+            Some(e) if *e == v.expiry => {}
+            Some(_) => return None,
+        }
+    }
+    let strikes: Vec<String> = strikes
+        .into_iter()
+        .map(|k| k.map(render_strike))
+        .collect::<Option<_>>()?;
+    let expiries: Vec<String> = expiries
+        .into_iter()
+        .map(|e| e.map(render_expiry))
+        .collect::<Option<_>>()?;
+    Some(format!(
+        "{}{} {} {} {}",
+        qty_prefix(qty),
+        underlying,
+        expiries.join("/"),
+        strikes.join("/"),
+        template.token()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +808,104 @@ mod tests {
         assert!(e.message.contains("expiry"), "{e:?}");
         // "+3" is a quantity.
         assert_eq!(line("+3 SPX DEC26 5000 C").qty, 3);
+    }
+
+    #[test]
+    fn an_expiry_renders_as_an_imm_code_a_full_date_or_the_tenor() {
+        assert_eq!(render_expiry(&d(2026, 12, 18)), "Z26");
+        assert_eq!(render_expiry(&d(2026, 5, 15)), "K26");
+        assert_eq!(render_expiry(&d(2026, 12, 20)), "20DEC26");
+        assert_eq!(render_expiry(&d(2026, 12, 5)), "05DEC26");
+        assert_eq!(render_expiry(&Expiry::Tenor("3m".into())), "3m");
+        assert_eq!(
+            imm_code(NaiveDate::from_ymd_opt(2026, 12, 18).unwrap()),
+            Some("Z26".into())
+        );
+        assert_eq!(
+            imm_code(NaiveDate::from_ymd_opt(2026, 12, 11).unwrap()),
+            None,
+            "the second Friday"
+        );
+    }
+
+    #[test]
+    fn a_strike_renders_without_trailing_zeros() {
+        assert_eq!(render_strike(Strike::Absolute(5000.0)), "5000");
+        assert_eq!(render_strike(Strike::Absolute(4250.5)), "4250.5");
+        assert_eq!(render_strike(Strike::Percent(95.0)), "95%");
+        assert_eq!(render_strike(Strike::Percent(102.5)), "102.5%");
+    }
+
+    #[test]
+    fn a_line_renders_and_round_trips_through_parse() {
+        for text in [
+            "SPX Z26 5000 C",
+            "-5 SPX Z26 95% P",
+            "10 NDX 3m 100% C",
+            "SPX 20DEC26 5000 C DO 4200",
+            "-2 SPX Z26 4800 P UI 5500",
+        ] {
+            let l = line(text);
+            let rendered = render_line(l.qty, &l.instrument);
+            assert_eq!(rendered, text, "renders as typed");
+            assert_eq!(line(&rendered), l, "round trip");
+        }
+        // Lower-case input renders upper-case tokens; a qty of 1 is omitted.
+        let l = line("1 spx dec26 5000 c");
+        assert_eq!(render_line(l.qty, &l.instrument), "SPX Z26 5000 C");
+    }
+
+    #[test]
+    fn every_template_renders_and_round_trips_through_parse() {
+        for text in [
+            "-5 SPX Z26 95%/105% CS",
+            "SPX Z26 4800/5200 PS",
+            "2 SPX Z26 5000 STRD",
+            "SPX Z26 4800/5200 STRG",
+            "SPX Z26 4800/5200 RR",
+            "3 SPX Z26 4800/5000/5200 FLY",
+            "SPX Z26/H27 5000 CAL",
+        ] {
+            let (template, legs) = package(text);
+            let pairs: Vec<(i64, &Instrument)> =
+                legs.iter().map(|l| (l.qty, &l.instrument)).collect();
+            let rendered = render_package(template, &pairs).expect(text);
+            assert_eq!(rendered, text);
+            assert_eq!(package(&rendered), (template, legs), "round trip");
+        }
+    }
+
+    #[test]
+    fn a_package_whose_legs_left_the_table_does_not_render_as_the_template() {
+        let (template, mut legs) = package("SPX Z26 4800/5200 CS");
+        // A 1×2 ratio: the second leg's qty edited (spec §6.4).
+        legs[1].qty = -2;
+        let pairs: Vec<(i64, &Instrument)> = legs.iter().map(|l| (l.qty, &l.instrument)).collect();
+        assert_eq!(render_package(template, &pairs), None);
+        // Legs on two underlyings.
+        let (template, mut legs) = package("SPX Z26 4800/5200 CS");
+        if let Instrument::Vanilla(v) = &mut legs[1].instrument {
+            v.underlying = "NDX".into();
+        }
+        let pairs: Vec<(i64, &Instrument)> = legs.iter().map(|l| (l.qty, &l.instrument)).collect();
+        assert_eq!(render_package(template, &pairs), None);
+        // A wrong leg count.
+        let (template, legs) = package("SPX Z26 4800/5200 CS");
+        let pairs: Vec<(i64, &Instrument)> = legs
+            .iter()
+            .take(1)
+            .map(|l| (l.qty, &l.instrument))
+            .collect();
+        assert_eq!(render_package(template, &pairs), None);
+        // Custom never renders as a template.
+        let pairs: Vec<(i64, &Instrument)> = legs.iter().map(|l| (l.qty, &l.instrument)).collect();
+        assert_eq!(render_package(Template::Custom, &pairs), None);
+        // A barrier leg is never a template leg.
+        let b = line("SPX Z26 5000 C DO 4200");
+        let c = line("SPX Z26 5200 C");
+        assert_eq!(
+            render_package(Template::CS, &[(1, &b.instrument), (-1, &c.instrument)]),
+            None
+        );
     }
 }
