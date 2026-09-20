@@ -14,6 +14,9 @@ fn expr_scope(text: &str) -> Scope {
     }
 }
 
+/// `enter` on a typed expression commits it through `Frame::set_scope`,
+/// closes the dialog, and — since it went through `set_scope` rather
+/// than bypassing undo — `frame::scope_undo` restores the prior scope.
 #[gpui::test]
 fn typing_an_expression_and_enter_sets_it_through_set_scope(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "frame::scope_expression");
@@ -38,6 +41,9 @@ fn typing_an_expression_and_enter_sets_it_through_set_scope(cx: &mut gpui::TestA
     );
 }
 
+/// An unparseable expression paints inline (`scope-expr-error`), the
+/// modal stays open and the frame is untouched; typing again clears the
+/// error.
 #[gpui::test]
 fn a_parse_error_paints_inline_and_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "frame::scope_expression");
@@ -57,6 +63,9 @@ fn a_parse_error_paints_inline_and_leaves_the_frame_alone(cx: &mut gpui::TestApp
     assert!(vcx.debug_bounds("scope-expr-error").is_none());
 }
 
+/// The field opens seeded with the frame's current expression text, and
+/// committing it emptied (`enter` on a blank field) clears the
+/// expression rather than refusing.
 #[gpui::test]
 fn the_field_opens_seeded_and_an_empty_commit_clears(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -81,6 +90,10 @@ fn the_field_opens_seeded_and_an_empty_commit_clears(cx: &mut gpui::TestAppConte
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
 }
 
+/// A click on the toolbar's expression chip opens the same dialog as
+/// `frame::scope_expression`, and — the mouse-opened-dialog rule —
+/// typing right after the click reaches the field rather than falling
+/// on the floor.
 #[gpui::test]
 fn clicking_the_expression_chip_opens_the_dialog_and_typing_lands(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -106,6 +119,9 @@ fn clicking_the_expression_chip_opens_the_dialog_and_typing_lands(cx: &mut gpui:
     );
 }
 
+/// Opening the dialog from the scope bar's focused text field and then
+/// closing it (`escape`) returns focus to that field, not the shell
+/// root.
 #[gpui::test]
 fn opened_from_the_text_field_focus_returns_to_it(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());

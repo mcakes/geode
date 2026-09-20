@@ -6361,8 +6361,10 @@ run_mutation "expr-dialog: an empty commit clears the expression" \
   geode-shell \
   the_field_opens_seeded_and_an_empty_commit_clears
 
-# A commit goes through set_scope, so undo restores it.
-run_mutation "expr-dialog: the commit goes through set_scope" \
+# `clear_scope()` in place of `set_scope(scope)` drops the parsed
+# expression instead of committing it — caught by the test's very first
+# assertion (the expression never lands), not by its later undo check.
+run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
   '                if f.set_scope(scope) {' \
   '                if f.clear_scope() {' \

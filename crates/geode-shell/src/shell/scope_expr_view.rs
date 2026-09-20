@@ -26,6 +26,7 @@ use geode_core::scope::{Expr, parse_expr};
 use crate::keymap::{Keystroke, Modifiers};
 
 use super::ShellView;
+use super::chip;
 use super::dialog;
 use super::picker::{Hint, hint_row};
 use super::scale;
@@ -144,10 +145,14 @@ fn build(shell: &ShellView, _window: &mut Window, cx: &mut App) -> AnyElement {
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx));
     if let Some(err) = &state.error {
+        // Through the chip door (`shell::chip`), not a raw `theme.danger`:
+        // that token bypasses the readability floor, and the parse error
+        // is the single thing in this dialog a trader must be able to
+        // read (review finding, Task 6 fix round 1).
         column = column.child(
             div()
                 .text_sm()
-                .text_color(theme.danger)
+                .text_color(chip::chip_paint(theme, chip::Tone::DangerText).text)
                 .debug_selector(|| "scope-expr-error".to_string())
                 .child(err.clone()),
         );
