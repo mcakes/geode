@@ -578,4 +578,13 @@ fn the_as_of_chip_leads_the_bar_and_opens_the_selector(cx: &mut gpui::TestAppCon
         shell.read_with(&vcx, |s, _| s.as_of_dialog.is_some()),
         "the chip opens the as-of selector"
     );
+    // A mouse-opened dialog's test types after the click (CLAUDE.md's
+    // `open_shell_dialog` gotcha): the `+` chip's dialog once opened
+    // deaf while its test asserted only `Some`.
+    vcx.simulate_input("12");
+    let typed = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(
+        typed, "12",
+        "the selector's field takes the keys after the click"
+    );
 }

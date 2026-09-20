@@ -1014,7 +1014,7 @@ impl Render for ShellView {
                 picker::open(view, Some(column), window, cx);
             });
         };
-        // The scope bar's `+` pick chip (scope-save spec's amendment) —
+        // The scope bar's `+` pick glyph (scope-save spec's amendment) —
         // the mouse form of `mod+p`, opened on the column-choice stage
         // exactly as `frame::pick` is. Same `cx.entity()`-captured shape
         // as `on_chip_open` just above.
@@ -1024,7 +1024,7 @@ impl Render for ShellView {
                 picker::open(view, None, window, cx);
             });
         };
-        // The scope bar's `save` chip — the mouse form of
+        // The scope bar's save glyph — the mouse form of
         // `scope::save_current`, through the same door `input.rs`'s
         // dispatch arm uses.
         let save_chip_entity = cx.entity();

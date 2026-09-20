@@ -718,8 +718,13 @@ fn the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker(
     let close = vcx
         .debug_bounds("scope-chip-close-book")
         .expect("close glyph painted");
+    // Edge-inclusive on purpose (`Bounds::contains` is far-edge
+    // exclusive): a flush-edge × would still be inside its chip.
     assert!(
-        chip.contains(&close.origin) && chip.contains(&close.bottom_right()),
+        close.left() >= chip.left()
+            && close.top() >= chip.top()
+            && close.right() <= chip.right()
+            && close.bottom() <= chip.bottom(),
         "the × sits inside its chip: chip {chip:?}, × {close:?}"
     );
 

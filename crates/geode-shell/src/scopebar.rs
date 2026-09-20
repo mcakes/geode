@@ -57,14 +57,15 @@ pub struct ScopeBarModel {
     /// (toolbar restyle 2026-09-19): the field itself shows the frame's
     /// text while unfocused (`ShellView::on_frame_changed`) and clears it
     /// through its own clear glyph, so a `text "…"` chip only repeated
-    /// what sat a few hundred pixels to its right.
+    /// what sat a few hundred pixels to its right. No painter reads this
+    /// field; it is the model's truth, pinned by the model tests.
     pub text: Option<String>,
     /// Elided source text (≤ 40 chars + `…`), or `None` when the scope has
     /// no expression.
     pub expr: Option<String>,
     /// The whole expression source, un-elided — what a hover on the
     /// elided `expr` chip shows. `SharedString` (fix round 1) for the
-    /// same reason as `text_tip`.
+    /// same reason as `Chip`'s tooltip fields.
     pub expr_full: Option<SharedString>,
     /// `Some("∅ {column}")` when the scope is a contradiction (spec
     /// §4.1's `Scope::impossible`) — named, not merely hidden, per
@@ -76,7 +77,7 @@ pub struct ScopeBarModel {
     pub as_of: Option<String>,
     /// The toolbar's AS OF badge, in its own display text (Phase 4b
     /// Task 1 fix round 1, MAJ-2): `Some("AS OF {as_of}")`, built here
-    /// for the same reason as `slot_label`/`text_chip` — distinct from
+    /// for the same reason as `slot_label` — distinct from
     /// `as_of` itself, which the status bar reads bare (no "AS OF "
     /// prefix). `SharedString` (fix round 1, Task 3 review): this used to
     /// double as the badge's tooltip TITLE too; since the final review
@@ -230,7 +231,7 @@ mod tests {
     }
 
     /// Phase 4b Task 1 fix round 1, MAJ-2: `shell::toolbar` used to
-    /// `format!` the text chip, the AS OF badge and the slot readout
+    /// `format!` the (since-retired) text chip, the AS OF badge and the slot readout
     /// fresh every paint even though `build_model` already had
     /// everything each of those three needs — this pins the model
     /// itself carrying the finished strings, so the render path has

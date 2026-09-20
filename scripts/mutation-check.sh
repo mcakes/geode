@@ -7611,7 +7611,7 @@ run_mutation "toolbar: the × occludes the chip body so a drop does not open the
 # in one run, the segmentation the restyle exists to paint.
 run_mutation "toolbar: the as-of segment paints its divider" \
   crates/geode-shell/src/shell/toolbar.rs \
-  '                .child(divider("scope-divider-asof"))' \
+  '                .child(divider("scope-divider-asof", theme.title_bar_border))' \
   '                .child(div())' \
   geode-shell \
   the_as_of_chip_leads_the_bar_and_opens_the_selector

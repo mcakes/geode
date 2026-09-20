@@ -132,16 +132,19 @@ fn verb(
 }
 
 /// The inset hairline between two segments. gpui-component's
-/// [`Separator`] inside a sized box: the component owns the line's
-/// colour (`theme.border`), the box owns the height and the debug
-/// selector a window test measures the segmentation by.
-fn divider(selector: &'static str) -> impl IntoElement {
+/// [`Separator`] inside a sized box: the component owns the line, the
+/// box owns the height and the debug selector a window test measures
+/// the segmentation by. `colour` is `theme.title_bar_border` — the token
+/// the bar's own bottom rule is drawn in (pinned `TitleBar`), so the
+/// hairline matches the surface it sits on rather than the panel
+/// `border` the component would default to.
+fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
     div()
         .flex_shrink_0()
         .w(px(1.))
         .h(scale::design(DIVIDER_HEIGHT))
         .debug_selector(move || selector.to_string())
-        .child(Separator::vertical())
+        .child(Separator::vertical().color(colour))
 }
 
 /// Six separate mouse doors rather than a bundling struct (clippy's
@@ -321,7 +324,7 @@ pub fn toolbar(
         );
     }
 
-    // The verbs, 2 px apart and one group gap after the chips. The `+`
+    // The verbs, `gap_0p5` apart and one group gap after the chips. The `+`
     // pick door (scope-save spec's amendment): a mouse door onto the
     // dimension picker (`mod+p`/`frame::pick`) for a trader who has not
     // memorised the chord — always painted, empty scope or not, since
@@ -486,11 +489,11 @@ pub fn toolbar(
                         on_as_of(window, cx)
                     }),
                 )
-                .child(divider("scope-divider-asof"))
+                .child(divider("scope-divider-asof", theme.title_bar_border))
             },
         )
         .child(grouping)
-        .child(divider("scope-divider-scope"))
+        .child(divider("scope-divider-scope", theme.title_bar_border))
         .child(scope_segment);
 
     TitleBar::new().child(

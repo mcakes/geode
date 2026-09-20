@@ -268,7 +268,9 @@ mod tests {
             ),
             (
                 ControlInputs::new(theme, Rest::Bare, theme.title_bar, theme.muted_foreground),
-                "scope chip ×",
+                // The grouping readout and the `+`/save verbs (2026-09-19);
+                // the chip's `×` takes the chip pairing above.
+                "bare title-bar glyph",
             ),
             (
                 ControlInputs::new(
