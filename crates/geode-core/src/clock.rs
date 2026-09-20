@@ -293,6 +293,7 @@ mod tests {
     use crate::config::test_support::config_from;
     use chrono::TimeZone;
     use chrono_tz::America::New_York;
+    use chrono_tz::Asia::Tehran;
     use chrono_tz::Europe::London;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -482,5 +483,27 @@ mod tests {
         // from `resolve_local` — is directly reachable: 02:30 does not
         // exist in New York on 2026-03-08 itself.
         assert!(c.sod_of(d(2026, 3, 8)).is_err());
+    }
+
+    #[test]
+    fn a_preset_in_a_weekday_dst_gap_is_dropped_by_presets_itself() {
+        // The previous test proves the drop arm's INPUT condition is
+        // reachable but never actually drives an `Err` through `presets`
+        // end to end, because every US/EU DST gap falls on a Sunday and
+        // `business_days_back`'s weekend snap never selects one. Iran's
+        // history (carried by chrono-tz) has a gap on a WEEKDAY instead:
+        // 2019-03-22 00:00 -> 01:00 Tehran, and 2019-03-22 is a Friday —
+        // an ordinary business day the snap never moves off of — so
+        // `SOD T` (00:30) lands squarely in the gap and this test
+        // exercises the real `Err(e) => { tracing::debug!(...); None }`
+        // arm inside `presets`, not just its precondition.
+        let c = Clock::in_zone(Tehran).with_times(hm(0, 30), hm(18, 0));
+        // Verify the gap exists on that exact date before relying on it.
+        assert!(c.sod_of(d(2019, 3, 22)).is_err());
+
+        let now = Utc.with_ymd_and_hms(2019, 3, 22, 12, 0, 0).unwrap();
+        let labels: Vec<&str> = presets(&c, now).iter().map(|p| p.label).collect();
+        assert!(!labels.contains(&"SOD T"), "{labels:?}");
+        assert!(labels.contains(&"EOD T-1"), "{labels:?}");
     }
 }
