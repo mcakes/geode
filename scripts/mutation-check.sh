@@ -15647,10 +15647,10 @@ run_mutation "clock: parse_as_of resolves on the clock's date" \
   as_of_resolves_on_the_clocks_date_not_utcs
 
 # A bad zone is an ERROR, not a silent fallback. This is the non-string
-# `time.zone` arm specifically (`zone = 42`) — the sibling "not an IANA
-# name" arm a few lines up sits at a different indent and is a separate
-# anchor's business.
-run_mutation "clock: a bad zone name is an error diagnostic" \
+# `time.zone` arm specifically (`zone = 42`, 24-space indent) — the
+# sibling "not an IANA name" arm a few lines up (28-space indent) is the
+# next entry's business.
+run_mutation "clock: a non-string zone value is an error diagnostic" \
   crates/geode-core/src/clock.rs \
   '                        Severity::Error,
                         "zone",' \
@@ -15658,6 +15658,20 @@ run_mutation "clock: a bad zone name is an error diagnostic" \
                         "zone",' \
   geode-core \
   a_non_string_zone_is_an_error_and_the_machine_zone_applies
+
+# The sibling arm: a STRING that is not a recognised IANA name
+# (`zone = "Mars/Olympus"`) is also an ERROR, not a silent fallback. The
+# 28-space indent is what disambiguates this anchor from the previous
+# entry's 24-space one — collapsing them to one shared string would let
+# only the FIRST site in the file ever be mutated.
+run_mutation "clock: a bad zone name is an error diagnostic" \
+  crates/geode-core/src/clock.rs \
+  '                            Severity::Error,
+                            "zone",' \
+  '                            Severity::Warning,
+                            "zone",' \
+  geode-core \
+  a_bad_zone_or_time_is_an_error_at_its_key_and_the_default_applies
 
 # A reload must republish the global or every module keeps the old zone.
 run_mutation "clock: a reload republishes AppClock" \
