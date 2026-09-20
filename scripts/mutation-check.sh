@@ -3421,6 +3421,19 @@ run_mutation "distinct: as-of reads the archive era" \
   '        let era = era_for(conn, &ds.name, &geode_core::query::AsOf::Live)?;' \
   geode-data distinct_under_as_of_reads_the_archive_era
 
+# 2026-09-19 (seen on the scope chip): `compile_distinct`'s `from` had
+# no `base` alias, so a scope term routed to another grain -- which
+# `membership` correlates as `probe.k is not distinct from base.k` --
+# failed to bind (`Referenced table "base" not found`). No fixture had
+# ever scoped a distinct on a column the picked dimension's grain does
+# not carry; this one picks `book` (position) under an instrument-grain
+# `currency` selection.
+run_mutation "distinct: the relation is aliased base for membership probes" \
+  crates/geode-data/src/query/distinct.rs \
+  '            "select {value_expr} as value, count(*) as n from {} base where {} group by 1",' \
+  '            "select {value_expr} as value, count(*) as n from {} where {} group by 1",' \
+  geode-data distinct_under_a_scope_probing_a_finer_grain_aliases_its_relation_as_base
+
 # D2 (final fix wave, T2 deferred): a derived dimension's own branch of
 # `compile_distinct` had no test — `derived_case(d)` mutated to the base
 # column's own varchar cast (what `None` already does) would silently
