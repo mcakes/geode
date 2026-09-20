@@ -595,7 +595,9 @@ impl Render for ShellView {
             // paints over the *tree's* area and would otherwise read as
             // an offer to fill the space the reader is looking at.
             let hint = match region {
-                crate::tiling::FocusRegion::Main => "ctrl+k → Add a tile".to_string(),
+                crate::tiling::FocusRegion::Main => {
+                    "double-click or ctrl+k → Add a tile".to_string()
+                }
                 crate::tiling::FocusRegion::Dock(side) => {
                     let side = match side {
                         crate::tiling::DockSide::Left => "left",
@@ -616,6 +618,17 @@ impl Render for ShellView {
                     .flex()
                     .items_center()
                     .justify_center()
+                    // A bare double-click anywhere on the empty tree
+                    // opens the tile picker (2026-09-19), the mouse form
+                    // of the `ctrl+k` the hint names — see
+                    // `try_pick_on_empty_tree_double_click`. A single
+                    // click is nothing: there is no tile to focus.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                            view.try_pick_on_empty_tree_double_click(event, window, cx);
+                        }),
+                    )
                     .child(
                         div()
                             // Test-only hook (no-op outside test/test-support

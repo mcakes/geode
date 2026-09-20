@@ -14,7 +14,7 @@ use gpui::SharedString;
 use geode_core::config::{Config, Diagnostic, Severity};
 use geode_core::log::Record;
 use geode_core::query::AsOf;
-use geode_shell::diagnostics::{Diagnostics, Health};
+use geode_shell::diagnostics::{Diagnostics, Health, SourceShape};
 use geode_shell::perf::{RequeryStats, format_ms};
 
 /// A row's visual weight — `tile.rs` maps each to a theme colour; `Marked`
@@ -168,34 +168,45 @@ fn push_spec_detail(out: &mut Vec<Row>, state: &geode_shell::diagnostics::Source
     // glob alone runs past a tile's width. Seen on a display 2026-09-08 —
     // the wrapped tail of this row painted over the poll row beneath it.
     //
-    // Which two depends on what kind of source it is, and `adapter` is
-    // that question — not `topics.is_empty()` (Part 2 residual, fixed at
-    // Part 3's opening): a subscribed source is refused at load without
-    // at least one topic, but a diagnostics reader must not lean on
-    // validation it cannot see from here, so an empty topic list on a
-    // subscribed source must still read as subscribed rather than
-    // silently falling back to the directory-source shape. A subscribed
-    // source has no path to poll and no readiness rule, so printing
-    // either described a market-data feed as a directory source with an
-    // empty path and a sentinel convention it has never used.
-    if spec.adapter == geode_core::source_config::CSV_DIR_ADAPTER {
-        let paths = spec.paths.join(", ");
-        out.push(row(format!("path: {paths}"), 1, Tone::Muted));
-        out.push(row(
-            format!(
-                "adapter: {} · priority: {} · readiness: {}",
-                spec.adapter, spec.priority, spec.readiness
-            ),
-            1,
-            Tone::Muted,
-        ));
-    } else {
-        out.push(row(format!("adapter: {}", spec.adapter), 1, Tone::Muted));
-        out.push(row(
-            format!("topics: {}", spec.topics.join(", ")),
-            1,
-            Tone::Muted,
-        ));
+    // Which two is the source's SHAPE (timeseries spec §5.1), carried on
+    // the summary by the bridge — not `adapter` (Part 3's opening, which
+    // replaced a `topics.is_empty()` test with one on `adapter`) and not
+    // `topics.is_empty()` either, because neither can tell a fetch source
+    // from a subscribed one: both are "not a directory", the difference
+    // is the FAMILY of the dataset behind them, and `SourceSpec::shape`
+    // is the one place that answers it. Read off `adapter` alone, a fetch
+    // source painted as a market-data feed with an empty topic list.
+    //
+    // A subscribed source has no path to poll and no readiness rule, so
+    // printing either described a market-data feed as a directory source
+    // with an empty path and a sentinel convention it has never used. A
+    // fetch source has no topic either — nothing is pushed to it; it is
+    // asked for a span by the tile that wants one.
+    match spec.shape {
+        SourceShape::Directory => {
+            let paths = spec.paths.join(", ");
+            out.push(row(format!("path: {paths}"), 1, Tone::Muted));
+            out.push(row(
+                format!(
+                    "adapter: {} · priority: {} · readiness: {}",
+                    spec.adapter, spec.priority, spec.readiness
+                ),
+                1,
+                Tone::Muted,
+            ));
+        }
+        SourceShape::Fetch => {
+            out.push(row(format!("adapter: {}", spec.adapter), 1, Tone::Muted));
+            out.push(row("fetch", 1, Tone::Muted));
+        }
+        SourceShape::Subscribed => {
+            out.push(row(format!("adapter: {}", spec.adapter), 1, Tone::Muted));
+            out.push(row(
+                format!("topics: {}", spec.topics.join(", ")),
+                1,
+                Tone::Muted,
+            ));
+        }
     }
 }
 
@@ -562,6 +573,7 @@ mod tests {
                 readiness: "sentinel".into(),
                 adapter: "csv_dir".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Directory,
             },
         );
         d.note_health(
@@ -590,6 +602,7 @@ mod tests {
                 readiness: "r".into(),
                 adapter: "csv_dir".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Directory,
             },
         );
 
@@ -661,6 +674,7 @@ mod tests {
                 readiness: "Sentinel".into(),
                 adapter: "csv_dir".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Directory,
             },
         );
         let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
@@ -694,6 +708,7 @@ mod tests {
                 readiness: "Sentinel".into(),
                 adapter: "demo_bus".into(),
                 topics: vec!["marketdata/cvi/>".into()],
+                shape: SourceShape::Subscribed,
             },
         );
         let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
@@ -727,6 +742,7 @@ mod tests {
                 readiness: "Sentinel".into(),
                 adapter: "demo_bus".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Subscribed,
             },
         );
         let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
@@ -735,6 +751,48 @@ mod tests {
         assert!(
             !texts.iter().any(|t| t.starts_with("path: ")),
             "a subscribed source has no path to poll even with no topics: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("readiness")),
+            "nor a readiness rule: {texts:?}"
+        );
+        assert!(
+            texts.contains(&"topics: "),
+            "and it is still the subscribed shape, empty topic list and all: {texts:?}"
+        );
+    }
+
+    /// A fetch source (timeseries spec §5.4) is neither of the other two:
+    /// no path to poll and no readiness rule, like a subscribed source,
+    /// but nothing is pushed to it, so it has no topic either. Decided
+    /// off `adapter` alone it fell through to the subscribed arm and
+    /// painted `topics: ` — an empty list for a source that will never
+    /// have one.
+    #[test]
+    fn a_fetch_source_shows_its_adapter_and_that_it_is_fetched() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.describe_source(
+            "kdb_hist",
+            SourceSummary {
+                paths: Vec::new(),
+                priority: "LatestOther".into(),
+                readiness: "Sentinel".into(),
+                adapter: "kdb".into(),
+                topics: Vec::new(),
+                shape: SourceShape::Fetch,
+            },
+        );
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
+        assert!(texts.contains(&"adapter: kdb"), "{texts:?}");
+        assert!(texts.contains(&"fetch"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.starts_with("topics")),
+            "a fetch source has no topics, not an empty list of them: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.starts_with("path: ")),
+            "nor a path to poll: {texts:?}"
         );
         assert!(
             !texts.iter().any(|t| t.contains("readiness")),
@@ -753,6 +811,7 @@ mod tests {
                 readiness: "r".into(),
                 adapter: "csv_dir".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Directory,
             },
         );
         let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
@@ -776,6 +835,7 @@ mod tests {
                 readiness: "r".into(),
                 adapter: "csv_dir".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Directory,
             },
         );
         let at = SystemTime::now();
@@ -819,6 +879,7 @@ mod tests {
             }],
             live_rows: 120,
             archive_rows: 100,
+            series: Vec::new(),
         }
     }
 
