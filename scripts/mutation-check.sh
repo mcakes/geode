@@ -3017,6 +3017,17 @@ run_mutation "delegate: the chevron stops the row's own click from double-toggli
 
 # ---- geode-app: the data bridge, the roster, --demo (Phase 3 §5.1, §5.4, §7.1)
 
+# The bridge is the last place a `SchemaSpec` and the source list are
+# both in hand, so it is the one place a source's shape is resolved.
+# Mutated to answer `Directory` for every source, the diagnostics rows
+# describe a fetch or a subscribed source as a directory of CSVs.
+run_mutation "bridge: every source is resolved as a directory source" \
+  crates/geode-app/src/bridge.rs \
+  '        .map(|s| (s.clone(), s.shape(schema)))' \
+  '        .map(|s| (s.clone(), SourceShape::Directory))' \
+  geode-app \
+  source_shapes_names_each_of_the_three_shapes
+
 run_mutation "bridge: dropped_events counted on a refused try_send" \
   crates/geode-app/src/bridge.rs \
   '            dropped.fetch_add(1, Ordering::Relaxed);
