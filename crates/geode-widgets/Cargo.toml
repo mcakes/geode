@@ -12,6 +12,8 @@ bench = false
 # `geode-shell` and every module depend on this crate, never the reverse —
 # so two hosts paint one widget through one door and cannot drift.
 [dependencies]
+# The layering anchor: a widget that needs the shared vocabulary (a
+# `Clock`, a colour) reaches it here, never through the shell.
 geode-core.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true

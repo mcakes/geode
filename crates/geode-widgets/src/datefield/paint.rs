@@ -7,7 +7,7 @@
 //! `FlooredTones`, the shell's chip/control doors) rather than per paint.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Hsla, MouseButton, Pixels, SharedString, Window, div};
+use gpui::{App, Div, Hsla, MouseButton, Pixels, SharedString, Window, div};
 use gpui_component::h_flex;
 
 use super::{Segment, SegmentText};
@@ -29,6 +29,13 @@ pub struct SegmentPaint {
 
 /// The separator painted BEFORE segment `i`: none before the year, `-`
 /// inside the date, a space between date and time, `:` inside the time.
+/// `i` is the PAINTED index, and it equals `Segment::index()` only
+/// because every `Precision` shows a PREFIX of the six segments (year
+/// through some cutoff, never a gap) — the same assumption `paint`'s
+/// click callback makes calling `Segment::at(i)`. A non-prefix precision
+/// (a segment shown alone, say, or two shown with a gap between) would
+/// need `SegmentText` to carry its own `Segment` rather than relying on
+/// its position in the slice.
 fn separator_before(i: usize) -> Option<&'static str> {
     match i {
         0 => None,
@@ -53,7 +60,7 @@ pub fn paint(
     paint: SegmentPaint,
     selector: SharedString,
     on_segment: impl Fn(Segment, &mut Window, &mut App) + Clone + 'static,
-) -> AnyElement {
+) -> Div {
     let mut row = h_flex().items_center();
     for (i, seg) in segments.iter().enumerate() {
         if let Some(sep) = separator_before(i) {
@@ -94,7 +101,7 @@ pub fn paint(
                 .child(suffix),
         );
     }
-    row.into_any_element()
+    row
 }
 
 #[cfg(test)]
@@ -169,6 +176,10 @@ mod tests {
         });
         let mut bounds = Vec::new();
         for i in 0..6 {
+            // `debug_bounds` takes `&'static str`, not `&str` — a dynamic
+            // selector has to leak to satisfy that, and the leak is
+            // bounded to these six loop iterations, never per-run or
+            // per-window.
             let b = vcx.debug_bounds(Box::leak(format!("probe-seg-{i}").into_boxed_str()));
             assert!(b.is_some(), "segment {i}");
             bounds.push(b.unwrap());

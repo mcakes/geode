@@ -292,21 +292,27 @@ impl EditorState {
 
 /// The date field as painted: the segments exactly as
 /// [`DateTimeField::segments`] answers them (`text` a `SharedString`,
-/// already carrying which one is active and mid-typing) — prepared by
+/// already carrying which one is active and mid-typing) plus the
+/// per-tile selector the painter needs — all prepared by
 /// [`DateFieldPaint::of`] whenever the field changes, never in `render`,
-/// so the painter (`geode_widgets::datefield::paint`) takes them
-/// straight through with no per-render allocation. `Clone` (a `Vec` of
-/// cheap-to-clone segments) because the delegate mirrors it into the
-/// cell it paints (`crate::delegate::DelegateEditorPaint`).
+/// so the painter (`geode_widgets::datefield::paint`) and the delegate
+/// mirror both take them straight through with NO allocation of their
+/// own: `segments` is an `Rc<[SegmentText]>` (one clone is a refcount
+/// bump, not a `Vec` copy) and `selector` a `SharedString` (an inline or
+/// refcounted copy, never a `format!` per render). `Clone` — three
+/// refcounts at most — because the delegate mirrors it into the cell it
+/// paints (`crate::delegate::DelegateEditorPaint`).
 #[derive(Clone)]
 pub(crate) struct DateFieldPaint {
-    pub segments: Vec<SegmentText>,
+    pub segments: Rc<[SegmentText]>,
+    pub selector: SharedString,
 }
 
 impl DateFieldPaint {
-    fn of(field: &DateTimeField) -> Self {
+    fn of(field: &DateTimeField, tile_id: u64) -> Self {
         Self {
-            segments: field.segments(),
+            segments: field.segments().into(),
+            selector: format!("marketdata-date-seg-{tile_id}").into(),
         }
     }
 }
@@ -2061,7 +2067,7 @@ impl MarketDataTile {
             );
             let focus = cx.focus_handle();
             focus.focus(window, cx);
-            let paint = DateFieldPaint::of(&field);
+            let paint = DateFieldPaint::of(&field, self.id.0);
             EditorState::Date {
                 field,
                 focus,
@@ -2085,6 +2091,9 @@ impl MarketDataTile {
     /// cmd) is never consumed: it reaches the shell exactly as it does
     /// from any editor (`ctrl+k` still opens the palette). Shift alone is
     /// the arrows' "ten steps", the number nudge's own rule.
+    /// `geode_widgets::datefield::route` is the ONE key table this
+    /// consults — the panel just computes `chord` and matches the two
+    /// arms (`Commit`/`Cancel`) it alone owns, `field.apply` the rest.
     ///
     /// `enter` and `escape` are ALSO bound by the fragment
     /// (`marketdata::commit`/`cancel`) for the shell's dispatch: both
@@ -2125,7 +2134,7 @@ impl MarketDataTile {
                 field.apply(other);
             }
         }
-        *paint = DateFieldPaint::of(field);
+        *paint = DateFieldPaint::of(field, self.id.0);
         // A date CELL's segments are painted from the delegate's copy.
         self.sync_editor(cx);
         // A keystroke that changed the field retires a standing refusal
@@ -2164,7 +2173,7 @@ impl MarketDataTile {
         }) = self.editor.as_mut()
         {
             field.select(segment);
-            *paint = DateFieldPaint::of(field);
+            *paint = DateFieldPaint::of(field, self.id.0);
             if !focus.is_focused(window) {
                 focus.focus(window, cx);
             }
@@ -2204,7 +2213,7 @@ impl MarketDataTile {
                         Some(format!("finish the {} or backspace", segment.name()).into());
                     return true;
                 }
-                *paint = DateFieldPaint::of(field);
+                *paint = DateFieldPaint::of(field, self.id.0);
                 // Always a valid date from here (the field's own
                 // invariant): nothing to parse, nothing to refuse.
                 let value = Value::Date(field.date());
@@ -2220,7 +2229,7 @@ impl MarketDataTile {
                         Some(format!("finish the {} or backspace", segment.name()).into());
                     return true;
                 }
-                *paint = DateFieldPaint::of(field);
+                *paint = DateFieldPaint::of(field, self.id.0);
                 let value = Value::Date(field.date());
                 self.commit_cell_value(cell, labels, value, window, cx)
             }
@@ -2259,7 +2268,7 @@ impl MarketDataTile {
                         Some(format!("finish the {} or backspace", segment.name()).into());
                     return true;
                 }
-                *paint = DateFieldPaint::of(field);
+                *paint = DateFieldPaint::of(field, self.id.0);
                 let new = field.date().format("%Y-%m-%d").to_string();
                 self.commit_row_label(row, label, new, window, cx)
             }
@@ -2338,7 +2347,7 @@ impl MarketDataTile {
                 // field's own listener did not consume the key, and step
                 // the same way it would have.
                 field.step(steps);
-                *paint = DateFieldPaint::of(field);
+                *paint = DateFieldPaint::of(field, self.id.0);
                 return self.notice.take().is_some();
             }
         };
@@ -2850,7 +2859,7 @@ impl MarketDataTile {
             );
             let focus = cx.focus_handle();
             focus.focus(window, cx);
-            let paint = DateFieldPaint::of(&field);
+            let paint = DateFieldPaint::of(&field, self.id.0);
             EditorState::Date {
                 field,
                 focus,
@@ -11233,6 +11242,12 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             h.tile.read_with(&vcx, |t, _| t.date_field().is_some()),
             "a Date axis opens the segmented field"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t
+                .date_field()
+                .is_some_and(|f| f.segments()[Segment::Day as usize].active)),
+            "the row-label editor opens on the day segment"
         );
         assert_eq!(h.mode(&vcx), "insert");
         assert!(

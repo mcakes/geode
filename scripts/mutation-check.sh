@@ -13437,12 +13437,39 @@ run_mutation "mddate: escape restores the painted date" \
 # ---- As-of dialog Part 1 (2026-09-20): the shared date-time field ------
 # `right` past the precision's last segment must stay — a Date field that
 # stepped into a hidden hour would type into a segment nobody can see.
-run_mutation "widgets: right stops at the precision's last segment" \
+# `Segment::right`'s own clamp is NOT the last line of defence —
+# `DateTimeField::select` independently refuses any segment past the
+# precision (the entry below this one), so mutating this clamp alone
+# leaves `segment()` unchanged at the boundary; the only thing that
+# differs is that `select` is now called with the UNCLAMPED (unfit)
+# segment and refuses it outright, where the correct code calls it with
+# `self` (already fitting) and it succeeds — clearing `typed`. So a
+# partial digit typed into the last segment SURVIVES a `right` at the
+# boundary instead of being dropped, and the next digit typed appends to
+# that stale one rather than starting fresh.
+run_mutation "widgets: right at the last segment re-selects it, clearing partial digits" \
   crates/geode-widgets/src/datefield/mod.rs \
   '        if next.fits(precision) { next } else { self }' \
   '        next' \
   geode-widgets \
   a_reselect_of_the_active_segment_drops_partial_digits
+
+# The real gate a hidden segment is refused by: `select` itself, which
+# every path into a new segment (`left`, `right`, a completed `digit`,
+# a click) goes through. Mutated away, `right` at the Date precision's
+# last segment (Day) would move the active segment to Hour — invisible
+# under `Precision::Date` — and a trader's next `up`/digit would act on
+# a segment nobody can see.
+run_mutation "widgets: a segment past the precision is refused" \
+  crates/geode-widgets/src/datefield/mod.rs \
+  '        if !segment.fits(self.precision) {
+            return false;
+        }' \
+  '        if false {
+            return false;
+        }' \
+  geode-widgets \
+  right_stops_at_the_precisions_last_segment
 
 # An hour step wraps within the hour; carrying into the day would move
 # the date under a trader stepping the time alone.
@@ -13489,6 +13516,31 @@ run_mutation "marketdata: the date field opens on the day segment" \
             );' \
   geode-marketdata \
   i_on_a_date_attribute_opens_the_field_on_the_day_segment
+
+# The row-label editor is the OTHER `DateTimeField::open` call site (a
+# provisional row on a `Typed(Date)` axis, `begin_label_edit`) — a
+# separate site from the attribute/cell editor above, seeded empty on
+# today's date rather than a painted value, so it needs its own entry.
+run_mutation "marketdata: the row-label date editor opens on the day segment" \
+  crates/geode-marketdata/src/tile.rs \
+  '            let field = DateTimeField::open(
+                chrono::Local::now()
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            );' \
+  '            let field = DateTimeField::open(
+                chrono::Local::now()
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight exists"),
+                Precision::Date,
+                Segment::Year,
+            );' \
+  geode-marketdata \
+  o_on_a_typed_axis_opens_the_label_editor
 
 run_mutation "vimnav: a bare ±1 wraps (spec §20.5)" \
   crates/geode-shell/src/vimnav.rs \

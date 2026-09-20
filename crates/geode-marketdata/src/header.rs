@@ -162,7 +162,7 @@ pub(crate) fn render_date_field(
         &paint.segments,
         None,
         segment_paint,
-        format!("marketdata-date-seg-{tile_id}").into(),
+        paint.selector.clone(),
         move |segment, window, cx| {
             tile.update(cx, |t, cx| t.date_segment_clicked(segment, window, cx));
         },
