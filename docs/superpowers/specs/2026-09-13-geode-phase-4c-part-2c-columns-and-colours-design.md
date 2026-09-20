@@ -1233,7 +1233,7 @@ to how the base is defined. `Definition::hue(..)`/`token(..)`/`tinted()`
 are the constructors every site uses; `summary` appends ` · ±sign`.
 
 **Rotation.** `geode_core::colour::tint(rgb, sign)` rotates the
-*resolved* colour's OKLCH hue by `TINT_DEGREES` (20°) toward
+*resolved* colour's OKLCH hue by `TINT_DEGREES` (40°; shipped at 20°, raised the same day after the display check found the difference too small to see — the two variants now sit 80° apart) toward
 `COOL_POLE_DEGREES` (230°) for `Sign::Positive` or `WARM_POLE_DEGREES`
 (50°) for `Sign::Negative`, along the shorter arc, stopping at the pole
 (so the two variants are always a full step apart, even for a colour

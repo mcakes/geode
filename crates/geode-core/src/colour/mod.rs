@@ -492,8 +492,11 @@ pub fn resolve_signed(def: &Definition, sign: Sign, anchors: &Anchors, tokens: &
 }
 
 /// How far [`tint`] rotates a hue, in OKLCH degrees: a hint of sign
-/// beside the colour's own identity, not a second colour.
-pub const TINT_DEGREES: f32 = 20.0;
+/// beside the colour's own identity, not a second colour. 40°, so the
+/// two variants sit 80° apart — 20° was invisible on a real display
+/// (user finding, 2026-09-20), and a full anchor step (60°) would read
+/// as two unrelated colours.
+pub const TINT_DEGREES: f32 = 40.0;
 /// The warm pole of the OKLCH wheel (orange) a negative number moves
 /// toward, and the cool pole (azure) a positive one moves toward — one
 /// axis, 180° apart.
@@ -945,6 +948,18 @@ mod tests {
             .to_degrees()
             .rem_euclid(360.0)
     }
+    /// Unsigned arc between two hues in degrees, wrap-safe.
+    fn arc(a: f32, b: f32) -> f32 {
+        ((a - b + 180.0).rem_euclid(360.0) - 180.0).abs()
+    }
+
+    /// The step is large enough to SEE — the first cut's 20° read as no
+    /// difference on a real display (user finding, 2026-09-20) — and
+    /// small enough that the two variants still read as one family.
+    #[test]
+    fn the_tint_step_is_forty_degrees() {
+        assert_eq!(TINT_DEGREES, 40.0);
+    }
 
     #[test]
     fn tint_rotates_positive_toward_the_cool_pole_and_negative_toward_the_warm_pole() {
@@ -955,28 +970,30 @@ mod tests {
         let positive = tint(green, Sign::Positive);
         let negative = tint(green, Sign::Negative);
         assert!(
-            (hue_of(positive) - (142.0 + TINT_DEGREES)).abs() < 0.5,
+            arc(hue_of(positive), 142.0 + TINT_DEGREES) < 0.5,
             "cooler: {}",
             hue_of(positive)
         );
         assert!(
-            (hue_of(negative) - (142.0 - TINT_DEGREES)).abs() < 0.5,
+            arc(hue_of(negative), 142.0 - TINT_DEGREES) < 0.5,
             "warmer: {}",
             hue_of(negative)
         );
         assert_eq!(tint(green, Sign::Zero), green, "zero is the base itself");
-        // Red (29°): the cool pole is now reached the OTHER way round the
-        // wheel (29 → 9 is the shorter arc to 230), and warm is upward.
-        let red = at_hue(29.0);
+        // Magenta-red (350°): the cool pole is now reached the OTHER way
+        // round the wheel (350 → 310 is the shorter arc to 230), and
+        // warm is upward through 0 (350 → 30). Both poles are more than
+        // a step away, so neither variant is clamped.
+        let magenta = at_hue(350.0);
         assert!(
-            (hue_of(tint(red, Sign::Positive)) - (29.0 - TINT_DEGREES)).abs() < 0.5,
-            "cooler from red goes down, magenta-ward: {}",
-            hue_of(tint(red, Sign::Positive))
+            arc(hue_of(tint(magenta, Sign::Positive)), 350.0 - TINT_DEGREES) < 0.5,
+            "cooler from magenta-red goes down toward blue: {}",
+            hue_of(tint(magenta, Sign::Positive))
         );
         assert!(
-            (hue_of(tint(red, Sign::Negative)) - (29.0 + TINT_DEGREES)).abs() < 0.5,
-            "warmer from red goes up toward orange: {}",
-            hue_of(tint(red, Sign::Negative))
+            arc(hue_of(tint(magenta, Sign::Negative)), 350.0 + TINT_DEGREES) < 0.5,
+            "warmer from magenta-red goes up through red: {}",
+            hue_of(tint(magenta, Sign::Negative))
         );
         // Lightness and chroma are kept, not traded for the rotation.
         let (base, got) = (
@@ -993,22 +1010,20 @@ mod tests {
         // (not 10° past it), negative moves the full step away.
         let azure = at_hue(220.0);
         assert!(
-            (hue_of(tint(azure, Sign::Positive)) - COOL_POLE_DEGREES).abs() < 0.5,
+            arc(hue_of(tint(azure, Sign::Positive)), COOL_POLE_DEGREES) < 0.5,
             "{}",
             hue_of(tint(azure, Sign::Positive))
         );
         assert!(
-            (hue_of(tint(azure, Sign::Negative)) - (220.0 - TINT_DEGREES)).abs() < 0.5,
+            arc(hue_of(tint(azure, Sign::Negative)), 220.0 - TINT_DEGREES) < 0.5,
             "{}",
             hue_of(tint(azure, Sign::Negative))
         );
         // Sitting exactly on the warm pole, negative is the base itself
         // and positive moves the full step away.
         let orange = at_hue(WARM_POLE_DEGREES);
-        assert!((hue_of(tint(orange, Sign::Negative)) - WARM_POLE_DEGREES).abs() < 0.5);
-        assert!(
-            (hue_of(tint(orange, Sign::Positive)) - WARM_POLE_DEGREES).abs() > TINT_DEGREES - 0.5
-        );
+        assert!(arc(hue_of(tint(orange, Sign::Negative)), WARM_POLE_DEGREES) < 0.5);
+        assert!(arc(hue_of(tint(orange, Sign::Positive)), WARM_POLE_DEGREES) > TINT_DEGREES - 0.5);
     }
 
     #[test]
