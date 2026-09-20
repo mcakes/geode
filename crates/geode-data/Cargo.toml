@@ -65,3 +65,7 @@ harness = false
 [[bench]]
 name = "append_series"
 harness = false
+
+[[bench]]
+name = "series_query"
+harness = false
