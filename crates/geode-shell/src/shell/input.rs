@@ -272,6 +272,8 @@ impl ShellView {
         } else if action.0 == "fontsize::decrease" {
             self.font_size = self.font_size.smaller();
             self.persist_font_size(cx);
+        } else if action.0 == "config::open_directory" {
+            self.open_config_directory(cx);
         } else if action.0 == "ui::line_numbers_cycle" {
             // off → on → rel → off (user ruling 2026-09-11); the settings
             // row steps the same value, through the same setter.
@@ -535,6 +537,44 @@ impl ShellView {
                 }
             })
             .detach();
+    }
+
+    /// `config::open_directory`: open the user config directory in the
+    /// OS file manager. `open_with_system` (the platform's `open` /
+    /// `ShellExecute`) opens a directory as a window; `reveal_path` would
+    /// only select it inside its parent. The directory is created first
+    /// so a fresh install with no `~/.config/geode` yet gets a window
+    /// rather than a silent failure — the same `create_dir_all` every
+    /// `config_write` does — on the background executor, since nothing
+    /// blocks the render thread; the open itself needs `App` and runs
+    /// back on the foreground once the directory exists.
+    fn open_config_directory(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            tracing::warn!(
+                target: "geode::config",
+                "config directory not opened: no user config directory (HOME/APPDATA unset)"
+            );
+            return;
+        };
+        cx.spawn(async move |_this, cx| {
+            let created = cx
+                .background_executor()
+                .spawn({
+                    let dir = dir.clone();
+                    async move { std::fs::create_dir_all(&dir) }
+                })
+                .await;
+            if let Err(e) = created {
+                tracing::warn!(
+                    target: "geode::config",
+                    "config directory not opened: failed to create {}: {e}",
+                    dir.display()
+                );
+                return;
+            }
+            cx.update(|cx| cx.open_with_system(&dir));
+        })
+        .detach();
     }
 
     /// Persist the current find style to `<user_dir>/app.toml`'s `[ui]`
