@@ -1905,16 +1905,16 @@ impl ShellView {
         self.picker.as_ref()
     }
 
+    /// The configured clock (`AppClock`), for the shell's own painters.
+    pub fn clock(&self, cx: &gpui::App) -> geode_core::clock::Clock {
+        cx.global::<crate::clock::AppClock>().0
+    }
+
     /// The dialogs' shared filter field (Task 3, `asof_view`'s calendar
     /// tests) — cross-module test reach the same as `picker()` above.
     #[cfg(any(test, feature = "test-support"))]
     pub fn dialog_input(&self) -> &Entity<InputState> {
         &self.dialog_input
-    }
-
-    /// The configured clock (`AppClock`), for the shell's own painters.
-    pub fn clock(&self, cx: &gpui::App) -> geode_core::clock::Clock {
-        cx.global::<crate::clock::AppClock>().0
     }
 
     /// The as-of dialog's calendar entity (Task 3) — cross-module test

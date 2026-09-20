@@ -1494,11 +1494,11 @@ fn rebuild_saved_scopes_prints_only_when_asked() {
 /// from the clock once per ~500ms reload-poll tick (alongside the flip
 /// sweep and the dirty-session flush), not on every paint. A stale value
 /// set directly here stands in for "yesterday" — the test executor's
-/// virtual clock (what `advance_clock` moves) never touches the real
-/// `chrono::Local::now()` this reads, the same limitation `shell::
-/// tests::flip`'s own reload-poll-tick test documents — so this proves
-/// the tick corrects a wrong value rather than proving a date rollover
-/// specifically.
+/// virtual clock (what `advance_clock` moves) never touches the
+/// `AppClock` global (the machine's zone unless `[time] zone` is set)
+/// this reads, the same limitation `shell::tests::flip`'s own
+/// reload-poll-tick test documents — so this proves the tick corrects a
+/// wrong value rather than proving a date rollover specifically.
 #[gpui::test]
 fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
@@ -1625,6 +1625,10 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
     let after = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
     assert_ne!(before, after);
     assert_eq!(after.zone_name(), "Asia/Tokyo");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.today),
+        after.today(chrono::Utc::now())
+    );
     let versions_after = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
     assert_eq!(versions_before.data, versions_after.data);
     assert_eq!(versions_before.as_of, versions_after.as_of);
