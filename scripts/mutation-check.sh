@@ -5705,13 +5705,11 @@ run_mutation "diagnostics module: the diagnostics observer rebuilds on every not
                 this.rebuild(cx);
             }
         })
-        .detach();
-        // MIN-7 (final review)' \
+        .detach();' \
   '            this.last_diag_versions = now;
             this.rebuild(cx);
         })
-        .detach();
-        // MIN-7 (final review)' \
+        .detach();' \
   geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
 
 # Re-homed 2026-09-08 (add-tile): `open_module` moved from `shell/mod.rs`
@@ -12124,8 +12122,14 @@ run_mutation "final: a painting delivery clears the previous delivery's notice" 
 # pinned assertions.
 run_mutation "final: the Behind chip does not call an older document newer" \
   crates/geode-marketdata/src/header.rs \
-  'Some((format!("update {}", local_hhmm(newer)).into(), Tone::Warn)),' \
-  'Some((format!("newer document received {}", local_hhmm(newer)).into(), Tone::Warn)),' \
+  '                Some((
+                    format!("update {}", local_hhmm(newer, i.clock)).into(),
+                    Tone::Warn,
+                )),' \
+  '                Some((
+                    format!("newer document received {}", local_hhmm(newer, i.clock)).into(),
+                    Tone::Warn,
+                )),' \
   geode-marketdata \
   a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base
 
@@ -12839,8 +12843,8 @@ run_mutation "mddraft: a malformed attribute entry is skipped, not the whole dra
 
 run_mutation "mdheader: behind reads update HH:MM" \
   crates/geode-marketdata/src/header.rs \
-  'format!("update {}", local_hhmm(newer))' \
-  'format!("different document received {}", local_hhmm(newer))' \
+  'format!("update {}", local_hhmm(newer, i.clock))' \
+  'format!("different document received {}", local_hhmm(newer, i.clock))' \
   geode-marketdata dirty_is_a_dot_and_behind_reads_update_hhmm
 
 run_mutation "mdheader: a dirty draft sets the dot flag" \

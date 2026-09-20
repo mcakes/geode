@@ -1095,6 +1095,73 @@ mod tests {
         );
     }
 
+    /// Review finding (Task 7): no test installed `AppClock`, so a tile
+    /// that hard-coded `Clock::machine()` — or whose `observe_global`
+    /// handler were deleted — would have passed everything else. The
+    /// log row's `HH:MM:SS` is baked into `Row.text` at `rebuild` time
+    /// (never reformatted at paint), so the "after" half specifically
+    /// pins the observer: without it, switching the global would leave
+    /// the stale Tokyo string sitting in `self.rows`. `2026-09-12T14:00:
+    /// 00Z` reads `23:00:00` in Tokyo (UTC+9) and `14:00:00` in UTC —
+    /// both spelled by hand, not derived through `Clock` (the thing
+    /// under test).
+    #[gpui::test]
+    fn the_log_section_reads_the_installed_app_clock_and_follows_a_later_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(geode_shell::clock::AppClock(
+                geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+            ))
+        });
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section log", cx).unwrap();
+        });
+        let at: SystemTime = chrono::DateTime::parse_from_rfc3339("2026-09-12T14:00:00Z")
+            .unwrap()
+            .to_utc()
+            .into();
+        h.ring.push(Record {
+            at,
+            level: Level::INFO,
+            target: "geode::shell",
+            message: "m".into(),
+            seq: 0,
+        });
+        // Ring pushes carry no notify of their own; `note_dropped` +
+        // `cx.notify()` is the existing tests' stand-in for the real
+        // caller (a health note, the reload-poll tick, …) that actually
+        // triggers the next rebuild — same trick as
+        // `the_log_section_follows_the_tail_until_the_cursor_moves`.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_dropped(1);
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let before = h
+            .tile
+            .read_with(&vcx, |t, _| t.rows().last().unwrap().text.to_string());
+        assert!(
+            before.starts_with("23:00:00"),
+            "Tokyo is UTC+9 on the 14:00:00Z fixture: {before}"
+        );
+
+        vcx.update(|_window, cx| {
+            cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc()))
+        });
+        vcx.run_until_parked();
+        let after = h
+            .tile
+            .read_with(&vcx, |t, _| t.rows().last().unwrap().text.to_string());
+        assert!(
+            after.starts_with("14:00:00"),
+            "the observer refreshed and repainted: {after}"
+        );
+    }
+
     #[gpui::test]
     fn the_log_section_follows_the_tail_until_the_cursor_moves(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);

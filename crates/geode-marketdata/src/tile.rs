@@ -5677,6 +5677,43 @@ mod tests {
         );
     }
 
+    /// Review finding (Task 7): no test installed `AppClock` before this
+    /// fix, so a tile that hard-coded `Clock::machine()` — or whose
+    /// `observe_global` handler were deleted — would have passed
+    /// everything else. `BASE` is `"2026-09-12T14:00:00Z"`: Tokyo is
+    /// UTC+9, so the header's source time reads `23:00:00` there and
+    /// `14:00:00` once the global switches to UTC — both spelled by
+    /// hand, not derived through `Clock` (the thing under test).
+    #[gpui::test]
+    fn the_header_time_reads_the_installed_app_clock_and_follows_a_later_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(geode_shell::clock::AppClock(
+                geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+            ))
+        });
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let before = h.tile.read_with(&vcx, |t, _| t.header.time.clone());
+        assert_eq!(
+            before.as_deref(),
+            Some("23:00:00"),
+            "Tokyo is UTC+9 on the BASE instant 14:00:00Z: {before:?}"
+        );
+
+        vcx.update(|_, cx| {
+            cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc()))
+        });
+        vcx.run_until_parked();
+        let after = h.tile.read_with(&vcx, |t, _| t.header.time.clone());
+        assert_eq!(
+            after.as_deref(),
+            Some("14:00:00"),
+            "the observer refreshed the tile's clock and repainted: {after:?}"
+        );
+    }
+
     #[gpui::test]
     fn a_stale_tag_is_dropped(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);

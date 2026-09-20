@@ -772,11 +772,13 @@ mod tests {
     fn the_time_is_on_the_clock_hhmmss_and_stale_is_a_flag() {
         let model = model_with_rows();
         let key = vec!["SPX.Z".to_string()];
-        let at = chrono::Utc::now();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-18T22:00:00Z")
+            .unwrap()
+            .to_utc();
         let mut i = inputs(&model, Some(&key), DraftBadge::Clean);
         i.source_at = Some(at);
         let h = HeaderModel::prepare(i);
-        assert_eq!(h.time.as_deref(), Some(Clock::utc().hms(at).as_str()));
+        assert_eq!(h.time.as_deref(), Some("22:00:00"));
         assert!(
             !h.stale,
             "staleness is the tile's clock reading, applied at paint"

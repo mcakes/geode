@@ -1298,6 +1298,34 @@ impl BlotterTile {
                     > self.stale_after.get()
             })
     }
+
+    /// The per-dataset freshness readout exactly as `render` builds it —
+    /// the `"{dataset} {short_time}"` strings, in the same `f.as_of`
+    /// order, read through the SAME `try_global` door `render` uses —
+    /// so a test asserts on what a trader reads rather than reaching
+    /// for the global itself (review finding, Task 7: no test installed
+    /// `AppClock` before this, so a tile that ignored it would have
+    /// passed everything else).
+    #[cfg(test)]
+    pub(crate) fn freshness_texts(&self, cx: &App) -> Vec<String> {
+        let clock = cx
+            .try_global::<geode_shell::clock::AppClock>()
+            .map(|c| c.0)
+            .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
+        let Some(snapshot) = self.table.read(cx).delegate().snapshot.clone() else {
+            return Vec::new();
+        };
+        let p = snapshot.provenance();
+        let mut datasets: Vec<_> = p.datasets.iter().collect();
+        datasets.sort_by(|a, b| a.as_of.cmp(&b.as_of));
+        datasets
+            .into_iter()
+            .map(|f| match &f.as_of {
+                Some(t) => format!("{} {}", f.dataset, short_time(t, clock)),
+                None => format!("{} \u{2014}", f.dataset),
+            })
+            .collect()
+    }
 }
 
 /// The `HH:MM` of an RFC 3339 `as_of` on the trader's clock, for the
@@ -1550,7 +1578,7 @@ mod tests {
     use geode_core::groupings::GroupingSlots;
     use geode_core::query::{QueryKey, QueryOutcome};
     use geode_core::scopes::SavedScopes;
-    use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+    use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
     use geode_shell::frame::{FLIP_DEADLINE, Frame, Publish};
@@ -2085,6 +2113,65 @@ mod tests {
     /// test compares to tell `snapshot()`'s labels from `snapshot2()`'s.
     fn shown_texts(tile: &Entity<BlotterTile>, cx: &gpui::VisualTestContext) -> Vec<String> {
         tile.read_with(cx, |t, cx| t.table().read(cx).delegate().shown_texts())
+    }
+
+    /// Review finding (Task 7): no test installed `AppClock`, so a tile
+    /// that hard-coded `Clock::machine()` — or whose `observe_global`
+    /// handler were deleted — would have passed everything else. The
+    /// freshness readout is built fresh every `render` (never cached),
+    /// so `freshness_texts` mirrors that same path rather than exposing
+    /// a stored field. `2026-09-12T14:00:00Z` is `23:00` in Tokyo
+    /// (UTC+9) and `14:00` in UTC — both spelled by hand, not derived
+    /// through `Clock` (the thing under test).
+    #[gpui::test]
+    fn the_freshness_readout_reads_the_installed_app_clock_and_follows_a_later_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(geode_shell::clock::AppClock(
+                geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+            ))
+        });
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        let meta = ColumnMeta {
+            name: "lhu".into(),
+            attribution_by_depth: vec![Attribution::Additive],
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let provenance = Provenance {
+            datasets: vec![Freshness {
+                dataset: "risk".into(),
+                as_of: Some("2026-09-12T14:00:00Z".into()),
+                generation: 1,
+            }],
+            as_of_request: None,
+        };
+        let snapshot = Arc::new(Snapshot::for_tests_with_provenance(
+            vec![(meta, TestColumn::Dict(vec![Some("X".into())]))],
+            1,
+            provenance,
+        ));
+        deliver(&h, &mut cx, tag, Ok(snapshot));
+
+        let before = h.tile.read_with(&cx, |t, cx| t.freshness_texts(cx));
+        assert_eq!(
+            before,
+            vec!["risk 23:00".to_string()],
+            "Tokyo is UTC+9 on the 14:00:00Z fixture: {before:?}"
+        );
+
+        cx.update(|_window, cx| {
+            cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc()))
+        });
+        cx.run_until_parked();
+        let after = h.tile.read_with(&cx, |t, cx| t.freshness_texts(cx));
+        assert_eq!(
+            after,
+            vec!["risk 14:00".to_string()],
+            "the observer refreshed and repainted: {after:?}"
+        );
     }
 
     #[gpui::test]
