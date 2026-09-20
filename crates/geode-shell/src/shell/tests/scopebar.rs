@@ -694,3 +694,114 @@ fn a_dialog_opened_through_the_palette_from_the_field_returns_focus_to_the_field
         "escape must return focus to the field the whole chain started from"
     );
 }
+
+/// Toolbar restyle (2026-09-19, option A): a selection chip's `×` is
+/// painted INSIDE the chip's own frame — one control with two hit zones
+/// — rather than as a sibling equidistant from the chips on either side
+/// of it. Clicking the `×` drops the dimension and, because the glyph
+/// occludes the body's hitbox, does NOT also open the picker the body's
+/// mouse-down would.
+#[gpui::test]
+fn the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(book_scope("BK000"));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    let chip = vcx.debug_bounds("scope-chip-book").expect("chip painted");
+    let close = vcx
+        .debug_bounds("scope-chip-close-book")
+        .expect("close glyph painted");
+    // Edge-inclusive on purpose (`Bounds::contains` is far-edge
+    // exclusive): a flush-edge × would still be inside its chip.
+    assert!(
+        close.left() >= chip.left()
+            && close.top() >= chip.top()
+            && close.right() <= chip.right()
+            && close.bottom() <= chip.bottom(),
+        "the × sits inside its chip: chip {chip:?}, × {close:?}"
+    );
+
+    vcx.simulate_click(close.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(frame.read_with(&vcx, |f, _| f.scope().dimensions.is_empty()));
+    assert!(
+        shell.read_with(&vcx, |s, _| s.picker.is_none()),
+        "dropping a chip must not also open the picker its body opens"
+    );
+}
+
+/// The bar is segments with a hairline between neighbours: the grouping
+/// readout, then the scope (chips and verbs). The divider between them
+/// lies strictly between the readout's right edge and the first scope
+/// element's left edge; the as-of divider is not painted while live.
+#[gpui::test]
+fn the_bar_divides_grouping_from_scope_with_a_hairline(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let _shell = shell_of(&window, &mut vcx);
+
+    let readout = vcx.debug_bounds("scope-grouping").expect("readout painted");
+    let pick = vcx
+        .debug_bounds("scope-pick-chip")
+        .expect("pick verb painted");
+    let divider = vcx
+        .debug_bounds("scope-divider-scope")
+        .expect("the grouping/scope divider is painted");
+    assert!(
+        readout.right() <= divider.left() && divider.right() <= pick.left(),
+        "readout {readout:?} | divider {divider:?} | + {pick:?}"
+    );
+    assert!(
+        vcx.debug_bounds("scope-divider-asof").is_none(),
+        "no as-of segment while live"
+    );
+}
+
+/// The text layer is shown by the field itself, which mirrors the
+/// frame's text while unfocused; the `text "…"` chip that used to repeat
+/// it is gone. The field's own clear glyph drops the text layer through
+/// the same subscription typing uses.
+#[gpui::test]
+fn the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        let mut s = book_scope("BK000");
+        s.text = Some("spx".into());
+        f.set_scope(s);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    assert!(
+        vcx.debug_bounds("scope-text-chip").is_none(),
+        "no text chip"
+    );
+    let value = shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).value().to_string());
+    assert_eq!(value, "spx", "the unfocused field shows the frame's text");
+
+    // The component's clear button sits at the trailing edge of the
+    // field, inside its padding; click just inside that edge.
+    let field = vcx.debug_bounds("scope-field").expect("field painted");
+    let at = gpui::point(field.right() - gpui::px(14.), field.center().y);
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.scope().text.clone()),
+        None,
+        "the clear glyph drops the text layer"
+    );
+    let value = shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).value().to_string());
+    assert_eq!(value, "");
+    assert!(
+        frame.read_with(&vcx, |f, _| !f.scope().dimensions.is_empty()),
+        "only the text layer went"
+    );
+}

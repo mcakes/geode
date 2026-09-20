@@ -7592,6 +7592,50 @@ run_mutation "scope-save: the toolbar only paints the save chip while savable" \
   geode-shell \
   the_save_chip_only_paints_with_a_savable_scope_and_opens_naming
 
+# Toolbar restyle (2026-09-19): the `×` sits INSIDE the chip whose body
+# opens the picker. `occlude()` on the glyph is the ONE mechanism that
+# keeps a click on it from also reaching the body's mouse-down (gpui
+# gates every mouse listener on `hitbox.is_hovered`, and an occluding
+# child's hitbox hides the parent's from the hit test). There is
+# deliberately no `stop_propagation` beside it; without the occlude the
+# drop still happens AND the picker opens.
+run_mutation "toolbar: the × occludes the chip body so a drop does not open the picker" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .occlude()' \
+  '                    .flex_shrink_0()' \
+  geode-shell \
+  the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker
+
+# The AS OF chip is its own segment, parted from the grouping readout
+# by a hairline. Dropping the divider leaves the chip and the readout
+# in one run, the segmentation the restyle exists to paint.
+run_mutation "toolbar: the as-of segment paints its divider" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                .child(divider("scope-divider-asof", theme.title_bar_border))' \
+  '                .child(div())' \
+  geode-shell \
+  the_as_of_chip_leads_the_bar_and_opens_the_selector
+
+# The grouping readout reads "open" (pressed fill, chevron up) only
+# while the grouping picker is up. Pinning the branch to rest leaves a
+# trigger that never shows its popup is open.
+run_mutation "toolbar: the readout's open state follows the grouping picker" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .child(if grouping_open {' \
+  '        .child(if false {' \
+  geode-shell \
+  the_readout_paints_a_chevron_and_reads_open_while_the_picker_is_up
+
+# The text layer's only mouse drop is the field's own clear glyph (the
+# `text "…"` chip is gone). Without `cleanable` the click lands on the
+# field itself and the text stays.
+run_mutation "toolbar: the field's clear glyph drops the text layer" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                        .cleanable(true)' \
+  '                        .cleanable(false)' \
+  geode-shell \
+  the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it
+
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
 # to normal mode, which keeps the query applied) must still be emptied

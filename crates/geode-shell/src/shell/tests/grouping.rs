@@ -278,3 +278,31 @@ fn hovering_the_readout_names_the_chord(cx: &mut gpui::TestAppContext) {
             || vcx.debug_bounds("tip-scope-grouping-chord-alt+g").is_some()
     );
 }
+
+/// Toolbar restyle (2026-09-19, option A): the grouping readout reads
+/// as a dropdown trigger — a trailing chevron — and stays visibly
+/// "open" while the picker it owns is up (design guide: a control that
+/// owns a popup remains pressed until it closes), returning to rest
+/// when the picker is dismissed.
+#[gpui::test]
+fn the_readout_paints_a_chevron_and_reads_open_while_the_picker_is_up(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_window, mut vcx, shell, _frame) = open_with_slots(cx);
+    assert!(vcx.debug_bounds("scope-grouping-chevron").is_some());
+    assert!(vcx.debug_bounds("scope-grouping-open").is_none());
+
+    let readout = vcx.debug_bounds("scope-grouping").expect("readout painted");
+    vcx.simulate_click(readout.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
+    assert!(
+        vcx.debug_bounds("scope-grouping-open").is_some(),
+        "the readout paints its open state while the picker is up"
+    );
+
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
+    assert!(vcx.debug_bounds("scope-grouping-open").is_none());
+}
