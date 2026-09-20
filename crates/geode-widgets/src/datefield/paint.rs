@@ -167,16 +167,31 @@ mod tests {
         vcx.update(|w, cx| {
             let _ = w.draw(cx);
         });
+        let mut bounds = Vec::new();
         for i in 0..6 {
-            assert!(
-                vcx.debug_bounds(Box::leak(format!("probe-seg-{i}").into_boxed_str()))
-                    .is_some(),
-                "segment {i}"
-            );
+            let b = vcx.debug_bounds(Box::leak(format!("probe-seg-{i}").into_boxed_str()));
+            assert!(b.is_some(), "segment {i}");
+            bounds.push(b.unwrap());
         }
         assert!(vcx.debug_bounds("probe-seg-suffix").is_some());
-        let y = vcx.debug_bounds("probe-seg-0").unwrap();
-        let s = vcx.debug_bounds("probe-seg-5").unwrap();
-        assert!(s.origin.x > y.origin.x, "painted left to right");
+        // The painted order holds all the way across — a scrambled
+        // separator between two segments (the space before the hour, the
+        // colons inside the time) would still leave segment 0 left of
+        // segment 5, so the sweep checks every consecutive pair, not just
+        // the two ends.
+        for pair in bounds.windows(2) {
+            assert!(
+                pair[1].origin.x > pair[0].origin.x,
+                "painted left to right: {pair:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn separators_are_dashes_inside_the_date_a_space_then_colons() {
+        assert_eq!(
+            (0..6).map(separator_before).collect::<Vec<_>>(),
+            [None, Some("-"), Some("-"), Some(" "), Some(":"), Some(":")]
+        );
     }
 }

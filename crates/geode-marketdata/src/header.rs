@@ -2,10 +2,10 @@
 //! by [`HeaderModel::prepare`] — the tile's `changed()` door — and painted
 //! by [`render`] with no formatting of its own.
 
+use crate::core::SegmentPaint;
 use crate::core::draft::{DraftBadge, local_hhmm};
 use crate::core::matrix::{HeaderCell, MatrixModel, RowState};
 use crate::core::spec::PanelSpec;
-use crate::core::{SegmentPaint, SegmentText};
 use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
@@ -145,26 +145,21 @@ pub(crate) fn render_date_field(
         rest_text: rest.text,
         rest_fill: rest.fill,
         active_text: active.text,
-        active_fill: active.fill.expect("active segment has a fill"),
+        // A missing fill here would mean `date_segment_paint(.., true, ..)`
+        // stopped filling the active/typing state — a colour-derivation
+        // bug, not a case worth panicking the render thread over: fall
+        // back to the theme's own primary/accent fill so a future edit
+        // degrades instead of crashing the window.
+        active_fill: active.fill.unwrap_or(theme.primary),
         typing_text: typing.text,
-        typing_fill: typing.fill.expect("typing segment has a fill"),
+        typing_fill: typing.fill.unwrap_or(theme.accent),
         separator,
         suffix: separator,
         radius: theme.radius_tokens().sm,
     };
-    let segments: Vec<SegmentText> = paint
-        .segments
-        .iter()
-        .enumerate()
-        .map(|(i, text)| SegmentText {
-            text: text.to_string(),
-            active: paint.active == i,
-            typing: paint.active == i && paint.typing,
-        })
-        .collect();
     let tile = tile.clone();
     field.child(geode_widgets::datefield::paint(
-        &segments,
+        &paint.segments,
         None,
         segment_paint,
         format!("marketdata-date-seg-{tile_id}").into(),

@@ -57,7 +57,7 @@ use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
     Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, FieldKey, MatrixModel, PanelSpec,
-    Precision, Segment, UpdatePolicy, attr_text, parse_attr, parse_cell, route,
+    Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell, route,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -290,31 +290,23 @@ impl EditorState {
     }
 }
 
-/// The date field as painted: one `SharedString` per segment, which one
-/// is active and whether that one is mid-typing — prepared by
-/// [`DateFieldPaint::of`] whenever the field changes, never in `render`.
-/// `Clone` (three refcounts and two words) because the delegate mirrors
-/// it into the cell it paints (`crate::delegate::DelegateEditorPaint`).
+/// The date field as painted: the segments exactly as
+/// [`DateTimeField::segments`] answers them (`text` a `SharedString`,
+/// already carrying which one is active and mid-typing) — prepared by
+/// [`DateFieldPaint::of`] whenever the field changes, never in `render`,
+/// so the painter (`geode_widgets::datefield::paint`) takes them
+/// straight through with no per-render allocation. `Clone` (a `Vec` of
+/// cheap-to-clone segments) because the delegate mirrors it into the
+/// cell it paints (`crate::delegate::DelegateEditorPaint`).
 #[derive(Clone)]
 pub(crate) struct DateFieldPaint {
-    pub segments: [SharedString; 3],
-    pub active: usize,
-    pub typing: bool,
+    pub segments: Vec<SegmentText>,
 }
 
 impl DateFieldPaint {
     fn of(field: &DateTimeField) -> Self {
-        let segs = field.segments();
-        let active = field.segment().index();
-        let typing = segs.iter().any(|s| s.typing);
-        let mut segments: [SharedString; 3] = Default::default();
-        for (slot, seg) in segments.iter_mut().zip(segs) {
-            *slot = seg.text.into();
-        }
         Self {
-            segments,
-            active,
-            typing,
+            segments: field.segments(),
         }
     }
 }
@@ -7630,20 +7622,28 @@ deleted = true
         let (row, col, date) = mirrored.expect("the editor is mirrored");
         assert_eq!((row, col), (1, Some(0)));
         let (segments, mirrored_focus) = date.expect("as a date field");
-        assert_eq!(segments.map(|s| s.to_string()), ["2027", "03", "19"]);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|s| s.text.to_string())
+                .collect::<Vec<_>>(),
+            vec!["2027", "03", "19"]
+        );
         assert_eq!(mirrored_focus, focus);
         // A keystroke re-prepares the mirror's segments.
         draw(&mut vcx);
         type_keys(&mut vcx, "up");
         let segments = h.tile.read_with(&vcx, |t, cx| {
             match &t.table().read(cx).delegate().editor.as_ref().unwrap().paint {
-                DelegateEditorPaint::Date { paint, .. } => {
-                    paint.segments.clone().map(|s| s.to_string())
-                }
+                DelegateEditorPaint::Date { paint, .. } => paint
+                    .segments
+                    .iter()
+                    .map(|s| s.text.to_string())
+                    .collect::<Vec<_>>(),
                 DelegateEditorPaint::Text(_) => unreachable!(),
             }
         });
-        assert_eq!(segments, ["2027", "03", "20"]);
+        assert_eq!(segments, vec!["2027", "03", "20"]);
         h.dispatch(&mut vcx, "cancel", None);
         assert!(
             h.tile
@@ -9601,7 +9601,11 @@ edits = [["2099-01-01", "-1", 1.0]]
             .expect("an open date field");
         let v = field.segments();
         (
-            [v[0].text.clone(), v[1].text.clone(), v[2].text.clone()],
+            [
+                v[0].text.to_string(),
+                v[1].text.to_string(),
+                v[2].text.to_string(),
+            ],
             field.segment(),
         )
     }

@@ -12,6 +12,7 @@ mod paint;
 pub use paint::{SegmentPaint, paint};
 
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use gpui::SharedString;
 
 /// How many segments the field shows: a date alone (the market-data
 /// attribute strip) or a date with a time to the second (the as-of
@@ -90,9 +91,14 @@ impl Segment {
 
 /// What one segment paints: its text, whether it carries the cursor, and
 /// whether the text is digits mid-typing rather than the committed value.
+/// `text` is a [`SharedString`] (cheap to clone — an inline copy of a
+/// refcounted or inlined buffer) so a host that paints every segment
+/// every frame (the panel's header, [`paint::paint`]) does not allocate
+/// one `String` per segment per frame — PHILOSOPHY's per-frame heap
+/// churn rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentText {
-    pub text: String,
+    pub text: SharedString,
     pub active: bool,
     pub typing: bool,
 }
@@ -389,18 +395,18 @@ impl DateTimeField {
             .copied()
             .filter(|s| s.fits(self.precision))
             .map(|segment| {
-                let committed = match segment {
-                    Segment::Year => format!("{:04}", v.year()),
-                    Segment::Month => format!("{:02}", v.month()),
-                    Segment::Day => format!("{:02}", v.day()),
-                    Segment::Hour => format!("{:02}", v.hour()),
-                    Segment::Minute => format!("{:02}", v.minute()),
-                    Segment::Second => format!("{:02}", v.second()),
+                let committed: SharedString = match segment {
+                    Segment::Year => format!("{:04}", v.year()).into(),
+                    Segment::Month => format!("{:02}", v.month()).into(),
+                    Segment::Day => format!("{:02}", v.day()).into(),
+                    Segment::Hour => format!("{:02}", v.hour()).into(),
+                    Segment::Minute => format!("{:02}", v.minute()).into(),
+                    Segment::Second => format!("{:02}", v.second()).into(),
                 };
                 let active = segment == self.segment;
                 SegmentText {
                     text: if typing && active {
-                        self.typed.clone()
+                        self.typed.clone().into()
                     } else {
                         committed
                     },
@@ -521,11 +527,18 @@ mod tests {
 
     fn texts(f: &DateTimeField) -> [String; 3] {
         let v = f.segments();
-        [v[0].text.clone(), v[1].text.clone(), v[2].text.clone()]
+        [
+            v[0].text.to_string(),
+            v[1].text.to_string(),
+            v[2].text.to_string(),
+        ]
     }
 
     fn texts_of(f: &DateTimeField) -> Vec<String> {
-        f.segments().into_iter().map(|s| s.text).collect()
+        f.segments()
+            .into_iter()
+            .map(|s| s.text.to_string())
+            .collect()
     }
 
     #[test]
