@@ -56,8 +56,8 @@ use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment,
-    UpdatePolicy, attr_text, parse_attr, parse_cell,
+    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, MatrixModel, PanelSpec, Precision,
+    Segment, UpdatePolicy, attr_text, parse_attr, parse_cell,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -267,13 +267,13 @@ enum EditorState {
     /// off the element tree would take no characters at all.
     Text(Entity<InputState>),
     /// The segmented date field a `Date` attribute or a `Date` cell opens
-    /// instead: a pure [`DateField`] the tile routes keys into
+    /// instead: a pure [`DateTimeField`] the tile routes keys into
     /// ([`MarketDataTile::date_field_key`]), its own focus handle (what
     /// makes the shell's insert branch see a non-shell focus and what
     /// `holds_focus` answers off), and the three segment strings prepared
     /// on every key so `render` formats nothing.
     Date {
-        field: DateField,
+        field: DateTimeField,
         focus: FocusHandle,
         paint: DateFieldPaint,
     },
@@ -303,12 +303,16 @@ pub(crate) struct DateFieldPaint {
 }
 
 impl DateFieldPaint {
-    fn of(field: &DateField) -> Self {
-        let [y, m, d] = field.segments();
-        let active = field.segment.index();
-        let typing = y.typing || m.typing || d.typing;
+    fn of(field: &DateTimeField) -> Self {
+        let segs = field.segments();
+        let active = field.segment().index();
+        let typing = segs.iter().any(|s| s.typing);
+        let mut segments: [SharedString; 3] = Default::default();
+        for (slot, seg) in segments.iter_mut().zip(segs) {
+            *slot = seg.text.into();
+        }
         Self {
-            segments: [y.text.into(), m.text.into(), d.text.into()],
+            segments,
             active,
             typing,
         }
@@ -2058,7 +2062,11 @@ impl MarketDataTile {
             // something a step or a digit can act on.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
                 .unwrap_or_else(|_| chrono::Local::now().date_naive());
-            let field = DateField::open(date);
+            let field = DateTimeField::open(
+                date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            );
             let focus = cx.focus_handle();
             focus.focus(window, cx);
             let paint = DateFieldPaint::of(&field);
@@ -2219,7 +2227,7 @@ impl MarketDataTile {
                 *paint = DateFieldPaint::of(field);
                 // Always a valid date from here (the field's own
                 // invariant): nothing to parse, nothing to refuse.
-                let value = Value::Date(field.value());
+                let value = Value::Date(field.date());
                 self.commit_attr_edit(index, column, AttrInput::Value(value), window, cx)
             }
             (EditorState::Date { field, paint, .. }, EditTarget::Cell { cell, labels }) => {
@@ -2233,7 +2241,7 @@ impl MarketDataTile {
                     return true;
                 }
                 *paint = DateFieldPaint::of(field);
-                let value = Value::Date(field.value());
+                let value = Value::Date(field.date());
                 self.commit_cell_value(cell, labels, value, window, cx)
             }
             (EditorState::Text(state), EditTarget::RowLabel { row, label }) => {
@@ -2272,7 +2280,7 @@ impl MarketDataTile {
                     return true;
                 }
                 *paint = DateFieldPaint::of(field);
-                let new = field.value().format("%Y-%m-%d").to_string();
+                let new = field.date().format("%Y-%m-%d").to_string();
                 self.commit_row_label(row, label, new, window, cx)
             }
         }
@@ -2852,7 +2860,14 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) {
         let state = if ty == ColumnType::Date {
-            let field = DateField::open(chrono::Local::now().date_naive());
+            let field = DateTimeField::open(
+                chrono::Local::now()
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            );
             let focus = cx.focus_handle();
             focus.focus(window, cx);
             let paint = DateFieldPaint::of(&field);
@@ -4116,7 +4131,7 @@ impl MarketDataTile {
 
     /// The open date field, `None` when the open editor is not one.
     #[cfg(test)]
-    pub(crate) fn date_field(&self) -> Option<DateField> {
+    pub(crate) fn date_field(&self) -> Option<DateTimeField> {
         self.editor.as_ref().and_then(|e| match &e.state {
             EditorState::Date { field, .. } => Some(field.clone()),
             EditorState::Text(_) => None,
@@ -9596,8 +9611,11 @@ edits = [["2099-01-01", "-1", 1.0]]
             .tile
             .read_with(vcx, |t, _| t.date_field())
             .expect("an open date field");
-        let [y, m, d] = field.segments();
-        ([y.text, m.text, d.text], field.segment)
+        let v = field.segments();
+        (
+            [v[0].text.clone(), v[1].text.clone(), v[2].text.clone()],
+            field.segment(),
+        )
     }
 
     fn type_keys(vcx: &mut gpui::VisualTestContext, keys: &str) {
@@ -9698,7 +9716,7 @@ edits = [["2099-01-01", "-1", 1.0]]
             ("1", true, true)
         );
         assert_eq!(
-            field.value(),
+            field.date(),
             chrono::NaiveDate::from_ymd_opt(2026, 9, 12).unwrap()
         );
         type_keys(&mut vcx, "2");
