@@ -360,6 +360,13 @@ impl Draft {
     /// row's label is not the draft's to rename) or `to` already names a
     /// row in this draft, so a caller never silently overwrites one edit
     /// with another.
+    ///
+    /// The row's followers move with it ([`Self::rehang_followers`],
+    /// final review's Critical): the tile anchors a chain on the MINTED
+    /// label before the rename lands, so a follower left saying
+    /// `after: new-2` would name a label no row holds — unresolvable by
+    /// the splice, painted at the top, and written to the session as a
+    /// dangling anchor.
     pub fn rename_row(&mut self, from: &str, to: &str) -> bool {
         if !matches!(self.rows.get(from), Some(RowEdit::Inserted { .. })) {
             return false;
@@ -369,6 +376,7 @@ impl Draft {
         }
         let edit = self.rows.remove(from).expect("checked above");
         self.rows.insert(to.to_string(), edit);
+        self.rehang_followers(Some(from), Some(to.to_string()));
         true
     }
 
@@ -997,15 +1005,18 @@ pub(crate) fn local_hhmm(rfc3339: &str) -> String {
     }
 }
 
-/// Parse a typed cell to the number a document holds.
+/// Parse a typed NUMERIC cell to the number a document holds.
 ///
-/// Only `f64` and `i64` columns are editable — a document's values are
-/// declared one of those two (spec §3.2) and an axis is read-only in
-/// slice 1 (a header attribute is editable too, but through
-/// [`parse_attr`], which parses its own broader vocabulary of types) — so
-/// anything else is refused by type rather than coerced. Every message
-/// names the text it refused, because the inline notice appears beside a
-/// field the trader can no longer see the whole of.
+/// This is the `CellKind::Number` parser alone: every caller dispatches
+/// on the cell's kind first (`commit_cell_edit`, and [`parse_attr`]'s
+/// numeric arms), and a `Text`, `Choice` or `Date` cell commits through
+/// its own arm there (dividend spec §3.3) rather than through this
+/// function. The non-numeric `ColumnType` arm below is therefore a belt
+/// behind that dispatch, not a rule about which cells are editable —
+/// refused by type rather than coerced, so a caller that forgets the
+/// dispatch gets a notice and not a number. Every message names the
+/// text it refused, because the inline notice appears beside a field
+/// the trader can no longer see the whole of.
 pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
     let trimmed = text.trim();
     match ty {
@@ -1023,7 +1034,7 @@ pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
             .map(|v| v as f64)
             .map_err(|_| format!("'{text}' is not a whole number")),
         ColumnType::Utf8 | ColumnType::Date | ColumnType::Timestamp | ColumnType::Bool => Err(
-            format!("'{text}' cannot be entered here — only numeric cells are editable"),
+            format!("'{text}' cannot be entered here — not a numeric cell"),
         ),
     }
 }
@@ -1547,7 +1558,8 @@ mod tests {
         assert!(!err.is_empty());
         let err = parse_cell("1e400", ColumnType::F64).expect_err("infinity is not a value");
         assert!(err.contains("1e400"), "{err}");
-        let err = parse_cell("2026-10-16", ColumnType::Date).expect_err("dates are read-only");
+        let err = parse_cell("2026-10-16", ColumnType::Date)
+            .expect_err("the belt behind the kind dispatch refuses a non-numeric type");
         assert!(err.contains("2026-10-16"), "{err}");
     }
 
@@ -1780,6 +1792,36 @@ mod tests {
         assert!(d.row_state("2027-01-15").is_some());
         assert!(!d.rename_row("new-2", "2027-01-15"));
         assert!(!d.rename_row("D1", "x"), "only an inserted row renames");
+    }
+
+    /// A rename carries the row's followers with it (final review,
+    /// Critical): the tile anchors a chain on the MINTED label — `o` on a
+    /// row re-hangs its follower onto `new-2` before `commit_row_label`
+    /// renames `new-2 → 2027-02-15` — so a follower still saying
+    /// `after: new-2` names a label no row holds, `splice_rows` cannot
+    /// resolve it, and the row lands at the top with a dangling anchor
+    /// written to the session.
+    #[test]
+    fn rename_row_rehangs_its_followers() {
+        let mut d = Draft::default();
+        d.insert_row("2027-01-15".into(), Some("new-2".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-3".into(), Some("D2".into()), "t0");
+        assert!(d.rename_row("new-2", "2027-02-15"));
+        assert!(
+            matches!(
+                d.row_state("2027-01-15"),
+                Some(RowEdit::Inserted { after: Some(a), .. }) if a == "2027-02-15"
+            ),
+            "the follower hangs off the renamed label"
+        );
+        assert!(
+            matches!(
+                d.row_state("new-3"),
+                Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D2"
+            ),
+            "a row anchored elsewhere is untouched"
+        );
     }
 
     /// Dropping the middle of a chain hands its followers to its own

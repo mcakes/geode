@@ -13878,6 +13878,17 @@ run_mutation "draft: dropping an inserted row hands its followers to its anchor"
   '                self.rehang_followers(Some(label), Some(label.to_string()));' \
   geode-marketdata dropping_an_inserted_row_hands_its_followers_to_its_anchor
 
+# A rename carries the row's followers with it (final review's
+# Critical): the tile anchors a chain on the MINTED label before
+# `commit_row_label` renames it. Mutated away, a follower keeps the dead
+# label, `splice_rows` cannot resolve it, and a second `o` on the same
+# document row paints the first typed row at the TOP of the grid.
+run_mutation "draft: rename_row re-hangs followers" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        self.rehang_followers(Some(from), Some(to.to_string()));' \
+  '        let _ = (from, to);' \
+  geode-marketdata rename_row_rehangs_its_followers
+
 # `o` on a row that already has a follower re-hangs that follower onto
 # the NEW row (Task 8's review), so the new row sits immediately below
 # the cursor row. Mutated away, the two hang off the same anchor as

@@ -583,6 +583,54 @@ one added case the review found: a row anchored on ANOTHER surviving
 inserted row must keep that anchor rather than being re-anchored to the
 top on a spurious "dropped" report (Task 7's review).
 
+The final whole-branch review (2026-09-20) added one behaviour and
+three records of where the text above and the build differ:
+
+- **`Draft::rename_row` carries the row's followers with it**
+  (`rehang_followers(from → to)` after the move — the review's
+  Critical). The tile anchors a chain on the MINTED label before the
+  row-label editor's commit renames it (`o` re-hangs the cursor row's
+  follower onto `new-2`, then `commit_row_label` renames `new-2` to the
+  typed term), so without the rehang the follower kept a label no row
+  held, `splice_rows`' `known` set could not resolve it, and a second
+  `o` on the same CVI term painted the first typed row at the TOP of
+  the grid with a dangling `after` in `session.toml` and a spurious
+  `anchor 'new-2'` drop on the next rebase. Pinned at three levels:
+  `rename_row_rehangs_its_followers`, the harness entry `draft:
+  rename_row re-hangs followers`, and the window test
+  `a_second_o_on_the_same_row_keeps_the_first_typed_row_below_it`.
+- **`required` and the kind disagree, and the disagreement is a Part 4
+  decision, not fixed here** (controller ruling). `DIVIDEND` marks
+  `announced_date` and `pay_date` `required: false` — §6.5's own
+  reasoning, that an `estimated` row does not have them yet — but
+  `DividendKind` refuses a `<dividend>` missing either (`is missing
+  announcedDate`/`payDate`) and `geode_core::document::Column::Date` is
+  a `Vec<NaiveDate>` with no NULL, so a row the header counts complete
+  is one the kind cannot write. The flags stay as they are; egress
+  (Part 4) decides between the kind writing an empty element with the
+  columns made nullable, or the flags becoming `required: true` — and
+  until then `incomplete_rows` UNDER-COUNTS what egress will refuse.
+  The sibling Part 4 item from the ledger sits beside it: `Draft::bump`
+  lands `Value::F64` on an `I64` column (`current + delta`, untyped)
+  where a commit lands `Value::I64`, so egress must coerce by the
+  column's declared type rather than trust the value's tag.
+- **§5.2's row tones are not both floored.** As built (`cell_paint`),
+  an inserted row's text is bare `foreground` over the `success` tint
+  at 18% — the bundled-theme sweep clears 3:1 on every theme with no
+  floor applied — and a deleted row's text is `muted_foreground` on the
+  bare ground, UNFLOORED, by the `Tone::Plain` rule (the theme author's
+  own secondary-text pairing; nine bundled themes ship it under 3:1, a
+  theme-authoring matter). `FlooredTones` is the header's, not the
+  cells'.
+- **§6.1's "declared once as `DividendKind::STATUSES`" is three
+  declarations.** The crate-layering rule (only `geode-app` sees a
+  document kind; `geode-demo-data` depends on `geode-core` alone, never
+  `geode-documents`) forbids one shared table, so the vocabulary is spelled in
+  `geode_documents::dividend::STATUSES`, `geode_marketdata::core::STATUSES`
+  and `geode_demo_data::documents::dividend::STATUSES`, and two
+  `geode-app` tests (`demo_bus.rs`) assert all three equal — one to
+  change means three, and the tests say which.
+
 ## 7. Amendments to earlier specs
 
 - **Market-data documents design §3 / §6:** a document `value` may be
@@ -658,4 +706,7 @@ tones; the dividend panel at an index-sized schedule.
 - The wire tags, `currency`/`schedule_date` and the `status` vocabulary
   wait for the desk's XSD (roadmap ruling 5).
 - How an upload names a minted row to Sophis (Part 4, egress).
+- Whether `announced_date`/`pay_date` become nullable on the wire or
+  `required: true` on the panel, and the `F64`-on-`I64` bump coercion
+  (Part 4, egress — §6.6 has both).
 - Sorting the flat panel by a column (the feed's order is the order).

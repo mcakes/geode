@@ -2332,9 +2332,11 @@ impl MarketDataTile {
         let (ty, precision) = match &editing.target {
             EditTarget::Cell { cell: (_, col), .. } => {
                 // `declared_type` answers `None` for the other three
-                // `CellKind`s (Task 4's), reachable while its (today,
-                // plain-text) editor is still open — refused here the
-                // same way `commit_cell_edit` refuses committing one.
+                // `CellKind`s (Task 4's), reachable while their text
+                // editor is still open — a `Text`/`Choice`/`Date` cell
+                // COMMITS through `commit_cell_edit`'s own arms, but a
+                // nudge is number arithmetic and has nothing to step
+                // there, so it is refused here with a notice instead.
                 // This is the ONE refusal: the precision lookup below
                 // does not repeat it, because `declared_type` already
                 // proved `kind_of` is `Number` here — a second refusal
@@ -11236,6 +11238,59 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             vcx.update(|window, cx| window.focused(cx).is_none()),
             "the field gave the keyboard up"
+        );
+    }
+
+    /// Two `o`s on the same document row of a `Typed(Date)` axis (final
+    /// review, Critical): the second `o` re-hangs the first typed row
+    /// onto the MINTED label, and `commit_row_label`'s rename must carry
+    /// that follower with it — otherwise the first row's anchor names a
+    /// label no row holds, the splice cannot place it, and it paints at
+    /// the TOP of the grid. Painted order is `[D1, second, first, D2]`
+    /// with `first.after == Some(second)`.
+    #[gpui::test]
+    fn a_second_o_on_the_same_row_keeps_the_first_typed_row_below_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx); // terms 2026-10-16, 2026-11-20
+        // First insert: `o` on 2026-10-16, type 2027-01-15, enter, cancel
+        // the first cell's editor the commit opened.
+        h.dispatch(&mut vcx, "insert_below", None);
+        draw(&mut vcx);
+        type_keys(&mut vcx, "left left 2 0 2 7 0 1 1 5");
+        type_keys(&mut vcx, "enter");
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(
+            row_labels(&h, &vcx),
+            ["2026-10-16", "2027-01-15", "2026-11-20"]
+        );
+        // Back onto 2026-10-16 and insert again below it.
+        h.dispatch(&mut vcx, "up", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            Cursor::Cell { row: 0, col: 0 }
+        );
+        h.dispatch(&mut vcx, "insert_below", None);
+        draw(&mut vcx);
+        type_keys(&mut vcx, "left left 2 0 2 7 0 2 1 5");
+        type_keys(&mut vcx, "enter");
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(
+            row_labels(&h, &vcx),
+            ["2026-10-16", "2027-02-15", "2027-01-15", "2026-11-20"],
+            "the second row sits immediately below the cursor row, the first below it"
+        );
+        let after = h
+            .tile
+            .read_with(&vcx, |t, _| match t.draft().row_state("2027-01-15") {
+                Some(RowEdit::Inserted { after, .. }) => after.clone(),
+                _ => None,
+            });
+        assert_eq!(
+            after.as_deref(),
+            Some("2027-02-15"),
+            "the first row hangs off the second's TYPED label, not the minted one"
         );
     }
 

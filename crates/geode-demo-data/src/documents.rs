@@ -401,6 +401,16 @@ pub mod cvi {
                 "anchor_date/spot_ref are fixed once a key's first document is drawn"
             );
             assert_ne!(first.values, second.values, "param must drift");
+            // The whole-values compare above is satisfied by `atm`/`skew`
+            // drifting alone (they walk independently of `param`), so
+            // the walk step's own effect is pinned on `param` by itself.
+            let param = |doc: &DocumentRows| doc.values[0].clone();
+            assert_eq!(param(&first).0, "param");
+            assert_ne!(
+                param(&first).1,
+                param(&second).1,
+                "param itself must drift, not only the slice values"
+            );
             let atm = |doc: &DocumentRows| doc.values[2].clone();
             assert_eq!(atm(&first).0, "atm");
             assert_ne!(atm(&first).1, atm(&second).1, "atm drifts per publish");
