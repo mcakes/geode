@@ -269,11 +269,46 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if event.click_count != 2
-            || event.modifiers.modified()
-            || self.occupant_kind(id) != Some(crate::module::placeholder::PLACEHOLDER_KIND)
+        if self.occupant_kind(id) != Some(crate::module::placeholder::PLACEHOLDER_KIND)
             || self.services.workspaces.active().focused_tile() != Some(id)
         {
+            return false;
+        }
+        self.try_pick_on_double_click(event, window, cx)
+    }
+
+    /// The same door from the EMPTY-TREE hint (`empty-hint`, painted
+    /// where the main tree has no tile at all — a fresh session's whole
+    /// screen; display finding 2026-09-19, the first thing a trader sees
+    /// was the one surface the placeholder door did not cover). No tile
+    /// to gate on: the pick lands where `ctrl+k` would put it — the
+    /// focused region's empty tree gets it as its root (`add_tile`), and
+    /// the hint's own text already says when that region is a dock. The
+    /// empty DOCK hints take no door: an empty dock can never be the
+    /// focused region (`Workspace::focus_dock` refuses it), so a pick
+    /// from one would land somewhere else — "add a tile here" must not
+    /// be a gesture that adds one elsewhere.
+    pub(super) fn try_pick_on_empty_tree_double_click(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.try_pick_on_double_click(event, window, cx)
+    }
+
+    /// The gesture and overlay table both tile-picker doors share: the
+    /// pair's second click, no modifier, no overlay or drag in flight.
+    /// Opens the picker and stops propagation (the shell root's own
+    /// bubble-phase focus grab must not follow the open — the dialog
+    /// door's `prevent_default` covers it too, belt and braces).
+    fn try_pick_on_double_click(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.click_count != 2 || event.modifiers.modified() {
             return false;
         }
         if self.palette.is_some()

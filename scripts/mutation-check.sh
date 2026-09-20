@@ -13859,27 +13859,24 @@ run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focu
 # belong to its module.
 run_mutation "tilepicker: the double-click door is gated on a placeholder" \
   crates/geode-shell/src/shell/drag.rs \
-  '            || self.occupant_kind(id) != Some(crate::module::placeholder::PLACEHOLDER_KIND)' \
-  '            || false' \
+  '        if self.occupant_kind(id) != Some(crate::module::placeholder::PLACEHOLDER_KIND)' \
+  '        if false' \
   geode-shell \
   a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing
 
 # Only the pair's SECOND click opens it.
 run_mutation "tilepicker: the door needs click_count 2" \
   crates/geode-shell/src/shell/drag.rs \
-  '        if event.click_count != 2
-            || event.modifiers.modified()' \
-  '        if false
-            || event.modifiers.modified()' \
+  '        if event.click_count != 2 || event.modifiers.modified() {' \
+  '        if event.modifiers.modified() {' \
   geode-shell \
   a_single_click_on_a_placeholder_opens_nothing
 
 # A modified double-click is not this door's (mod+ is fullscreen's).
 run_mutation "tilepicker: a modifier refuses the door" \
   crates/geode-shell/src/shell/drag.rs \
-  '            || event.modifiers.modified()
-            || self.occupant_kind(id)' \
-  '            || self.occupant_kind(id)' \
+  '        if event.click_count != 2 || event.modifiers.modified() {' \
+  '        if event.click_count != 2 {' \
   geode-shell \
   a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing
 
@@ -13942,6 +13939,16 @@ run_mutation "tilepicker: the dock listener calls the door" \
                             if view.try_fullscreen_on_double_click(id, event, window, cx)' \
   geode-shell \
   a_docked_placeholder_double_click_opens_the_picker_and_fills_it
+
+# The EMPTY-TREE hint has its own door (display finding 2026-09-19: a
+# fresh session has no tile, so the placeholder door alone left the
+# first screen deaf).
+run_mutation "tilepicker: the empty-tree hint's double-click opens the picker" \
+  crates/geode-shell/src/shell/render.rs \
+  '                            view.try_pick_on_empty_tree_double_click(event, window, cx);' \
+  '                            let _ = (event, window, cx);' \
+  geode-shell \
+  double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tree
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

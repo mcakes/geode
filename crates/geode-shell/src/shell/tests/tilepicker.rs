@@ -314,3 +314,77 @@ fn a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing(cx: &mut gpui:
         "a real tile's double-click opens nothing"
     );
 }
+
+/// A fresh session has no tile at all — the main tree is empty and the
+/// `ctrl+k → Add a tile` text is the EMPTY-REGION hint, not a
+/// placeholder occupant (display finding 2026-09-19: the placeholder
+/// door alone left this, the first thing a trader sees, deaf). A bare
+/// double-click on it opens the picker too, and the pick becomes the
+/// tree's root tile, exactly where `ctrl+k` would put it.
+#[gpui::test]
+fn double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tree(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut cx, shell) = dock_test_shell(cx);
+    assert!(
+        shell.read_with(&cx, |s, _| s
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .tiles()
+            .is_empty()),
+        "sanity: a fresh shell has no tile"
+    );
+    let hint = cx
+        .debug_bounds("empty-hint")
+        .expect("the empty hint painted");
+    double_click(&mut cx, hint.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    assert!(is_tile_picker(&shell, &cx), "the tile picker opened");
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "the field holds focus after the pair"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles.len(), 1, "the pick is the tree's root tile");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tiles[0])),
+        Some("rec")
+    );
+    assert!(cx.debug_bounds("empty-hint").is_none());
+}
+
+/// A single click on the empty hint is nothing, and so is a modified
+/// double-click — the same gesture table as the placeholder door.
+#[gpui::test]
+fn a_single_or_modified_click_on_the_empty_tree_hint_opens_nothing(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell) = dock_test_shell(cx);
+    let hint = cx
+        .debug_bounds("empty-hint")
+        .expect("the empty hint painted");
+    cx.simulate_click(hint.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    double_click(
+        &mut cx,
+        hint.center(),
+        gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().tree().tiles().is_empty()
+    }));
+}
