@@ -16,6 +16,7 @@ use crate::keymap::KeyContext;
 use crate::keymap::fragments;
 use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
+use geode_core::pricing::PriceOutcome;
 use geode_core::query::{QueryKey, QueryOutcome};
 use gpui::{AnyView, App, Entity, Window};
 
@@ -27,19 +28,13 @@ pub enum FindEvent {
     Cancelled,
 }
 
-/// What the shell routes to a tile by its id (market-data spec §8.6).
-/// One variant today — a query result addressed by its `QueryKey`
-/// (§5.1) — but Part 4 adds `Upload(UploadOutcome)` for a document
-/// upload's own outcome, carried through this same door. An enum
-/// rather than a second `TileContent` method: every existing `match` on
-/// `Delivery` then refuses to compile the instant a new variant lands,
-/// until the occupant it belongs to grows an arm for it — an occupant
-/// cannot silently ignore a delivery kind it was never taught about, the
-/// way an unmatched second method could be forgotten and no compiler
-/// would say a word.
+/// What the shell routes to a tile by its id (market-data spec §8.6,
+/// line-pricer spec §5.4). One variant per outcome kind, no wildcard
+/// arms anywhere: adding a variant makes the compiler name every site.
 #[derive(Debug)]
 pub enum Delivery {
     Query(QueryOutcome),
+    Price(PriceOutcome),
 }
 
 impl Delivery {
@@ -48,6 +43,7 @@ impl Delivery {
     pub fn key(&self) -> QueryKey {
         match self {
             Delivery::Query(outcome) => outcome.key,
+            Delivery::Price(outcome) => outcome.key,
         }
     }
 }
@@ -313,7 +309,10 @@ pub mod placeholder {
         fn find(&self, _: FindEvent, _: &mut Window, _: &mut App) {}
         fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
             match delivery {
+                // This tile has no module; nothing is ever addressed here.
                 Delivery::Query(_) => {}
+                // This tile has no module; nothing is ever addressed here.
+                Delivery::Price(_) => {}
             }
         }
         fn set_visible(&self, _: bool, _: &mut App) {}
@@ -365,6 +364,7 @@ pub mod recording {
         Find(TileId, FindEvent),
         Visible(TileId, bool),
         Delivered(TileId, u64),
+        Priced(TileId, u64),
     }
 
     pub struct RecordingFactory {
@@ -578,6 +578,11 @@ pub mod recording {
                     self.log
                         .borrow_mut()
                         .push(Recorded::Delivered(self.tile, outcome.tag));
+                }
+                Delivery::Price(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Priced(self.tile, outcome.tag));
                 }
             }
         }
