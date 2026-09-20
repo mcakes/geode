@@ -252,6 +252,41 @@ pub fn business_days_back(date: NaiveDate, n: u32) -> NaiveDate {
     day
 }
 
+/// One named preset the as-of dialog offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preset {
+    pub label: &'static str,
+    pub at: DateTime<Utc>,
+}
+
+/// The fixed preset list (spec §3.3), in display order. `T` is `now` on
+/// the clock's date; `T-n` walks business days. A preset that resolves
+/// AFTER `now` is dropped — it would mean live, and the dialog's `Live`
+/// row already says that — and one whose local time does not exist on
+/// that day (a DST gap on `sod`/`eod`) is dropped with a debug line,
+/// since it depends on the date and cannot be a config diagnostic.
+pub fn presets(clock: &Clock, now: DateTime<Utc>) -> Vec<Preset> {
+    let today = clock.today(now);
+    let table: [(&'static str, Result<DateTime<Utc>, ClockError>); 5] = [
+        ("EOD T-1", clock.eod_of(business_days_back(today, 1))),
+        ("SOD T", clock.sod_of(business_days_back(today, 0))),
+        ("EOD T-2", clock.eod_of(business_days_back(today, 2))),
+        ("EOD T-3", clock.eod_of(business_days_back(today, 3))),
+        ("EOD T-5", clock.eod_of(business_days_back(today, 5))),
+    ];
+    table
+        .into_iter()
+        .filter_map(|(label, at)| match at {
+            Ok(at) if at <= now => Some(Preset { label, at }),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(target: "geode::shell", "preset {label} dropped: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +436,51 @@ mod tests {
         let (machine, warning) = Clock::machine();
         assert_eq!(clock, machine);
         assert_eq!(diags.len(), usize::from(warning.is_some()));
+    }
+
+    #[test]
+    fn presets_resolve_on_business_days_in_order_and_drop_a_future_one() {
+        let c = Clock::in_zone(New_York);
+        // Monday 21 Sep 2026, 10:42 New York (14:42 UTC).
+        let now = Utc.with_ymd_and_hms(2026, 9, 21, 14, 42, 0).unwrap();
+        let p = presets(&c, now);
+        let labels: Vec<&str> = p.iter().map(|p| p.label).collect();
+        assert_eq!(
+            labels,
+            ["EOD T-1", "SOD T", "EOD T-2", "EOD T-3", "EOD T-5"]
+        );
+        assert_eq!(p[0].at, c.eod_of(d(2026, 9, 18)).unwrap(), "Friday's close");
+        assert_eq!(p[1].at, c.sod_of(d(2026, 9, 21)).unwrap());
+        assert_eq!(p[4].at, c.eod_of(d(2026, 9, 14)).unwrap());
+
+        // 07:00 New York: SOD T (08:00) is in the future and is dropped.
+        let early = Utc.with_ymd_and_hms(2026, 9, 21, 11, 0, 0).unwrap();
+        let labels: Vec<&str> = presets(&c, early).iter().map(|p| p.label).collect();
+        assert_eq!(labels, ["EOD T-1", "EOD T-2", "EOD T-3", "EOD T-5"]);
+    }
+
+    #[test]
+    fn a_preset_whose_local_time_does_not_exist_is_dropped() {
+        // Two facts, checked separately, because business_days_back's
+        // weekend snap means the preset walk itself never lands `SOD T`
+        // on a Sunday: (2026-03-08 is the US spring-forward day, so a
+        // clock whose `sod` is 02:30 cannot resolve it in New York that
+        // day — but `today` on a Sunday `now` snaps `SOD T`'s business
+        // day back to Friday 2026-03-06, where 02:30 DOES exist, so the
+        // gap is never actually hit by `presets` from this `now`.)
+        //
+        // Fact 1: `presets` never panics on a config that CAN produce a
+        // DST-gap `Err` from `resolve_local`, and every preset it does
+        // return resolves at or before `now`.
+        let c = Clock::in_zone(New_York).with_times(hm(2, 30), hm(18, 0));
+        let now = Utc.with_ymd_and_hms(2026, 3, 8, 20, 0, 0).unwrap(); // Sunday 16:00 EDT
+        let p = presets(&c, now);
+        for preset in &p {
+            assert!(preset.at <= now, "{preset:?} resolved after now");
+        }
+        // Fact 2: the drop arm's own input condition — a DST-gap `Err`
+        // from `resolve_local` — is directly reachable: 02:30 does not
+        // exist in New York on 2026-03-08 itself.
+        assert!(c.sod_of(d(2026, 3, 8)).is_err());
     }
 }
