@@ -132,6 +132,12 @@ pub fn normal_command(ks: &Keystroke) -> Option<NormalCommand> {
             // before it went modal, and a hand that learned them there
             // must not find them dead in the config dialogs.
             "space" | "tab" => Some(NormalCommand::ToggleBack),
+            // The one shifted verb: `shift+r` is "reset all" beside the
+            // keybindings dialog's `r` (2026-09-19). Spelled as the
+            // uppercase letter so a surface matches `Verb('R')` the way
+            // it matches `Verb('r')`; a surface with no `R` names it
+            // like any other letter it has no verb for.
+            "r" => Some(NormalCommand::Verb('R')),
             _ => None,
         };
     }
@@ -297,6 +303,11 @@ mod tests {
         assert_eq!(normal_command(&bare("s")), Some(NormalCommand::Verb('s')));
         assert_eq!(normal_command(&bare("d")), Some(NormalCommand::Verb('d')));
         assert_eq!(normal_command(&bare("r")), Some(NormalCommand::Verb('r')));
+        assert_eq!(
+            normal_command(&ks("r", SHIFT)),
+            Some(NormalCommand::Verb('R')),
+            "shift+r is the reset-all verb, spelled uppercase"
+        );
         assert_eq!(normal_command(&bare("escape")), None);
         assert_eq!(normal_command(&ks("s", Modifiers::CTRL)), None);
     }
