@@ -9927,13 +9927,21 @@ run_mutation "subscribe: a subscription's refusal count reads zero rather than i
 
 run_mutation "demo bus: publishes every key once at start" \
   crates/geode-app/src/demo_bus.rs \
-  '    // Every key once, immediately: the first thing a freshly opened
-    // panel sees.
-    for key in &underlyings {
-        if stop.load(Ordering::Relaxed) {
-            return;
+  '    for producer in producers.iter_mut() {
+        let keys = producer.keys.clone();
+        for key in &keys {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            publish_one(
+                &feed,
+                &producer.kind,
+                producer.topic_prefix,
+                producer.next.as_mut(),
+                key,
+                &mut warned_full,
+            );
         }
-        publish_one(&feed, kind, generator, key, &mut warned_full);
     }
 ' \
   '' \
@@ -9941,7 +9949,7 @@ run_mutation "demo bus: publishes every key once at start" \
 
 run_mutation "demo bus: the topic format" \
   crates/geode-app/src/demo_bus.rs \
-  'let topic = format!("marketdata/cvi/{key}");' \
+  'let topic = format!("{topic_prefix}{key}");' \
   'let topic = format!("marketdata/wrong/{key}");' \
   geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
 
@@ -9955,11 +9963,27 @@ run_mutation "demo bus: the demo layer's [cvi] source" \
   crates/geode-app/src/demo.rs \
   '         [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
          topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
-         priority = \"latest_other\"\n",
+         priority = \"latest_other\"\n\
+' \
+  '' \
+  geode-app the_demo_layer_declares_the_cvi_source
+
+run_mutation "demo bus: the demo layer's [dividend] source" \
+  crates/geode-app/src/demo.rs \
+  '         [dividend]\nadapter = \"demo_bus\"\ndataset = \"dividend_schedule\"\n\
+         document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/>\"]\n\
+         coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n",
 ' \
   '",
 ' \
-  geode-app the_demo_layer_declares_the_cvi_source
+  geode-app the_demo_layer_declares_the_dividend_source
+
+run_mutation "demo bus: publishes round-robin across producers" \
+  crates/geode-app/src/demo_bus.rs \
+  '    let schedule = round_robin_schedule(&producers);' \
+  '    let schedule: Vec<(usize, String)> =
+        producers.first().into_iter().flat_map(|p| p.keys.iter().cloned().map(|k| (0, k))).collect();' \
+  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
 
 
 # ---- final fix wave: repeated known elements must not merge into duplicate rows ----
