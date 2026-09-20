@@ -404,4 +404,25 @@ Run `--anchors-only` before merge as always.
   `["section"]` → the five section names.
 - The harness lost the stale `commands: scope drop needs a dimension`
   entry (its anchored line was deleted with `:scope`).
+- `Frame::save_scope`, `Frame::save_slot`, `ShellView::save_slot`,
+  `take_pending_persist`, `take_pending_scope_persist` and
+  `persist_slot_to_user_config` are production-unreachable since this
+  branch: the Groupings and Scopes dialogs write a slot or a saved
+  scope through `config_write` directly rather than through the frame's
+  own pending-persist queue. They are kept as the seams the sweep tests
+  watch, not dead code to delete.
+- The scope bar's expression chip is an EDIT door only — it paints only
+  while an expression already exists on the frame's scope. The palette
+  action (`frame::scope_expression`, "Set scope expression…") is the
+  door from empty; there is no chip to click before a first expression
+  exists.
+- §7 named the sweep `every_colon_command_leaves_the_frame_and_config_
+  alone`; as built it is `every_colon_command_leaves_the_frame_alone`
+  in the blotter and market-data crates and
+  `every_colon_command_leaves_the_app_alone` in diagnostics. The
+  diagnostics and market-data sweeps' own doc comments note they check
+  the frame's three counters (`grouping`, `scope`, `as_of`), not the
+  slot/scope/as-of *values* themselves, because a `save_slot` still
+  bumps `grouping` and `config` and is caught that way even though
+  nothing reads the value it would have written.
 - Display checks pending: §8's list.

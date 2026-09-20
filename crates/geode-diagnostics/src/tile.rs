@@ -1019,7 +1019,11 @@ mod tests {
 
     /// The rule (command-line locality spec §2): a `:` line on this tile
     /// changes only this tile — never the app's log levels, the overlay
-    /// or the frame. Every accepted word plus every refusal.
+    /// or the frame. Every accepted word plus every refusal. Checks the
+    /// frame's three counters (`scope`, `grouping`, `as_of`), not any
+    /// slot/scope/as-of *value* — a `save_slot` would still bump
+    /// `grouping` (and `config`) and be caught that way even though
+    /// nothing here reads what it wrote.
     #[gpui::test]
     fn every_colon_command_leaves_the_app_alone(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);

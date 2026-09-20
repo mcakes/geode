@@ -8939,6 +8939,10 @@ edits = [["2026-11-20", "-1", 9.5]]
 
     /// The rule (command-line locality spec §2): every `:` verb the panel
     /// accepts changes only the panel — never the frame or the app.
+    /// Checks the frame's three counters (`scope`, `grouping`, `as_of`),
+    /// not any slot/scope/as-of *value* — a `save_slot` would still
+    /// bump `grouping` (and `config`) and be caught that way even
+    /// though nothing here reads what it wrote.
     #[gpui::test]
     fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);

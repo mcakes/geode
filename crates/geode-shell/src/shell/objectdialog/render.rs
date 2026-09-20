@@ -588,7 +588,9 @@ fn handle_naming_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
 
 /// `enter` in the naming row. The one moment a name is typed and the
 /// one place it is checked: [`check_object_name`]'s rule (the same one
-/// `:scope save` applies), then "nothing already holds it"
+/// `Frame::save_scope` applies — reached by `:scope save` on a tile's
+/// command line until command-line locality closed that route
+/// 2026-09-20), then "nothing already holds it"
 /// ([`Domain::name_taken`], which spans the presentation overlay as well
 /// as every layer of the domain's own doc) — creating over a desk object
 /// would be a fork the trader did not ask for, and creating over an
@@ -3138,7 +3140,10 @@ fn overwrite_scope(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 /// content rather than the old. `commit_edit` answers `None` both for
 /// "queued" and for "nothing changed", so the no-op case is identified
 /// here instead: a saved scope that already equals the frame's — the
-/// ordinary state straight after `:scope load` — would otherwise answer
+/// ordinary state straight after picking it from the palette's
+/// `scope::<name>` action (`:scope load` did the same until
+/// command-line locality closed that route 2026-09-20) — would
+/// otherwise answer
 /// a deliberate keystroke with no write, no config change and nothing on
 /// screen. A verb that does visibly nothing is the defect class this
 /// interaction model exists to remove.

@@ -421,10 +421,14 @@ impl BlotterTile {
 
     /// `:filter` narrows the tile's own scope layer, so it must be valid
     /// against this tile's dataset (spec §10.1) the same way the frame's
-    /// `:scope` is validated in the shell — an unknown column or a bad
-    /// operator on a derived dimension is a user error reported at the
-    /// caret/column, not a silent no-op or a compiler error surfaced far
-    /// downstream. `Ok(())` when the view or its dataset isn't resolvable
+    /// own scope expression is validated in the shell's
+    /// `shell::scope_expr_view` (the `Set scope expression…` dialog; a
+    /// tile's `:scope` word reached a frame-wide version of the same
+    /// check until command-line locality closed that route 2026-09-20)
+    /// — an unknown column or a bad operator on a derived dimension is a
+    /// user error reported at the caret/column, not a silent no-op or a
+    /// compiler error surfaced far downstream. `Ok(())` when the view or
+    /// its dataset isn't resolvable
     /// (nothing to validate against yet — `requery`'s own "view is not
     /// configured" error already covers that case).
     fn validate_tile_scope(&self, scope: &Scope) -> Result<(), String> {
@@ -2892,12 +2896,42 @@ mod tests {
 
     /// Command-line locality spec §3: `:asof <time>` pins THIS tile, the
     /// frame's own as-of untouched; `:asof live` pins it to live under a
-    /// historical frame; `:asof clear` follows again.
+    /// historical frame; `:asof clear` follows again. Spec §7's own
+    /// case opens the test: pinning the frame's OWN current (live)
+    /// value still stops following it — a real transition, so it
+    /// requeries once, but the frame moving on afterward requeries
+    /// nothing out of the now-pinned tile.
     #[gpui::test]
     fn asof_pins_the_tile_and_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests);
+
+        // Spec §7: pinning the frame's own value still stops following.
+        // The frame is live and the tile follows; `:asof live` pins the
+        // tile to that same (live) value — a real transition
+        // (Follow → Pinned(Live)) — so it requeries once.
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert!(
+            p.as_of.is_live(),
+            "pinning to the frame's own live value still requeries once"
+        );
+        // The frame moves on to a new (historical) instant; a tile
+        // pinned to the frame's own former value does not track it.
+        h.frame.update(&mut cx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            cx.notify();
+        });
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a tile pinned to the frame's own value still does not follow it"
+        );
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        let _ = next_query(&h.requests);
+
         let frame_as_of_version = h.frame.read_with(&cx, |f, _| f.versions().as_of);
 
         h.tile
@@ -2908,8 +2942,8 @@ mod tests {
             "the request carries the pin"
         );
         assert!(
-            h.frame.read_with(&cx, |f, _| f.as_of().is_live()),
-            "the frame is still live"
+            !h.frame.read_with(&cx, |f, _| f.as_of().is_live()),
+            "the frame stayed at the historical instant the prelude moved it to"
         );
         assert_eq!(
             h.frame.read_with(&cx, |f, _| f.versions().as_of),
@@ -2921,14 +2955,15 @@ mod tests {
             TileAsOf::Pinned(AsOf::At(_))
         ));
 
-        // Pinning the same value again is a no-op: no requery.
         h.tile
             .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
         let p = next_query(&h.requests);
         assert!(
-            p.as_of.is_live(),
-            "following again queries at the frame's (live) as-of"
+            matches!(p.as_of, AsOf::At(_)),
+            "following again queries at the frame's (now historical) as-of"
         );
+
+        // Pinning the same value again is a no-op: no requery.
         h.tile
             .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
         assert!(
