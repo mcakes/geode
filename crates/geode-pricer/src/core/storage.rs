@@ -112,7 +112,8 @@ role = "attribute"
 "#;
 
 /// `NDX=20000.5;SPX=5100` in `BTreeMap` order; `""` when empty
-/// (planning decision 6). Plain data, no arithmetic.
+/// (planning decision 6). Plain data, no arithmetic. Keys are
+/// upper-case, as `Edit::SetSpotOverride` stores them.
 pub fn encode_overrides(overrides: &MarketOverrides) -> String {
     overrides
         .spot
@@ -137,16 +138,22 @@ pub fn parse_overrides(text: &str) -> Result<MarketOverrides, String> {
         let level: f64 = v
             .parse()
             .map_err(|_| format!("spot_overrides: '{v}' is not a number"))?;
-        out.spot.insert(k.to_string(), level);
+        // `SetSpotOverride` upper-cases its underlying; a document
+        // hand-edited in lower case must key the same way or the
+        // override would never match an instrument.
+        out.spot.insert(k.to_ascii_uppercase(), level);
     }
     Ok(out)
 }
 
-/// `""` | `off` | `<secs>s` (spec §7.2).
+/// `""` | `off` | `<secs>s`, or `<millis>ms` where the interval has a
+/// sub-second remainder (spec §7.2): `{}s` alone would spell every
+/// sub-second refresh `0s`, and `parse_duration` reads both units.
 pub fn encode_refresh(refresh: Refresh) -> String {
     match refresh {
         Refresh::Default => String::new(),
         Refresh::Off => "off".to_string(),
+        Refresh::Every(d) if d.subsec_nanos() != 0 => format!("{}ms", d.as_millis()),
         Refresh::Every(d) => format!("{}s", d.as_secs()),
     }
 }
@@ -272,8 +279,8 @@ pub fn to_rows(sheet: &Sheet) -> Option<DocumentRows> {
         vol_own.push(vo);
         vol.push(v);
     }
-    let (sso, ss) = own_pair(sheet.sheet_shift.spot_pct);
-    let (svo, sv) = own_pair(sheet.sheet_shift.vol_pts);
+    let (sso, ss) = own_pair(sheet.sheet_shift().spot_pct);
+    let (svo, sv) = own_pair(sheet.sheet_shift().vol_pts);
     Some(DocumentRows {
         key: vec![sheet.name.clone()],
         attributes: vec![
@@ -285,7 +292,7 @@ pub fn to_rows(sheet: &Sheet) -> Option<DocumentRows> {
             ("refresh".into(), Value::Utf8(encode_refresh(sheet.refresh))),
             (
                 "spot_overrides".into(),
-                Value::Utf8(encode_overrides(&sheet.overrides)),
+                Value::Utf8(encode_overrides(sheet.overrides())),
             ),
         ],
         axes: vec![(LINE_AXIS.into(), Column::I64(line))],
@@ -367,7 +374,10 @@ fn own(flag: i64, value: f64) -> Option<f64> {
 }
 
 /// A sheet from its document. Rows are taken in `order`; a leg's parent
-/// is resolved by id and must precede it. Every line comes back `Stale`
+/// is resolved by id, must be a package earlier in that order, and the
+/// legs of one package must follow it CONTIGUOUSLY (the sheet's own
+/// invariant — `children` is a scan of the following rows). Every line
+/// comes back `Stale`
 /// at revision 1 with no result (results are not stored, spec §1.2), and
 /// `next_id` continues past the highest stored id.
 pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
@@ -448,6 +458,20 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
             {
                 return Err(format!(
                     "line {} names parent {} which is not a package before it",
+                    id.0, pid.0
+                ));
+            }
+            // The sheet's invariant is that a package's legs are the
+            // CONTIGUOUS run after it (`Sheet::children` is a scan, not
+            // an index): a leg whose predecessor is neither its package
+            // nor another of its legs would land in neither `roots()`
+            // nor `children(package)` once `reindex_parents` ran.
+            let follows = records
+                .last()
+                .is_some_and(|prev| prev.id == pid || prev.parent == Some(pid));
+            if !follows {
+                return Err(format!(
+                    "line {}: legs of package {} must follow it contiguously",
                     id.0, pid.0
                 ));
             }
@@ -713,8 +737,8 @@ mod tests {
         let back = from_rows("book-1", &rows).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(back.name, "book-1");
         assert_eq!(back.view, "barrier");
-        assert_eq!(back.sheet_shift, s.sheet_shift);
-        assert_eq!(back.overrides, s.overrides);
+        assert_eq!(back.sheet_shift(), s.sheet_shift());
+        assert_eq!(back.overrides(), s.overrides());
         assert_eq!(back.refresh, Refresh::Every(Duration::from_secs(45)));
         assert_eq!(definition(&back), definition(&s));
         // Results are not persisted (spec §1.2): every line is stale, rev 1, unpriced.
@@ -758,6 +782,11 @@ mod tests {
         assert!(parse_overrides("SPX").is_err());
         assert!(parse_overrides("SPX=abc").is_err());
         assert!(parse_overrides("=5").is_err());
+        // The key is upper-cased on the way in, as SetSpotOverride does.
+        assert_eq!(
+            parse_overrides("spx=5100").unwrap().spot.get("SPX"),
+            Some(&5100.0)
+        );
         assert_eq!(encode_refresh(Refresh::Default), "");
         assert_eq!(encode_refresh(Refresh::Off), "off");
         assert_eq!(
@@ -767,6 +796,15 @@ mod tests {
         assert_eq!(
             encode_refresh(Refresh::Every(Duration::from_secs(90))),
             "90s"
+        );
+        // A sub-second interval keeps its unit rather than spelling 0s.
+        assert_eq!(
+            encode_refresh(Refresh::Every(Duration::from_millis(500))),
+            "500ms"
+        );
+        assert_eq!(
+            parse_refresh("500ms").unwrap(),
+            Refresh::Every(Duration::from_millis(500))
         );
         assert_eq!(parse_refresh("").unwrap(), Refresh::Default);
         assert_eq!(parse_refresh("off").unwrap(), Refresh::Off);
@@ -825,6 +863,20 @@ mod tests {
             ids[1] = ids[0];
         }
         assert!(from_rows("book-1", &rows).unwrap_err().contains("line"));
+        // Legs that are not contiguous after their package: row 2 is a
+        // root line and row 5 the second leg of the callspread at row 3,
+        // so this `order` reads package, leg, root line, leg — every id
+        // resolves, and the sheet would still be malformed.
+        let mut rows = good.clone();
+        if let Some((_, geode_core::document::Column::I64(order))) =
+            rows.values.iter_mut().find(|(n, _)| n == "order")
+        {
+            assert_eq!((order[2], order[3], order[5]), (2, 3, 5), "the fixture");
+            order[2] = 100;
+            order[5] = 101;
+        }
+        let e = from_rows("book-1", &rows).unwrap_err();
+        assert!(e.contains("contiguously"), "{e}");
         // The good one still loads.
         assert!(from_rows("book-1", &good).is_ok());
     }
