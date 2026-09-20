@@ -191,7 +191,16 @@ pub fn completions(
     colours: &[String],
 ) -> Vec<String> {
     let _ = sources;
-    let head = &line[..cursor.min(line.len())];
+    let mut cursor = cursor.min(line.len());
+    // The caller's cursor should always be on a char boundary, but this
+    // pure core must not depend on that — clamp down to the nearest
+    // boundary at or before it rather than panicking on the slice below
+    // (mirrors `commandline::word_at`'s guard for the same case, and
+    // `geode-blotter`'s `commands::completions`).
+    while !line.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let head = &line[..cursor];
     let position = head.split_whitespace().count().saturating_sub(
         if head.ends_with(char::is_whitespace) || head.is_empty() {
             0
@@ -411,6 +420,21 @@ mod tests {
         assert_eq!(
             completions("clear ", 6, &slots, &sources, &colours),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn completions_clamp_a_cursor_inside_a_multibyte_char() {
+        let slots = [1u8, 3];
+        let sources = ["demo_kdb".to_string()];
+        let colours = ["spx".to_string()];
+        let line = "colour s1 café";
+        // `é` is two bytes; this cursor lands one byte past its start,
+        // inside the character, not on a char boundary.
+        let cursor = line.find('é').unwrap() + 1;
+        assert_eq!(
+            completions(line, cursor, &slots, &sources, &colours),
+            vec!["spx", "1", "2", "3", "4", "5"]
         );
     }
 }
