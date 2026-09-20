@@ -1049,8 +1049,13 @@ impl BlotterTile {
                 })?;
             }
             Command::AsOf(text) => {
-                // Part 2 interim: Task 6 threads the real clock
-                let at = parse_as_of(&text, chrono::Utc::now(), &geode_core::clock::Clock::utc())?;
+                // Part 2 interim: the machine clock, as `Local` was, until
+                // Task 6/7 thread `AppClock`
+                let at = parse_as_of(
+                    &text,
+                    chrono::Utc::now(),
+                    &geode_core::clock::Clock::machine().0,
+                )?;
                 self.frame.update(cx, |f, cx| {
                     if f.set_as_of(AsOf::At(at)) {
                         cx.notify();
