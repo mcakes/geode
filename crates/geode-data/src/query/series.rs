@@ -801,6 +801,41 @@ mod tests {
         assert!(e.contains("cycle"), "{e}");
     }
 
+    /// A literal too big for an `f64` is not a parse error: Rust's own
+    /// `str::parse` answers `Ok(inf)` on overflow, so a pasted wall of
+    /// digits arrives at the compiler as `Ast::Num(inf)`. `lower`'s
+    /// finiteness check is the only thing between that and the text
+    /// `inf` inside a SQL string, which DuckDB would refuse at prepare
+    /// time as a syntax error naming an identifier a trader never typed.
+    #[test]
+    fn a_non_finite_literal_is_refused() {
+        let text = format!("s1 * {}", "9".repeat(400));
+        let ast = parse(&text).unwrap();
+        assert!(
+            matches!(&ast, Ast::Bin(_, _, r) if matches!(**r, Ast::Num(x) if !x.is_finite())),
+            "the literal overflows to inf rather than failing to parse: {ast:?}"
+        );
+        let e = ast
+            .resolve(&mut |r: &RefName| match r {
+                RefName::Handle(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap();
+        let err = compile_series(
+            &schema(),
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                SeriesSpec {
+                    slot: 2,
+                    kind: SlotKind::Expr(e),
+                },
+            ]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("finite"), "{err}");
+    }
+
     // The end-to-end half: every statement above run against a real
     // DuckDB store, so a plan that reads plausibly but answers wrongly
     // has nowhere to hide.

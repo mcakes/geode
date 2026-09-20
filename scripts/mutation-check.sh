@@ -14484,6 +14484,229 @@ run_mutation "bridge: a SeriesFetched event reaches the shell" \
   geode-app \
   a_series_fetched_event_is_broadcast_to_the_shell
 
+# ---- timeseries Part 2: the series query (spec §6) and its expressions (§7) ----
+#
+# The series compiler is the second query path in this crate and it has
+# the same failure mode as the first: a statement that reads plausibly
+# and answers wrongly. Every entry below breaks one clause of one
+# statement, and the tests that catch them are split on purpose between
+# the SQL-text assertions (what the compiler emits) and the end-to-end
+# ones (what DuckDB answers), because neither kind sees the other's
+# defects.
+
+# The inner collapse is what makes a CORRECTION replace its predecessor
+# rather than join it: one value per `ts`, the one with the greatest
+# `received_at`. `arg_min` there is the bitemporal read run backwards —
+# every live series would paint its oldest version, with no marker
+# anywhere saying so.
+run_mutation "series query: live is the oldest version, not the newest" \
+  crates/geode-data/src/query/series.rs \
+  'select ts, arg_max(value, received_at) as v\n    from {table}' \
+  'select ts, arg_min(value, received_at) as v\n    from {table}' \
+  geode-data \
+  an_as_of_before_a_correction_sees_the_original_value
+
+# An as-of is two predicates, not one: `received_at <= t` is what hides a
+# later correction, `ts <= t` what hides a later bar. Dropping the first
+# (spelled here as a second copy of the second, so the bound parameter
+# count is unchanged and the plan still runs) makes every as-of read
+# report today's corrected value under yesterday's date.
+run_mutation "series query: as-of drops the received_at filter" \
+  crates/geode-data/src/query/series.rs \
+  '" and received_at <= make_timestamp(?) and ts <= make_timestamp(?)".to_string()' \
+  '" and ts <= make_timestamp(?) and ts <= make_timestamp(?)".to_string()' \
+  geode-data \
+  an_as_of_before_a_correction_sees_the_original_value
+
+# An expression is an INNER join of its operands (spec §6.2): it exists
+# only in buckets where every operand does. A `left join` is caught by
+# the SQL-text test alone and that is not an accident — arithmetic over
+# a NULL is NULL either way, and the points statement left-joins the
+# expression CTE from the bucket set regardless, so the VALUES are
+# identical. What changes is the shape of the statement, and with it
+# what a later reader may assume about the CTE's rows.
+run_mutation "series query: an expression is an outer join of its operands" \
+  crates/geode-data/src/query/series.rs \
+  '.map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))' \
+  '.map(|d| format!(" left join s{d} on s{d}.b = s{anchor}.b"))' \
+  geode-data \
+  an_expression_is_an_inner_join_of_its_operands_with_a_guarded_division
+
+# The zero guard: a bucket whose denominator vanished is a gap, and the
+# `case when` is what makes it one. Removing it hands the answer to
+# whatever DuckDB does with a zero denominator instead of to the spec.
+run_mutation "series query: division by zero is not guarded" \
+  crates/geode-data/src/query/series.rs \
+  'format!("(case when ({r}) = 0 then null else ({l}) / ({r}) end)")' \
+  'format!("(({l}) / ({r}))")' \
+  geode-data \
+  an_expression_is_an_inner_join_of_its_operands_with_a_guarded_division
+
+# The bucket set is the union of the SOURCE slots' buckets alone. Let an
+# expression into it and a chart grows rows no source ever carried —
+# every one of them NaN across the board, which reads as a data gap
+# rather than as the request's own arithmetic.
+run_mutation "series query: an expression widens the bucket set" \
+  crates/geode-data/src/query/series.rs \
+  '        .filter(|s| matches!(s.kind, SlotKind::Source { .. }))
+        .map(|s| s.slot)
+        .collect();' \
+  '        .map(|s| s.slot)
+        .collect();' \
+  geode-data \
+  an_expression_is_an_inner_join_of_its_operands_with_a_guarded_division
+
+# Stats are computed over the WINDOW, the range's zoomed subset, not the
+# range: `and` there is the difference between a median of what a trader
+# is looking at and a median of everything fetched around it. `or` keeps
+# the statement valid and returns every bucket.
+run_mutation "series query: stats ignore the window" \
+  crates/geode-data/src/query/series.rs \
+  'select {cols} from s{n} where b >= make_timestamp(?) and b < make_timestamp(?)' \
+  'select {cols} from s{n} where b >= make_timestamp(?) or b < make_timestamp(?)' \
+  geode-data \
+  percentiles_and_bins_are_computed_over_the_window_only
+
+# The bin index is `width_bucket` spelled out, because the pinned DuckDB
+# has no such function. The `least(.., k)` is that definition's last
+# clause: the maximum itself lands in bin `k + 1` and the fold is what
+# puts it back in the top bin. Without it the reader's `1..=k` range
+# check silently DISCARDS the window's maximum — the histogram is short
+# by however many rows sit exactly on `hi`, with no error anywhere.
+run_mutation "series query: the top bin folds nothing" \
+  crates/geode-data/src/query/series.rs \
+  'cast(least(floor((w.v - m.lo) / (m.hi - m.lo) * {k}) + 1, {k}) as bigint) as k' \
+  'cast(floor((w.v - m.lo) / (m.hi - m.lo) * {k}) + 1 as bigint) as k' \
+  geode-data \
+  percentiles_and_bins_are_computed_over_the_window_only
+
+# A NULL value column is a bucket this slot has no point in, and the
+# dense `Vec<f64>` has to spell it somehow. `0.0` is the one spelling a
+# chart would draw as a line through zero and any later arithmetic would
+# absorb; NaN is the contract.
+run_mutation "series query: a null bucket is zero, not a gap" \
+  crates/geode-data/src/query/series.rs \
+  '    v.unwrap_or(f64::NAN)' \
+  '    v.unwrap_or(0.0)' \
+  geode-data \
+  the_bucket_set_is_the_union_and_a_missing_bucket_is_nan
+
+# A literal too big for an f64 is `Ok(inf)` from Rust's own parser, not
+# an error, so a pasted wall of digits reaches `lower` as `Num(inf)` and
+# `{x:?}` formats it into the statement as the bare word `inf`. The
+# check is the only thing between that and a DuckDB syntax error naming
+# an identifier the trader never typed.
+run_mutation "series query: a non-finite literal is formatted into SQL" \
+  crates/geode-data/src/query/series.rs \
+  '            if !x.is_finite() {' \
+  '            if false {' \
+  geode-data \
+  a_non_finite_literal_is_refused
+
+# Spec §6.3: the cap is checked BEFORE compilation, so a request no
+# chart could paint costs nothing but the arithmetic.
+run_mutation "series query: the cap is never checked" \
+  crates/geode-data/src/service.rs \
+  '        if points > SERIES_POINT_CAP {' \
+  '        if false {' \
+  geode-data \
+  a_capped_request_is_refused_before_compilation
+
+# The load lane's word is how a slot says its pair is stale or failed
+# (spec §6.4). Without it a failed fetch paints as an empty series and
+# nothing on the chart says why.
+run_mutation "series query: the pair's health is not attached" \
+  crates/geode-data/src/service.rs \
+  '                                    s.provenance.health = health_tracker.load_lane(source, &key);' \
+  '                                    let _ = (&key, &health_tracker, &mut s.provenance);' \
+  geode-data \
+  a_failed_pairs_health_rides_its_slot
+
+# ...and it is filed BY SLOT NUMBER. `SeriesResult::slots` holds every
+# slot, expressions included; `pairs` holds only the source ones, so the
+# two lists differ in length the moment a request has an expression. A
+# positional zip marks the wrong pane in both directions — the healthy
+# slot warned, the failed one clean — and every single-slot assertion
+# stays green through it.
+run_mutation "series query: health is filed by position, not slot" \
+  crates/geode-data/src/service.rs \
+  '                            for (slot, source, identity) in &pairs {
+                                let key = format!("{identity}@{source}");
+                                if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {' \
+  '                            for (i, (_slot, source, identity)) in pairs.iter().enumerate() {
+                                let key = format!("{identity}@{source}");
+                                if let Some(s) = res.slots.iter_mut().nth(i) {' \
+  geode-data \
+  health_is_attached_by_slot_number_not_position
+
+# ---- the expression parser (timeseries spec §7) ----
+
+# Precedence is the grammar's two tiers: `expr` over terms, `term` over
+# factors. Flatten the top tier onto factors and `s1 * s2 + s3` stops
+# parsing at the `*` — but `1 + 2 * 3` still parses correctly, which is
+# why the test that catches this asserts on a product on the LEFT.
+run_mutation "expr: precedence is flat" \
+  crates/geode-core/src/series/expr.rs \
+  '        let mut lhs = self.term()?;' \
+  '        let mut lhs = self.factor()?;' \
+  geode-core \
+  precedence_and_associativity
+
+# A slot whose expression reaches itself is a cycle, and the compiler's
+# emission order depends on there being none: a cycle reported as Ok
+# leaves the CTE list short an operand and DuckDB answers with a missing
+# table rather than the spec's message.
+run_mutation "expr: a cycle is not detected" \
+  crates/geode-core/src/series/expr.rs \
+  '            Mark::Visiting => return Err(exprs[i].0),' \
+  '            Mark::Visiting => return Ok(()),' \
+  geode-core \
+  expression_order_puts_operands_first_and_names_a_cycle
+
+# `max(s1, s2)` is not arithmetic, and the `(` right after a word is the
+# only place the tokenizer can say so in the trader's own words. Without
+# it the word becomes an identity and the parse fails later with
+# "unexpected token", pointing at a paren rather than at the boundary.
+run_mutation "expr: a function call is accepted" \
+  crates/geode-core/src/series/expr.rs \
+  '                if i < bytes.len() && bytes[i] == b'"'"'('"'"' {
+                    return Err(ParseError {
+                        position: i,
+                        message: ARITHMETIC_ONLY.into(),
+                    });
+                }' \
+  '                let _ = ();' \
+  geode-core \
+  foreign_tokens_are_refused_with_the_arithmetic_only_message
+
+# A handle is `s` followed by digits and NOTHING else: `spx_1y` is an
+# identity a desk really uses, and `s999` is an identity too (past u8).
+# Take the filter away and every word beginning with s becomes a slot
+# handle — `spx_1y` would resolve to slot 0 and read some other pane's
+# series under the trader's own name.
+run_mutation "expr: the s-prefix filter accepts any word" \
+  crates/geode-core/src/series/expr.rs \
+  '                let handle = word
+                    .strip_prefix('"'"'s'"'"')
+                    .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|rest| rest.parse::<u8>().ok());' \
+  '                let handle = word
+                    .strip_prefix('"'"'s'"'"')
+                    .map(|rest| rest.parse::<u8>().unwrap_or(0));' \
+  geode-core \
+  unary_minus_parentheses_and_every_reference_form
+
+# The pool's second payload kind (spec §6.1): a series work item runs
+# `run_series`, not the view path. The arm answering an error is the
+# shape a mis-wired dispatch would take — the request comes back as this
+# key's own failure, which is exactly what makes it easy to miss.
+run_mutation "pool: a series work item runs the view path" \
+  crates/geode-data/src/query/pool.rs \
+  '        Work::Series(plan) => run_series(conn, plan).map(Payload::Series),' \
+  '        Work::Series(_) => Err(duckdb::Error::InvalidParameterName("series".into())),' \
+  geode-data \
+  a_series_request_rides_the_pool_and_delivers_a_series_payload
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
