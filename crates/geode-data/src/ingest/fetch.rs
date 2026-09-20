@@ -173,19 +173,30 @@ pub(crate) mod tests {
 
     /// Answers `n` one-minute bars from `from` for any identity but
     /// "broken", and counts its calls.
+    ///
+    /// With `fail_once`, "broken" fails only the FIRST time it is asked
+    /// for and answers bars on every later call — the shape a
+    /// clear-on-success test needs, since a lane that never recovers can
+    /// only ever show the failure half. The count is taken from the
+    /// shared `calls` log rather than a field of its own, because
+    /// `Adapter::fetch` hands out a fresh `FakeFetch` per source while
+    /// `calls` is the one thing every copy shares.
     pub(crate) struct FakeFetch {
         pub(crate) calls: Arc<Mutex<Vec<FetchRequest>>>,
         pub(crate) n: usize,
         pub(crate) catalogue: Option<Vec<String>>,
+        pub(crate) fail_once: bool,
     }
 
     impl Fetch for FakeFetch {
         fn fetch(&mut self, req: &FetchRequest) -> Result<SeriesRows, AdapterError> {
-            self.calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(req.clone());
-            if req.identity == "broken" {
+            let asked_before = {
+                let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+                let asked_before = calls.iter().filter(|c| c.identity == req.identity).count();
+                calls.push(req.clone());
+                asked_before
+            };
+            if req.identity == "broken" && !(self.fail_once && asked_before > 0) {
                 return Err(AdapterError {
                     message: "no such symbol".into(),
                 });
@@ -218,6 +229,7 @@ pub(crate) mod tests {
                 calls: calls.clone(),
                 n: 3,
                 catalogue: None,
+                fail_once: false,
             }),
             sink,
         )
@@ -260,6 +272,7 @@ pub(crate) mod tests {
                 calls: Default::default(),
                 n: 1,
                 catalogue: None,
+                fail_once: false,
             }),
             sink,
         )
@@ -291,6 +304,7 @@ pub(crate) mod tests {
                 calls: Default::default(),
                 n: 1,
                 catalogue: Some(vec!["VIX".into(), "SPX.close".into()]),
+                fail_once: false,
             }),
             sink,
         )

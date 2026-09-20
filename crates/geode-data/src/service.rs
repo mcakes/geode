@@ -2268,6 +2268,10 @@ mod tests {
     struct FakeFetchAdapter {
         calls: Arc<std::sync::Mutex<Vec<crate::adapter::FetchRequest>>>,
         catalogue: Option<Vec<String>>,
+        /// See `FakeFetch::fail_once`: "broken" recovers on its second
+        /// ask, which is the only way a test can watch the load lane
+        /// clear.
+        fail_once: bool,
     }
 
     impl crate::adapter::Adapter for FakeFetchAdapter {
@@ -2285,6 +2289,7 @@ mod tests {
                 calls: self.calls.clone(),
                 n: 3,
                 catalogue: self.catalogue.clone(),
+                fail_once: self.fail_once,
             }))
         }
     }
@@ -2300,12 +2305,25 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
+        fetch_service_with(catalogue, false)
+    }
+
+    fn fetch_service_with(
+        catalogue: Option<Vec<String>>,
+        fail_once: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<std::sync::Mutex<Vec<crate::adapter::FetchRequest>>>,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut adapters = AdapterRegistry::default();
         adapters.register(Arc::new(FakeFetchAdapter {
             calls: calls.clone(),
             catalogue,
+            fail_once,
         }));
         let mut schema = SchemaSpec::default();
         schema
@@ -2461,7 +2479,14 @@ mod tests {
 
     #[test]
     fn a_failed_fetch_is_a_load_lane_failure_keyed_by_the_pair_and_clears_on_success() {
-        let (_d, _calls, service, rx) = fetch_service(None);
+        // `fail_once`: "broken" fails the first ask and answers bars on
+        // the second, so the SAME pair can be watched failing and then
+        // recovering — the only shape in which the load lane's key is
+        // observable, since a key that differs between the failing path
+        // (the fetch worker's own `Failed`) and the succeeding one (the
+        // runner's `SeriesAppended`) leaves the failure standing forever
+        // while every assertion about the failure itself still passes.
+        let (_d, _calls, service, rx) = fetch_service_with(None, true);
         service.fetch(&fetch_params(
             "broken",
             "2026-01-05T00:00:00Z",
@@ -2497,10 +2522,44 @@ mod tests {
         assert_eq!(health.0, "kdb_hist");
         assert!(matches!(health.1, Health::Failed { .. }));
         assert!(health.2.starts_with("broken@kdb_hist:"), "{}", health.2);
+
+        // The clear-on-success half. The retry of the same pair succeeds
+        // and lands rows, so the runner's `SeriesAppended` arm reports
+        // `Ok` under `"broken@kdb_hist"` — the key the failure above was
+        // filed under — and the lane transitions back to `Ok`. Under a
+        // key that differs between the two paths the failure is never
+        // cleared, no `Ok` is ever emitted, and this loop runs out its
+        // deadline.
+        service.fetch(&fetch_params(
+            "broken",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut cleared = false;
+        let mut refetched = None;
+        while !cleared || refetched.is_none() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let never_cleared = "the load lane never cleared to Ok after the retry succeeded";
+            assert!(!left.is_zero(), "{never_cleared}");
+            match rx.recv_timeout(left) {
+                Ok(DataEvent::Health { source, worst, .. }) if source == "kdb_hist" => {
+                    assert_eq!(worst, Health::Ok, "the retry clears the pair's failure");
+                    cleared = true;
+                }
+                Ok(DataEvent::SeriesFetched {
+                    identity, result, ..
+                }) => refetched = Some((identity, result)),
+                Ok(_) => continue,
+                Err(_) => panic!("{never_cleared}"),
+            }
+        }
+        assert_eq!(
+            refetched.unwrap(),
+            ("broken".to_string(), Ok(2)),
+            "three bars, one NaN dropped"
+        );
         drop(rx);
-        // (The clear-on-success half is `HealthTracker`'s own contract,
-        // pinned by `report_load_and_emit`'s tests; the seam here is that
-        // the SAME key is used on both paths — see the `ingest_sink` arm.)
         drop(service);
     }
 
