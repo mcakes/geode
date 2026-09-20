@@ -77,12 +77,15 @@ impl PricerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::pricing::{PriceRequest, PriceResult, PricingError};
+    use geode_core::pricing::{MarketOverrides, PriceRequest, PriceResult, PricingError};
 
     struct Named(&'static str);
     impl Pricer for Named {
         fn name(&self) -> &str {
             self.0
+        }
+        fn set_overrides(&self, _: &MarketOverrides) -> Result<(), PricingError> {
+            Ok(())
         }
         fn price(&self, _: &PriceRequest) -> Result<PriceResult, PricingError> {
             Err(PricingError("unused".into()))

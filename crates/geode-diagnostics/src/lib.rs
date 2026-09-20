@@ -109,8 +109,7 @@ impl TileContent for DiagnosticsContent {
             // This tile never queries — nothing addressed to it ever
             // arrives, so there is nothing to do with the outcome itself.
             Delivery::Query(_) => {}
-            // This tile never prices; an outcome addressed here is a
-            // routing bug the shell already logs.
+            // This tile never prices; an outcome addressed here is a routing bug.
             Delivery::Price(_) => {}
         }
     }

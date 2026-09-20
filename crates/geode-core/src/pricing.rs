@@ -16,6 +16,7 @@
 use crate::document::DocumentRows;
 use crate::query::QueryKey;
 use chrono::NaiveDate;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 /// The `source` a local publish (`Request::Publish`) is stamped with.
@@ -115,6 +116,10 @@ impl Instrument {
     pub fn kind(&self) -> OptionKind {
         self.vanilla().kind
     }
+
+    pub fn strike(&self) -> Strike {
+        self.vanilla().strike
+    }
 }
 
 /// Spot in percent, vol in points; both `0.0` when unshifted.
@@ -147,11 +152,24 @@ pub struct PriceResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PricingError(pub String);
 
+/// What the app overrides in the library's `PricingDataSource` (spec ruling 1):
+/// spot levels by underlying now; CVI and dividend documents are later fields.
+/// Plain data — the library interprets it, the app never does.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MarketOverrides {
+    pub spot: BTreeMap<String, f64>,
+}
+
 /// One synchronous, self-contained call per instrument (spec ruling 1).
 /// The library fetches or is handed its own market data; the app hands
 /// it a definition and shifts and shows what comes back.
 pub trait Pricer: Send + Sync {
     fn name(&self) -> &str;
+    /// Replace the overridable market data for every `price` call that follows,
+    /// until the next call here. Stateful on purpose (spec ruling 1); the worker
+    /// calls it once per batch, so a batch's lines all see the same overrides and
+    /// no other batch's.
+    fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError>;
     fn price(&self, req: &PriceRequest) -> Result<PriceResult, PricingError>;
 }
 
@@ -171,6 +189,9 @@ pub struct PriceParams {
     pub key: QueryKey,
     pub tag: u64,
     pub submitted: Instant,
+    /// The sheet's overrides for this batch; the worker sets them once
+    /// before the first line (spec §5.3).
+    pub overrides: MarketOverrides,
     pub lines: Vec<PriceLine>,
 }
 
@@ -260,5 +281,15 @@ mod tests {
     #[test]
     fn the_local_source_name_is_the_word_local() {
         assert_eq!(LOCAL_SOURCE, "local");
+    }
+
+    #[test]
+    fn overrides_default_to_none_and_compare_by_value() {
+        let a = MarketOverrides::default();
+        assert!(a.spot.is_empty());
+        let mut b = MarketOverrides::default();
+        b.spot.insert("SPX".into(), 5000.0);
+        assert_ne!(a, b);
+        assert_eq!(b.clone(), b);
     }
 }

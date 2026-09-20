@@ -104,6 +104,16 @@ impl Drop for PricingWorker {
     }
 }
 
+/// The one place a `catch_unwind` payload becomes a message, shared by
+/// both boundary sites in `run` (`set_overrides` and `price`).
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string())
+}
+
 fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: PricerConfig, sink: PriceSink) {
     let (lock, cvar) = &*queue;
     let mut refusal_logged = false;
@@ -127,12 +137,41 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: PricerConfig, sink: PriceSin
         let started = std::time::Instant::now();
         let mut results = Vec::with_capacity(params.lines.len());
         let mut failures = 0usize;
+        // Spec §5.3 "Overrides once per batch": a refusal or a panic here
+        // fails the whole batch — a line priced against the wrong data
+        // source is worse than no price.
+        let overrides_failed: Option<String> = match &config.pricer {
+            None => None,
+            Some(pricer) => {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    geode_core::panic::contained(|| pricer.set_overrides(&params.overrides))
+                }));
+                match outcome {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(format!("overrides refused: {}", e.0)),
+                    Err(payload) => {
+                        let message = panic_message(&payload);
+                        tracing::warn!(
+                            target: "geode::pricing",
+                            "set_overrides panicked for key {}: {message}",
+                            params.key.0
+                        );
+                        Some(format!("overrides refused: pricer panicked: {message}"))
+                    }
+                }
+            }
+        };
         for line in &params.lines {
             {
                 let q = lock.lock().unwrap_or_else(|e| e.into_inner());
                 if q.cancel_running || q.shutdown {
                     break;
                 }
+            }
+            if let Some(reason) = &overrides_failed {
+                failures += 1;
+                results.push((line.id, line.revision, Err(reason.clone())));
+                continue;
             }
             let result = match &config.pricer {
                 None => Err(config.missing_reason()),
@@ -144,11 +183,7 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: PricerConfig, sink: PriceSin
                         Ok(Ok(r)) => Ok(r),
                         Ok(Err(e)) => Err(e.0),
                         Err(payload) => {
-                            let message = payload
-                                .downcast_ref::<&str>()
-                                .map(|s| s.to_string())
-                                .or_else(|| payload.downcast_ref::<String>().cloned())
-                                .unwrap_or_else(|| "non-string panic payload".to_string());
+                            let message = panic_message(&payload);
                             tracing::warn!(
                                 target: "geode::pricing",
                                 "pricer panicked on line {} of key {}: {message}",
@@ -195,22 +230,32 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: PricerConfig, sink: PriceSin
 pub(crate) mod tests {
     use super::*;
     use geode_core::pricing::{
-        Expiry, Instrument, OptionKind, PriceLine, PriceRequest, PriceResult, Pricer, PricingError,
-        Shifts, Strike, Vanilla,
+        Expiry, Instrument, MarketOverrides, OptionKind, PriceLine, PriceRequest, PriceResult,
+        Pricer, PricingError, Shifts, Strike, Vanilla,
     };
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
 
     /// Prices anything but "FAIL" (an error) and "BOOM" (a panic), after
-    /// `delay`, and records every underlying it was asked.
+    /// `delay`, and records every underlying it was asked. `set_overrides`
+    /// pushes a clone into `overrides_seen` and refuses when the map
+    /// contains the key `"REFUSE"`.
     pub(crate) struct FakePricer {
         pub(crate) asked: Arc<Mutex<Vec<String>>>,
         pub(crate) delay: Duration,
+        pub(crate) overrides_seen: Arc<Mutex<Vec<MarketOverrides>>>,
     }
     impl Pricer for FakePricer {
         fn name(&self) -> &str {
             "fake"
+        }
+        fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError> {
+            self.overrides_seen.lock().unwrap().push(overrides.clone());
+            if overrides.spot.contains_key("REFUSE") {
+                return Err(PricingError("refused overrides".into()));
+            }
+            Ok(())
         }
         fn price(&self, req: &PriceRequest) -> Result<PriceResult, PricingError> {
             self.asked
@@ -250,10 +295,20 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn params(key: u64, tag: u64, underlyings: &[&str]) -> PriceParams {
+        params_with_overrides(key, tag, underlyings, MarketOverrides::default())
+    }
+
+    pub(crate) fn params_with_overrides(
+        key: u64,
+        tag: u64,
+        underlyings: &[&str],
+        overrides: MarketOverrides,
+    ) -> PriceParams {
         PriceParams {
             key: QueryKey(key),
             tag,
             submitted: Instant::now(),
+            overrides,
             lines: underlyings
                 .iter()
                 .enumerate()
@@ -276,6 +331,7 @@ pub(crate) mod tests {
             PricerConfig::with(Arc::new(FakePricer {
                 asked: asked.clone(),
                 delay,
+                overrides_seen: Default::default(),
             })),
             sink,
         );
@@ -455,5 +511,73 @@ pub(crate) mod tests {
         );
         w.shutdown();
         assert!(!w.request(params(99, 1, &["A"])));
+    }
+
+    #[test]
+    fn overrides_are_set_once_per_batch_before_its_first_line() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = channel();
+        let sink: PriceSink = Arc::new(move |o| tx.send(o).is_ok());
+        let w = PricingWorker::spawn(
+            PricerConfig::with(Arc::new(FakePricer {
+                asked: asked.clone(),
+                delay: Duration::ZERO,
+                overrides_seen: seen.clone(),
+            })),
+            sink,
+        );
+        let mut o = MarketOverrides::default();
+        o.spot.insert("SPX".into(), 5000.0);
+        assert!(w.request(params_with_overrides(1, 1, &["SPX", "NDX"], o.clone())));
+        assert!(w.request(params_with_overrides(
+            2,
+            1,
+            &["SPX"],
+            MarketOverrides::default()
+        )));
+        next(&rx);
+        next(&rx);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "once per batch, not per line: {seen:?}");
+        assert_eq!(seen[0], o);
+        assert_eq!(seen[1], MarketOverrides::default());
+        w.shutdown();
+    }
+
+    #[test]
+    fn refused_overrides_fail_every_line_of_the_batch_and_price_none() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = channel();
+        let sink: PriceSink = Arc::new(move |o| tx.send(o).is_ok());
+        let w = PricingWorker::spawn(
+            PricerConfig::with(Arc::new(FakePricer {
+                asked: asked.clone(),
+                delay: Duration::ZERO,
+                overrides_seen: Default::default(),
+            })),
+            sink,
+        );
+        let mut bad = MarketOverrides::default();
+        bad.spot.insert("REFUSE".into(), 1.0);
+        assert!(w.request(params_with_overrides(3, 1, &["SPX", "NDX"], bad)));
+        let o = next(&rx);
+        assert_eq!(o.results.len(), 2);
+        for (_, _, r) in &o.results {
+            assert_eq!(
+                r.as_ref().unwrap_err(),
+                "overrides refused: refused overrides"
+            );
+        }
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "no line was priced against the wrong data source"
+        );
+        assert!(
+            w.request(params(3, 2, &["SPX"])),
+            "the worker is still alive"
+        );
+        assert!(next(&rx).results[0].2.is_ok());
+        w.shutdown();
     }
 }

@@ -1883,6 +1883,7 @@ mod tests {
             pricer: PricerConfig::with(Arc::new(crate::pricing::worker::tests::FakePricer {
                 asked: Default::default(),
                 delay,
+                overrides_seen: Default::default(),
             })),
         })
         .unwrap();
