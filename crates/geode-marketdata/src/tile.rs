@@ -52,6 +52,7 @@
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
 use crate::core::draft::local_hhmm;
+use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::{
     Cell, CellKind, Columns, DateField, Draft, DraftBadge, MatrixModel, PanelSpec, Segment,
@@ -220,6 +221,13 @@ const CELL_MOVED: &str = "the document changed under the edit — nothing was wr
 /// and not how it got there. `:rebase`/`:revert` are the only doors
 /// forward, and the notice names both.
 const BEHIND_REFUSED: &str = "the draft is behind — :rebase or :revert first";
+
+/// What every edit door answers on a `Deleted` row (dividend spec §5.2):
+/// the row is still painted, struck through, so the cursor can land on
+/// it, but a value written into a row the draft is about to remove would
+/// be an edit with nowhere to go. `:revert` is the door back, and the
+/// notice names it.
+pub(crate) const DELETED_REFUSED: &str = "row is deleted — :revert restores it";
 
 /// What `:rebase`/`:revert` answer outside `Behind` — there is no
 /// "newer" document to move onto or fall back to.
@@ -759,6 +767,7 @@ impl MarketDataTile {
                 attrs: Vec::new(),
                 badge: DraftBadge::Clean,
                 state: None,
+                incomplete: None,
                 notice: None,
                 time: None,
                 stale: false,
@@ -1184,7 +1193,28 @@ impl MarketDataTile {
             // edits onto a generation the trader has not seen is exactly
             // the decision `:rebase` exists to ask for (§8.4).
             if !self.draft.is_behind() {
-                let (_, dropped) = self.draft.rebase(&self.model);
+                // Against the DOCUMENT's own grid, never `self.model`:
+                // that one was built WITH this draft, so it already
+                // carries the draft's inserted rows spliced in — `rebase`
+                // would read each as a row the document now carries and
+                // drop it as a conflict (§5.1), and would key every cell
+                // edit by its post-splice position rather than the
+                // document position `Draft::edits` holds. The same rule
+                // `:rebase` and the update policy's `rebase` arm follow.
+                // One extra build, once per restore, never per delivery.
+                // Not `Behind`, so the painted snapshot is the delivered
+                // one; it built a moment ago, so this cannot fail, and a
+                // failure would leave the draft parked (the honest state)
+                // rather than rebased against nothing.
+                let clean = self
+                    .painted_snapshot()
+                    .and_then(|s| MatrixModel::build(&s, self.spec, &Draft::default()).ok());
+                let Some(clean) = clean else {
+                    self.unresolved_restore = true;
+                    self.install_model(cx);
+                    return;
+                };
+                let (_, dropped) = self.draft.rebase(&clean);
                 self.rebuild_model(cx);
                 // Reported, never pruned in silence — `:rebase` names
                 // every dropped pair on the same situation, and a reader
@@ -1535,6 +1565,7 @@ impl MarketDataTile {
             unresolved_restore: self.unresolved_restore,
             notice: self.notice.as_ref(),
             source_at: self.source_at,
+            incomplete: self.draft.incomplete_rows(self.spec, &self.model.columns),
         });
     }
 
@@ -1906,6 +1937,13 @@ impl MarketDataTile {
             Cursor::Cell { row, col } => {
                 if let Err(e) = self.edit_base() {
                     self.notice = Some(e.into());
+                    return;
+                }
+                // A deleted row's cells refuse edits (dividend spec
+                // §5.2) — here, ahead of the editor and the choice popup
+                // alike, so nothing opens over a row that is going.
+                if self.model.rows[row].state == RowState::Deleted {
+                    self.notice = Some(DELETED_REFUSED.into());
                     return;
                 }
                 let cell = (row, col);
@@ -2318,6 +2356,17 @@ impl MarketDataTile {
     /// the identity check above makes unreachable, kept as the belt), and
     /// a draft that was `Sent` — `Draft::set` moves it back to `Editing`,
     /// which changes EVERY cell's `sent` flag, not this one's.
+    ///
+    /// WHERE the value is written is the row's state (dividend spec
+    /// §5.1/§5.2). A document row's edit goes into `Draft::edits` under
+    /// the cell's own `cell_ref` — the row's DOCUMENT position, which is
+    /// `cell` itself only while no row is inserted above it — never under
+    /// the cursor's model index. An inserted row's value goes into its
+    /// `RowEdit.cells` by column label through `Draft::set_row_cell`,
+    /// since such a row has no document position for an index-keyed edit
+    /// to name. A deleted row refuses: `begin_edit` already declines to
+    /// open an editor on one, and this is the belt for the doors that
+    /// open nothing (a choice step).
     fn commit_cell_value(
         &mut self,
         cell: (usize, usize),
@@ -2341,12 +2390,42 @@ impl MarketDataTile {
             }
         };
         let was_sent = self.draft.is_sent();
-        self.draft.set(
-            cell,
-            (labels.0.to_string(), labels.1.to_string()),
-            value,
-            &base,
-        );
+        // Both `Copy`, read out ahead of the match so the arms can take
+        // `&mut self` (the editor's close) with no borrow of the model.
+        let (state, cell_ref) = {
+            let row = &self.model.rows[cell.0];
+            (row.state, row.cells[cell.1].cell_ref)
+        };
+        match state {
+            RowState::Deleted => {
+                self.close_editor(window, cx);
+                self.notice = Some(DELETED_REFUSED.into());
+                return true;
+            }
+            RowState::Inserted => {
+                // The identity check above proved `labels.0` is this
+                // row's label; a draft that no longer holds it as an
+                // inserted row is a grid that moved (the row was dropped
+                // between the editor opening and this commit), refused
+                // the same way.
+                if !self
+                    .draft
+                    .set_row_cell(labels.0.as_ref(), labels.1.as_ref(), value)
+                {
+                    self.close_editor(window, cx);
+                    self.notice = Some(CELL_MOVED.into());
+                    return true;
+                }
+            }
+            RowState::Document => {
+                self.draft.set(
+                    cell_ref,
+                    (labels.0.to_string(), labels.1.to_string()),
+                    value,
+                    &base,
+                );
+            }
+        }
         self.close_editor(window, cx);
         self.notice = None;
         let snapshot = match self.painted_snapshot() {
@@ -2870,6 +2949,9 @@ impl MarketDataTile {
         let Cursor::Cell { row, col } = self.cursor else {
             return Err("step needs a grid cell — the cursor is in the header".to_string());
         };
+        if self.model.rows[row].state == RowState::Deleted {
+            return Err(DELETED_REFUSED.to_string());
+        }
         let Some(CellKind::Choice(options)) = self.model.kind_of(col) else {
             return Err("not a choice cell".to_string());
         };
@@ -2963,39 +3045,53 @@ impl MarketDataTile {
             // has neither, and there is no cell here to name.
             return Err("bump needs a grid cell — the cursor is in the header".to_string());
         };
+        // A row bump on a deleted row is refused outright (dividend spec
+        // §5.2: a deleted row's cells refuse edits); a column bump skips
+        // one, below, rather than refusing the whole column for it.
+        if matches!(axis, BumpAxis::Row) && self.model.rows[row].state == RowState::Deleted {
+            return Err(DELETED_REFUSED.to_string());
+        }
         // The draft's own edit for this cell, through `Draft::numeric_edit`
         // — `:bump`'s own door onto it — falling back to the model's own
         // painted value (the document's, or NULL) when there is no edit
-        // yet to read.
-        let numeric_value = |cell: &Cell| {
-            self.draft
-                .numeric_edit(cell.cell_ref)
-                .or(match &cell.value {
-                    Some(Value::F64(v)) => Some(*v),
-                    Some(Value::I64(v)) => Some(*v as f64),
-                    Some(Value::Utf8(_) | Value::Date(_)) | None => None,
-                })
+        // yet to read. An INSERTED row's cell_ref is a model position, not
+        // a document one, so `Draft::edits` is never asked about it: its
+        // painted value IS the draft's own (`RowEdit.cells`, which is all
+        // the model ever paints there).
+        let numeric_value = |state: RowState, cell: &Cell| {
+            let edit = match state {
+                RowState::Inserted => None,
+                RowState::Document | RowState::Deleted => self.draft.numeric_edit(cell.cell_ref),
+            };
+            edit.or(match &cell.value {
+                Some(Value::F64(v)) => Some(*v),
+                Some(Value::I64(v)) => Some(*v as f64),
+                Some(Value::Utf8(_) | Value::Date(_)) | None => None,
+            })
         };
         let mut skipped = 0usize;
+        // Each cell to bump as (model cell, its current value).
         let values: Vec<((usize, usize), f64)> = match axis {
             // A row bump walks the LADDER: the leading `slice_columns`
             // cells are the term's own forward/atm/skew, and bumping a
             // term's vols must not move its forward with them. A column
             // bump on a slice column still bumps that column down every
             // term, which is what a bump on `fwd` means.
-            BumpAxis::Row => self.model.rows[row]
-                .cells
-                .iter()
-                .enumerate()
-                .skip(self.model.slice_columns)
-                .filter_map(|(ci, cell)| {
-                    if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
-                        skipped += 1;
-                        return None;
-                    }
-                    numeric_value(cell).map(|v| ((row, ci), v))
-                })
-                .collect(),
+            BumpAxis::Row => {
+                let r = &self.model.rows[row];
+                r.cells
+                    .iter()
+                    .enumerate()
+                    .skip(self.model.slice_columns)
+                    .filter_map(|(ci, cell)| {
+                        if !matches!(self.model.kind_of(ci), Some(CellKind::Number(_))) {
+                            skipped += 1;
+                            return None;
+                        }
+                        numeric_value(r.state, cell).map(|v| ((row, ci), v))
+                    })
+                    .collect()
+            }
             BumpAxis::Col => {
                 if !matches!(self.model.kind_of(col), Some(CellKind::Number(_))) {
                     return Err("not a numeric column".to_string());
@@ -3004,10 +3100,11 @@ impl MarketDataTile {
                     .rows
                     .iter()
                     .enumerate()
+                    .filter(|(_, r)| r.state != RowState::Deleted)
                     .filter_map(|(ri, r)| {
                         r.cells
                             .get(col)
-                            .and_then(numeric_value)
+                            .and_then(|cell| numeric_value(r.state, cell))
                             .map(|v| ((ri, col), v))
                     })
                     .collect()
@@ -3024,14 +3121,28 @@ impl MarketDataTile {
         // the labels come off `self.model` while the draft is borrowed
         // mutably, which the borrow checker refuses — and one `Vec` per
         // `:bump` line is a keystroke's worth of work, not a per-frame one.
-        let cells: Vec<BumpCell> = values
-            .into_iter()
-            .map(|(cell, value)| {
-                let labels = self.model.label_of(cell);
-                (cell, (labels.0.to_string(), labels.1.to_string()), value)
-            })
-            .collect();
-        self.draft.bump(cells.into_iter(), delta, &base);
+        // A document row's cell is keyed for `Draft::edits` by its own
+        // `cell_ref` (the document position — `commit_cell_value`'s rule);
+        // an inserted row's goes to its `RowEdit.cells` by label instead,
+        // with the same arithmetic.
+        let mut document: Vec<BumpCell> = Vec::with_capacity(values.len());
+        let mut inserted: Vec<((String, String), f64)> = Vec::new();
+        for (cell, value) in values {
+            let labels = self.model.label_of(cell);
+            let labels = (labels.0.to_string(), labels.1.to_string());
+            let r = &self.model.rows[cell.0];
+            match r.state {
+                RowState::Inserted => inserted.push((labels, value)),
+                RowState::Document | RowState::Deleted => {
+                    document.push((r.cells[cell.1].cell_ref, labels, value));
+                }
+            }
+        }
+        self.draft.bump(document.into_iter(), delta, &base);
+        for ((row_label, col_label), value) in inserted {
+            self.draft
+                .set_row_cell(&row_label, &col_label, Value::F64(value + delta));
+        }
         self.rebuild_model(cx);
         self.changed(cx);
         Ok(())
@@ -3616,6 +3727,13 @@ impl MarketDataTile {
         &self.draft
     }
 
+    /// The state of model row `row` (dividend spec §5.2), `None` past the
+    /// grid's end.
+    #[cfg(test)]
+    pub(crate) fn row_state_at(&self, row: usize) -> Option<RowState> {
+        self.model.rows.get(row).map(|r| r.state)
+    }
+
     #[cfg(test)]
     pub(crate) fn cursor(&self) -> Cursor {
         self.cursor
@@ -3979,6 +4097,7 @@ mod tests {
     use super::*;
     use crate::commands;
     use crate::content::MarketDataFactory;
+    use crate::core::draft::RowEdit;
     use crate::core::spec::{RowAxis, RowIdentity, ValueColumn};
     use crate::core::test_fixtures;
     use crate::core::{CVI, DraftState};
@@ -4498,6 +4617,10 @@ mod tests {
             vcx.update(|window, cx| {
                 state.update(cx, |s, cx| s.set_value(text, window, cx));
             });
+        }
+        /// The header as painted, off the tile's own reader.
+        fn header_texts(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+            self.tile.read_with(vcx, |t, _| t.header_texts())
         }
         /// One cell as painted: its text and whether it reads as an edit.
         fn cell(&self, vcx: &gpui::VisualTestContext, row: usize, col: usize) -> (String, bool) {
@@ -6564,6 +6687,237 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(
             h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
             "nothing was written"
+        );
+    }
+
+    /// A session carrying an inserted row, a deleted row and a cell edit
+    /// on the row below the insert, restored onto the schedule (spec
+    /// §5.4): the first delivery splices the inserted row in, keeps the
+    /// deleted row painted and marked, and lands the cell edit on D2 —
+    /// which now sits one row lower than its document index — rather
+    /// than on whatever row took its old index. The restore's rebase runs
+    /// against the DOCUMENT's own grid: against the spliced model it would
+    /// read the draft's own `new-1` as a row the document now carries and
+    /// drop it as a conflict.
+    #[gpui::test]
+    fn a_restored_draft_with_rows_splices_them_and_keeps_its_edits_in_place(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["D2", "amount", 0.75]]
+[draft.rows.new-1]
+after = "D1"
+cells = {{ amount = 2.0 }}
+[draft.rows.D3]
+deleted = true
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::SCHEDULE, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("a restored key requeries").tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "estimated"),
+                ("D3", "2027-06-18", 0.9, "estimated"),
+            ])),
+        );
+        assert_eq!(
+            h.col_texts(&vcx, 1),
+            ["1.2500", "2.0000", "0.7500", "0.9000"]
+        );
+        let states: Vec<Option<RowState>> = h
+            .tile
+            .read_with(&vcx, |t, _| (0..5).map(|r| t.row_state_at(r)).collect());
+        assert_eq!(
+            states,
+            [
+                Some(RowState::Document),
+                Some(RowState::Inserted),
+                Some(RowState::Document),
+                Some(RowState::Deleted),
+                None
+            ]
+        );
+        assert_eq!(h.cell(&vcx, 2, 1), ("0.7500".to_string(), true));
+        assert_eq!(h.cell(&vcx, 1, 0), ("·".to_string(), true));
+        let (added, removed, edits) = h.tile.read_with(&vcx, |t, _| {
+            let d = t.draft();
+            (d.rows_added(), d.rows_removed(), d.edits.clone())
+        });
+        assert_eq!((added, removed), (1, 1));
+        assert_eq!(
+            edits.keys().copied().collect::<Vec<_>>(),
+            [(1, 1)],
+            "the edit is keyed by D2's DOCUMENT row, not its painted one"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.header_dirty()));
+        assert!(
+            h.header_texts(&vcx)
+                .contains(&"1 row incomplete".to_string()),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+    }
+
+    /// A commit on an inserted row's cell writes `RowEdit.cells` by column
+    /// label, never `Draft::edits` by index (spec §5.1) — and paints on
+    /// the same keystroke, patched; the incomplete chip follows. A row
+    /// bump on it composes with what it painted, the same way.
+    #[gpui::test]
+    fn a_commit_on_an_inserted_row_writes_its_own_cells(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = []
+[draft.rows.new-1]
+after = "D1"
+cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "text", value = "declared" }} }}
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::SCHEDULE, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "estimated"),
+            ])),
+        );
+        assert!(
+            h.header_texts(&vcx)
+                .contains(&"1 row incomplete".to_string())
+        );
+        h.tile.update(&mut vcx, |t, cx| t.cursor_to(1, Some(1), cx));
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("·"));
+        h.set_editor(&mut vcx, "2.5");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.cell(&vcx, 1, 1), ("2.5000".to_string(), true));
+        let (edits, cells) = h.tile.read_with(&vcx, |t, _| {
+            let d = t.draft();
+            let cells = match d.row_state("new-1") {
+                Some(RowEdit::Inserted { cells, .. }) => cells.clone(),
+                other => panic!("new-1 is still an inserted row, got {other:?}"),
+            };
+            (d.edits.clone(), cells)
+        });
+        assert!(edits.is_empty(), "no index-keyed edit for an inserted row");
+        assert_eq!(cells.get("amount"), Some(&Value::F64(2.5)));
+        assert!(
+            !h.header_texts(&vcx)
+                .contains(&"1 row incomplete".to_string()),
+            "every required column is filled now: {:?}",
+            h.header_texts(&vcx)
+        );
+        assert_eq!(
+            h.cell(&vcx, 2, 1),
+            ("0.5000".to_string(), false),
+            "D2, below the insert, is untouched"
+        );
+
+        h.command(&mut vcx, "bump 1 row")
+            .expect("a bump on the inserted row");
+        assert_eq!(h.cell(&vcx, 1, 1), ("3.5000".to_string(), true));
+        let (edits, amount) = h.tile.read_with(&vcx, |t, _| {
+            let d = t.draft();
+            let amount = match d.row_state("new-1") {
+                Some(RowEdit::Inserted { cells, .. }) => cells.get("amount").cloned(),
+                _ => None,
+            };
+            (d.edits.clone(), amount)
+        });
+        assert!(edits.is_empty());
+        assert_eq!(amount, Some(Value::F64(3.5)));
+    }
+
+    /// A deleted row's cells refuse edits (spec §5.2): `i`, a choice
+    /// step, and a row bump all answer "row is deleted — :revert restores
+    /// it" and open nothing; a column bump skips the row rather than
+    /// writing a value into a row that is going.
+    #[gpui::test]
+    fn a_deleted_rows_cells_refuse_edits(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = []
+[draft.rows.D1]
+deleted = true
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::SCHEDULE, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "estimated"),
+            ])),
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.row_state_at(0)),
+            Some(RowState::Deleted)
+        );
+        h.tile.update(&mut vcx, |t, cx| t.cursor_to(0, Some(1), cx));
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(DELETED_REFUSED.to_string())
+        );
+        h.tile.update(&mut vcx, |t, cx| {
+            t.notice = None;
+            t.cursor_to(0, Some(2), cx);
+        });
+        h.dispatch(&mut vcx, "step", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(DELETED_REFUSED.to_string())
+        );
+        assert_eq!(
+            h.cell(&vcx, 0, 2),
+            ("declared".to_string(), false),
+            "nothing stepped"
+        );
+        assert_eq!(
+            h.command(&mut vcx, "bump 1 row"),
+            Err(DELETED_REFUSED.to_string())
+        );
+        h.tile.update(&mut vcx, |t, cx| t.cursor_to(0, Some(1), cx));
+        h.command(&mut vcx, "bump 1 col")
+            .expect("a column bump skips the deleted row and moves D2");
+        assert_eq!(h.col_texts(&vcx, 1), ["1.2500", "1.5000"]);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t
+                .draft()
+                .edits
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()),
+            [(1, 1)]
         );
     }
 

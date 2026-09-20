@@ -18,6 +18,7 @@
 //! saturating to 0 — a click there moves the cursor's row and leaves its
 //! column alone.
 
+use crate::core::matrix::RowState;
 use crate::core::{MatrixModel, PanelSpec};
 use crate::header;
 use crate::popup::{ChoicePaint, render_choice};
@@ -327,27 +328,43 @@ impl TableDelegate for MatrixDelegate {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let Some(model_col) = Self::model_col(col_ix) else {
-            // The row-label column: the label in the data face, in the
-            // full foreground — it is what identifies the row. The editor
-            // slot is here too (Task 8's row-label editor opens into it;
-            // nothing does yet), so the label arm and the value arm paint
-            // an editor through the one `render_editor`.
-            let label = self
+            // The row-label column: the label in the data face — it is
+            // what identifies the row — painted in the ROW's own state
+            // (spec §5.2): an inserted row's label takes the same tint
+            // its cells do and a deleted row's is struck through with
+            // them, so the row reads as one thing across the pinned
+            // column and the scrolling ones. The editor slot is here too
+            // (Task 8's row-label editor opens into it; nothing does
+            // yet), so the label arm and the value arm paint an editor
+            // through the one `render_editor`.
+            let (label, state, sent) = self
                 .model
                 .rows
                 .get(row_ix)
-                .map(|r| r.label.clone())
-                .unwrap_or_default();
+                .map(|r| {
+                    (
+                        r.label.clone(),
+                        r.state,
+                        // Every cell of an inserted row shares the
+                        // draft's `sent`; a document row's cells vary,
+                        // and its label carries no fill of its own.
+                        r.state == RowState::Inserted && r.cells.first().is_some_and(|c| c.sent),
+                    )
+                })
+                .unwrap_or((SharedString::default(), RowState::Document, false));
             let editor = self
                 .editor_at(row_ix, col_ix)
                 .cloned()
                 .and_then(|e| self.render_editor(&e, theme));
+            let CellPaint { fill, text, strike } = cell_paint(theme, sent, false, state);
             let el = div()
                 .size_full()
                 .flex()
                 .items_center()
                 .font_family(fonts::MONO)
-                .text_color(theme.foreground)
+                .text_color(text)
+                .when_some(fill, |el, fill| el.bg(fill))
+                .when(strike, |el| el.line_through())
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_ellipsis()
@@ -363,11 +380,9 @@ impl TableDelegate for MatrixDelegate {
             };
         };
         let at_cursor = self.cursor == Some((row_ix, model_col));
-        let cell = self
-            .model
-            .rows
-            .get(row_ix)
-            .and_then(|r| r.cells.get(model_col));
+        let row = self.model.rows.get(row_ix);
+        let state = row.map_or(RowState::Document, |r| r.state);
+        let cell = row.and_then(|r| r.cells.get(model_col));
         let mut el = div()
             .size_full()
             .flex()
@@ -396,8 +411,11 @@ impl TableDelegate for MatrixDelegate {
         let Some(cell) = cell else {
             return el;
         };
-        let CellPaint { fill, text } = cell_paint(theme, cell.sent, cell.edited);
-        el = el.when_some(fill, |el, fill| el.bg(fill)).text_color(text);
+        let CellPaint { fill, text, strike } = cell_paint(theme, cell.sent, cell.edited, state);
+        el = el
+            .when_some(fill, |el, fill| el.bg(fill))
+            .text_color(text)
+            .when(strike, |el| el.line_through());
         // The editor is cloned out (three refcounts at most) because
         // `render_editor` needs `&mut self` for the tones refresh while
         // `editor_at` borrows `self.editor`; the cell's own text is what
@@ -440,12 +458,13 @@ impl TableDelegate for MatrixDelegate {
     }
 }
 
-/// How a value cell paints in one draft state: an optional fill and the
-/// text colour over it.
+/// How a value cell paints in one draft state: an optional fill, the
+/// text colour over it, and whether the text is struck through.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CellPaint {
     pub fill: Option<Hsla>,
     pub text: Hsla,
+    pub strike: bool,
 }
 
 /// The one answer to "what colour is a cell in this state", read by
@@ -462,12 +481,31 @@ pub(crate) struct CellPaint {
 /// one colour every theme author made readable on their own background,
 /// which a translucent tint or the muted band barely moves.
 ///
-/// `sent` is checked first: a sent cell is also an edited one (the draft
-/// keeps its edits until the echo clears them, spec §9.4), and what it
-/// needs to say is that it is out the door.
-pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool) -> CellPaint {
+/// The ROW's state decides ahead of the cell's own flags (spec §5.2). A
+/// `Deleted` row's cells are struck through in the theme's own secondary
+/// text with no fill — the row is going, whatever edit a cell carries,
+/// and this is the one place `muted_foreground` is right: it is on the
+/// bare ground, the pairing the theme author made (unfloored, as every
+/// `Tone::Plain` run is). Then `sent`: a sent cell is also an edited one
+/// (the draft keeps its edits until the echo clears them, spec §9.4), and
+/// what it needs to say is that it is out the door — an inserted row's
+/// cells included. Then an `Inserted` row, every cell of which is
+/// `edited`: the `success` family at an 18% tint, so a new row reads as
+/// new rather than as a row full of changed numbers. The bundled-theme
+/// sweep holds `foreground` over that tint to the same 3:1 floor as the
+/// warning one; no theme needed flooring.
+pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool, state: RowState) -> CellPaint {
+    if state == RowState::Deleted {
+        return CellPaint {
+            fill: None,
+            text: theme.muted_foreground,
+            strike: true,
+        };
+    }
     let fill = if sent {
         Some(theme.muted)
+    } else if state == RowState::Inserted {
+        Some(theme.success.opacity(0.18))
     } else if edited {
         Some(theme.warning.opacity(0.25))
     } else {
@@ -476,6 +514,7 @@ pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool) -> CellPaint {
     CellPaint {
         fill,
         text: theme.foreground,
+        strike: false,
     }
 }
 
@@ -522,14 +561,29 @@ pub(crate) mod tests {
             cx.update(|cx| {
                 Theme::global_mut(cx).apply_config(&entry);
                 let theme = cx.theme();
-                for (state, sent, edited) in [("edited", false, true), ("sent", true, false)] {
-                    let paint = cell_paint(theme, sent, edited);
-                    let fill = paint.fill.expect("both marked states carry a fill");
+                for (state, sent, edited, row) in [
+                    ("edited", false, true, RowState::Document),
+                    ("sent", true, false, RowState::Document),
+                    ("inserted", false, true, RowState::Inserted),
+                ] {
+                    let paint = cell_paint(theme, sent, edited, row);
+                    let fill = paint.fill.expect("every marked state carries a fill");
                     let ratio = contrast_ratio(to_rgb(paint.text), over(fill, ground(theme)));
                     if ratio < READABLE_RATIO {
                         failures.push(format!("{name}: {state} text at {ratio:.2}:1"));
                     }
                 }
+                // A deleted row's text is the theme's OWN secondary text
+                // on its own ground — exactly the pairing `Tone::Plain`
+                // paints every quiet header run in, unfloored (CLAUDE.md
+                // records nine themes ship it under 3:1; a theme-authoring
+                // matter). Asserted as "the same colour `Plain` uses" and
+                // nothing more: this sweep is about the fills this crate
+                // invents, not the theme's own pairs.
+                let deleted = cell_paint(theme, false, false, RowState::Deleted);
+                assert_eq!(deleted.fill, None, "{name}: a deleted row has no fill");
+                assert_eq!(deleted.text, theme.muted_foreground, "{name}");
+                assert!(deleted.strike, "{name}: a deleted row is struck through");
             });
         }
         assert!(
@@ -537,6 +591,33 @@ pub(crate) mod tests {
             "unreadable cells:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// The row state decides ahead of the cell's own flags: a deleted
+    /// row's cells strike through whatever edit they carry (the row is
+    /// going), a sent inserted row reads as out the door like any sent
+    /// cell, and an inserted row's cells — every one of which is
+    /// `edited` — take the `success` tint, never the warning one.
+    #[gpui::test]
+    fn the_row_state_decides_a_cells_paint_ahead_of_its_flags(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            let theme = cx.theme();
+            let plain = cell_paint(theme, false, false, RowState::Document);
+            assert_eq!(plain.fill, None);
+            assert!(!plain.strike);
+            let edited = cell_paint(theme, false, true, RowState::Document);
+            assert_eq!(edited.fill, Some(theme.warning.opacity(0.25)));
+            let inserted = cell_paint(theme, false, true, RowState::Inserted);
+            assert_eq!(inserted.fill, Some(theme.success.opacity(0.18)));
+            assert!(!inserted.strike);
+            let inserted_sent = cell_paint(theme, true, true, RowState::Inserted);
+            assert_eq!(inserted_sent.fill, Some(theme.muted));
+            let deleted_edited = cell_paint(theme, false, true, RowState::Deleted);
+            assert_eq!(deleted_edited.fill, None);
+            assert!(deleted_edited.strike);
+            assert_eq!(deleted_edited.text, theme.muted_foreground);
+        });
     }
 
     /// The label column is index 0 and every value column sits one to its

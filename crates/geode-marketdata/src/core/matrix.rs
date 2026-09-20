@@ -12,7 +12,7 @@
 //! answer the same `Cell`, so the tile's cursor, yank and edit paths know
 //! only about a grid.
 
-use crate::core::draft::{Draft, attr_text};
+use crate::core::draft::{Draft, RowEdit, attr_text};
 use crate::core::spec::{Columns, PanelSpec, ValueColumn};
 use geode_core::attribution::Attribution;
 use geode_core::document::Value;
@@ -21,7 +21,7 @@ use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
 use geode_core::view::ColumnFormat;
 use gpui::SharedString;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// One column's edited shape (spec §4.3): a number paints through its own
 /// `ColumnFormat` exactly as before, a date paints ISO, and text/choice
@@ -77,17 +77,37 @@ pub struct Cell {
     pub value: Option<Value>,
     pub edited: bool,
     pub sent: bool,
-    /// The grid index this cell sits at, which is also the key a
-    /// [`Draft`] edit is stored under. Carried on the cell so a render
-    /// closure that already has the cell never has to reconstruct it —
-    /// for `Columns::Values` it reads as (document row, value column).
+    /// The key a [`Draft`] edit on this cell is stored under. For a
+    /// document row it is the row's position in the DOCUMENT's own grid
+    /// — the pivot row, or the snapshot row for `Columns::Values` — plus
+    /// the column, which is the cell's model index only while no row is
+    /// inserted above it: an [`RowState::Inserted`] row is spliced into
+    /// the model and shifts every row below it, and `Draft::edits` is
+    /// keyed by the document position precisely so an insert moves no
+    /// edit. For an inserted row it is `(model row, col)` — there is no
+    /// document position to name — and `Draft::edits` never holds one:
+    /// an inserted row's cells live in `RowEdit.cells` by column label
+    /// (spec §5.1). Carried on the cell so a render closure that already
+    /// has the cell never has to reconstruct it.
     pub cell_ref: (usize, usize),
+}
+
+/// Whose row this is (spec §5.2): the document's own, one the draft
+/// inserted (spliced in after its anchor, cells from `RowEdit.cells`),
+/// or one the draft marked deleted — still laid out, struck through,
+/// until upload or a rebase drops it outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    Document,
+    Inserted,
+    Deleted,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowModel {
     pub label: SharedString,
     pub cells: Vec<Cell>,
+    pub state: RowState,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -169,6 +189,13 @@ impl MatrixModel {
     /// unique and its column labels unique — the invariant
     /// [`Draft`]'s own doc states and [`Draft::rebase`] resolves edits
     /// against.
+    ///
+    /// The draft's row edits (spec §5.2) are applied last, by
+    /// [`splice_rows`]: a document row the draft marks deleted stays in
+    /// the grid as [`RowState::Deleted`], and each inserted row is
+    /// spliced in after its anchor. A document row's cells — and its
+    /// `cell_ref` — are decided BEFORE the splice, against the document's
+    /// own grid, which is what `Draft::edits` is keyed by.
     pub fn build(
         snapshot: &Snapshot,
         spec: &PanelSpec,
@@ -206,6 +233,7 @@ impl MatrixModel {
                 (columns, column_kinds, 0, rows, None)
             }
         };
+        let rows = splice_rows(rows, draft, &columns, &column_kinds);
         Ok(MatrixModel {
             key,
             source_time,
@@ -232,6 +260,14 @@ impl MatrixModel {
     /// [`PivotIndex`] holds that snapshot's row numbers. The tile hands
     /// over `painted_snapshot()`, which is exactly that.
     ///
+    /// `row` is the MODEL row. A document row's position in the document
+    /// (the one `Draft::edits`, `PivotIndex` and the flat snapshot are all
+    /// indexed by) is read off its own `cell_ref`, since an inserted row
+    /// above it has shifted the two apart; an inserted row's cell is
+    /// re-read from `RowEdit.cells` instead, and answers `false` once the
+    /// draft no longer holds that row — the model has a row the draft
+    /// does not, and only a rebuild can say what belongs there.
+    ///
     /// Out of range answers `false` rather than panicking: the caller
     /// falls back to a rebuild, the one answer that is always right.
     pub fn patch_cell(
@@ -245,15 +281,30 @@ impl MatrixModel {
         let Some(kind) = self.column_kinds.get(col) else {
             return false;
         };
-        if row >= self.rows.len() {
+        let Some(current) = self.rows.get(row) else {
             return false;
+        };
+        if current.state == RowState::Inserted {
+            let Some(RowEdit::Inserted { cells, .. }) = draft.rows.get(current.label.as_ref())
+            else {
+                return false;
+            };
+            let Some(label) = self.columns.get(col) else {
+                return false;
+            };
+            self.rows[row].cells[col] =
+                inserted_cell(cells.get(label.as_ref()), (row, col), kind, draft);
+            return true;
         }
+        let Some(doc_row) = current.cells.get(col).map(|c| c.cell_ref.0) else {
+            return false;
+        };
         let value = match &self.pivot_index {
             Some(index) => match col.checked_sub(self.slice_columns) {
                 // A ladder cell: the value column at the snapshot row the
                 // build's own grid map recorded for this pair.
                 Some(ci) => {
-                    let Some(&srow) = index.at.get(row * index.ladder + ci) else {
+                    let Some(&srow) = index.at.get(doc_row * index.ladder + ci) else {
                         return false;
                     };
                     snapshot.f64_at(index.value_idx, srow).map(Value::F64)
@@ -264,16 +315,17 @@ impl MatrixModel {
                 // the document).
                 None => {
                     let (Some(&idx), Some(&first)) =
-                        (index.slice_idx.get(col), index.first_row.get(row))
+                        (index.slice_idx.get(col), index.first_row.get(doc_row))
                     else {
                         return false;
                     };
                     snapshot.f64_at(idx, first).map(Value::F64)
                 }
             },
-            // The flat shape: grid row `row` is snapshot row `row`, and
-            // grid column `col` is the spec's `col`th flat column — the
-            // same resolution `flatten` made, redone for one column.
+            // The flat shape: document row `doc_row` is snapshot row
+            // `doc_row`, and grid column `col` is the spec's `col`th flat
+            // column — the same resolution `flatten` made, redone for one
+            // column.
             None => {
                 let Some(vc) = spec.flat_columns().get(col) else {
                     return false;
@@ -281,10 +333,10 @@ impl MatrixModel {
                 let Some(idx) = snapshot.column_index(vc.column) else {
                     return false;
                 };
-                read_flat_value(snapshot, idx, row, vc.ty)
+                read_flat_value(snapshot, idx, doc_row, vc.ty)
             }
         };
-        self.rows[row].cells[col] = cell_of(value, (row, col), kind, draft);
+        self.rows[row].cells[col] = cell_of(value, (doc_row, col), kind, draft);
         true
     }
 
@@ -700,6 +752,7 @@ fn pivot(
         rows.push(RowModel {
             label: SharedString::from(row_label.clone()),
             cells,
+            state: RowState::Document,
         });
     }
     Ok((
@@ -826,10 +879,186 @@ fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize
         rows.push(RowModel {
             label: SharedString::from(label),
             cells,
+            state: RowState::Document,
         });
     }
     Ok((columns, column_kinds, rows))
 }
+
+/// Apply the draft's row edits to the document's rows (spec §5.2): mark
+/// each `Deleted` row rather than removing it — it is still laid out,
+/// struck through, so a trader sees what is going — and splice each
+/// `Inserted` row in after its anchor. A row anchored on the top (`None`)
+/// leads; several under one anchor land in label order (the draft's
+/// `BTreeMap` order); a row anchored on another inserted row follows that
+/// one, so a row inserted below an inserted row sits where it was put;
+/// and an anchor naming no row at all — a document row that vanished
+/// before `rebase` re-anchored it, say — lands at the top rather than
+/// losing the row, since unsent work is never dropped in silence.
+///
+/// A document row's cells, and their `cell_ref`, are left exactly as
+/// `pivot`/`flatten` built them — the document's own positions, which
+/// `Draft::edits` is keyed by — so the splice moves rows and never
+/// re-keys an edit. An inserted row's cells come from `RowEdit.cells`
+/// alone, by column label, through [`inserted_cell`].
+///
+/// With no row edits this is the identity and allocates nothing.
+fn splice_rows(
+    rows: Vec<RowModel>,
+    draft: &Draft,
+    columns: &[SharedString],
+    column_kinds: &[CellKind],
+) -> Vec<RowModel> {
+    if draft.rows.is_empty() {
+        return rows;
+    }
+    // Every label the model will carry — the document's rows and the
+    // draft's inserted ones — so an anchor can be checked against the
+    // whole set; then the inserted rows grouped by anchor (the top's own
+    // group apart), each group in label order (the draft's own `BTreeMap`
+    // order), and each row's cells by label for the fill below.
+    let known: HashSet<&str> = rows
+        .iter()
+        .map(|r| r.label.as_ref())
+        .chain(draft.rows.keys().map(String::as_str))
+        .collect();
+    let mut top: Vec<&str> = Vec::new();
+    let mut splicer = Splicer {
+        followers: HashMap::new(),
+        stack: Vec::new(),
+        cells_of: HashMap::new(),
+        columns,
+        column_kinds,
+        draft,
+    };
+    for (label, edit) in &draft.rows {
+        if let RowEdit::Inserted { after, cells } = edit {
+            match after.as_deref() {
+                Some(a) if known.contains(a) => {
+                    splicer.followers.entry(a).or_default().push(label);
+                }
+                _ => top.push(label),
+            }
+            splicer.cells_of.insert(label, cells);
+        }
+    }
+
+    let mut out: Vec<RowModel> = Vec::with_capacity(rows.len() + splicer.cells_of.len());
+    splicer.emit(top, &mut out);
+    for mut row in rows {
+        if matches!(draft.rows.get(row.label.as_ref()), Some(RowEdit::Deleted)) {
+            row.state = RowState::Deleted;
+        }
+        let group = splicer.followers.remove(row.label.as_ref());
+        out.push(row);
+        if let Some(group) = group {
+            splicer.emit(group, &mut out);
+        }
+    }
+    // An anchor that is an inserted row is reachable only through that
+    // row, so a cycle among inserted rows (a after b, b after a — nothing
+    // in this crate writes one, but a session file could) would leave
+    // both unplaced. Appended at the end, in label order, rather than
+    // lost: unsent work is never dropped in silence.
+    if !splicer.followers.is_empty() {
+        let mut rest: Vec<&str> = std::mem::take(&mut splicer.followers)
+            .into_values()
+            .flatten()
+            .collect();
+        rest.sort_unstable();
+        splicer.emit(rest, &mut out);
+    }
+    out
+}
+
+/// [`splice_rows`]'s working state: the inserted rows still waiting by
+/// anchor label, the depth-first worklist, each row's cells, and what a
+/// row's cells are built from. A struct rather than a closure so the
+/// document loop can pull a row's own group out of `followers` while the
+/// emitter is alive, which one closure borrowing both could not allow.
+struct Splicer<'a> {
+    followers: HashMap<&'a str, Vec<&'a str>>,
+    stack: Vec<&'a str>,
+    cells_of: HashMap<&'a str, &'a BTreeMap<String, Value>>,
+    columns: &'a [SharedString],
+    column_kinds: &'a [CellKind],
+    draft: &'a Draft,
+}
+
+impl<'a> Splicer<'a> {
+    /// Emit `group` and, depth first, every row anchored on each of them:
+    /// a row's own followers go on TOP of the stack, so a chain hangs off
+    /// its anchor ahead of the anchor's next sibling. A worklist rather
+    /// than recursion, so a long chain costs no stack frames. A row is
+    /// removed from `followers` as it is placed, so nothing is emitted
+    /// twice.
+    fn emit(&mut self, group: Vec<&'a str>, out: &mut Vec<RowModel>) {
+        self.stack.extend(group.into_iter().rev());
+        while let Some(label) = self.stack.pop() {
+            let at = out.len();
+            out.push(inserted_row(
+                label,
+                self.cells_of[label],
+                at,
+                self.columns,
+                self.column_kinds,
+                self.draft,
+            ));
+            if let Some(next) = self.followers.remove(label) {
+                self.stack.extend(next.into_iter().rev());
+            }
+        }
+    }
+}
+/// One inserted row at model position `at`: a cell per column, each from
+/// the row's own `cells` by column label through [`inserted_cell`].
+fn inserted_row(
+    label: &str,
+    cells: &BTreeMap<String, Value>,
+    at: usize,
+    columns: &[SharedString],
+    column_kinds: &[CellKind],
+    draft: &Draft,
+) -> RowModel {
+    RowModel {
+        label: SharedString::from(label.to_string()),
+        cells: columns
+            .iter()
+            .zip(column_kinds)
+            .enumerate()
+            .map(|(ci, (column, kind))| {
+                inserted_cell(cells.get(column.as_ref()), (at, ci), kind, draft)
+            })
+            .collect(),
+        state: RowState::Inserted,
+    }
+}
+
+/// One cell of an inserted row (spec §5.2): the draft's own value for
+/// this column, formatted through `kind` exactly as a document cell's
+/// edit is, or `·` where the trader has not filled it yet — never empty,
+/// which is a document's NULL (§6.3), and never a zero. Every cell of an
+/// inserted row is `edited`: the whole row is unsent work.
+fn inserted_cell(
+    value: Option<&Value>,
+    cell_ref: (usize, usize),
+    kind: &CellKind,
+    draft: &Draft,
+) -> Cell {
+    Cell {
+        text: value.map_or_else(
+            || SharedString::new_static(UNFILLED),
+            |v| SharedString::from(cell_text(v, kind)),
+        ),
+        value: value.cloned(),
+        edited: true,
+        sent: draft.is_sent(),
+        cell_ref,
+    }
+}
+
+/// What an inserted row's unfilled cell paints.
+pub const UNFILLED: &str = "·";
 
 /// One cell: the draft's value where there is an edit, `value` (already
 /// read off the document, per the caller's own rule — `f64_at` for a
@@ -1859,6 +2088,208 @@ mod tests {
         assert_eq!(patched.rows[1].cells[5].text.as_ref(), "0.6000");
         assert_eq!(patched.rows[0].cells[0].text.as_ref(), "4512.30");
         assert!(!patched.patch_cell(2, 0, &snapshot, &CVI, &draft));
+    }
+
+    /// §5.2: an `Inserted` row is spliced after its anchor (the top for
+    /// `None`), several under one anchor in label order; a `Deleted` row
+    /// stays in the grid, marked; an inserted row's cells come from the
+    /// draft's own `RowEdit.cells` by column label, an unfilled one
+    /// painting `·`; and the incomplete count is per row, not per cell.
+    #[test]
+    fn inserted_rows_splice_after_their_anchor_and_deleted_rows_stay_marked() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+            ("D3", "2027-06-18", 0.75, "estimated"),
+        ]);
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-2".into(), None, "t0");
+        d.set_row_cell("new-1", "amount", Value::F64(2.0));
+        d.delete_row("D3", "t0");
+        let m = MatrixModel::build(&snapshot, &SCHEDULE, &d).unwrap();
+        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        assert_eq!(labels, ["new-2", "D1", "new-1", "D2", "D3"]);
+        assert_eq!(m.rows[0].state, RowState::Inserted);
+        assert_eq!(m.rows[1].state, RowState::Document);
+        assert_eq!(m.rows[2].state, RowState::Inserted);
+        assert_eq!(m.rows[2].cells[1].text.as_ref(), "2.0000");
+        assert_eq!(m.rows[2].cells[1].value, Some(Value::F64(2.0)));
+        assert!(m.rows[2].cells[1].edited);
+        assert_eq!(
+            m.rows[2].cells[0].text.as_ref(),
+            "·",
+            "an unfilled cell paints a dot"
+        );
+        assert_eq!(m.rows[2].cells[0].value, None);
+        assert!(m.rows[2].cells[0].edited);
+        assert_eq!(m.rows[4].state, RowState::Deleted);
+        assert_eq!(
+            m.rows[4].cells[1].text.as_ref(),
+            "0.7500",
+            "a deleted row still paints the document's own cells"
+        );
+        assert_eq!(
+            d.incomplete_rows(&SCHEDULE, &m.columns),
+            2,
+            "new-1 lacks ex and status; new-2 lacks all three"
+        );
+        // An inserted row's cell_ref is its MODEL position (there is no
+        // document position for it); a document row keeps the document's
+        // own, which is what `Draft::edits` is keyed by — so D2, now at
+        // model row 3, still says it is document row 1.
+        assert_eq!(m.rows[2].cells[1].cell_ref, (2, 1));
+        assert_eq!(m.rows[3].cells[0].cell_ref, (1, 0));
+    }
+
+    /// Several rows under one anchor land in label order; a row anchored
+    /// on an inserted row follows it; an anchor that names no row at all
+    /// lands at the top rather than losing the row.
+    #[test]
+    fn inserted_rows_chain_and_an_unknown_anchor_lands_at_the_top() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ]);
+        let mut d = Draft::default();
+        d.insert_row("new-3".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-2".into(), Some("new-3".into()), "t0");
+        d.insert_row("new-4".into(), Some("gone".into()), "t0");
+        let m = MatrixModel::build(&snapshot, &SCHEDULE, &d).unwrap();
+        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        assert_eq!(labels, ["new-4", "D1", "new-1", "new-3", "new-2", "D2"]);
+        for (i, row) in m.rows.iter().enumerate() {
+            if row.state == RowState::Inserted {
+                for (j, cell) in row.cells.iter().enumerate() {
+                    assert_eq!(cell.cell_ref, (i, j));
+                }
+            }
+        }
+    }
+
+    /// A pivot's inserted row is incomplete until EVERY column — the
+    /// ladder and the slice values alike — is filled: a CVI term with a
+    /// node missing is not a term the desk can price.
+    #[test]
+    fn a_pivot_inserted_row_is_incomplete_until_every_cell_is_filled() {
+        let snapshot = full_grid();
+        let mut d = Draft::default();
+        d.insert_row("2027-01-15".into(), Some("2026-11-20".into()), BASE);
+        let m = MatrixModel::build(&snapshot, &CVI, &d).unwrap();
+        let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
+        assert_eq!(labels, ["2026-10-16", "2026-11-20", "2027-01-15"]);
+        assert_eq!(m.rows[2].state, RowState::Inserted);
+        assert_eq!(
+            m.rows[2].cells.len(),
+            6,
+            "three slice values and three nodes"
+        );
+        assert!(m.rows[2].cells.iter().all(|c| c.text.as_ref() == "·"));
+        assert_eq!(d.incomplete_rows(&CVI, &m.columns), 1);
+        for node in ["-20", "-1", "3.5"] {
+            d.set_row_cell("2027-01-15", node, Value::F64(0.2));
+        }
+        assert_eq!(
+            d.incomplete_rows(&CVI, &m.columns),
+            1,
+            "the ladder is filled but the slice values are not"
+        );
+        for slice in ["fwd", "atm", "skew"] {
+            d.set_row_cell("2027-01-15", slice, Value::F64(1.0));
+        }
+        assert_eq!(d.incomplete_rows(&CVI, &m.columns), 0);
+        let m = MatrixModel::build(&snapshot, &CVI, &d).unwrap();
+        assert_eq!(
+            m.rows[2].cells[0].text.as_ref(),
+            "1.00",
+            "fwd at its own format"
+        );
+        assert_eq!(
+            m.rows[2].cells[3].text.as_ref(),
+            "0.2000",
+            "a node at the panel's"
+        );
+    }
+
+    /// Under `Columns::Values` only the `required` columns count: a row
+    /// missing an optional column is complete.
+    #[test]
+    fn a_flat_inserted_row_is_complete_once_its_required_columns_are_filled() {
+        let spec = PanelSpec {
+            columns: Columns::Values(&[
+                ValueColumn {
+                    column: "gross",
+                    label: "gross",
+                    ty: ColumnType::F64,
+                    format: ColumnFormat::MEASURE,
+                    choices: None,
+                    required: true,
+                },
+                ValueColumn {
+                    column: "net",
+                    label: "net",
+                    ty: ColumnType::F64,
+                    format: ColumnFormat::MEASURE,
+                    choices: None,
+                    required: false,
+                },
+            ]),
+            ..FLAT_SPEC.clone()
+        };
+        let m = MatrixModel::build(&flat_snapshot(), &spec, &Draft::default()).unwrap();
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), None, BASE);
+        assert_eq!(d.incomplete_rows(&spec, &m.columns), 1);
+        d.set_row_cell("new-1", "gross", Value::F64(1.0));
+        assert_eq!(d.incomplete_rows(&spec, &m.columns), 0, "net is optional");
+        assert_eq!(
+            Draft::default().incomplete_rows(&spec, &m.columns),
+            0,
+            "no inserted rows, nothing incomplete"
+        );
+    }
+
+    /// §4.5 with rows spliced in: a patch on an inserted row re-reads its
+    /// cell from `RowEdit.cells`, a patch on a document row shifted below
+    /// an insert still reads the DOCUMENT's row (the edit stays on D2, not
+    /// on the row now sitting at its old index), and both match a rebuild.
+    #[test]
+    fn patch_cell_matches_a_rebuild_with_rows_spliced() {
+        let snapshot = schedule_snapshot(&[
+            ("D1", "2026-12-18", 1.25, "declared"),
+            ("D2", "2027-03-19", 0.5, "estimated"),
+        ]);
+        let mut draft = Draft::default();
+        draft.insert_row("new-1".into(), None, "t0");
+        let mut patched = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(patched.rows[2].label.as_ref(), "D2");
+        // D2 is model row 2 but document row 1 — its cell_ref says so, and
+        // that is the key its edit lives under.
+        let d2_ref = patched.rows[2].cells[1].cell_ref;
+        assert_eq!(d2_ref, (1, 1));
+        draft.set(
+            d2_ref,
+            ("D2".into(), "amount".into()),
+            Value::F64(0.75),
+            "t0",
+        );
+        draft.set_row_cell("new-1", "amount", Value::F64(3.0));
+        assert!(patched.patch_cell(2, 1, &snapshot, &SCHEDULE, &draft));
+        assert!(patched.patch_cell(0, 1, &snapshot, &SCHEDULE, &draft));
+        let rebuilt = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
+        assert_eq!(patched, rebuilt);
+        assert_eq!(patched.rows[2].cells[1].text.as_ref(), "0.7500");
+        assert_eq!(patched.rows[0].cells[1].text.as_ref(), "3.0000");
+        assert_eq!(
+            patched.rows[1].cells[1].text.as_ref(),
+            "1.2500",
+            "D1, at the inserted row's old index, is untouched"
+        );
+        // An inserted row the draft no longer holds cannot be patched:
+        // the caller rebuilds.
+        draft.delete_row("new-1", "t0");
+        assert!(!patched.patch_cell(0, 1, &snapshot, &SCHEDULE, &draft));
     }
 
     proptest! {

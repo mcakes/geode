@@ -12,8 +12,10 @@
 //! the draft goes `Behind` rather than being clobbered (roadmap ruling 9).
 
 use crate::core::matrix::MatrixModel;
+use crate::core::spec::{Columns, PanelSpec};
 use geode_core::document::Value;
 use geode_core::schema::ColumnType;
+use gpui::SharedString;
 use std::collections::{BTreeMap, HashMap};
 
 /// Where the draft stands against the document on screen.
@@ -383,6 +385,32 @@ impl Draft {
             .count()
     }
 
+    /// How many inserted rows still lack a required cell (spec §5.2) —
+    /// the header's `N rows incomplete`, and what Part 4's upload will
+    /// refuse on. Under `Columns::Values` a cell is required when its
+    /// [`ValueColumn::required`](crate::core::spec::ValueColumn) says so;
+    /// under `Columns::Axis` EVERY column is — the ladder and the slice
+    /// values alike, since a term with a node missing is not a term the
+    /// desk can price. `columns` is the model's own column labels, the
+    /// ladder being the document's and not the spec's to know; a flat
+    /// spec's required labels are checked against it too, so a column
+    /// the spec requires but the model does not carry never counts.
+    pub fn incomplete_rows(&self, spec: &PanelSpec, columns: &[SharedString]) -> usize {
+        let required = |label: &str| match &spec.columns {
+            Columns::Axis(_) => true,
+            Columns::Values(cols) => cols.iter().any(|c| c.label == label && c.required),
+        };
+        self.rows
+            .values()
+            .filter(|e| match e {
+                RowEdit::Inserted { cells, .. } => columns
+                    .iter()
+                    .any(|c| required(c.as_ref()) && !cells.contains_key(c.as_ref())),
+                RowEdit::Deleted => false,
+            })
+            .count()
+    }
+
     /// The smallest `new-<n>` (`n` starting at 1) that `taken` (the
     /// model's own rows, or whatever else a caller wants to avoid) does
     /// not name and that is not CURRENTLY a key of this draft's own
@@ -506,6 +534,15 @@ impl Draft {
     /// rather than by index is the whole point: a term that moved from row
     /// 3 to row 2 is the same term, and an edit left at index 3 would be
     /// silently reassigned to a different expiry.
+    ///
+    /// `model_of_newer` must be the DOCUMENT's own grid — built with
+    /// `Draft::default()`, never with this draft. A model built with the
+    /// draft carries its inserted rows spliced in (§5.2), so every one of
+    /// them would read here as a row the document now carries and be
+    /// dropped as a conflict, and a document row below an insert would
+    /// resolve to its painted position rather than the document position
+    /// `edits` is keyed by. Every caller in the tile builds a clean model
+    /// for this.
     pub fn rebase(&mut self, model_of_newer: &MatrixModel) -> (usize, Vec<(String, String)>) {
         // The two axes are indexed separately — O(R + C), not the R × C
         // every cell pair would cost, which at a 10,000-row schedule is
@@ -966,7 +1003,7 @@ pub fn attr_text(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::matrix::{Cell, HeaderCell, MatrixModel, RowModel};
+    use crate::core::matrix::{Cell, HeaderCell, MatrixModel, RowModel, RowState};
     use chrono::NaiveDate;
     use geode_core::document::Value;
     use geode_core::schema::ColumnType;
@@ -996,6 +1033,7 @@ mod tests {
                 .map(|label| RowModel {
                     label: SharedString::from(*label),
                     cells: Vec::new(),
+                    state: RowState::Document,
                 })
                 .collect(),
             ..MatrixModel::default()
@@ -1053,6 +1091,7 @@ mod tests {
                             cell_ref: (r, c),
                         })
                         .collect(),
+                    state: RowState::Document,
                 })
                 .collect(),
             pivot_index: None,
