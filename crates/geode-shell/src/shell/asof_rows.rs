@@ -6,7 +6,7 @@
 //! never matched), section order kept and rank order inside a section.
 //! No `gpui`: every transition is unit-tested here; `asof_view` paints.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 
 use geode_core::clock::{Clock, Preset, presets};
 use geode_core::query::AsOf;
@@ -306,16 +306,25 @@ impl AsOfState {
     }
 
     /// `tab`: open the Custom field seeded from the highlighted row's
-    /// instant, else the pinned instant, else `now`; on the day segment;
-    /// and move the highlight onto the Custom row. The query is cleared
-    /// so the Custom row is always painted while the field is open.
+    /// instant, else the pinned instant, else `now`, truncated to the
+    /// second; on the day segment; and move the highlight onto the
+    /// Custom row. The query is cleared so the Custom row is always
+    /// painted while the field is open.
     pub fn open_field(&mut self) {
         let seed = self
             .ranked
             .get(self.highlighted)
             .and_then(|p| self.instant_of(&p.row))
             .or(self.pinned)
-            .unwrap_or(self.now);
+            .unwrap_or(self.now)
+            // Final whole-branch review, finding M-3: the field has no
+            // sub-second segment (`Segment::ALL` stops at `Second`), so a
+            // seed carrying nanoseconds (typically `now`) kept them dead
+            // in `self.value` where nothing ever showed or cleared
+            // them — a bare `tab` then `enter` with no segment touched
+            // would silently commit `HH:MM:SS.<whatever now's ns were>`.
+            .with_nanosecond(0)
+            .expect("0 is always a valid nanosecond value");
         let local = self.clock.local(seed).naive_local();
         self.field = Some(DateTimeField::open(
             local,
@@ -582,6 +591,25 @@ mod tests {
             "no instant on the row: now"
         );
         assert_eq!(s.field().unwrap().segment(), Segment::Day);
+
+        // Final whole-branch review, finding M-3: the field has no
+        // sub-second segment (`Segment::ALL` stops at `Second`), so a
+        // nanosecond-bearing seed — `now` itself, most likely, since
+        // nothing else in this state carries one — must be truncated to
+        // the second before it ever reaches the field's value, or a
+        // bare `tab` then `enter` with no segment touched would silently
+        // commit `HH:MM:SS.<whatever now's nanoseconds were>`.
+        let now_with_ns = now()
+            .with_nanosecond(123_456_789)
+            .expect("a valid nanosecond value");
+        let mut s = AsOfState::build(&AsOf::Live, &[], Clock::utc(), now_with_ns);
+        s.set_query("custom");
+        s.open_field();
+        assert_eq!(
+            s.field().unwrap().value().nanosecond(),
+            0,
+            "the seed must be truncated to the second"
+        );
     }
 
     #[test]

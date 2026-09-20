@@ -1793,6 +1793,16 @@ impl ShellView {
             let publishes: Vec<_> = frame.read(cx).recent_publishes().iter().cloned().collect();
             if let Some(state) = self.as_of_dialog.as_mut() {
                 state.refresh(&as_of, &publishes, chrono::Utc::now());
+                // Final whole-branch review, finding M-10: the same
+                // scroll-follow every other seam that moves the
+                // highlight already owns (`input.rs`'s query-change arm,
+                // `handle_key`'s `tab` and nav arms) — a publish landing
+                // below the fold must not leave the restored highlight
+                // (`refresh`'s identity match) off-screen.
+                self.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+                    state.painted(),
+                    state.highlighted(),
+                ));
             }
         }
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())

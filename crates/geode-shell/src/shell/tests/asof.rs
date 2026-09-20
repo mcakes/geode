@@ -531,6 +531,89 @@ fn a_publish_while_open_adds_a_new_row(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// Final whole-branch review, finding M-10: `refresh`'s identity restore
+/// (review round 2 re-review, finding 3) can land the SAME highlighted
+/// row at a very different painted index — new, newer publishes rank
+/// ABOVE it — so the scroll must follow it there the same way the other
+/// three seams that move the highlight already do (`input.rs`'s
+/// query-change arm, `handle_key`'s `tab` and nav arms), or a trader
+/// scrolled down to a publish loses sight of it the moment a fresher one
+/// lands.
+#[gpui::test]
+fn a_publish_below_the_fold_scrolls_the_highlight_into_view(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let newest = chrono::Utc::now();
+    // 20 publishes, oldest last — well under the 32-deep cap
+    // (`recent_publishes_keep_the_last_thirty_two_newest_first`), so
+    // none of them are evicted by the 10 fresher ones landed below.
+    frame.update(&mut vcx, |f, _| {
+        for i in 0..20 {
+            f.note_published(Publish {
+                dataset: "risk".into(),
+                batch: "EOD".into(),
+                books: 1,
+                at: newest - chrono::Duration::seconds(i as i64),
+            });
+        }
+    });
+    vcx.simulate_keystrokes("alt-t");
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+    // Scroll all the way down, the same 15×ctrl-d clamp the sibling
+    // scroll-follow test uses, landing the highlight on one of the
+    // OLDEST publishes at the tail of the list.
+    vcx.simulate_keystrokes(&vec!["ctrl-d"; 15].join(" "));
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+    let before_offset = shell.read_with(&vcx, |s, _| s.as_of_scroll.offset());
+    let before_state = state_of(&shell, &vcx);
+    let highlighted_label = before_state.painted()[before_state.highlighted()]
+        .label
+        .clone();
+
+    // 10 MORE, NEWER publishes land while the dialog is open — ranking
+    // above every one of the first 20, so the previously highlighted
+    // row's identity survives `refresh` but its painted INDEX shifts
+    // ten rows further from the top without moving relative to the
+    // bottom of the (now longer) list.
+    frame.update(&mut vcx, |f, cx| {
+        for i in 0..10 {
+            f.note_published(Publish {
+                dataset: "risk".into(),
+                batch: "EOD".into(),
+                books: 1,
+                at: newest + chrono::Duration::seconds(i as i64 + 1),
+            });
+        }
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+    vcx.run_until_parked();
+
+    let after_state = state_of(&shell, &vcx);
+    assert_eq!(
+        after_state.painted()[after_state.highlighted()].label,
+        highlighted_label,
+        "sanity: refresh's identity restore kept the same row highlighted"
+    );
+    let after_offset = shell.read_with(&vcx, |s, _| s.as_of_scroll.offset());
+    assert_ne!(
+        after_offset, before_offset,
+        "the highlighted row's position shifted well below the fold — \
+         the scroll must follow it there, not stay where it was \
+         (before {before_offset:?}, after {after_offset:?})"
+    );
+}
+
 /// The dialog's own tests deleted `frame::live`/`frame::as_of_undo`'s one
 /// window test along with the free-text grammar it used to type through
 /// (Part 3's rewrite) — these two palette-only actions are otherwise
@@ -556,6 +639,104 @@ fn frame_live_and_as_of_undo_still_dispatch(cx: &mut gpui::TestAppContext) {
         });
     });
     assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), pinned);
+}
+
+/// Final whole-branch review, finding I-1: the Custom row's segment
+/// click callback now calls `dialog::sync_dialog_text` after selecting
+/// the segment, the same reconciliation seam every other `AsOfState`
+/// mutation goes through. Proves the click selects the right segment,
+/// the keyboard still reaches the field afterward, and the shared
+/// `Input` still holds window focus. NOTE: this does not reproduce a
+/// live regression — verified by deliberately reverting the fix and
+/// re-running this test, which stayed green, because `dialog::
+/// render_modal`'s panel already calls `cx.stop_propagation()` on every
+/// mouse-down anywhere inside an already-open modal, which blocks gpui's
+/// default track-focus grab (the "+" chip's mechanism, CLAUDE.md's
+/// `open_shell_dialog` precedent) before it can ever reach the shell
+/// root — that mechanism only bites the mouse-down that OPENS a dialog,
+/// before a modal panel exists to intercept it. The fix is still correct
+/// hygiene (every other mutation site in this file reconciles on its own
+/// seam; a segment select had none), so it stays; this test locks in the
+/// resulting behaviour rather than catching a regression that does not
+/// reproduce here.
+#[gpui::test]
+fn clicking_a_segment_selects_it_and_the_field_still_hears_the_keyboard(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) = open_as_of(cx);
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    let before = state_of(&shell, &vcx).field().unwrap().value();
+
+    let seg = vcx
+        .debug_bounds("as-of-custom-seg-1")
+        .expect("the month segment is painted");
+    vcx.simulate_mouse_down(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    assert_eq!(
+        state_of(&shell, &vcx).field().unwrap().segment(),
+        geode_widgets::datefield::Segment::Month,
+        "the click selected the month segment"
+    );
+
+    vcx.simulate_keystrokes("up");
+    let after = state_of(&shell, &vcx).field().unwrap().value();
+    assert_ne!(
+        after, before,
+        "the keyboard must still reach the field after the click stepped \
+         the month, not have gone deaf behind a stolen focus"
+    );
+
+    let input_focus = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).focus_handle(cx));
+    assert!(
+        vcx.update(|window, _cx| input_focus.is_focused(window)),
+        "the shared Input must still hold window focus after the click"
+    );
+}
+
+/// Final whole-branch review, finding I-1's second half: the
+/// `sync_dialog_text` hoist out of the `field().is_none()` arm — a body
+/// click on the Custom row while its field is ALREADY open resyncs too,
+/// not just the click that opens it. Same note as the segment-click test
+/// above: this does not reproduce a live regression in this codebase
+/// (the modal panel's own `stop_propagation()` already prevents a click
+/// anywhere inside it from stealing window focus, verified by reverting
+/// the hoist and re-running this test, which stayed green) — kept for
+/// the same "every mutation seam reconciles the same way" consistency,
+/// not because a bug reproduces without it.
+#[gpui::test]
+fn clicking_the_custom_rows_body_while_open_keeps_the_field_focused(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_as_of(cx);
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    let custom_row = state_of(&shell, &vcx)
+        .painted()
+        .iter()
+        .position(|p| matches!(p.row, crate::shell::asof_rows::Row::Custom))
+        .expect("the custom row is painted");
+    let row_selector: &'static str = Box::leak(format!("as-of-row-{custom_row}").into_boxed_str());
+    let row = vcx
+        .debug_bounds(row_selector)
+        .expect("the custom row is painted");
+    // Land the click on the row's body, not a segment — the far right,
+    // past where the segments themselves paint.
+    let body = gpui::Point::new(row.right() - gpui::px(4.), row.center().y);
+    vcx.simulate_mouse_down(body, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        state_of(&shell, &vcx).field().is_some(),
+        "the field stays open"
+    );
+
+    let input_focus = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).focus_handle(cx));
+    assert!(
+        vcx.update(|window, _cx| input_focus.is_focused(window)),
+        "a body click on an already-open Custom row must resync focus too"
+    );
 }
 
 /// Toolbar restyle (2026-09-19, option A): the AS OF chip leads the bar

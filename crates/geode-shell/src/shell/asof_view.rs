@@ -11,7 +11,7 @@
 //! opens the Custom field (and leaves it); while the field is open every
 //! bare key goes through `geode_widgets::datefield::route` — `enter`
 //! commits the field's value, `escape` closes the field, a chord is not
-//! the field's and falls through to the shell. A second `escape` closes
+//! the field's (a modal owns the keyboard). A second `escape` closes
 //! the dialog through `handle_key_down`'s own modal branch.
 
 use std::rc::Rc;
@@ -119,9 +119,14 @@ fn apply_commit(
 /// key-path seam `handle_key_down` already runs unconditionally after
 /// the modal's own key handler (`input.rs`), so a query the field's own
 /// mutations clear (`open_field`) or set (`set_query`) always reaches
-/// the shared `Input` back, and the `enter` arm's own re-feed below is
-/// the no-op compare it was meant to be rather than papering over a
-/// stale field.
+/// the shared `Input` back. Final whole-branch review, finding M-8: the
+/// `enter` arm USED to re-feed that same live text into `set_query`
+/// before trusting the highlight, which is what made this guarantee true
+/// in the first place — now that the guarantee holds on every return
+/// from this handler (not just this one arm), the re-feed is gone and a
+/// `debug_assert_eq!` stands in its place instead, since re-feeding on
+/// divergence would be actively wrong (`set_query` re-ranks and resets
+/// the highlight to 0).
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -181,9 +186,23 @@ fn handle_key(
                 let Some(state) = shell.as_of_dialog.as_mut() else {
                     return false;
                 };
-                // `set_value` emits no `Change`: re-feed the live text
-                // before trusting the highlight (the choice dialogs' rule).
-                state.set_query(&live);
+                // The re-feed this used to do here (`state.set_query(
+                // &live)`) is now redundant: `sync_dialog_text`'s as-of
+                // arm (this function's own doc comment) keeps the shared
+                // `Input` and `AsOfState::query` equal on every return
+                // from this handler, so by the time a later keystroke
+                // reaches here the two can never have diverged. Final
+                // whole-branch review, finding M-8: re-feeding anyway
+                // would be worse than redundant if they ever DID diverge
+                // — `set_query` re-ranks and resets the highlight to 0
+                // (review round 2's Critical all over again), silently
+                // committing row 0 instead of whatever the trader is
+                // actually looking at. The assert is the tripwire.
+                debug_assert_eq!(
+                    state.query(),
+                    live.as_str(),
+                    "the sync arm keeps the field and the model equal"
+                );
                 match state.commit() {
                     Ok(commit) => apply_commit(shell, commit, window, cx),
                     Err(_) => cx.notify(),
@@ -309,6 +328,7 @@ fn build(
             if let Some(eyebrow) = row.section.eyebrow() {
                 list = list.child(
                     div()
+                        .flex_shrink_0()
                         .px_2()
                         .pt_2()
                         .pb_0p5()
@@ -322,7 +342,7 @@ fn build(
         let is_highlighted = position == state.highlighted();
         let mut el = h_flex()
             .w_full()
-            .h(scale::design(28.))
+            .h(scale::design(ROW_HEIGHT))
             .flex_shrink_0()
             .px_2()
             .items_center()
@@ -353,13 +373,33 @@ fn build(
                         Some(suffix),
                         segment_paint,
                         "as-of-custom-seg".into(),
-                        move |segment, _window, cx| {
+                        move |segment, window, cx| {
                             seg_entity.update(cx, |shell, cx| {
                                 if let Some(f) =
                                     shell.as_of_dialog.as_mut().and_then(|s| s.field_mut())
                                 {
                                     f.select(segment);
                                 }
+                                // Final whole-branch review, finding I-1:
+                                // every OTHER seam that mutates `AsOfState`
+                                // reconciles the shared `Input` through
+                                // this same call (this function's own doc
+                                // comment names the key-path seam; the
+                                // row-click arm below already did it on
+                                // its own opening click) — a segment
+                                // select had no seam of its own. Belt and
+                                // braces today (`render_modal`'s panel
+                                // already stops this mouse-down's
+                                // propagation before it could reach the
+                                // shell root's own default focus grab —
+                                // verified empirically, not assumed — so
+                                // nothing observable currently regresses
+                                // without this call), but the one thing
+                                // every mutation of the field is supposed
+                                // to do unconditionally, and cheap enough
+                                // that skipping it here was the outlier,
+                                // not a deliberate exception.
+                                dialog::sync_dialog_text(shell, window, cx);
                                 cx.notify();
                             });
                         },
@@ -402,15 +442,24 @@ fn build(
                 if is_custom {
                     // A click on the Custom row's body (not a segment —
                     // the painter stops propagation there) opens the
-                    // field, like `tab`.
+                    // field, like `tab`. `sync_dialog_text` is hoisted
+                    // OUT of the `field().is_none()` arm (final
+                    // whole-branch review, finding I-1): every arm that
+                    // mutates `AsOfState` reconciles the shared `Input`
+                    // through this call, and a body click on an
+                    // ALREADY-open Custom row is exactly such a mutation
+                    // (it still runs `set_highlighted`-equivalent work
+                    // via the highlight move to the Custom row on open,
+                    // and is symmetric with the segment click beside it),
+                    // so it belongs here whether or not THIS particular
+                    // click is the one that opened the field, the same
+                    // "every seam, not just the ones that happened to
+                    // need it" reasoning the segment click's own call
+                    // just above follows.
                     if state.field().is_none() {
                         state.open_field();
-                        // `open_field` clears the query — the row-click
-                        // seam of `sync_dialog_text`'s five seam classes
-                        // (review round 2, finding 1), same as `tab`'s
-                        // own key-path seam.
-                        dialog::sync_dialog_text(shell, window, cx);
                     }
+                    dialog::sync_dialog_text(shell, window, cx);
                     cx.notify();
                     return;
                 }

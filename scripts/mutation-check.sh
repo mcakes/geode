@@ -13876,6 +13876,58 @@ run_mutation "asof: refresh identity includes the right column" \
   geode-shell \
   refresh_identity_includes_right_so_same_labelled_publishes_dont_hop
 
+# Final whole-branch review, finding M-3: the field has no sub-second
+# segment, so a seed carrying nanoseconds (`now`, typically) must be
+# truncated to the second before it reaches the field's value — else a
+# bare `tab` then `enter` with no segment touched silently commits
+# `HH:MM:SS.<whatever now's nanoseconds happened to be>`.
+run_mutation "asof: the custom field's seed is truncated to the second" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '            .with_nanosecond(0)
+            .expect("0 is always a valid nanosecond value");' \
+  '            ;' \
+  geode-shell \
+  tab_seeds_the_field_from_the_highlighted_row_or_the_pin_or_now
+
+# Final whole-branch review, finding M-8: the `enter` arm's redundant
+# re-feed of the shared Input's text was removed (`sync_dialog_text`
+# already keeps `AsOfState::query` and the field equal on every return
+# from this handler) and replaced with a `debug_assert_eq!` tripwire —
+# this entry defends the surviving behaviour the removed re-feed used to
+# incidentally guarantee: `enter` still commits whatever row is actually
+# highlighted.
+run_mutation "asof: enter commits the state's own highlighted row" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '                match state.commit() {
+                    Ok(commit) => apply_commit(shell, commit, window, cx),
+                    Err(_) => cx.notify(),
+                }
+                return true;
+            }
+            "tab" => {' \
+  '                let _ = state.commit();
+                cx.notify();
+                return true;
+            }
+            "tab" => {' \
+  geode-shell \
+  tab_then_escape_then_down_then_enter_commits_the_highlighted_row
+
+# Final whole-branch review, finding M-10: a publish landing while the
+# dialog is open can shift the restored highlight (`refresh`'s identity
+# match) to a painted index well below the fold — the scroll must follow
+# it there, the same as the other three seams that move the highlight
+# (`input.rs`'s query-change arm, `handle_key`'s `tab` and nav arms).
+run_mutation "asof: a refreshed highlight scrolls into view too" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                self.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+                    state.painted(),
+                    state.highlighted(),
+                ));' \
+  '                let _ = &state;' \
+  geode-shell \
+  a_publish_below_the_fold_scrolls_the_highlight_into_view
+
 # Ingest progress (2026-09-19): `queued` is what still WAITS behind the
 # popped job. Counting the job itself (+1) would paint "1 queued" for a
 # lone file and never reach 0 while anything loads.
