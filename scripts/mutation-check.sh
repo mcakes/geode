@@ -9470,6 +9470,36 @@ run_mutation "cvi: write refuses a hole in the grid" \
   '        if false {' \
   geode-documents write_refuses_rows_that_are_not_a_full_grid
 
+# dividend: an upstream id beginning `new-` is refused on the way in
+# (design spec §5.3), because that prefix is reserved for a row a
+# trader's insert mints locally — accepting one silently would let a
+# fed id collide with a minted one, corrupting the draft's own
+# uniqueness invariant with no marker to show it.
+run_mutation "dividend: a new- id is refused" \
+  crates/geode-documents/src/dividend.rs \
+  '                                if trimmed.starts_with(MINTED_PREFIX) {' \
+  '                                if false {' \
+  geode-documents a_new_prefixed_id_is_refused
+
+# dividend: a `status` outside the closed four-word set is refused on
+# parse, not passed through as an uncategorised value the panel would
+# have nowhere honest to paint.
+run_mutation "dividend: an unknown status is refused" \
+  crates/geode-documents/src/dividend.rs \
+  '                                if !STATUSES.contains(&trimmed) {' \
+  '                                if false {' \
+  geode-documents an_unknown_status_is_refused_naming_it
+
+# dividend: `write` refuses to emit a status outside the closed set — the
+# document form has no way to spell one (an XSD enumeration would refuse
+# it on the wire), so writing it anyway would produce a document a
+# conformant reader could not parse back.
+run_mutation "dividend: write refuses an unknown status" \
+  crates/geode-documents/src/dividend.rs \
+  '    if let Some(bad) = statuses.iter().find(|s| !STATUSES.contains(&s.as_str())) {' \
+  '    if let Some(bad) = statuses.iter().find(|_s| false) {' \
+  geode-documents write_refuses_an_unknown_status
+
 # ---- sources.toml grows an adapter (market-data-documents plan, Task 5) ----
 
 # A subscribed source (`adapter != "csv_dir"`) with no `topics` is
