@@ -3894,20 +3894,41 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // draft's own live fields (`colours::definition_of`), not from the
     // saved `colours.toml`, so stepping the hue repaints it before any
     // write lands. `None` (no swatch) only if the draft somehow lacks a
-    // `hue` row, which `colours::fields` never produces.
+    // `hue` row, which `colours::fields` never produces. A colour that
+    // tints by sign paints a triad — negative, base, positive — since
+    // the tint is the thing the trader ticked the row to see.
     let name_child = match (state.domain, colours::definition_of(draft)) {
         (Domain::Colours, Some(def)) => {
             let anchors = colour_theme::anchors_from_theme(theme);
             let tokens = colour_theme::tokens_from_theme(theme);
-            let hsla = colour_theme::to_hsla(geode_core::colour::resolve(&def, &anchors, &tokens));
+            let variant = |sign: geode_core::colour::Sign| {
+                colour_theme::to_hsla(geode_core::colour::resolve_signed(
+                    &def, sign, &anchors, &tokens,
+                ))
+            };
+            let base = variant(geode_core::colour::Sign::Zero);
             h_flex()
                 .gap_2()
                 .items_center()
+                .when(def.tint_sign, |el| {
+                    el.child(dialog::swatch(
+                        variant(geode_core::colour::Sign::Negative),
+                        "objectdialog-swatch-header-negative".to_string(),
+                        cx,
+                    ))
+                })
                 .child(dialog::swatch(
-                    hsla,
+                    base,
                     "objectdialog-swatch-header".to_string(),
                     cx,
                 ))
+                .when(def.tint_sign, |el| {
+                    el.child(dialog::swatch(
+                        variant(geode_core::colour::Sign::Positive),
+                        "objectdialog-swatch-header-positive".to_string(),
+                        cx,
+                    ))
+                })
                 .child(div().text_lg().child(draft.name.clone()))
                 .into_any_element()
         }

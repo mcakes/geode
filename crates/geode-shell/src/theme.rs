@@ -810,6 +810,7 @@ font_size = \"large\"
 #[cfg(test)]
 mod gpui_tests {
     use super::*;
+    use geode_core::colour::Sign;
     use geode_core::config::{ConfigSources, LayerDoc};
     use gpui::TestAppContext;
     use gpui_component::ActiveTheme as _;
@@ -875,7 +876,7 @@ mod gpui_tests {
 
     /// 2c §7 fix round 2 (controller ruling, 2026-09-13): the exception
     /// list from fix round 1 is gone. [`geode_core::colour::resolve`]
-    /// itself now floors every `Definition::Hue` against the theme's
+    /// itself now floors every `Base::Hue` against the theme's
     /// own background (`readable_on`, spec §2.2/§7), so every bundled
     /// theme clears `READABLE_RATIO` at every generated hue, in both
     /// tones, with no exceptions — asserted here unconditionally, the
@@ -937,11 +938,8 @@ mod gpui_tests {
                 for step in 0..12 {
                     let hue = step as f32 * 30.0;
                     let raw = geode_core::colour::interpolate_hue(hue, tone, &anchors);
-                    let resolved = geode_core::colour::resolve(
-                        &geode_core::colour::Definition::Hue { degrees: hue, tone },
-                        &anchors,
-                        &tokens,
-                    );
+                    let def = geode_core::colour::Definition::hue(hue, tone);
+                    let resolved = geode_core::colour::resolve(&def, &anchors, &tokens);
                     if resolved != raw {
                         floored += 1;
                     }
@@ -952,9 +950,43 @@ mod gpui_tests {
                         entry.name,
                         step * 30
                     );
+                    // The two sign-tinted variants of the same hue are
+                    // generated colours too, under the same floor.
+                    for sign in [Sign::Negative, Sign::Positive] {
+                        let tinted = geode_core::colour::resolve_signed(
+                            &def.clone().tinted(),
+                            sign,
+                            &anchors,
+                            &tokens,
+                        );
+                        let ratio = geode_core::colour::contrast_ratio(tinted, tokens.background);
+                        assert!(
+                            ratio >= geode_core::colour::READABLE_RATIO,
+                            "{}: hue {} ({tone:?}) tinted {sign:?} reads {ratio:.2}:1 against the background",
+                            entry.name,
+                            step * 30
+                        );
+                    }
                 }
             }
             floor_counts.push((entry.name.to_string(), floored));
+            // A token's tinted variants: a base token is never floored
+            // (it is the theme author's own colour) but its rotation is
+            // ours, so every token on every theme must clear 3:1 once
+            // tinted — with no exception list.
+            for token in geode_core::colour::Token::ALL {
+                let def = geode_core::colour::Definition::token(token).tinted();
+                for sign in [Sign::Negative, Sign::Positive] {
+                    let tinted = geode_core::colour::resolve_signed(&def, sign, &anchors, &tokens);
+                    let ratio = geode_core::colour::contrast_ratio(tinted, tokens.background);
+                    assert!(
+                        ratio >= geode_core::colour::READABLE_RATIO,
+                        "{}: token {} tinted {sign:?} reads {ratio:.2}:1 against the background",
+                        entry.name,
+                        token.name()
+                    );
+                }
+            }
         }
         worst.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         eprintln!("smallest anchor arcs: {:?}", &worst[..worst.len().min(5)]);

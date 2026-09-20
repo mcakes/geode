@@ -6987,6 +6987,53 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
     assert!(written.contains("[delta]\nhue = 255"), "{written}");
 }
 
+/// Ticking `tint_sign` turns the edit header's swatch into a triad —
+/// the negative variant, the base, the positive variant — so the trader
+/// sees the tint before any write lands; unticked, the header paints
+/// the one swatch it always did and neither variant.
+#[gpui::test]
+fn ticking_tint_by_sign_paints_the_two_variant_swatches(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    cx.simulate_keystrokes("enter"); // delta
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-swatch-header").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-swatch-header-negative")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-swatch-header-positive")
+            .is_none()
+    );
+    cx.simulate_keystrokes("j j j space"); // hue, tone, token → tint_sign, tick
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        d.fields[3].kind,
+        objectdialog::FieldKind::Bool(true)
+    )));
+    let base = cx
+        .debug_bounds("objectdialog-swatch-header")
+        .expect("the base swatch stays");
+    let negative = cx
+        .debug_bounds("objectdialog-swatch-header-negative")
+        .expect("the negative variant is painted");
+    let positive = cx
+        .debug_bounds("objectdialog-swatch-header-positive")
+        .expect("the positive variant is painted");
+    assert!(
+        negative.origin.x < base.origin.x && base.origin.x < positive.origin.x,
+        "in sign order: − base +"
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    assert!(
+        written.contains("[delta]\nhue = 240\ntint_sign = true"),
+        "{written}"
+    );
+}
+
 /// A double-click on a value row is `i` (user ruling 2026-09-19,
 /// interaction-model spec §17 amendment): the first mouse-down selects
 /// the row exactly as a single click does, and the second — the one the
