@@ -300,7 +300,7 @@ impl Draft {
         if matches!(self.state, DraftState::Clean | DraftState::Sent) {
             self.state = DraftState::Editing;
         }
-        match self.rows.get(label) {
+        let result = match self.rows.get(label) {
             Some(RowEdit::Inserted { .. }) => {
                 self.rows.remove(label);
                 RowDelete::Dropped
@@ -310,7 +310,23 @@ impl Draft {
                 self.rows.insert(label.to_string(), RowEdit::Deleted);
                 RowDelete::Marked
             }
+        };
+        // Dropping the draft's only `Inserted` row (insert, then delete
+        // the same row right back, nothing else pending) can leave every
+        // map empty again — the invariant `revert` and `rebase`'s own
+        // tail both keep, `base` is `None` exactly when there is no
+        // unsent work, is not automatic here the way it is there: the
+        // base/state bump above runs unconditionally, ahead of knowing
+        // whether this call will end up removing the draft's only
+        // content. Left unchecked, an insert-then-undo leaves `state`
+        // `Editing` and `base` `Some` over an empty draft — `badge()`
+        // would say `Dirty` and a later `on_delivered` would push a
+        // draft with nothing in it into `Behind`.
+        if self.is_empty() {
+            self.base = None;
+            self.state = DraftState::Clean;
         }
+        result
     }
 
     /// Write one cell of an `Inserted` row, keyed by the column's own
@@ -367,11 +383,14 @@ impl Draft {
             .count()
     }
 
-    /// The smallest `new-<n>` (`n` starting at 1) that neither `taken`
-    /// (the model's own rows, or whatever else a caller wants to avoid)
-    /// nor this draft's own `rows` already names — so minting never
-    /// reuses a label within the draft even after the row it first named
-    /// is renamed or deleted, and never collides with what is on screen.
+    /// The smallest `new-<n>` (`n` starting at 1) that `taken` (the
+    /// model's own rows, or whatever else a caller wants to avoid) does
+    /// not name and that is not CURRENTLY a key of this draft's own
+    /// `rows` — so a mint never collides with a row already on screen or
+    /// already pending in this very draft. A number freed by renaming or
+    /// dropping the row that first took it CAN be re-minted: that is
+    /// harmless, since by then it is minting a fresh row with no history
+    /// of its own, not reusing one still live.
     pub fn mint_label(&self, taken: impl Fn(&str) -> bool) -> String {
         let mut n = 1usize;
         loop {
@@ -1610,6 +1629,27 @@ mod tests {
         assert_eq!(d.rows_added(), 0);
         assert_eq!(d.revert(), 1);
         assert!(d.rows.is_empty());
+    }
+
+    /// The review finding: `delete_row`'s base/state bump runs
+    /// unconditionally, ahead of the match, so dropping the draft's ONLY
+    /// `Inserted` row (insert, then delete it right back, nothing else
+    /// pending) must not leave `base`/`state` claiming unsent work that
+    /// no longer exists — the same invariant `revert` and `rebase`'s own
+    /// tail keep. Reachable in exactly two calls, with nothing else in
+    /// the draft.
+    #[test]
+    fn dropping_the_only_inserted_row_leaves_a_clean_draft() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), None, "t0");
+        assert_eq!(d.delete_row("new-1", "t0"), RowDelete::Dropped);
+        assert!(d.is_empty());
+        assert!(d.base.is_none());
+        assert_eq!(d.badge(), DraftBadge::Clean);
+        assert!(
+            !d.on_delivered("t9"),
+            "a clean draft with nothing pending never goes Behind"
+        );
     }
 
     #[test]

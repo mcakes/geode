@@ -12165,10 +12165,11 @@ run_mutation "mdheader: a session written with key still restores" \
 
 # ---- Panel header: one draft (spec 2026-09-14 §4) -----------------------
 
-# `is_empty` must answer for BOTH maps: mutated to `edits` alone, a draft
-# holding only an attribute edit (no cell touched at all) reads empty —
-# `set_key` would let a trader navigate away with unsent work uncounted,
-# and a restart would never think to serialise it.
+# `is_empty` must answer for all three maps: mutated to drop the `attrs`
+# conjunct (edits and rows alone), a draft holding only an attribute edit
+# (no cell or row touched at all) reads empty — `set_key` would let a
+# trader navigate away with unsent work uncounted, and a restart would
+# never think to serialise it.
 run_mutation "mddraft: an attribute edit counts in the draft" \
   crates/geode-marketdata/src/core/draft.rs \
   '    pub fn is_empty(&self) -> bool {
@@ -13675,6 +13676,28 @@ run_mutation "draft: mint_label never reuses a label" \
   '            if !taken(&candidate) && !self.rows.contains_key(&candidate) {' \
   '            if !taken(&candidate) {' \
   geode-marketdata mint_label_takes_the_smallest_unused_number
+
+# `delete_row`'s unconditional base/state bump (the same rule `set`
+# follows) runs ahead of knowing whether this call empties the draft.
+# Mutated away, dropping the draft's only `Inserted` row (insert, then
+# delete it right back) leaves `base` `Some` and `state` `Editing` over
+# an empty draft — `badge()` reads `Dirty` with nothing behind it, and a
+# later `on_delivered` pushes a draft with no content into `Behind`.
+run_mutation "draft: dropping the last row leaves the draft clean" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        if self.is_empty() {
+            self.base = None;
+            self.state = DraftState::Clean;
+        }
+        result
+    }' \
+  '        if false {
+            self.base = None;
+            self.state = DraftState::Clean;
+        }
+        result
+    }' \
+  geode-marketdata dropping_the_only_inserted_row_leaves_a_clean_draft
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
