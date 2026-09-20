@@ -2,6 +2,7 @@
 //! ladder (spec §5).
 
 pub mod coalesce;
+pub mod fetch;
 pub mod load;
 pub mod plan;
 pub mod runner;
@@ -9,7 +10,7 @@ pub mod scheduler;
 pub mod split;
 pub mod subscribe;
 
-pub use runner::{DocumentJob, IngestEvent, IngestHandle, IngestRunner, IngestSink};
+pub use runner::{DocumentJob, IngestEvent, IngestHandle, IngestRunner, IngestSink, SeriesJob};
 
 pub use load::{LoadError, LoadOutcome, LoadRequest, load_file};
 pub use plan::{WorkItem, WorkPlan, build_plan};

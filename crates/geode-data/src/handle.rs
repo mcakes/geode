@@ -5,7 +5,9 @@
 //! counted rather than waited on (§7.3 — backpressure never stalls the
 //! UI).
 
-use crate::service::{DataEvent, DataService, DataServiceConfig, EventSink, QueryParams};
+use crate::service::{
+    DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams,
+};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{
@@ -34,6 +36,16 @@ pub enum Request {
     /// (Phase 4b §4.5). Answered synchronously on the service thread,
     /// not through the query pool — see `DataService::catalog`.
     Catalog(CatalogParams),
+    /// The timeseries viewer's on-demand fetch (timeseries spec §5.3):
+    /// coverage is subtracted on the service thread and only the gaps
+    /// reach the source's fetch worker; the outcome is
+    /// `DataEvent::SeriesFetched`, keyed by the pair, never by `key`.
+    Fetch(FetchParams),
+    /// Ask a fetch source for its identities again; they land in the
+    /// next `CatalogSnapshot::identities`.
+    Identities {
+        source: String,
+    },
     Cancel {
         key: QueryKey,
     },
@@ -143,6 +155,24 @@ impl DataHandle {
     /// the sink as `DataEvent::Catalog`, keyed and tagged as asked.
     pub fn catalog(&self, params: CatalogParams) -> bool {
         self.send(Request::Catalog(params))
+    }
+
+    /// Queue an on-demand fetch (timeseries spec §5.3). `false` means it
+    /// was not queued; the outcome, when it comes, arrives on the sink as
+    /// `DataEvent::SeriesFetched` — keyed by the `(identity, source)`
+    /// pair, not by `params.key`, so every tile watching that pair hears
+    /// the one answer.
+    pub fn fetch(&self, params: FetchParams) -> bool {
+        self.send(Request::Fetch(params))
+    }
+
+    /// Ask a fetch source for its identities again (timeseries spec
+    /// §5.5). `false` means the request was not queued; the answer lands
+    /// in the next `CatalogSnapshot::identities`.
+    pub fn identities(&self, source: impl Into<String>) -> bool {
+        self.send(Request::Identities {
+            source: source.into(),
+        })
     }
 
     /// The safe hot-reload path for views (foundation §8). Diagnostics
@@ -275,6 +305,12 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
             Request::Catalog(params) => {
                 sink(DataEvent::Catalog(service.catalog(&params)));
             }
+            Request::Fetch(params) => service.fetch(&params),
+            Request::Identities { source } => {
+                if !service.identities(&source) {
+                    tracing::warn!(target: "geode::ingest", "identities request for '{source}' refused");
+                }
+            }
             Request::Cancel { key } => service.cancel(key),
             Request::ReplaceViews { views, dimensions } => {
                 let diags = service.replace_views(views, dimensions);
@@ -366,6 +402,21 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn fetch_and_identities_are_queued_as_requests() {
+        let (handle, rx) = DataHandle::for_tests();
+        assert!(handle.fetch(FetchParams {
+            key: QueryKey(3),
+            source: "k".into(),
+            identity: "SPX".into(),
+            from: chrono::Utc::now(),
+            to: chrono::Utc::now(),
+        }));
+        assert!(handle.identities("k"));
+        assert!(matches!(rx.recv().unwrap(), Request::Fetch(p) if p.identity == "SPX"));
+        assert!(matches!(rx.recv().unwrap(), Request::Identities { source } if source == "k"));
     }
 
     #[test]

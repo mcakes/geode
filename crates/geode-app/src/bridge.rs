@@ -9,6 +9,7 @@ use geode_core::config::{Config, Diagnostic, load_views};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
+use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
 use geode_data::documents::DocumentRegistry;
@@ -205,11 +206,13 @@ pub struct Bridge {
     events: async_channel::Receiver<DataEvent>,
     dropped: Arc<AtomicU64>,
     /// The sources the running service was actually built from (Phase 4b
-    /// §4.4) — `attach` describes each one to the `Diagnostics` entity
-    /// once. Cloned out of `setup.config.sources` before that config
-    /// moves into `DataService::spawn` below, same reasoning as `schema`/
-    /// `dimensions` two lines up.
-    sources: Vec<SourceSpec>,
+    /// §4.4), each with the shape it rides (timeseries spec §5.1) —
+    /// `attach` describes each one to the `Diagnostics` entity once.
+    /// Cloned out of `setup.config.sources` before that config moves into
+    /// `DataService::spawn` below, same reasoning as `schema`/
+    /// `dimensions` two lines up; the shape is resolved here, against
+    /// that same schema, because no tile downstream holds one.
+    sources: Vec<(SourceSpec, SourceShape)>,
 }
 
 pub fn start(
@@ -229,7 +232,12 @@ pub fn start(
     // dimensions the service itself was built from (spec §3.7).
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
-    let sources = setup.config.sources.clone();
+    let sources: Vec<(SourceSpec, SourceShape)> = setup
+        .config
+        .sources
+        .iter()
+        .map(|s| (s.clone(), s.shape(&schema)))
+        .collect();
     let handle = DataService::spawn(setup.config, sink);
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
@@ -279,7 +287,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     // `geode_data::source::{Priority, Readiness}` themselves (CLAUDE.md:
     // shell and data never depend on each other).
     diagnostics.update(cx, |d, cx| {
-        for source in &bridge.sources {
+        for (source, shape) in &bridge.sources {
             d.describe_source(
                 &source.name,
                 SourceSummary {
@@ -289,9 +297,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     adapter: source.adapter.clone(),
                     // Already empty for a directory source — `from_doc`
                     // reads `topics` only when the source is subscribed —
-                    // and the tile reads that emptiness as "a directory
-                    // source", so it is cloned rather than gated here.
+                    // so it is cloned rather than gated here.
                     topics: source.topics.clone(),
+                    // Which two detail rows the tile paints. Resolved in
+                    // `start`, against the schema the service itself was
+                    // built from, because `shape` needs one (a fetch
+                    // source is a non-directory source over a series
+                    // dataset) and nothing downstream of here holds one
+                    // — a diagnostics tile has only this summary.
+                    shape: *shape,
                 },
             );
         }
@@ -689,6 +703,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     // when nothing is — including the extra copy the
                     // queue drain now sends after every `Published`/
                     // `Failed`'s own.
+                    // Timeseries spec §5.4: routed to the timeseries tiles in
+                    // Part 2 (`Delivery::SeriesFetched`). Until then the data
+                    // crate's own log line at `info` is the record; nothing
+                    // here logs, per the UI-thread level constraint.
+                    DataEvent::SeriesFetched { .. } => {}
                     DataEvent::LoadEnded => {
                         diagnostics.update(cx, |d, cx| {
                             let before = d.version();
@@ -1510,10 +1529,13 @@ role = "key"
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
-            sources: vec![SourceSpec {
-                pending_timeout: Duration::from_secs(120),
-                ..SourceSpec::directory("risk", "risk", vec!["/data/risk/*.csv".into()])
-            }],
+            sources: vec![(
+                SourceSpec {
+                    pending_timeout: Duration::from_secs(120),
+                    ..SourceSpec::directory("risk", "risk", vec!["/data/risk/*.csv".into()])
+                },
+                SourceShape::Directory,
+            )],
         };
         cx.update(|cx| attach(&bridge, window, cx));
 

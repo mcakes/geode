@@ -71,10 +71,14 @@ things that make it more than "wrap the loop in a thread pool".
 1. **Staging table names are fixed and global.** `load.rs` has
    `const RAW_TABLE: &str = "staging_raw"`, and `split.rs` has
    `staging_table(grain) -> format!("staging_{}", grain.table())`. Both
-   are created with `create or replace table`. **Two files staged
-   concurrently would silently overwrite each other's staging tables.**
-   Parallel staging requires per-file unique names, which changes a
-   shared invariant several call sites read.
+   are created with `create or replace table`. The other two families
+   own one such name each — `store::document::STAGING_TABLE`
+   (`staging_document`) and `store::series::STAGING_TABLE`
+   (`staging_series`), both `create or replace` too — so the fixed-global
+   rule now covers four names, not two. **Two files staged concurrently
+   would silently overwrite each other's staging tables.** Parallel
+   staging requires per-file unique names, which changes a shared
+   invariant several call sites read.
 
 2. **Preemption granularity changes.** The runner re-sorts its queue on
    every submit so a newly landed current file jumps ahead of remaining

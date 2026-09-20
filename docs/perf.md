@@ -1456,3 +1456,44 @@ calls it — and nothing below has been measured yet.
 | reading | where read | value |
 | --- | --- | --- |
 | frame time, `DataTable` paint over a 10,000-row `Columns::Values` panel, p50/p95/max | perf overlay, counters reset before scrolling | *(template — not yet measured)* |
+
+## Timeseries (spec §4.4, Part 1)
+
+`append_series`'s store-side cost, `--release`, DuckDB 1.10505 bundled,
+criterion medians, an M-series Mac (`cargo bench -p geode-data --bench
+append_series`, new). Each iteration gets its own temporary `Store` —
+schema applied from the real `examples/demo-config/datasets.toml`,
+catalog tables ensured — the per-iteration pattern `benches/ingest.rs`
+and `benches/publish_document.rs` both use. The untimed setup half
+appends the span once already; the **timed** half appends a second set
+of values over the same timestamps under a later `received_at`, so what
+is measured is the steady state a fetch source produces all day: stage,
+dedupe against the live row per `(source, series_id, ts)`, insert what
+remains, write the coverage row, and run the pair's retention sweep
+inside the same transaction (the demo dataset declares `retention =
+"7d"`, and §4.7 as built puts the sweep in `append_series` itself).
+
+| Benchmark | Result |
+|---|---|
+| `append_series/390` (one session of minute bars, the widening a chart asks for) | 2.52 ms |
+| `append_series/196560` (two years of them, a first load) | 249 ms |
+
+The 390-row figure is the one the interactive path pays: it is off the
+UI thread entirely (the ingest runner's series lane), and the tile hears
+back through `DataEvent::SeriesFetched`, so it is nowhere near the §7.1
+8 ms pure-UI budget even if it were on it. The 196,560-row figure is a
+**first-load bound, not a steady-state one** — a pair is loaded whole
+once and afterwards only its gaps are asked for, because
+`DataService::fetch` subtracts the coverage table before queueing any
+work.
+
+**Known gap, recorded rather than fixed here:** the dedupe's
+`arg_max(value, received_at) … group by ts` aggregates every stored
+version of the pair on every append, so the timed cost above grows with
+what is already stored, not only with what is being appended. It does
+not show at
+these sizes against the insert's own cost, and the append is off the UI
+thread, so nothing is done about it now — but an index on `(source,
+series_id, ts)` or partitioning the series table is what would be
+reached for if a desk ever reports an append that drags, and this is the
+line it would be measured against.

@@ -6065,23 +6065,23 @@ run_mutation "sections: the resolved-generation marker requires the snapshot's o
 
 run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
   crates/geode-diagnostics/src/sections.rs \
-  '        out.push(row(format!("path: {paths}"), 1, Tone::Muted));
-        out.push(row(
-            format!(
-                "adapter: {} · priority: {} · readiness: {}",
-                spec.adapter, spec.priority, spec.readiness
-            ),
-            1,
-            Tone::Muted,
-        ));' \
-  '        out.push(row(
-            format!(
-                "path: {paths} · adapter: {} · priority: {} · readiness: {}",
-                spec.adapter, spec.priority, spec.readiness
-            ),
-            1,
-            Tone::Muted,
-        ));' \
+  '            out.push(row(format!("path: {paths}"), 1, Tone::Muted));
+            out.push(row(
+                format!(
+                    "adapter: {} · priority: {} · readiness: {}",
+                    spec.adapter, spec.priority, spec.readiness
+                ),
+                1,
+                Tone::Muted,
+            ));' \
+  '            out.push(row(
+                format!(
+                    "path: {paths} · adapter: {} · priority: {} · readiness: {}",
+                    spec.adapter, spec.priority, spec.readiness
+                ),
+                1,
+                Tone::Muted,
+            ));' \
   geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
 
 run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
@@ -8855,11 +8855,11 @@ run_mutation "schema/document: a column named book collides with the partition c
 # path never reached the guard at all.
 run_mutation "schema/document: the no-columns path skips validation and pushes anyway" \
   crates/geode-core/src/schema/mod.rs \
-  "                None => diags.push(note(
+  "                None if family != Family::Series => diags.push(note(
                     format!(\"datasets.{ds_name}\"),
                     format!(\"dataset '{ds_name}': no [columns] table\"),
                 ))," \
-  "                None => {
+  "                None if family != Family::Series => {
                     diags.push(note(
                         format!(\"datasets.{ds_name}\"),
                         format!(\"dataset '{ds_name}': no [columns] table\"),
@@ -9000,28 +9000,28 @@ run_mutation "document: an attribute the dataset does not declare is refused" \
 # see them".
 run_mutation "catalog: row counts are per table, not per grain" \
   crates/geode-data/src/query/catalog.rs \
-  '    for pair in crate::store::ddl::table_pairs(ds) {
-        live_rows += sizes.get(&pair.live).copied().unwrap_or(0);
-        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
-    }' \
-  '    for grain in ds.grains() {
-        live_rows += sizes
-            .get(&crate::store::ddl::table_name(
-                &ds.name,
-                grain,
-                crate::store::ddl::TableKind::Live,
-            ))
-            .copied()
-            .unwrap_or(0);
-        archive_rows += sizes
-            .get(&crate::store::ddl::table_name(
-                &ds.name,
-                grain,
-                crate::store::ddl::TableKind::Archive,
-            ))
-            .copied()
-            .unwrap_or(0);
-    }' \
+  '        for pair in crate::store::ddl::table_pairs(ds) {
+            live_rows += sizes.get(&pair.live).copied().unwrap_or(0);
+            archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
+        }' \
+  '        for grain in ds.grains() {
+            live_rows += sizes
+                .get(&crate::store::ddl::table_name(
+                    &ds.name,
+                    grain,
+                    crate::store::ddl::TableKind::Live,
+                ))
+                .copied()
+                .unwrap_or(0);
+            archive_rows += sizes
+                .get(&crate::store::ddl::table_name(
+                    &ds.name,
+                    grain,
+                    crate::store::ddl::TableKind::Archive,
+                ))
+                .copied()
+                .unwrap_or(0);
+        }' \
   geode-data a_document_datasets_partitions_split_back_to_their_keys
 
 # Important 3: the picker's values for a document dataset. Without the
@@ -9611,8 +9611,8 @@ run_mutation "sources/adapter: a subscribed source needs a document" \
 # source would otherwise sail through silently.
 run_mutation "sources/adapter: a subscribed source needs a document family dataset" \
   crates/geode-core/src/source_config.rs \
-  '            if subscribed && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
-  '            if subscribed && schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
+  '            if subscribed && !fetch && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
+  '            if subscribed && !fetch && schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
   geode-core a_subscribed_source_on_a_measure_dataset_is_an_error
 
 # `parse_duration`'s `ms` unit: a wrong-VALUE mutation (seconds instead
@@ -9920,11 +9920,8 @@ run_mutation "subscribe: the kind/dataset column check (spec 6.4) runs and its v
 
 run_mutation "subscribe: a parse failure is reported on the DISCOVERY lane, not the load lane" \
   crates/geode-data/src/service.rs \
-  '                    health_tracker.report_load_and_emit(
-                        &source,
-                        batch,' \
-  '                    health_tracker.report_discovery_and_emit(
-                        &source,' \
+  '        health_tracker.report_load_and_emit(&source, batch, health, detail, |reported| {' \
+  '        health_tracker.report_discovery_and_emit(&source, health, detail, |reported| {' \
   geode-data a_lost_connection_is_discovery_health_and_a_parse_failure_outlives_a_reconnect
 
 run_mutation "subscribe: ConnectionState::Connected maps to Pending rather than Ok" \
@@ -10003,10 +10000,9 @@ run_mutation "demo bus: the demo layer's [cvi] source" \
   crates/geode-app/src/demo.rs \
   '         [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
          topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
-         priority = \"latest_other\"\n",
+         priority = \"latest_other\"\n\
 ' \
-  '",
-' \
+  '' \
   geode-app the_demo_layer_declares_the_cvi_source
 
 
@@ -10055,9 +10051,18 @@ run_mutation "sources: a subscribed source stores the paths it just said it igno
 
 run_mutation "sections: a subscribed source is described as a directory one (path and readiness)" \
   crates/geode-diagnostics/src/sections.rs \
-  '    if spec.adapter == geode_core::source_config::CSV_DIR_ADAPTER {' \
-  '    if true {' \
+  '    match spec.shape {' \
+  '    match SourceShape::Directory {' \
   geode-diagnostics a_subscribed_source_shows_its_adapter_and_topics_not_paths
+
+# The third shape (timeseries spec §5.4). Mutated to paint the subscribed
+# rows, a fetch source shows `topics: ` — an empty list for a source
+# nothing is ever pushed to, which is what it did before the arm existed.
+run_mutation "sections: a fetch source is described as a subscribed one (empty topics)" \
+  crates/geode-diagnostics/src/sections.rs \
+  '            out.push(row("fetch", 1, Tone::Muted));' \
+  '            out.push(row(format!("topics: {}", spec.topics.join(", ")), 1, Tone::Muted));' \
+  geode-diagnostics a_fetch_source_shows_its_adapter_and_that_it_is_fetched
 
 run_mutation "cvi: a second <term> inside one slice wins silently instead of being refused" \
   crates/geode-documents/src/cvi.rs \
@@ -10767,10 +10772,14 @@ run_mutation "objectdialog: a column stage offers no destructive action" \
 
 # ---- Part 2 residuals, fixed at Part 3's opening (Task 1) ----
 
-run_mutation "parked: sections discriminates a subscribed source by adapter, not by topics.is_empty()" \
+# Re-anchored 2026-09-19 (timeseries Part 1): the discriminator is the
+# source's SHAPE now, not its adapter — a fetch source is "not a
+# directory" too — so the mutation derives one from `topics.is_empty()`
+# instead, which is the residual this entry has always guarded against.
+run_mutation "parked: sections discriminates a source by shape, not by topics.is_empty()" \
   crates/geode-diagnostics/src/sections.rs \
-  '    if spec.adapter == geode_core::source_config::CSV_DIR_ADAPTER {' \
-  '    if spec.adapter != geode_core::source_config::CSV_DIR_ADAPTER {' \
+  '    match spec.shape {' \
+  '    match (if spec.topics.is_empty() { SourceShape::Directory } else { SourceShape::Subscribed }) {' \
   geode-diagnostics a_subscribed_source_with_no_topics_still_shows_the_subscribed_shape
 
 run_mutation "parked: a topic pattern with a non-final '>' is accepted rather than refused" \
@@ -13104,8 +13113,8 @@ run_mutation "asof: open returns the calendar to the day grid" \
 # lone file and never reach 0 while anything loads.
 run_mutation "ingest: queued counts what waits behind the popped job" \
   crates/geode-data/src/ingest/runner.rs \
-  '                    break (work, q.items.len() + q.documents.len());' \
-  '                    break (work, q.items.len() + q.documents.len() + 1);' \
+  '                    break (work, q.items.len() + q.documents.len() + q.series.len());' \
+  '                    break (work, q.items.len() + q.documents.len() + q.series.len() + 1);' \
   geode-data \
   started_precedes_each_publish_and_counts_what_is_still_queued
 
@@ -13939,6 +13948,240 @@ run_mutation "tilepicker: the dock listener calls the door" \
                             if view.try_fullscreen_on_double_click(id, event, window, cx)' \
   geode-shell \
   a_docked_placeholder_double_click_opens_the_picker_and_fills_it
+# ---------------------------------------------------------------------
+# Timeseries Part 1, the data tier (timeseries spec §4, §5.1–§5.6).
+#
+# The series family is append-only and bitemporal, so every behaviour
+# below is one a green suite can lose silently: a dedupe that compares
+# against the wrong version grows the table forever, a coverage row that
+# is not written asks the source for the same span for the rest of the
+# session, and a retention predicate that is one clause short deletes the
+# row a chart is drawn from.
+# ---------------------------------------------------------------------
+
+# The dedupe is what makes an overlapping refetch free. Mutated away, the
+# same three bars are appended a second time under a new received_at and
+# the table grows with every poll.
+run_mutation "series: an unchanged row is appended again" \
+  crates/geode-data/src/store/series.rs \
+  'where live.ts = make_timestamp(s.ts_us) and live.v = s.value' \
+  'where false' \
+  geode-data \
+  an_overlapping_refetch_with_the_same_values_appends_nothing_but_records_coverage
+
+# Live is the GREATEST received_at per ts. Mutated to arg_min, the dedupe
+# compares a staged row against the OLDEST version instead, so re-offering
+# a value that was later corrected is silently dropped — the chart keeps
+# painting the correction and the source's own answer never lands.
+run_mutation "series: dedupe compares against any version, not the live one" \
+  crates/geode-data/src/store/series.rs \
+  'select ts, arg_max(value, received_at) as v from {table}' \
+  'select ts, arg_min(value, received_at) as v from {table}' \
+  geode-data \
+  a_third_append_of_the_original_value_re_appends_because_live_is_the_correction
+
+# The derived table the dedupe compares against is filtered to the pair.
+# Mutated so the filter is inert, "live" is the whole table folded by ts,
+# and a value another series happens to share is dropped as already held
+# for a series that has never seen it.
+run_mutation "series: dedupe ignores the pair filter" \
+  crates/geode-data/src/store/series.rs \
+  '                 where source = ? and series_id = ? group by ts' \
+  '                 where (source = ? or true) and (series_id = ? or true) group by ts' \
+  geode-data \
+  an_equal_value_for_another_series_still_lands
+
+# Coverage is written whether or not a row was new — an empty gap is the
+# one a naive implementation asks for forever. Mutated to return early on
+# an empty fetch, the coverage row is never written.
+run_mutation "series: coverage is not recorded for an empty fetch" \
+  crates/geode-data/src/store/series.rs \
+  '    // 4. Coverage, always.' \
+  '    // 4. Coverage, always.
+    if req.rows.is_empty() {
+        return Ok(SeriesAppended { appended, swept: 0 });
+    }' \
+  geode-data \
+  an_empty_fetch_records_coverage_and_appends_nothing
+
+# Retention deletes SUPERSEDED versions only: the `exists` clause is what
+# says "a later received_at exists for this ts". Without it a row is its
+# own witness and the live row goes with the history behind it.
+run_mutation "series: retention deletes the live row too" \
+  crates/geode-data/src/store/series.rs \
+  'and n.series_id = t.series_id and n.ts = t.ts and n.received_at > t.received_at)' \
+  'and n.series_id = t.series_id and n.ts = t.ts)' \
+  geode-data \
+  retention_deletes_superseded_rows_older_than_the_window_and_keeps_live
+
+# The history sweep deletes the coverage rows with the rows they cover.
+# Mutated inert, the rows go but their coverage stays, so the span reads
+# as loaded forever and a chart over it is permanently empty.
+run_mutation "series: history keeps the coverage rows it should drop" \
+  crates/geode-data/src/store/series.rs \
+  '"delete from {} where source = ? and series_id = ? and epoch_us(to_ts) <= ?",' \
+  '"delete from {} where source = ? and series_id = ? and epoch_us(to_ts) <= ? and 1 = 0",' \
+  geode-data \
+  history_deletes_rows_and_coverage_whose_ts_is_too_old
+
+# The history sweep deletes the ROWS as well as their coverage, and the
+# two are separate statements. Mutated inert, the coverage goes but the
+# rows it covered stay, so a chart keeps painting values the dataset's
+# own history window says are gone and nothing will ever delete them.
+run_mutation "series: history keeps the rows it should drop" \
+  crates/geode-data/src/store/series.rs \
+  'format!("delete from {table} where source = ? and series_id = ? and epoch_us(ts) < ?");' \
+  'format!("delete from {table} where source = ? and series_id = ? and epoch_us(ts) < ? and 1 = 0");' \
+  geode-data \
+  history_deletes_rows_and_coverage_whose_ts_is_too_old
+
+# A window is user-configured and unbounded in magnitude (`parse_duration`
+# accepts `y`), so its micros need not fit an i64. Mutated back to the
+# wrapping cast, `"300000000y"` wraps NEGATIVE, the cutoff lands tens of
+# thousands of years in the future, and the retention sweep deletes every
+# superseded row the pair has — inside the append's own transaction.
+run_mutation "series: an unrepresentable window is treated as zero" \
+  crates/geode-data/src/store/series.rs \
+  '    if let Some(window) = policy.retention
+        && let Some(cutoff) = cutoff(now, window)
+    {' \
+  '    if let Some(window) = policy.retention {
+        let cutoff = micros(now) - window.as_micros() as i64;' \
+  geode-data \
+  an_unrepresentable_window_sweeps_nothing
+
+# Subtracting coverage is the whole point of the coverage table. Mutated
+# to ignore what is loaded, every request re-fetches its entire span.
+run_mutation "series: missing_spans ignores loaded spans" \
+  crates/geode-data/src/store/series.rs \
+  '    let mut loaded = loaded.to_vec();
+    merge_spans(&mut loaded);' \
+  '    let loaded: Vec<Span> = Vec::new();' \
+  geode-data \
+  missing_spans_subtracts_loaded_spans
+
+# `DataService::fetch` answers a fully covered span itself. Mutated to
+# ask for the requested span whole, a second look at the same range is a
+# round trip to the vendor.
+run_mutation "service: a covered span still reaches the source" \
+  crates/geode-data/src/service.rs \
+  '        if gaps.is_empty() {
+            answer(Ok(0));
+            return;
+        }' \
+  '        let gaps = vec![(params.from, params.to)];' \
+  geode-data \
+  a_covered_span_is_answered_without_asking_the_source
+
+# The request is clipped to the dataset's `history` window BEFORE
+# coverage is subtracted (§4.7 as built). Mutated away, a span older than
+# the window is fetched, appended and swept in one breath — coverage row
+# included — so the same dead span is asked for on every look.
+run_mutation "service: the history clip is skipped" \
+  crates/geode-data/src/service.rs \
+  '            from = from.max(cutoff);' \
+  '            let _ = cutoff;' \
+  geode-data \
+  a_fetch_older_than_the_history_window_is_answered_without_asking_the_source
+
+# The clip RAISES `from` to the window's cutoff; it never lowers it.
+# Mutated to `min`, a request inside the window is widened to the whole
+# history before coverage is subtracted, so every look fetches the dead
+# span ahead of it — appended and swept in the same breath, forever.
+run_mutation "service: the history clip goes the wrong way" \
+  crates/geode-data/src/service.rs \
+  '            from = from.max(cutoff);' \
+  '            from = from.min(cutoff);' \
+  geode-data \
+  a_fetch_older_than_the_history_window_is_answered_without_asking_the_source
+
+# The load lane's key for a series is `"{identity}@{source}"` on EVERY
+# path. Mutated to key the fetch worker's failure by the identity alone,
+# every assertion about the failure itself still passes — but the
+# runner's later `Ok` lands under a different key, so the failure is
+# never cleared and the source stays red for the session.
+run_mutation "service: the fetch failure lane key differs from the success key" \
+  crates/geode-data/src/service.rs \
+  '                                report_load(
+                                    &pair,' \
+  '                                report_load(
+                                    &identity,' \
+  geode-data \
+  a_failed_fetch_is_a_load_lane_failure_keyed_by_the_pair_and_clears_on_success
+
+# `take_work`s order is documents, then series, then files: an
+# interactive fetch must not wait behind a backfill. Mutated to take
+# series only once the file queue has drained, a chart's own request
+# waits for every queued CSV.
+run_mutation "runner: series jobs are taken after files" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(job) = q.series.pop_front() {
+        return Some(Work::Series(job));
+    }
+    if q.items.is_empty() {
+        return None;
+    }' \
+  '    if q.items.is_empty() {
+        if let Some(job) = q.series.pop_front() {
+            return Some(Work::Series(job));
+        }
+        return None;
+    }' \
+  geode-data \
+  take_work_pops_documents_then_series_then_files
+
+# The other half of the same order: a document still goes first. Mutated
+# by swapping the two pops, a queued series job delays the document a
+# panel is waiting on.
+run_mutation "runner: series jobs are taken before documents" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(job) = q.documents.pop_front() {
+        return Some(Work::Document(job));
+    }
+    if let Some(job) = q.series.pop_front() {
+        return Some(Work::Series(job));
+    }' \
+  '    if let Some(job) = q.series.pop_front() {
+        return Some(Work::Series(job));
+    }
+    if let Some(job) = q.documents.pop_front() {
+        return Some(Work::Document(job));
+    }' \
+  geode-data \
+  take_work_pops_documents_then_series_then_files
+
+# A NaN or an infinity from a vendor is dropped at the worker, before the
+# rows reach storage. Mutated away, they are appended as DOUBLE values a
+# chart cannot scale.
+run_mutation "fetch: non-finite values are handed on" \
+  crates/geode-data/src/ingest/fetch.rs \
+  '                        let dropped = rows.drop_non_finite();' \
+  '                        let dropped = 0;' \
+  geode-data \
+  a_span_request_yields_fetched_rows_with_non_finite_values_dropped
+
+# The series family implies its five columns, so a declared one is an
+# error AND dropped. Mutated to keep it, the DDL is still generated from
+# `SERIES_COLUMNS` while the spec claims a column no table has.
+run_mutation "core: a series dataset keeps a declared column" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.clear();
+    for (field, list) in [("key", &mut ds.key), ("axes", &mut ds.axes)] {' \
+  '    for (field, list) in [("key", &mut ds.key), ("axes", &mut ds.axes)] {' \
+  geode-core \
+  a_declared_column_on_a_series_dataset_is_an_error_and_dropped
+
+# A non-directory source over a series dataset is `Fetch`, not
+# `Subscribed`. Mutated, the service opens a subscription worker for it
+# and no fetch worker exists to answer a chart at all.
+run_mutation "core: a fetch source is classified as subscribed" \
+  crates/geode-core/src/source_config.rs \
+  '        } else if schema.dataset(&self.dataset).is_some_and(|d| d.is_series()) {
+            SourceShape::Fetch' \
+  '        } else if false {
+            SourceShape::Fetch' \
+  geode-core \
+  shape_names_all_three
 
 # The EMPTY-TREE hint has its own door (display finding 2026-09-19: a
 # fresh session has no tile, so the placeholder door alone left the

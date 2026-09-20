@@ -7,6 +7,7 @@ mod bridge;
 mod crash;
 mod demo;
 mod demo_bus;
+mod demo_series;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -132,6 +133,11 @@ fn main() {
                 let (adapter, feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
                 let mut adapters = geode_data::adapter::AdapterRegistry::default();
                 adapters.register(adapter);
+                // The timeseries demo sources (timeseries spec §5.6): the
+                // same seed as the risk generator, one with a catalogue
+                // and one without.
+                adapters.register(demo_series::DemoSeries::new("demo_kdb", 42, true));
+                adapters.register(demo_series::DemoSeries::new("demo_rest", 42, false));
                 (Some(feed), adapters)
             } else {
                 (None, geode_data::adapter::AdapterRegistry::default())
