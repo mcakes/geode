@@ -6350,6 +6350,25 @@ run_mutation "locality: :level never reaches the Diagnostics entity" \
   geode-diagnostics \
   every_colon_command_leaves_the_app_alone
 
+# Command-line locality (2026-09-20) — the scope expression dialog
+# (spec §4.1), the palette door that replaced `:scope <expr>`.
+
+# An empty commit clears the frame's expression (locality §4.1).
+run_mutation "expr-dialog: an empty commit clears the expression" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return Ok(None);' \
+  '        return Err("empty".into());' \
+  geode-shell \
+  the_field_opens_seeded_and_an_empty_commit_clears
+
+# A commit goes through set_scope, so undo restores it.
+run_mutation "expr-dialog: the commit goes through set_scope" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '                if f.set_scope(scope) {' \
+  '                if f.clear_scope() {' \
+  geode-shell \
+  typing_an_expression_and_enter_sets_it_through_set_scope
+
 # ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
 #
 # The split verbs are gone: a tile is *added* by kind, and the split is

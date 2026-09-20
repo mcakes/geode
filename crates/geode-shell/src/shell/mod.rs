@@ -30,6 +30,7 @@ pub mod picker;
 pub mod profiling_hook;
 mod render;
 pub mod scale;
+pub mod scope_expr_view;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;
@@ -929,6 +930,12 @@ pub struct ShellView {
     /// and cleared by [`close_modal`](Self::close_modal), same as the
     /// other three dialogs.
     as_of_dialog: Option<asof_view::AsOfState>,
+    /// The open scope expression dialog's own pure state (command-line
+    /// locality spec §4.1), or `None` when closed/never opened — the
+    /// `picker`/`as_of_dialog` fields' own contract. Set fresh by
+    /// [`scope_expr_view::open`] each time and cleared by
+    /// [`close_modal`](Self::close_modal).
+    scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
     /// The as-of dialog's calendar (spec §5.2), built once here like
     /// `dialog_input` — one entity, seeded on every open (`gpui` focus
     /// handles are refcounted, so a fresh one per open would not have
@@ -1215,6 +1222,10 @@ impl ShellView {
                         }
                     });
                 }
+            } else if let Some(state) = view.scope_expr_dialog.as_mut() {
+                // The field IS the value (spec §4.1); typing clears the last
+                // failed commit's message.
+                scope_expr_view::on_query_changed(state);
             }
             cx.notify();
         })
@@ -1640,6 +1651,7 @@ impl ShellView {
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
+            scope_expr_dialog: None,
             as_of_calendar,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
@@ -1674,6 +1686,7 @@ impl ShellView {
         self.keybindings = None;
         self.picker = None;
         self.as_of_dialog = None;
+        self.scope_expr_dialog = None;
         self.choice_dialog = None;
         self.object_dialog = None;
         self.return_focus_from_overlay(window, cx);

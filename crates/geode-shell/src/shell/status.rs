@@ -219,7 +219,7 @@ pub fn status_bar(
         // whole resolved timestamp (final review, spec §5.1) — a trader
         // hovering to see exactly when must not get the same elided text
         // the segment already shows.
-        let as_of_text: SharedString = format!("AS OF {t} · :live to return").into();
+        let as_of_text: SharedString = format!("AS OF {t} · Return to live in the palette").into();
         // Through the chip door (`shell::chip`): `warning_foreground` over
         // the tint is the background family on a barely-tinted background
         // at the pinned rev.

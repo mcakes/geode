@@ -471,6 +471,15 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Swap to the previous as of",
         "Frame",
     );
+    // The scope expression dialog (command-line locality spec §4.1):
+    // palette-only, the typed door onto the frame's expression layer now
+    // that `:scope <expr>` is a refusal. `…` because it opens a dialog.
+    action(
+        reg,
+        "frame::scope_expression",
+        "Set scope expression…",
+        "Frame",
+    );
     // Profiler-feature actions (the `profiling` feature — gpui's own
     // `profiler` histograms/overlay): registered only when compiled in,
     // so the palette never advertises a no-op.

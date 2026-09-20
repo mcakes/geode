@@ -23,7 +23,7 @@ use super::keys::convert_keystroke;
 use super::profiling_hook;
 use super::{
     ShellView, asof_view, choicedialog, dialog, keybindings_view, objectdialog, picker,
-    settings_view,
+    scope_expr_view, settings_view,
 };
 
 /// A stack verb's refusal on a tile that is not a stack member
@@ -392,6 +392,11 @@ impl ShellView {
         } else if action.0 == "frame::as_of" {
             // mod+t (spec §3.6): the as-of selector modal.
             asof_view::open(self, window, cx);
+        } else if action.0 == "frame::scope_expression" {
+            // Palette-only (command-line locality spec §4.1): the typed door
+            // onto the frame's expression layer — the same door the scope
+            // bar's expression chip opens.
+            scope_expr_view::open(self, window, cx);
         } else if action.0 == "frame::grouping" {
             // mod+g (2026-09-19): the grouping picker — the same door the
             // toolbar readout's click takes.
