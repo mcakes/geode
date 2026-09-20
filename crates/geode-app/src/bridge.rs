@@ -703,6 +703,30 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             cx.notify();
                         });
                     }
+                    // Timeseries spec §5.4: keyed by the `(identity,
+                    // source)` pair rather than by the tile that asked,
+                    // so it goes to the shell key-less and
+                    // `ShellView::deliver` hands a copy to every
+                    // visible occupant. Nothing is logged here: the
+                    // data crate's own line at `info` is the record,
+                    // and this whole match runs on the UI thread.
+                    DataEvent::SeriesFetched {
+                        source,
+                        identity,
+                        result,
+                    } => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(
+                                Delivery::SeriesFetched {
+                                    source,
+                                    identity,
+                                    result,
+                                },
+                                window,
+                                cx,
+                            )
+                        });
+                    }
                     // Carries no `source` (finding 2, 2026-09-19 final
                     // review): one ingest runner draining one FIFO queue
                     // means loads are strictly sequential, so the load
@@ -711,11 +735,6 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     // when nothing is — including the extra copy the
                     // queue drain now sends after every `Published`/
                     // `Failed`'s own.
-                    // Timeseries spec §5.4: routed to the timeseries tiles in
-                    // Part 2 (`Delivery::SeriesFetched`). Until then the data
-                    // crate's own log line at `info` is the record; nothing
-                    // here logs, per the UI-thread level constraint.
-                    DataEvent::SeriesFetched { .. } => {}
                     DataEvent::LoadEnded => {
                         diagnostics.update(cx, |d, cx| {
                             let before = d.version();
@@ -1070,6 +1089,111 @@ role = "key"
             Arc::strong_count(&dropped),
             alive - 1,
             "the drain task released its clone of `dropped` once the window was gone"
+        );
+    }
+
+    /// [`test_shell_services`] with the shell's own recording module in
+    /// the roster and one tile of that kind restored into workspace 1.
+    /// `ModuleRoster::default()` holds no factory at all, so the plain
+    /// fixture's shell has nothing a broadcast could reach; this one has
+    /// exactly one live, visible occupant, and hands back the log it
+    /// writes every delivery into.
+    fn test_shell_services_with_a_recording_tile() -> (
+        ShellServices,
+        Rc<std::cell::RefCell<Vec<geode_shell::module::recording::Recorded>>>,
+    ) {
+        let mut services = test_shell_services();
+        let factory = geode_shell::module::recording::RecordingFactory::new("rec");
+        let log = factory.log.clone();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(factory));
+        roster.register_actions(&mut services.registry);
+        services.roster = roster;
+
+        // The one public door onto a workspace holding a tile — the same
+        // route `geode-shell`'s own occupant tests restore through.
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::palette_usage::PaletteUsage::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "rec"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        (services, log)
+    }
+
+    /// Timeseries spec §5.4: a fetch outcome is keyed by the `(identity,
+    /// source)` pair rather than by the tile that asked, so the bridge
+    /// hands it to the shell as a key-less `Delivery::SeriesFetched` and
+    /// `ShellView::deliver` broadcasts it to every visible occupant. An
+    /// `Err` is carried through the same door as an `Ok` — the tile marks
+    /// its slot rather than requerying.
+    #[gpui::test]
+    fn a_series_fetched_event_is_broadcast_to_the_shell(cx: &mut gpui::TestAppContext) {
+        let (services, log) = test_shell_services_with_a_recording_tile();
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        tx.try_send(DataEvent::SeriesFetched {
+            source: "demo_kdb".into(),
+            identity: "VIX".into(),
+            result: Err("no such symbol".into()),
+        })
+        .unwrap();
+        vcx.run_until_parked();
+
+        assert!(
+            log.borrow().iter().any(|r| matches!(
+                r,
+                geode_shell::module::recording::Recorded::SeriesFetched(_, pair)
+                    if pair == "VIX@demo_kdb"
+            )),
+            "{:?}",
+            log.borrow()
         );
     }
 

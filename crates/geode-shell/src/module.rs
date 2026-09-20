@@ -7,7 +7,8 @@
 //! data carries its own handle as a field of its factory, built in
 //! `geode-app` where both sides meet (§2.1). The one data type that
 //! crosses is [`Delivery`], which the shell routes to the tile whose id
-//! is `Delivery::key()`.
+//! is `Delivery::key()` — or, where that answers `None`, to every tile
+//! on screen.
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::diagnostics::Diagnostics;
@@ -18,6 +19,7 @@ use crate::shell::control::{self, PointerStates as _};
 use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
 use geode_core::query::{QueryKey, QueryOutcome};
+use geode_core::series::SeriesOutcome;
 use gpui::{AnyView, App, Entity, SharedString, Window};
 use std::rc::Rc;
 
@@ -29,27 +31,45 @@ pub enum FindEvent {
     Cancelled,
 }
 
-/// What the shell routes to a tile by its id (market-data spec §8.6).
-/// One variant today — a query result addressed by its `QueryKey`
-/// (§5.1) — but Part 4 adds `Upload(UploadOutcome)` for a document
-/// upload's own outcome, carried through this same door. An enum
-/// rather than a second `TileContent` method: every existing `match` on
-/// `Delivery` then refuses to compile the instant a new variant lands,
-/// until the occupant it belongs to grows an arm for it — an occupant
-/// cannot silently ignore a delivery kind it was never taught about, the
-/// way an unmatched second method could be forgotten and no compiler
-/// would say a word.
+/// What the shell routes to a tile (market-data spec §8.6) — by its id
+/// where the delivery names one, to every visible tile where it does
+/// not. Part 4 adds `Upload(UploadOutcome)` for a document upload's own
+/// outcome, carried through this same door. An enum rather than a
+/// second `TileContent` method: every existing `match` on `Delivery`
+/// then refuses to compile the instant a new variant lands, until the
+/// occupant it belongs to grows an arm for it — an occupant cannot
+/// silently ignore a delivery kind it was never taught about, the way an
+/// unmatched second method could be forgotten and no compiler would say
+/// a word.
 #[derive(Debug)]
 pub enum Delivery {
     Query(QueryOutcome),
+    /// A series query's answer (timeseries spec §6.4), routed by the
+    /// tile's key like a `Query`.
+    Series(SeriesOutcome),
+    /// A fetch finished (timeseries spec §5.4). Keyed by the
+    /// `(identity, source)` pair, not a tile: `ShellView::deliver` hands
+    /// one to EVERY visible occupant, each its own copy, and a tile
+    /// holding the pair requeries on `Ok` (an `Ok(0)` too — the span is
+    /// covered, whether just now or already) or marks the slot on `Err`.
+    /// A tile holding nothing of the kind ignores it. Plain strings so
+    /// the shell, which never names `geode-data`, can carry it.
+    SeriesFetched {
+        source: String,
+        identity: String,
+        result: Result<u64, String>,
+    },
 }
 
 impl Delivery {
-    /// The tile id (as a bare `QueryKey`) this delivery is addressed to.
+    /// The tile id (as a bare `QueryKey`) this delivery is addressed to,
+    /// or `None` for one addressed to every visible tile.
     /// `ShellView::deliver` routes on this alone, never on the variant.
-    pub fn key(&self) -> QueryKey {
+    pub fn key(&self) -> Option<QueryKey> {
         match self {
-            Delivery::Query(outcome) => outcome.key,
+            Delivery::Query(outcome) => Some(outcome.key),
+            Delivery::Series(outcome) => Some(outcome.key),
+            Delivery::SeriesFetched { .. } => None,
         }
     }
 }
@@ -442,6 +462,9 @@ pub mod placeholder {
         fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
             match delivery {
                 Delivery::Query(_) => {}
+                // This tile asks no series query and holds no
+                // `(identity, source)` pair.
+                Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
             }
         }
         fn set_visible(&self, _: bool, _: &mut App) {}
@@ -502,6 +525,12 @@ pub mod recording {
         Find(TileId, FindEvent),
         Visible(TileId, bool),
         Delivered(TileId, u64),
+        /// A key-less [`Delivery::SeriesFetched`] this tile was handed,
+        /// as `"{identity}@{source}"` — the pair spelled the way a
+        /// timeseries slot names it, so a broadcast test can assert on
+        /// WHICH fetch each tile heard about, not merely that one
+        /// arrived.
+        SeriesFetched(TileId, String),
         Stack(TileId, Option<(usize, usize)>),
     }
 
@@ -720,6 +749,22 @@ pub mod recording {
                     self.log
                         .borrow_mut()
                         .push(Recorded::Delivered(self.tile, outcome.tag));
+                }
+                // A series outcome is routed by key exactly as a query's
+                // is, so it is recorded the same way — the tag is what
+                // tells the two apart at the call site.
+                Delivery::Series(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Delivered(self.tile, outcome.tag));
+                }
+                Delivery::SeriesFetched {
+                    source, identity, ..
+                } => {
+                    self.log.borrow_mut().push(Recorded::SeriesFetched(
+                        self.tile,
+                        format!("{identity}@{source}"),
+                    ));
                 }
             }
         }

@@ -111,6 +111,11 @@ impl TileContent for DiagnosticsContent {
             // This tile never queries — nothing addressed to it ever
             // arrives, so there is nothing to do with the outcome itself.
             Delivery::Query(_) => {}
+            // This tile asks no series query and holds no
+            // `(identity, source)` pair — and a key-less
+            // `SeriesFetched` DOES reach it, since it is broadcast to
+            // every visible occupant.
+            Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

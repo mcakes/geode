@@ -10995,8 +10995,10 @@ run_mutation "parked: the expiry ladder never skips a month whose third Friday a
 
 run_mutation "delivery: ShellView::deliver routes to the tile addressed by delivery.key(), not always tile 0" \
   crates/geode-shell/src/shell/occupants.rs \
-  'TileId(delivery.key().0)' \
-  'TileId(0)' \
+  '                if let Some(o) = self.occupants.get(&TileId(key.0)) {
+                    o.content.deliver(delivery, window, cx);' \
+  '                if let Some(o) = self.occupants.get(&TileId(0)) {
+                    o.content.deliver(delivery, window, cx);' \
   geode-shell a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other
 
 # ---- Part 3 Task 3: keymap fragments (market-data documents §8.4) ----
@@ -14424,6 +14426,63 @@ run_mutation "tilepicker: the empty dock hint's double-click opens the picker" \
         }' \
   geode-shell \
   clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it
+
+# ---- timeseries Part 2 Task 6: the two `Delivery` variants and the broadcast ----
+
+# The whole point of the key-less arm (timeseries §5.4): a `SeriesFetched`
+# reaches the tiles a trader can SEE, not every occupant in the session.
+# Broadcasting over the occupant map itself is the shape the bug would
+# take — every switched-away workspace's tile told about a fetch it holds
+# no subscription for and will requery for on `set_visible(true)` anyway.
+run_mutation "hosting: a key-less delivery reaches only the visible occupants" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                let mut keys = Vec::new();
+                self.visible_tile_keys(&mut keys);' \
+  '                let mut keys: Vec<QueryKey> =
+                    self.occupants.keys().map(|t| QueryKey(t.0)).collect();
+                keys.sort();' \
+  geode-shell \
+  a_key_less_delivery_reaches_every_visible_occupant_and_no_hidden_one
+
+# The other half of the same routing rule: a `Series` outcome is
+# ADDRESSED, like a `Query`, so it must not fall into the broadcast arm.
+# The mutation makes `key()` answer `None` for it, which is exactly the
+# defect the name claims; `deliver`'s own `unreachable!` guard is what
+# the named test then trips, having asked for one tile and been handed
+# the key-less path.
+run_mutation "hosting: a series outcome is routed by its key, not broadcast" \
+  crates/geode-shell/src/module.rs \
+  '            Delivery::Series(outcome) => Some(outcome.key),' \
+  '            Delivery::Series(_) => None,' \
+  geode-shell \
+  a_series_outcome_is_routed_to_its_key_alone
+
+# The bridge's own arm: a fetch outcome has to leave the drain loop at
+# all. This arm was empty until Task 6, so a revert to `=> {}` is the
+# live hazard — and it is silent: nothing here logs, by the UI-thread
+# level constraint.
+run_mutation "bridge: a SeriesFetched event reaches the shell" \
+  crates/geode-app/src/bridge.rs \
+  '                    DataEvent::SeriesFetched {
+                        source,
+                        identity,
+                        result,
+                    } => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(
+                                Delivery::SeriesFetched {
+                                    source,
+                                    identity,
+                                    result,
+                                },
+                                window,
+                                cx,
+                            )
+                        });
+                    }' \
+  '                    DataEvent::SeriesFetched { .. } => {}' \
+  geode-app \
+  a_series_fetched_event_is_broadcast_to_the_shell
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
