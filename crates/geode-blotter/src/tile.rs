@@ -4597,6 +4597,12 @@ mod tests {
                     .is_none(),
                 "`:{line}` queued a slot write"
             );
+            assert!(
+                h.frame
+                    .update(&mut cx, |f, _| f.take_pending_scope_persist())
+                    .is_none(),
+                "`:{line}` queued a scope write"
+            );
         }
     }
 }

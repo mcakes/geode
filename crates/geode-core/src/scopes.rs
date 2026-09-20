@@ -9,11 +9,12 @@ use std::collections::BTreeMap;
 
 pub type SavedScopes = BTreeMap<String, Scope>;
 
-/// Names a saved scope may never take, shared by every door that can
-/// create one — `Frame::save_scope` (`geode-shell`, `:scope save` on a
-/// tile's command line) and `shell::objectdialog::Domain::Scopes::
-/// reserved_names` (the config dialog's `n`/`c`/`scope::save_current`
-/// naming prompt) both read this one list, in the mould of
+/// Names a saved scope may never take, shared by every door that could
+/// create one — `Frame::save_scope` (`geode-shell`, historically
+/// `:scope save` on a tile's command line, test-only since 2026-09-20)
+/// and `shell::objectdialog::Domain::Scopes::reserved_names` (the config
+/// dialog's `n`/`c`/`scope::save_current` naming prompt, the one
+/// production door left) both read this one list, in the mould of
 /// `geode_core::colour::RESERVED_NAMES`. `save_current` is the
 /// `scope::save_current` palette action's own id (scope-save spec's
 /// amendment): a saved scope by that name would collide with it in the
@@ -26,10 +27,15 @@ pub type SavedScopes = BTreeMap<String, Scope>;
 /// (`ActionRegistry::register`'s `.expect("builtin action ids are
 /// unique by construction")`) — a config value on disk that crashes the
 /// app at every launch, unfixable by a trader who cannot even open the
-/// dialog that would tell them why. That route closed on 2026-09-20
-/// (command-line locality spec §5): `:scope` is a refusal on every
-/// tile now, and the palette's `Scope: Save current as…` is the one
-/// door onto `Frame::save_scope`. `register_scope_actions` itself
+/// dialog that would tell them why. The `:scope save` route closed on
+/// 2026-09-20 (command-line locality spec §5): `:scope` is a refusal on
+/// every tile now, and `Frame::save_scope` has no production caller
+/// left — the palette's `Scope: Save current as…` action
+/// (`scope::save_current`) opens the Scopes object dialog's own naming
+/// prompt (`objectdialog::render::open_save_scope`, `NameSeed::
+/// FromFrame`) and commits through the dialog's own create path,
+/// guarded by this same list via `Domain::reserved_names`.
+/// `register_scope_actions` itself
 /// (`geode-shell/src/defaults.rs`) is the second, independent backstop:
 /// even a scope named some OTHER already-registered id (a future
 /// action, or a name collision this list has not yet learned about)

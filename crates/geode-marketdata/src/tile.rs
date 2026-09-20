@@ -8962,6 +8962,10 @@ edits = [["2026-11-20", "-1", 9.5]]
         }
         let before = h.frame.read_with(&vcx, |f, _| f.versions());
         for line in lines {
+            assert!(
+                crate::commands::parse(line).is_ok(),
+                "`{line}` no longer parses"
+            );
             let _ = vcx.update(|window, cx| h.content.command(line, window, cx));
             let after = h.frame.read_with(&vcx, |f, _| f.versions());
             assert_eq!(

@@ -435,8 +435,11 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
 
 /// The [`dialog::ModalKeyHandler`] for this modal: [`choice::route`]'s
 /// table, plus the grouping target's digit jump on an empty field.
-/// `escape` claims nothing (falls through to `handle_key_down`'s
-/// modal-closes-on-escape branch), like every other dialog here.
+/// `escape` claims nothing on every target and step EXCEPT
+/// `Target::LogLevel`'s level step, which claims it to step back to the
+/// target step instead of closing the dialog (locality spec §4.2);
+/// everywhere else it falls through to `handle_key_down`'s
+/// modal-closes-on-escape branch.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,

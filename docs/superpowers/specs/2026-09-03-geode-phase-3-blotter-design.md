@@ -402,7 +402,7 @@ to collide with it, so it works as written above.
 
 ### 4.3 The `:` vocabulary
 
-> **Superseded 2026-09-20** by `docs/superpowers/specs/2026-09-20-geode-command-line-locality-design.md`: a `:` line changes only its own tile. The `:scope …`, `:asof undo`, `:live` and `:group save N` rows below are refusals now, and `:asof <time>` pins the TILE (with `:asof live` / `:asof clear`), not the frame.
+> **Superseded 2026-09-20** by `docs/superpowers/specs/2026-09-20-geode-command-line-locality-design.md`: a `:` line changes only its own tile. The `:scope …`, `:live` and `:group save N` rows below are refusals now, and `:asof <time>` pins the TILE (with `:asof live` / `:asof clear`), not the frame.
 
 Every command below is a `blotter::` action reachable from the palette
 too; the line is the fast path. `:` commands that change the frame do so

@@ -356,11 +356,13 @@ Run `--anchors-only` before merge as always.
 
 ## 10. As built (2026-09-20)
 
-- §2's sweep checks `Frame::take_pending_persist` and the `Diagnostics`
-  entity's pending level/overlay rather than diffing a user directory:
-  those two are the only channels a module has onto a config write (the
+- §2's sweep checks `Frame::take_pending_persist`,
+  `Frame::take_pending_scope_persist` and the `Diagnostics` entity's
+  pending level/overlay rather than diffing a user directory: those
+  three are the only channels a module has onto a config write (the
   shell performs the write), so they are the honest check at module
-  level.
+  level. The blotter sweep checks all three it can reach; a module with
+  a narrower vocabulary checks only the ones its own words could touch.
 - §7's `asof-pin:chip` entry became `asof-pin: the pinned chip paints`
   and `asof-pin: the frame chip hides while pinned`: a `TestAppContext`
   can see whether a chip paints, not its colour; the tone rides the
@@ -376,16 +378,27 @@ Run `--anchors-only` before merge as always.
   `refresh_asof_chip`), so the elided form never outlives its day
   (review finding on Task 3).
 - The harness entry for the expression commit is titled `expr-dialog:
-  enter commits the parsed expression to the frame` (the
-  `set_scope_in_session` mutation the spec's table implied would have
-  survived: that method pushes undo identically; the entry defends the
-  commit, and the undo half is the test's own last assertion).
+  enter commits the parsed expression to the frame` (a
+  `set_scope_in_session` mutation considered during Task 6 would have
+  survived: that method pushes undo identically; the entry as built
+  defends the commit, and the undo half is the test's own last
+  assertion).
 - The parse-error text in the expression dialog AND the as-of dialog now
   paints through `chip_paint(theme, Tone::DangerText)` (a raw
-  `theme.danger` bypassed the 3:1 floor); three other raw `theme.danger`
-  text sites (status.rs message strip, commandline_view.rs error,
-  toolbar.rs contradiction fallback) are pre-existing and left for a
-  follow-up.
+  `theme.danger` bypassed the 3:1 floor); four other raw `theme.danger`
+  text sites (`status.rs`'s reload-message and config-write-error
+  segments, `commandline_view.rs`'s error strip, `objectdialog/
+  render.rs`'s diagnostic `!` glyph) are pre-existing and left for a
+  follow-up — `toolbar.rs`'s contradiction chip is NOT one of them: its
+  fill falls back to `theme.danger` but its text already comes from
+  `chip_paint`.
+- §7's harness table reconciles against what was built as follows:
+  `locality:blotter-scope` and `locality:blotter-live` merged into the
+  one entry `locality: a refused word never writes the frame`; every
+  other row was respelled to match its as-built name; and three entries
+  are new beyond the table — `expr-dialog: enter commits the parsed
+  expression to the frame` and the two `loglevel:` entries (the step-1
+  and step-2 mutations of `shell::choicedialog`'s `Target::LogLevel`).
 - Task 5 kept one renamed completion test
   (`completions_offer_sections_after_the_section_word`) that pins
   `["section"]` → the five section names.
