@@ -56,8 +56,8 @@ use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, MatrixModel, PanelSpec, Precision,
-    Segment, UpdatePolicy, attr_text, parse_attr, parse_cell,
+    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, FieldKey, MatrixModel, PanelSpec,
+    Precision, Segment, UpdatePolicy, attr_text, parse_attr, parse_cell, route,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -2105,9 +2105,10 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) -> bool {
         let modifiers = event.keystroke.modifiers;
-        if modifiers.control || modifiers.alt || modifiers.platform {
+        let chord = modifiers.control || modifiers.alt || modifiers.platform;
+        let Some(key) = route(event.keystroke.key.as_str(), modifiers.shift, chord) else {
             return false;
-        }
+        };
         let Some(Editing {
             state: EditorState::Date { field, paint, .. },
             ..
@@ -2115,34 +2116,21 @@ impl MarketDataTile {
         else {
             return false;
         };
-        let key = event.keystroke.key.as_str();
-        let big = if modifiers.shift { 10 } else { 1 };
         match key {
-            "left" => field.left(),
-            "right" => field.right(),
-            "up" => field.step(big),
-            "down" => field.step(-big),
-            "backspace" => field.backspace(),
-            "enter" => {
+            FieldKey::Commit => {
                 self.commit_edit(window, cx);
                 self.sync_cursor(cx);
                 self.changed(cx);
                 return true;
             }
-            "escape" => {
+            FieldKey::Cancel => {
                 self.close_editor(window, cx);
                 self.sync_cursor(cx);
                 self.changed(cx);
                 return true;
             }
-            _ => {
-                let mut chars = key.chars();
-                match (chars.next().and_then(|c| c.to_digit(10)), chars.next()) {
-                    (Some(d), None) => {
-                        field.digit(d as u8);
-                    }
-                    _ => return false,
-                }
+            other => {
+                field.apply(other);
             }
         }
         *paint = DateFieldPaint::of(field);

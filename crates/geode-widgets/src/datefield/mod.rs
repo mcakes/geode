@@ -93,6 +93,69 @@ pub struct SegmentText {
     pub typing: bool,
 }
 
+/// What one keystroke means to the field — [`route`]'s answer, applied
+/// by [`DateTimeField::apply`] except for the two the host owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKey {
+    Left,
+    Right,
+    Step(i64),
+    Digit(u8),
+    Backspace,
+    Commit,
+    Cancel,
+}
+
+/// The ONE key table every host consults (spec §4.2): `left`/`right`
+/// move, `up`/`down` step (`shift` = ten), a digit types, `backspace`
+/// clears, `enter` commits, `escape` cancels. `chord` is "ctrl, alt or
+/// cmd held" — such a keystroke is never the field's, so a shell chord
+/// keeps working while a field is open.
+pub fn route(key: &str, shift: bool, chord: bool) -> Option<FieldKey> {
+    if chord {
+        return None;
+    }
+    let big = if shift { 10 } else { 1 };
+    Some(match key {
+        "left" => FieldKey::Left,
+        "right" => FieldKey::Right,
+        "up" => FieldKey::Step(big),
+        "down" => FieldKey::Step(-big),
+        "backspace" => FieldKey::Backspace,
+        "enter" => FieldKey::Commit,
+        "escape" => FieldKey::Cancel,
+        _ => {
+            let mut chars = key.chars();
+            match (chars.next().and_then(|c| c.to_digit(10)), chars.next()) {
+                (Some(d), None) => FieldKey::Digit(d as u8),
+                _ => return None,
+            }
+        }
+    })
+}
+
+impl DateTimeField {
+    /// Perform `key`'s arm on the field. `Commit` and `Cancel` do nothing
+    /// here — the host owns what a commit writes and what a cancel
+    /// restores — and answer `false`. Every other arm answers whether
+    /// anything about the field (value, segment or partial digits)
+    /// changed, so a host can skip a repaint on a no-op.
+    pub fn apply(&mut self, key: FieldKey) -> bool {
+        let before = self.clone();
+        match key {
+            FieldKey::Left => self.left(),
+            FieldKey::Right => self.right(),
+            FieldKey::Step(n) => self.step(n),
+            FieldKey::Digit(d) => {
+                self.digit(d);
+            }
+            FieldKey::Backspace => self.backspace(),
+            FieldKey::Commit | FieldKey::Cancel => return false,
+        }
+        *self != before
+    }
+}
+
 /// The field's state: the committed value, the precision, the active
 /// segment, and the digits typed into that segment since it became
 /// active.
@@ -1040,5 +1103,56 @@ mod tests {
             Segment::Day,
             "the panel's contract: the day stays the day"
         );
+    }
+
+    #[test]
+    fn route_maps_every_field_key_and_lets_a_chord_through() {
+        assert_eq!(route("left", false, false), Some(FieldKey::Left));
+        assert_eq!(route("right", false, false), Some(FieldKey::Right));
+        assert_eq!(route("up", false, false), Some(FieldKey::Step(1)));
+        assert_eq!(route("down", false, false), Some(FieldKey::Step(-1)));
+        assert_eq!(route("up", true, false), Some(FieldKey::Step(10)));
+        assert_eq!(route("down", true, false), Some(FieldKey::Step(-10)));
+        assert_eq!(route("7", false, false), Some(FieldKey::Digit(7)));
+        assert_eq!(route("backspace", false, false), Some(FieldKey::Backspace));
+        assert_eq!(route("enter", false, false), Some(FieldKey::Commit));
+        assert_eq!(route("escape", false, false), Some(FieldKey::Cancel));
+        assert_eq!(
+            route("a", false, false),
+            None,
+            "a letter is not the field's"
+        );
+        assert_eq!(route("tab", false, false), None, "tab belongs to the host");
+        assert_eq!(
+            route("up", false, true),
+            None,
+            "a chord falls through to the shell"
+        );
+        assert_eq!(route("7", false, true), None);
+    }
+
+    #[test]
+    fn apply_performs_the_field_arms_and_reports_a_change() {
+        let mut f =
+            DateTimeField::open(dt(2026, 9, 18, 10, 0, 0), Precision::DateTime, Segment::Day);
+        assert!(f.apply(FieldKey::Step(1)));
+        assert_eq!(f.date(), d(2026, 9, 19));
+        assert!(f.apply(FieldKey::Right));
+        assert_eq!(f.segment(), Segment::Hour);
+        assert!(
+            f.apply(FieldKey::Digit(1)),
+            "a waiting digit is a change too"
+        );
+        assert!(f.apply(FieldKey::Backspace));
+        assert!(
+            !f.apply(FieldKey::Backspace),
+            "nothing typed: nothing changed"
+        );
+        assert!(f.apply(FieldKey::Left));
+        assert!(
+            !f.apply(FieldKey::Commit),
+            "commit and cancel are the host's"
+        );
+        assert!(!f.apply(FieldKey::Cancel));
     }
 }
