@@ -1728,17 +1728,35 @@ run_mutation "keybindings: escape only walks the ladder when unmodified" \
 
 run_mutation "keybindings: d never writes an unbind" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"')) => {' \
-  '            NormalCommand::Verb(key @ ('"'"'r'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"' | '"'"'R'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'r'"'"' | '"'"'R'"'"')) => {' \
   geode-shell \
   d_unbinds_the_selected_binding
 
 run_mutation "keybindings: r never writes a reset" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"')) => {' \
-  '            NormalCommand::Verb(key @ ('"'"'d'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"' | '"'"'R'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'R'"'"')) => {' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
+
+# `shift+r` reaches the dialog as `Verb('R')` through the shared key
+# table; drop it from the arm and reset-all is a key that does nothing.
+run_mutation "keybindings: shift+r never resets all" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"' | '"'"'R'"'"')) => {' \
+  '            NormalCommand::Verb(key @ ('"'"'d'"'"' | '"'"'r'"'"')) => {' \
+  geode-shell \
+  shift_r_asks_and_y_removes_every_user_binding
+
+# The shared table is the only place `shift+r` becomes a verb; a `None`
+# there is the key silently dropped by every dialog at once.
+run_mutation "dialogmode: shift+r is not a verb" \
+  crates/geode-shell/src/dialogmode.rs \
+  '            "r" => Some(NormalCommand::Verb('"'"'R'"'"')),' \
+  '            "r" => None,' \
+  geode-shell \
+  shift_r_asks_and_y_removes_every_user_binding
 
 # `d` ignoring the row's layer, both directions. A `false` here shadows
 # the user's own key with `"none"` instead of removing it; a `true`
@@ -1758,14 +1776,85 @@ run_mutation "keybindings: d removes where it should shadow a lower layer" \
   geode-shell \
   d_unbinds_the_selected_binding
 
-# Reset is the removal branch by definition — a shadow would bury the
-# very layer it was asked to uncover.
+# Reset is a removal by definition — a shadow would bury the very layer
+# it was asked to uncover. The writer is `apply_reset` since 2026-09-19.
 run_mutation "keybindings: r shadows instead of removing the user's override" \
-  crates/geode-shell/src/shell/keybindings_view.rs \
-  '        is_user_layer: true,' \
-  '        is_user_layer: false,' \
+  crates/geode-shell/src/keymap_edit.rs \
+  '        if keys.remove(&o.key).is_some() {
+            removed += 1;
+        }' \
+  '        set_key(keys, o.key.as_str(), value("none"));
+        removed += 1;' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
+
+# The reset removes the WHOLE override set, not the row's displayed
+# binding: a rebind of a builtin is two keys (the new one and the `"none"`
+# shadow over the old), and removing only the first leaves the action
+# unbound rather than reset — the defect `user_overrides_for` closes.
+# Dropping its shadow branch is exactly the old behaviour.
+run_mutation "keymap: a reset misses the none shadow half of a rebind" \
+  crates/geode-shell/src/keymap/build.rs \
+  '        } else if b.action.0 == UNBOUND_ACTION {' \
+  '        } else if false {' \
+  geode-shell \
+  r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow
+
+# A shadow under another context never reaches the builtin it would have
+# to silence, so it is not this action's override; removing it is
+# removing someone else's binding.
+run_mutation "keymap: a reset takes a shadow from an unrelated context" \
+  crates/geode-shell/src/keymap/build.rs \
+  '                    && (b.context_source.is_none() || b.context_source == lower.context_source)' \
+  '                    && true' \
+  geode-shell \
+  a_shadow_in_a_different_context_is_not_this_actions_override
+
+# The user layer is the only one the app writes; a desk entry in the set
+# would be a removal `apply_reset` cannot perform, reported as done.
+run_mutation "keymap: a reset counts a desk override as the user's" \
+  crates/geode-shell/src/keymap/build.rs \
+  '    for b in bindings.iter().filter(|b| b.layer == Layer::User) {' \
+  '    for b in bindings.iter() {' \
+  geode-shell \
+  a_desk_override_is_never_the_users_to_remove
+
+# The removal is `keys.remove(spelling)` on the file; a re-rendering of
+# the parsed keystroke (`alt+h` for a file that wrote `mod+h`) finds
+# nothing and reports the reset as done.
+run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
+  crates/geode-shell/src/keymap/build.rs \
+  '                    key_source: spec.clone(),' \
+  '                    key_source: crate::palette::render_binding(&keystrokes),' \
+  geode-shell \
+  the_override_carries_the_files_own_key_spelling
+
+# `apply_reset` must never CREATE an entry: a context with no entry is a
+# key not found, and `keys_table_for` would leave an empty `[[bindings]]`
+# behind on every miss.
+run_mutation "keymap_edit: a reset creates the entry it was going to remove from" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '        let Some(entry) = bindings.iter_mut().find(|entry| {
+            entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
+        }) else {
+            continue;
+        };
+        let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+            continue;
+        };' \
+  '        let keys = keys_table_for(bindings, o.context_source.as_deref());' \
+  geode-shell \
+  resetting_a_key_that_is_not_there_counts_nothing_and_creates_no_entry
+
+# Reset-all drops the `bindings` array and nothing else; a `clear()` of
+# the whole document would take `config_version` and the `mod` alias
+# with it.
+run_mutation "keymap_edit: reset-all empties the whole file" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '    doc.remove("bindings");' \
+  '    doc.clear();' \
+  geode-shell \
+  reset_all_drops_every_bindings_entry_and_keeps_the_rest_of_the_file
 
 # Without the user-layer guard, `r` on a builtin row reaches
 # `apply_unbind` with `is_user_layer: true` against a key that is not in
@@ -1776,12 +1865,50 @@ run_mutation "keybindings: r shadows instead of removing the user's override" \
 # into two branches, an unbound row (which HAS an override — the `"none"`
 # shadow — and is told how to recover) and a live lower-layer binding
 # (which genuinely has none). This entry defends the second guard.
+# Re-anchored 2026-09-19: the guard is the override SET being empty
+# (`user_overrides_for` over the whole keymap), which is honest for a
+# shadowed row too — the shadow is in the set.
 run_mutation "keybindings: r writes on a row with no user override" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '    if bound.layer != Layer::User {' \
-  '    if false {' \
+  '    if row.overrides.is_empty() {
+        return Some(format!("{} has no user override to reset", row.title));
+    }' \
+  '' \
   geode-shell \
   r_on_a_row_with_no_user_override_says_so_and_writes_nothing
+
+# With no user bindings there is nothing to reset; `shift+r` must say so
+# and write nothing, not create an empty keymap.toml.
+run_mutation "keybindings: shift+r writes with nothing to reset" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    if user_bindings == 0 {
+        return Some("no user keyboard shortcut overrides to reset".to_string());
+    }' \
+  '' \
+  geode-shell \
+  shift_r_with_no_user_bindings_says_so_and_writes_nothing
+
+# `shift+r` is a confirm like `d`/`r`; unguarded it writes on the keystroke.
+run_mutation "keybindings: shift+r resets all without asking" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        '"'"'R'"'"' if user_bindings > 0 => {
+            state.confirm = Some(KeybindingConfirm::ResetAll);
+        }' \
+  '' \
+  geode-shell \
+  shift_r_n_withdraws_and_writes_nothing
+
+# The reset-all button is painted only where there is something to
+# reset — a button for a verb that can only say "nothing to do" is the
+# defect class this dialog exists to remove.
+run_mutation "keybindings: the reset-all button paints with nothing to reset" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        if user_binding_count(bindings) > 0 {
+            verbs.push(("shift+r", '"'"'R'"'"', "Reset all"));
+        }' \
+  '        verbs.push(("shift+r", '"'"'R'"'"', "Reset all"));' \
+  geode-shell \
+  shift_r_with_no_user_bindings_says_so_and_writes_nothing
 
 # A notice reports on the keystroke (or click) that produced it. Left
 # standing, it points at a row the user has since moved off — the footer
@@ -1829,22 +1956,16 @@ run_mutation "keybindings: a click leaves the previous row's notice standing" \
   geode-shell \
   clicking_a_row_clears_a_standing_notice
 
-# Fix round 1, Important 1. A row silenced by the user's own `d` HAS a
-# user override — the `"none"` shadow is one — but derives as unbound, so
-# the old single-branch refusal called it "no user override to reset".
-# That is false, and it steers the user away from the one recovery that
-# works. Every other assertion in the file stays green with the lie
-# restored; only a test on the message itself sees it.
-run_mutation "keybindings: r denies the user's own none shadow" \
+# A row silenced by the user's own `d` HAS a user override — the `"none"`
+# shadow is one — and since 2026-09-19 `r` lifts it. `can_reset` reading
+# the row's displayed binding (the pre-2026-09-19 rule) refuses to arm on
+# the shadowed row, since it displays nothing.
+run_mutation "keybindings: r cannot lift the user's own none shadow" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        return Some(format!(
-            "{} is unbound — if you silenced it, {RECOVERY}, or undo it \
-             in keymap.toml if it was context-scoped",
-            row.title
-        ));' \
-  '        return Some(format!("{} has no user override to reset", row.title));' \
+  '    row.is_some_and(|r| !r.overrides.is_empty())' \
+  '    row.is_some_and(|r| r.current.as_ref().is_some_and(|b| b.layer == Layer::User))' \
   geode-shell \
-  r_on_a_silenced_row_names_the_recovery_instead_of_denying_the_override
+  r_on_a_silenced_row_lifts_the_shadow
 
 # Fix round 1, Important 3. `d` is one bare, unmodified key performing an
 # immediate destructive disk write, and the row does not relabel until
@@ -1900,11 +2021,22 @@ run_mutation "keybindings: d promises the retype recovery for a contexted bindin
 # before `run_until_parked` sees the silence.
 run_mutation "keybindings: r resets without acknowledging it" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        .or_else(|| Some(format!("removing your {key} override")))
+  '        .or_else(|| Some(format!("removing {what} on {}", row.title)))
 ' \
   '' \
   geode-shell \
   r_acknowledges_the_write_it_spawned
+
+# Reset-all's acknowledgement, the same rule: the write is invisible
+# until the ~500ms watcher, so a silent success reads as an inert key.
+run_mutation "keybindings: shift+r resets all without acknowledging it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    Some(format!(
+        "removing all {user_bindings} of your keyboard shortcut overrides"
+    ))' \
+  '    None' \
+  geode-shell \
+  shift_r_asks_and_y_removes_every_user_binding
 
 # §17.1 rule 2: one click captures. Mutated back to the two-click rule,
 # the first click on an unselected row only selects.
