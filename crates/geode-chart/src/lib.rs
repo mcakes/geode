@@ -5,7 +5,11 @@
 //! gpui-component's `Plot` trait. Nothing here knows a series, a source
 //! or the shell — the rem scale is a parameter.
 
-// `element` and `model` are created in Task 7; the `pub use` re-exports of
-// `Axis`/`AxisMode`/`Pane`/`Side`/`View`/`ChartElement`/`ChartModel`/
-// `ChartSlot` land there too. Until then this crate is `core` alone.
 pub mod core;
+pub mod element;
+pub mod model;
+
+pub use crate::core::axis::{Axis, AxisMode, Pane, Side};
+pub use crate::core::view::View;
+pub use element::{ChartElement, rebuilds};
+pub use model::{ChartModel, ChartSlot};
