@@ -7190,9 +7190,15 @@ edits = [["2026-11-20", "-1", 9.5]]
             "a row click picks and never also selects the grid cell beneath the popup"
         );
 
+        // "Elsewhere" is the HEADER, on purpose: a click on another grid
+        // cell would also run the table's own `SelectCell` → `sync_cursor`,
+        // which re-mirrors on its own and so could not tell whether the
+        // popup's own close did. The header runs no dispatch tail at all,
+        // so the delegate reading `None` here is `close_popup_with_window`'s
+        // re-mirror and nothing else's.
         h.dispatch(&mut vcx, "edit", None);
         assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
-        let elsewhere = centre_of(&mut vcx, "marketdata-cell-1-2");
+        let elsewhere = centre_of(&mut vcx, &format!("marketdata-header-{TILE}"));
         click_at(&mut vcx, elsewhere, 1);
         assert!(
             !h.tile.read_with(&vcx, |t, _| t.choice_popup_open()),
@@ -7203,6 +7209,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             None,
             "the mouse close re-mirrors: the delegate paints no popup"
         );
+        assert_eq!(h.selection(&vcx), (Some(0), Some(3)), "the cursor stayed");
         draw(&mut vcx);
         assert!(
             vcx.debug_bounds(Box::leak(
