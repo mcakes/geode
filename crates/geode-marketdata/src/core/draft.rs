@@ -96,6 +96,39 @@ impl UpdatePolicy {
     }
 }
 
+/// One row-level edit (spec §5.1): `Inserted` is a whole new row, its own
+/// cells keyed by COLUMN LABEL rather than grid index — an inserted row's
+/// index is the model's business, not the draft's — and `Deleted` marks a
+/// document row for removal without saying anything about its cells,
+/// which still paint from the document until the row is actually gone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RowEdit {
+    /// `after` is the label of the document row this one sits under,
+    /// `None` meaning the top. `cells` are the values typed into it so
+    /// far, keyed by the column's own label — the same identity a cell
+    /// edit's `labels` side map already uses, so a row that moves
+    /// columns (a reordered ladder) is not a row that loses its edits.
+    Inserted {
+        after: Option<String>,
+        cells: BTreeMap<String, Value>,
+    },
+    /// A document row marked for removal. The row itself is not gone
+    /// from `rows` — the model still lays it out, struck through
+    /// (§5.2) — until upload or a rebase drops it outright.
+    Deleted,
+}
+
+/// What [`Draft::delete_row`] did, so a caller can say so: `Dropped` is an
+/// `Inserted` row removed outright (there was nothing to send in the
+/// first place), `Marked` is a document row now `Deleted`, `Already` is a
+/// document row that already was.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RowDelete {
+    Dropped,
+    Marked,
+    Already,
+}
+
 /// Edits keyed by grid cell, with the labels that make them portable, plus
 /// document-level attribute edits keyed by column name.
 ///
@@ -113,6 +146,11 @@ impl UpdatePolicy {
 /// A header attribute needs no such indexing — its column NAME is its
 /// identity, the same name every generation of one document carries it
 /// under — so `attrs` is keyed directly, with no `labels`-style side map.
+///
+/// A row-level edit ([`RowEdit`], §5.1) is a third kind of unsent work,
+/// keyed by the row's own label directly — a row has no grid index of its
+/// own to key by until a model places it, unlike a cell edit, which is
+/// always made against a row that already has one.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Draft {
     /// The source time of the generation every edit was made against,
@@ -123,6 +161,10 @@ pub struct Draft {
     /// same draft as `edits` (one base, one state) because both are unsent
     /// work against the same document generation.
     pub attrs: BTreeMap<String, Value>,
+    /// Row insert/delete, keyed by row label. Part of the same draft as
+    /// `edits`/`attrs` for the same reason: one base, one state, one
+    /// `len()`, one `revert`.
+    pub rows: BTreeMap<String, RowEdit>,
     pub state: DraftState,
     /// (row label, column label) per edited cell. Private because it must
     /// never drift from `edits`: every door that writes one writes both.
@@ -153,14 +195,14 @@ impl Draft {
         self.attrs.len()
     }
 
-    /// Cells and attributes together — the one number that answers
+    /// Cells, attributes and rows together — the one number that answers
     /// "is there unsent work".
     pub fn len(&self) -> usize {
-        self.edits.len() + self.attrs.len()
+        self.edits.len() + self.attrs.len() + self.rows.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.edits.is_empty() && self.attrs.is_empty()
+        self.edits.is_empty() && self.attrs.is_empty() && self.rows.is_empty()
     }
 
     pub fn is_sent(&self) -> bool {
@@ -224,14 +266,132 @@ impl Draft {
         }
     }
 
-    /// Drop every edit and attribute, answering how many there were in
-    /// total. The draft is `Clean` afterwards and carries no base, since a
-    /// base describes a set of edits.
+    /// Insert a new row, empty of cells, sitting under `after` (`None` =
+    /// top) — the same base rule as `set`. `label` is the row's own
+    /// identity; a caller inserting on a `Minted` axis mints one first
+    /// through [`Self::mint_label`], while a `Typed` axis's row-label
+    /// editor supplies one directly (spec §5.3).
+    pub fn insert_row(&mut self, label: String, after: Option<String>, base: &str) {
+        if self.is_empty() || self.base.is_none() {
+            self.base = Some(base.to_string());
+        }
+        self.rows.insert(
+            label,
+            RowEdit::Inserted {
+                after,
+                cells: BTreeMap::new(),
+            },
+        );
+        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+            self.state = DraftState::Editing;
+        }
+    }
+
+    /// Delete a row by label — the same base rule as `set`. An `Inserted`
+    /// row is dropped outright (there was never anything to send), a
+    /// document row not already marked becomes `Deleted`, and a row
+    /// already `Deleted` answers `Already` rather than being marked
+    /// twice (marking it again would not be wrong, but the caller's
+    /// notice needs to say which happened).
+    pub fn delete_row(&mut self, label: &str, base: &str) -> RowDelete {
+        if self.is_empty() || self.base.is_none() {
+            self.base = Some(base.to_string());
+        }
+        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+            self.state = DraftState::Editing;
+        }
+        match self.rows.get(label) {
+            Some(RowEdit::Inserted { .. }) => {
+                self.rows.remove(label);
+                RowDelete::Dropped
+            }
+            Some(RowEdit::Deleted) => RowDelete::Already,
+            None => {
+                self.rows.insert(label.to_string(), RowEdit::Deleted);
+                RowDelete::Marked
+            }
+        }
+    }
+
+    /// Write one cell of an `Inserted` row, keyed by the column's own
+    /// label. Answers `false` for anything else — a document row (even a
+    /// `Deleted` one) or a label with no row edit at all — since a cell
+    /// edit on a row the draft did not insert belongs in `Draft::set`
+    /// against the model's own grid index, not here.
+    pub fn set_row_cell(&mut self, label: &str, column_label: &str, value: Value) -> bool {
+        match self.rows.get_mut(label) {
+            Some(RowEdit::Inserted { cells, .. }) => {
+                cells.insert(column_label.to_string(), value);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Move an `Inserted` row to a new label — the row-label editor
+    /// committing a typed label onto a minted or blank one (spec §5.3).
+    /// Answers `false` when `from` is not an `Inserted` row (a document
+    /// row's label is not the draft's to rename) or `to` already names a
+    /// row in this draft, so a caller never silently overwrites one edit
+    /// with another.
+    pub fn rename_row(&mut self, from: &str, to: &str) -> bool {
+        if !matches!(self.rows.get(from), Some(RowEdit::Inserted { .. })) {
+            return false;
+        }
+        if self.rows.contains_key(to) {
+            return false;
+        }
+        let edit = self.rows.remove(from).expect("checked above");
+        self.rows.insert(to.to_string(), edit);
+        true
+    }
+
+    /// The row edit at `label`, if any.
+    pub fn row_state(&self, label: &str) -> Option<&RowEdit> {
+        self.rows.get(label)
+    }
+
+    /// How many rows this draft inserts.
+    pub fn rows_added(&self) -> usize {
+        self.rows
+            .values()
+            .filter(|e| matches!(e, RowEdit::Inserted { .. }))
+            .count()
+    }
+
+    /// How many rows this draft marks deleted.
+    pub fn rows_removed(&self) -> usize {
+        self.rows
+            .values()
+            .filter(|e| matches!(e, RowEdit::Deleted))
+            .count()
+    }
+
+    /// The smallest `new-<n>` (`n` starting at 1) that neither `taken`
+    /// (the model's own rows, or whatever else a caller wants to avoid)
+    /// nor this draft's own `rows` already names — so minting never
+    /// reuses a label within the draft even after the row it first named
+    /// is renamed or deleted, and never collides with what is on screen.
+    pub fn mint_label(&self, taken: impl Fn(&str) -> bool) -> String {
+        let mut n = 1usize;
+        loop {
+            let candidate = format!("new-{n}");
+            if !taken(&candidate) && !self.rows.contains_key(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Drop every edit, attribute and row, answering how many there were
+    /// in total. The draft is `Clean` afterwards and carries no base,
+    /// since a base describes a set of edits.
     pub fn revert(&mut self) -> usize {
         let n = self.len();
         self.edits.clear();
         self.labels.clear();
         self.attrs.clear();
+        self.rows.clear();
         self.base = None;
         self.state = DraftState::Clean;
         n
@@ -393,6 +553,48 @@ impl Draft {
         }
         self.attrs = attrs;
 
+        // A row edit's identity is its own label — the same `rows` index
+        // built above for cell edits, since a row that exists in the
+        // newer model is exactly a label that index carries (§5.1).
+        let mut rows_out = BTreeMap::new();
+        for (label, edit) in std::mem::take(&mut self.rows) {
+            match edit {
+                // Deleted, and the newer document still has it: keep
+                // marking it deleted. Deleted, and the newer document
+                // dropped the row itself: there is nothing left to
+                // delete, so the edit is dropped and named.
+                RowEdit::Deleted => {
+                    if rows.contains_key(label.as_str()) {
+                        rows_out.insert(label, RowEdit::Deleted);
+                    } else {
+                        dropped.push((label, "row".to_string()));
+                    }
+                }
+                // Inserted, and the newer document now carries a row
+                // under this very label: upstream got there first, so
+                // this draft's own insert is dropped and named as a
+                // conflict rather than silently shadowing the real row.
+                // Otherwise it survives, but its anchor might not have:
+                // an `after` label the newer document no longer carries
+                // re-anchors to the top and is named too.
+                RowEdit::Inserted { after, cells } => {
+                    if rows.contains_key(label.as_str()) {
+                        dropped.push((label, "row (the document now carries it)".to_string()));
+                    } else {
+                        let after = match after {
+                            Some(anchor) if !rows.contains_key(anchor.as_str()) => {
+                                dropped.push((label.clone(), format!("anchor '{anchor}'")));
+                                None
+                            }
+                            other => other,
+                        };
+                        rows_out.insert(label, RowEdit::Inserted { after, cells });
+                    }
+                }
+            }
+        }
+        self.rows = rows_out;
+
         self.base = model_of_newer.source_time.clone();
         self.state = if self.is_empty() {
             DraftState::Clean
@@ -417,16 +619,27 @@ impl Draft {
         }
     }
 
-    /// "3 cells, spot_ref" / "1 cell" / "anchor_date, spot_ref" — the
-    /// unsent work named for a notice or a confirm, cells first (a count,
-    /// since a cell has no name worth showing) and then every edited
-    /// attribute's own column name.
+    /// "3 cells, 1 row added, 1 row removed, spot_ref" — the unsent work
+    /// named for a notice or a confirm, in that fixed order: cells (a
+    /// count, since a cell has no name worth showing), rows added, rows
+    /// removed, then every edited attribute's own column name. Each part
+    /// appears only when non-zero.
     pub fn count_phrase(&self) -> String {
         let mut parts = Vec::new();
         match self.edits.len() {
             0 => {}
             1 => parts.push("1 cell".to_string()),
             n => parts.push(format!("{n} cells")),
+        }
+        match self.rows_added() {
+            0 => {}
+            1 => parts.push("1 row added".to_string()),
+            n => parts.push(format!("{n} rows added")),
+        }
+        match self.rows_removed() {
+            0 => {}
+            1 => parts.push("1 row removed".to_string()),
+            n => parts.push(format!("{n} rows removed")),
         }
         parts.extend(self.attrs.keys().cloned());
         parts.join(", ")
@@ -467,6 +680,29 @@ impl Draft {
                 );
             }
             table.insert("attrs".into(), toml::Value::Table(attrs));
+        }
+        if !self.rows.is_empty() {
+            let mut rows = toml::Table::new();
+            for (label, edit) in &self.rows {
+                let mut row = toml::Table::new();
+                match edit {
+                    RowEdit::Inserted { after, cells } => {
+                        if let Some(after) = after {
+                            row.insert("after".into(), toml::Value::String(after.clone()));
+                        }
+                        let mut cells_table = toml::Table::new();
+                        for (column_label, value) in cells {
+                            cells_table.insert(column_label.clone(), value_to_toml(value));
+                        }
+                        row.insert("cells".into(), toml::Value::Table(cells_table));
+                    }
+                    RowEdit::Deleted => {
+                        row.insert("deleted".into(), toml::Value::Boolean(true));
+                    }
+                }
+                rows.insert(label.clone(), toml::Value::Table(row));
+            }
+            table.insert("rows".into(), toml::Value::Table(rows));
         }
         table
     }
@@ -533,7 +769,36 @@ impl Draft {
                 attrs.insert(column.clone(), value);
             }
         }
-        let state = if edits.is_empty() && attrs.is_empty() {
+        // Named `row_edits`, not `rows` — this function's `rows` above is
+        // already the (oddly named) top-level `edits` array.
+        let mut row_edits = BTreeMap::new();
+        if let Some(toml::Value::Table(rows_table)) = t.get("rows") {
+            for (label, entry) in rows_table {
+                let Some(row) = entry.as_table() else {
+                    continue;
+                };
+                if row.get("deleted").and_then(|v| v.as_bool()) == Some(true) {
+                    row_edits.insert(label.clone(), RowEdit::Deleted);
+                    continue;
+                }
+                let after = row
+                    .get("after")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let mut cells = BTreeMap::new();
+                if let Some(toml::Value::Table(cells_table)) = row.get("cells") {
+                    for (column_label, value) in cells_table {
+                        // A malformed cell is skipped, the same rule the
+                        // top-level `edits` loop above follows.
+                        if let Some(value) = value_from_toml(value) {
+                            cells.insert(column_label.clone(), value);
+                        }
+                    }
+                }
+                row_edits.insert(label.clone(), RowEdit::Inserted { after, cells });
+            }
+        }
+        let state = if edits.is_empty() && attrs.is_empty() && row_edits.is_empty() {
             DraftState::Clean
         } else {
             DraftState::Editing
@@ -542,6 +807,7 @@ impl Draft {
             base,
             edits,
             attrs,
+            rows: row_edits,
             state,
             labels,
         }
@@ -693,6 +959,28 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    /// Same as `d`, spelled out — the row tests below bind `d` to a
+    /// `Draft` and need a date constructor `d` would shadow.
+    fn date(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    /// A flat model naming only the given row labels, no columns and no
+    /// header — `rebase`'s row handling reads a newer model's row labels
+    /// alone (see [`Draft::rebase`]'s doc comment).
+    fn flat_model_with_rows(labels: &[&str]) -> MatrixModel {
+        MatrixModel {
+            rows: labels
+                .iter()
+                .map(|label| RowModel {
+                    label: SharedString::from(*label),
+                    cells: Vec::new(),
+                })
+                .collect(),
+            ..MatrixModel::default()
+        }
     }
 
     /// A model whose header names the given `(column, label)` pairs and
@@ -1302,5 +1590,85 @@ mod tests {
             let back = Draft::from_toml(&draft.to_toml());
             prop_assert_eq!(back.attrs, draft.attrs);
         }
+    }
+
+    #[test]
+    fn inserting_and_deleting_rows_is_counted_and_phrased() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        assert!(d.set_row_cell("new-1", "amount", Value::F64(1.0)));
+        assert!(
+            !d.set_row_cell("D1", "amount", Value::F64(1.0)),
+            "not an inserted row"
+        );
+        assert_eq!(d.delete_row("D2", "t0"), RowDelete::Marked);
+        assert_eq!(d.delete_row("D2", "t0"), RowDelete::Already);
+        assert_eq!(d.rows_added(), 1);
+        assert_eq!(d.rows_removed(), 1);
+        assert_eq!(d.count_phrase(), "1 row added, 1 row removed");
+        assert_eq!(d.delete_row("new-1", "t0"), RowDelete::Dropped);
+        assert_eq!(d.rows_added(), 0);
+        assert_eq!(d.revert(), 1);
+        assert!(d.rows.is_empty());
+    }
+
+    #[test]
+    fn mint_label_takes_the_smallest_unused_number() {
+        let mut d = Draft::default();
+        assert_eq!(d.mint_label(|_| false), "new-1");
+        d.insert_row("new-1".into(), None, "t0");
+        assert_eq!(d.mint_label(|_| false), "new-2");
+        assert_eq!(
+            d.mint_label(|l| l == "new-2"),
+            "new-3",
+            "a label the model already has is skipped"
+        );
+    }
+
+    #[test]
+    fn rename_row_moves_an_inserted_row_and_refuses_a_collision() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), None, "t0");
+        d.insert_row("new-2".into(), None, "t0");
+        assert!(d.rename_row("new-1", "2027-01-15"));
+        assert!(d.row_state("2027-01-15").is_some());
+        assert!(!d.rename_row("new-2", "2027-01-15"));
+        assert!(!d.rename_row("D1", "x"), "only an inserted row renames");
+    }
+
+    /// §5.1: rebase carries rows by label — a deleted row whose label vanished is dropped and named,
+    /// an inserted row whose label the newer document now carries is dropped and named, a vanished
+    /// anchor re-anchors to the top and is named.
+    #[test]
+    fn rebase_carries_rows_by_label() {
+        let mut d = Draft::default();
+        d.delete_row("GONE", "t0");
+        d.delete_row("D1", "t0");
+        d.insert_row("D9".into(), Some("D1".into()), "t0"); // upstream will carry D9
+        d.insert_row("new-1".into(), Some("GONE".into()), "t0"); // anchor vanishes
+        let newer = flat_model_with_rows(&["D1", "D2", "D9"]);
+        let (_, dropped) = d.rebase(&newer);
+        assert!(matches!(d.row_state("D1"), Some(RowEdit::Deleted)));
+        assert!(d.row_state("GONE").is_none());
+        assert!(d.row_state("D9").is_none(), "upstream got there first");
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: None, .. })
+        ));
+        assert!(dropped.contains(&("GONE".into(), "row".into())));
+        assert!(dropped.contains(&("D9".into(), "row (the document now carries it)".into())));
+        assert!(dropped.contains(&("new-1".into(), "anchor 'GONE'".into())));
+    }
+
+    #[test]
+    fn rows_round_trip_through_toml() {
+        let mut d = Draft::default();
+        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.set_row_cell("new-1", "ex", Value::Date(date(2027, 1, 15)));
+        d.set_row_cell("new-1", "status", Value::Utf8("estimated".into()));
+        d.delete_row("D2", "t0");
+        let back = Draft::from_toml(&d.to_toml());
+        assert_eq!(back.rows, d.rows);
+        assert_eq!(back.base, d.base);
     }
 }
