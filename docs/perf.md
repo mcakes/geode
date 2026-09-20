@@ -1595,6 +1595,37 @@ once; it is not done now because the measured cost is a third of the
 budget and the per-statement shape is what makes each slot's stats
 independently testable.
 
+## Line pricer core (spec §12, Part 2)
+
+`cargo bench -p geode-pricer`, criterion medians, `--release`, an M-series
+Mac. The sheet is 1,000 rows (every tenth a two-leg callspread), the
+shape spec §8.2 sizes the grid model for. Nothing here paints; the grid
+model bench is Part 3's.
+
+| Benchmark | What it is | Result |
+|---|---|---|
+| `parse_1000_lines` | the shorthand parser over 1,000 typed lines | 270 µs |
+| `apply_undo_sheet_shift_1000` | one sheet-wide shift and its undo: every line's request compared twice, ~1,000 lines staled each way | 1.52 ms |
+| `apply_undo_set_instrument_1000` | one cell edit and its undo at 1,000 lines: the per-keystroke cost | 6.66 µs |
+| `deliver_all_1000` | one full reprice landing as a batch: ~900 results installed and ONE `fold_packages` | 175 µs |
+| `to_rows_from_rows_1000` | the autosave's document build plus a restore's rebuild through `Edit::Restore` | 1.14 ms |
+
+Budget: the per-keystroke figure is what §7's 8 ms pure-UI budget
+constrains (an edit happens on the UI thread before the frame that shows
+it); the sheet-wide edit is the worst single keystroke (`:shift spot 2`).
+`parse` runs once per `enter` in entry mode. The round trip runs once per
+autosave (`to_rows`, Part 4's write-behind) and once per restore. All
+five medians are well inside the 8 ms budget, the sheet-wide shift (the
+worst of the five) leaving over 6 ms of headroom before the grid model's
+own paint cost is even added in.
+
+`deliver_all` is the door a whole batch of results lands through, and
+the figure above is why it exists: the per-line `deliver` folds every
+package on the sheet per landing, which is right for a single result
+and quadratic for a batch (one full reprice of a 1,200-row sheet
+measured 3.37 ms that way against 175 µs here). Part 3's
+`Delivery::Price` arm calls `deliver_all`; `deliver` stays the
+single-result form.
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the

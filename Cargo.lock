@@ -2626,10 +2626,20 @@ dependencies = [
  "geode-core",
  "geode-data",
  "geode-shell",
+ "geode-widgets",
  "gpui-component",
  "gpui-pre",
  "proptest",
  "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
+name = "geode-pricer"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "geode-core",
 ]
 
 [[package]]
@@ -2657,6 +2667,16 @@ dependencies = [
  "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "geode-widgets"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "geode-core",
+ "gpui-component",
+ "gpui-pre",
 ]
 
 [[package]]

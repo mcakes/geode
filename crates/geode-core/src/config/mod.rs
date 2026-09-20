@@ -339,10 +339,13 @@ pub mod test_support {
 /// stamp every doc carries, and free of the three characters that would
 /// make it a quoted or dotted TOML key (whitespace, `.`, `"`).
 ///
-/// One rule, two callers — `Frame::save_scope` (`:scope save <name>`)
-/// and the object dialog's `n` — so a name the command line accepts is
-/// a name the dialog accepts, and vice versa. Returns the trimmed name
-/// so a caller cannot check one spelling and write another.
+/// One rule, two callers — `Frame::save_scope` (historically `:scope
+/// save <name>` on a tile's command line, test-only since the
+/// 2026-09-20 command-line locality ruling retired that route) and the
+/// object dialog's `n` — so a name the dialog accepts is a name
+/// `Frame::save_scope` still accepts too, and vice versa. Returns the
+/// trimmed name so a caller cannot check one spelling and write
+/// another.
 pub fn check_object_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
     if name.is_empty()

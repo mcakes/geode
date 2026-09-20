@@ -353,3 +353,76 @@ Run `--anchors-only` before merge as always.
   its reverse.
 - Any change to what `ctrl+k` dispatches; the palette's global-or-local
   reading is already right.
+
+## 10. As built (2026-09-20)
+
+- §2's sweep checks `Frame::take_pending_persist`,
+  `Frame::take_pending_scope_persist` and the `Diagnostics` entity's
+  pending level/overlay rather than diffing a user directory: those
+  three are the only channels a module has onto a config write (the
+  shell performs the write), so they are the honest check at module
+  level. The blotter sweep checks all three it can reach; a module with
+  a narrower vocabulary checks only the ones its own words could touch.
+- §7's `asof-pin:chip` entry became `asof-pin: the pinned chip paints`
+  and `asof-pin: the frame chip hides while pinned`: a `TestAppContext`
+  can see whether a chip paints, not its colour; the tone rides the
+  existing `every_chip_tone_is_readable_on_every_bundled_theme` sweep.
+- §5's refusal for `:asof undo` names the palette title as it is,
+  `Swap to the previous as of`; `:group save N` names `Edit groupings…`.
+- The status bar's as-of segment read `:live to return`; it now reads
+  `Return to live in the palette`.
+- The expression chip's tooltip had said `:filter <expr> sets it` (the
+  tile layer); it names `frame::scope_expression` now.
+- The pinned chip's cached `AS OF HH:MM` text is rebuilt lazily in
+  `render` when the local date changes (`asof_chip_date`,
+  `refresh_asof_chip`), so the elided form never outlives its day
+  (review finding on Task 3).
+- The harness entry for the expression commit is titled `expr-dialog:
+  enter commits the parsed expression to the frame` (a
+  `set_scope_in_session` mutation considered during Task 6 would have
+  survived: that method pushes undo identically; the entry as built
+  defends the commit, and the undo half is the test's own last
+  assertion).
+- The parse-error text in the expression dialog AND the as-of dialog now
+  paints through `chip_paint(theme, Tone::DangerText)` (a raw
+  `theme.danger` bypassed the 3:1 floor); four other raw `theme.danger`
+  text sites (`status.rs`'s reload-message and config-write-error
+  segments, `commandline_view.rs`'s error strip, `objectdialog/
+  render.rs`'s diagnostic `!` glyph) are pre-existing and left for a
+  follow-up — `toolbar.rs`'s contradiction chip is NOT one of them: its
+  fill falls back to `theme.danger` but its text already comes from
+  `chip_paint`.
+- §7's harness table reconciles against what was built as follows:
+  `locality:blotter-scope` and `locality:blotter-live` merged into the
+  one entry `locality: a refused word never writes the frame`; every
+  other row was respelled to match its as-built name; and three entries
+  are new beyond the table — `expr-dialog: enter commits the parsed
+  expression to the frame` and the two `loglevel:` entries (the step-1
+  and step-2 mutations of `shell::choicedialog`'s `Target::LogLevel`).
+- Task 5 kept one renamed completion test
+  (`completions_offer_sections_after_the_section_word`) that pins
+  `["section"]` → the five section names.
+- The harness lost the stale `commands: scope drop needs a dimension`
+  entry (its anchored line was deleted with `:scope`).
+- `Frame::save_scope`, `Frame::save_slot`, `ShellView::save_slot`,
+  `take_pending_persist`, `take_pending_scope_persist` and
+  `persist_slot_to_user_config` are production-unreachable since this
+  branch: the Groupings and Scopes dialogs write a slot or a saved
+  scope through `config_write` directly rather than through the frame's
+  own pending-persist queue. They are kept as the seams the sweep tests
+  watch, not dead code to delete.
+- The scope bar's expression chip is an EDIT door only — it paints only
+  while an expression already exists on the frame's scope. The palette
+  action (`frame::scope_expression`, "Set scope expression…") is the
+  door from empty; there is no chip to click before a first expression
+  exists.
+- §7 named the sweep `every_colon_command_leaves_the_frame_and_config_
+  alone`; as built it is `every_colon_command_leaves_the_frame_alone`
+  in the blotter and market-data crates and
+  `every_colon_command_leaves_the_app_alone` in diagnostics. The
+  diagnostics and market-data sweeps' own doc comments note they check
+  the frame's three counters (`grouping`, `scope`, `as_of`), not the
+  slot/scope/as-of *values* themselves, because a `save_slot` still
+  bumps `grouping` and `config` and is caught that way even though
+  nothing reads the value it would have written.
+- Display checks pending: §8's list.

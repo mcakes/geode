@@ -4,12 +4,14 @@ members = [
     "crates/geode-core",
     "crates/geode-data",
     "crates/geode-shell",
+    "crates/geode-widgets",
     "crates/geode-blotter",
     "crates/geode-marketdata",
     "crates/geode-chart",
     "crates/geode-diagnostics",
     "crates/geode-documents",
     "crates/geode-pricing",
+    "crates/geode-pricer",
     "crates/geode-demo-data",
     "crates/geode-app",
 ]
@@ -22,6 +24,7 @@ publish = false
 [workspace.dependencies]
 geode-core = { path = "crates/geode-core" }
 geode-shell = { path = "crates/geode-shell" }
+geode-widgets = { path = "crates/geode-widgets" }
 geode-pricing = { path = "crates/geode-pricing" }
 geode-chart = { path = "crates/geode-chart" }
 

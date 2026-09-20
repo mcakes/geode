@@ -85,8 +85,8 @@ pub(crate) struct DelegateEditor {
 
 /// The two forms an editor paints in a cell — the tile's `EditorState`,
 /// with the date form reduced to what `render_td` needs: the pure
-/// `DateField` itself stays on the tile, since only the tile's key path
-/// ever steps it.
+/// `DateTimeField` itself stays on the tile, since only the tile's key
+/// path ever steps it.
 #[derive(Clone)]
 pub(crate) enum DelegateEditorPaint {
     Text(Entity<InputState>),
