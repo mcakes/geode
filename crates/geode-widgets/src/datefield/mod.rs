@@ -939,6 +939,12 @@ mod tests {
         );
         full.left();
         assert_eq!(full.segment(), Segment::Minute);
+
+        assert_eq!(
+            DateTimeField::open(dt(2026, 9, 18, 0, 0, 0), Precision::Date, Segment::Hour).segment(),
+            Segment::Day,
+            "open falls back to the precision's last segment"
+        );
     }
 
     #[test]
@@ -1013,7 +1019,19 @@ mod tests {
         let mut full =
             DateTimeField::open(dt(2026, 9, 18, 10, 0, 0), Precision::DateTime, Segment::Day);
         assert!(full.digit(5), "5 completes as 05");
+        assert_eq!(
+            full.value(),
+            dt(2026, 9, 5, 10, 0, 0),
+            "a typed day preserves the time"
+        );
         assert_eq!(full.segment(), Segment::Hour);
+        full.select(Segment::Day);
+        full.step(1);
+        assert_eq!(
+            full.value(),
+            dt(2026, 9, 6, 10, 0, 0),
+            "a date-segment step preserves the time"
+        );
         let mut date =
             DateTimeField::open(dt(2026, 9, 18, 10, 0, 0), Precision::Date, Segment::Day);
         assert!(date.digit(5));
