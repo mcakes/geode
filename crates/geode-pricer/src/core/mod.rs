@@ -3,6 +3,8 @@
 //! package templates, the column vocabulary, the views doc and the
 //! storage row shape. No gpui type appears here.
 
+pub mod shorthand;
 pub mod template;
 
+pub use shorthand::{LineSpec, OwnShifts, ParseError, RowSpec, parse};
 pub use template::{LegSpec, Template};
