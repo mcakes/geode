@@ -14186,6 +14186,17 @@ run_mutation "core: a fetch source is classified as subscribed" \
   geode-core \
   shape_names_all_three
 
+# A `retention`/`history` window whose microseconds exceed `i64::MAX`
+# reaches `store::series::cutoff` as unrepresentable and sweeps NOTHING.
+# Mutated so the range check never fires, the dataset is accepted
+# silently and a trader's `retention = "300000000y"` bounds nothing.
+run_mutation "core: an out-of-range window is accepted silently" \
+  crates/geode-core/src/schema/mod.rs \
+  '                        if i64::try_from(d.as_micros()).is_ok() {' \
+  '                        if true {' \
+  geode-core \
+  an_out_of_range_window_is_an_error_and_unbounded
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

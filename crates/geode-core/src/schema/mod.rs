@@ -312,19 +312,50 @@ impl SchemaSpec {
                 series_retention: None,
             };
             if family == Family::Series {
+                // Every way a declared window can fail to become one is an
+                // error diagnostic here and `None` (unbounded) in the spec,
+                // because both silent forms were reachable and neither is
+                // visible downstream. A non-string (`retention = 30`, an
+                // easy TOML mistake) read through `as_str()` alone is
+                // indistinguishable from an absent key; a value whose
+                // microseconds do not fit an `i64` (`parse_duration`
+                // accepts `y`, so `"300000000y"` parses) reaches
+                // `store::series::cutoff` as unrepresentable and sweeps
+                // NOTHING. With this check "an unrepresentable window
+                // sweeps nothing" is only reachable by a hand-built
+                // `DatasetSpec` (timeseries spec §4.10).
                 let mut window = |field: &str| -> Option<std::time::Duration> {
-                    let raw = ds_value.get(field).and_then(|v| v.as_str())?;
-                    match crate::source_config::parse_duration(raw) {
-                        Some(d) => Some(d),
-                        None => {
+                    let value = ds_value.get(field)?;
+                    let parsed = match value.as_str() {
+                        Some(raw) => crate::source_config::parse_duration(raw).ok_or_else(|| {
+                            format!(
+                                "dataset '{ds_name}': '{field}' must be a duration such as \
+                                 \"30d\", \"12h\" or \"5y\"; unbounded"
+                            )
+                        }),
+                        None => Err(format!(
+                            "dataset '{ds_name}': '{field}' must be a duration string such as \
+                             \"30d\" or \"5y\"; unbounded"
+                        )),
+                    }
+                    .and_then(|d| {
+                        if i64::try_from(d.as_micros()).is_ok() {
+                            Ok(d)
+                        } else {
+                            Err(format!(
+                                "dataset '{ds_name}': '{field}' is too large to apply (at most \
+                                 about 292,000 years); unbounded"
+                            ))
+                        }
+                    });
+                    match parsed {
+                        Ok(d) => Some(d),
+                        Err(message) => {
                             diags.push(Diagnostic {
                                 severity: Severity::Error,
                                 layer: None,
                                 file: None,
-                                message: format!(
-                                    "dataset '{ds_name}': '{field}' must be a duration such as \
-                                     \"30d\", \"12h\" or \"5y\"; unbounded"
-                                ),
+                                message,
                                 path: Some(format!("datasets.{ds_name}.{field}")),
                             });
                             None
@@ -2064,6 +2095,69 @@ retention = "soon"
                 "missing error at {path}: {diags:?}"
             );
         }
+    }
+
+    /// A window that parses but whose microseconds exceed `i64::MAX`
+    /// (`parse_duration` accepts `y`) would reach `store::series::cutoff`
+    /// as an unrepresentable window and sweep NOTHING. The load-time
+    /// diagnostic is what keeps that from being a silent "unbounded".
+    #[test]
+    fn an_out_of_range_window_is_an_error_and_unbounded() {
+        let (schema, diags) = series_schema(
+            r#"
+[series]
+family = "series"
+retention = "300000000y"
+"#,
+        );
+        assert_eq!(
+            schema
+                .dataset("series")
+                .unwrap()
+                .series_retention
+                .as_ref()
+                .unwrap()
+                .retention,
+            None
+        );
+        assert!(
+            diags.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path.as_deref() == Some("datasets.series.retention")
+                    && d.message.contains("too large to apply")
+            }),
+            "{diags:?}"
+        );
+    }
+
+    /// `retention = 30` is an easy TOML mistake; `as_str()` alone turns it
+    /// into "absent", so it must be diagnosed rather than silently
+    /// unbounded.
+    #[test]
+    fn a_non_string_window_is_an_error_and_unbounded() {
+        let (schema, diags) = series_schema(
+            r#"
+[series]
+family = "series"
+retention = 30
+history = "5y"
+"#,
+        );
+        let r = schema.dataset("series").unwrap().series_retention.unwrap();
+        assert_eq!(r.retention, None);
+        assert_eq!(
+            r.history,
+            Some(std::time::Duration::from_secs(5 * 365 * 86_400)),
+            "the sibling window is unaffected"
+        );
+        assert!(
+            diags.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.path.as_deref() == Some("datasets.series.retention")
+                    && d.message.contains("must be a duration string")
+            }),
+            "{diags:?}"
+        );
     }
 
     #[test]
