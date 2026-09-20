@@ -2858,6 +2858,24 @@ mod tests {
             "{bound} keys for {} actions",
             ACTIONS.len()
         );
+        // And every key SPELLS. `check_fragment` only reads predicates,
+        // and the two checks above only read action ids, so an
+        // unparseable keystroke used to reach the running app and be
+        // dropped there with an error diagnostic in the trader's
+        // diagnostics tile — which is where `"+"` was found, on the
+        // first `--demo` boot after the module was registered (Task 11).
+        // `build_keymap` over the real spliced docs is the production
+        // path and the one that reports it.
+        let docs = geode_shell::keymap::fragments::splice(
+            &[geode_core::config::LayerDoc::builtin("keymap", "").unwrap()],
+            &docs,
+        );
+        let (_, diags) = geode_shell::keymap::build_keymap(
+            &docs,
+            geode_shell::defaults::default_mod(),
+            &registry,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[gpui::test]

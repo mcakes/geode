@@ -95,7 +95,12 @@ context = "timeseries && mode == normal"
 "h" = "timeseries::pan_left"
 "l" = "timeseries::pan_right"
 "=" = "timeseries::zoom_in"
-"+" = "timeseries::zoom_in"
+# The plus key, spelled the way this keymap's own parser spells it:
+# `parse_keystroke` splits a binding on `+`, so a bare `"+"` is an
+# "empty segment" error and the binding never existed — an error
+# diagnostic on every startup, found on the first `--demo` boot after
+# the module was registered (Task 11).
+"shift+=" = "timeseries::zoom_in"
 "-" = "timeseries::zoom_out"
 "0" = "timeseries::reset_view"
 "g" = "timeseries::jump_start"
