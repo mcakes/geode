@@ -4,10 +4,10 @@
 //! `parent`, and `parent` itself is rebuilt by one walk after every
 //! structural edit.
 //!
-//! Mutation goes through [`Sheet::apply`] (`edit.rs`); the two other
-//! `pub` mutators are [`Sheet::deliver`] (a result landing) and
-//! [`Sheet::fold_packages`] (a recompute), and both are called by
-//! `apply` where they matter.
+//! Mutation goes through [`Sheet::apply`] (`edit.rs`); the other `pub`
+//! mutators are [`Sheet::deliver`] and [`Sheet::deliver_all`] (a result
+//! landing, one or a batch) and [`Sheet::fold_packages`] (a recompute),
+//! and both are called by `apply` where they matter.
 
 use crate::core::shorthand::{render_line, render_package};
 use crate::core::template::Template;
@@ -125,9 +125,15 @@ pub enum Delivered {
 pub struct Sheet {
     pub name: String,
     pub view: String,
-    pub sheet_shift: OwnShifts,
-    /// Sheet-wide, by underlying: spot levels now (spec ruling 1).
-    pub overrides: MarketOverrides,
+    /// Read through [`Sheet::sheet_shift`]; written only by
+    /// `Edit::SetSheetShift`, because it feeds every inheriting line's
+    /// `request()` and a direct write would leave them all unstaled.
+    pub(crate) sheet_shift: OwnShifts,
+    /// Sheet-wide, by underlying: spot levels now (spec ruling 1). Read
+    /// through [`Sheet::overrides`]; written only by
+    /// `Edit::SetSpotOverride`, for the same reason (§9.3 stales the
+    /// underlying's lines explicitly).
+    pub(crate) overrides: MarketOverrides,
     pub refresh: Refresh,
     // per row, in sheet order
     ids: Vec<LineId>,
@@ -203,6 +209,18 @@ impl Sheet {
 
     pub fn shift(&self, row: usize) -> OwnShifts {
         self.shift[row]
+    }
+
+    /// The sheet-wide shifts every line without its own inherits; set
+    /// through `Edit::SetSheetShift` alone (the one mutation door).
+    pub fn sheet_shift(&self) -> OwnShifts {
+        self.sheet_shift
+    }
+
+    /// The sheet-wide spot overrides; set through
+    /// `Edit::SetSpotOverride` alone.
+    pub fn overrides(&self) -> &MarketOverrides {
+        &self.overrides
     }
 
     pub fn revision(&self, row: usize) -> u64 {
@@ -289,8 +307,41 @@ impl Sheet {
     /// A result landing (spec §9.2): installed only for a line that
     /// exists at exactly the answered revision. A failure installs
     /// `Failed` and keeps the last good result (the row paints `—`
-    /// either way). Folds packages.
+    /// either way). Folds packages — the single-result form; a whole
+    /// batch goes through [`Sheet::deliver_all`], which folds once.
     pub fn deliver(
+        &mut self,
+        id: LineId,
+        revision: u64,
+        result: Result<PriceResult, String>,
+        at: DateTime<Utc>,
+    ) -> Delivered {
+        let delivered = self.install(id, revision, result, at);
+        self.fold_packages();
+        delivered
+    }
+
+    /// The batch door Part 3's `Delivery::Price` arm uses: every result
+    /// installed, then ONE `fold_packages` at the end (spec §9.2 folds
+    /// once after the loop over a batch's results — folding per landing
+    /// is quadratic in the sheet's length). Answers one [`Delivered`]
+    /// per result, in the order given. `deliver` is the single-line form.
+    pub fn deliver_all(
+        &mut self,
+        results: impl IntoIterator<Item = (LineId, u64, Result<PriceResult, String>)>,
+        at: DateTime<Utc>,
+    ) -> Vec<Delivered> {
+        let out: Vec<Delivered> = results
+            .into_iter()
+            .map(|(id, revision, result)| self.install(id, revision, result, at))
+            .collect();
+        self.fold_packages();
+        out
+    }
+
+    /// One result into its row; everything `deliver` does except the
+    /// fold, so a batch can fold once (spec §9.2).
+    fn install(
         &mut self,
         id: LineId,
         revision: u64,
@@ -318,16 +369,15 @@ impl Sheet {
             Err(message) => self.state[row] = LineState::Failed(message),
         }
         self.priced_at[row] = Some(at);
-        self.fold_packages();
         Delivered::Installed
     }
 
     /// Every package's painted numbers are `Σ qty_leg × value_leg` over
     /// its legs, its state `Failed` (naming the first failed leg) if any
     /// leg is, else `Stale` if any leg is, else `Fresh`; its result is
-    /// `Some` only when every leg has one; its `priced_at` the oldest
-    /// leg's (spec §6.4, planning decision 9). Aggregation, not
-    /// arithmetic (PHILOSOPHY §1).
+    /// `Some` only when every leg has one and none has failed; its
+    /// `priced_at` the oldest leg's (spec §6.4, planning decision 9).
+    /// Aggregation, not arithmetic (PHILOSOPHY §1).
     pub fn fold_packages(&mut self) {
         for p in 0..self.len() {
             if !self.is_package(p) {
@@ -626,7 +676,7 @@ pub(crate) mod tests {
         assert!(s.is_empty());
         assert_eq!(s.roots().count(), 0);
         assert_eq!(s.refresh, Refresh::Default);
-        assert_eq!(s.sheet_shift, OwnShifts::default());
+        assert_eq!(s.sheet_shift(), OwnShifts::default());
     }
 
     #[test]
@@ -815,10 +865,11 @@ pub(crate) mod tests {
         let r = s.request(0).unwrap();
         assert_eq!(r.instrument, spx(5000.0, OptionKind::Call));
         assert_eq!(r.shifts, Shifts::default(), "both None → 0.0");
-        s.sheet_shift = OwnShifts {
+        s.apply(Edit::SetSheetShift(OwnShifts {
             spot_pct: Some(2.0),
             vol_pts: None,
-        };
+        }))
+        .unwrap();
         assert_eq!(
             s.effective_shifts(0),
             Shifts {
@@ -827,13 +878,13 @@ pub(crate) mod tests {
             },
             "inherits the sheet's"
         );
-        // The direct field write above is test-only; the edit door is Task 5.
         // An own value wins per field.
         let mut own = s;
-        own.sheet_shift = OwnShifts {
+        own.apply(Edit::SetSheetShift(OwnShifts {
             spot_pct: Some(2.0),
             vol_pts: Some(-1.0),
-        };
+        }))
+        .unwrap();
         // A row's own shift is set through Task 5's SetShift; here use the
         // record/restore door to build one with an own vol shift.
         let mut rec = own.record(0);
@@ -943,6 +994,68 @@ pub(crate) mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(s.result(0), None, "a failed leg makes the sum uncomputable");
+    }
+
+    #[test]
+    fn deliver_all_installs_every_result_and_folds_once() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![callspread(-5), line(spx(5000.0, OptionKind::Call), 2)],
+        );
+        // rows: 0 package, 1 leg (-5 × 4800 C), 2 leg (+5 × 5200 C), 3 line
+        let (long, short, plain) = (s.id(1), s.id(2), s.id(3));
+        let delivered = s.deliver_all(
+            [
+                (long, 1, Ok(result(100.0))),
+                // An edit landed on this one during the round trip.
+                (short, 0, Ok(result(40.0))),
+                (plain, 1, Ok(result(7.0))),
+            ],
+            at(3),
+        );
+        assert_eq!(
+            delivered,
+            vec![
+                Delivered::Installed,
+                Delivered::OldRevision { current: 1 },
+                Delivered::Installed,
+            ],
+            "one answer per result, in order"
+        );
+        assert_eq!(s.result(1), Some(&result(100.0)));
+        assert_eq!(s.result(2), None, "the old-revision result was dropped");
+        assert_eq!(s.result(3), Some(&result(7.0)));
+        assert_eq!(s.state(1), &LineState::Fresh);
+        assert_eq!(s.state(2), &LineState::Stale);
+        assert_eq!(s.state(3), &LineState::Fresh);
+        // The one fold at the end ran: the package is stale (a leg is)
+        // and has no sum until every leg has a result.
+        assert_eq!(s.state(0), &LineState::Stale);
+        assert_eq!(s.result(0), None);
+        // The missing leg lands; the sum is the folded batch.
+        let delivered = s.deliver_all([(short, 1, Ok(result(40.0)))], at(4));
+        assert_eq!(delivered, vec![Delivered::Installed]);
+        assert_eq!(s.state(0), &LineState::Fresh);
+        // -5 × 100 + 5 × 40 = -300
+        assert_eq!(s.result(0).unwrap().price, -300.0);
+        assert_eq!(s.priced_at(0), Some(at(3)), "the oldest leg's");
+        // Unknown and not-a-line answers come back in place too.
+        assert_eq!(
+            s.deliver_all(
+                [
+                    (LineId(77), 1, Ok(result(1.0))),
+                    (s.id(0), 1, Ok(result(1.0))),
+                ],
+                at(5),
+            ),
+            vec![Delivered::UnknownLine, Delivered::NotALine]
+        );
+        assert_eq!(
+            s.result(0).unwrap().price,
+            -300.0,
+            "neither touched the fold"
+        );
     }
 
     #[test]

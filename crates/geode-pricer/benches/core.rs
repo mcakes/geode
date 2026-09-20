@@ -3,8 +3,12 @@
 //! and undo is per keystroke; `to_rows`/`from_rows` is per autosave and
 //! per restore. Medians go to docs/perf.md under "Line pricer core".
 
-use criterion::{Criterion, criterion_group, criterion_main};
-use geode_pricer::core::{Edit, OwnShifts, Place, RowSpec, Sheet, from_rows, parse, to_rows};
+use chrono::Utc;
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use geode_core::pricing::PriceResult;
+use geode_pricer::core::{
+    Edit, LineId, OwnShifts, Place, RowSpec, Sheet, from_rows, parse, to_rows,
+};
 use std::hint::black_box;
 
 /// `n` distinct vanilla lines: alternating buy/sell, calls/puts, strikes
@@ -92,6 +96,35 @@ fn bench(c: &mut Criterion) {
             black_box(s.undo(&undo).expect("undo"));
             debug_assert_eq!(s.instrument(500), Some(&instrument));
         })
+    });
+
+    // One full reprice: every line's answer landing in one batch, with
+    // the single fold `deliver_all` promises at the end of it.
+    let mut s = sheet(1_000);
+    let batch: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
+        .filter(|r| s.is_line(*r))
+        .map(|r| {
+            (
+                s.id(r),
+                s.revision(r),
+                Ok(PriceResult {
+                    price: 12.5,
+                    delta: 0.5,
+                    gamma: 0.01,
+                    vega: 1.0,
+                    theta: -0.5,
+                    rho: 0.1,
+                }),
+            )
+        })
+        .collect();
+    let now = Utc::now();
+    g.bench_function("deliver_all_1000", |b| {
+        b.iter_batched(
+            || batch.clone(),
+            |batch| black_box(s.deliver_all(batch, now)),
+            BatchSize::SmallInput,
+        )
     });
 
     let s = sheet(1_000);
