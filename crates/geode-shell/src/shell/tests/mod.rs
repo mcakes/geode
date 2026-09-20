@@ -640,4 +640,5 @@ mod reload;
 mod scopebar;
 mod session;
 mod stacks;
+mod tilepicker;
 mod tiling_keys;

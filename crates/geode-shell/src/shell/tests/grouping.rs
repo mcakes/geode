@@ -51,7 +51,7 @@ fn clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot(
         .expect("the grouping readout is painted");
     vcx.simulate_click(readout.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.grouping_picker.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
     assert!(vcx.debug_bounds("grouping-choice-list").is_some());
     assert!(vcx.debug_bounds("grouping-choice-view default").is_some());
     assert!(vcx.debug_bounds("grouping-choice-1 · book / lhu").is_some());
@@ -81,7 +81,7 @@ fn clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot(
 
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
-    assert!(shell.read_with(&vcx, |s, _| s.grouping_picker.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
 }
 
 /// `mod+g` opens the same picker the readout does, on the frame's
@@ -100,7 +100,7 @@ fn mod_g_opens_the_picker_on_the_active_slot(cx: &mut gpui::TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
-            .grouping_picker
+            .choice_dialog
             .as_ref()
             .and_then(|p| p.highlighted_slot())),
         Some(Some(3))
@@ -127,7 +127,7 @@ fn a_digit_jumps_to_a_filled_slot_and_zero_to_the_view_default(cx: &mut gpui::Te
     vcx.simulate_keystrokes("2");
     vcx.run_until_parked();
     assert!(
-        shell.read_with(&vcx, |s, _| s.grouping_picker.is_some()),
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()),
         "an empty slot's digit does nothing"
     );
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
@@ -152,12 +152,10 @@ fn a_digit_after_text_filters_rather_than_jumps(cx: &mut gpui::TestAppContext) {
     vcx.simulate_input("book");
     vcx.simulate_keystrokes("1");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.grouping_picker.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
     let query = shell.read_with(&vcx, |s, _| {
-        s.grouping_picker
-            .as_ref()
-            .map(|p| p.list.query().to_string())
+        s.choice_dialog.as_ref().map(|p| p.list.query().to_string())
     });
     assert_eq!(query.as_deref(), Some("book1"));
 }
@@ -188,7 +186,7 @@ fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppCont
     vcx.simulate_input("zzz");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.grouping_picker.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
@@ -210,7 +208,7 @@ fn enter_re_feeds_the_fields_live_text_before_picking(cx: &mut gpui::TestAppCont
     });
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
-            .grouping_picker
+            .choice_dialog
             .as_ref()
             .and_then(|p| p.highlighted_slot())),
         Some(None),
@@ -242,7 +240,7 @@ fn picking_a_slot_emptied_under_the_picker_says_so(cx: &mut gpui::TestAppContext
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.notice),
-        Some(crate::shell::groupingpicker::SLOT_GONE)
+        Some(crate::shell::choicedialog::SLOT_GONE)
     );
 }
 
@@ -258,7 +256,7 @@ fn tab_completes_the_field_to_the_highlighted_row(cx: &mut gpui::TestAppContext)
     vcx.run_until_parked();
     let field = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
     assert_eq!(field, "3 · underlying_ref");
-    assert!(shell.read_with(&vcx, |s, _| s.grouping_picker.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
 }
 
 /// Hovering the readout names the chord, like the AS OF badge does.
