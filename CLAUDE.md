@@ -41,7 +41,7 @@ Everything below is merged unless the row says otherwise. Specs live in `docs/su
 | Toolbar segments (2026-09-19) | The title-bar readout is three segments parted by inset hairlines (`Separator`): AS OF (a clickable `Tone::Warning` chip, the tint on it alone), the grouping readout (chevron, pressed fill while its picker is up), the scope (chips with the `×` INSIDE the frame, then bare `+`/save glyphs). The `text "…"` chip is gone: the field mirrors the text and clears it (`Input::cleanable`). Three user rulings on the mockups. Display check done 2026-09-20 ("Looks fine"). | history |
 | Timeseries Part 1 (data tier) (2026-09-19) | The `series` family (bitemporal, append-only, no generation), the `Fetch` adapter shape, `Request::Fetch` with coverage subtraction and a history clip, per-pair retention inside the append, `SeriesCatalog` rows, `Request::Identities`, and the `demo_series` walk behind two demo fetch sources. No query, no tile — Part 2. | `2026-09-19-…timeseries-viewer` §4, §5 |
 | Timeseries Part 2 (series query) (2026-09-20) | `geode_core::series` (`Frequency`, `BucketRule`, `SeriesParams`/`SeriesOutcome`, the 500,000-point cap) and its arithmetic-only expression parser; `compile_series`/`run_series` — points over the union of the source buckets, stats per slot over the window, coverage per source slot; `Work::Series`/`Payload::Series` on the query pool; `DataService::series` and `DataEvent::Series`; `Delivery::Series`/`Delivery::SeriesFetched` in the shell. No chart (Part 3) and no tile (Part 4). | `2026-09-19-…timeseries-viewer` §6, §7 |
-| As-of dialog Part 1 (2026-09-20) | `geode-widgets`: `DateTimeField` (`Precision::{Date, DateTime}`, six segments, `route`/`FieldKey`/`apply`, `SegmentPaint` + `paint`); the market-data date field migrated, no visible change. Parts 2 (clock) and 3 (dialog) next. | `2026-09-20-…as-of-dialog-design` §4 |
+| As-of dialog Part 1 (2026-09-20) | `geode-widgets`: `DateTimeField` (`Precision::{Date, DateTime}`, six segments, `route`/`FieldKey`/`apply`, `SegmentPaint` + `paint`); the market-data date field migrated, no visible change. Parts 2 (clock) and 3 (dialog) next. Display check pending (the panel's field now nests its segments in a second `h_flex`). | `2026-09-20-…as-of-dialog-design` §4 |
 | **On hold** | Cold start: read `docs/ingest-cold-start-handoff.md` first — the 1.87× figure measures `read_csv` alone, and `staging_*` are fixed global table names. | — |
 
 Display checks on a real window are pending for most of the above (the implementation sandbox cannot paint one); each spec's "as built" section says which claims are pixel-unverified.
@@ -152,7 +152,7 @@ cargo bench -p geode-shell                             # run criterion benchmark
 cargo bench -p geode-blotter                           # run criterion benchmarks (blotter pure core — see docs/perf.md)
 cargo bench -p geode-documents                         # run criterion benchmarks (CVI parse/write — see docs/perf.md)
 cargo bench -p geode-marketdata                        # run criterion benchmarks (panel matrix model + draft — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (1276 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (1278 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 zsh scripts/mutation-check.sh --anchors-only           # no cargo: stale or ambiguous anchors (<1 s, exits 1 on any) — run before every merge
@@ -167,7 +167,7 @@ Cargo workspace with strict layering, enforced by crate visibility:
 ```
 geode-app          the binary: wires shell + modules + services together
   ├─ geode-shell   tiling WM, workspaces, palette, keymap engine, scope/as-of state, theming
-  ├─ geode-widgets shared widgets: a pure core + colour-parameterised painter each (the date-time field); below the shell, depended on by shell and modules
+  ├─ geode-widgets shared widgets: a pure core + colour-parameterised painter each (the date-time field); below the shell, may be depended on by the shell and any module (today only geode-marketdata does)
   ├─ geode-blotter any view definition as a collapsible, keyboard-driven hierarchy (Phase 3)
   ├─ (modules)     future per-module crates: config editor, diagnostics…
   ├─ geode-data    DataService: sources, ingestion, DuckDB, archive, query API
