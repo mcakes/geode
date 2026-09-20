@@ -9,6 +9,7 @@ use geode_core::config::{Config, Diagnostic, Severity, load_views};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
+use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
 use geode_data::documents::DocumentRegistry;
@@ -248,15 +249,30 @@ pub struct Bridge {
     events: async_channel::Receiver<DataEvent>,
     dropped: Arc<AtomicU64>,
     /// The sources the running service was actually built from (Phase 4b
-    /// §4.4) — `attach` describes each one to the `Diagnostics` entity
-    /// once. Cloned out of `setup.config.sources` before that config
-    /// moves into `DataService::spawn` below, same reasoning as `schema`/
-    /// `dimensions` two lines up.
-    sources: Vec<SourceSpec>,
+    /// §4.4), each with the shape it rides (timeseries spec §5.1) —
+    /// `attach` describes each one to the `Diagnostics` entity once.
+    /// Cloned out of `setup.config.sources` before that config moves into
+    /// `DataService::spawn` below, same reasoning as `schema`/
+    /// `dimensions` two lines up; the shape is resolved here, against
+    /// that same schema, because no tile downstream holds one.
+    sources: Vec<(SourceSpec, SourceShape)>,
     /// Copied from `DataSetup.local_datasets` (line-pricer spec §7.2):
     /// the `Published` arm in `attach`'s drain task reads this to skip
     /// the frame's `data` version bump for a local dataset's publish.
     pub local_datasets: Rc<HashSet<String>>,
+}
+
+/// Each source paired with the shape it rides (timeseries spec §5.1),
+/// resolved against the schema the service is built from. This is the
+/// last place a `SchemaSpec` and the source list are both in hand — no
+/// tile downstream holds a schema, and neither `adapter` nor
+/// `topics.is_empty()` can tell a subscribed source from a fetch one —
+/// so the answer is computed once here and carried on `Bridge::sources`.
+fn source_shapes(sources: &[SourceSpec], schema: &SchemaSpec) -> Vec<(SourceSpec, SourceShape)> {
+    sources
+        .iter()
+        .map(|s| (s.clone(), s.shape(schema)))
+        .collect()
 }
 
 pub fn start(
@@ -276,7 +292,7 @@ pub fn start(
     // dimensions the service itself was built from (spec §3.7).
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
-    let sources = setup.config.sources.clone();
+    let sources = source_shapes(&setup.config.sources, &schema);
     let local_datasets = Rc::new(setup.local_datasets);
     let handle = DataService::spawn(setup.config, sink);
     let factory = Rc::new(BlotterFactory::new(
@@ -328,7 +344,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     // `geode_data::source::{Priority, Readiness}` themselves (CLAUDE.md:
     // shell and data never depend on each other).
     diagnostics.update(cx, |d, cx| {
-        for source in &bridge.sources {
+        for (source, shape) in &bridge.sources {
             d.describe_source(
                 &source.name,
                 SourceSummary {
@@ -338,9 +354,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     adapter: source.adapter.clone(),
                     // Already empty for a directory source — `from_doc`
                     // reads `topics` only when the source is subscribed —
-                    // and the tile reads that emptiness as "a directory
-                    // source", so it is cloned rather than gated here.
+                    // so it is cloned rather than gated here.
                     topics: source.topics.clone(),
+                    // Which two detail rows the tile paints. Resolved in
+                    // `start`, against the schema the service itself was
+                    // built from, because `shape` needs one (a fetch
+                    // source is a non-directory source over a series
+                    // dataset) and nothing downstream of here holds one
+                    // — a diagnostics tile has only this summary.
+                    shape: *shape,
                 },
             );
         }
@@ -751,6 +773,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     // when nothing is — including the extra copy the
                     // queue drain now sends after every `Published`/
                     // `Failed`'s own.
+                    // Timeseries spec §5.4: routed to the timeseries tiles in
+                    // Part 2 (`Delivery::SeriesFetched`). Until then the data
+                    // crate's own log line at `info` is the record; nothing
+                    // here logs, per the UI-thread level constraint.
+                    DataEvent::SeriesFetched { .. } => {}
                     DataEvent::LoadEnded => {
                         diagnostics.update(cx, |d, cx| {
                             let before = d.version();
@@ -799,6 +826,90 @@ mod tests {
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
     use std::cell::RefCell;
+
+    /// The bridge is the one place a source's shape is resolved, and
+    /// every diagnostics row about a source is painted from the answer.
+    /// The three shapes are distinguished by two different facts — the
+    /// adapter (directory or not) and the dataset's family (series or
+    /// not) — so this pins the pairing rather than the classification,
+    /// which `source_config`'s own `shape_names_all_three` pins.
+    #[test]
+    fn source_shapes_names_each_of_the_three_shapes() {
+        let (schema, diags) = SchemaSpec::from_doc(&geode_core::config::merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                r#"
+[risk]
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+[risk.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk.columns.npv]
+type = "f64"
+role = "measure"
+grain = "position"
+
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+
+[series]
+family = "series"
+"#,
+            )
+            .unwrap()],
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+        let files = SourceSpec::directory("risk_files", "risk", vec!["/x/*.csv".into()]);
+        let bus = SourceSpec {
+            adapter: "demo_bus".into(),
+            document: Some("cvi_params".into()),
+            topics: vec!["marketdata/cvi/>".into()],
+            ..SourceSpec::directory("cvi", "cvi_params", Vec::new())
+        };
+        let kdb = SourceSpec {
+            adapter: "demo_kdb".into(),
+            ..SourceSpec::directory("history", "series", Vec::new())
+        };
+        let shapes = source_shapes(&[files, bus, kdb], &schema);
+        assert_eq!(
+            shapes
+                .iter()
+                .map(|(s, shape)| (s.name.as_str(), *shape))
+                .collect::<Vec<_>>(),
+            vec![
+                ("risk_files", SourceShape::Directory),
+                ("cvi", SourceShape::Subscribed),
+                ("history", SourceShape::Fetch),
+            ]
+        );
+    }
 
     /// Records logged while `f` runs, on this thread only — the same
     /// scoped-subscriber pattern `geode-data`'s own test modules use.
@@ -1946,10 +2057,13 @@ role = "key"
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
-            sources: vec![SourceSpec {
-                pending_timeout: Duration::from_secs(120),
-                ..SourceSpec::directory("risk", "risk", vec!["/data/risk/*.csv".into()])
-            }],
+            sources: vec![(
+                SourceSpec {
+                    pending_timeout: Duration::from_secs(120),
+                    ..SourceSpec::directory("risk", "risk", vec!["/data/risk/*.csv".into()])
+                },
+                SourceShape::Directory,
+            )],
             local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));

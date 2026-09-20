@@ -23,13 +23,11 @@
 //!   tile here" hint area) — but the classification is geometric, not
 //!   state-aware, so it stays correct if dock chrome ever leaves gaps.
 //!
-//! **Center-drop semantics note (recorded)**: today a center drop *swaps*
-//! the two tiles in place — deliberate keyboard parity with
-//! `workspace::move_*`'s swap semantics. When spec §3.1's tabbed/stacked
-//! container modes are built (segmented-title-row direction chosen),
-//! center-drop is planned to become "add to the target's stack"; that
-//! meaning change is accepted in advance rather than designing a reserved
-//! zone for it now.
+//! **Center-drop semantics (tile-stacks spec §6.2)**: a center drop adds
+//! the dragged tile to the target's stack, after the target — the
+//! meaning change the original tile-drag design accepted in advance.
+//! Keyboard `workspace::move_*` keeps its swap on a plain leaf and pops a
+//! member out of its stack.
 
 use super::docks::layout as dock_layout;
 use super::tree::{Direction, Rect, TileId};

@@ -73,6 +73,15 @@ tracing-appender.workspace = true
 toml = "1.1.4"
 
 [dev-dependencies]
+# Test-feature parity (2026-09-19): `cargo test --workspace` resolves
+# geode-core WITH `test-support` (geode-shell's dev-dependencies turn it
+# on, and cargo unifies features across every member it builds together),
+# so a `cargo test -p` of this crate alone must ask for the same thing or
+# it builds a second geode-core — and everything above it — that differs
+# only in that feature. One artifact per crate per profile is the rule;
+# `cargo tree -p <member> -i geode-core --format '{p} [{f}]'` must agree
+# with `cargo tree --workspace` for every member.
+geode-core = { workspace = true, features = ["test-support"] }
 tempfile = "3.27.0"
 # `#[gpui::test]` / `TestAppContext` / `VisualTestContext` for the bridge's
 # window-close drain-task test (`src/bridge.rs`), and `DataHandle::

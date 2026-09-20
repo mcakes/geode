@@ -21,7 +21,15 @@ use geode_core::query::AsOf;
 use super::keys::convert_keystroke;
 #[cfg(feature = "profiling")]
 use super::profiling_hook;
-use super::{ShellView, asof_view, dialog, keybindings_view, objectdialog, picker, settings_view};
+use super::{
+    ShellView, asof_view, choicedialog, dialog, keybindings_view, objectdialog, picker,
+    settings_view,
+};
+
+/// A stack verb's refusal on a tile that is not a stack member
+/// (tile-stacks spec §4) — `ShellView::notice`'s value for the rest of
+/// that one dispatch.
+pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
 
 impl ShellView {
     /// The active context stack for key resolution, outermost first:
@@ -142,6 +150,56 @@ impl ShellView {
         // branch that resolved it says so on its own line just before.
         tracing::debug!(target: "geode::shell", action = %action.0, count = ?count, "dispatch");
 
+        // A stack verb's refusal notice (tile-stacks spec §4) says its
+        // piece for exactly one dispatch — the next one, whatever it is,
+        // clears it. The transient member list (spec §5.2) is likewise
+        // closed by any dispatch — the list's own keys never reach this
+        // function (`handle_key_down`'s own branch, above, claims them
+        // first), so this only ever fires for a keystroke or a mouse
+        // action from OUTSIDE the list.
+        self.notice = None;
+        self.stack_list = None;
+
+        if action.0 == "stack::next" || action.0 == "stack::prev" {
+            // Tile stacks (spec §4): count-aware, so not in the router.
+            let n = i64::from(count.unwrap_or(1).max(1));
+            let delta = if action.0 == "stack::next" { n } else { -n };
+            if self.services.workspaces.active_mut().stack_step(delta) {
+                self.session_dirty = true;
+                self.note_keyboard_focus_move(window, cx);
+            } else {
+                self.notice = Some(NOT_IN_A_STACK);
+            }
+            return;
+        }
+        if action.0 == "stack::unstack" {
+            let rect = self
+                .services
+                .workspaces
+                .active()
+                .focused_tile_rect(super::render::content_area(window));
+            let orientation = self.add_direction.resolve(None, rect);
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .unstack_focused(orientation)
+            {
+                self.session_dirty = true;
+                self.note_keyboard_focus_move(window, cx);
+            } else {
+                self.notice = Some(NOT_IN_A_STACK);
+            }
+            return;
+        }
+        if action.0 == "stack::pick" {
+            match self.services.workspaces.active().focused_tile() {
+                Some(tile) => self.open_stack_list(tile, window, cx),
+                None => self.notice = Some(NOT_IN_A_STACK),
+            }
+            return;
+        }
+
         // Every workspace verb below ignores the count; only the module
         // fall-through at the end (Phase 3 §3.3) is count-aware today.
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
@@ -214,6 +272,8 @@ impl ShellView {
         } else if action.0 == "fontsize::decrease" {
             self.font_size = self.font_size.smaller();
             self.persist_font_size(cx);
+        } else if action.0 == "config::open_directory" {
+            self.open_config_directory(cx);
         } else if action.0 == "ui::line_numbers_cycle" {
             // off → on → rel → off (user ruling 2026-09-11); the settings
             // row steps the same value, through the same setter.
@@ -332,6 +392,15 @@ impl ShellView {
         } else if action.0 == "frame::as_of" {
             // mod+t (spec §3.6): the as-of selector modal.
             asof_view::open(self, window, cx);
+        } else if action.0 == "frame::grouping" {
+            // mod+g (2026-09-19): the grouping picker — the same door the
+            // toolbar readout's click takes.
+            choicedialog::open_grouping(self, window, cx);
+        } else if action.0 == "tile::add" {
+            // mod+n (2026-09-19): the tile picker — the same door a
+            // placeholder's double-click takes
+            // (`try_pick_tile_on_double_click`).
+            choicedialog::open_tile_kinds(self, window, cx);
         } else if action.0 == "frame::live" {
             // Palette-only (spec §3.6, same reasoning as `frame::
             // scope_clear`): return to live, remembering the previous
@@ -349,13 +418,14 @@ impl ShellView {
                     cx.notify();
                 }
             });
-        } else if let Some((kind, direction)) = crate::defaults::parse_add_action(&action.0) {
+        } else if let Some((kind, placement)) = crate::defaults::parse_add_action(&action.0) {
             // A palette row from `register_add_actions` (spec 2026-09-08
             // add-tile §3.2) — "<Kind>: Split" follows the setting; the
-            // suffixed pair say where. Always adds (or fills); never
+            // suffixed rows say where, `_stacked` onto the focused tile
+            // (tile-stacks spec §6.1). Always adds (or fills); never
             // focuses an existing tile — that is `open_module`'s job.
             let kind = kind.to_string();
-            self.add_tile(&kind, direction, None, window, cx);
+            self.add_tile(&kind, placement, None, window, cx);
         } else if action.0 == "workspace::duplicate_horizontal" {
             self.duplicate_tile(Orientation::Horizontal, window, cx);
         } else if action.0 == "workspace::duplicate_vertical" {
@@ -467,6 +537,44 @@ impl ShellView {
                 }
             })
             .detach();
+    }
+
+    /// `config::open_directory`: open the user config directory in the
+    /// OS file manager. `open_with_system` (the platform's `open` /
+    /// `ShellExecute`) opens a directory as a window; `reveal_path` would
+    /// only select it inside its parent. The directory is created first
+    /// so a fresh install with no `~/.config/geode` yet gets a window
+    /// rather than a silent failure — the same `create_dir_all` every
+    /// `config_write` does — on the background executor, since nothing
+    /// blocks the render thread; the open itself needs `App` and runs
+    /// back on the foreground once the directory exists.
+    fn open_config_directory(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            tracing::warn!(
+                target: "geode::config",
+                "config directory not opened: no user config directory (HOME/APPDATA unset)"
+            );
+            return;
+        };
+        cx.spawn(async move |_this, cx| {
+            let created = cx
+                .background_executor()
+                .spawn({
+                    let dir = dir.clone();
+                    async move { std::fs::create_dir_all(&dir) }
+                })
+                .await;
+            if let Err(e) = created {
+                tracing::warn!(
+                    target: "geode::config",
+                    "config directory not opened: failed to create {}: {e}",
+                    dir.display()
+                );
+                return;
+            }
+            cx.update(|cx| cx.open_with_system(&dir));
+        })
+        .detach();
     }
 
     /// Persist the current find style to `<user_dir>/app.toml`'s `[ui]`
@@ -964,6 +1072,58 @@ impl ShellView {
             self.handle_palette_key(event, window, cx);
             cx.notify();
             return;
+        }
+
+        if let Some(list) = self.stack_list.clone() {
+            // A CHORD (ctrl/alt/cmd — `Modifiers::is_chord`, the same line
+            // the filter-field branch above draws) is not a list key: a
+            // shipped shell chord (`ctrl+k` closes the list itself, via
+            // `toggle_palette`, before this branch even runs — see its own
+            // comment) must still fire from inside the list exactly as it
+            // does from inside a text field, and something like `ctrl+3`
+            // (a grouping slot) must not be read as "activate member 3".
+            // Deliberately NOT returning here: the keystroke falls through
+            // to the matcher below, whose `dispatch` clears `stack_list`
+            // at its own top (fix round 1, Ruling 5).
+            let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
+            if !is_chord {
+                // The member list owns the keyboard while open (spec
+                // §5.2): `j`/`k`/arrows step with wrap, a digit activates
+                // at once, `enter` activates the highlighted row, `escape`
+                // closes with no change. Every other bare key is swallowed
+                // here too — the list is modal in the same sense the
+                // palette is, and the matcher must not see a keystroke
+                // behind it.
+                let key = event.keystroke.key.as_str();
+                match key {
+                    "escape" => self.close_stack_list(cx),
+                    "j" | "down" => {
+                        let mut l = list;
+                        super::stacklist::step(&mut l, 1);
+                        self.stack_list = Some(l);
+                    }
+                    "k" | "up" => {
+                        let mut l = list;
+                        super::stacklist::step(&mut l, -1);
+                        self.stack_list = Some(l);
+                    }
+                    "enter" => {
+                        if let Some(id) = list.members.get(list.highlighted).copied() {
+                            self.activate_stack_member(id, window, cx);
+                        }
+                    }
+                    d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
+                        if let Some(id) =
+                            super::stacklist::jump(&list, u32::from(d.as_bytes()[0] - b'0'))
+                        {
+                            self.activate_stack_member(id, window, cx);
+                        }
+                    }
+                    _ => {}
+                }
+                cx.notify();
+                return;
+            }
         }
 
         // Escape ends an in-flight drag of either kind before the matcher

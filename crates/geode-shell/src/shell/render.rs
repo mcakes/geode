@@ -26,8 +26,8 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, commandline_view, dialog, objectdialog, perf_overlay, picker, sidebar, status,
-    toolbar, whichkey,
+    ShellView, choicedialog, commandline_view, dialog, objectdialog, perf_overlay, picker, sidebar,
+    stacklist, status, toolbar, whichkey,
 };
 
 /// gpui hover-group name shared by every divider strip (drag-splitters
@@ -143,6 +143,29 @@ impl Render for ShellView {
         // leaves_a_live_focused_input_alone` guards that half.
         if window.focused(cx).is_none() {
             self.focus_handle.focus(window, cx);
+        }
+
+        // The transient stack-member list's own staleness check (tile-
+        // stacks spec §5.2), the same shape as the command-line one just
+        // below: a list stays open only while its tile IS the workspace's
+        // own focused tile AND still a stack member — a workspace switch,
+        // a directional focus move that leaves the stack, or the stack
+        // collapsing out from under it (its last other member unstacked)
+        // all close it here rather than leaving stale chrome painted over
+        // whatever tile now has focus. Ahead of `ensure_occupants` (not
+        // beside the command-line check below, which needs the rem/
+        // surface arithmetic that follows it): nothing this reads depends
+        // on this render's own occupant reconciliation.
+        if self.stack_list.as_ref().is_some_and(|l| {
+            self.services.workspaces.active().focused_tile() != Some(l.tile)
+                || self
+                    .services
+                    .workspaces
+                    .active()
+                    .stack_position(l.tile)
+                    .is_none()
+        }) {
+            self.stack_list = None;
         }
 
         // Create occupants for any tile that lacks one, drop occupants
@@ -572,7 +595,9 @@ impl Render for ShellView {
             // paints over the *tree's* area and would otherwise read as
             // an offer to fill the space the reader is looking at.
             let hint = match region {
-                crate::tiling::FocusRegion::Main => "ctrl+k → Add a tile".to_string(),
+                crate::tiling::FocusRegion::Main => {
+                    "double-click or ctrl+k → Add a tile".to_string()
+                }
                 crate::tiling::FocusRegion::Dock(side) => {
                     let side = match side {
                         crate::tiling::DockSide::Left => "left",
@@ -593,6 +618,17 @@ impl Render for ShellView {
                     .flex()
                     .items_center()
                     .justify_center()
+                    // A bare double-click anywhere on the empty tree
+                    // opens the tile picker (2026-09-19), the mouse form
+                    // of the `ctrl+k` the hint names — see
+                    // `try_pick_on_empty_tree_double_click`. A single
+                    // click is nothing: there is no tile to focus.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                            view.try_pick_on_empty_tree_double_click(event, window, cx);
+                        }),
+                    )
                     .child(
                         div()
                             // Test-only hook (no-op outside test/test-support
@@ -661,8 +697,12 @@ impl Render for ShellView {
                                 // below.
                                 view.leave_command_line(window, cx);
                                 // Ahead of the drag arm on purpose — see
-                                // `try_fullscreen_on_double_click`.
+                                // `try_fullscreen_on_double_click`; the
+                                // placeholder's bare double-click opens
+                                // the tile picker and must skip the tail
+                                // (`try_pick_tile_on_double_click`).
                                 if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                    || view.try_pick_tile_on_double_click(id, event, window, cx)
                                     || view.try_arm_tile_drag(id, event, cx)
                                 {
                                     return;
@@ -722,6 +762,7 @@ impl Render for ShellView {
                             // called here too so both listeners read the
                             // same gesture table.
                             if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                || view.try_pick_tile_on_double_click(id, event, window, cx)
                                 || view.try_arm_tile_drag(id, event, cx)
                             {
                                 return;
@@ -747,15 +788,15 @@ impl Render for ShellView {
             } else {
                 let (hint, selector) = match side {
                     crate::tiling::DockSide::Left => (
-                        "ctrl+k → Add a tile here · ctrl+shift+[ moves one",
+                        "double-click or ctrl+k → Add a tile here · ctrl+shift+[ moves one",
                         "dock-empty-hint-left",
                     ),
                     crate::tiling::DockSide::Right => (
-                        "ctrl+k → Add a tile here · ctrl+shift+] moves one",
+                        "double-click or ctrl+k → Add a tile here · ctrl+shift+] moves one",
                         "dock-empty-hint-right",
                     ),
                     crate::tiling::DockSide::Bottom => (
-                        "ctrl+k → Add a tile here · ctrl+shift+/ moves one",
+                        "double-click or ctrl+k → Add a tile here · ctrl+shift+/ moves one",
                         "dock-empty-hint-bottom",
                     ),
                 };
@@ -773,6 +814,16 @@ impl Render for ShellView {
                         .border_1()
                         .border_color(cx.theme().border)
                         .text_color(cx.theme().muted_foreground)
+                        // A click focuses the empty dock as the region,
+                        // a double-click opens the tile picker into it
+                        // (`on_empty_dock_mouse_down`, user ruling
+                        // 2026-09-19).
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                                view.on_empty_dock_mouse_down(side, event, window, cx);
+                            }),
+                        )
                         .child(div().debug_selector(|| selector.to_string()).child(hint)),
                 );
             }
@@ -927,6 +978,7 @@ impl Render for ShellView {
             reload_message.as_deref(),
             self.config_write_error.as_deref(),
             self.restart_required.as_deref(),
+            self.notice,
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
             on_diagnostics_click,
             ingest,
@@ -981,6 +1033,15 @@ impl Render for ShellView {
                 objectdialog::render::open_save_scope(view, window, cx);
             });
         };
+        // The grouping readout's click (2026-09-19) — the mouse form of
+        // `frame::grouping`/`mod+g`, through the same door `input.rs`'s
+        // dispatch arm uses.
+        let grouping_entity = cx.entity();
+        let on_grouping = move |window: &mut Window, cx: &mut App| {
+            grouping_entity.update(cx, |view, cx| {
+                choicedialog::open_grouping(view, window, cx);
+            });
+        };
         let toolbar = toolbar::toolbar(
             &self.filter_input,
             &bar_model,
@@ -988,6 +1049,7 @@ impl Render for ShellView {
             on_chip_open,
             on_pick,
             on_save,
+            on_grouping,
             cx,
         );
 
@@ -1352,6 +1414,60 @@ impl Render for ShellView {
                         rem_size,
                         cx,
                     ))
+                },
+            )
+            // The transient stack-member list (tile-stacks spec §5.2):
+            // painted from the focused tile's own rect, above the tile
+            // surface and the command line but below the palette — the
+            // two are never open at once (the palette's open arm closes
+            // the list first), but this ordering is what would govern it
+            // if that ever changed. `rows` is prepared fresh per frame
+            // only while the list is open, at most nine `SharedString`
+            // clones (`TileContent::title`) — accepted for now, per the
+            // task brief; Task 9 caches the blotter's own title instead
+            // of formatting it here every frame.
+            .when_some(
+                self.stack_list.as_ref().zip(focused_rect),
+                |el, (list, rect)| {
+                    let rows: Vec<stacklist::Row> = list
+                        .members
+                        .iter()
+                        .map(|id| match self.occupants.get(id) {
+                            Some(o) => stacklist::Row {
+                                title: o.content.title(cx),
+                                kind: o.kind,
+                            },
+                            None => stacklist::Row {
+                                title: "empty".into(),
+                                kind: "placeholder",
+                            },
+                        })
+                        .collect();
+                    let weak = cx.entity().downgrade();
+                    let members = list.members.clone();
+                    let on_row_click = move |i: usize, window: &mut Window, cx: &mut App| {
+                        let Some(id) = members.get(i).copied() else {
+                            return;
+                        };
+                        let _ =
+                            weak.update(cx, |view, cx| view.activate_stack_member(id, window, cx));
+                    };
+                    let panel = stacklist::render(list, &rows, rect, rem_size, on_row_click, cx);
+                    el.child(
+                        div()
+                            .id("stack-list-click-catcher")
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(0.))
+                            .w(px(width))
+                            .h(px(viewport_height))
+                            .debug_selector(|| "stack-list-click-catcher".to_string())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _event, _window, cx| view.close_stack_list(cx)),
+                            )
+                            .child(panel),
+                    )
                 },
             )
             // The palette overlay paints above the tiles/status bar (later

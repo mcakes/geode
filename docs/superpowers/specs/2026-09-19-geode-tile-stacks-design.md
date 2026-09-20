@@ -86,7 +86,12 @@ workspace is a member only ever when that member is active.
 
 **Fullscreen.** `fullscreen` is a `TileId`; when a cycle changes the
 active member of the stack that holds the fullscreen tile, the new
-active member becomes the fullscreen one. Exiting is unchanged.
+active member becomes the fullscreen one. Exiting is unchanged. Every
+other stack mutation that changes the layout — `stack_after` (an add or
+a centre drop onto a fullscreen tile) and `pop_out` (move-out, unstack)
+— exits fullscreen first, the rule `split` already follows: an explicit
+layout operation trumps a stale fullscreen (rulings 4 and the
+whole-branch review, 2026-09-19).
 
 **Split beside.** `Tree::split` on a focused member wraps the *stack*
 in the new split, not the member: adding a tile horizontally beside a
@@ -176,10 +181,15 @@ A fresh occupant is told its stack position on the same first render
 `set_visible` is delivered on, under the same contract.
 
 The marker is one chip, painted first in the header strip at the
-position the module's own layout gives it: text `{index}/{len}` in the
-mono face, `Tone::Neutral` through `chip_paint` (it is a state the
-trader chose, like `pinned`), theme radius, painted only while
-`len > 1`. Its mouse-down calls `open_list` and stops propagation, so
+position the module's own layout gives it, and built by ONE door —
+`StackHandle::marker(theme, tile)` in `geode_shell::module`, which every
+module calls with `.children(stack.as_ref().and_then(|s| s.marker(..)))`
+(a follow-up to the whole-branch review, 2026-09-19: the first build
+hand-copied the chip at four sites): text `{index}/{len}` in the mono
+face, `Tone::Neutral` through `chip_paint` (it is a state the trader
+chose, like `pinned`), theme radius, and `None` — nothing painted —
+unless `len > 1`, so the gate lives in the builder and not at the call
+sites. Its mouse-down calls `open_list` and stops propagation, so
 the click that opens the list is not also a tile click-to-focus with a
 drag arm behind it (the tile is already focused by the time the list
 matters; `open_list` focuses it first regardless, §5.2). The placeholder
@@ -273,14 +283,27 @@ Written from `Node::Stack` verbatim through the shared `node_to_toml`
 seam, so a dock's tree carries it too. On read: a `members` list shorter than two
 after unknown ids are dropped collapses to a `leaf` of the survivor or
 to nothing; an `active` that is missing, negative or out of range clamps
-to `0`; a member id that also appears elsewhere in the tree is dropped
-from the stack (the first occurrence in document order wins, the rule
-the reader already applies to leaves). A hostile file therefore never
-produces a stack the tree's own verbs could not have built. `Tree`'s
-derived `PartialEq` stays, so `session.rs`'s dock-table skip is
-unaffected, and `SESSION_CONFIG_VERSION` is unchanged: an older reader
-meets a `kind = "stack"` node it does not know and drops it as it drops
-any child of unknown kind, losing the members but nothing else.
+to `0`; a stack member duplicating an id already claimed earlier in
+document order — by an earlier leaf, or by an earlier stack's own
+member — is dropped from the stack. That rule is one-directional, not
+"first occurrence wins" both ways: a later LEAF duplicating an earlier
+stack member is *kept*, because `validate_node`'s leaf arm never checks
+against what it has already seen — the pre-existing rule for leaves,
+unchanged here, and only a stack's own arm dedupes on the way in. A
+hostile file therefore never produces a stack the tree's own verbs
+could not have built. `Tree`'s derived `PartialEq` stays, so
+`session.rs`'s dock-table skip is unaffected, and
+`SESSION_CONFIG_VERSION` is unchanged — but the two trees an older
+reader can meet `kind = "stack"` in diverge sharply. In a workspace's
+MAIN tree, `node_from_toml`'s "unknown node kind" error propagates
+through `parse_workspace`'s `?` into `from_toml`'s `errors`, so
+`from_toml` returns `Err` and `load` answers a wholly fresh session:
+every workspace, every tile record and the palette usage history are
+discarded, and the next periodic flush overwrites the file with that
+empty state. In a DOCK tree the same error is caught inside
+`parse_docks`'s own `match node_from_toml { .. }` arm, which only warns
+and drops that one dock's tree — the main tree, the workspace's other
+docks and every other workspace survive intact.
 
 Hidden members are serialised through `serialize` like any tile; there
 is nothing stack-specific in a tile record.

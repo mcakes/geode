@@ -992,6 +992,13 @@ fn build(
     let row_paint = super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+    // The dialog sits on `popover` (`dialog::render_modal`'s own fill).
+    let chip_states = super::control::paint(
+        theme,
+        super::control::Rest::Filled(chip_bg),
+        theme.popover,
+        chip_fg,
+    );
     let chip_radius = theme.radius;
 
     // Row list vs. the open choice field's ranked options (spec
@@ -1081,6 +1088,7 @@ fn build(
                 chip_fg,
                 chip_bg,
                 chip_radius,
+                chip_states,
                 Some(on_step),
             );
 

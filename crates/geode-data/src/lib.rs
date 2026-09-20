@@ -15,4 +15,4 @@ pub mod store;
 
 pub use handle::{DataHandle, REQUEST_BOUND, Request};
 pub use pricing::{PricerConfig, PricerRegistry};
-pub use service::{DataEvent, DataService, DataServiceConfig, EventSink, QueryParams};
+pub use service::{DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams};

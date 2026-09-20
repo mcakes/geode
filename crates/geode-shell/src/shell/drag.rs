@@ -241,6 +241,113 @@ impl ShellView {
         }
     }
 
+    /// The mouse form of `tile::add` (2026-09-19): a bare double-click on
+    /// a PLACEHOLDER tile opens the tile picker, whose pick fills that
+    /// placeholder in place (`add_tile`'s first rule). Returns true when
+    /// it acted — the caller's drag-arm and click-to-focus tail must then
+    /// NOT run: the tail re-arms `pending_focus_restore`, which would move
+    /// window focus to the shell root on the next frame and take it from
+    /// the picker's field. The pick lands on the FOCUSED tile (`add_tile`
+    /// reads it at commit), so the door also requires `id` to be that
+    /// tile — normally the pair's first click focused it through the
+    /// ordinary tail, but a first click that landed on an occluding
+    /// neighbour inside the OS double-click distance (a divider strip,
+    /// a modal's backdrop that closed on it) never reached this listener,
+    /// and an ungated door would then fill a DIFFERENT placeholder, or
+    /// split a real tile, on the second click (review finding). Refused,
+    /// the click is the plain click-to-focus it looks like, and the next
+    /// double-click works. A double-click on a real tile is left alone —
+    /// a module may own it (the market-data panel's cell editor does).
+    /// Bare modifiers only: with the mod key held the pair is
+    /// `try_fullscreen_on_double_click`'s, which both listeners try
+    /// first. `click_count == 2` rather than `>= 2` for the same reason
+    /// as there; the same overlay/drag gates.
+    pub(super) fn try_pick_tile_on_double_click(
+        &mut self,
+        id: TileId,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.occupant_kind(id) != Some(crate::module::placeholder::PLACEHOLDER_KIND)
+            || self.services.workspaces.active().focused_tile() != Some(id)
+        {
+            return false;
+        }
+        self.try_pick_on_double_click(event, window, cx)
+    }
+
+    /// The same door from the EMPTY-TREE hint (`empty-hint`, painted
+    /// where the main tree has no tile at all — a fresh session's whole
+    /// screen; display finding 2026-09-19, the first thing a trader sees
+    /// was the one surface the placeholder door did not cover). No tile
+    /// to gate on: the pick lands where `ctrl+k` would put it — the
+    /// focused region's empty tree gets it as its root (`add_tile`), and
+    /// the hint's own text already says when that region is a dock. The
+    /// empty DOCK hints take no door: an empty dock can never be the
+    /// focused region (`Workspace::focus_dock` refuses it), so a pick
+    /// from one would land somewhere else — "add a tile here" must not
+    /// be a gesture that adds one elsewhere.
+    pub(super) fn try_pick_on_empty_tree_double_click(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.try_pick_on_double_click(event, window, cx)
+    }
+
+    /// A mouse-down on an EMPTY dock's hint (user ruling 2026-09-19,
+    /// "double-click should work on dock areas too"): every click is
+    /// click-to-focus for the dock as a region
+    /// (`Workspace::focus_empty_dock`, dirtying the session like a
+    /// tile's click), and the pair's second click is the picker door —
+    /// so the pick lands in THIS dock, the region the first click just
+    /// moved, and the hint's "add a tile here" is a gesture that adds one
+    /// here. The single-click half is what a trader who shows a dock and
+    /// then clicks into it expects; before this the click reached
+    /// nothing.
+    pub(super) fn on_empty_dock_mouse_down(
+        &mut self,
+        side: DockSide,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.services.workspaces.active_mut().focus_empty_dock(side) {
+            self.session_dirty = true;
+            cx.notify();
+        }
+        self.try_pick_on_double_click(event, window, cx);
+    }
+
+    /// The gesture and overlay table both tile-picker doors share: the
+    /// pair's second click, no modifier, no overlay or drag in flight.
+    /// Opens the picker and stops propagation (the shell root's own
+    /// bubble-phase focus grab must not follow the open — the dialog
+    /// door's `prevent_default` covers it too, belt and braces).
+    fn try_pick_on_double_click(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.click_count != 2 || event.modifiers.modified() {
+            return false;
+        }
+        if self.palette.is_some()
+            || self.modal.is_some()
+            || !self.matcher.pending().is_empty()
+            || self.divider_drag.is_some()
+            || self.tile_drag.is_some()
+        {
+            return false;
+        }
+        super::choicedialog::open_tile_kinds(self, window, cx);
+        cx.stop_propagation();
+        true
+    }
+
     /// The mouse form of `mod+f` (2026-09-19): a mod+double-click on a
     /// main-tree tile focuses it and toggles fullscreen on it. Returns
     /// true when it acted — the caller's drag-arm and click-to-focus
@@ -494,7 +601,7 @@ impl ShellView {
     /// the render pass uses, re-derived once here rather than snapshotted
     /// at mouse-down, so a keyboard split mid-drag can't make the drop
     /// land beside a tile the user isn't seeing — and routes to the
-    /// matching pure `Workspace` drop verb: center → swap, edge → split-
+    /// matching pure `Workspace` drop verb: center → stack, edge → split-
     /// insert, dock background → move-to-dock-convention insert. The
     /// verbs own every focus/region/auto-hide rule and report whether the
     /// layout changed; only a real change dirties the session (no-op
@@ -544,7 +651,7 @@ impl ShellView {
                 Some(DropTarget::Tile {
                     id,
                     zone: DropZone::Center,
-                }) => ws.drop_swap(drag.tile, id),
+                }) => ws.drop_stack(drag.tile, id),
                 Some(DropTarget::Tile {
                     id,
                     zone: DropZone::Edge(edge),

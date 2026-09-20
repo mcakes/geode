@@ -39,6 +39,10 @@ pub fn build_catalog(
         block_size,
         memory_bytes,
         threads,
+        // Filled by `DataService::catalog` from the fetch workers'
+        // answers: nothing about a source's catalogue is in the
+        // database, so this read cannot know it (timeseries spec §5.5).
+        identities: Vec::new(),
     })
 }
 
@@ -90,16 +94,36 @@ fn dataset_catalog(
     // count cannot drift from what exists.
     let mut live_rows = 0u64;
     let mut archive_rows = 0u64;
-    for pair in crate::store::ddl::table_pairs(ds) {
-        live_rows += sizes.get(&pair.live).copied().unwrap_or(0);
-        archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
+    if ds.is_series() {
+        // A series dataset has no live/archive pair at all (timeseries
+        // spec §4.4), so `table_pairs` is empty for it and the loop
+        // below would report 0 rows however much history it holds. Its
+        // one table is the live side; there is no archive.
+        live_rows = sizes
+            .get(&crate::store::series::series_table(&ds.name))
+            .copied()
+            .unwrap_or(0);
+    } else {
+        for pair in crate::store::ddl::table_pairs(ds) {
+            live_rows += sizes.get(&pair.live).copied().unwrap_or(0);
+            archive_rows += sizes.get(&pair.archive).copied().unwrap_or(0);
+        }
     }
+
+    // Catalog-sized, like everything else here: the coverage table holds
+    // one row per fetch, never one per bar.
+    let series = if ds.is_series() {
+        crate::store::series::series_catalog(conn, &ds.name)?
+    } else {
+        Vec::new()
+    };
 
     Ok(DatasetCatalog {
         name: ds.name.clone(),
         partitions,
         live_rows,
         archive_rows,
+        series,
     })
 }
 
@@ -721,5 +745,95 @@ grain = "position"
             keys,
             vec![vec!["NDX.Z".to_string()], vec!["SPX.Z".to_string()],]
         );
+    }
+
+    /// The series family's catalog rows (timeseries spec §4.6): one per
+    /// `(identity, source)` pair, the hull of its fetched spans, and a
+    /// `live_rows` that comes from the series table — a series dataset
+    /// has no live/archive pair, so the `table_pairs` loop alone would
+    /// report 0 rows beside a real list of pairs.
+    #[test]
+    fn a_series_datasets_catalog_lists_its_pairs_from_coverage() {
+        use crate::store::ddl::tests_support::{series_dataset, series_rows};
+        use crate::store::series::{SeriesAppendRequest, append_series};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        let ds = series_dataset();
+        store.apply_schema(&ds).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        let append = |identity: &str, start: &str, from: &str, to: &str, received: &str| {
+            append_series(
+                &store,
+                &SeriesAppendRequest {
+                    dataset: &ds,
+                    source: "kdb_hist",
+                    identity,
+                    rows: &series_rows(start, 3, 1.0),
+                    span: (ts(from), ts(to)),
+                    received_at: ts(received),
+                },
+            )
+            .unwrap()
+        };
+        // Two fetches for SPX.close, one for VIX.
+        append(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+            "2026-01-06T09:00:00Z",
+        );
+        append(
+            "SPX.close",
+            "2026-01-06T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+            "2026-01-07T00:00:00Z",
+            "2026-01-07T09:00:00Z",
+        );
+        append(
+            "VIX",
+            "2026-01-05T00:00:00Z",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+            "2026-01-06T09:00:00Z",
+        );
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        // Same precondition the document test states: `estimated_size`
+        // equals `count(*)` only on a checkpointed table.
+        store.writer().execute_batch("checkpoint;").unwrap();
+        let snap = build_catalog(store.writer(), &schema, &AsOf::Live).unwrap();
+        let ds_catalog = &snap.datasets[0];
+        assert_eq!(
+            (ds_catalog.live_rows, ds_catalog.archive_rows),
+            (9, 0),
+            "three appends of three bars; a series dataset has no archive"
+        );
+        let pairs: Vec<(&str, &str, u64)> = ds_catalog
+            .series
+            .iter()
+            .map(|s| (s.identity.as_str(), s.source.as_str(), s.fetches))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("SPX.close", "kdb_hist", 2), ("VIX", "kdb_hist", 1)],
+            "one row per pair, ordered by identity"
+        );
+        let spx = &ds_catalog.series[0];
+        assert_eq!(
+            (spx.from, spx.to),
+            (ts("2026-01-05T00:00:00Z"), ts("2026-01-07T00:00:00Z")),
+            "the hull of both fetched spans"
+        );
+        assert_eq!(spx.latest_received_at, ts("2026-01-07T09:00:00Z"));
+        // Every other family reports no series rows at all.
+        let mut with_document = SchemaSpec::default();
+        with_document.datasets.push(cvi_dataset());
+        let other = build_catalog(store.writer(), &with_document, &AsOf::Live).unwrap();
+        assert!(other.datasets[0].series.is_empty());
     }
 }

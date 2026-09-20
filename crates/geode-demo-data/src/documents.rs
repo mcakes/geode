@@ -373,6 +373,7 @@ pub mod cvi {
                         false,
                     ),
                 ],
+                series_retention: None,
             }
         }
 

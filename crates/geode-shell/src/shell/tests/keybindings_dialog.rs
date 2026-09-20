@@ -1270,16 +1270,13 @@ fn services_with_the_palette_silenced() -> ShellServices {
     services
 }
 
-/// Fix round 1, Important 1. A row silenced by the user's own `"none"`
-/// shadow HAS a user override — the shadow is one — so telling the user
-/// there is none is false, and it steers them away from the one
-/// recovery that works (`enter`, then retyping the key, overwrites the
-/// shadow in place). The row no longer shows the key, so the message is
-/// the only place that recovery can come from.
+/// A row silenced by the user's own `"none"` shadow HAS a user override —
+/// the shadow is one — and `r` lifts it. Before 2026-09-19 the row's
+/// missing key left `r` nothing to name and it could only point at the
+/// recovery; the override set now comes from the whole keymap
+/// (`user_overrides_for`), not the row's displayed binding.
 #[gpui::test]
-fn r_on_a_silenced_row_names_the_recovery_instead_of_denying_the_override(
-    cx: &mut gpui::TestAppContext,
-) {
+fn r_on_a_silenced_row_lifts_the_shadow(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("keymap.toml"),
@@ -1299,25 +1296,311 @@ fn r_on_a_silenced_row_names_the_recovery_instead_of_denying_the_override(
     );
     assert!(
         bound.is_none(),
-        "sanity: a shadowed row derives as unbound — that is why the \
-         message is the only thing left to guide the user"
+        "sanity: a shadowed row derives as unbound — the row itself has no \
+         key to name, so the override must come from the keymap"
     );
 
     vcx.simulate_keystrokes("r");
     vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().confirm),
+        Some(keybindings_view::KeybindingConfirm::Reset),
+        "r ARMS on the shadowed row — the set is non-empty even though the row shows no key"
+    );
+    let unchanged = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("still there");
+    assert_eq!(
+        unchanged, USER_KEYMAP_SILENCING_THE_PALETTE,
+        "nothing is written while the question stands"
+    );
 
-    let notice = shell
-        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
-        .expect("r must say something");
+    vcx.simulate_keystrokes("y");
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
     assert!(
-        !notice.contains("no user override"),
-        "the `\"none\"` shadow IS the user's override; denying it is a \
-         lie: {notice}"
+        !text.contains("\"ctrl+k\" = \"none\""),
+        "the shadow over the builtin key is lifted: {text}"
     );
     assert!(
-        notice.contains("enter"),
-        "and the message must name the recovery — enter, then retyping \
-         the key: {notice}"
+        !text.contains("\"ctrl+shift+p\" = \"none\""),
+        "and the one over the second builtin key: {text}"
+    );
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("r acknowledges the write");
+    assert!(
+        !notice.contains("no user override"),
+        "the shadow IS the user's override: {notice}"
+    );
+}
+
+/// The user keymap a rebind of the builtin palette toggle writes
+/// (`apply_rebind`: the new key, then the `"none"` shadow over the old).
+const USER_KEYMAP_REBINDING_THE_PALETTE: &str = "config_version = 1\n\n[[bindings]]\n\n\
+     [bindings.keys]\n\"ctrl+alt+y\" = \"palette::toggle\"\n\"ctrl+k\" = \"none\"\n";
+
+fn services_with_the_palette_rebound() -> ShellServices {
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: USER_KEYMAP_REBINDING_THE_PALETTE.parse().unwrap(),
+    };
+    let (keymap, diags) = build_keymap(&[builtin, user], default_mod(), &services.registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = keymap;
+    services
+}
+
+/// The defect that made "reset" not reset: after a rebind of a builtin,
+/// `r` removed the new key and left the `"none"` shadow, so the action
+/// ended up UNBOUND rather than back on its builtin key. Both halves of
+/// the pair go in one write.
+#[gpui::test]
+fn r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("keymap.toml"),
+        USER_KEYMAP_REBINDING_THE_PALETTE,
+    )
+    .unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_the_palette_rebound(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_the_palette_row(&mut vcx);
+    let (_, bound) = selected_row(&shell, &vcx);
+    assert_eq!(
+        bound.map(|(_, layer)| layer),
+        Some(Layer::User),
+        "sanity: the row shows the user's rebind"
+    );
+
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+    let prompt = vcx
+        .debug_bounds("keybindings-confirm")
+        .map(|_| shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().confirm));
+    assert_eq!(
+        prompt,
+        Some(Some(keybindings_view::KeybindingConfirm::Reset)),
+        "r arms the reset question"
+    );
+    let question = shell.read_with(&vcx, |s, _| {
+        let rows = keybindings_view::derive_rows(&s.services.registry, &s.services.keymap);
+        let state = s.keybindings.as_ref().unwrap();
+        let visible = keybindings_view::visible_rows(state, &rows);
+        keybindings_view::confirm_prompt(
+            keybindings_view::KeybindingConfirm::Reset,
+            Some(&rows[visible[state.selected].row]),
+            s.services.keymap.bindings(),
+        )
+    });
+    assert!(
+        question.contains("2 overrides"),
+        "the question counts both halves of the pair: {question}"
+    );
+
+    vcx.simulate_keystrokes("y");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("r acknowledges");
+    assert!(notice.contains("2 overrides"), "{notice}");
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
+    assert!(
+        !text.contains("ctrl+alt+y"),
+        "the new key is removed: {text}"
+    );
+    assert!(
+        !text.contains("none"),
+        "AND the shadow over the builtin key is lifted, or the action is \
+         left unbound instead of reset: {text}"
+    );
+}
+
+/// Two user entries under two contexts, so reset-all has more than one
+/// entry to drop and the count it reports is the KEY count, not the entry
+/// count.
+const USER_KEYMAP_WITH_TWO_ENTRIES: &str = "# mine\nconfig_version = 1\n\n[[bindings]]\n\n\
+     [bindings.keys]\n\"ctrl+alt+y\" = \"palette::toggle\"\n\"ctrl+k\" = \"none\"\n\n\
+     [[bindings]]\ncontext = \"workspace\"\n\n[bindings.keys]\n\
+     \"ctrl+alt+u\" = \"workspace::focus_left\"\n";
+
+fn services_with_two_user_entries() -> ShellServices {
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: USER_KEYMAP_WITH_TWO_ENTRIES.parse().unwrap(),
+    };
+    let (keymap, diags) = build_keymap(&[builtin, user], default_mod(), &services.registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = keymap;
+    services
+}
+
+/// `shift+r` asks, names the number of user bindings it will remove, and
+/// on `y` drops every `[[bindings]]` entry from the user keymap — leaving
+/// the rest of the file alone. Desk and builtin layers are not this
+/// app's to touch, so "all" is the user layer's whole say.
+#[gpui::test]
+fn shift_r_asks_and_y_removes_every_user_binding(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_WITH_TWO_ENTRIES).unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_two_user_entries(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    vcx.simulate_keystrokes("shift-r");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().confirm),
+        Some(keybindings_view::KeybindingConfirm::ResetAll),
+        "shift+r arms the reset-all question"
+    );
+    assert!(
+        vcx.debug_bounds("keybindings-confirm").is_some(),
+        "and it paints"
+    );
+    let prompt = shell.read_with(&vcx, |s, _| {
+        keybindings_view::confirm_prompt(
+            keybindings_view::KeybindingConfirm::ResetAll,
+            None,
+            s.services.keymap.bindings(),
+        )
+    });
+    assert!(
+        prompt.contains('3'),
+        "the question names the number of user bindings, 3 keys across 2 \
+         entries: {prompt}"
+    );
+    let unchanged = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("still there");
+    assert_eq!(
+        unchanged, USER_KEYMAP_WITH_TWO_ENTRIES,
+        "nothing is written while the question stands"
+    );
+
+    vcx.simulate_keystrokes("y");
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("written");
+    assert!(
+        !text.contains("[[bindings]]"),
+        "every entry is gone: {text}"
+    );
+    assert!(
+        text.contains("# mine"),
+        "the rest of the file survives: {text}"
+    );
+    assert!(text.contains("config_version = 1"), "{text}");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("reset-all acknowledges the write it spawned");
+    assert!(notice.contains('3'), "and names the count: {notice}");
+}
+
+#[gpui::test]
+fn shift_r_n_withdraws_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_WITH_TWO_ENTRIES).unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_two_user_entries(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    vcx.simulate_keystrokes("shift-r n");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .confirm
+            .is_none()),
+        "n withdraws it"
+    );
+    let unchanged = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("still there");
+    assert_eq!(unchanged, USER_KEYMAP_WITH_TWO_ENTRIES);
+}
+
+/// A key that visibly does nothing is the defect class this dialog
+/// exists to remove: with no user bindings there is nothing to reset,
+/// so `shift+r` says so in the footer rather than asking a question
+/// about removing nothing — and the button is not painted at all.
+#[gpui::test]
+fn shift_r_with_no_user_bindings_says_so_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    assert!(
+        vcx.debug_bounds("keybindings-action-shift+r").is_none(),
+        "no reset-all button with nothing to reset"
+    );
+
+    vcx.simulate_keystrokes("shift-r");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .confirm
+            .is_none()),
+        "nothing to ask about"
+    );
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("shift+r must say something");
+    assert!(notice.contains("no "), "{notice}");
+    assert!(
+        !dir.path().join("keymap.toml").exists(),
+        "nothing was written"
+    );
+}
+
+/// The reset-all button is the mouse form of `shift+r` and the yes
+/// button the mouse form of `y`.
+#[gpui::test]
+fn the_reset_all_button_arms_and_the_yes_button_writes(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_WITH_TWO_ENTRIES).unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_two_user_entries(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    let button = vcx
+        .debug_bounds("keybindings-action-shift+r")
+        .expect("the reset-all button paints when there is something to reset");
+    vcx.simulate_click(button.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().confirm),
+        Some(keybindings_view::KeybindingConfirm::ResetAll),
+        "the button arms"
+    );
+
+    let yes = vcx
+        .debug_bounds("keybindings-confirm-yes")
+        .expect("yes paints");
+    vcx.simulate_click(yes.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("written");
+    assert!(!text.contains("[[bindings]]"), "{text}");
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .confirm
+            .is_none()),
+        "and the question is gone"
     );
 }
 
@@ -1348,26 +1631,20 @@ fn d_acknowledges_the_write_immediately_and_names_the_way_back(cx: &mut gpui::Te
         notice.contains(&key),
         "the acknowledgement must name the key it silenced: {notice}"
     );
-    assert!(notice.contains("enter"), "and how to get it back: {notice}");
+    assert!(
+        notice.contains("press r"),
+        "and how to get it back — r lifts the shadow: {notice}"
+    );
     vcx.run_until_parked();
 }
 
-/// Whole-branch review, Important 2. The `enter`-then-retype recovery is
-/// exact only for a binding with NO context. Roughly 60 of the ~80
-/// builtin bindings carry one, and for those `d` writes `"none"` into the
-/// *contexted* entry while the recovery rebind — whose row is unbound by
-/// then, so it passes `context: None` — writes the no-context entry
-/// instead. Different table, not an overwrite: recovery is silently
-/// defeated when array order puts the new entry first, and escalates the
-/// binding from contexted to global even when it appears to work.
-///
-/// The ruling was to fix the HONESTY, not the mechanism (making contexted
-/// recovery work needs the row to carry its pre-shadow context — the same
-/// row-vocabulary change as the parked `suppressed_by` follow-up). So the
-/// contract this pins is negative: on a contexted row the message must
-/// not promise the retype.
+/// Roughly 60 of the ~80 builtin bindings carry a context, and before
+/// 2026-09-19 `d` on one of those could only send the user to
+/// `keymap.toml` (the `enter`-then-retype recovery wrote the no-context
+/// entry). `r` now lifts the shadow from the contexted entry too, so the
+/// acknowledgement names `r` — and neither of the two old doors.
 #[gpui::test]
-fn d_on_a_contexted_binding_does_not_promise_the_retype_recovery(cx: &mut gpui::TestAppContext) {
+fn d_on_a_contexted_binding_names_r_as_the_way_back(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
     let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
     let shell = shell_of(&window, &mut vcx);
@@ -1393,17 +1670,77 @@ fn d_on_a_contexted_binding_does_not_promise_the_retype_recovery(cx: &mut gpui::
         "it must still name the key: {notice}"
     );
     assert!(
-        !notice.contains("type that key again"),
-        "the retype recovery does not hold for a contexted binding — it \
-         writes the no-context entry, leaving the `\"none\"` shadow \
-         standing in the contexted one: {notice}"
+        notice.contains("press r"),
+        "r lifts the shadow from the contexted entry: {notice}"
     );
     assert!(
-        notice.contains("keymap.toml"),
-        "so the message must point at the one way back that does work: \
-         {notice}"
+        !notice.contains("type that key again") && !notice.contains("keymap.toml"),
+        "neither retired door is promised: {notice}"
     );
     vcx.run_until_parked();
+    // That the promise holds for a CONTEXTED shadow is pinned in the pure
+    // layer (`keymap::build::tests::
+    // a_rebind_of_a_builtin_yields_both_halves_of_the_pair`, whose shadow
+    // sits under `context = "workspace"`): a `d`-then-`r` round trip here
+    // would need the ~500ms reload the fixture does not run before the
+    // in-memory keymap sees the file `d` wrote.
+}
+
+/// The user keymap spelled with the `mod` alias, which `render_binding`
+/// does not preserve (`mod+y` parses to alt+y under the default alias and
+/// renders as `alt+y`). A `d` on the user's own binding removes the key
+/// from the file, so it must name it the way the file does.
+const USER_KEYMAP_SPELLED_WITH_MOD: &str =
+    "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n\"mod+y\" = \"palette::toggle\"\n";
+
+fn services_with_a_mod_spelled_user_binding() -> ShellServices {
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: USER_KEYMAP_SPELLED_WITH_MOD.parse().unwrap(),
+    };
+    let (keymap, diags) = build_keymap(&[builtin, user], default_mod(), &services.registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = keymap;
+    services
+}
+
+#[gpui::test]
+fn d_on_a_user_binding_spelled_with_mod_removes_it_by_the_files_spelling(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_SPELLED_WITH_MOD).unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_a_mod_spelled_user_binding(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_the_palette_row(&mut vcx);
+    let (_, bound) = selected_row(&shell, &vcx);
+    assert_eq!(
+        bound,
+        Some(("alt+y".to_string(), Layer::User)),
+        "sanity: the row renders the alias resolved, which is not the file's spelling"
+    );
+
+    vcx.simulate_keystrokes("d y");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("d acknowledges");
+    assert!(
+        !notice.contains("press r"),
+        "r cannot restore a removed user key, so d must not promise it: {notice}"
+    );
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("written");
+    assert!(
+        !text.contains("mod+y"),
+        "the user's key is removed under the file's own spelling: {text}"
+    );
+    assert!(!text.contains("none"), "and not shadowed: {text}");
 }
 
 /// Whole-branch review, Minor 3. `d`'s acknowledgement was past tense

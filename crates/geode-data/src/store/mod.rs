@@ -10,6 +10,7 @@ pub mod ddl;
 pub mod document;
 pub mod publish;
 pub mod retention;
+pub mod series;
 
 pub use catalog::{AttributeConflict, Catalog, FileGeneration, FileId};
 pub use publish::{Partition, PublishOutcome, PublishRequest, publish_file};
@@ -42,6 +43,11 @@ pub enum StoreError {
     /// caller that wants to report "the feed sent something malformed"
     /// separately from "the database refused a statement" can match on it.
     Document(String),
+    /// Series rows were refused before they reached SQL at all
+    /// (`SeriesRows::validate`, timeseries spec §4.6) — a variant of its
+    /// own for the same reason `Document` is: there is no statement to
+    /// report.
+    Series(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -57,6 +63,7 @@ impl std::fmt::Display for StoreError {
                 write!(f, "starting a query worker: {source}")
             }
             StoreError::Document(reason) => write!(f, "document: {reason}"),
+            StoreError::Series(reason) => write!(f, "series: {reason}"),
         }
     }
 }
@@ -99,16 +106,31 @@ impl Store {
         &self.path
     }
 
-    /// Create the live and archive pair(s) a dataset owns: one per grain
-    /// for the measure family (every grain it declares a measure or an
-    /// attribute at), one for the whole dataset for the document family.
-    /// Idempotent.
+    /// Create the tables a dataset owns, one family at a time: a live and
+    /// archive pair per grain for the measure family (every grain it
+    /// declares a measure or an attribute at), one such pair for the whole
+    /// dataset for the document family, and for the series family no pair
+    /// at all — its one append-only table plus the coverage table beside
+    /// it (timeseries spec §4.4). Idempotent.
     ///
     /// `CREATE TABLE IF NOT EXISTS` never migrates an existing table, so a
     /// dataset whose column set grew since the database was written keeps
     /// the old table and fails at publish with a column-count mismatch —
     /// see `CLAUDE.md` on deleting the demo database after a schema change.
     pub fn apply_schema(&self, ds: &DatasetSpec) -> Result<(), StoreError> {
+        if ds.is_series() {
+            // No live/archive pair: one table plus its coverage table
+            // (timeseries spec §4.4), created once for both "kinds".
+            for sql in series::create_series_tables_sql(ds) {
+                self.writer
+                    .execute_batch(&sql)
+                    .map_err(|source| StoreError::Sql {
+                        statement: sql,
+                        source,
+                    })?;
+            }
+            return Ok(());
+        }
         for kind in [TableKind::Live, TableKind::Archive] {
             let statements: Vec<String> = if ds.is_document() {
                 vec![ddl::create_document_table_sql(ds, kind)]

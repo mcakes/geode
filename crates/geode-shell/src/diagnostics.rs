@@ -27,6 +27,7 @@ use geode_core::config::{Diagnostic, Severity};
 pub use geode_core::health::Health;
 use geode_core::log::{Level, LogLevels};
 use geode_core::query::{CatalogSnapshot, DatasetCatalog};
+pub use geode_core::source_config::SourceShape;
 
 use crate::perf::FrameHistogram;
 
@@ -47,11 +48,18 @@ pub struct SourceSummary {
     /// described every source as a directory one — it had only `paths`
     /// and `readiness` to go on, and a subscribed source has neither.
     pub adapter: String,
-    /// The topic patterns a subscribed source subscribes to, and EMPTY
-    /// for a directory source — which is how a reader tells the two
-    /// apart (a subscribed source is refused at load without at least
-    /// one topic).
+    /// The topic patterns a subscribed source subscribes to; empty for a
+    /// directory or a fetch source. Never how a reader tells the shapes
+    /// apart — `shape` below is (a subscribed source is refused at load
+    /// without at least one topic, but a fetch source has none by design).
     pub topics: Vec<String>,
+    /// Which of the three pipelines this source rides. `SourceSpec::
+    /// shape` is the one answer, but it needs the `SchemaSpec` (a fetch
+    /// source is a non-directory source whose DATASET is of the series
+    /// family) and no tile has one: the bridge, which does, computes it
+    /// once here (timeseries spec §5.1). Without it a fetch source read
+    /// as a subscribed one and painted an empty topic list.
+    pub shape: SourceShape,
 }
 
 /// How many transitions [`SourceState::history`] keeps, newest last.
@@ -909,6 +917,7 @@ mod tests {
                 readiness: "".into(),
                 adapter: "csv_dir".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Directory,
             },
         );
         d.note_polled(
@@ -997,6 +1006,7 @@ mod tests {
                 readiness: "sentinel".into(),
                 adapter: "csv_dir".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Directory,
             },
         );
         assert_eq!(d.summary().as_ref(), "");
@@ -1145,6 +1155,7 @@ mod tests {
                 readiness: "sentinel".into(),
                 adapter: "csv_dir".into(),
                 topics: Vec::new(),
+                shape: SourceShape::Directory,
             },
         );
         assert!(d.version() > v0);
@@ -1165,6 +1176,7 @@ mod tests {
             readiness: "r".into(),
             adapter: "csv_dir".into(),
             topics: Vec::new(),
+            shape: SourceShape::Directory,
         };
         d.describe_source("risk", summary.clone());
         let v = d.version();

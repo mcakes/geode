@@ -17,8 +17,10 @@ use crate::tiling::Orientation;
 mod watching {
     use super::*;
     use crate::keymap::KeyContext;
-    use crate::module::{Delivery, FindEvent, ModuleFactory, TileContent, TileOccupant};
-    use gpui::{App, Context, FocusHandle, Render, div};
+    use crate::module::{
+        Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+    };
+    use gpui::{App, Context, FocusHandle, Render, SharedString, div};
 
     pub const WATCHING_KIND: &str = "watching";
 
@@ -81,6 +83,10 @@ mod watching {
                 }
                 cx.notify();
             });
+        }
+        fn set_stack(&self, _: Option<StackHandle>, _: &mut App) {}
+        fn title(&self, _: &App) -> SharedString {
+            "watching".into()
         }
         fn serialize(&self, _: &App) -> toml::Table {
             toml::Table::new()
@@ -1057,7 +1063,11 @@ fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
 /// Dispatch an action id straight into the shell and draw once — the
 /// add rows are palette rows, and `dispatch` is exactly what a palette
 /// `enter` calls (`palette_ctl::dispatch_palette_item`).
-fn dispatch_and_draw(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, id: &str) {
+pub(super) fn dispatch_and_draw(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+    id: &str,
+) {
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
             s.dispatch(&ActionId(id.to_string()), None, window, cx);

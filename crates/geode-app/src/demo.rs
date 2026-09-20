@@ -38,10 +38,13 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 
 /// The demo layer: every doc under `examples/demo-config`, compiled in,
 /// plus a `sources` doc over `source_dir` polled every two seconds so a
-/// file dropped into it shows up while you watch, and a `[cvi]` source
+/// file dropped into it shows up while you watch, a `[cvi]` source
 /// subscribing to `geode_app::demo_bus`'s CVI documents (market-data-
 /// documents plan, Task 10) — a subscribed source, so none of the
-/// directory-only keys `[demo]` carries apply to it.
+/// directory-only keys `[demo]` carries apply to it — and two fetch
+/// sources, `demo_kdb` and `demo_rest`, over the timeseries demo's
+/// `series` dataset (Task 9: `geode_app::demo_series::DemoSeries`), one
+/// with a catalogue and one without.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
@@ -49,7 +52,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          pending_timeout = \"1m\"\nbatch_pattern = '^risk_\\d{{4}}-\\d{{2}}-\\d{{2}}_(?P<batch>.+)$'\n\
          [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
          topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
-         priority = \"latest_other\"\n",
+         priority = \"latest_other\"\n\
+         [demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
+         [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n",
         source_dir.join("*.csv").to_string_lossy()
     );
     let docs = [
@@ -137,7 +142,58 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 2);
+        assert_eq!(sources.len(), 4);
+    }
+
+    /// Task 9 (the demo adapter): `demo_kdb` and `demo_rest` are declared
+    /// over the `series` dataset, with no diagnostics at all, and both
+    /// name a fetch shape once `SourceSpec::shape` sees the demo schema
+    /// (`series` is `family = "series"`, and both name an adapter other
+    /// than the directory default).
+    #[test]
+    fn the_demo_layer_declares_the_two_fetch_sources() {
+        let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
+        let sources = docs.iter().find(|d| d.name == "sources").unwrap();
+        assert_eq!(
+            sources.table["demo_kdb"]["adapter"].as_str(),
+            Some("demo_kdb")
+        );
+        assert_eq!(
+            sources.table["demo_kdb"]["dataset"].as_str(),
+            Some("series")
+        );
+        assert_eq!(
+            sources.table["demo_rest"]["adapter"].as_str(),
+            Some("demo_rest")
+        );
+        assert_eq!(
+            sources.table["demo_rest"]["dataset"].as_str(),
+            Some("series")
+        );
+
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(
+            d.is_empty(),
+            "SourceSpec::from_doc found diagnostics: {d:?}"
+        );
+        let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
+        let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
+        assert_eq!(
+            kdb.shape(&schema),
+            geode_core::source_config::SourceShape::Fetch
+        );
+        assert_eq!(
+            rest.shape(&schema),
+            geode_core::source_config::SourceShape::Fetch
+        );
     }
 
     #[test]
@@ -207,11 +263,13 @@ mod demo_config_integration {
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "spec §6.6's 100-column view");
-        // [demo] (a csv_dir source over risk_snapshot) and [cvi] (a
-        // subscribed source over cvi_params, Task 10) — both parse with
-        // no diagnostics, per this same fixture's own
-        // the_demo_layer_declares_the_cvi_source.
-        assert_eq!(setup.config.sources.len(), 2);
+        // [demo] (a csv_dir source over risk_snapshot), [cvi] (a
+        // subscribed source over cvi_params, Task 10), and the two fetch
+        // sources [demo_kdb]/[demo_rest] over series (Task 9) — all four
+        // parse with no diagnostics, per this same fixture's own
+        // the_demo_layer_declares_the_cvi_source and
+        // the_demo_layer_declares_the_two_fetch_sources.
+        assert_eq!(setup.config.sources.len(), 4);
         // Task 11 carry-in: the demo schema's own `cvi_params` dataset
         // must agree with the built-in `CviKind`'s column set (spec
         // §6.4) — the same check `DataService::open` runs per subscribed

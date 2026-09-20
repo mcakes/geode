@@ -28,46 +28,64 @@
 //! own doc comment for why claiming, not just ignoring, is what actually
 //! makes them inert).
 //!
-//! ## The two verbs (spec §8)
+//! ## The three verbs (spec §8, §20.1; reset-all 2026-09-19)
 //!
-//! `d` **unbinds** the selected row's currently-effective binding and
-//! `r` **resets** it — the capability that could not exist while the
-//! filter owned every letter, and the reason this dialog went modal at
-//! all. Both write through [`crate::keymap_edit::apply_unbind`], which
-//! only ever edits the *user* layer, so the two verbs differ exactly
-//! where the layers do:
+//! `d` **unbinds** the selected row's currently-effective binding, `r`
+//! **resets** the row's action to what the layers beneath say, and
+//! `shift+r` **resets every action** — the capability that could not exist
+//! while the filter owned every letter, and the reason this dialog went
+//! modal at all. All three write only the *user* layer
+//! (`crate::keymap_edit`), so they differ exactly where the layers do:
 //!
 //! - a binding from builtin or desk cannot be removed, so `d` silences
-//!   it with the documented `"none"` shadow in the user entry;
-//! - a binding that IS the user's own is removed outright, which is also
-//!   the whole of what `r` does — `r` is the removal branch on its own,
-//!   guarded by the row's binding actually coming from the user layer.
+//!   it with the documented `"none"` shadow in the user entry
+//!   ([`crate::keymap_edit::apply_unbind`]); a binding that IS the user's
+//!   own is removed outright. Which branch is decided by
+//!   [`BoundKey::layer`], carried onto the row by [`derive_rows`] from the
+//!   very [`Binding`] the row displays — never re-inferred at the call
+//!   site. See [`unbind_selected`] for why getting that backwards is
+//!   destructive in two different directions;
+//! - `r` removes **every** user-layer entry that overrides the row's
+//!   action ([`KeybindingRow::overrides`], from
+//!   [`crate::keymap::user_overrides_for`] over the whole keymap): a
+//!   rebind's new key AND the `"none"` shadow the rebind left over the
+//!   old one, or the bare shadow a `d` left. This is not the row's
+//!   displayed binding — that is `None` on a shadowed row and only the new
+//!   key on a rebound one, and a reset that read it (the rule before
+//!   2026-09-19) removed the new key alone and left the action *unbound*
+//!   rather than reset. One [`crate::keymap_edit::apply_reset`] write,
+//!   keyed by the file's own key spelling ([`Binding::key_source`]), so
+//!   `mod+h` is removed as `mod+h`, not as the `alt+h` it renders to;
+//! - `shift+r` drops every `[[bindings]]` entry from the user keymap
+//!   ([`crate::keymap_edit::apply_reset_all`]) — dialog-written and
+//!   hand-written alike, by user ruling, since nothing tells them apart —
+//!   and leaves the rest of the file (`config_version`, `mod`, comments
+//!   outside the entries) as it was. Desk and builtin are never touched.
 //!
-//! Which branch a write takes is decided by [`BoundKey::layer`], carried
-//! onto the row by [`derive_rows`] from the very [`Binding`] the row
-//! displays — never re-inferred at the call site. See
-//! [`unbind_selected`] for why getting that backwards is destructive in
-//! two different directions.
+//! Every verb reports in [`KeybindingsState::notice`], a line painted in
+//! the footer and dropped at the next keystroke or click, and uses it to
+//! acknowledge the write *immediately*, naming the key(s) and, for `d`
+//! on a lower-layer binding, the way back ([`RECOVERY`]: `r`) — a disk
+//! write needs an acknowledgement
+//! that does not wait on the ~500ms reload before the row relabels.
+//! Those acknowledgements are in the present tense ("silencing …",
+//! "removing …") on purpose: the write is on the background executor and
+//! can still come back short, so a completed tense would assert an
+//! outcome the dialog has not confirmed. A verb that finds nothing to do
+//! writes nothing and says that instead — `r` on a row with no user
+//! override, `shift+r` with no user bindings. A key that visibly does
+//! nothing is the defect class this interaction model exists to remove,
+//! so "nothing happened" is stated in the footer rather than left to be
+//! inferred from an unchanged screen.
 //!
-//! Both verbs report in [`KeybindingsState::notice`], a line painted in
-//! the footer and dropped at the next keystroke or click. Both use it to
-//! acknowledge the write *immediately*, naming the key and the way back
-//! ([`recovery`]) — one bare, unmodified key performing a disk write
-//! needs an acknowledgement that does not wait on the ~500ms reload
-//! before the row relabels. Those acknowledgements are in the present
-//! tense ("silencing …", "removing …") on purpose: the write is on the
-//! background executor and can still come back `removed: false`, so a
-//! completed tense would assert an outcome the dialog has not confirmed.
-//! A verb that finds nothing to do writes nothing and says that instead.
-//! A key that visibly does nothing is the defect class this interaction
-//! model exists to remove, so "nothing happened" is stated in the footer
-//! rather than left to be inferred from an unchanged screen.
-//!
-//! Neither verb prompts for confirmation. `d` is recoverable — in the
-//! dialog itself for a binding with no context ([`RECOVERY`]), by hand
-//! in `keymap.toml` for a contexted one ([`RECOVERY_CONTEXTED`], the
-//! common case) — so a confirm step would tax every deliberate unbind to
-//! guard against a mistake that can be undone.
+//! Each verb asks first where it would write ([`KeybindingConfirm`],
+//! spec §20.1: `y`/`enter` or the yes button; `n`/`escape` withdraws),
+//! and is unarmed — notice only — where it would not. The question is
+//! [`confirm_prompt`]'s sentence, from the row and the live keymap, so
+//! `r` names the key it removes (or how many) and `shift+r` the count.
+//! The action bar paints each verb as a button only while it can act:
+//! `d` on a bound row, `r` on a row with overrides, `shift+r` while the
+//! user layer binds anything.
 //!
 //! `escape` walks the ladder of [`crate::dialogmode::escape_step`], one
 //! visible change per press: filter → normal (keeping the query
@@ -172,8 +190,13 @@ use geode_core::config::Layer;
 use crate::actions::{ActionId, ActionRegistry};
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
-use crate::keymap::{Keymap, Keystroke, Modifiers, effective_binding};
-use crate::keymap_edit::{Displacement, Rebind, Unbind, apply_rebind, apply_unbind};
+use crate::keymap::{
+    Binding, Keymap, Keystroke, Modifiers, UserOverride, effective_binding, user_overrides_for,
+};
+use crate::keymap_edit::{
+    Displacement, Rebind, ResetOutcome, Unbind, apply_rebind, apply_reset, apply_reset_all,
+    apply_unbind,
+};
 use crate::listfilter::{self, Ranked};
 use crate::palette;
 // The title/category index splitter lives in the palette's pure core
@@ -200,6 +223,11 @@ pub struct BoundKey {
     pub keystrokes: Vec<Keystroke>,
     pub context_source: Option<String>,
     pub layer: Layer,
+    /// The key's spelling in its source document ([`Binding::key_source`]).
+    /// A removal from the USER document must name the key the way that
+    /// file does — `render_binding` says `alt+y` for a file that wrote
+    /// `mod+y`, and `keys.remove("alt+y")` finds nothing.
+    pub key_source: String,
 }
 
 /// One row of the keybinding dialog: one registered action, its palette-
@@ -211,6 +239,12 @@ pub struct KeybindingRow {
     pub title: String,
     pub category: String,
     pub current: Option<BoundKey>,
+    /// Every user-layer entry that overrides this action
+    /// ([`user_overrides_for`]): a rebind's new key AND its `"none"`
+    /// shadow, or the bare shadow a `d` left. What `r` removes — read
+    /// from the whole keymap, never inferred from `current`, which is
+    /// `None` on a shadowed row and only the new key on a rebound one.
+    pub overrides: Vec<UserOverride>,
 }
 
 /// Build the dialog's row list: every action in `registry`, each paired
@@ -248,12 +282,14 @@ pub fn derive_rows(registry: &ActionRegistry, keymap: &Keymap) -> Vec<Keybinding
                 keystrokes: b.keystrokes.clone(),
                 context_source: b.context_source.clone(),
                 layer: b.layer,
+                key_source: b.key_source.clone(),
             });
             KeybindingRow {
                 action: def.id.clone(),
                 title: def.title.clone(),
                 category: def.category.clone(),
                 current,
+                overrides: user_overrides_for(bindings, &def.id),
             }
         })
         .collect();
@@ -261,31 +297,73 @@ pub fn derive_rows(registry: &ActionRegistry, keymap: &Keymap) -> Vec<Keybinding
     rows
 }
 
-/// The destructive question `d`/`r` arm (spec §20.1): the same
+/// The destructive question `d`/`r`/`shift+r` arm (spec §20.1): the same
 /// ask-then-act shape the object dialog's `Confirm` has, on this dialog's
-/// two verbs. `Unbind` writes the `"none"` shadow (or removes the user's
-/// own entry); `Reset` removes the user override. Armed only where the
-/// write would actually happen — `d` on an unbound row and `r` on a row
-/// with no user override keep giving their notices unarmed.
+/// three verbs. `Unbind` writes the `"none"` shadow (or removes the
+/// user's own entry); `Reset` removes every user override of the row's
+/// action; `ResetAll` drops every user-layer binding. Armed only where
+/// the write would actually happen — `d` on an unbound row, `r` on a row
+/// with no user override and `shift+r` with no user bindings keep giving
+/// their notices unarmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeybindingConfirm {
     Unbind,
     Reset,
+    ResetAll,
 }
 
 impl KeybindingConfirm {
-    pub fn prompt(self, title: &str, key: &str) -> String {
-        match self {
-            KeybindingConfirm::Unbind => format!("Silence {key} for '{title}'?"),
-            KeybindingConfirm::Reset => format!("Remove your {key} override on '{title}'?"),
-        }
-    }
     pub fn yes_label(self) -> &'static str {
         match self {
             KeybindingConfirm::Unbind => "Unbind",
             KeybindingConfirm::Reset => "Reset",
+            KeybindingConfirm::ResetAll => "Reset all",
         }
     }
+}
+
+/// The question the confirm row asks, from the selected row and the live
+/// keymap. Pure and public so a test can read the exact sentence the
+/// painter paints: `Reset` names the one key it removes or the count when
+/// a rebind left two; `ResetAll` names the user-layer key count and says
+/// what it leaves alone.
+pub fn confirm_prompt(
+    confirm: KeybindingConfirm,
+    row: Option<&KeybindingRow>,
+    bindings: &[Binding],
+) -> String {
+    let title = row.map(|r| r.title.as_str()).unwrap_or_default();
+    match confirm {
+        KeybindingConfirm::Unbind => {
+            let key = row
+                .and_then(|r| r.current.as_ref())
+                .map(|b| palette::render_binding(&b.keystrokes))
+                .unwrap_or_default();
+            format!("Silence {key} for '{title}'?")
+        }
+        KeybindingConfirm::Reset => match row.map(|r| r.overrides.as_slice()) {
+            Some([one]) => format!("Remove your {} override on '{title}'?", one.key),
+            Some(many) => format!("Remove your {} overrides on '{title}'?", many.len()),
+            None => format!("Remove your override on '{title}'?"),
+        },
+        KeybindingConfirm::ResetAll => format!(
+            "Remove all {} of your keyboard shortcut overrides? Desk and built-in bindings \
+             are untouched.",
+            user_binding_count(bindings)
+        ),
+    }
+}
+
+/// How many keys the user layer binds — what `shift+r` would remove, and
+/// `0` is where it gives its notice unarmed and paints no button. Counts
+/// PARSED bindings: a user key that failed to parse, or names an unknown
+/// action, is skipped by `build_keymap` with a diagnostic and is not
+/// counted here, though `apply_reset_all` would remove it too. A file
+/// whose only entries are such keys therefore reads as "nothing to
+/// reset" — the diagnostics section names them, and the gap is accepted
+/// over gating a destructive verb on unparsed text.
+pub fn user_binding_count(bindings: &[Binding]) -> usize {
+    bindings.iter().filter(|b| b.layer == Layer::User).count()
 }
 
 /// Persistent state for one open keybinding dialog session — the
@@ -598,15 +676,18 @@ fn can_unbind(row: Option<&KeybindingRow>) -> bool {
     row.is_some_and(|r| r.current.is_some())
 }
 
-/// Whether `r` on `row` would actually remove something — the row's
-/// effective binding is the USER's own. `false` (a builtin/desk binding,
-/// or none at all) is where `r` gives its "no user override" notice
-/// unarmed, since there is nothing of the user's to remove.
+/// Whether `r` on `row` would actually remove something — the user layer
+/// holds at least one override of the row's action ([`KeybindingRow::
+/// overrides`]: a rebind, a shadow, or both). `false` (a builtin/desk
+/// binding the user never touched, or an action bound nowhere) is where
+/// `r` gives its "no user override" notice unarmed, since there is
+/// nothing of the user's to remove. The row's displayed binding does not
+/// decide this: a shadowed row shows nothing and still resets.
 fn can_reset(row: Option<&KeybindingRow>) -> bool {
-    row.is_some_and(|r| r.current.as_ref().is_some_and(|b| b.layer == Layer::User))
+    row.is_some_and(|r| !r.overrides.is_empty())
 }
 
-/// The ONE arm-or-notice decision for `d`/`r` (spec §20.1, controller
+/// The ONE arm-or-notice decision for `d`/`r`/`shift+r` (spec §20.1, controller
 /// ruling: this was spelled three times — [`handle_key`]'s two `Verb`
 /// arms and [`press_verb`] — and is now spelled once, called from both).
 /// Arms the matching [`KeybindingConfirm`] where [`can_unbind`]/
@@ -619,6 +700,7 @@ fn arm_verb(
     state: &mut KeybindingsState,
     key: char,
     row: Option<&KeybindingRow>,
+    user_bindings: usize,
     user_dir: &Option<PathBuf>,
     cx: &mut Context<ShellView>,
 ) {
@@ -631,6 +713,10 @@ fn arm_verb(
             state.confirm = Some(KeybindingConfirm::Reset);
         }
         'r' => state.notice = reset_selected(row, user_dir, cx),
+        'R' if user_bindings > 0 => {
+            state.confirm = Some(KeybindingConfirm::ResetAll);
+        }
+        'R' => state.notice = reset_all(user_bindings, user_dir, cx),
         _ => {}
     }
 }
@@ -699,6 +785,7 @@ fn handle_key(
     cx: &mut Context<ShellView>,
 ) -> bool {
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
+    let user_bindings = user_binding_count(shell.services.keymap.bindings());
     let user_dir = shell.user_dir.clone();
     let Some(state) = shell.keybindings.as_mut() else {
         return false;
@@ -759,6 +846,7 @@ fn handle_key(
                 state.notice = match confirm {
                     KeybindingConfirm::Unbind => unbind_selected(row, &user_dir, cx),
                     KeybindingConfirm::Reset => reset_selected(row, &user_dir, cx),
+                    KeybindingConfirm::ResetAll => reset_all(user_bindings, &user_dir, cx),
                 };
             }
             Some(dialog::ConfirmAnswer::No) => state.confirm = None,
@@ -837,9 +925,9 @@ fn handle_key(
             // ONE arm-or-notice decision, shared with [`press_verb`] so
             // the keyboard and the mouse can never disagree on which rows
             // arm a question.
-            NormalCommand::Verb(key @ ('d' | 'r')) => {
+            NormalCommand::Verb(key @ ('d' | 'r' | 'R')) => {
                 let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-                arm_verb(state, key, row, &user_dir, cx);
+                arm_verb(state, key, row, user_bindings, &user_dir, cx);
             }
             // `Toggle`, `EditText`, `MoveItem` and any other verb belong
             // to surfaces that have something to toggle, edit or reorder;
@@ -1003,10 +1091,16 @@ fn spawn_rebind(
         context: row.current.as_ref().and_then(|b| b.context_source.clone()),
         new_key: palette::render_binding(&new_keystrokes),
         action: row.action.0.clone(),
-        old_key: row
-            .current
-            .as_ref()
-            .map(|b| palette::render_binding(&b.keystrokes)),
+        // A user-layer old key is REMOVED from the user file, so it must
+        // be named by the file's spelling; a lower-layer one is shadowed
+        // under a fresh key, where the rendered spelling is as good.
+        old_key: row.current.as_ref().map(|b| {
+            if b.layer == Layer::User {
+                b.key_source.clone()
+            } else {
+                palette::render_binding(&b.keystrokes)
+            }
+        }),
         old_key_is_user_layer: row.current.as_ref().is_some_and(|b| b.layer == Layer::User),
     };
     cx.background_executor()
@@ -1032,59 +1126,22 @@ fn spawn_rebind(
         .detach();
 }
 
-/// How a silenced binding comes back when the binding carried **no
-/// context**. Exact, not a guess, for exactly that case: `begin_capture`
-/// starts a capture on any row including an unbound one (it only checks
-/// that the list is non-empty), and `apply_rebind`'s step 1 writes
-/// through `set_key`, which *overwrites* an existing `keys` entry in
-/// place — and with no context on either side, both writes land in the
-/// same no-`context` `[[bindings]]` entry, so retyping the original
-/// keystroke replaces the `"none"` this dialog just wrote rather than
-/// appending beside it. `d` is therefore not a one-way door there, which
-/// is why fix round 1 ruled for an acknowledgement instead of a
-/// confirmation prompt: taxing every deliberate unbind to guard against
-/// a recoverable mistake is the worse trade.
+/// How a silenced builtin or desk binding comes back: `r` on the same
+/// row lifts the `"none"` shadow `d` wrote (2026-09-19 —
+/// [`user_overrides_for`] finds the shadow by keystroke and context, so
+/// the row does not need to display a key for `r` to know what to
+/// remove). Exact for a contexted binding as well as a bare one: the
+/// shadow lands in the entry whose `context` is the binding's own, and
+/// that is the context the override set matches on. Before 2026-09-19
+/// the recovery was `enter`-then-retype for a bare binding and "undo it
+/// in keymap.toml" for a contexted one (the retype wrote the no-context
+/// entry, escalating the binding to global); both sentences are gone
+/// because both doors were worse than the one that now opens.
 ///
-/// Use [`recovery`], never this constant directly — most builtin
-/// bindings are contexted, and for those this sentence is false.
-const RECOVERY: &str = "press enter and type that key again to restore it";
-
-/// The way back for a **contexted** binding, which [`RECOVERY`] is not.
-///
-/// Whole-branch review, Important 2. `d` writes its `"none"` into the
-/// `[[bindings]]` entry whose `context` matches the row's
-/// ([`unbind_selected`] passes `bound.context_source`). A recovery
-/// rebind, though, runs on a row that is unbound by then, so
-/// `apply_rebind`'s `Rebind` takes `context: None`
-/// (`row.current.and_then(|b| b.context_source)`) and `set_key` writes
-/// the *no-`context`* entry — a different table, not an overwrite. Two
-/// consequences, both bad enough to stop promising the retype: the
-/// `"none"` shadow survives in the contexted entry, so whether the key
-/// works again is decided by array order (the matcher is last-wins), and
-/// even when it appears to work the binding has been escalated from
-/// contexted to global.
-///
-/// This is the common case, not a corner: roughly 60 of the ~80 builtin
-/// bindings carry a context (`workspace`, `tile`, `blotter && …` in
-/// `crate::defaults`).
-///
-/// Making contexted recovery actually work needs `derive_rows` to carry
-/// the row's pre-shadow context onto the row — the same row-vocabulary
-/// change as the parked "`r` cannot lift a `"none"` shadow" follow-up
-/// (spec §15), and deliberately not built here. Until then the honest
-/// thing is to name the door that does open: the file itself.
-const RECOVERY_CONTEXTED: &str = "undo that in keymap.toml — retyping the key would rebind it \
-                                  globally instead of in that context";
-
-/// Which of the two recovery sentences is true for a binding declared
-/// under `context`. The one place that choice is made, so no call site
-/// can quietly promise the wrong one.
-fn recovery(context: Option<&str>) -> &'static str {
-    match context {
-        None => RECOVERY,
-        Some(_) => RECOVERY_CONTEXTED,
-    }
-}
+/// Not offered for `d` on the USER's own binding: that write removes the
+/// key, and there is no lower entry for `r` to uncover it from — see
+/// [`unbind_selected`].
+const RECOVERY: &str = "press r to restore it";
 
 /// `d`: silence the selected row's currently-effective binding.
 ///
@@ -1106,15 +1163,20 @@ fn recovery(context: Option<&str>) -> &'static str {
 /// the layer travels with the binding from `derive_rows` rather than
 /// being recomputed here from the action id.
 ///
-/// One consequence worth stating, since it makes `d` and `r` coincide on
-/// exactly one kind of row: when the effective binding IS the user's,
-/// `is_user_layer` is `true`, so the write removes the key from the user
-/// entry rather than shadowing it — which silences that keystroke (no
-/// lower layer binds it, or the user would not have been the effective
-/// layer for it) but lets the *action* fall back to whatever lower-layer
-/// binding it has. That is the same removal `r` performs, and it is the
-/// right shape: writing `"none"` over a key the user themselves put
-/// there would leave a self-shadowing entry no reader could explain.
+/// One consequence worth stating: when the effective binding IS the
+/// user's, `is_user_layer` is `true`, so the write removes the key from
+/// the user entry rather than shadowing it — which silences that
+/// keystroke (no lower layer binds it, or the user would not have been
+/// the effective layer for it) but lets the *action* fall back to
+/// whatever lower-layer binding it has. It is the right shape: writing
+/// `"none"` over a key the user themselves put there would leave a
+/// self-shadowing entry no reader could explain. It is NOT the same
+/// write as `r` — `r` removes the action's whole override set (a rebind's
+/// shadow included), this removes one displayed key — and `r` cannot
+/// undo it, since the removed key was the user's and no lower entry
+/// holds it; so this branch's notice does not promise [`RECOVERY`].
+/// The removal names the key by [`BoundKey::key_source`], the file's own
+/// spelling, for the reason that field's doc gives.
 fn unbind_selected(
     row: Option<&KeybindingRow>,
     user_dir: &Option<PathBuf>,
@@ -1127,104 +1189,147 @@ fn unbind_selected(
         // exists to remove.
         return Some(format!("{} is already unbound", row.title));
     };
-    let key = palette::render_binding(&bound.keystrokes);
+    let is_user_layer = bound.layer == Layer::User;
+    let key = if is_user_layer {
+        bound.key_source.clone()
+    } else {
+        palette::render_binding(&bound.keystrokes)
+    };
     let unbind = Unbind {
         context: bound.context_source.clone(),
         key: key.clone(),
-        is_user_layer: bound.layer == Layer::User,
+        is_user_layer,
     };
-    let way_back = recovery(bound.context_source.as_deref());
     spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
         // Present tense on purpose (whole-branch review, Minor 3): the
         // write is still on the background executor and can come back
-        // `removed: false` — a stale row, or a user file that spells the
-        // key differently from `render_binding` — in which case only
-        // stderr ever says so. "silenced" asserted an outcome this
-        // keystroke has not confirmed and cannot wait for (the row does
-        // not relabel until the ~500ms watcher); "silencing" says what
-        // is actually known, which is that the write was dispatched.
-        .or_else(|| Some(format!("silencing {key} — {way_back}")))
+        // `removed: false` — a stale row — in which case only stderr
+        // ever says so. "silenced" asserted an outcome this keystroke
+        // has not confirmed and cannot wait for (the row does not
+        // relabel until the ~500ms watcher); "silencing" says what is
+        // actually known, which is that the write was dispatched.
+        .or_else(|| {
+            Some(if is_user_layer {
+                format!("removing your {key} binding")
+            } else {
+                format!("silencing {key} — {RECOVERY}")
+            })
+        })
 }
 
-/// `r`: remove the user's own override on the selected row, so the layer
-/// beneath it shows through again.
+/// `r`: remove every user-layer override of the selected row's action, so
+/// the layers beneath show through again.
 ///
-/// Unlike [`unbind_selected`], the layer here is a *precondition*, not a
-/// branch selector: reset is only meaningful when the row's effective
-/// binding actually came from the user layer, and the [`Unbind`] it
-/// builds is therefore always `is_user_layer: true`. That `true` is
-/// still earned rather than asserted — the guard below is what
-/// establishes it, so the one branch that can delete a user's binding is
-/// only ever reached on a row whose binding demonstrably IS the user's.
+/// The set is [`KeybindingRow::overrides`] ([`user_overrides_for`] over
+/// the whole keymap), not the row's displayed binding — the two differ in
+/// exactly the cases that made the old `r` not reset: a rebind of a
+/// builtin leaves the new key on the row and the `"none"` shadow off it
+/// (removing only the new key left the action UNBOUND), and a `d` on a
+/// builtin leaves the row unbound with the shadow as the only thing to
+/// remove (the old `r` could only point at the recovery). Both go in one
+/// [`apply_reset`] write.
 ///
-/// A row with no user override is the case the brief singles out: a
+/// A row with nothing of the user's is the case the brief singles out: a
 /// silent no-op there would be a key that visibly does nothing, so it
-/// returns a notice and writes nothing at all. Writing anyway would be
-/// actively wrong, not merely redundant — the only thing `apply_unbind`
-/// could write for a non-user row is the `"none"` shadow, which would
-/// *silence* the very binding the user asked to restore.
-///
-/// It cannot lift a `"none"` shadow a previous `d` left over a builtin
-/// binding: such a row derives as unbound (the shadow carries the
-/// `"none"` action, not this row's, so [`effective_binding`] reports no
-/// binding at all), leaving nothing on the row to name the key that
-/// would have to be removed. That is a convenience gap, not a
-/// correctness one — [`RECOVERY`] is the way back, and this function
-/// says so on exactly that row rather than claiming the override does
-/// not exist. Letting `r` lift a shadow directly would need
-/// `derive_rows` to carry the suppressing entry onto the row; it is
-/// recorded as a follow-up, deliberately not built here.
-///
-/// That same missing row vocabulary is why the unbound branch's message
-/// hedges rather than calling [`recovery`]: with `row.current` gone
-/// there is no `context_source` left to decide *which* recovery is true
-/// (whole-branch review, Important 2), so it names both doors instead of
-/// picking one it cannot justify.
+/// returns a notice and writes nothing at all. That sentence is honest
+/// now — the whole user layer was consulted, not one row's binding.
 fn reset_selected(
     row: Option<&KeybindingRow>,
     user_dir: &Option<PathBuf>,
     cx: &mut Context<ShellView>,
 ) -> Option<String> {
     let row = row?;
-    let Some(bound) = row.current.as_ref() else {
-        // Unbound — which does NOT mean "no user override". The most
-        // likely way a row gets here is the user's own `d`, whose
-        // `"none"` shadow IS an override; it just carries the `"none"`
-        // action rather than this row's, so `effective_binding` reports
-        // no binding and the row has nothing left to name the key with.
-        // Claiming there is no override would be false AND would steer
-        // the user away from the recovery, so this says what is actually
-        // true and points at it — at BOTH doors, because the row no
-        // longer carries the context that would say which one opens (see
-        // this function's own doc comment).
-        return Some(format!(
-            "{} is unbound — if you silenced it, {RECOVERY}, or undo it \
-             in keymap.toml if it was context-scoped",
-            row.title
-        ));
-    };
-    if bound.layer != Layer::User {
-        // A live binding from a layer this app never writes: there is
-        // genuinely nothing of the user's to remove, and this is the one
-        // case where "no user override" is the honest sentence.
+    if row.overrides.is_empty() {
         return Some(format!("{} has no user override to reset", row.title));
     }
-    let key = palette::render_binding(&bound.keystrokes);
-    let unbind = Unbind {
-        context: bound.context_source.clone(),
-        key: key.clone(),
-        is_user_layer: true,
+    let what = match row.overrides.as_slice() {
+        [one] => format!("your {} override", one.key),
+        many => format!("your {} overrides", many.len()),
     };
-    spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
-        // Whole-branch review, Minor 3: saying nothing was the worst of
-        // the three outcomes. A reset whose `apply_unbind` comes back
-        // `removed: false` looked identical to one that worked (only
-        // stderr knew), and even a reset that DID work is invisible
-        // until the ~500ms watcher relabels the row — so `r` read as
-        // inert, the defect class this interaction model exists to
-        // remove. Present tense for the same reason `d` uses it: the
-        // write is dispatched, not confirmed.
-        .or_else(|| Some(format!("removing your {key} override")))
+    spawn_reset(row.overrides.clone(), row.action.0.clone(), user_dir, cx)
+        // Present tense, as `d` and the old `r`: the write is dispatched,
+        // not confirmed, and the row relabels only on the ~500ms watcher.
+        .or_else(|| Some(format!("removing {what} on {}", row.title)))
+}
+
+/// `shift+r`: drop every user-layer binding, so every action is back on
+/// what desk and builtin say. `user_bindings` is the count the caller
+/// already gated the confirm on; `0` is the unarmed notice.
+fn reset_all(
+    user_bindings: usize,
+    user_dir: &Option<PathBuf>,
+    cx: &mut Context<ShellView>,
+) -> Option<String> {
+    if user_bindings == 0 {
+        return Some("no user keyboard shortcut overrides to reset".to_string());
+    }
+    let Some(user_dir) = user_dir.clone() else {
+        return Some(no_user_dir_notice("every binding"));
+    };
+    cx.background_executor()
+        .spawn(async move {
+            match apply_reset_all(&user_dir) {
+                Ok(ResetOutcome { removed }) => {
+                    tracing::info!(target: "geode::config",
+                        "reset all keyboard shortcuts: removed {removed} user bindings"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(target: "geode::config", "failed to reset all keyboard shortcuts: {e}");
+                }
+            }
+        })
+        .detach();
+    Some(format!(
+        "removing all {user_bindings} of your keyboard shortcut overrides"
+    ))
+}
+
+/// Run one [`apply_reset`] on the background executor — [`spawn_unbind`]'s
+/// contract for the reset of one action: no file I/O on the render thread,
+/// args captured, task detached, failures logged from inside the task, no
+/// touch of `shell`'s own state. A `removed` short of the request is the
+/// stale-belief warning [`UnbindOutcome::removed`] `false` is.
+fn spawn_reset(
+    overrides: Vec<UserOverride>,
+    action: String,
+    user_dir: &Option<PathBuf>,
+    cx: &mut Context<ShellView>,
+) -> Option<String> {
+    let Some(user_dir) = user_dir.clone() else {
+        return Some(no_user_dir_notice(&action));
+    };
+    cx.background_executor()
+        .spawn(async move {
+            let asked = overrides.len();
+            match apply_reset(&user_dir, &overrides) {
+                Ok(ResetOutcome { removed }) if removed == asked => {
+                    tracing::info!(target: "geode::config",
+                        "reset {action}: removed {removed} user overrides"
+                    );
+                }
+                Ok(ResetOutcome { removed }) => {
+                    tracing::warn!(target: "geode::config",
+                        "reset {action}: removed {removed} of {asked} user overrides — the \
+                         keymap on disk differs from the one loaded"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(target: "geode::config", "failed to reset {action}: {e}");
+                }
+            }
+        })
+        .detach();
+    None
+}
+
+/// The one refusal every spawner owns: no writable user config dir at all,
+/// in which case nothing was even attempted.
+fn no_user_dir_notice(what: &str) -> String {
+    tracing::warn!(target: "geode::config",
+        "no writable user config dir; the binding change for {what} was not saved"
+    );
+    "no writable user config directory — nothing was saved".to_string()
 }
 
 /// Run one [`apply_unbind`] on the background executor — the unbind twin
@@ -1250,10 +1355,7 @@ fn spawn_unbind(
     cx: &mut Context<ShellView>,
 ) -> Option<String> {
     let Some(user_dir) = user_dir.clone() else {
-        tracing::warn!(target: "geode::config",
-            "no writable user config dir; the binding change for {action} was not saved"
-        );
-        return Some("no writable user config directory — nothing was saved".to_string());
+        return Some(no_user_dir_notice(&action));
     };
     cx.background_executor()
         .spawn(async move {
@@ -1306,8 +1408,9 @@ pub(crate) fn highlighted_text(text: &str, indices: &[usize], primary: Hsla) -> 
 /// already armed or a capture is listening — because a button click, and
 /// so a second `press_verb` call before the first's write lands, can
 /// happen with no keystroke in between at all.
-fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Context<ShellView>) {
+fn press_verb(shell: &mut ShellView, key: char, window: &mut Window, cx: &mut Context<ShellView>) {
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
+    let user_bindings = user_binding_count(shell.services.keymap.bindings());
     let user_dir = shell.user_dir.clone();
     let Some(state) = shell.keybindings.as_mut() else {
         return;
@@ -1320,31 +1423,24 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
     }
     let visible = visible_rows(state, &rows);
     let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-    if let Some(key) = key.chars().next() {
-        arm_verb(state, key, row, &user_dir, cx);
-    }
+    arm_verb(state, key, row, user_bindings, &user_dir, cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
 
 /// The action bar under the list: `d` where the row has a binding to
-/// silence, `r` where it has a user override to remove — `danger`
-/// outline buttons showing their key chip, `keybindings-action-{key}`.
-/// Replaced by the confirm row while a question stands.
+/// silence, `r` where it has a user override to remove, `shift+r` where
+/// the user layer binds anything at all — `danger` outline buttons
+/// showing their key chip, `keybindings-action-{key}`. Replaced by the
+/// confirm row while a question stands.
 fn action_block(
     state: &KeybindingsState,
     row: Option<&KeybindingRow>,
+    bindings: &[Binding],
     entity: &Entity<ShellView>,
     cx: &mut App,
 ) -> AnyElement {
     if let Some(confirm) = state.confirm {
-        let (title, key) = row
-            .and_then(|r| {
-                r.current
-                    .as_ref()
-                    .map(|b| (r.title.to_string(), palette::render_binding(&b.keystrokes)))
-            })
-            .unwrap_or_default();
         let on_yes: dialog::ConfirmHandler = Rc::new(|shell, window, cx| {
             let ks = Keystroke {
                 mods: Modifiers::NONE,
@@ -1358,7 +1454,7 @@ fn action_block(
             }
         });
         return dialog::confirm_row(
-            confirm.prompt(&title, &key),
+            confirm_prompt(confirm, row, bindings),
             confirm.yes_label(),
             "keybindings",
             entity,
@@ -1371,13 +1467,17 @@ fn action_block(
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
-    let mut verbs: Vec<(&'static str, &'static str)> = Vec::new();
+    // (chip spelling, the verb `arm_verb` reads, label)
+    let mut verbs: Vec<(&'static str, char, &'static str)> = Vec::new();
     if state.listening.is_none() {
         if can_unbind(row) {
-            verbs.push(("d", "Unbind"));
+            verbs.push(("d", 'd', "Unbind"));
         }
         if can_reset(row) {
-            verbs.push(("r", "Reset to lower layer"));
+            verbs.push(("r", 'r', "Reset to lower layer"));
+        }
+        if user_binding_count(bindings) > 0 {
+            verbs.push(("shift+r", 'R', "Reset all"));
         }
     }
     let mut bar = h_flex()
@@ -1385,7 +1485,7 @@ fn action_block(
         .gap_2()
         .items_center()
         .debug_selector(|| "keybindings-actions".to_string());
-    for (key, label) in verbs {
+    for (key, verb, label) in verbs {
         let ks = crate::keymap::parse_keystroke(key, Modifiers::NONE).expect("valid");
         let entity_for_action = entity.clone();
         let selector = format!("keybindings-action-{key}");
@@ -1401,7 +1501,7 @@ fn action_block(
                     .child(label),
             )
             .on_click(move |_event, window, cx| {
-                entity_for_action.update(cx, |shell, cx| press_verb(shell, key, window, cx));
+                entity_for_action.update(cx, |shell, cx| press_verb(shell, verb, window, cx));
             });
         bar = bar.child(div().debug_selector(move || selector.clone()).child(button));
     }
@@ -1594,6 +1694,7 @@ fn build(
                 // its own — rather than the verbs' only door.
                 Hint::new(HintRow::Edit, &["d"], "unbind"),
                 Hint::new(HintRow::Edit, &["r"], "reset"),
+                Hint::new(HintRow::Edit, &["shift+r"], "reset all"),
                 Hint::new(HintRow::Go, &["/"], "filter"),
                 // Honest about which rung the next escape takes: with a
                 // query still applied it clears the query, and only then
@@ -1688,7 +1789,13 @@ fn build(
         // was moved out of this dialog's content entirely.
         .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
         .child(list)
-        .child(action_block(state, row, entity, cx))
+        .child(action_block(
+            state,
+            row,
+            shell.services.keymap.bindings(),
+            entity,
+            cx,
+        ))
         .child(footer)
         .into_any_element()
 }
@@ -2016,7 +2123,9 @@ mod tests {
                 keystrokes,
                 context_source: None,
                 layer: Layer::Builtin,
+                key_source: "ctrl+h".to_string(),
             }),
+            overrides: Vec::new(),
         }
     }
 
@@ -2040,6 +2149,7 @@ mod tests {
             title: "Focus left".to_string(),
             category: "Workspace".to_string(),
             current: None,
+            overrides: Vec::new(),
         };
         assert!(!is_same_key_recapture(&row, &[ctrl("h")]));
     }
@@ -2060,6 +2170,7 @@ mod tests {
             title: title.to_string(),
             category: category.to_string(),
             current: None,
+            overrides: Vec::new(),
         })
         .to_vec()
     }

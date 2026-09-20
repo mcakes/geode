@@ -298,6 +298,92 @@ series tables under the same `CREATE TABLE IF NOT EXISTS` rule; the
 family's column set is fixed, so the reorder hazard the CLAUDE.md
 records for measures cannot arise here.
 
+### 4.10 As built (Part 1)
+
+Part 1 (the data tier) is built; §6–§10 are not. Where the code
+differs from the sections above, the code is the specification now.
+
+- **Retention runs per pair inside `append_series`, and there is no
+  sweeper (amends §4.7).** `store::retention::sweep` gained no series
+  arm and `SweepReport` no series counts. `store::series::sweep_pair`
+  runs in the append's own transaction with `now = received_at`: the
+  one place a series table grows is the one place it is bounded, and a
+  sweeper over every pair would have to scan the whole table to find
+  the pairs that grew. `SeriesAppended` carries `swept` beside
+  `appended`. The two predicates are unchanged from §4.7.
+- **A window that cannot be applied is an error diagnostic at load
+  (amends §4.2).** `SchemaSpec::from_doc` diagnoses both silent forms
+  of a `retention`/`history` declaration — a non-string value
+  (`retention = 30`, which `as_str()` alone turns into "absent") and a
+  value whose microseconds exceed `i64::MAX` (`parse_duration` accepts
+  `y`, so `"300000000y"` parses) — as an error at
+  `datasets.<name>.<field>`, leaving the window `None`, so the
+  "unrepresentable window sweeps nothing" answer in
+  `store::series::cutoff` is now only reachable by a hand-built
+  `DatasetSpec`.
+- **A fetch is clipped to `history` before coverage is subtracted
+  (amends §4.7, and is the consequence of the amendment above).**
+  Because the sweep is inside the append, a span older than `history`
+  would be inserted and deleted in one breath, its coverage row with
+  it, so the next look would ask for the same dead span forever.
+  `DataService::fetch` raises `from` to `now - history` first
+  (`checked_sub_signed`, and no clip at all if the window does not
+  convert or the subtraction leaves the representable range —
+  `history` is user-configured and unbounded in magnitude, and not
+  clipping is the safe direction), and answers `Ok(0)` without asking
+  the source when nothing of the request survives.
+- **Health is reported before the asking tile is answered, on every
+  path (clarifies §4.8).** The fetch worker's `Failed` arm and the
+  runner's `SeriesAppended`/`SeriesFailed` arms all call the load
+  report first and send `DataEvent::SeriesFetched` second, so the two
+  read the same way wherever an outcome comes from. The load-lane key
+  is `"{identity}@{source}"` at all three sites, which is what lets a
+  success clear a failure, and both arms close their `Started` with a
+  `LoadEnded` exactly as the file and document arms do.
+- **A `Fetch` source has no connection state, so a servable one is
+  `Ok` on the discovery lane at open (amends §4.8).** `Fetch` exposes
+  no `ConnectionState` — there is no long-lived connection to lose —
+  so `DataService::open` reports a clean discovery lane once the
+  worker spawns, and an unservable one (no adapter in this build, no
+  fetch side, or a worker that would not spawn) is `Failed` there.
+  That report goes through the same emit closure every other health
+  report uses, never a `|_| true`: the tracker commits a transition
+  only when its emit says the event was delivered, so a dropped one
+  would both hide the `ok` and mark as reported a value nothing saw.
+- **`SeriesCatalog` carries `fetches` and the coverage hull, not a row
+  count (amends §4.6).** One row per pair, read from the coverage
+  table alone — `source`, `identity`, `from`/`to` (the hull of its
+  fetched spans), `fetches` (how many coverage rows), and
+  `latest_received_at`. Coverage is one row per fetch, so this is
+  catalog-sized and honours `build_catalog`'s rule that nothing there
+  scans a data table; a row count over the series table would have
+  broken it.
+- **The identities request is `Request::Identities { source }`
+  (amends §5.3/§5.5's `Catalogue` naming).** It asks one fetch source
+  to re-answer `Fetch::catalogue`; the answer lands in
+  `CatalogSnapshot::identities` as `(source, identities)` pairs. A
+  source that cannot enumerate is not a failure — the picker simply
+  has no typeahead for it.
+- **A `Fetch` shim owes its own deadline (clarifies §5.2).** The
+  worker's shutdown drops its sender and joins the thread, with no
+  cancellation, so an unbounded vendor call holds app exit for its whole
+  duration; the `Fetch` trait doc states the contract, and the demo
+  adapter (pure CPU) needs no deadline.
+- **`FetchWorker` hands an outcome to a service-built sink, which
+  submits to the ingest runner (clarifies §5.4).** The worker owns the
+  adapter and nothing else: rows become a `SeriesJob` on the runner's
+  series lane, so the append runs on the ingest thread, the one door
+  storage is entered by; a failure is the load lane plus the asking
+  tile's answer; a catalogue is remembered for the next `catalog`
+  read. `take_work` pops documents, then series, then files, so an
+  interactive fetch never waits behind a backfill.
+- **Coverage subtraction runs on the service thread, through the
+  service's own reader connection (clarifies §5.4).** `coverage` +
+  `missing_spans` are read and computed in `DataService::fetch`
+  itself, not in the worker and not in the pool: `append_series`
+  commits rows and coverage in one transaction, so a span this reader
+  sees as covered is a span whose rows are queryable.
+
 ## 5. The fetch adapter shape
 
 ### 5.1 Config

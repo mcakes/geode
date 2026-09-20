@@ -10,7 +10,10 @@ use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
 use geode_shell::fonts;
+use geode_shell::module::StackHandle;
+use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
+use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
 use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div};
@@ -293,6 +296,7 @@ pub(crate) fn render(
     tile_id: u64,
     menu_tip_selector: SharedString,
     state_tip_selector: SharedString,
+    stack: Option<&StackHandle>,
 ) -> impl IntoElement {
     let muted = theme.muted_foreground;
     let mut row = h_flex()
@@ -306,6 +310,12 @@ pub(crate) fn render(
         .border_b_1()
         .border_color(theme.border)
         .debug_selector(move || format!("marketdata-header-{tile_id}"));
+
+    // 0. The stack marker (tile-stacks spec §5.1), first in the strip,
+    //    through the one builder every module uses (`StackHandle::marker`)
+    //    — a trader reading the chip never learns a second shape per
+    //    module.
+    row = row.children(stack.and_then(|s| s.marker(theme, TileId(tile_id))));
 
     // 1. Kind badge.
     row = row.child(
@@ -494,6 +504,20 @@ pub(crate) fn render(
             .border_color(theme.border)
             .when(menu_open, |d| d.bg(theme.secondary))
             .text_color(muted)
+            // A bare control's pointer states (`control::PointerStates`)
+            // while CLOSED; open, the button keeps its persistent fill
+            // above and answers the pointer with nothing, as the guide
+            // asks of a button that owns a popup (and as gpui-component's
+            // own `Button` does while `selected`). The header sits on the
+            // tile surface, the window background.
+            .when(!menu_open, |d| {
+                d.pointer_states(control::paint(
+                    theme,
+                    control::Rest::Bare,
+                    theme.background,
+                    muted,
+                ))
+            })
             .child("⋯")
             .debug_selector(move || format!("marketdata-menu-button-{tile_id}"))
             .capture_any_mouse_down({

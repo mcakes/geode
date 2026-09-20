@@ -10,8 +10,10 @@
 //! putting content inside it via `TitleBar::new().child(...)`.
 //!
 //! Content: the app title left, the frame readout centered in the
-//! previously-reserved middle region (Task 6, spec §4.4 — slot, scope
-//! chips, and an unmissable AS OF badge when scoped to a snapshot), and a
+//! previously-reserved middle region (Task 6, spec §4.4 — the grouping
+//! readout, a click on which opens the grouping picker (2026-09-19),
+//! scope chips, and an unmissable AS OF badge when scoped to a
+//! snapshot), and a
 //! right-aligned scope text [`Input`] (Task 4, spec §3.1/§3.11) — every
 //! keystroke while it's focused feeds the frame's scope through
 //! `ShellView`'s own `InputEvent` subscription; this function only
@@ -31,6 +33,7 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
 use super::chip;
+use super::control::{self, PointerStates as _};
 use super::scale;
 use crate::fonts;
 use crate::scopebar::ScopeBarModel;
@@ -90,10 +93,19 @@ fn icon_chip(
         .rounded(radius)
         .bg(bg)
         .text_color(fg)
-        .child(icon.text_color(fg))
+        // The icon inherits `fg` from the box rather than pinning it, so a
+        // hover recolours glyph and box together (`control::PointerStates`).
+        .child(icon)
         .debug_selector(selector)
 }
 
+/// Five separate mouse doors rather than a bundling struct (clippy's
+/// `too_many_arguments`, `-D warnings`-enforced) — `status_bar`'s own
+/// reasoning: `render.rs`'s one call site builds each as its own
+/// `cx.entity()`-capturing closure, and this body hands each to exactly
+/// one element, so a struct would only move the assembly for no reader
+/// benefit.
+#[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
@@ -101,6 +113,7 @@ pub fn toolbar(
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_pick: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_grouping: impl Fn(&mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -109,6 +122,17 @@ pub fn toolbar(
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
+    // Pointer states for the chips that are clickable (the selection
+    // chips, `+`, save) and for the bare `×` glyph; the text, expression
+    // and contradiction chips have no listener and take none — a hover
+    // fill promises a click (design guide, interaction states).
+    let chip_states = control::paint(
+        theme,
+        control::Rest::Filled(chip_bg),
+        theme.title_bar,
+        chip_fg,
+    );
+    let glyph_states = control::paint(theme, control::Rest::Bare, theme.title_bar, chip_fg);
 
     let mut chips_row = h_flex().gap_1().items_center();
     for (i, c) in model.chips.iter().enumerate() {
@@ -155,6 +179,7 @@ pub fn toolbar(
                         Some("frame::pick"),
                         Some(SharedString::new_static("click: pick values")),
                     ))
+                    .pointer_states(chip_states)
                     .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                         on_open(&open_column, window, cx)
                     }),
@@ -165,8 +190,11 @@ pub fn toolbar(
                             SharedString::new_static("scope-chip-close"),
                             i as u64,
                         ))
-                        .child(Icon::new(IconName::Close).text_color(chip_fg))
+                        .rounded(theme.radius_tokens().sm)
+                        .text_color(chip_fg)
+                        .child(Icon::new(IconName::Close))
                         .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                        .pointer_states(glyph_states)
                         .tooltip(tips::tip_with(
                             c.close_selector.clone(),
                             c.close_title.clone(),
@@ -234,6 +262,7 @@ pub fn toolbar(
             Some("frame::pick"),
             None,
         ))
+        .pointer_states(chip_states)
         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
             on_pick(window, cx)
         }),
@@ -264,6 +293,7 @@ pub fn toolbar(
                 Some("scope::save_current"),
                 None,
             ))
+            .pointer_states(chip_states)
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 on_save(window, cx)
             }),
@@ -353,9 +383,30 @@ pub fn toolbar(
                                 )
                         },
                     )
+                    // The grouping readout (2026-09-19) is a control: a
+                    // click opens the grouping picker, the mouse form of
+                    // `frame::grouping`/`mod+g`, so it takes the bare
+                    // glyph's pointer states (the same `(Bare, title_bar,
+                    // muted_foreground)` pairing the `×` glyph ships in
+                    // `control`'s sweep) and a tooltip naming the chord.
+                    // Padded and rounded so the hover fill has a shape.
                     .child(
                         div()
-                            .text_color(theme.muted_foreground)
+                            .id("scope-grouping")
+                            .px_1()
+                            .rounded(chip_radius)
+                            .text_color(chip_fg)
+                            .debug_selector(|| "scope-grouping".to_string())
+                            .tooltip(tips::tip(
+                                "tip-scope-grouping",
+                                "Pick a grouping",
+                                Some("frame::grouping"),
+                                None,
+                            ))
+                            .pointer_states(glyph_states)
+                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                on_grouping(window, cx)
+                            })
                             .child(model.slot_label.clone()),
                     )
                     .child(chips_row),

@@ -12,10 +12,12 @@ use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent, TileOccupant};
+use geode_shell::module::{
+    Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+};
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
-use gpui::{App, Entity, Window};
+use gpui::{App, Entity, SharedString, Window};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -206,6 +208,12 @@ impl TileContent for MarketDataContent {
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
+    }
+    fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
+    }
+    fn title(&self, cx: &App) -> SharedString {
+        self.tile.read(cx).title()
     }
     fn serialize(&self, cx: &App) -> toml::Table {
         self.tile.read(cx).serialize()

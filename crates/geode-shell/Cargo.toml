@@ -50,6 +50,15 @@ chrono = "0.4.42"
 tracing.workspace = true
 
 [dev-dependencies]
+# Test-feature parity (2026-09-19): the downstream crates' dev-dependencies
+# enable this crate's `test-support`, so `cargo test --workspace` compiles
+# geode-shell with it on — and `cargo test -p geode-shell` used to compile
+# a second, feature-less copy of the same 95k lines (and the mutation
+# harness a third, per entry). A self dev-dependency (cargo allows it for
+# exactly this; geode-core's is the precedent) makes the two graphs one.
+# Every `test-support` cfg is `any(test, feature = "test-support")`, so
+# nothing is defined twice with both on.
+geode-shell = { path = ".", features = ["test-support"] }
 tempfile = "3.27.0"
 # The Snapshot fixture builder, so probe tests never name an Arrow type.
 geode-core = { workspace = true, features = ["test-support"] }
