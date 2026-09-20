@@ -2088,8 +2088,8 @@ impl MarketDataTile {
             // A `Date` attribute or cell opens the segmented field (header
             // spec §5.2, 2026-09-19; spec §4.4), seeded with the painted
             // date — or, when that does not parse (a NULL painted empty,
-            // say), today's local date, so the field always opens on
-            // something a step or a digit can act on.
+            // say), today's date on the trader's clock, so the field
+            // always opens on something a step or a digit can act on.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
                 .unwrap_or_else(|_| self.clock.today(chrono::Utc::now()));
             let field = DateTimeField::open(
@@ -2807,7 +2807,7 @@ impl MarketDataTile {
     /// `new-<n>` against the rows on screen and opens the first CELL's
     /// editor at once; a `Typed` axis opens the row-label editor on the
     /// minted row instead — the segmented date field for a `Date` axis
-    /// (opening on today's local date, the strip's own landing), the text
+    /// (opening on today's date on the trader's clock, the strip's own landing), the text
     /// `Input` for any other type — whose commit renames the row and then
     /// opens the first cell (`commit_row_label`), and whose cancel drops
     /// the row (`close_editor`).
@@ -2869,7 +2869,7 @@ impl MarketDataTile {
 
     /// Open the row-label editor on the provisional row at `row` (spec
     /// §5.3): `begin_edit`'s two forms, seeded EMPTY — a `Date` axis's
-    /// field on today's local date, since there is no painted text to
+    /// field on today's date on the trader's clock, since there is no painted text to
     /// open on, and any other type's text `Input` blank — with the
     /// keyboard, so the shell's insert branch hands it every bare key.
     fn begin_label_edit(

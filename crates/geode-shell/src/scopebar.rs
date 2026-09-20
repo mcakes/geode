@@ -89,8 +89,9 @@ pub struct ScopeBarModel {
     /// `SharedString` here still means a refcount bump wherever it feeds
     /// either the painted label or that detail line, never a heap clone.
     pub as_of_badge: Option<SharedString>,
-    /// The as-of instant's FULL resolved timestamp, `%Y-%m-%d %H:%M:%S`
-    /// in the trader's local clock, whatever `as_of`'s own elision does —
+    /// The as-of instant's FULL resolved timestamp, `%Y-%m-%d %H:%M:%S
+    /// %Z` (`Clock::full`) on the trader's configured clock, whatever
+    /// `as_of`'s own elision does —
     /// `as_of` drops the date on today and always drops seconds, which is
     /// fine for a glance at the badge but not for a hover that exists to
     /// answer "exactly when". Built alongside `as_of` from the same
@@ -162,7 +163,7 @@ pub fn build_model(frame: &Frame, clock: Clock, today: NaiveDate) -> ScopeBarMod
             } else {
                 local.format("%Y-%m-%d %H:%M").to_string()
             };
-            let full: SharedString = local.format("%Y-%m-%d %H:%M:%S").to_string().into();
+            let full: SharedString = clock.full(*t).into();
             (Some(elided), Some(full))
         }
     };
@@ -301,7 +302,7 @@ mod tests {
         assert_eq!(m.as_of.as_deref(), Some("14:05"), "the elided badge form");
         assert_eq!(
             m.as_of_full.as_deref(),
-            Some("2026-09-08 14:05:30"),
+            Some("2026-09-08 14:05:30 UTC"),
             "the full resolved timestamp, seconds included"
         );
     }
@@ -342,7 +343,7 @@ mod tests {
             Some("2026-09-18 22:00"),
             "another day: dated"
         );
-        assert_eq!(m.as_of_full.as_deref(), Some("2026-09-18 22:00:00"));
+        assert_eq!(m.as_of_full.as_deref(), Some("2026-09-18 22:00:00 UTC"));
 
         // UTC alone cannot see a zone — the same instant on a real
         // non-UTC clock (Tokyo, UTC+9) must read a different wall-clock
@@ -361,6 +362,6 @@ mod tests {
             Some("2026-09-19 07:00"),
             "another day on the clock: dated"
         );
-        assert_eq!(m.as_of_full.as_deref(), Some("2026-09-19 07:00:00"));
+        assert_eq!(m.as_of_full.as_deref(), Some("2026-09-19 07:00:00 JST"));
     }
 }

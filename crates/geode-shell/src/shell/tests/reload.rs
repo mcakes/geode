@@ -1613,9 +1613,18 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
     let before = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
     let versions_before = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
 
+    // Final review, Minor 4: `before` is the MACHINE's zone (no `[time]`
+    // section yet), which fails unmutated on a Tokyo machine if this
+    // hardcodes "Asia/Tokyo" as the target — pick a zone that can never
+    // equal `before`'s.
+    let target = if before.zone_name() == "Asia/Tokyo" {
+        "Europe/London"
+    } else {
+        "Asia/Tokyo"
+    };
     std::fs::write(
         dir.path().join("app.toml"),
-        "config_version = 1\n[time]\nzone = \"Asia/Tokyo\"\n",
+        format!("config_version = 1\n[time]\nzone = \"{target}\"\n"),
     )
     .unwrap();
     let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
@@ -1624,7 +1633,7 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
 
     let after = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
     assert_ne!(before, after);
-    assert_eq!(after.zone_name(), "Asia/Tokyo");
+    assert_eq!(after.zone_name(), target);
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.today),
         after.today(chrono::Utc::now())

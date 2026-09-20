@@ -143,14 +143,24 @@ pub struct BlotterTile {
     /// Both empty while `Follow`.
     asof_chip: SharedString,
     asof_tip: SharedString,
-    /// The LOCAL date `asof_chip`/`asof_tip` were built for (review round
-    /// 1, Important: the date-elided `AS OF HH:MM` form must not outlive
-    /// its day). `render` compares this against today before painting and
-    /// rebuilds through `refresh_asof_chip` on a mismatch, so a session
-    /// pinned across local midnight does not keep claiming "today" for an
-    /// instant that no longer is. Meaningless while `Follow` (never read
-    /// then — the chip strings are empty and nothing paints).
+    /// The date, ON THE CLOCK BELOW, `asof_chip`/`asof_tip` were built
+    /// for (review round 1, Important: the date-elided `AS OF HH:MM`
+    /// form must not outlive its day). `render` compares this against
+    /// today before painting and rebuilds through `refresh_asof_chip` on
+    /// a mismatch, so a session pinned across midnight does not keep
+    /// claiming "today" for an instant that no longer is. Meaningless
+    /// while `Follow` (never read then — the chip strings are empty and
+    /// nothing paints).
     pub(crate) asof_chip_date: chrono::NaiveDate,
+    /// The clock `asof_chip_date` was computed on (final review,
+    /// Important): `today` alone cannot tell a `[time] zone` reload from
+    /// a no-op, since `Clock::today` returns the SAME date in most zone
+    /// pairs — a reload that only changes the zone (never the date)
+    /// would leave the wall-clock text stuck on the old zone until an
+    /// unrelated midnight rollover or the next `:asof` edit. `render`'s
+    /// guard checks this alongside the date, so either changing is a
+    /// rebuild.
+    pub(crate) asof_chip_clock: geode_core::clock::Clock,
     /// `"tip-blotter-asof-{id}"`, built once.
     asof_tip_selector: SharedString,
     tile_scope: Scope,
@@ -321,6 +331,7 @@ impl BlotterTile {
             .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
         let (asof_chip, asof_tip) = Self::asof_chip_strings(&tile_as_of, clock);
         let asof_chip_date = clock.today(chrono::Utc::now());
+        let asof_chip_clock = clock;
         let asof_tip_selector: SharedString = format!("tip-blotter-asof-{}", tile.0).into();
         let unscoped_tip_selector: SharedString = format!("tip-blotter-unscoped-{}", tile.0).into();
         let filter_tip_selector: SharedString = format!("tip-blotter-filtered-{}", tile.0).into();
@@ -368,11 +379,13 @@ impl BlotterTile {
             .detach();
         cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
-        // `AppClock` (as-of dialog spec §6.1): the header's freshness
-        // readouts and the `AS OF` chip read the global at paint time
-        // (see `render`); this just needs to repaint on a `[time]`
-        // reload — nothing here is cached the way `UiSettings`' render
-        // is.
+        // `AppClock` (as-of dialog spec §6.1): the per-dataset freshness
+        // readouts read the global fresh at paint time (see `render`) —
+        // a bare notify is all THEY need. The pinned `AS OF` chip does
+        // NOT (`asof_chip`/`asof_chip_date`/`asof_chip_clock`, review
+        // round 1 and the final review): `render`'s own guard, not this
+        // observer, is what notices the clock changed and rebuilds the
+        // cache — this handler only has to get `render` to run again.
         cx.observe_global::<geode_shell::clock::AppClock>(|_this, cx| cx.notify())
             .detach();
 
@@ -397,6 +410,7 @@ impl BlotterTile {
             asof_chip,
             asof_tip,
             asof_chip_date,
+            asof_chip_clock,
             asof_tip_selector,
             tile_scope,
             filter_tip,
@@ -491,17 +505,23 @@ impl BlotterTile {
         }
     }
 
-    /// Rebuilds `asof_chip`/`asof_tip`/`asof_chip_date` from `tile_as_of`
-    /// — the one door: called whenever `tile_as_of` changes
-    /// (`set_tile_as_of`) and lazily by `render` when the trader's date
-    /// has rolled over since the cache was last built (review round 1,
-    /// Important: the date-elided `AS OF HH:MM` form must not outlive its
-    /// day).
+    /// Rebuilds `asof_chip`/`asof_tip`/`asof_chip_date`/`asof_chip_clock`
+    /// from `tile_as_of` — the one door: called whenever `tile_as_of`
+    /// changes (`set_tile_as_of`) and lazily by `render` when the
+    /// trader's date OR clock has moved since the cache was last built
+    /// (review round 1, Important: the date-elided `AS OF HH:MM` form
+    /// must not outlive its day; final review, Important: a `[time]`
+    /// zone reload that lands on the SAME date as before — the common
+    /// case — must not leave the wall-clock text painted in the old
+    /// zone until an unrelated midnight or the next `:asof` edit, which
+    /// is why the clock is part of the cache key too, not just the
+    /// date).
     fn refresh_asof_chip(&mut self, clock: geode_core::clock::Clock) {
         let (chip, tip) = Self::asof_chip_strings(&self.tile_as_of, clock);
         self.asof_chip = chip;
         self.asof_tip = tip;
         self.asof_chip_date = clock.today(chrono::Utc::now());
+        self.asof_chip_clock = clock;
     }
 
     /// Change the as-of override; `true` when it changed. The one door,
@@ -1429,13 +1449,21 @@ impl gpui::Render for BlotterTile {
             .try_global::<geode_shell::clock::AppClock>()
             .map(|c| c.0)
             .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
-        // Midnight rollover (review round 1, Important): a tile pinned to
-        // a today-instant that stays open past the trader's own midnight
+        // Midnight rollover (review round 1, Important) AND a `[time]`
+        // zone reload landing on the same date (final review, Important:
+        // `Clock::today` returns the same `NaiveDate` for most zone
+        // pairs, so the date alone cannot tell a reload from a no-op) —
+        // either one leaves `asof_chip`/`asof_tip` stale: a pinned
+        // today-instant that stays open past the trader's own midnight
         // must not keep painting the date-elided `AS OF HH:MM` form as
-        // if it were still today — one date read per render, an
-        // allocation only on the day it actually rolls over.
+        // if it were still today, and a zone change must not keep
+        // painting the OLD zone's wall clock until one of those two
+        // things eventually happens to shake it loose. One date read and
+        // one `Clock` comparison per render, a rebuild only when either
+        // moved.
         if matches!(self.tile_as_of, TileAsOf::Pinned(AsOf::At(_)))
-            && clock.today(chrono::Utc::now()) != self.asof_chip_date
+            && (clock.today(chrono::Utc::now()) != self.asof_chip_date
+                || clock != self.asof_chip_clock)
         {
             self.refresh_asof_chip(clock);
         }
@@ -2287,6 +2315,67 @@ mod tests {
             after,
             vec!["risk 14:00".to_string()],
             "the observer refreshed and repainted: {after:?}"
+        );
+    }
+
+    /// Final review, Important 1: the freshness readout above reads the
+    /// global fresh on every call and could never tell "observer
+    /// present" from "observer deleted" — but the PINNED `AS OF` chip
+    /// IS cached (`asof_chip`/`asof_chip_date`/`asof_chip_clock`), so
+    /// this is a real pin on both the `AppClock` observer and the
+    /// cache's clock key, the shape the market-data and diagnostics
+    /// tests already have. Pinned with an explicit DATE, not a bare
+    /// `HH:MM` (`parse_as_of` would otherwise resolve "today" on
+    /// whichever clock is installed at pin time — deterministic per
+    /// run, but on a different date than the assertion strings below
+    /// expect whenever the real machine's date differs from the one
+    /// this comment was written against); `2030-06-15 13:00` Tokyo is
+    /// `2030-06-15 04:00` UTC (Tokyo is UTC+9, same calendar day either
+    /// way) — both hand-spelled, not derived through `Clock` (the thing
+    /// under test). The cache's DATE is force-set to what UTC's
+    /// `today(now)` will read a moment later, BEFORE the global switch
+    /// (the same poke-the-field trick `the_pinned_chip_is_rebuilt_when_
+    /// the_local_date_rolls_over` uses to simulate staleness): without
+    /// it, `render`'s date half of the guard would ALSO fire whenever
+    /// Tokyo's real "today" happens to run ahead of UTC's (true for up
+    /// to nine hours of every real day) and mask whether the clock half
+    /// — `asof_chip_clock`, this finding's whole fix — is doing
+    /// anything at all. Deleting the observer, or dropping
+    /// `asof_chip_clock` back out of `render`'s guard, fails this test
+    /// (checked by hand, each once, reverted).
+    #[gpui::test]
+    fn the_pinned_chip_reads_the_installed_app_clock_and_follows_a_later_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(geode_shell::clock::AppClock(
+                geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+            ))
+        });
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| {
+            t.command("asof 2030-06-15 13:00", cx).unwrap()
+        });
+
+        let before = h.tile.read_with(&cx, |t, _| t.asof_chip.to_string());
+        assert_eq!(
+            before, "AS OF 2030-06-15 13:00",
+            "pinned at 13:00 in Tokyo: {before}"
+        );
+
+        let utc_today = geode_core::clock::Clock::utc().today(chrono::Utc::now());
+        h.tile.update(&mut cx, |t, _| {
+            t.asof_chip_date = utc_today;
+        });
+
+        cx.update(|_window, cx| {
+            cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc()))
+        });
+        cx.run_until_parked();
+        let after = h.tile.read_with(&cx, |t, _| t.asof_chip.to_string());
+        assert_eq!(
+            after, "AS OF 2030-06-15 04:00",
+            "the clock alone triggered the rebuild — its date matched already: {after}"
         );
     }
 
@@ -3147,8 +3236,8 @@ mod tests {
         );
     }
 
-    /// The pinned chip reads `AS OF HH:MM` for today in the trader's
-    /// local clock and carries the date otherwise (spec §3.4).
+    /// The pinned chip reads `AS OF HH:MM` for today on the trader's
+    /// configured clock and carries the date otherwise (spec §3.4).
     #[test]
     fn pinned_chip_text_elides_todays_date() {
         let now = chrono::Utc::now();

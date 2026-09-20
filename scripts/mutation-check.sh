@@ -16050,6 +16050,20 @@ run_mutation "clock: the blotter's short_time reads on the clock" \
   geode-blotter \
   short_time_formats_an_rfc3339_instant_on_the_clock_and_echoes_garbage
 
+# Final review, Important 1: a `[time]` zone reload landing on the SAME
+# date (the common case — `Clock::today` agrees across most zone pairs)
+# must not leave the pinned `AS OF` chip painted in the OLD zone until an
+# unrelated midnight or the next `:asof` edit shakes it loose.
+run_mutation "clock: the blotter's as-of chip cache is keyed on the clock" \
+  crates/geode-blotter/src/tile.rs \
+  '            && (clock.today(chrono::Utc::now()) != self.asof_chip_date
+                || clock != self.asof_chip_clock)
+        {' \
+  '            && (clock.today(chrono::Utc::now()) != self.asof_chip_date)
+        {' \
+  geode-blotter \
+  the_pinned_chip_reads_the_installed_app_clock_and_follows_a_later_change
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

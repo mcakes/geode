@@ -88,27 +88,20 @@ impl Clock {
         self
     }
 
-    /// The machine's own zone, read once (the caller keeps the answer).
-    /// `Some(warning)` when it could not be read or named a zone the
-    /// database does not know, in which case the clock is UTC.
+    /// The machine's own zone, read and memoised ONCE per process (spec
+    /// §3.1, final review Minor 2): the machine's zone cannot change
+    /// mid-session, but every module's `try_global` fallback calls this
+    /// on the paint path (a tile that never installed `AppClock`, or a
+    /// test fixture), and `iana_time_zone::get_timezone()` is an OS
+    /// call — a filesystem read on most platforms — that a hot render
+    /// loop must never pay per frame. `Some(warning)` when the zone
+    /// could not be read or named one the database does not know, in
+    /// which case the clock is UTC.
     pub fn machine() -> (Clock, Option<String>) {
-        match iana_time_zone::get_timezone() {
-            Ok(name) => match Tz::from_str(&name) {
-                Ok(zone) => (Clock::in_zone(zone), None),
-                Err(_) => (
-                    Clock::utc(),
-                    Some(format!(
-                        "time.zone: the machine's zone '{name}' is not in the IANA database — using UTC; set [time] zone"
-                    )),
-                ),
-            },
-            Err(e) => (
-                Clock::utc(),
-                Some(format!(
-                    "time.zone: could not read the machine's zone ({e}) — using UTC; set [time] zone"
-                )),
-            ),
-        }
+        static MACHINE: std::sync::OnceLock<(Clock, Option<String>)> = std::sync::OnceLock::new();
+        MACHINE
+            .get_or_init(|| machine_from(iana_time_zone::get_timezone()))
+            .clone()
     }
 
     pub fn zone(&self) -> Tz {
@@ -245,6 +238,31 @@ impl Clock {
     }
 }
 
+/// [`Clock::machine`]'s pure seam (final review, Minor 3): the OS call
+/// pulled out into an argument, so the two fallback arms — a zone that
+/// could not be read, a zone name the IANA database does not recognise
+/// — are ordinary function inputs rather than states neither test nor
+/// developer can provoke on a real machine.
+fn machine_from(zone: Result<String, impl std::fmt::Display>) -> (Clock, Option<String>) {
+    match zone {
+        Ok(name) => match Tz::from_str(&name) {
+            Ok(zone) => (Clock::in_zone(zone), None),
+            Err(_) => (
+                Clock::utc(),
+                Some(format!(
+                    "time.zone: the machine's zone '{name}' is not in the IANA database — using UTC; set [time] zone"
+                )),
+            ),
+        },
+        Err(e) => (
+            Clock::utc(),
+            Some(format!(
+                "time.zone: could not read the machine's zone ({e}) — using UTC; set [time] zone"
+            )),
+        ),
+    }
+}
+
 /// Walk `n` business days back from `date`, weekends skipped (spec §2
 /// ruling 1: no holiday calendar). A `date` that is itself a Saturday or
 /// Sunday first snaps to the Friday before it, so `T-0` on a weekend is
@@ -307,6 +325,39 @@ mod tests {
     use chrono_tz::America::New_York;
     use chrono_tz::Asia::Tehran;
     use chrono_tz::Europe::London;
+
+    /// Final review, Minor 3: `machine_from` is [`Clock::machine`]'s pure
+    /// seam — the two fallback arms are untestable through `machine()`
+    /// itself (neither state is provokable on a real machine), but each
+    /// is an ordinary argument here.
+    #[test]
+    fn machine_from_an_unreadable_zone_is_utc_with_a_warning_naming_time_zone() {
+        let zone: Result<String, &str> = Err("no zone");
+        let (clock, warning) = machine_from(zone);
+        assert_eq!(clock, Clock::utc());
+        let warning = warning.expect("a warning");
+        assert!(warning.starts_with("time.zone:"), "{warning}");
+        assert!(warning.contains("could not read"), "{warning}");
+    }
+
+    #[test]
+    fn machine_from_an_unrecognised_zone_name_is_utc_with_a_warning() {
+        let (clock, warning) = machine_from(Ok::<_, std::convert::Infallible>(
+            "Mars/Olympus".to_string(),
+        ));
+        assert_eq!(clock, Clock::utc());
+        let warning = warning.expect("a warning");
+        assert!(warning.starts_with("time.zone:"), "{warning}");
+        assert!(warning.contains("Mars/Olympus"), "{warning}");
+    }
+
+    #[test]
+    fn machine_from_a_known_zone_name_is_that_zone_with_no_warning() {
+        let (clock, warning) =
+            machine_from(Ok::<_, std::convert::Infallible>("Asia/Tokyo".to_string()));
+        assert_eq!(clock.zone_name(), "Asia/Tokyo");
+        assert!(warning.is_none(), "{warning:?}");
+    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
