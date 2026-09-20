@@ -7,6 +7,7 @@
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
 mod add_tile;
+pub mod asof_rows;
 pub mod asof_view;
 pub mod chip;
 pub mod choicedialog;
