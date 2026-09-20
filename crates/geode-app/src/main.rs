@@ -170,7 +170,13 @@ fn main() {
             // close the bus's inbound channel out from under the data
             // service's own subscription.
             let mut demo_bus = demo_feed.map(|feed| {
-                let today = chrono::Local::now().date_naive();
+                // Every OTHER displayed time in this codebase reads the
+                // trader's clock (Phase 4a's ruling); the demo generators'
+                // "today" is no exception, even though it never paints —
+                // it seeds the synthetic documents' own dates.
+                let today = geode_core::clock::Clock::from_config(&services.config)
+                    .0
+                    .today(chrono::Utc::now());
                 let underlyings = geode_demo_data::demo_underlyings();
                 let mut cvi_generator = geode_demo_data::documents::cvi::CviGenerator::new(
                     42,
