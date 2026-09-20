@@ -480,6 +480,11 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Set scope expression…",
         "Frame",
     );
+    // Set log level… (command-line locality spec §4.2): target then level
+    // over the choice dialog, landing on `Diagnostics::request_level` —
+    // the diagnostics tile's `:level` moved here. Category "Diagnostics"
+    // beside the tile's own actions.
+    action(reg, "log::level", "Set log level…", "Diagnostics");
     // Profiler-feature actions (the `profiling` feature — gpui's own
     // `profiler` histograms/overlay): registered only when compiled in,
     // so the palette never advertises a no-op.

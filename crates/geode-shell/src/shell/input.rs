@@ -406,6 +406,10 @@ impl ShellView {
             // placeholder's double-click takes
             // (`try_pick_tile_on_double_click`).
             choicedialog::open_tile_kinds(self, window, cx);
+        } else if action.0 == "log::level" {
+            // Palette-only (command-line locality spec §4.2): the two-step
+            // log-level picker, `:level`'s replacement.
+            choicedialog::open_log_level(self, window, cx);
         } else if action.0 == "frame::live" {
             // Palette-only (spec §3.6, same reasoning as `frame::
             // scope_clear`): return to live, remembering the previous

@@ -1,7 +1,7 @@
 //! The choice dialog (2026-09-19): one filter-first modal in
 //! [`asof_view`](super::asof_view)'s mould for "pick one of these and
 //! act", with a [`Target`] saying what the rows are and what a pick
-//! does. Two targets so far:
+//! does. Three targets so far:
 //!
 //! - [`Target::Grouping`] — the frame's grouping slots: the mouse and
 //!   typeahead form of `ctrl+1..9`/`ctrl+0`, opened by `frame::grouping`
@@ -13,6 +13,12 @@
 //!   (`mod+n`, "Add a tile…") and by a bare double-click on a placeholder
 //!   tile (`ShellView::try_pick_tile_on_double_click`), where the pick
 //!   fills that placeholder in place through `add_tile`.
+//! - [`Target::LogLevel`] — `Set log level…` (command-line locality spec
+//!   §4.2), two steps over the one dialog: step 1's rows are the seven
+//!   `geode::` targets with their effective level, a pick replaces the
+//!   rows in place with step 2's five levels, and a pick there lands on
+//!   `Diagnostics::request_level` — the path `:level` used to take.
+//!   `escape` on step 2 returns to step 1 rather than closing.
 //!
 //! ## Architecture
 //!
@@ -43,6 +49,7 @@ use gpui::{AnyElement, App, Context, Entity, Focusable as _, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use geode_core::groupings::GroupingSlots;
+use geode_core::log::{Level, LogLevels, TARGETS};
 
 use crate::choice::{self, ChoiceKey, ChoiceList};
 use crate::defaults::{AddPlacement, capitalize};
@@ -71,6 +78,40 @@ pub enum Target {
     Grouping { slots: Vec<Option<u8>> },
     /// The module kind each declared option adds (`add_tile`).
     TileKind { kinds: Vec<String> },
+    /// `Set log level…` (command-line locality spec §4.2), two steps over
+    /// one dialog: `chosen` is `None` while the rows are targets and
+    /// `Some(target)` while they are levels.
+    LogLevel {
+        targets: Vec<String>,
+        chosen: Option<String>,
+    },
+}
+
+/// The level rows, in severity order, as `[log]` spells them.
+pub const LEVEL_WORDS: [(&str, Level); 5] = [
+    ("error", Level::ERROR),
+    ("warn", Level::WARN),
+    ("info", Level::INFO),
+    ("debug", Level::DEBUG),
+    ("trace", Level::TRACE),
+];
+
+fn level_word(level: Level) -> &'static str {
+    LEVEL_WORDS
+        .iter()
+        .find(|(_, l)| *l == level)
+        .map(|(w, _)| *w)
+        .unwrap_or("info")
+}
+
+/// A target's effective level: its own entry, else the default.
+fn effective_level(levels: &LogLevels, target: &str) -> Level {
+    levels
+        .targets
+        .iter()
+        .find(|(t, _)| t == target)
+        .map(|(_, l)| *l)
+        .unwrap_or(levels.default)
 }
 
 /// Persistent state for one open choice-dialog session.
@@ -117,6 +158,41 @@ impl ChoiceDialogState {
         }
     }
 
+    /// Step 1 of `Set log level…`: one row per `geode::` target suffix,
+    /// `"{target} · {level}"`, the highlight on the first.
+    pub fn log_targets(levels: &LogLevels) -> Self {
+        let targets: Vec<String> = TARGETS
+            .iter()
+            .map(|t| t.strip_prefix("geode::").unwrap_or(t).to_string())
+            .collect();
+        let options = targets
+            .iter()
+            .map(|t| format!("{t} · {}", level_word(effective_level(levels, t))))
+            .collect();
+        Self {
+            list: ChoiceList::new(options, choice::DEFAULT_CAP),
+            target: Target::LogLevel {
+                targets,
+                chosen: None,
+            },
+        }
+    }
+
+    /// Step 2: the five levels, the highlight placed on `current` so a
+    /// bare `enter` changes nothing.
+    pub fn log_levels(target: String, current: Level) -> Self {
+        let options: Vec<String> = LEVEL_WORDS.iter().map(|(w, _)| (*w).to_string()).collect();
+        let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
+        list.place(Some(level_word(current)));
+        Self {
+            list,
+            target: Target::LogLevel {
+                targets: Vec::new(),
+                chosen: Some(target),
+            },
+        }
+    }
+
     /// The pick the highlighted row stands for, or `None` with nothing
     /// highlighted (every row filtered out).
     pub fn highlighted_pick(&self) -> Option<Pick> {
@@ -133,6 +209,10 @@ impl ChoiceDialogState {
         match &self.target {
             Target::Grouping { slots } => Pick::Slot(slots[declared]),
             Target::TileKind { kinds } => Pick::Kind(kinds[declared].clone()),
+            Target::LogLevel { targets, chosen } => match chosen {
+                None => Pick::LogTarget(targets[declared].clone()),
+                Some(target) => Pick::LogLevel(target.clone(), LEVEL_WORDS[declared].1),
+            },
         }
     }
 
@@ -155,7 +235,7 @@ impl ChoiceDialogState {
     pub fn highlighted_slot(&self) -> Option<Option<u8>> {
         match self.highlighted_pick()? {
             Pick::Slot(slot) => Some(slot),
-            Pick::Kind(_) => None,
+            Pick::Kind(_) | Pick::LogTarget(_) | Pick::LogLevel(..) => None,
         }
     }
 }
@@ -168,6 +248,10 @@ pub enum Pick {
     Slot(Option<u8>),
     /// `ShellView::add_tile` of this kind.
     Kind(String),
+    /// Step 1 of `Set log level…`: replace the rows with the levels.
+    LogTarget(String),
+    /// Step 2: `Diagnostics::request_level`.
+    LogLevel(String, Level),
 }
 
 /// The grouping option texts and their slots, in row order: the view
@@ -219,6 +303,17 @@ const TILE_HINTS: &[Hint] = &[
     Hint::Text("close"),
 ];
 
+const LOG_HINTS: &[Hint] = &[
+    Hint::Text("type to filter ·"),
+    Hint::Key("up"),
+    Hint::Key("down"),
+    Hint::Text("move ·"),
+    Hint::Key("enter"),
+    Hint::Text("choose ·"),
+    Hint::Key("escape"),
+    Hint::Text("back / close"),
+];
+
 /// The per-target chrome: the modal's title, the selector prefix
 /// (`{prefix}-choice-list`, `{prefix}-choice-{text}`, `{prefix}-hints`)
 /// and the footer.
@@ -226,6 +321,7 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
     match target {
         Target::Grouping { .. } => ("Grouping", "grouping", "grouping-hints", GROUPING_HINTS),
         Target::TileKind { .. } => ("Add a tile", "tile", "tile-hints", TILE_HINTS),
+        Target::LogLevel { .. } => ("Log level", "loglevel", "loglevel-hints", LOG_HINTS),
     }
 }
 
@@ -245,6 +341,12 @@ pub fn open_grouping(view: &mut ShellView, window: &mut Window, cx: &mut Context
 /// a real tile is split in the `add` setting's direction.
 pub fn open_tile_kinds(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let state = ChoiceDialogState::tile_kinds(view.services.roster.kinds());
+    open(view, state, window, cx);
+}
+
+/// Open `Set log level…` on the target step (`log::level`, palette-only).
+pub fn open_log_level(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let state = ChoiceDialogState::log_targets(&view.diagnostics.read(cx).levels);
     open(view, state, window, cx);
 }
 
@@ -306,6 +408,28 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
             shell.close_modal(window, cx);
             shell.add_tile(&kind, AddPlacement::Split(None), None, window, cx);
         }
+        Pick::LogTarget(target) => {
+            // Step 2 replaces the rows in place; the modal stays open and
+            // the field is reset (`set_value` emits no `Change`, and the
+            // new list starts with an empty query).
+            let current = effective_level(&shell.diagnostics.read(cx).levels, &target);
+            let state = ChoiceDialogState::log_levels(target, current);
+            shell
+                .choice_dialog_scroll
+                .scroll_to_item(state.list.ranked_highlighted());
+            shell.choice_dialog = Some(state);
+            let input = shell.dialog_input.clone();
+            input.update(cx, |i, cx| i.set_value("", window, cx));
+            input.read(cx).focus_handle(cx).focus(window, cx);
+            cx.notify();
+        }
+        Pick::LogLevel(target, level) => {
+            shell.diagnostics.update(cx, |d, cx| {
+                d.request_level(&target, level);
+                cx.notify();
+            });
+            shell.close_modal(window, cx);
+        }
     }
 }
 
@@ -320,7 +444,30 @@ fn handle_key(
     cx: &mut Context<ShellView>,
 ) -> bool {
     match choice::route(ks) {
-        Some(ChoiceKey::Cancel) => return false,
+        Some(ChoiceKey::Cancel) => {
+            // The level step goes BACK to the target step; every other
+            // dialog (and the target step itself) falls through to
+            // `handle_key_down`'s modal-closes-on-escape branch.
+            if matches!(
+                shell.choice_dialog.as_ref().map(|s| &s.target),
+                Some(Target::LogLevel {
+                    chosen: Some(_),
+                    ..
+                })
+            ) {
+                let state = ChoiceDialogState::log_targets(&shell.diagnostics.read(cx).levels);
+                shell
+                    .choice_dialog_scroll
+                    .scroll_to_item(state.list.ranked_highlighted());
+                shell.choice_dialog = Some(state);
+                let input = shell.dialog_input.clone();
+                input.update(cx, |i, cx| i.set_value("", window, cx));
+                input.read(cx).focus_handle(cx).focus(window, cx);
+                cx.notify();
+                return true;
+            }
+            return false;
+        }
         Some(ChoiceKey::Pick) => {
             // The field's live text may never have reached the list
             // through a `Change` event (`set_value` emits none): re-feed
@@ -548,6 +695,49 @@ mod tests {
         assert_eq!(
             state.pick_at_ranked(0),
             Some(Pick::Kind("diagnostics".into()))
+        );
+    }
+
+    /// Step 1 rows are the seven `geode::` suffixes with each one's
+    /// effective level; step 2 rows are the five levels with the current
+    /// one lit.
+    #[test]
+    fn log_level_rows_name_targets_then_levels() {
+        let levels = geode_core::log::LogLevels {
+            default: geode_core::log::Level::INFO,
+            targets: vec![("ingest".into(), geode_core::log::Level::DEBUG)],
+        };
+        let state = ChoiceDialogState::log_targets(&levels);
+        assert_eq!(state.list.options()[0], "ingest · debug");
+        assert_eq!(state.list.options()[1], "query · info");
+        assert_eq!(state.list.options().len(), geode_core::log::TARGETS.len());
+        assert_eq!(
+            state.highlighted_pick(),
+            Some(Pick::LogTarget("ingest".into()))
+        );
+        assert_eq!(state.jump("1"), None, "digits type on this target");
+
+        let mut state =
+            ChoiceDialogState::log_levels("ingest".into(), geode_core::log::Level::DEBUG);
+        assert_eq!(
+            state.list.options(),
+            ["error", "warn", "info", "debug", "trace"]
+        );
+        assert_eq!(
+            state.highlighted_pick(),
+            Some(Pick::LogLevel(
+                "ingest".into(),
+                geode_core::log::Level::DEBUG
+            )),
+            "opens on the current level"
+        );
+        state.list.set_query("tr");
+        assert_eq!(
+            state.pick_at_ranked(0),
+            Some(Pick::LogLevel(
+                "ingest".into(),
+                geode_core::log::Level::TRACE
+            ))
         );
     }
 }

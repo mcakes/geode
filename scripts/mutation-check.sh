@@ -14466,6 +14466,26 @@ run_mutation "tilepicker: the dock listener calls the door" \
                             if view.try_fullscreen_on_double_click(id, event, window, cx)' \
   geode-shell \
   a_docked_placeholder_double_click_opens_the_picker_and_fills_it
+
+# ---- Set log level… (command-line locality spec §4.2): a two-step
+# choice dialog, target then level, replacing the diagnostics tile's
+# `:level` -----------------------------------------------------------
+
+# Step 2 opens on the target's CURRENT level (locality §4.2).
+run_mutation "loglevel: the level step opens on the current level" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.place(Some(level_word(current)));' \
+  '        list.place(None);' \
+  geode-shell \
+  log_level_rows_name_targets_then_levels
+
+# The pick lands on request_level, not on a no-op.
+run_mutation "loglevel: the level pick reaches request_level" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                d.request_level(&target, level);' \
+  '                let _ = (&target, level);' \
+  geode-shell \
+  set_log_level_picks_a_target_then_a_level
 # ---------------------------------------------------------------------
 # Timeseries Part 1, the data tier (timeseries spec §4, §5.1–§5.6).
 #
