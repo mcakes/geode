@@ -1,16 +1,16 @@
-//! The tile's one overlay (spec §9.5–§9.8): the add picker, the
-//! expression editor, the series list, the range dialog. Task 8 built
-//! the series list ([`Popup::Series`]), Task 9 the add picker
-//! ([`Popup::Picker`], §9.6) and the expression field ([`Popup::Expr`],
-//! §9.7); the range dialog is Task 10.
+//! The tile's one overlay (spec §9.5–§9.8): the series list
+//! ([`Popup::Series`], §9.5), the add picker ([`Popup::Picker`], §9.6),
+//! the expression field ([`Popup::Expr`], §9.7) and the range dialog
+//! ([`Popup::Range`], §9.8).
 //!
-//! **Two of the three hold the keyboard.** The picker's and the
-//! expression field's `InputState`s are tile-owned and focused, which
-//! is what puts the tile's key context into `insert` mode — and what
-//! makes `TimeseriesTile::close_popup_with_window` the ONE closer:
-//! a focused `InputState` dropped without a blur leaves `Window::
-//! focused` pointing at a dead handle for the rest of the session
-//! (CLAUDE.md).
+//! **Three of the four hold the keyboard.** The picker's and the
+//! expression field's `InputState`s are tile-owned and focused, and the
+//! range dialog owns a bare [`gpui::FocusHandle`] with its two date
+//! fields' keys on it; all three put the tile's key context into
+//! `insert` mode — and all three are why
+//! `TimeseriesTile::close_popup_with_window` is the ONE closer: a
+//! focused handle dropped without a blur leaves `Window::focused`
+//! pointing at nothing for the rest of the session (CLAUDE.md).
 //!
 //! **One popup at a time, and it is prepared, never formatted.** The
 //! list's rows are built in the tile's `rebuild_chrome` — the same door
@@ -29,18 +29,25 @@
 //! stops hit-testing under it, and an `on_mouse_down_out` into the ONE
 //! closer. No animation, no gpui-component `Dialog`.
 
+use std::rc::Rc;
+
 use geode_core::health::Health;
 use geode_core::series::{SeriesResult, SlotKind};
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
+use geode_shell::fonts;
+use geode_shell::shell::chip::{Tone, chip_paint};
+use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
+use geode_widgets::datefield::{DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
-    Anchor, AnchoredPositionMode, App, Deferred, Div, Entity, Focusable as _, Hsla, MouseButton,
-    SharedString, anchored, deferred, div, px,
+    Anchor, AnchoredPositionMode, App, Deferred, Div, ElementId, Entity, FocusHandle,
+    Focusable as _, Hsla, MouseButton, SharedString, anchored, deferred, div, px,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
 
+use crate::core::Preset;
 use crate::core::model::{Colour, Model, SlotState};
 use crate::tile::TimeseriesTile;
 
@@ -55,19 +62,34 @@ const ROW_INSET: f32 = 8.0;
 const MIN_WIDTH: f32 = 240.0;
 /// The swatch beside a row's label, matching the header chip's.
 const SWATCH: f32 = 8.0;
+/// The `from`/`to` label column in the range popup, at the design rem.
+const LABEL_WIDTH: f32 = 32.0;
+
+/// The gpui key context the range popup's container carries — the
+/// scope `crate::init`'s `tab`/`shift+tab` reclaim is bound in, and the
+/// only place in this crate that needs one (every other key the tile
+/// resolves goes through the shell's matcher, not gpui's).
+pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
+
+/// The range popup's one hint line: the digit shortcut is otherwise
+/// invisible, and the `edited` rule behind it ("until you start editing
+/// a date") is what makes it worth naming.
+const RANGE_HINT: &str = "1–7 preset · tab switches · enter commits";
 
 /// What the tile currently has open. `Series` is the series list (spec
 /// §9.5) — it holds no field, so it is NOT an insert-mode popup: the key
 /// context stays `normal` and gains a `popup == series` pair, which is
 /// what its three keys bind against. `Picker` (§9.6) and `Expr` (§9.7)
-/// each own a focused field, so both report `insert` and neither takes
-/// a `popup` pair: their keys are the shared `mode == insert` layer's
-/// (`enter`/`escape`/`up`/`down`), the market-data panel's own split.
-/// Task 10 adds the range dialog.
+/// each own a focused field and `Range` (§9.8) its own focus handle, so
+/// all three report `insert` and none takes a `popup` pair: their keys
+/// are the shared `mode == insert` layer's (`enter`/`escape`/`up`/
+/// `down`) plus, for `Range`, its own container listener — the
+/// market-data panel's own split.
 pub(crate) enum Popup {
     Series(SeriesPopup),
     Picker(PickerState),
     Expr(ExprField),
+    Range(RangePopup),
 }
 
 impl Popup {
@@ -76,7 +98,11 @@ impl Popup {
     pub(crate) fn is_insert(&self) -> bool {
         match self {
             Popup::Series(_) => false,
-            Popup::Picker(_) | Popup::Expr(_) => true,
+            // The range popup holds no `InputState`, but it DOES hold
+            // the keyboard — its own focus handle, with the two date
+            // fields' keys on it — so it is an insert popup in every
+            // sense the shell and the `popup_survives` gate care about.
+            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) => true,
         }
     }
 
@@ -91,6 +117,10 @@ impl Popup {
             Popup::Series(_) => false,
             Popup::Picker(p) => p.input.read(cx).focus_handle(cx).is_focused(window),
             Popup::Expr(f) => f.input.read(cx).focus_handle(cx).is_focused(window),
+            // Its own handle, not an `InputState`'s: the segmented
+            // fields are pure state and the CONTAINER is what is
+            // focused (the market-data date field's shape).
+            Popup::Range(r) => r.focus.is_focused(window),
         }
     }
 
@@ -100,8 +130,151 @@ impl Popup {
     pub(crate) fn context_pair(&self) -> Option<&'static str> {
         match self {
             Popup::Series(_) => Some("series"),
-            Popup::Picker(_) | Popup::Expr(_) => None,
+            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) => None,
         }
+    }
+}
+
+/// Which of the range popup's two date fields the keyboard is on
+/// (spec §9.8). `tab`/`shift+tab` move between them; everything else a
+/// keystroke does, it does to this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Which {
+    From,
+    To,
+}
+
+impl Which {
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Which::From => "from",
+            Which::To => "to",
+        }
+    }
+
+    fn other(self) -> Which {
+        match self {
+            Which::From => Which::To,
+            Which::To => Which::From,
+        }
+    }
+}
+
+/// One date field's painted segments plus its selector — prepared
+/// whenever the field changes, never in `render` (the market-data
+/// panel's `DateFieldPaint`, spelled the same way so the two cannot
+/// drift). `segments` is an `Rc<[SegmentText]>`: the painter takes it
+/// straight through, so a frame costs a refcount bump rather than a
+/// `Vec` of six `SegmentText`s.
+pub(crate) struct DateFieldPaint {
+    pub segments: Rc<[SegmentText]>,
+    pub selector: SharedString,
+}
+
+impl DateFieldPaint {
+    pub(crate) fn of(field: &DateTimeField, tile_id: u64, which: Which) -> Self {
+        DateFieldPaint {
+            segments: field.segments().into(),
+            selector: format!("ts-range-{}-{tile_id}", which.word()).into(),
+        }
+    }
+}
+
+/// The range popup (spec §9.8): two segmented date fields, a row of
+/// preset chips, and the inline refusal a bad commit leaves behind.
+///
+/// It holds no `InputState` — the fields are `geode-widgets`' pure
+/// state — so the KEYBOARD is its own [`FocusHandle`], tracked on the
+/// popup's container with an `on_key_down` listener over it. That is the
+/// market-data date field's shape, and the reason
+/// `TimeseriesTile::close_popup_with_window` is still the one closer: a
+/// focused handle dropped without a blur leaves `Window::focused`
+/// pointing at nothing for the rest of the session (CLAUDE.md).
+pub(crate) struct RangePopup {
+    pub from: DateTimeField,
+    pub to: DateTimeField,
+    pub active: Which,
+    pub focus: FocusHandle,
+    pub from_paint: DateFieldPaint,
+    pub to_paint: DateFieldPaint,
+    /// A backwards range, an unfinished segment or the point cap —
+    /// painted UNDER the fields, like the expression field's parse
+    /// error, because the popup stays open and the reason belongs
+    /// beside what caused it.
+    pub error: Option<SharedString>,
+    /// Whether a keystroke has reached either field since the popup
+    /// opened — what decides whether a bare `1`..`7` is a PRESET or a
+    /// digit (see [`RangePopup::digit_is_preset`]).
+    pub edited: bool,
+}
+
+impl RangePopup {
+    pub(crate) fn active_field(&self) -> &DateTimeField {
+        match self.active {
+            Which::From => &self.from,
+            Which::To => &self.to,
+        }
+    }
+
+    fn active_field_mut(&mut self) -> &mut DateTimeField {
+        match self.active {
+            Which::From => &mut self.from,
+            Which::To => &mut self.to,
+        }
+    }
+
+    /// `tab`/`shift+tab`: with two fields both directions are the same
+    /// move, and neither counts as an edit — a trader who tabbed over to
+    /// read the other date has typed nothing.
+    pub(crate) fn switch(&mut self) {
+        self.active = self.active.other();
+    }
+
+    /// Apply one key to the active field, re-preparing that field's
+    /// segments. Answers whether anything moved.
+    pub(crate) fn apply(&mut self, key: geode_widgets::datefield::FieldKey, tile_id: u64) -> bool {
+        self.edited = true;
+        let which = self.active;
+        let moved = self.active_field_mut().apply(key);
+        self.reprepare(which, tile_id);
+        moved
+    }
+
+    pub(crate) fn select(
+        &mut self,
+        which: Which,
+        segment: geode_widgets::datefield::Segment,
+        tile_id: u64,
+    ) {
+        self.active = which;
+        self.edited = true;
+        self.active_field_mut().select(segment);
+        self.reprepare(which, tile_id);
+    }
+
+    fn reprepare(&mut self, which: Which, tile_id: u64) {
+        match which {
+            Which::From => self.from_paint = DateFieldPaint::of(&self.from, tile_id, which),
+            Which::To => self.to_paint = DateFieldPaint::of(&self.to, tile_id, which),
+        }
+    }
+
+    /// Whether a bare `1`..`7` means a PRESET rather than a digit typed
+    /// into the active segment (spec §9.8).
+    ///
+    /// Two conditions, and both are load-bearing. `!typing()` is the
+    /// obvious one: a second digit always belongs to the segment being
+    /// typed. `!edited` is the one the two readings of §9.8 disagree on,
+    /// and it is what makes both halves of the popup reachable — every
+    /// preset digit but `8`, `9` and `0` is also a legal first digit of
+    /// a year, so a popup that read `1` as a preset AFTER the trader had
+    /// moved onto the year segment could never be used to type `1990`.
+    /// The rule a trader learns is therefore "a digit is a preset until
+    /// you start editing a date, and the date's from then on" — and
+    /// `escape`, then `r` again, is how you get back to the presets
+    /// without the mouse.
+    pub(crate) fn digit_is_preset(&self) -> bool {
+        !self.edited && !self.active_field().typing()
     }
 }
 
@@ -569,6 +742,188 @@ pub(crate) fn render_picker(
         );
     }
     anchor_popup(list)
+}
+
+/// One date field's colours, derived from the theme per paint (nine
+/// `Hsla` reads — the "cheap enough for `render`" half of the
+/// prepare/paint split; what is NOT cheap, the segments themselves, is
+/// prepared in the key handler).
+///
+/// `live` is the field the keyboard is on: its active segment wears the
+/// theme's own `primary`/`primary_foreground` pair (gpui-component's,
+/// like the market-data field's), and the other field is painted muted
+/// throughout so the strip shows at a glance which date a digit lands
+/// in.
+fn segment_paint(theme: &Theme, live: bool) -> SegmentPaint {
+    let muted = theme.muted_foreground;
+    SegmentPaint {
+        rest_text: if live {
+            theme.popover_foreground
+        } else {
+            muted
+        },
+        rest_fill: None,
+        active_text: if live {
+            theme.primary_foreground
+        } else {
+            muted
+        },
+        active_fill: if live { theme.primary } else { theme.secondary },
+        typing_text: if live { theme.accent_foreground } else { muted },
+        typing_fill: if live { theme.accent } else { theme.secondary },
+        separator: muted,
+        suffix: muted,
+        radius: theme.radius_tokens().sm,
+    }
+}
+
+/// One `from`/`to` row: the label, then the segmented field.
+fn range_row(
+    p: &RangePopup,
+    which: Which,
+    theme: &Theme,
+    tile: &Entity<TimeseriesTile>,
+) -> impl IntoElement {
+    let live = p.active == which;
+    let paint = match which {
+        Which::From => &p.from_paint,
+        Which::To => &p.to_paint,
+    };
+    let tile = tile.clone();
+    h_flex()
+        .h(scale::design(ROW_HEIGHT))
+        .px(scale::design(ROW_INSET))
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .w(scale::design(LABEL_WIDTH))
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(which.word()),
+        )
+        .child(
+            h_flex()
+                .items_center()
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .border_1()
+                .border_color(if live {
+                    theme.table_active_border
+                } else {
+                    theme.border
+                })
+                .font_family(fonts::MONO)
+                .child(geode_widgets::datefield::paint(
+                    &paint.segments,
+                    None,
+                    segment_paint(theme, live),
+                    paint.selector.clone(),
+                    move |segment, window, cx| {
+                        tile.update(cx, |t, cx| {
+                            t.range_segment_clicked(which, segment, window, cx)
+                        });
+                    },
+                )),
+        )
+}
+
+/// Paint the range popup (spec §9.8) on the series list's own surface:
+/// a `from` row, a `to` row, the seven presets as chips, the hint and
+/// the inline refusal.
+///
+/// The CONTAINER carries the focus handle and the key listener — one
+/// keyboard for both fields, the market-data date field's shape — which
+/// is why the fields themselves are plain painted state.
+pub(crate) fn render_range(
+    p: &RangePopup,
+    tile: &Entity<TimeseriesTile>,
+    tile_id: u64,
+    cx: &App,
+) -> Deferred {
+    let theme = cx.theme();
+    let mut panel = popover_surface(cx)
+        .track_focus(&p.focus)
+        // `tab` is this popup's own key, and gpui-component's `Root`
+        // binds it window-wide to focus cycling; `crate::init` unbinds
+        // it in THIS context so the listener below is reached.
+        .key_context(RANGE_CONTEXT)
+        .debug_selector(move || format!("ts-range-{tile_id}"))
+        // The series list's reasons, exactly (see `render_series_popup`).
+        .occlude()
+        .on_mouse_down_out({
+            let tile = tile.clone();
+            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
+        })
+        .on_key_down({
+            let tile = tile.clone();
+            move |event: &gpui::KeyDownEvent, window, cx| {
+                // The listener sits on the FOCUSED element, so it runs
+                // before the shell's own: a key this popup owns stops
+                // here, and a chord (`route` answers `None`) falls
+                // through to the shell untouched.
+                if tile.update(cx, |t, cx| t.range_key(event, window, cx)) {
+                    cx.stop_propagation();
+                }
+            }
+        })
+        .child(range_row(p, Which::From, theme, tile))
+        .child(range_row(p, Which::To, theme, tile));
+
+    let mut presets = h_flex()
+        .h(scale::design(ROW_HEIGHT))
+        .px(scale::design(ROW_INSET))
+        .gap_1()
+        .items_center();
+    // One derivation for all seven: every preset chip is the same
+    // `Tone::Neutral` on the same popover ground, and `for_chip` costs a
+    // handful of contrast checks and up to an OKLab bisection per call.
+    let chip = chip_paint(theme, Tone::Neutral);
+    let states = control::for_chip(theme, &chip, theme.popover);
+    for (i, preset) in Preset::ALL.into_iter().enumerate() {
+        let word = preset.as_str();
+        presets = presets.child(
+            div()
+                .id(ElementId::NamedInteger(
+                    SharedString::new_static("ts-range-preset"),
+                    i as u64,
+                ))
+                .debug_selector(move || format!("ts-range-preset-{tile_id}-{word}"))
+                .px_1()
+                .text_xs()
+                .rounded(theme.radius)
+                .text_color(chip.text)
+                .when_some(chip.fill, |d, fill| d.bg(fill))
+                .pointer_states(states)
+                // The mouse's form of the digit: commits at once, like
+                // every other preset door (§9.8).
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        tile.update(cx, |t, cx| t.range_preset_clicked(preset, window, cx));
+                    }
+                })
+                .child(word),
+        );
+    }
+    panel = panel.child(presets).child(
+        div()
+            .px(scale::design(ROW_INSET))
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(RANGE_HINT),
+    );
+    if let Some(error) = &p.error {
+        panel = panel.child(
+            div()
+                .px(scale::design(ROW_INSET))
+                .text_xs()
+                .text_color(chip_paint(theme, Tone::DangerText).text)
+                .child(error.clone()),
+        );
+    }
+    anchor_popup(panel)
 }
 
 #[cfg(test)]

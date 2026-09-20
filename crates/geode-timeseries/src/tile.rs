@@ -49,17 +49,21 @@ use geode_shell::shell::colours::{
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimnav::NavCommand;
+use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
-use gpui::{App, Context, ElementId, Entity, Focusable as _, Hsla, SharedString, Window, div};
+use gpui::{
+    App, Context, ElementId, Entity, Focusable as _, Hsla, KeyDownEvent, SharedString, Window, div,
+};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
 use crate::core::model::{Changed, Colour, Model, SlotState};
-use crate::core::{Range, chart, request, resolve, session};
+use crate::core::{Preset, Range, chart, request, resolve, session};
 use crate::header::{self, HeaderModel};
 use crate::popup::{
-    ExprField, PickerStage, PickerState, Popup, SeriesPopup, render_picker, render_series_popup,
+    DateFieldPaint, ExprField, PickerStage, PickerState, Popup, RangePopup, SeriesPopup, Which,
+    render_picker, render_range, render_series_popup,
 };
 
 /// Exactly what [`chart::build`] reads, and nothing else — the memo key
@@ -168,10 +172,12 @@ pub struct TimeseriesTile {
     header: HeaderModel,
     title: SharedString,
     stack: Option<StackHandle>,
-    /// The tile's one overlay: the series list here, the add picker,
-    /// the expression editor and the range dialog in Tasks 9–10. Its
-    /// rows are PREPARED in `rebuild_chrome`, never formatted in
-    /// `render`.
+    /// The tile's one overlay: the series list, the add picker, the
+    /// expression editor or the range dialog — one at a time, which is
+    /// what this being an `Option<Popup>` rather than four fields
+    /// enforces. The list's rows are PREPARED in `rebuild_chrome` and
+    /// the range dialog's segments in its own key handler, never
+    /// formatted in `render`.
     popup: Option<Popup>,
     footer: SharedString,
 }
@@ -650,7 +656,7 @@ impl TimeseriesTile {
             "reset_view" => self.model.reset_view(),
             "jump_start" => self.model.jump_start(),
             "jump_end" => self.model.jump_end(),
-            // Tasks 8–10; `false` until then.
+            // Every popup verb, through the one door below.
             "add" | "expr" | "edit" | "list" | "range" | "list_down" | "list_up" | "list_close"
             | "commit" | "cancel" | "insert_up" | "insert_down" => {
                 let handled = self.popup_verb(verb, n, window, cx);
@@ -674,9 +680,9 @@ impl TimeseriesTile {
         true
     }
 
-    /// Every popup verb. The series list, the add picker and the
-    /// expression field are built here; Task 10 adds the range dialog,
-    /// whose verb still answers `false`.
+    /// Every popup verb: the series list, the add picker, the
+    /// expression field and the range dialog are all opened, committed
+    /// and cancelled from here.
     ///
     /// `e`'s refusal on a SOURCE slot stays this method's: there is no
     /// expression to open, and a trader who pressed it deserves the
@@ -730,6 +736,19 @@ impl TimeseriesTile {
                 self.open_expr(None, window, cx);
                 true
             }
+            // `r` opens the range popup, closing whatever was up first —
+            // `a` and `x`'s own rule. Note what that means for a SECOND
+            // `r`: the popup is an insert popup, so `dispatch`'s
+            // stage-aware gate has already closed it by the time this
+            // arm runs, and the arm therefore REOPENS it on a fresh
+            // seed rather than toggling it shut. `escape` is the close
+            // (spec §9.8 gives `r` no toggle), and reopening on the
+            // range now in the model is a harmless answer to a key the
+            // trader pressed meaning "the range".
+            "range" => {
+                self.open_range(window, cx);
+                true
+            }
             "edit" => {
                 if let Some(number) = header::cursor_is_source(&self.model) {
                     self.notice = Some(format!("s{number} is not an expression").into());
@@ -753,6 +772,7 @@ impl TimeseriesTile {
             "commit" => match &self.popup {
                 Some(Popup::Picker(_)) => self.commit_picker(window, cx),
                 Some(Popup::Expr(_)) => self.commit_expr(window, cx),
+                Some(Popup::Range(_)) => self.commit_range(window, cx),
                 _ => false,
             },
             "cancel" if self.popup.as_ref().is_some_and(Popup::is_insert) => {
@@ -763,6 +783,19 @@ impl TimeseriesTile {
             // the underlying picker's): a bare step at either end stays
             // put rather than wrapping round to the far end of a list
             // the trader is reading top-down.
+            // The range popup's own step: `up`/`down` on the active
+            // segment, the same `FieldKey::Step` its listener routes
+            // them to — the keymap path and the listener path must not
+            // be able to disagree about what an arrow means.
+            "insert_up" | "insert_down" if matches!(self.popup, Some(Popup::Range(_))) => {
+                let delta = if verb == "insert_up" {
+                    n as i64
+                } else {
+                    -(n as i64)
+                };
+                self.apply_range_key(FieldKey::Step(delta), cx);
+                true
+            }
             "insert_up" | "insert_down" => match &mut self.popup {
                 Some(Popup::Picker(p)) => {
                     let delta = if verb == "insert_up" {
@@ -1068,6 +1101,13 @@ impl TimeseriesTile {
                     f.error = Some(e.into());
                 }
                 cx.notify();
+                // UNHANDLED, like the picker's inert `enter`: nothing
+                // was written, the field is still open on the text that
+                // caused it, and `dispatch`'s tail is what puts a
+                // standing notice back — answering `true` here dropped
+                // one for a keystroke that changed nothing (Task 9
+                // re-review).
+                return false;
             }
             Ok(expr) => {
                 let written = match editing {
@@ -1088,6 +1128,234 @@ impl TimeseriesTile {
             }
         }
         true
+    }
+
+    // ---- the range popup (spec §9.8) ---------------------------------
+
+    /// `r`: two segmented date fields seeded from the range the model
+    /// holds now, with `from` active on its day segment.
+    ///
+    /// The seed is the RESOLVED span, so a relative range opens as the
+    /// dates it currently means — and the `to` field shows the
+    /// INCLUSIVE last day, which `resolve`'s half-open end is a second
+    /// past (midnight after it for an absolute range, `now` for a
+    /// relative one). Hence the second back before the date is taken:
+    /// `Range::Absolute`'s own convention, read in reverse.
+    fn open_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup.is_some() {
+            self.close_popup_with_window(window, cx);
+        }
+        let (now, as_of) = self.now_and_as_of(cx);
+        let (start, end) = self.model.range().resolve(now, &as_of);
+        let last = end
+            .checked_sub_signed(chrono::Duration::seconds(1))
+            .unwrap_or(end)
+            .max(start);
+        let open = |date: chrono::NaiveDate| {
+            DateTimeField::open(
+                date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+                Precision::Date,
+                Segment::Day,
+            )
+        };
+        let from = open(start.date_naive());
+        let to = open(last.date_naive());
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let id = self.id.0;
+        self.popup = Some(Popup::Range(RangePopup {
+            from_paint: DateFieldPaint::of(&from, id, Which::From),
+            to_paint: DateFieldPaint::of(&to, id, Which::To),
+            from,
+            to,
+            active: Which::From,
+            focus,
+            error: None,
+            edited: false,
+        }));
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// The range popup's own keys, run from the `on_key_down` on its
+    /// focused container — which sits on the focused element and so runs
+    /// BEFORE the shell root's listener. Answers whether the key was
+    /// consumed; the listener stops propagation on `true`.
+    ///
+    /// `geode_widgets::datefield::route` is the ONE key table this
+    /// consults (CLAUDE.md), and a chord answers `None` there, so
+    /// `ctrl+k` still opens the palette over an open popup. `tab` is the
+    /// one key this popup adds: `route` has no arm for it, and with two
+    /// fields under one keyboard both directions are the same move.
+    ///
+    /// `enter`, `escape`, `up` and `down` are ALSO bound by the
+    /// fragment's `mode == insert` layer, so both doors end in the same
+    /// four calls — whichever fires first stops the other.
+    pub(crate) fn range_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(self.popup, Some(Popup::Range(_))) {
+            return false;
+        }
+        let modifiers = event.keystroke.modifiers;
+        let chord = modifiers.control || modifiers.alt || modifiers.platform;
+        if !chord && event.keystroke.key.as_str() == "tab" {
+            if let Some(Popup::Range(r)) = &mut self.popup {
+                r.switch();
+            }
+            cx.notify();
+            return true;
+        }
+        let Some(key) = route(event.keystroke.key.as_str(), modifiers.shift, chord) else {
+            return false;
+        };
+        match key {
+            FieldKey::Commit => {
+                self.commit_range(window, cx);
+            }
+            FieldKey::Cancel => self.close_popup_with_window(window, cx),
+            // The digit shortcut (§9.8) — see `RangePopup::
+            // digit_is_preset` for when a digit is a preset and when it
+            // belongs to the date.
+            FieldKey::Digit(d)
+                if matches!(&self.popup, Some(Popup::Range(r)) if r.digit_is_preset())
+                    && Preset::digit(d).is_some() =>
+            {
+                let preset = Preset::digit(d).expect("just checked");
+                self.write_range(Range::Relative(preset), window, cx);
+            }
+            other => self.apply_range_key(other, cx),
+        }
+        true
+    }
+
+    /// One key onto the active field. A keystroke that moves the field
+    /// answers a refusal about a date that is no longer on screen — the
+    /// expression field's own rule.
+    fn apply_range_key(&mut self, key: FieldKey, cx: &mut Context<Self>) {
+        let id = self.id.0;
+        if let Some(Popup::Range(r)) = &mut self.popup {
+            r.apply(key, id);
+            r.error = None;
+        }
+        cx.notify();
+    }
+
+    /// A click on one of the two fields' segments: the mouse form of
+    /// `tab` plus `left`/`right`, taking the keyboard back when a
+    /// tile-focus move has left the popup open without it (the
+    /// market-data field's M4).
+    pub(crate) fn range_segment_clicked(
+        &mut self,
+        which: Which,
+        segment: Segment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.id.0;
+        if let Some(Popup::Range(r)) = &mut self.popup {
+            r.select(which, segment, id);
+            r.error = None;
+            if !r.focus.is_focused(window) {
+                r.focus.focus(window, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// A click on a preset chip — the mouse form of the digit, and the
+    /// same door.
+    pub(crate) fn range_preset_clicked(
+        &mut self,
+        preset: Preset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.write_range(Range::Relative(preset), window, cx);
+    }
+
+    /// `enter` with the range popup open: finish both fields' pending
+    /// digits, then write the two dates.
+    ///
+    /// Answers whether the keystroke was HANDLED, in the sense
+    /// `dispatch`'s tail means: a refusal that keeps the popup open and
+    /// paints an inline reason is `false`, so a standing notice survives
+    /// it (the expression field's own answer).
+    fn commit_range(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let id = self.id.0;
+        let Some(Popup::Range(r)) = &mut self.popup else {
+            return false;
+        };
+        // A digit still being typed is part of the answer (the widget's
+        // commit rule: `1` in the day means the 1st), so both fields are
+        // completed before either date is read — and one that cannot
+        // complete names its own segment rather than committing a date
+        // the trader never finished typing.
+        let mut refusal = None;
+        for which in [Which::From, Which::To] {
+            let field = match which {
+                Which::From => &mut r.from,
+                Which::To => &mut r.to,
+            };
+            if let Err(segment) = field.complete_pending() {
+                refusal = Some(format!(
+                    "finish the '{}' {} or backspace",
+                    which.word(),
+                    segment.name()
+                ));
+                break;
+            }
+        }
+        // The completion moved a value; the painted segments follow it.
+        r.from_paint = DateFieldPaint::of(&r.from, id, Which::From);
+        r.to_paint = DateFieldPaint::of(&r.to, id, Which::To);
+        let range = match refusal {
+            Some(e) => Err(e),
+            // Refused INLINE rather than as a notice: the popup stays
+            // open on the two dates that caused it, which is the only
+            // place the trader can fix them.
+            None if r.to.date() < r.from.date() => Err("'to' is before 'from'".to_string()),
+            None => Ok(Range::Absolute {
+                from: r.from.date(),
+                to: r.to.date(),
+            }),
+        };
+        match range {
+            Ok(range) => self.write_range(range, window, cx),
+            Err(e) => {
+                if let Some(Popup::Range(r)) = &mut self.popup {
+                    r.error = Some(e.into());
+                }
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    /// The ONE door the range popup writes through — the digit, the
+    /// chip click and `enter` all take it, so the cap refusal, the
+    /// close and the `apply_changed` tail cannot drift between them.
+    /// A cap refusal is inline too, for the same reason a backwards
+    /// range is: the popup holds what caused it.
+    fn write_range(&mut self, range: Range, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (now, as_of) = self.now_and_as_of(cx);
+        match self.model.set_range(range, now, &as_of) {
+            Ok(changed) => {
+                self.close_popup_with_window(window, cx);
+                self.apply_changed(changed, cx);
+                true
+            }
+            Err(e) => {
+                if let Some(Popup::Range(r)) = &mut self.popup {
+                    r.error = Some(e.into());
+                }
+                cx.notify();
+                false
+            }
+        }
     }
 
     /// The ONE door a `(identity, source)` pair is added by — the `:add`
@@ -1737,6 +2005,7 @@ impl Render for TimeseriesTile {
                 cx,
             )),
             Some(Popup::Picker(p)) => Some(render_picker(p, &tile, tile_id, cx)),
+            Some(Popup::Range(r)) => Some(render_range(r, &tile, tile_id, cx)),
             // The expression field is not an overlay: it is a strip in
             // the body, below.
             Some(Popup::Expr(_)) | None => None,
@@ -1887,7 +2156,7 @@ mod tests {
     use crate::content::{ACTIONS, DEFAULT_KEYMAP, TimeseriesFactory};
     use crate::core::model::SlotState;
     use crate::core::{Colour, Model, Preset, Range};
-    use crate::popup::{PickerStage, SeriesRow};
+    use crate::popup::{PickerStage, SeriesRow, Which};
     use geode_chart::{Axis, ChartModel};
     use geode_core::colour::NamedColours;
     use geode_core::groupings::GroupingSlots;
@@ -1902,6 +2171,7 @@ mod tests {
     use geode_shell::module::{Delivery, ModuleFactory, ModuleRoster, TileContent, TileOccupant};
     use geode_shell::series::{FetchSource, SeriesSettings};
     use geode_shell::tiling::TileId;
+    use geode_widgets::datefield::Segment;
     use gpui::{Entity, SharedString, Window};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -2104,6 +2374,10 @@ mod tests {
         sources: Vec<FetchSource>,
     ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
+        // The module's own key reclaim, exactly as `main.rs` will call
+        // it: without it `Root`'s window-wide `tab` binding eats the
+        // range popup's field switch before any listener runs.
+        cx.update(crate::init);
         let default_source = default_source.map(str::to_string);
         cx.update(move |cx| {
             cx.set_global(SeriesSettings {
@@ -2399,6 +2673,42 @@ mod tests {
                 _ => None,
             })
         }
+        fn popup_is_range(&self, vcx: &gpui::VisualTestContext) -> bool {
+            self.tile
+                .read_with(vcx, |t, _| matches!(t.popup(), Some(Popup::Range(_))))
+        }
+        /// Where the range popup's keyboard is: which field, and which
+        /// of that field's segments — the popup's own "painted text",
+        /// read off the state the painter takes.
+        fn range_active_segment(&self, vcx: &gpui::VisualTestContext) -> (Which, Segment) {
+            self.tile
+                .read_with(vcx, |t, _| match t.popup() {
+                    Some(Popup::Range(r)) => Some((r.active, r.active_field().segment())),
+                    _ => None,
+                })
+                .expect("the range popup is open")
+        }
+        /// The two dates the range popup's fields hold right now —
+        /// committed values, so a segment mid-entry is not in them.
+        fn range_dates(
+            &self,
+            vcx: &gpui::VisualTestContext,
+        ) -> (chrono::NaiveDate, chrono::NaiveDate) {
+            self.tile
+                .read_with(vcx, |t, _| match t.popup() {
+                    Some(Popup::Range(r)) => Some((r.from.date(), r.to.date())),
+                    _ => None,
+                })
+                .expect("the range popup is open")
+        }
+        /// The range popup's inline refusal — a backwards range, an
+        /// unfinished segment or the point cap.
+        fn range_error(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+            self.tile.read_with(vcx, |t, _| match t.popup() {
+                Some(Popup::Range(r)) => r.error.as_ref().map(|e| e.to_string()),
+                _ => None,
+            })
+        }
         /// The open popup's own field, as it reads right now.
         fn input_text(&self, vcx: &gpui::VisualTestContext) -> String {
             self.tile
@@ -2423,7 +2733,7 @@ mod tests {
                     .and_then(|p| match p {
                         Popup::Picker(p) => Some(p.input.clone()),
                         Popup::Expr(f) => Some(f.input.clone()),
-                        Popup::Series(_) => None,
+                        Popup::Series(_) | Popup::Range(_) => None,
                     })
                     .expect("a field popup is open");
                 input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
@@ -2678,11 +2988,11 @@ mod tests {
         // A verb this tile does not handle leaves the notice on screen:
         // clearing it in state while the old text is still painted is a
         // lie (review round 1, MIN-3).
-        // (`list` is no longer one of those, and neither are `add` and
-        // `expr`: Tasks 8 and 9 built all three, and a handled verb
-        // clears the notice — `range` is the one still waiting for Task
-        // 10.)
-        h.dispatch(&mut vcx, "range", None);
+        // (Every popup verb is built as of Task 10, so the unhandled
+        // one here is a list key with no list open — `popup_verb`'s
+        // guards fall through to `false` exactly as an unrecognised
+        // verb does.)
+        h.dispatch(&mut vcx, "list_down", None);
         assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
         // A handled one takes it away and speaks for itself.
         h.dispatch(&mut vcx, "next", None);
@@ -3460,7 +3770,10 @@ mod tests {
         assert_eq!(h.key_context_mode(&mut vcx), "insert");
         h.draw(&mut vcx);
         vcx.simulate_input("s1 ^ s2");
-        h.dispatch(&mut vcx, "commit", None);
+        assert!(
+            !h.dispatch_handled(&mut vcx, "commit", None),
+            "a parse error is UNHANDLED, like an inert enter: the field              stays open and `dispatch`'s tail puts a standing notice back"
+        );
         assert!(h.popup_is_expr(&vcx), "a parse error keeps the field open");
         assert!(
             vcx.update(|w, cx| h.content.holds_focus(w, cx)),
@@ -3581,8 +3894,172 @@ mod tests {
         );
     }
 
+    /// One keystroke, two halves: `L` over the picker closes the field
+    /// (through the ONE closer, so the keyboard comes back) and opens
+    /// the list — the gate runs first and `popup_verb` then sees an
+    /// empty slot (Task 9 re-review).
     #[gpui::test]
-    fn both_closers_blur_before_dropping_the_input(cx: &mut gpui::TestAppContext) {
+    fn l_over_an_open_picker_closes_it_and_opens_the_series_list(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.dispatch(&mut vcx, "add", None);
+        assert_eq!(h.key_context_mode(&mut vcx), "insert");
+        h.dispatch(&mut vcx, "list", None);
+        assert!(
+            h.popup_is_series(&vcx),
+            "the picker closed and the list opened in one keystroke"
+        );
+        assert_eq!(h.key_context_mode(&mut vcx), "normal");
+        assert!(
+            !vcx.update(|w, cx| h.content.holds_focus(w, cx)),
+            "blurred on the way through"
+        );
+    }
+
+    // ---- the range popup (spec §9.8) ---------------------------------
+
+    #[gpui::test]
+    fn r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.visible(&mut vcx, true);
+        h.requests();
+        h.dispatch(&mut vcx, "range", None);
+        assert_eq!(h.key_context_mode(&mut vcx), "insert");
+        assert!(vcx.update(|w, cx| h.content.holds_focus(w, cx)));
+        assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
+        // The popup has to be PAINTED before a keystroke can reach its
+        // own listener: gpui dispatches against the LAST frame's focus
+        // path (the picker tests' own rule).
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("3");
+        assert!(h.popup_is_none(&vcx));
+        assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M3));
+        assert!(
+            h.requests().iter().any(|r| matches!(r, Request::Fetch(_))),
+            "a committed range fetches"
+        );
+    }
+
+    #[gpui::test]
+    fn tab_moves_between_the_fields_and_enter_commits_an_absolute_range(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use chrono::Datelike as _;
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        // `from` opens on today minus the current preset; type a year.
+        vcx.simulate_keystrokes("left left"); // year segment
+        assert_eq!(h.range_active_segment(&vcx).1, Segment::Year);
+        vcx.simulate_keystrokes("2 0 2 6");
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(h.range_active_segment(&vcx).0, Which::To);
+        vcx.simulate_keystrokes("shift-tab");
+        assert_eq!(h.range_active_segment(&vcx).0, Which::From);
+        vcx.simulate_keystrokes("enter");
+        assert!(h.popup_is_none(&vcx));
+        assert!(
+            matches!(h.model(&vcx).range(), Range::Absolute { from, .. } if from.year() == 2026)
+        );
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("escape");
+        assert!(h.popup_is_none(&vcx));
+        assert!(!vcx.update(|w, cx| h.content.holds_focus(w, cx)));
+    }
+
+    #[gpui::test]
+    fn a_preset_click_commits_at_once_and_a_backwards_range_is_refused_inline(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        // Not the default preset: a click that did nothing at all would
+        // otherwise leave `1y` standing and pass.
+        h.command(&mut vcx, "range 3m").unwrap();
+        h.dispatch(&mut vcx, "range", None);
+        h.click(&mut vcx, &format!("ts-range-preset-{TILE}-1y"));
+        assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y1));
+        assert!(h.popup_is_none(&vcx), "a preset click commits and closes");
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        // Move `to` before `from` and commit.
+        vcx.simulate_keystrokes("tab");
+        vcx.simulate_keystrokes("left left");
+        vcx.simulate_keystrokes("1 9 9 0");
+        vcx.simulate_keystrokes("enter");
+        assert!(h.popup_is_range(&vcx), "refused: still open");
+        assert!(h.range_error(&vcx).unwrap().contains("before"));
+        assert_eq!(
+            h.model(&vcx).range(),
+            &Range::Relative(Preset::Y1),
+            "and nothing was written"
+        );
+    }
+
+    /// `enter` over a segment still mid-entry that cannot stand alone:
+    /// refused inline, naming the field and the segment, with the popup
+    /// still open on the date that caused it.
+    #[gpui::test]
+    fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        // `0` is no preset (`Preset::digit` has no zero), so it types —
+        // and a day of `0` waits for a second digit it never gets.
+        vcx.simulate_keystrokes("0");
+        assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
+        vcx.simulate_keystrokes("enter");
+        assert!(h.popup_is_range(&vcx), "refused: still open");
+        let error = h.range_error(&vcx).expect("named");
+        assert!(error.contains("day") && error.contains("from"), "{error}");
+        // A keystroke answers a refusal about a date that has moved on.
+        vcx.simulate_keystrokes("backspace");
+        assert_eq!(h.range_error(&vcx), None);
+        // `r` over the open popup REOPENS it on a fresh seed rather than
+        // toggling it shut: it is an insert popup, so `dispatch`'s gate
+        // closes it before the arm runs (spec §9.8 gives `r` no toggle;
+        // `escape` is the close).
+        vcx.simulate_keystrokes("left");
+        assert_eq!(h.range_active_segment(&vcx).1, Segment::Month);
+        h.dispatch(&mut vcx, "range", None);
+        assert_eq!(
+            h.range_active_segment(&vcx),
+            (Which::From, Segment::Day),
+            "reopened on the day of a fresh seed"
+        );
+    }
+
+    /// The keymap path and the listener path must agree about what an
+    /// arrow means: `timeseries::insert_up` (the `mode == insert`
+    /// fragment's `up`) and the listener's own `up`/`down` are the same
+    /// `FieldKey::Step`.
+    #[gpui::test]
+    fn an_arrow_steps_the_active_segment_through_either_door(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        let (from, to) = h.range_dates(&vcx);
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(
+            h.range_dates(&vcx),
+            (from + chrono::Duration::days(1), to),
+            "the keymap's up steps the active field's day"
+        );
+        vcx.simulate_keystrokes("down down");
+        assert_eq!(
+            h.range_dates(&vcx),
+            (from - chrono::Duration::days(1), to),
+            "and the listener's down steps it the same way"
+        );
+    }
+
+    #[gpui::test]
+    fn every_closer_blurs_before_dropping_the_focused_handle(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.dispatch(&mut vcx, "add", None);
         assert!(vcx.update(|w, cx| w.focused(cx).is_some()));
@@ -3598,6 +4075,25 @@ mod tests {
         assert!(
             vcx.update(|w, cx| w.focused(cx).is_none()),
             "expression field: blurred, then dropped"
+        );
+        // The range popup holds a bare handle rather than an
+        // `InputState`, and the rule is the same: an unblurred dead
+        // handle leaves `Window::focused` pointing at nothing and the
+        // shell's own focus-return net never fires (CLAUDE.md).
+        h.dispatch(&mut vcx, "range", None);
+        assert!(vcx.update(|w, cx| w.focused(cx).is_some()));
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(
+            vcx.update(|w, cx| w.focused(cx).is_none()),
+            "range popup: blurred, then dropped"
+        );
+        // …and through the listener's own `escape`, the other door.
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("escape");
+        assert!(
+            vcx.update(|w, cx| w.focused(cx).is_none()),
+            "range popup: the listener's escape takes the same closer"
         );
     }
 }
