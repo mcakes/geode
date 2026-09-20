@@ -2670,7 +2670,6 @@ dependencies = [
  "geode-core",
  "geode-shell",
  "geode-widgets",
- "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",

@@ -933,11 +933,12 @@ pub struct ShellView {
     /// `picker::sync_picker_scroll`'s doc comment for the call sites that
     /// drive it).
     picker_scroll: UniformListScrollHandle,
-    /// The open as-of dialog's own pure state (Phase 4a §3.6), or `None`
-    /// when closed/never opened — the `picker`/`keybindings`/`settings`
-    /// fields' own contract. Set fresh by [`asof_view::open`] each time
-    /// and cleared by [`close_modal`](Self::close_modal), same as the
-    /// other three dialogs.
+    /// The open as-of dialog's own pure state (as-of dialog spec
+    /// 2026-09-20 §5), or `None` when closed/never opened — the
+    /// `picker`/`keybindings`/`settings` fields' own contract. Set fresh
+    /// by [`asof_view::open`] each time and cleared by
+    /// [`close_modal`](Self::close_modal), same as the other three
+    /// dialogs.
     as_of_dialog: Option<asof_view::AsOfState>,
     /// The open scope expression dialog's own pure state (command-line
     /// locality spec §4.1), or `None` when closed/never opened — the
@@ -945,14 +946,6 @@ pub struct ShellView {
     /// [`scope_expr_view::open`] each time and cleared by
     /// [`close_modal`](Self::close_modal).
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
-    /// The as-of dialog's calendar (spec §5.2), built once here like
-    /// `dialog_input` — one entity, seeded on every open (`gpui` focus
-    /// handles are refcounted, so a fresh one per open would not have
-    /// leaked; it is built once regardless, the same contract every
-    /// other modal field on `ShellView` holds). It is painted only while
-    /// the dialog is open and the field does not read `live`; its
-    /// selection mirrors the field.
-    as_of_calendar: Entity<gpui_component::calendar::CalendarState>,
     /// The open choice dialog's own pure state (2026-09-19: the grouping
     /// picker — the toolbar readout's click and `frame::grouping` — and
     /// the tile picker — a placeholder's double-click and `tile::add`),
@@ -1154,7 +1147,7 @@ impl ShellView {
         // same no-placeholder rule: `dialog::filter_row` puts a search
         // icon in the `Input`'s prefix slot instead.
         let dialog_input = cx.new(|cx| InputState::new(window, cx));
-        cx.subscribe_in(&dialog_input, window, |view, input, event, window, cx| {
+        cx.subscribe_in(&dialog_input, window, |view, input, event, _window, cx| {
             if !matches!(event, InputEvent::Change) {
                 return;
             }
@@ -1206,56 +1199,15 @@ impl ShellView {
                 state.list.set_query(&query);
                 view.choice_dialog_scroll
                     .scroll_to_item(state.list.ranked_highlighted());
-            } else if view.as_of_dialog.is_some() {
-                // Unlike the three dialogs above, this field's raw text IS
-                // the value being edited (spec §3.6), not a filter over
-                // something else — re-resolve it and store the outcome
-                // (`resolved`/`error`) for `build` to show; see
-                // `asof_view::on_query_changed`'s own doc comment. The
-                // clock is read BEFORE `as_of_dialog.as_mut()`'s borrow
-                // (`ShellView::clock` needs `&self`/`&App`, which a `&mut
-                // AsOfState` borrowed out of `view` would otherwise
-                // conflict with).
-                let clock = view.clock(cx);
-                let now = chrono::Utc::now();
-                if let Some(state) = view.as_of_dialog.as_mut() {
-                    asof_view::on_query_changed(state, &query, now, clock);
-                }
-                // Typing mirrors onto the calendar (spec §5.2): the parsed
-                // day, and ONLY the parsed day — final review, finding 4.
-                // `calendar_date` falls back to today when `resolved` is
-                // `None`, which is right for a genuinely blank field but
-                // wrong for a failed INTERMEDIATE parse (a trader mid-edit
-                // backspacing through a date): mirroring on every
-                // keystroke regardless of `resolved` snapped the calendar
-                // to today on every invalid partial date, discarding
-                // whatever day it was showing. `set_date` notifies the
-                // calendar only.
-                if let Some(state) = view.as_of_dialog.as_ref()
-                    && state.resolved.is_some()
-                {
-                    let day = asof_view::calendar_date(state, now, clock);
-                    view.as_of_calendar.update(cx, |c, cx| {
-                        if c.date().start() != Some(day) {
-                            c.set_date(day, window, cx);
-                        }
-                    });
-                }
+            } else if let Some(state) = view.as_of_dialog.as_mut() {
+                // The field's text is the query (spec §5.1).
+                asof_view::on_query_changed(state, &query);
             } else if let Some(state) = view.scope_expr_dialog.as_mut() {
                 // The field IS the value (spec §4.1); typing clears the last
                 // failed commit's message.
                 scope_expr_view::on_query_changed(state);
             }
             cx.notify();
-        })
-        .detach();
-
-        let as_of_calendar = cx.new(|cx| gpui_component::calendar::CalendarState::new(window, cx));
-        cx.subscribe_in(&as_of_calendar, window, |view, _, event, window, cx| {
-            let gpui_component::calendar::CalendarEvent::Selected(date) = event;
-            if let Some(day) = date.start() {
-                asof_view::on_calendar_selected(view, day, window, cx);
-            }
         })
         .detach();
 
@@ -1686,7 +1638,6 @@ impl ShellView {
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             scope_expr_dialog: None,
-            as_of_calendar,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
             object_dialog: None,
@@ -1959,20 +1910,11 @@ impl ShellView {
         cx.global::<crate::clock::AppClock>().0
     }
 
-    /// The dialogs' shared filter field (Task 3, `asof_view`'s calendar
-    /// tests) — cross-module test reach the same as `picker()` above.
+    /// The dialogs' shared filter field — cross-module test reach the
+    /// same as `picker()` above.
     #[cfg(any(test, feature = "test-support"))]
     pub fn dialog_input(&self) -> &Entity<InputState> {
         &self.dialog_input
-    }
-
-    /// The as-of dialog's calendar entity (Task 3) — cross-module test
-    /// reach the same as `picker()` above, so a test can drive
-    /// `CalendarState::activate_date` exactly as the component's own day
-    /// cell does.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn as_of_calendar(&self) -> &Entity<gpui_component::calendar::CalendarState> {
-        &self.as_of_calendar
     }
 
     /// Deliver a `DataEvent::Distinct` outcome (spec §3.4), routed here by
