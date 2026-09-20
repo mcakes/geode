@@ -53,22 +53,19 @@ pub struct ScopeBarModel {
     /// clones this rather than `format!`ing it fresh every paint.
     pub slot_label: String,
     pub chips: Vec<Chip>,
+    /// The scope's text layer, bare. The toolbar paints no chip for it
+    /// (toolbar restyle 2026-09-19): the field itself shows the frame's
+    /// text while unfocused (`ShellView::on_frame_changed`) and clears it
+    /// through its own clear glyph, so a `text "…"` chip only repeated
+    /// what sat a few hundred pixels to its right. No painter reads this
+    /// field; it is the model's truth, pinned by the model tests.
     pub text: Option<String>,
-    /// The scope bar's text chip, in its own display text (Phase 4b
-    /// Task 1 fix round 1, MAJ-2): `Some("text \"{t}\"")` when `text` is
-    /// `Some`, built here for the same reason as `slot_label`.
-    pub text_chip: Option<String>,
-    /// The raw, un-decorated text (fix round 1) — the text chip's
-    /// tooltip title; `text_chip` above is the painted `"text \"…\""`
-    /// label. `SharedString` for the same reason as `Chip`'s tooltip
-    /// fields: cloned into a `.tooltip(..)` attachment on every render.
-    pub text_tip: Option<SharedString>,
     /// Elided source text (≤ 40 chars + `…`), or `None` when the scope has
     /// no expression.
     pub expr: Option<String>,
     /// The whole expression source, un-elided — what a hover on the
     /// elided `expr` chip shows. `SharedString` (fix round 1) for the
-    /// same reason as `text_tip`.
+    /// same reason as `Chip`'s tooltip fields.
     pub expr_full: Option<SharedString>,
     /// `Some("∅ {column}")` when the scope is a contradiction (spec
     /// §4.1's `Scope::impossible`) — named, not merely hidden, per
@@ -80,7 +77,7 @@ pub struct ScopeBarModel {
     pub as_of: Option<String>,
     /// The toolbar's AS OF badge, in its own display text (Phase 4b
     /// Task 1 fix round 1, MAJ-2): `Some("AS OF {as_of}")`, built here
-    /// for the same reason as `slot_label`/`text_chip` — distinct from
+    /// for the same reason as `slot_label` — distinct from
     /// `as_of` itself, which the status bar reads bare (no "AS OF "
     /// prefix). `SharedString` (fix round 1, Task 3 review): this used to
     /// double as the badge's tooltip TITLE too; since the final review
@@ -169,8 +166,6 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         Some((n, label)) => format!("{n} · {label}"),
         None => "view default".to_string(),
     };
-    let text_chip = scope.text.as_ref().map(|t| format!("text \"{t}\""));
-    let text_tip: Option<SharedString> = scope.text.clone().map(Into::into);
     let as_of_badge: Option<SharedString> = as_of.as_ref().map(|t| format!("AS OF {t}").into());
     let savable = !scope.is_empty();
     ScopeBarModel {
@@ -178,8 +173,6 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
         slot_label,
         chips,
         text: scope.text.clone(),
-        text_chip,
-        text_tip,
         expr,
         expr_full,
         impossible,
@@ -238,7 +231,7 @@ mod tests {
     }
 
     /// Phase 4b Task 1 fix round 1, MAJ-2: `shell::toolbar` used to
-    /// `format!` the text chip, the AS OF badge and the slot readout
+    /// `format!` the (since-retired) text chip, the AS OF badge and the slot readout
     /// fresh every paint even though `build_model` already had
     /// everything each of those three needs — this pins the model
     /// itself carrying the finished strings, so the render path has
@@ -264,9 +257,9 @@ mod tests {
 
         let m = build_model(&f, today);
         assert_eq!(
-            m.text_chip.as_deref(),
-            Some("text \"spx\""),
-            "the text chip's own display string"
+            m.text.as_deref(),
+            Some("spx"),
+            "the text layer rides on the model bare; the field shows it (no text chip since 2026-09-19)"
         );
         assert_eq!(
             m.as_of_badge.as_deref(),
@@ -311,7 +304,7 @@ mod tests {
         let m = build_model(&f, chrono::Local::now().date_naive());
         assert_eq!(m.slot, None);
         assert_eq!(m.slot_label, "view default");
-        assert_eq!(m.text_chip, None);
+        assert_eq!(m.text, None);
         assert_eq!(m.as_of_badge, None);
         assert_eq!(m.as_of_full, None);
         assert!(!m.savable, "an empty scope has nothing to save");

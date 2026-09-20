@@ -185,7 +185,9 @@ slice 3 the third; slice 4 the fourth.
 - **G. Pricer.** A local dataset of typed lines, an upstream price
   request whose response is ingested, scenario output. The charter
   bites here: pricing is upstream, the app only sends and shows. Needs
-  A, B, C, E. Slice 4.
+  A, B, C, E. Slice 4. Part 1 (seam and data tier) built 2026-09-19,
+  see the line-pricer spec; the local publish is the roadmap §3
+  "local" shape.
 - **H. Watchlists.** A named list of underlyings is a saved scope with
   one dimension selection; the scopes dialog exists and the TODO's
   "duplicate and edit" is the missing piece. Any gap.
@@ -215,7 +217,9 @@ disagree) and built in two parts, each with the slice that needs it.
 2. **Scenario panel** — axes on measures, link groups, launch context,
    the pivot grid with its cell-count measurement.
 3. **Vol viewers** — fetch, cache datasets, charts.
-4. **Pricer.**
+4. **Pricer.** Part 1 (seam and data tier) built 2026-09-19, see the
+   line-pricer spec; the local publish is the roadmap §3 "local"
+   shape.
 5. **Watchlists** whenever there is a gap.
 
 ## 7. Not decided here

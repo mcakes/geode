@@ -143,8 +143,20 @@ fn main() {
                 (None, geode_data::adapter::AdapterRegistry::default())
             };
 
-            let (mut services, desk, user, bridge, diagnostics_factory) =
-                build_shell_services(demo_root.as_deref(), log_ring, log_control, adapters, cx);
+            // Every build has the mock (line-pricer spec §5.5); a vendor
+            // crate, when one exists, registers itself here behind its
+            // feature gate.
+            let mut pricers = geode_data::PricerRegistry::default();
+            pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+
+            let (mut services, desk, user, bridge, diagnostics_factory) = build_shell_services(
+                demo_root.as_deref(),
+                log_ring,
+                log_control,
+                adapters,
+                pricers,
+                cx,
+            );
 
             // The demo bus itself (Task 10): spawned once, right after
             // the services it feeds exist. `geode_demo_data::
@@ -654,6 +666,7 @@ fn build_shell_services(
     log_ring: Arc<Ring>,
     log_control: Arc<dyn LevelControl>,
     adapters: geode_data::adapter::AdapterRegistry,
+    pricers: geode_data::PricerRegistry,
     cx: &mut App,
 ) -> (
     ShellServices,
@@ -750,7 +763,7 @@ fn build_shell_services(
         std::env::var("LOCALAPPDATA").ok(),
         std::env::var("HOME").ok(),
     );
-    let bridge = bridge::data_setup(&config, db, adapters).map(|setup| {
+    let bridge = bridge::data_setup(&config, db, adapters, pricers).map(|setup| {
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);

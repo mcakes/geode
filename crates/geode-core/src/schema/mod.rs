@@ -66,6 +66,11 @@ pub struct DatasetSpec {
     /// order — also the order a document request sorts by (spec §7).
     /// Empty for the measure family.
     pub axes: Vec<String>,
+    /// The app itself is this dataset's writer (`Request::Publish`); no
+    /// `[sources]` entry may feed it, and the bridge does not bump the
+    /// frame's data version when it publishes (line-pricer spec §7.2).
+    /// Document family only.
+    pub local: bool,
     /// Series family only: its retention windows. `None` on every other
     /// family, `Some` (possibly both unbounded) on a series dataset.
     pub series_retention: Option<SeriesRetention>,
@@ -256,6 +261,24 @@ impl SchemaSpec {
                     }
                 },
             };
+            let local = match ds_value.get("local") {
+                None => false,
+                Some(v) => match v.as_bool() {
+                    Some(b) => b,
+                    None => {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            layer: None,
+                            file: None,
+                            message: format!(
+                                "dataset '{ds_name}': 'local' must be true or false; treated as false"
+                            ),
+                            path: Some(format!("datasets.{ds_name}.local")),
+                        });
+                        false
+                    }
+                },
+            };
             let string_list =
                 |field: &str, diags: &mut Vec<Diagnostic>| -> Result<Vec<String>, ()> {
                     match ds_value.get(field) {
@@ -309,6 +332,7 @@ impl SchemaSpec {
                 family,
                 key,
                 axes,
+                local,
                 series_retention: None,
             };
             if family == Family::Series {
@@ -458,6 +482,20 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 ),
             ));
         }
+    }
+
+    if ds.local && !ds.is_document() {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: format!(
+                "dataset '{}': 'local' is accepted on the document family only",
+                ds.name
+            ),
+            path: Some(format!("datasets.{}.local", ds.name)),
+        });
+        ds.local = false;
     }
 
     if ds.is_series() {
@@ -1156,6 +1194,91 @@ required = false
             "required defaults true"
         );
         assert!(!ds.column("cross_gamma02").unwrap().required);
+    }
+
+    #[test]
+    fn local_is_read_on_a_document_dataset_and_defaults_to_false() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(r#"
+[sheets]
+family = "document"
+local = true
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+
+[cvi]
+family = "document"
+key = ["u"]
+axes = ["t"]
+[cvi.columns.u]
+type = "utf8"
+role = "dimension"
+[cvi.columns.t]
+type = "date"
+role = "axis"
+[cvi.columns.v]
+type = "f64"
+role = "value"
+"#));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(schema.dataset("sheets").unwrap().local);
+        assert!(!schema.dataset("cvi").unwrap().local);
+    }
+
+    #[test]
+    fn local_on_a_measure_dataset_is_an_error_and_cleared() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(r#"
+[risk]
+local = true
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+grain = "book"
+[risk.columns.npv]
+type = "f64"
+role = "measure"
+"#));
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("datasets.risk.local"))
+            .expect("a diagnostic at the key");
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("document family"), "{}", d.message);
+        assert!(!schema.dataset("risk").unwrap().local, "cleared");
+    }
+
+    #[test]
+    fn a_non_bool_local_is_a_warning_and_false() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(r#"
+[sheets]
+family = "document"
+local = "yes"
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+"#));
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("datasets.sheets.local"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert!(!schema.dataset("sheets").unwrap().local);
     }
 
     #[test]

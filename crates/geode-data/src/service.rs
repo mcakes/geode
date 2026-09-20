@@ -11,7 +11,8 @@ use crate::health::{Health, severity_rank};
 use crate::ingest::fetch::{FetchOutcome, FetchOutcomeSink, FetchWork, FetchWorker};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
 use crate::ingest::subscribe::{LoadReportSink, SubscriptionWorker};
-use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink, SeriesJob};
+use crate::ingest::{DocumentJob, IngestEvent, IngestHandle, IngestRunner, IngestSink, SeriesJob};
+use crate::pricing::{PriceSink, PricerConfig, PricingWorker};
 use crate::query::as_of::AsOf;
 use crate::query::catalog::build_catalog;
 use crate::query::compile::compile_view;
@@ -24,9 +25,10 @@ use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
-use geode_core::config::Diagnostic;
+use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::{check_kind_against, join_key};
+use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
     QueryOutcome,
@@ -61,6 +63,9 @@ pub struct DataServiceConfig {
     /// `geode-app` for the same reason and consulted the same way — a
     /// subscribed source's `document` key names one of these.
     pub documents: DocumentRegistry,
+    /// The pricer this build runs (line-pricer spec §5.3), filled by
+    /// `geode-app` for the same reason as `adapters`/`documents`.
+    pub pricer: PricerConfig,
 }
 
 /// Everything the service produces, on one channel (spec §5.1).
@@ -72,6 +77,9 @@ pub enum DataEvent {
     /// The diagnostics tile's "what does the database hold" result
     /// (spec §4.5).
     Catalog(CatalogOutcome),
+    /// A pricing batch's answer (line-pricer spec §5.3), addressed to
+    /// the tile key that asked.
+    Price(PriceOutcome),
     /// A file was published: the frame bumps its data generation and every
     /// visible tile requeries. A burst coalesces there.
     Published {
@@ -632,6 +640,13 @@ impl HealthTracker {
 
 pub struct DataService {
     config: DataServiceConfig,
+    /// Captured from `open`'s `sink` argument before it is cloned into
+    /// the ingest/pool/scheduler closures, so `publish` can send a
+    /// refusal diagnostic itself without a request round trip through any
+    /// of them, and so `fetch` can answer the asking tile directly —
+    /// every early exit of a fetch is a `SeriesFetched`, and the ones
+    /// decided here never reach a worker or the runner.
+    sink: EventSink,
     /// Config errors found at open (spec §10.1). Held rather than
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
@@ -639,13 +654,16 @@ pub struct DataService {
     /// Field order is drop order. The fetch workers stop first and the
     /// subscriptions stop receiving next (each one's thread submits work
     /// into the runner, so both have to stop before the runner does); the
-    /// pool joins its workers after them; the scheduler stops submitting
-    /// after that; then the runner stops, which
-    /// it does by RETURNING on its stop flag at the top of its loop —
-    /// whatever is still queued is dropped unstarted, never drained, which
-    /// is the whole reason everything that submits into it is stopped
-    /// before it — and drops the `Store` on its way out. `conn`, the field
-    /// listed last, drops after everything else.
+    /// pool joins its workers after them; `pricing` is an independent
+    /// worker on its own thread and queue, unrelated to the pool's DuckDB
+    /// connections, stopped in `shutdown` right after the pool — placed
+    /// here for that reason, not because anything below it depends on it;
+    /// the scheduler stops submitting after that; then the runner stops,
+    /// which it does by RETURNING on its stop flag at the top of its loop
+    /// — whatever is still queued is dropped unstarted, never drained,
+    /// which is the whole reason everything that submits into it is
+    /// stopped before it — and drops the `Store` on its way out. `conn`,
+    /// the field listed last, drops after everything else.
     ///
     /// `conn` dropping last is harmless, not accidental correctness:
     /// duckdb-rs holds the database as `Arc<Mutex<DatabaseHandle>>`, and
@@ -681,11 +699,8 @@ pub struct DataService {
     /// that makes "is this a fetch source" a lookup rather than a
     /// re-derivation from the schema.
     fetch_datasets: std::collections::HashMap<String, String>,
-    /// The sink `open` was given, kept so `fetch` can answer the asking
-    /// tile directly — every early exit is a `SeriesFetched`, and the
-    /// ones decided here never reach a worker or the runner.
-    sink: EventSink,
     pool: QueryPool,
+    pricing: PricingWorker,
     scheduler: Scheduler,
     ingest: Arc<IngestHandle>,
     /// A dedicated read connection for compilation and catalog reads.
@@ -694,6 +709,9 @@ pub struct DataService {
 
 impl DataService {
     pub fn open(config: DataServiceConfig, sink: EventSink) -> Result<DataService, StoreError> {
+        // Captured before every closure below clones `sink` for its own
+        // use, so `publish`'s refusal path can send through it directly.
+        let stored_sink = Arc::clone(&sink);
         let store = Store::open(&config.db_path)?;
         for ds in &config.schema.datasets {
             store.apply_schema(ds)?;
@@ -874,6 +892,12 @@ impl DataService {
         };
         let pool = QueryPool::spawn_with_sink(&store, config.query_workers.max(1), result_sink)?;
 
+        let price_sink: PriceSink = {
+            let sink = Arc::clone(&sink);
+            Arc::new(move |o| sink(DataEvent::Price(o)))
+        };
+        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink);
+
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
             let health_tracker = Arc::clone(&health_tracker);
@@ -907,6 +931,13 @@ impl DataService {
                         gen_id,
                         books,
                     });
+                    // A local publish (line-pricer spec §5.3) has no
+                    // source a `[sources]` entry declares, so no health
+                    // lane: `Published` and `LoadEnded` only.
+                    if source == LOCAL_SOURCE {
+                        let _ = sink(DataEvent::LoadEnded);
+                        return delivered;
+                    }
                     // MAJ-3 (final review): a degraded *publish* — the
                     // exact carried-dimension violation Phase 4a's grain
                     // rules exist to catch — used to reach nowhere but a
@@ -993,6 +1024,17 @@ impl DataService {
                     // this line, whether or not the AGGREGATE health
                     // (below) changed.
                     log_ingest_failure(&dataset, &batch, &reason);
+                    if source == LOCAL_SOURCE {
+                        let delivered = sink(DataEvent::Diagnostics(vec![Diagnostic {
+                            severity: Severity::Error,
+                            layer: None,
+                            file: None,
+                            message: format!("local publish of {dataset}/{batch} failed: {reason}"),
+                            path: None,
+                        }]));
+                        let _ = sink(DataEvent::LoadEnded);
+                        return delivered;
+                    }
                     // MAJ-1 (final review): keyed by the SOURCE name
                     // (`WorkItem::source`, threaded onto `IngestEvent`),
                     // never the dataset — a `[sources.<name>]` block's
@@ -1509,13 +1551,14 @@ impl DataService {
             .collect();
         Ok(DataService {
             config,
+            sink: stored_sink,
             diagnostics,
             subscriptions: std::sync::Mutex::new(subscriptions),
             fetchers: std::sync::Mutex::new(fetchers),
             identities,
             fetch_datasets,
-            sink,
             pool,
+            pricing,
             scheduler,
             ingest,
             conn,
@@ -1763,8 +1806,86 @@ impl DataService {
         }))
     }
 
+    /// The line pricer's batch (spec §5.3). A batch the worker's own
+    /// bounded queue refuses is answered here, not dropped: every line
+    /// captured before `params` moves into `PricingWorker::request`
+    /// (which consumes it) so a refused batch still gets an outcome — a
+    /// tile must never sit waiting on a batch that will not come.
+    pub fn price(&self, params: PriceParams) {
+        let key = params.key;
+        let tag = params.tag;
+        let submitted = params.submitted;
+        let lines: Vec<(u64, u64)> = params.lines.iter().map(|l| (l.id, l.revision)).collect();
+        if self.pricing.request(params) {
+            return;
+        }
+        tracing::warn!(
+            target: "geode::pricing",
+            "the pricing queue is full; batch for key {} tag {tag} was refused",
+            key.0
+        );
+        let results = lines
+            .into_iter()
+            .map(|(id, revision)| {
+                (
+                    id,
+                    revision,
+                    Err("the pricing queue is full; resubmit".to_string()),
+                )
+            })
+            .collect();
+        let _ = (self.sink)(DataEvent::Price(PriceOutcome {
+            key,
+            tag,
+            submitted,
+            results,
+        }));
+    }
+
+    /// Publish an app-authored document (spec §5.3, §7.2). The dataset
+    /// must be declared `local = true`: anything else is refused with an
+    /// error diagnostic and nothing is written. Accepted, the rows go
+    /// through the ingest runner's document lane exactly as a
+    /// subscribed document does — same validation, same `contained`
+    /// boundary, same `Published` event — stamped `LOCAL_SOURCE`.
+    pub fn publish(&self, publish: LocalPublish) {
+        let local = self
+            .config
+            .schema
+            .dataset(&publish.dataset)
+            .is_some_and(|d| d.local);
+        if !local {
+            tracing::warn!(
+                target: "geode::ingest",
+                "refused a local publish to '{}': not a local dataset",
+                publish.dataset
+            );
+            let _ = (self.sink)(DataEvent::Diagnostics(vec![Diagnostic {
+                severity: Severity::Error,
+                layer: None,
+                file: None,
+                message: format!(
+                    "refused a local publish to '{}': not a local dataset (declare `local = true` on a document dataset)",
+                    publish.dataset
+                ),
+                path: None,
+            }]));
+            return;
+        }
+        let now = chrono::Utc::now();
+        self.ingest.submit_document(DocumentJob {
+            source: LOCAL_SOURCE.to_string(),
+            dataset: publish.dataset,
+            rows: publish.rows,
+            source_time: now,
+            received_at: now,
+            bytes: 0,
+        });
+    }
+
     pub fn cancel(&self, key: QueryKey) {
         self.pool.cancel(key);
+        self.pricing.cancel(key);
     }
 
     /// The on-demand fetch (timeseries spec §5.4): subtract what the
@@ -2012,6 +2133,7 @@ impl DataService {
             worker.shutdown();
         }
         self.pool.shutdown();
+        self.pricing.shutdown();
         self.scheduler.shutdown();
         self.ingest.shutdown();
     }
@@ -2020,7 +2142,9 @@ impl DataService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::ddl::tests_support::{FakeKind, cvi_dataset, cvi_doc, ts};
+    use crate::store::ddl::tests_support::{
+        FakeKind, cvi_dataset, cvi_doc, local_dataset, sheet_rows, ts,
+    };
     use geode_core::scope::{DimensionSelection, Scope};
     use std::time::Duration;
 
@@ -2059,6 +2183,7 @@ mod tests {
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
         (db, src, service, rx)
@@ -2136,9 +2261,304 @@ mod tests {
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
         (dir, service, rx)
+    }
+
+    /// A service over a `local = true` document dataset (`sheets`) plus
+    /// the CVI fixture dataset (not `local`), with a `FakePricer` behind
+    /// the pricing worker — the fixture the publish and pricing tests
+    /// share (line-pricer spec §5.3, §7.2). `delay` is the fake's own
+    /// per-line delay: `Duration::ZERO` for most tests, non-zero where a
+    /// test needs a batch to still be running when it submits the next
+    /// one (the cancel and full-queue tests below).
+    fn local_service_with_delay(
+        delay: Duration,
+    ) -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(local_dataset());
+        schema.datasets.push(cvi_dataset());
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            pricer: PricerConfig::with(Arc::new(crate::pricing::worker::tests::FakePricer {
+                asked: Default::default(),
+                delay,
+                overrides_seen: Default::default(),
+            })),
+        })
+        .unwrap();
+        (dir, service, rx)
+    }
+
+    fn local_service() -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        local_service_with_delay(Duration::ZERO)
+    }
+
+    /// Drains `rx` until `pick` answers `Some`, discarding everything
+    /// else — the shape every test below wants: "the event I asked for,
+    /// whenever it lands among the others".
+    fn until<T>(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        mut pick: impl FnMut(DataEvent) -> Option<T>,
+    ) -> T {
+        loop {
+            let e = rx.recv_timeout(Duration::from_secs(30)).expect("an event");
+            if let Some(t) = pick(e) {
+                return t;
+            }
+        }
+    }
+
+    #[test]
+    fn a_local_publish_lands_a_generation_the_document_request_reads_back() {
+        let (_d, service, rx) = local_service();
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("untitled-1", &[1, -2, 3]),
+        });
+        let (dataset, batch) = until(&rx, |e| match e {
+            DataEvent::Published { dataset, batch, .. } => Some((dataset, batch)),
+            _ => None,
+        });
+        assert_eq!((dataset.as_str(), batch.as_str()), ("sheets", "untitled-1"));
+        service
+            .document(&DocumentParams {
+                key: QueryKey(5),
+                tag: 1,
+                submitted: Instant::now(),
+                dataset: "sheets".into(),
+                document_key: vec!["untitled-1".into()],
+                as_of: AsOf::Live,
+            })
+            .unwrap();
+        let snapshot = until(&rx, |e| match e {
+            DataEvent::Query(o) if o.key == QueryKey(5) => Some(o.snapshot.unwrap()),
+            _ => None,
+        });
+        assert_eq!(snapshot.rows(), 3);
+    }
+
+    #[test]
+    fn a_local_publish_emits_no_health_event_and_a_load_ended() {
+        let (_d, service, rx) = local_service();
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("s", &[1]),
+        });
+        let mut saw_published = false;
+        let mut saw_ended = false;
+        // `local_service` opens with no `[sources]`, so the ingest
+        // runner's own startup drain announces an idle `PlanComplete` —
+        // a `LoadEnded` with nothing behind it — before this publish's
+        // job is even queued; a bare "break on the first LoadEnded"
+        // races that spurious one. The `LoadEnded` this test asserts on
+        // is specifically the one that follows OUR `Published`.
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(5)) {
+            match e {
+                DataEvent::Health { source, .. } => {
+                    panic!("no health lane for a local publish, got {source}")
+                }
+                // final-review finding 3: a sheet autosave must never
+                // blink the ingest progress strip — the runner skips
+                // `Started` for `LOCAL_SOURCE`, so no `Loading` for
+                // "local" should ever reach here. A `Loading` for some
+                // other source (there is none in this fixture) is not
+                // the concern.
+                DataEvent::Loading { ref source, .. } if source == "local" => {
+                    panic!("a local publish must not emit Loading, got {e:?}")
+                }
+                DataEvent::Published { .. } => saw_published = true,
+                DataEvent::LoadEnded if saw_published => {
+                    saw_ended = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_published && saw_ended);
+    }
+
+    #[test]
+    fn a_failed_local_publish_is_a_diagnostics_error_and_a_load_ended_with_no_health() {
+        let (_d, service, rx) = local_service();
+        // A zero-row document (`DocumentRows::validate`'s row floor):
+        // refused by the runner's own publish, never reaching the
+        // store, and — like any local publish — reported with no health
+        // lane at all (there is no `[sources]` entry to key one under).
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("s", &[]),
+        });
+        let mut saw_diagnostic = false;
+        let mut saw_ended = false;
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(5)) {
+            match e {
+                DataEvent::Health { source, .. } => {
+                    panic!("no health lane for a local publish, got {source}")
+                }
+                DataEvent::Diagnostics(diags) => {
+                    assert!(
+                        diags.iter().any(|d| d.severity == Severity::Error
+                            && d.message.contains("local publish of sheets/s failed")),
+                        "{diags:?}"
+                    );
+                    saw_diagnostic = true;
+                }
+                DataEvent::LoadEnded if saw_diagnostic => {
+                    saw_ended = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_diagnostic && saw_ended);
+    }
+
+    #[test]
+    fn a_publish_to_a_dataset_that_is_not_local_is_refused_unwritten() {
+        let (_d, service, rx) = local_service();
+        service.publish(LocalPublish {
+            dataset: "cvi_params".into(),
+            rows: cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        });
+        let diags = until(&rx, |e| match e {
+            DataEvent::Diagnostics(d) => Some(d),
+            DataEvent::Published { dataset, .. } if dataset == "cvi_params" => {
+                panic!("written: {dataset}")
+            }
+            _ => None,
+        });
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.message.contains("not a local dataset")),
+            "{diags:?}"
+        );
+        // Prove nothing landed rather than merely asserting the refusal
+        // fired: the runner's document queue is FIFO, so a wrongly
+        // submitted `cvi_params` job — if one had slipped through —
+        // would publish before this second, good `sheets` document does.
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("proof", &[1]),
+        });
+        let dataset = until(&rx, |e| match e {
+            DataEvent::Published { dataset, .. } => Some(dataset),
+            _ => None,
+        });
+        assert_eq!(dataset, "sheets");
+        let catalog = service.catalog(&CatalogParams {
+            key: QueryKey(1),
+            tag: 1,
+            as_of: AsOf::Live,
+        });
+        assert!(
+            catalog
+                .snapshot
+                .unwrap()
+                .datasets
+                .iter()
+                .all(|d| d.name != "cvi_params" || d.partitions.is_empty()),
+            "nothing landed for cvi_params"
+        );
+    }
+
+    #[test]
+    fn a_price_request_reaches_the_sink_as_a_price_event_and_cancel_reaches_the_worker() {
+        // A ~150 ms delay so key 11's batch is still running when key
+        // 12's is submitted and cancelled — cancelling AFTER key 11's
+        // outcome had already been delivered would make the cancel a
+        // guaranteed no-op that a deleted `PricingWorker::cancel` call
+        // could not fail.
+        let (_d, service, rx) = local_service_with_delay(Duration::from_millis(150));
+        service.price(crate::pricing::worker::tests::params(
+            11,
+            4,
+            &["SPX", "FAIL"],
+        ));
+        service.price(crate::pricing::worker::tests::params(12, 1, &["NDX"]));
+        service.cancel(QueryKey(12));
+        let o = until(&rx, |e| match e {
+            DataEvent::Price(o) if o.key == QueryKey(11) => Some(o),
+            _ => None,
+        });
+        assert_eq!((o.key, o.tag), (QueryKey(11), 4));
+        assert!(o.results[0].2.is_ok());
+        assert!(o.results[1].2.is_err());
+        // No outcome for key 12 within a generous window after key 11's
+        // own arrived — cancel must have stopped it before it ran.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(DataEvent::Price(o)) if o.key == QueryKey(12) => {
+                    panic!("key 12 was cancelled and must not have priced")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_pricing_queue_answers_the_refused_batch_with_an_error_per_line() {
+        // The first key is given a moment to actually start running —
+        // freeing its slot from the WAITING queue — before the rest are
+        // submitted back to back. A margin well beyond `PRICE_BOUND`
+        // (not just one over it) is what makes this robust rather than
+        // a race against the worker's own draining: submitting one
+        // instant faster than the worker can pop-and-start the next
+        // (measured: the worker can drain a handful of keys during a
+        // tight submission loop even at a few milliseconds per line) is
+        // not reliable, but submitting dozens more than fit is.
+        let (_d, service, rx) = local_service_with_delay(Duration::from_millis(20));
+        let bound = crate::pricing::PRICE_BOUND as u64;
+        let first = 100u64;
+        service.price(crate::pricing::worker::tests::params(first, 1, &["SPX"]));
+        std::thread::sleep(Duration::from_millis(50));
+        let rest: Vec<u64> = (first + 1..=first + bound + 20).collect();
+        for &k in &rest {
+            service.price(crate::pricing::worker::tests::params(k, 1, &["SPX"]));
+        }
+        let mut keys = vec![first];
+        keys.extend(&rest);
+        let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        let mut saw_queue_full_error = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while seen.len() < keys.len() && std::time::Instant::now() < deadline {
+            if let Ok(DataEvent::Price(o)) = rx.recv_timeout(Duration::from_secs(5)) {
+                seen.insert(o.key.0);
+                if o.results.iter().any(|(_, _, r)| {
+                    r.as_ref()
+                        .is_err_and(|e| e == "the pricing queue is full; resubmit")
+                }) {
+                    saw_queue_full_error = true;
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            keys.iter().copied().collect(),
+            "every submitted key gets exactly one outcome"
+        );
+        assert!(saw_queue_full_error, "at least one batch was refused");
     }
 
     /// A service with one SUBSCRIBED source (market-data spec §5.4) on an
@@ -2205,6 +2625,7 @@ mod tests {
             sources: vec![spec],
             adapters,
             documents,
+            pricer: PricerConfig::default(),
         })
         .unwrap();
         (dir, feed, service, rx)
@@ -2346,6 +2767,7 @@ mod tests {
             sources: vec![spec],
             adapters,
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
         (dir, calls, service, rx)
@@ -2604,6 +3026,7 @@ mod tests {
             sources: vec![spec],
             adapters,
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
         let health = loop {
@@ -3145,6 +3568,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: Default::default(),
                 documents: Default::default(),
+                pricer: PricerConfig::default(),
             },
             sink,
         )
@@ -3180,6 +3604,7 @@ mod tests {
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .expect("a broken view must not stop the service opening")
         .0
@@ -3432,6 +3857,7 @@ mod tests {
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -3517,6 +3943,7 @@ mod tests {
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -3639,6 +4066,7 @@ mod tests {
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -3718,6 +4146,7 @@ mod tests {
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -3845,6 +4274,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -3939,6 +4369,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -4037,6 +4468,7 @@ source_name = "NPV"
             sources: vec![carried_source(src, poll)],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         }
     }
 
@@ -4920,6 +5352,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -5025,6 +5458,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -5126,6 +5560,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -5247,6 +5682,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -5318,6 +5754,7 @@ source_name = "NPV"
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 
@@ -5373,6 +5810,7 @@ source_name = "NPV"
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            pricer: PricerConfig::default(),
         })
         .unwrap();
 

@@ -7592,6 +7592,50 @@ run_mutation "scope-save: the toolbar only paints the save chip while savable" \
   geode-shell \
   the_save_chip_only_paints_with_a_savable_scope_and_opens_naming
 
+# Toolbar restyle (2026-09-19): the `×` sits INSIDE the chip whose body
+# opens the picker. `occlude()` on the glyph is the ONE mechanism that
+# keeps a click on it from also reaching the body's mouse-down (gpui
+# gates every mouse listener on `hitbox.is_hovered`, and an occluding
+# child's hitbox hides the parent's from the hit test). There is
+# deliberately no `stop_propagation` beside it; without the occlude the
+# drop still happens AND the picker opens.
+run_mutation "toolbar: the × occludes the chip body so a drop does not open the picker" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .occlude()' \
+  '                    .flex_shrink_0()' \
+  geode-shell \
+  the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker
+
+# The AS OF chip is its own segment, parted from the grouping readout
+# by a hairline. Dropping the divider leaves the chip and the readout
+# in one run, the segmentation the restyle exists to paint.
+run_mutation "toolbar: the as-of segment paints its divider" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                .child(divider("scope-divider-asof", theme.title_bar_border))' \
+  '                .child(div())' \
+  geode-shell \
+  the_as_of_chip_leads_the_bar_and_opens_the_selector
+
+# The grouping readout reads "open" (pressed fill, chevron up) only
+# while the grouping picker is up. Pinning the branch to rest leaves a
+# trigger that never shows its popup is open.
+run_mutation "toolbar: the readout's open state follows the grouping picker" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .child(if grouping_open {' \
+  '        .child(if false {' \
+  geode-shell \
+  the_readout_paints_a_chevron_and_reads_open_while_the_picker_is_up
+
+# The text layer's only mouse drop is the field's own clear glyph (the
+# `text "…"` chip is gone). Without `cleanable` the click lands on the
+# field itself and the text stays.
+run_mutation "toolbar: the field's clear glyph drops the text layer" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                        .cleanable(true)' \
+  '                        .cleanable(false)' \
+  geode-shell \
+  the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it
+
 # Review round 1: `begin_naming` clears only `state.query`; a stale
 # browse filter left in the shared `Input` (typed, then `escape`'d back
 # to normal mode, which keeps the query applied) must still be emptied
@@ -13864,6 +13908,205 @@ run_mutation "mdpark: the picker opens while the draft has edits" \
         }' \
   geode-marketdata \
   the_picker_opens_while_the_draft_has_edits
+
+# --- Line pricer Part 1 (2026-09-19): the seam, the worker, the local
+# publish gate, the frame bump and the restart stripe (line-pricer spec
+# §5.3, §5.5, §7.2). ---
+
+run_mutation "pricing: a replacement for a queued key takes a new slot" \
+  crates/geode-data/src/pricing/worker.rs \
+  '        if let Some(slot) = q.pending.get_mut(&key) {
+            *slot = params;
+        } else {' \
+  '        if false {
+        } else {' \
+  geode-data the_queue_is_bounded_by_distinct_keys_and_a_stopped_worker_refuses
+
+run_mutation "pricing: cancel stops a running batch at the line boundary" \
+  crates/geode-data/src/pricing/worker.rs \
+  '                if q.cancel_running || q.shutdown {
+                    break;
+                }' \
+  '                if q.shutdown {
+                    break;
+                }' \
+  geode-data cancel_drops_a_queued_batch_and_stops_a_running_one_at_the_line_boundary
+
+run_mutation "pricing: a panic is contained per line" \
+  crates/geode-data/src/pricing/worker.rs \
+  '                        Err(payload) => {' \
+  '                        Err(payload) => std::panic::resume_unwind(payload),
+                        #[allow(unreachable_patterns)]
+                        Err(payload) => {' \
+  geode-data a_panicking_line_is_that_lines_error_and_the_next_line_prices
+
+run_mutation "pricing: no pricer names the configured one" \
+  crates/geode-data/src/pricing/mod.rs \
+  '            format!("pricer \"{}\" is not built into this binary", self.name)' \
+  '            "no pricer is configured".to_string()' \
+  geode-data no_pricer_answers_every_line_with_the_configured_name
+
+run_mutation "service: a publish to a non-local dataset is written" \
+  crates/geode-data/src/service.rs \
+  '            .is_some_and(|d| d.local);
+        if !local {' \
+  '            .is_some_and(|d| d.local);
+        if false {' \
+  geode-data a_publish_to_a_dataset_that_is_not_local_is_refused_unwritten
+
+run_mutation "service: a local publish reports health for a source nobody declared" \
+  crates/geode-data/src/service.rs \
+  '                    if source == LOCAL_SOURCE {
+                        let _ = sink(DataEvent::LoadEnded);
+                        return delivered;
+                    }' \
+  '' \
+  geode-data a_local_publish_emits_no_health_event_and_a_load_ended
+
+run_mutation "core: local is accepted on a measure dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if ds.local && !ds.is_document() {' \
+  '    if false {' \
+  geode-core local_on_a_measure_dataset_is_an_error_and_cleared
+
+run_mutation "core: a source may feed a local dataset" \
+  crates/geode-core/src/source_config.rs \
+  '                Some(d) if schema.dataset(d).is_some_and(|ds| ds.local) => {' \
+  '                Some(d) if false && schema.dataset(d).is_some_and(|ds| ds.local) => {' \
+  geode-core a_source_naming_a_local_dataset_is_refused
+
+run_mutation "bridge: a local publish bumps the frame" \
+  crates/geode-app/src/bridge.rs \
+  '                        if local_datasets.contains(&dataset) {' \
+  '                        if false {' \
+  geode-app a_local_publish_does_not_bump_the_frames_data_version_but_a_normal_one_does
+
+run_mutation "shell: a Price delivery is routed to the wrong key" \
+  crates/geode-shell/src/module.rs \
+  '            Delivery::Price(outcome) => outcome.key,' \
+  '            Delivery::Price(outcome) => QueryKey(outcome.key.0 + 1),' \
+  geode-shell a_price_delivery_is_routed_by_key_like_a_query
+
+run_mutation "shell: a pricing change needs no restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            if new_config.get("app", "pricing.adapter").cloned() != self.pricing_baseline {' \
+  '            if false {' \
+  geode-shell a_pricing_change_requires_a_restart_and_a_revert_clears_it
+
+# Final-review fix wave: the baseline is narrowed to `pricing.adapter`
+# alone (`refresh` is a live sheet setting from Part 3 onward and must
+# not demand a restart) — reintroducing the whole-`[pricing]`-table read
+# must be caught by the sibling test that adds `refresh` with no
+# `adapter` key.
+run_mutation "shell: a pricing refresh change asks for a restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '"pricing.adapter"' \
+  '"pricing"' \
+  geode-shell a_pricing_refresh_change_needs_no_restart
+
+# Final-review fix wave: a local publish must never blink the ingest
+# progress strip — the runner's document arm skips `Started` (and so
+# `DataEvent::Loading`) when `job.source == LOCAL_SOURCE`. Reinstating
+# the emit must be caught by the extended service-level test.
+run_mutation "runner: a local publish reports Loading" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                if job.source == LOCAL_SOURCE {' \
+  '                if false && job.source == LOCAL_SOURCE {' \
+  geode-data a_local_publish_emits_no_health_event_and_a_load_ended
+
+# Overrides (Task 7b, ruling 1 amended): stateful, batch-scoped. A no-op
+# `set_overrides` proves the worker actually calls the pricer's real
+# method rather than assuming a plain `Ok`, which is what "once per
+# batch, before the first line" (`overrides_are_set_once_per_batch_
+# before_its_first_line`) is really pinning: the seen-list stays empty.
+run_mutation "pricing: overrides are never set" \
+  crates/geode-data/src/pricing/worker.rs \
+  '                    geode_core::panic::contained(|| pricer.set_overrides(&params.overrides))' \
+  '                    geode_core::panic::contained(|| Ok::<(), geode_core::pricing::PricingError>(()))' \
+  geode-data overrides_are_set_once_per_batch_before_its_first_line
+
+run_mutation "pricing: refused overrides still price the batch" \
+  crates/geode-data/src/pricing/worker.rs \
+  '            if let Some(reason) = &overrides_failed {' \
+  '            if let Some(reason) = &overrides_failed && false {' \
+  geode-data refused_overrides_fail_every_line_of_the_batch_and_price_none
+
+run_mutation "mock: a refused override is stored anyway" \
+  crates/geode-pricing/src/lib.rs \
+  '    fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError> {
+        if overrides
+            .spot
+            .values()
+            .any(|s| !(s.is_finite() && *s > 0.0))
+        {
+            return Err(PricingError(
+                "spot override must be a positive finite number".to_string(),
+            ));
+        }
+        *self.overrides.lock().unwrap_or_else(|e| e.into_inner()) = overrides.clone();
+        Ok(())
+    }' \
+  '    fn set_overrides(&self, overrides: &MarketOverrides) -> Result<(), PricingError> {
+        *self.overrides.lock().unwrap_or_else(|e| e.into_inner()) = overrides.clone();
+        if overrides
+            .spot
+            .values()
+            .any(|s| !(s.is_finite() && *s > 0.0))
+        {
+            return Err(PricingError(
+                "spot override must be a positive finite number".to_string(),
+            ));
+        }
+        Ok(())
+    }' \
+  geode-pricing a_non_positive_or_non_finite_spot_override_is_refused_and_the_previous_one_stays
+
+run_mutation "mock: a percent strike uses the strike as its reference spot" \
+  crates/geode-pricing/src/lib.rs \
+  'Strike::Percent(_) => 100.0,' \
+  'Strike::Percent(p) => p,' \
+  geode-pricing a_percent_strike_uses_one_hundred_as_its_reference_spot
+
+run_mutation "service: a refused pricing batch is dropped silently" \
+  crates/geode-data/src/service.rs \
+  '        let _ = (self.sink)(DataEvent::Price(PriceOutcome {
+            key,
+            tag,
+            submitted,
+            results,
+        }));' \
+  '        if false {
+        let _ = (self.sink)(DataEvent::Price(PriceOutcome {
+            key,
+            tag,
+            submitted,
+            results,
+        }));
+        }' \
+  geode-data a_full_pricing_queue_answers_the_refused_batch_with_an_error_per_line
+
+# Review fix (Important 2a): the message text itself is pinned by an
+# exact-equality assertion now, not a `contains`, so a drift in the
+# wording — not just the outcome being dropped — is its own finding.
+run_mutation "service: the queue-full message drifts" \
+  crates/geode-data/src/service.rs \
+  '                    Err("the pricing queue is full; resubmit".to_string()),' \
+  '                    Err("the pricing queue is full".to_string()),' \
+  geode-data a_full_pricing_queue_answers_the_refused_batch_with_an_error_per_line
+
+run_mutation "service: a failed local publish reports health" \
+  crates/geode-data/src/service.rs \
+  '                    if source == LOCAL_SOURCE {
+                        let delivered = sink(DataEvent::Diagnostics(vec![Diagnostic {' \
+  '                    if false && source == LOCAL_SOURCE {
+                        let delivered = sink(DataEvent::Diagnostics(vec![Diagnostic {' \
+  geode-data a_failed_local_publish_is_a_diagnostics_error_and_a_load_ended_with_no_health
+
+run_mutation "service: cancel does not reach the pricing worker" \
+  crates/geode-data/src/service.rs \
+  '        self.pricing.cancel(key);' \
+  '' \
+  geode-data a_price_request_reaches_the_sink_as_a_price_event_and_cancel_reaches_the_worker
 
 # ---- tile stacks (spec 2026-09-19-geode-tile-stacks-design.md)
 #

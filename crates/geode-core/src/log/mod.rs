@@ -7,15 +7,17 @@ use std::time::SystemTime;
 pub use tracing::Level;
 use tracing_subscriber::filter::Targets;
 
-/// The six targets every subscriber layer and `[log]` key name (by
-/// suffix, e.g. `ingest` → `geode::ingest`) know about.
-pub const TARGETS: [&str; 6] = [
+/// The seven targets every subscriber layer and `[log]` key name (by
+/// suffix, e.g. `ingest` → `geode::ingest`) know about. `geode::pricing`
+/// is the pricing worker's (line-pricer spec §10.2).
+pub const TARGETS: [&str; 7] = [
     "geode::ingest",
     "geode::query",
     "geode::config",
     "geode::session",
     "geode::shell",
     "geode::theme",
+    "geode::pricing",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -650,5 +652,21 @@ mod tests {
         // 5 pushes into a 3-slot ring: seq 1 and 2 were overwritten:
         // seq 3 is the oldest survivor.
         assert_eq!(ring.oldest_seq(), Some(3), "wrapped: oldest is at head");
+    }
+
+    #[test]
+    fn pricing_is_a_known_log_target() {
+        assert_eq!(TARGETS.len(), 7);
+        assert!(TARGETS.contains(&"geode::pricing"));
+        let config =
+            crate::config::test_support::config_from("app", "[log]\npricing = \"debug\"\n");
+        let (levels, diags) = LogLevels::from_doc(&config);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            levels
+                .targets
+                .iter()
+                .any(|(t, l)| t == "pricing" && *l == tracing::Level::DEBUG)
+        );
     }
 }

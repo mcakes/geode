@@ -601,6 +601,47 @@ role = "attribute"
             .clone()
     }
 
+    /// A `local = true` document dataset for the publish tests
+    /// (line-pricer spec §7.2): one key, one axis, one value.
+    pub(crate) fn local_dataset() -> DatasetSpec {
+        let text = r#"
+[sheets]
+family = "document"
+local = true
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("sheets").unwrap().clone()
+    }
+
+    /// A `sheets` document: one row per `qty` value, `line` numbered
+    /// from one. An empty `qty` produces a zero-row document, which
+    /// `DocumentRows::validate`'s row floor refuses — the shape the
+    /// failed-local-publish test wants.
+    pub(crate) fn sheet_rows(sheet: &str, qty: &[i64]) -> DocumentRows {
+        DocumentRows {
+            key: vec![sheet.to_string()],
+            attributes: Vec::new(),
+            axes: vec![(
+                "line".to_string(),
+                Column::I64((1..=qty.len() as i64).collect()),
+            )],
+            values: vec![("qty".to_string(), Column::I64(qty.to_vec()))],
+        }
+    }
+
     /// The timeseries spec's one series dataset (§4.2), parsed through
     /// the real reader for the same reason `cvi_dataset` is.
     pub(crate) fn series_dataset() -> DatasetSpec {

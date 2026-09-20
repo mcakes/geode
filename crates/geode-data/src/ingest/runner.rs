@@ -55,6 +55,7 @@ use crate::store::series::{SeriesAppendRequest, SeriesAppended, Span, append_ser
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::document::{DocumentRows, join_key};
+use geode_core::pricing::LOCAL_SOURCE;
 use geode_core::schema::SchemaSpec;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -688,10 +689,18 @@ fn run(
         // detection (there is no file to re-`stat`), no `in_flight` to
         // clear (it was never set), no sentinel. Its `Started` is emitted
         // right here, before the publish, since a document has no stale
-        // check to emit it after.
+        // check to emit it after — except for a local publish
+        // (`LOCAL_SOURCE`, line-pricer §5.5, final-review finding 3): a
+        // sheet autosave must never blink the ingest progress strip, so
+        // its `Started`/`Loading` is skipped entirely. The unconditional
+        // `LoadEnded` the service sends after every publish is untouched
+        // — the strip tolerates a `LoadEnded` with no matching `Started`.
         let item = match work {
             Work::Document(job) => {
-                if !sink(IngestEvent::Started {
+                if job.source == LOCAL_SOURCE {
+                    // no Started/Loading for a local publish — see the
+                    // doc comment above.
+                } else if !sink(IngestEvent::Started {
                     source: job.source.clone(),
                     path: format!("document://{}/{}", job.source, job.dataset),
                     queued,
@@ -1954,6 +1963,36 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        handle.shutdown();
+        let _ = dir;
+    }
+
+    /// line-pricer §5.5, final-review finding 3: a local publish
+    /// (`LOCAL_SOURCE`) must never blink the ingest progress strip — no
+    /// `IngestEvent::Started` for it, though `Published` still fires.
+    /// Reads the raw stream (not `next_event`, which skips `Started` on
+    /// purpose) so an unwanted `Started` cannot hide from the assertion.
+    #[test]
+    fn a_local_publish_emits_no_started() {
+        let (dir, store) = document_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+        let mut local_job = job("cvi_params", spx());
+        local_job.source = geode_core::pricing::LOCAL_SOURCE.into();
+        handle.submit_document(local_job);
+        let mut saw_published = false;
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(10)) {
+            match e {
+                IngestEvent::Started { ref source, .. } if source == "local" => {
+                    panic!("a local publish must not emit Started, got {e:?}")
+                }
+                IngestEvent::Published { .. } => {
+                    saw_published = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_published, "the local publish still reports Published");
         handle.shutdown();
         let _ = dir;
     }

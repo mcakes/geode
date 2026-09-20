@@ -64,7 +64,10 @@ mod watching {
         fn find(&self, _: FindEvent, _: &mut Window, _: &mut App) {}
         fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
             match delivery {
+                // This tile never queries — nothing addressed here.
                 Delivery::Query(_) => {}
+                // This tile never prices — nothing addressed here.
+                Delivery::Price(_) => {}
             }
         }
         fn set_visible(&self, visible: bool, cx: &mut App) {
@@ -1516,6 +1519,55 @@ fn a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other(cx: &mut gpui::
         )),
         "the other tile must not be delivered to: {:?}",
         log.borrow()
+    );
+}
+
+/// `Delivery::Price` (line-pricer spec §5.4) rides the same router:
+/// keyed like a query, delivered to that tile alone.
+#[gpui::test]
+fn a_price_delivery_is_routed_by_key_like_a_query(cx: &mut gpui::TestAppContext) {
+    use crate::module::Delivery;
+    use geode_core::pricing::PriceOutcome;
+    use geode_core::query::QueryKey;
+    use std::time::Instant;
+
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let first = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let second = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::Price(PriceOutcome {
+                    key: QueryKey(second.0),
+                    tag: 7,
+                    submitted: Instant::now(),
+                    results: Vec::new(),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+
+    let log = log.borrow();
+    assert!(
+        log.iter()
+            .any(|r| matches!(r, crate::module::recording::Recorded::Priced(t, 7) if *t == second)),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|r| matches!(r, crate::module::recording::Recorded::Priced(t, _) if *t == first)),
+        "{log:?}"
     );
 }
 

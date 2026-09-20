@@ -268,7 +268,9 @@ mod tests {
             ),
             (
                 ControlInputs::new(theme, Rest::Bare, theme.title_bar, theme.muted_foreground),
-                "scope chip ×",
+                // The grouping readout and the `+`/save verbs (2026-09-19);
+                // the chip's `×` takes the chip pairing above.
+                "bare title-bar glyph",
             ),
             (
                 ControlInputs::new(
@@ -319,6 +321,17 @@ mod tests {
                     theme.secondary_foreground,
                 ),
                 "stack marker (Tone::Neutral on a tile header)",
+            ),
+            (
+                // The toolbar's AS OF chip (2026-09-19): clickable since
+                // the restyle, a `Tone::Warning` chip on the title bar.
+                ControlInputs::new(
+                    theme,
+                    Rest::Filled(theme.warning.opacity(crate::shell::chip::FILL_ALPHA)),
+                    theme.title_bar,
+                    theme.foreground,
+                ),
+                "as-of chip (Tone::Warning on the title bar)",
             ),
         ]
     }

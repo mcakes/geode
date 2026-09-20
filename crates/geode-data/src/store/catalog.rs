@@ -753,6 +753,7 @@ mod tests {
                 categorical: false,
                 role: ColumnRole::Attribute { grain: None },
             }],
+            local: false,
             ..Default::default()
         };
         let conflicts = cat
