@@ -247,9 +247,8 @@ impl AsOfState {
 
     /// `tab`: open the Custom field seeded from the highlighted row's
     /// instant, else the pinned instant, else `now`; on the day segment;
-    /// and move the highlight onto the Custom row (re-showing it if the
-    /// query had filtered it out is not needed: the field is painted in
-    /// its place only while it is painted, so the query is cleared).
+    /// and move the highlight onto the Custom row. The query is cleared
+    /// so the Custom row is always painted while the field is open.
     pub fn open_field(&mut self) {
         let seed = self
             .ranked
@@ -282,6 +281,11 @@ impl AsOfState {
         self.field.as_ref()
     }
 
+    /// The field for editing. Clears a standing DST-gap refusal on every
+    /// call — any further key routed to the field is a fresh attempt, and
+    /// the stale refusal must not keep painting on the Custom row through
+    /// it (`field_refusal` is only ever set again by a `commit` that
+    /// refuses).
     pub fn field_mut(&mut self) -> Option<&mut DateTimeField> {
         self.refusal = None;
         self.field.as_mut()
