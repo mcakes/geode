@@ -651,8 +651,9 @@ fn run(
                 if q.shutdown {
                     return;
                 }
-                // Documents first; `None` means both queues are empty,
-                // which is the only state that announces a drain.
+                // Documents first, then series, then files; `None` means
+                // all three queues are empty, which is the only state
+                // that announces a drain.
                 if let Some(work) = take_work(&mut q) {
                     announced_idle = false;
                     break (work, q.items.len() + q.documents.len() + q.series.len());

@@ -192,12 +192,34 @@ fn append_in_transaction(
     Ok(SeriesAppended { appended, swept })
 }
 
+/// `now` minus `window` in epoch microseconds, or `None` when the window
+/// is not representable there.
+///
+/// `retention`/`history` are user-configured and unbounded in magnitude —
+/// `source_config::parse_duration` accepts `y`, so `"300000000y"` is a
+/// window whose microseconds exceed `i64::MAX`. Cast rather than
+/// converted, such a window wraps NEGATIVE, the cutoff becomes an instant
+/// far in the future, and both of `sweep_pair`'s predicates match every
+/// row: the pair's whole table and its whole coverage, deleted inside the
+/// append's own transaction. `None` means the caller skips that window's
+/// deletes entirely — unbounded is the safe direction, and it is the same
+/// answer `DataService::fetch` gives an unrepresentable window on the
+/// request side (no clip).
+fn cutoff(now: DateTime<Utc>, window: std::time::Duration) -> Option<i64> {
+    i64::try_from(window.as_micros())
+        .ok()
+        .and_then(|w| micros(now).checked_sub(w))
+}
+
 /// The series family's retention (timeseries spec §4.7), for ONE pair,
 /// run inside `append_series`'s transaction with `now` = the append's
 /// `received_at`. `retention` deletes rows that are superseded (a later
 /// `received_at` exists for the same ts) and older than the window; the
 /// live row survives whatever its age. `history` deletes rows and
 /// coverage whose `ts`/`to_ts` are older than the window.
+///
+/// A window whose microseconds do not fit an `i64`, or whose subtraction
+/// leaves the representable range, sweeps NOTHING (see [`cutoff`]).
 ///
 /// A span that is already older than `history` when appended is inserted
 /// and then swept in the same transaction, coverage included, so a
@@ -218,8 +240,9 @@ pub fn sweep_pair(
     };
     let table = series_table(&ds.name);
     let mut swept = 0;
-    if let Some(window) = policy.retention {
-        let cutoff = micros(now) - window.as_micros() as i64;
+    if let Some(window) = policy.retention
+        && let Some(cutoff) = cutoff(now, window)
+    {
         let sql = format!(
             "delete from {table} t where source = ? and series_id = ? \
              and epoch_us(received_at) < ? \
@@ -230,8 +253,9 @@ pub fn sweep_pair(
             .execute(&sql, duckdb::params![source, identity, cutoff])
             .map_err(sql_err(&sql))?;
     }
-    if let Some(window) = policy.history {
-        let cutoff = micros(now) - window.as_micros() as i64;
+    if let Some(window) = policy.history
+        && let Some(cutoff) = cutoff(now, window)
+    {
         let sql =
             format!("delete from {table} where source = ? and series_id = ? and epoch_us(ts) < ?");
         swept += conn
@@ -736,20 +760,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_unbounded_policy_sweeps_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
-        let text = "[series]\nfamily = \"series\"\n";
+    /// A series `DatasetSpec` straight from TOML, for the tests that need
+    /// a retention policy other than `series_dataset()`'s own.
+    fn dataset_from(text: &str) -> DatasetSpec {
         let doc = geode_core::config::merge_docs(
             "datasets",
             &[geode_core::config::LayerDoc::builtin("datasets", text).unwrap()],
         );
-        let ds = geode_core::schema::SchemaSpec::from_doc(&doc)
+        geode_core::schema::SchemaSpec::from_doc(&doc)
             .0
             .dataset("series")
             .unwrap()
-            .clone();
+            .clone()
+    }
+
+    #[test]
+    fn an_unbounded_policy_sweeps_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = dataset_from("[series]\nfamily = \"series\"\n");
         store.apply_schema(&ds).unwrap();
         let a = series_rows("2019-01-05T14:30:00Z", 1, 1.0);
         append(
@@ -769,6 +798,61 @@ mod tests {
         );
         assert_eq!(out.swept, 0);
         assert_eq!(all_rows(&store).len(), 2);
+    }
+
+    /// `parse_duration` accepts `y`, so a trader can configure a window
+    /// whose microseconds exceed `i64::MAX`. Cast rather than converted,
+    /// it wraps negative, the cutoff lands tens of thousands of years in
+    /// the future and BOTH sweeps match every row — the pair's whole
+    /// table and its whole coverage, gone inside the append's own
+    /// transaction. Unrepresentable is unbounded, and unbounded sweeps
+    /// nothing.
+    #[test]
+    fn an_unrepresentable_window_sweeps_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        // 3e8 years is 9.46e21 microseconds; `i64::MAX` is 9.22e18.
+        let ds = dataset_from(
+            "[series]\nfamily = \"series\"\nretention = \"300000000y\"\nhistory = \"300000000y\"\n",
+        );
+        assert!(
+            ds.series_retention
+                .unwrap()
+                .retention
+                .is_some_and(|w| i64::try_from(w.as_micros()).is_err()),
+            "the fixture's window must be the unrepresentable one"
+        );
+        store.apply_schema(&ds).unwrap();
+        let first = series_rows("2026-01-05T14:30:00Z", 1, 100.0);
+        append(
+            &store,
+            &ds,
+            &first,
+            ("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z"),
+            "2026-01-06T09:00:00Z",
+        );
+        // A year later, a correction for the same ts: the first row is
+        // now superseded, which is what the retention sweep deletes.
+        let corrected = series_rows("2026-01-05T14:30:00Z", 1, 101.0);
+        let out = append(
+            &store,
+            &ds,
+            &corrected,
+            ("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z"),
+            "2027-01-06T09:00:00Z",
+        );
+        assert_eq!(out.swept, 0);
+        let got = all_rows(&store);
+        assert_eq!(
+            got.iter().map(|r| r.2).collect::<Vec<_>>(),
+            vec![100.0, 101.0],
+            "both versions survive: {got:?}"
+        );
+        assert_eq!(
+            coverage(store.writer(), "series", "demo_kdb", "SPX.close").unwrap(),
+            vec![sp("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z")],
+            "and so does the coverage"
+        );
     }
 
     fn sp(a: &str, b: &str) -> Span {
@@ -873,6 +957,15 @@ mod tests {
             for w in missing.windows(2) {
                 prop_assert!(w[0].1 <= w[1].0, "missing spans are sorted and disjoint");
             }
+            // The hour-by-hour check above cannot see a missing span that
+            // runs PAST the request: an hour outside it is in neither
+            // loop, so a gap that over-reaches the request's own bounds
+            // (and would be fetched from the vendor, then swept) passes
+            // every assertion here without this one.
+            prop_assert!(
+                missing.iter().all(|(f, t)| *f >= req.0 && *t <= req.1),
+                "missing spans stay inside the request"
+            );
         }
     }
 

@@ -106,10 +106,12 @@ impl Store {
         &self.path
     }
 
-    /// Create the live and archive pair(s) a dataset owns: one per grain
-    /// for the measure family (every grain it declares a measure or an
-    /// attribute at), one for the whole dataset for the document family.
-    /// Idempotent.
+    /// Create the tables a dataset owns, one family at a time: a live and
+    /// archive pair per grain for the measure family (every grain it
+    /// declares a measure or an attribute at), one such pair for the whole
+    /// dataset for the document family, and for the series family no pair
+    /// at all — its one append-only table plus the coverage table beside
+    /// it (timeseries spec §4.4). Idempotent.
     ///
     /// `CREATE TABLE IF NOT EXISTS` never migrates an existing table, so a
     /// dataset whose column set grew since the database was written keeps

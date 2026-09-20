@@ -636,10 +636,11 @@ pub struct DataService {
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
-    /// Field order is drop order. The subscriptions stop receiving first
-    /// (each one's thread submits documents into the runner, so it has to
-    /// stop before the runner does); the pool joins its workers next; the
-    /// scheduler stops submitting after that; then the runner stops, which
+    /// Field order is drop order. The fetch workers stop first and the
+    /// subscriptions stop receiving next (each one's thread submits work
+    /// into the runner, so both have to stop before the runner does); the
+    /// pool joins its workers after them; the scheduler stops submitting
+    /// after that; then the runner stops, which
     /// it does by RETURNING on its stop flag at the top of its loop —
     /// whatever is still queued is dropped unstarted, never drained, which
     /// is the whole reason everything that submits into it is stopped
@@ -655,6 +656,14 @@ pub struct DataService {
     /// version of this comment wrongly called a different drop order a
     /// live bug on the strength of this same detail.
     ///
+    /// `fetchers` is one fetch worker per fetch source (timeseries spec
+    /// §5.4), behind a `Mutex` for the same reason `subscriptions` below
+    /// is. Declared
+    /// BEFORE `subscriptions`, so this declaration order — which is drop
+    /// order — is the order `shutdown` stops the two in as well: a
+    /// worker's outcome sink submits series jobs into `ingest`, so both
+    /// must precede the runner, and the fetchers come first of the two.
+    fetchers: std::sync::Mutex<Vec<FetchWorker>>,
     /// `subscriptions` is one receiver thread per subscribed source
     /// (market-data spec §5.4), behind a `Mutex` only because
     /// `DataService::shutdown` takes `&self` (as every other stop door
@@ -663,13 +672,6 @@ pub struct DataService {
     /// one. It is never contended: only `shutdown` and `Drop` take it,
     /// and `shutdown` is idempotent.
     subscriptions: std::sync::Mutex<Vec<SubscriptionWorker>>,
-    /// One fetch worker per fetch source (timeseries spec §5.4), behind
-    /// a `Mutex` for the same reason `subscriptions` is. Listed BEFORE
-    /// `subscriptions` in stop order (`shutdown` stops these first) and
-    /// here in drop order for the same reason the subscriptions precede
-    /// the runner: a worker's outcome sink submits into `ingest`, so it
-    /// must stop before the runner does.
-    fetchers: std::sync::Mutex<Vec<FetchWorker>>,
     /// What each fetch source last answered `Fetch::catalogue` with,
     /// written by the workers' outcome sinks and read by `catalog`.
     /// Sorted and deduplicated on the way in, so the read is a clone.

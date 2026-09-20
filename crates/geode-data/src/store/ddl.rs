@@ -92,9 +92,12 @@ impl TablePair {
 }
 
 /// Every live/archive pair a dataset owns: one per grain for the measure
-/// family, exactly one for the document family. The single place the two
-/// families' table sets are named, so `apply_schema`, `history_of` and
-/// the sweep's reconciliation cannot drift apart on which tables exist.
+/// family, exactly one for the document family, and NONE for the series
+/// family — a series dataset's own two tables are named by
+/// `store::series` (timeseries spec §4.4) and answered empty here. The
+/// single place all three families' pair sets are named, so
+/// `apply_schema`, `history_of` and the sweep's reconciliation cannot
+/// drift apart on which pairs exist.
 pub fn table_pairs(ds: &DatasetSpec) -> Vec<TablePair> {
     if ds.is_series() {
         // A series dataset has no live/archive pair at all (timeseries
