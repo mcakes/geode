@@ -12339,8 +12339,8 @@ run_mutation "mdtable: a model swap refreshes the table" \
 # column can scroll out of view while the label column is scrolled to.
 run_mutation "mdtable: the cursor mirror skips the label column" \
   crates/geode-marketdata/src/tile.rs \
-  '            t.set_selected_col(MatrixDelegate::table_col(col), cx);' \
-  '            t.set_selected_col(col, cx);' \
+  '                let table_col = d.table_col(col);' \
+  '                let table_col = col;' \
   geode-marketdata \
   the_cursor_never_enters_the_label_column
 
@@ -12356,8 +12356,8 @@ run_mutation "mdtable: the cursor mirror skips the label column" \
 # mutation, and now the only click path there is.
 run_mutation "mdtable: a clicked column is translated back through the label column" \
   crates/geode-marketdata/src/tile.rs \
-  '                this.cursor_to(*row, MatrixDelegate::model_col(*col), cx)' \
-  '                this.cursor_to(*row, Some(*col), cx)' \
+  '                    let col = this.table.read(cx).delegate().model_col(*col);' \
+  '                    let col = Some(*col);' \
   geode-marketdata \
   the_cursor_never_enters_the_label_column
 
@@ -13253,8 +13253,8 @@ run_mutation "mdmenu: the arrow keys move the menu highlight" \
 # column, the double-click moves nothing and opens nothing.
 run_mutation "mdedit: a double-click on a cell opens the editor" \
   crates/geode-marketdata/src/tile.rs \
-  '                    if let Some(col) = MatrixDelegate::model_col(*col) {' \
-  '                    if let Some(col) = MatrixDelegate::model_col(*col).filter(|_| false) {' \
+  '                    if let Some(col) = this.table.read(cx).delegate().model_col(*col) {' \
+  '                    if let Some(col) = this.table.read(cx).delegate().model_col(*col).filter(|_| false) {' \
   geode-marketdata a_double_click_opens_the_editor_on_the_cell
 
 # The strip's half of the same ruling: the second press of a pair on an
@@ -14424,6 +14424,37 @@ run_mutation "tile: a typed text label commits through parse_attr" \
   '                    Ok(value) => attr_text(&value),' \
   '                    Ok(_) => text.trim().to_string(),' \
   geode-marketdata o_on_an_integer_axis_opens_the_text_label_editor
+
+# ---- Hidden row label (2026-09-20): dividend_id is not displayed ----
+
+# The delegate's one flag. Mutated to always show, a `RowLabel::Hidden`
+# spec paints its opaque id in column 0 exactly as before — every cursor
+# and editor test on the CVI fixture still passes, since those specs are
+# `Shown`; only the hidden fixture's column count and first header see it.
+run_mutation "mdhide: a hidden row label withholds the label column" \
+  crates/geode-marketdata/src/delegate.rs \
+  '            label_column: spec.rows.shown(),' \
+  '            label_column: true,' \
+  geode-marketdata a_hidden_row_label_withholds_the_label_column
+
+# `/` searches what is painted. Mutated to search labels whatever the
+# spec says, a find for a status or a date on the dividend panel lands
+# nowhere while a find for the id nobody can see still moves the cursor.
+run_mutation "mdhide: find searches the painted cells under a hidden label" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.spec.rows.shown() {
+            self.model
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()' \
+  '        if true {
+            self.model
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()' \
+  geode-marketdata a_hidden_row_label_withholds_the_label_column
 
 # ---- Task 12: DIVIDEND spec and the second factory ----
 
