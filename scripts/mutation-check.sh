@@ -1764,15 +1764,15 @@ run_mutation "dialogmode: shift+r is not a verb" \
 # builtin binding is left live and the user's file gains nothing.
 run_mutation "keybindings: d shadows the user's own binding instead of removing it" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        is_user_layer: bound.layer == Layer::User,' \
-  '        is_user_layer: false,' \
+  '    let is_user_layer = bound.layer == Layer::User;' \
+  '    let is_user_layer = false;' \
   geode-shell \
   d_on_a_user_layer_binding_removes_it_rather_than_shadowing_it
 
 run_mutation "keybindings: d removes where it should shadow a lower layer" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        is_user_layer: bound.layer == Layer::User,' \
-  '        is_user_layer: true,' \
+  '    let is_user_layer = bound.layer == Layer::User;' \
+  '    let is_user_layer = true;' \
   geode-shell \
   d_unbinds_the_selected_binding
 
@@ -1780,11 +1780,11 @@ run_mutation "keybindings: d removes where it should shadow a lower layer" \
 # it was asked to uncover. The writer is `apply_reset` since 2026-09-19.
 run_mutation "keybindings: r shadows instead of removing the user's override" \
   crates/geode-shell/src/keymap_edit.rs \
-  '        if keys.remove(&o.key).is_some() {
-            removed += 1;
-        }' \
-  '        set_key(keys, o.key.as_str(), value("none"));
-        removed += 1;' \
+  '            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }' \
+  '            set_key(keys, o.key.as_str(), value("none"));
+            removed += 1;' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
 
@@ -1800,13 +1800,35 @@ run_mutation "keymap: a reset misses the none shadow half of a rebind" \
   geode-shell \
   r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow
 
+# A shadow silences the LIVE lower binding on its key. Where the desk
+# re-purposed a builtin key to another action, the user's shadow is the
+# desk action's override; claiming it for the builtin action's row would
+# undo the user's `d` on a different action behind a prompt naming this
+# one, and leave this one exactly as unbound as before.
+run_mutation "keymap: a reset lifts a shadow over a key a lower layer re-purposed" \
+  crates/geode-shell/src/keymap/build.rs \
+  '                    && !lower[i + 1..].iter().any(|later| shadows(later, l))' \
+  '' \
+  geode-shell \
+  a_shadow_over_a_key_a_lower_layer_repurposed_is_the_repurposers_override
+
+# The first branch on its own: every user binding is NOT every action's
+# override. Isolated because the shadow-branch tests all use `"none"`
+# entries and would catch this only by accident.
+run_mutation "keymap: a reset takes another action's user binding" \
+  crates/geode-shell/src/keymap/build.rs \
+  '        let is_override = if b.action == *action {' \
+  '        let is_override = if true {' \
+  geode-shell \
+  a_user_binding_for_another_action_is_not_this_actions_override
+
 # A shadow under another context never reaches the builtin it would have
 # to silence, so it is not this action's override; removing it is
 # removing someone else's binding.
 run_mutation "keymap: a reset takes a shadow from an unrelated context" \
   crates/geode-shell/src/keymap/build.rs \
-  '                    && (b.context_source.is_none() || b.context_source == lower.context_source)' \
-  '                    && true' \
+  '                    && shadows(b, l)' \
+  '                    && l.keystrokes == b.keystrokes' \
   geode-shell \
   a_shadow_in_a_different_context_is_not_this_actions_override
 
@@ -1834,15 +1856,22 @@ run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
 # behind on every miss.
 run_mutation "keymap_edit: a reset creates the entry it was going to remove from" \
   crates/geode-shell/src/keymap_edit.rs \
-  '        let Some(entry) = bindings.iter_mut().find(|entry| {
+  '        for entry in bindings.iter_mut().filter(|entry| {
             entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
-        }) else {
-            continue;
-        };
-        let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
-            continue;
-        };' \
-  '        let keys = keys_table_for(bindings, o.context_source.as_deref());' \
+        }) {
+            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                continue;
+            };
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }' \
+  '        {
+            let keys = keys_table_for(bindings, o.context_source.as_deref());
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
+        }' \
   geode-shell \
   resetting_a_key_that_is_not_there_counts_nothing_and_creates_no_entry
 
@@ -1975,7 +2004,13 @@ run_mutation "keybindings: r cannot lift the user's own none shadow" \
 # the notice BEFORE `run_until_parked` catches it.
 run_mutation "keybindings: d performs its write without acknowledging it" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        .or_else(|| Some(format!("silencing {key} — {way_back}")))
+  '        .or_else(|| {
+            Some(if is_user_layer {
+                format!("removing your {key} binding")
+            } else {
+                format!("silencing {key} — {RECOVERY}")
+            })
+        })
 ' \
   '' \
   geode-shell \
@@ -1999,19 +2034,32 @@ run_mutation "dialog: tab escapes the modal in normal mode" \
   geode-shell \
   tab_in_normal_mode_leaves_focus_on_the_shell_root
 
-# Whole-branch review, Important 2. `RECOVERY` ("press enter and type
-# that key again") is exact only for a binding with NO context; for a
-# contexted one `d`'s `"none"` lands in the contexted entry while the
-# recovery rebind writes the no-context entry, so the promise is false.
-# The mutation restores the single-sentence promise. Nothing about the
-# FILE the write produces changes, so only an assertion on the message
-# for a contexted row catches it.
-run_mutation "keybindings: d promises the retype recovery for a contexted binding" \
+# Since 2026-09-19 the way back from `d` is `r`, for a contexted binding
+# as much as a bare one. The mutation restores the retired retype
+# promise, which for ~60 of ~80 builtins wrote the no-context entry and
+# escalated the binding to global. Nothing about the FILE `d` writes
+# changes, so only an assertion on the message catches it.
+run_mutation "keybindings: d promises the retired retype recovery" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        Some(_) => RECOVERY_CONTEXTED,' \
-  '        Some(_) => RECOVERY,' \
+  '"press r to restore it";' \
+  '"press enter and type that key again to restore it";' \
   geode-shell \
-  d_on_a_contexted_binding_does_not_promise_the_retype_recovery
+  d_on_a_contexted_binding_names_r_as_the_way_back
+
+# `d` on the user's own key REMOVES it, and the removal is
+# `keys.remove(spelling)` on the file: the rendered `alt+y` misses a
+# file that wrote `mod+y`, and the binding stays live with only stderr
+# knowing.
+run_mutation "keybindings: d removes the user's key by its rendered spelling" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    let key = if is_user_layer {
+        bound.key_source.clone()
+    } else {
+        palette::render_binding(&bound.keystrokes)
+    };' \
+  '    let key = palette::render_binding(&bound.keystrokes);' \
+  geode-shell \
+  d_on_a_user_binding_spelled_with_mod_removes_it_by_the_files_spelling
 
 # Whole-branch review, Minor 3, the `r` half. Its success path used to
 # say nothing at all, so a reset whose `apply_unbind` came back

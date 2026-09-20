@@ -1300,7 +1300,20 @@ fn r_on_a_silenced_row_lifts_the_shadow(cx: &mut gpui::TestAppContext) {
          key to name, so the override must come from the keymap"
     );
 
-    vcx.simulate_keystrokes("r y");
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().confirm),
+        Some(keybindings_view::KeybindingConfirm::Reset),
+        "r ARMS on the shadowed row — the set is non-empty even though the row shows no key"
+    );
+    let unchanged = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("still there");
+    assert_eq!(
+        unchanged, USER_KEYMAP_SILENCING_THE_PALETTE,
+        "nothing is written while the question stands"
+    );
+
+    vcx.simulate_keystrokes("y");
     vcx.run_until_parked();
 
     let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
@@ -1375,8 +1388,26 @@ fn r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow(cx: &mut gpui
         Some(Some(keybindings_view::KeybindingConfirm::Reset)),
         "r arms the reset question"
     );
+    let question = shell.read_with(&vcx, |s, _| {
+        let rows = keybindings_view::derive_rows(&s.services.registry, &s.services.keymap);
+        let state = s.keybindings.as_ref().unwrap();
+        let visible = keybindings_view::visible_rows(state, &rows);
+        keybindings_view::confirm_prompt(
+            keybindings_view::KeybindingConfirm::Reset,
+            Some(&rows[visible[state.selected].row]),
+            s.services.keymap.bindings(),
+        )
+    });
+    assert!(
+        question.contains("2 overrides"),
+        "the question counts both halves of the pair: {question}"
+    );
 
     vcx.simulate_keystrokes("y");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("r acknowledges");
+    assert!(notice.contains("2 overrides"), "{notice}");
     vcx.run_until_parked();
     let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
     assert!(
@@ -1600,26 +1631,20 @@ fn d_acknowledges_the_write_immediately_and_names_the_way_back(cx: &mut gpui::Te
         notice.contains(&key),
         "the acknowledgement must name the key it silenced: {notice}"
     );
-    assert!(notice.contains("enter"), "and how to get it back: {notice}");
+    assert!(
+        notice.contains("press r"),
+        "and how to get it back — r lifts the shadow: {notice}"
+    );
     vcx.run_until_parked();
 }
 
-/// Whole-branch review, Important 2. The `enter`-then-retype recovery is
-/// exact only for a binding with NO context. Roughly 60 of the ~80
-/// builtin bindings carry one, and for those `d` writes `"none"` into the
-/// *contexted* entry while the recovery rebind — whose row is unbound by
-/// then, so it passes `context: None` — writes the no-context entry
-/// instead. Different table, not an overwrite: recovery is silently
-/// defeated when array order puts the new entry first, and escalates the
-/// binding from contexted to global even when it appears to work.
-///
-/// The ruling was to fix the HONESTY, not the mechanism (making contexted
-/// recovery work needs the row to carry its pre-shadow context — the same
-/// row-vocabulary change as the parked `suppressed_by` follow-up). So the
-/// contract this pins is negative: on a contexted row the message must
-/// not promise the retype.
+/// Roughly 60 of the ~80 builtin bindings carry a context, and before
+/// 2026-09-19 `d` on one of those could only send the user to
+/// `keymap.toml` (the `enter`-then-retype recovery wrote the no-context
+/// entry). `r` now lifts the shadow from the contexted entry too, so the
+/// acknowledgement names `r` — and neither of the two old doors.
 #[gpui::test]
-fn d_on_a_contexted_binding_does_not_promise_the_retype_recovery(cx: &mut gpui::TestAppContext) {
+fn d_on_a_contexted_binding_names_r_as_the_way_back(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
     let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
     let shell = shell_of(&window, &mut vcx);
@@ -1645,17 +1670,77 @@ fn d_on_a_contexted_binding_does_not_promise_the_retype_recovery(cx: &mut gpui::
         "it must still name the key: {notice}"
     );
     assert!(
-        !notice.contains("type that key again"),
-        "the retype recovery does not hold for a contexted binding — it \
-         writes the no-context entry, leaving the `\"none\"` shadow \
-         standing in the contexted one: {notice}"
+        notice.contains("press r"),
+        "r lifts the shadow from the contexted entry: {notice}"
     );
     assert!(
-        notice.contains("keymap.toml"),
-        "so the message must point at the one way back that does work: \
-         {notice}"
+        !notice.contains("type that key again") && !notice.contains("keymap.toml"),
+        "neither retired door is promised: {notice}"
     );
     vcx.run_until_parked();
+    // That the promise holds for a CONTEXTED shadow is pinned in the pure
+    // layer (`keymap::build::tests::
+    // a_rebind_of_a_builtin_yields_both_halves_of_the_pair`, whose shadow
+    // sits under `context = "workspace"`): a `d`-then-`r` round trip here
+    // would need the ~500ms reload the fixture does not run before the
+    // in-memory keymap sees the file `d` wrote.
+}
+
+/// The user keymap spelled with the `mod` alias, which `render_binding`
+/// does not preserve (`mod+y` parses to alt+y under the default alias and
+/// renders as `alt+y`). A `d` on the user's own binding removes the key
+/// from the file, so it must name it the way the file does.
+const USER_KEYMAP_SPELLED_WITH_MOD: &str =
+    "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n\"mod+y\" = \"palette::toggle\"\n";
+
+fn services_with_a_mod_spelled_user_binding() -> ShellServices {
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: USER_KEYMAP_SPELLED_WITH_MOD.parse().unwrap(),
+    };
+    let (keymap, diags) = build_keymap(&[builtin, user], default_mod(), &services.registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = keymap;
+    services
+}
+
+#[gpui::test]
+fn d_on_a_user_binding_spelled_with_mod_removes_it_by_the_files_spelling(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_SPELLED_WITH_MOD).unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_a_mod_spelled_user_binding(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    select_the_palette_row(&mut vcx);
+    let (_, bound) = selected_row(&shell, &vcx);
+    assert_eq!(
+        bound,
+        Some(("alt+y".to_string(), Layer::User)),
+        "sanity: the row renders the alias resolved, which is not the file's spelling"
+    );
+
+    vcx.simulate_keystrokes("d y");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("d acknowledges");
+    assert!(
+        !notice.contains("press r"),
+        "r cannot restore a removed user key, so d must not promise it: {notice}"
+    );
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("written");
+    assert!(
+        !text.contains("mod+y"),
+        "the user's key is removed under the file's own spelling: {text}"
+    );
+    assert!(!text.contains("none"), "and not shadowed: {text}");
 }
 
 /// Whole-branch review, Minor 3. `d`'s acknowledgement was past tense

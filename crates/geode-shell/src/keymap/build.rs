@@ -226,10 +226,15 @@ pub fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Opti
 /// 1. a user binding whose action IS `action` (a rebind's new key, or a
 ///    binding the user added themselves);
 /// 2. a user `"none"` shadow ([`UNBOUND_ACTION`]) on a keystroke that a
-///    lower layer binds to `action`, under a context that would apply
-///    whenever that lower binding's does — the same context-equality
-///    approximation [`effective_binding`] states (a no-context shadow
-///    silences everything; a contexted one only its own string).
+///    lower layer binds to `action` — and binds LIVE among the lower
+///    layers: a desk entry that re-purposed a builtin key to another
+///    action is what the shadow silences, so the shadow is the desk
+///    action's override, not the builtin action's, and lifting it from
+///    the builtin action's row would undo the user's `d` on a different
+///    action while leaving this one exactly as unbound as before. Both
+///    tests are the same context-equality approximation
+///    [`effective_binding`] states (a no-context shadow silences
+///    everything; a contexted one only its own string).
 ///
 /// A rebind of a builtin writes both kinds at once (`keymap_edit::
 /// apply_rebind`: the new key, then the `"none"` shadow over the old), and
@@ -240,16 +245,16 @@ pub fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Opti
 /// Sorted by `(context_source, key)`, deduplicated, so the same shadow
 /// covering two lower bindings is one removal.
 pub fn user_overrides_for(bindings: &[Binding], action: &ActionId) -> Vec<UserOverride> {
+    let lower: Vec<&Binding> = bindings.iter().filter(|b| b.layer != Layer::User).collect();
     let mut out: Vec<UserOverride> = Vec::new();
     for b in bindings.iter().filter(|b| b.layer == Layer::User) {
         let is_override = if b.action == *action {
             true
         } else if b.action.0 == UNBOUND_ACTION {
-            bindings.iter().any(|lower| {
-                lower.layer != Layer::User
-                    && lower.action == *action
-                    && lower.keystrokes == b.keystrokes
-                    && (b.context_source.is_none() || b.context_source == lower.context_source)
+            lower.iter().enumerate().any(|(i, l)| {
+                l.action == *action
+                    && shadows(b, l)
+                    && !lower[i + 1..].iter().any(|later| shadows(later, l))
             })
         } else {
             false
@@ -272,10 +277,19 @@ pub fn user_overrides_for(bindings: &[Binding], action: &ActionId) -> Vec<UserOv
 /// doc comment for the full reasoning and the stated context-equality
 /// approximation.
 fn is_shadowed(bindings: &[Binding], index: usize, candidate: &Binding) -> bool {
-    bindings[index + 1..].iter().any(|later| {
-        later.keystrokes == candidate.keystrokes
-            && (later.context_source.is_none() || later.context_source == candidate.context_source)
-    })
+    bindings[index + 1..]
+        .iter()
+        .any(|later| shadows(later, candidate))
+}
+
+/// Whether `later`, declared after `candidate`, would take `candidate`'s
+/// keystroke wherever `candidate` applies: the same keystrokes under a
+/// context that is `None` (always active) or string-equal to the
+/// candidate's. The one spelling of the approximation, shared by
+/// [`is_shadowed`] and [`user_overrides_for`].
+fn shadows(later: &Binding, candidate: &Binding) -> bool {
+    later.keystrokes == candidate.keystrokes
+        && (later.context_source.is_none() || later.context_source == candidate.context_source)
 }
 
 #[cfg(test)]
@@ -504,6 +518,46 @@ mod tests {
             "[[bindings]]\ncontext = \"blotter\"\n[bindings.keys]\n\"mod+h\" = \"none\"\n",
         );
         assert!(overrides(&[builtin, user], &focus_left()).is_empty());
+    }
+
+    #[test]
+    fn a_shadow_over_a_key_a_lower_layer_repurposed_is_the_repurposers_override() {
+        // builtin: mod+h = focus_left; desk: mod+h = focus_right (the desk
+        // re-purposed the key); user: mod+h = "none" (a `d` on Focus
+        // right). The shadow silences focus_right — the live lower
+        // binding — so it is focus_right's override and NOT focus_left's:
+        // lifting it from the Focus left row would resurrect focus_right
+        // and leave focus_left as unbound as before.
+        let builtin = doc(
+            Layer::Builtin,
+            "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",
+        );
+        let desk = doc(
+            Layer::Desk,
+            "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_right\"\n",
+        );
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"none\"\n",
+        );
+        let docs = [builtin, desk, user];
+        assert!(overrides(&docs, &focus_left()).is_empty());
+        assert_eq!(
+            overrides(&docs, &ActionId("workspace::focus_right".to_string())),
+            vec![(Some("workspace".to_string()), "mod+h".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_user_binding_for_another_action_is_not_this_actions_override() {
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n\"mod+l\" = \"workspace::focus_right\"\n",
+        );
+        assert_eq!(
+            overrides(&[user], &focus_left()),
+            vec![(None, "mod+h".to_string())]
+        );
     }
 
     #[test]

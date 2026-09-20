@@ -109,7 +109,8 @@ pub enum NormalCommand {
     /// digit — `ctrl+3` is the frame's own regroup chord.
     Digit(u8),
     /// A bare letter the vocabulary does not claim — the surface's own
-    /// verb (`s`, `d`, `r`, `n`).
+    /// verb (`s`, `d`, `r`, `n`) — or the one shifted verb, `shift+r`,
+    /// spelled as the uppercase letter (`Verb('R')`).
     Verb(char),
 }
 

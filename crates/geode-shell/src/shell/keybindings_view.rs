@@ -64,8 +64,9 @@
 //!
 //! Every verb reports in [`KeybindingsState::notice`], a line painted in
 //! the footer and dropped at the next keystroke or click, and uses it to
-//! acknowledge the write *immediately*, naming the key(s) and, for `d`,
-//! the way back ([`recovery`]) — a disk write needs an acknowledgement
+//! acknowledge the write *immediately*, naming the key(s) and, for `d`
+//! on a lower-layer binding, the way back ([`RECOVERY`]: `r`) — a disk
+//! write needs an acknowledgement
 //! that does not wait on the ~500ms reload before the row relabels.
 //! Those acknowledgements are in the present tense ("silencing …",
 //! "removing …") on purpose: the write is on the background executor and
@@ -222,6 +223,11 @@ pub struct BoundKey {
     pub keystrokes: Vec<Keystroke>,
     pub context_source: Option<String>,
     pub layer: Layer,
+    /// The key's spelling in its source document ([`Binding::key_source`]).
+    /// A removal from the USER document must name the key the way that
+    /// file does — `render_binding` says `alt+y` for a file that wrote
+    /// `mod+y`, and `keys.remove("alt+y")` finds nothing.
+    pub key_source: String,
 }
 
 /// One row of the keybinding dialog: one registered action, its palette-
@@ -276,6 +282,7 @@ pub fn derive_rows(registry: &ActionRegistry, keymap: &Keymap) -> Vec<Keybinding
                 keystrokes: b.keystrokes.clone(),
                 context_source: b.context_source.clone(),
                 layer: b.layer,
+                key_source: b.key_source.clone(),
             });
             KeybindingRow {
                 action: def.id.clone(),
@@ -348,7 +355,13 @@ pub fn confirm_prompt(
 }
 
 /// How many keys the user layer binds — what `shift+r` would remove, and
-/// `0` is where it gives its notice unarmed and paints no button.
+/// `0` is where it gives its notice unarmed and paints no button. Counts
+/// PARSED bindings: a user key that failed to parse, or names an unknown
+/// action, is skipped by `build_keymap` with a diagnostic and is not
+/// counted here, though `apply_reset_all` would remove it too. A file
+/// whose only entries are such keys therefore reads as "nothing to
+/// reset" — the diagnostics section names them, and the gap is accepted
+/// over gating a destructive verb on unparsed text.
 pub fn user_binding_count(bindings: &[Binding]) -> usize {
     bindings.iter().filter(|b| b.layer == Layer::User).count()
 }
@@ -1078,10 +1091,16 @@ fn spawn_rebind(
         context: row.current.as_ref().and_then(|b| b.context_source.clone()),
         new_key: palette::render_binding(&new_keystrokes),
         action: row.action.0.clone(),
-        old_key: row
-            .current
-            .as_ref()
-            .map(|b| palette::render_binding(&b.keystrokes)),
+        // A user-layer old key is REMOVED from the user file, so it must
+        // be named by the file's spelling; a lower-layer one is shadowed
+        // under a fresh key, where the rendered spelling is as good.
+        old_key: row.current.as_ref().map(|b| {
+            if b.layer == Layer::User {
+                b.key_source.clone()
+            } else {
+                palette::render_binding(&b.keystrokes)
+            }
+        }),
         old_key_is_user_layer: row.current.as_ref().is_some_and(|b| b.layer == Layer::User),
     };
     cx.background_executor()
@@ -1107,59 +1126,22 @@ fn spawn_rebind(
         .detach();
 }
 
-/// How a silenced binding comes back when the binding carried **no
-/// context**. Exact, not a guess, for exactly that case: `begin_capture`
-/// starts a capture on any row including an unbound one (it only checks
-/// that the list is non-empty), and `apply_rebind`'s step 1 writes
-/// through `set_key`, which *overwrites* an existing `keys` entry in
-/// place — and with no context on either side, both writes land in the
-/// same no-`context` `[[bindings]]` entry, so retyping the original
-/// keystroke replaces the `"none"` this dialog just wrote rather than
-/// appending beside it. `d` is therefore not a one-way door there, which
-/// is why fix round 1 ruled for an acknowledgement instead of a
-/// confirmation prompt: taxing every deliberate unbind to guard against
-/// a recoverable mistake is the worse trade.
+/// How a silenced builtin or desk binding comes back: `r` on the same
+/// row lifts the `"none"` shadow `d` wrote (2026-09-19 —
+/// [`user_overrides_for`] finds the shadow by keystroke and context, so
+/// the row does not need to display a key for `r` to know what to
+/// remove). Exact for a contexted binding as well as a bare one: the
+/// shadow lands in the entry whose `context` is the binding's own, and
+/// that is the context the override set matches on. Before 2026-09-19
+/// the recovery was `enter`-then-retype for a bare binding and "undo it
+/// in keymap.toml" for a contexted one (the retype wrote the no-context
+/// entry, escalating the binding to global); both sentences are gone
+/// because both doors were worse than the one that now opens.
 ///
-/// Use [`recovery`], never this constant directly — most builtin
-/// bindings are contexted, and for those this sentence is false.
-const RECOVERY: &str = "press enter and type that key again to restore it";
-
-/// The way back for a **contexted** binding, which [`RECOVERY`] is not.
-///
-/// Whole-branch review, Important 2. `d` writes its `"none"` into the
-/// `[[bindings]]` entry whose `context` matches the row's
-/// ([`unbind_selected`] passes `bound.context_source`). A recovery
-/// rebind, though, runs on a row that is unbound by then, so
-/// `apply_rebind`'s `Rebind` takes `context: None`
-/// (`row.current.and_then(|b| b.context_source)`) and `set_key` writes
-/// the *no-`context`* entry — a different table, not an overwrite. Two
-/// consequences, both bad enough to stop promising the retype: the
-/// `"none"` shadow survives in the contexted entry, so whether the key
-/// works again is decided by array order (the matcher is last-wins), and
-/// even when it appears to work the binding has been escalated from
-/// contexted to global.
-///
-/// This is the common case, not a corner: roughly 60 of the ~80 builtin
-/// bindings carry a context (`workspace`, `tile`, `blotter && …` in
-/// `crate::defaults`).
-///
-/// Making contexted recovery actually work needs `derive_rows` to carry
-/// the row's pre-shadow context onto the row — the same row-vocabulary
-/// change as the parked "`r` cannot lift a `"none"` shadow" follow-up
-/// (spec §15), and deliberately not built here. Until then the honest
-/// thing is to name the door that does open: the file itself.
-const RECOVERY_CONTEXTED: &str = "undo that in keymap.toml — retyping the key would rebind it \
-                                  globally instead of in that context";
-
-/// Which of the two recovery sentences is true for a binding declared
-/// under `context`. The one place that choice is made, so no call site
-/// can quietly promise the wrong one.
-fn recovery(context: Option<&str>) -> &'static str {
-    match context {
-        None => RECOVERY,
-        Some(_) => RECOVERY_CONTEXTED,
-    }
-}
+/// Not offered for `d` on the USER's own binding: that write removes the
+/// key, and there is no lower entry for `r` to uncover it from — see
+/// [`unbind_selected`].
+const RECOVERY: &str = "press r to restore it";
 
 /// `d`: silence the selected row's currently-effective binding.
 ///
@@ -1181,15 +1163,20 @@ fn recovery(context: Option<&str>) -> &'static str {
 /// the layer travels with the binding from `derive_rows` rather than
 /// being recomputed here from the action id.
 ///
-/// One consequence worth stating, since it makes `d` and `r` coincide on
-/// exactly one kind of row: when the effective binding IS the user's,
-/// `is_user_layer` is `true`, so the write removes the key from the user
-/// entry rather than shadowing it — which silences that keystroke (no
-/// lower layer binds it, or the user would not have been the effective
-/// layer for it) but lets the *action* fall back to whatever lower-layer
-/// binding it has. That is the same removal `r` performs, and it is the
-/// right shape: writing `"none"` over a key the user themselves put
-/// there would leave a self-shadowing entry no reader could explain.
+/// One consequence worth stating: when the effective binding IS the
+/// user's, `is_user_layer` is `true`, so the write removes the key from
+/// the user entry rather than shadowing it — which silences that
+/// keystroke (no lower layer binds it, or the user would not have been
+/// the effective layer for it) but lets the *action* fall back to
+/// whatever lower-layer binding it has. It is the right shape: writing
+/// `"none"` over a key the user themselves put there would leave a
+/// self-shadowing entry no reader could explain. It is NOT the same
+/// write as `r` — `r` removes the action's whole override set (a rebind's
+/// shadow included), this removes one displayed key — and `r` cannot
+/// undo it, since the removed key was the user's and no lower entry
+/// holds it; so this branch's notice does not promise [`RECOVERY`].
+/// The removal names the key by [`BoundKey::key_source`], the file's own
+/// spelling, for the reason that field's doc gives.
 fn unbind_selected(
     row: Option<&KeybindingRow>,
     user_dir: &Option<PathBuf>,
@@ -1202,23 +1189,32 @@ fn unbind_selected(
         // exists to remove.
         return Some(format!("{} is already unbound", row.title));
     };
-    let key = palette::render_binding(&bound.keystrokes);
+    let is_user_layer = bound.layer == Layer::User;
+    let key = if is_user_layer {
+        bound.key_source.clone()
+    } else {
+        palette::render_binding(&bound.keystrokes)
+    };
     let unbind = Unbind {
         context: bound.context_source.clone(),
         key: key.clone(),
-        is_user_layer: bound.layer == Layer::User,
+        is_user_layer,
     };
-    let way_back = recovery(bound.context_source.as_deref());
     spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
         // Present tense on purpose (whole-branch review, Minor 3): the
         // write is still on the background executor and can come back
-        // `removed: false` — a stale row, or a user file that spells the
-        // key differently from `render_binding` — in which case only
-        // stderr ever says so. "silenced" asserted an outcome this
-        // keystroke has not confirmed and cannot wait for (the row does
-        // not relabel until the ~500ms watcher); "silencing" says what
-        // is actually known, which is that the write was dispatched.
-        .or_else(|| Some(format!("silencing {key} — {way_back}")))
+        // `removed: false` — a stale row — in which case only stderr
+        // ever says so. "silenced" asserted an outcome this keystroke
+        // has not confirmed and cannot wait for (the row does not
+        // relabel until the ~500ms watcher); "silencing" says what is
+        // actually known, which is that the write was dispatched.
+        .or_else(|| {
+            Some(if is_user_layer {
+                format!("removing your {key} binding")
+            } else {
+                format!("silencing {key} — {RECOVERY}")
+            })
+        })
 }
 
 /// `r`: remove every user-layer override of the selected row's action, so
@@ -2127,6 +2123,7 @@ mod tests {
                 keystrokes,
                 context_source: None,
                 layer: Layer::Builtin,
+                key_source: "ctrl+h".to_string(),
             }),
             overrides: Vec::new(),
         }

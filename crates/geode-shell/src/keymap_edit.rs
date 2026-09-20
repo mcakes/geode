@@ -290,8 +290,10 @@ pub struct ResetOutcome {
 ///
 /// Unlike [`apply_unbind`], this never creates a `[[bindings]]` entry: a
 /// removal has nothing to write into a missing one, so a context with no
-/// entry is simply a key not found. Entries emptied by the removal are
-/// left in place — a hand-written entry's comments are its owner's.
+/// entry is simply a key not found. Every entry whose `context` matches is
+/// searched (a hand-written file may spell the same context twice;
+/// `keys_table_for` stops at the first). Entries emptied by the removal
+/// are left in place — a hand-written entry's comments are its owner's.
 pub fn apply_reset(user_dir: &Path, overrides: &[UserOverride]) -> Result<ResetOutcome, String> {
     let mut doc = open_doc_with_bindings(user_dir)?;
     let bindings = doc["bindings"]
@@ -300,16 +302,15 @@ pub fn apply_reset(user_dir: &Path, overrides: &[UserOverride]) -> Result<ResetO
 
     let mut removed = 0;
     for o in overrides {
-        let Some(entry) = bindings.iter_mut().find(|entry| {
+        for entry in bindings.iter_mut().filter(|entry| {
             entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
-        }) else {
-            continue;
-        };
-        let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
-            continue;
-        };
-        if keys.remove(&o.key).is_some() {
-            removed += 1;
+        }) {
+            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                continue;
+            };
+            if keys.remove(&o.key).is_some() {
+                removed += 1;
+            }
         }
     }
 
@@ -1169,15 +1170,6 @@ context = \"workspace\"
         assert!(!text.contains("ctrl+k"), "{text}");
     }
 
-    /// Overwriting an already-present key must preserve that key's own
-    /// comment and quoting. Round 1's index-to-insert conversion
-    /// regressed this: `TableLike::insert`'s occupied-entry branch calls
-    /// `entry.key_mut().fmt()`, which resets the key's own formatting —
-    /// stripping a leading comment and reverting custom quoting (e.g.
-    /// `'mod+h'`) to a plain double-quoted key — while indexing
-    /// assignment (what round 1 replaced) touched only the value slot.
-    /// This fires on real paths: overwriting a binding the user already
-    /// has, and the same-key rebind edge case.
     fn user_override(context: Option<&str>, key: &str) -> UserOverride {
         UserOverride {
             context_source: context.map(str::to_string),
@@ -1301,6 +1293,15 @@ context = \"workspace\"
         assert_eq!(read(dir.path()), original);
     }
 
+    /// Overwriting an already-present key must preserve that key's own
+    /// comment and quoting. Round 1's index-to-insert conversion
+    /// regressed this: `TableLike::insert`'s occupied-entry branch calls
+    /// `entry.key_mut().fmt()`, which resets the key's own formatting —
+    /// stripping a leading comment and reverting custom quoting (e.g.
+    /// `'mod+h'`) to a plain double-quoted key — while indexing
+    /// assignment (what round 1 replaced) touched only the value slot.
+    /// This fires on real paths: overwriting a binding the user already
+    /// has, and the same-key rebind edge case.
     #[test]
     fn overwriting_an_existing_key_preserves_its_comment_and_quoting() {
         let dir = tempfile::tempdir().unwrap();
