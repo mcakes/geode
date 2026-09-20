@@ -143,6 +143,14 @@ pub struct BlotterTile {
     /// Both empty while `Follow`.
     asof_chip: SharedString,
     asof_tip: SharedString,
+    /// The LOCAL date `asof_chip`/`asof_tip` were built for (review round
+    /// 1, Important: the date-elided `AS OF HH:MM` form must not outlive
+    /// its day). `render` compares this against today before painting and
+    /// rebuilds through `refresh_asof_chip` on a mismatch, so a session
+    /// pinned across local midnight does not keep claiming "today" for an
+    /// instant that no longer is. Meaningless while `Follow` (never read
+    /// then — the chip strings are empty and nothing paints).
+    pub(crate) asof_chip_date: chrono::NaiveDate,
     /// `"tip-blotter-asof-{id}"`, built once.
     asof_tip_selector: SharedString,
     tile_scope: Scope,
@@ -306,6 +314,7 @@ impl BlotterTile {
             },
         };
         let (asof_chip, asof_tip) = Self::asof_chip_strings(&tile_as_of);
+        let asof_chip_date = chrono::Local::now().date_naive();
         let asof_tip_selector: SharedString = format!("tip-blotter-asof-{}", tile.0).into();
         let unscoped_tip_selector: SharedString = format!("tip-blotter-unscoped-{}", tile.0).into();
         let filter_tip_selector: SharedString = format!("tip-blotter-filtered-{}", tile.0).into();
@@ -374,6 +383,7 @@ impl BlotterTile {
             tile_as_of,
             asof_chip,
             asof_tip,
+            asof_chip_date,
             asof_tip_selector,
             tile_scope,
             filter_tip,
@@ -462,16 +472,27 @@ impl BlotterTile {
         }
     }
 
+    /// Rebuilds `asof_chip`/`asof_tip`/`asof_chip_date` from `tile_as_of`
+    /// — the one door: called whenever `tile_as_of` changes
+    /// (`set_tile_as_of`) and lazily by `render` when the local date has
+    /// rolled over since the cache was last built (review round 1,
+    /// Important: the date-elided `AS OF HH:MM` form must not outlive its
+    /// day).
+    fn refresh_asof_chip(&mut self) {
+        let (chip, tip) = Self::asof_chip_strings(&self.tile_as_of);
+        self.asof_chip = chip;
+        self.asof_tip = tip;
+        self.asof_chip_date = chrono::Local::now().date_naive();
+    }
+
     /// Change the as-of override; `true` when it changed. The one door,
     /// so Task 3's chip cache cannot go stale.
     fn set_tile_as_of(&mut self, next: TileAsOf) -> bool {
         if self.tile_as_of == next {
             return false;
         }
-        let (chip, tip) = Self::asof_chip_strings(&next);
-        self.asof_chip = chip;
-        self.asof_tip = tip;
         self.tile_as_of = next;
+        self.refresh_asof_chip();
         true
     }
 
@@ -1344,6 +1365,16 @@ impl gpui::Render for BlotterTile {
             let micros = at.elapsed().as_micros() as u64;
             self.frame
                 .update(cx, |f, _| f.requery.record_snapshot_to_paint(micros));
+        }
+        // Midnight rollover (review round 1, Important): a tile pinned to
+        // a today-instant that stays open past local midnight must not
+        // keep painting the date-elided `AS OF HH:MM` form as if it were
+        // still today — one date read per render, an allocation only on
+        // the day it actually rolls over.
+        if matches!(self.tile_as_of, TileAsOf::Pinned(AsOf::At(_)))
+            && chrono::Local::now().date_naive() != self.asof_chip_date
+        {
+            self.refresh_asof_chip();
         }
         let theme = cx.theme();
         let delegate = self.table.read(cx).delegate();
@@ -3049,6 +3080,51 @@ mod tests {
             TileAsOf::Follow,
             "a malformed value follows the frame"
         );
+    }
+
+    /// The pinned chip is a per-render date guard, not just a per-
+    /// mutation cache (review round 1, Important): a stale
+    /// `asof_chip_date` (as if the cache was last built yesterday) is
+    /// corrected on the very next draw, so the elided `AS OF HH:MM` form
+    /// cannot survive into a day it no longer describes.
+    #[gpui::test]
+    fn the_pinned_chip_is_rebuilt_when_the_local_date_rolls_over(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let at = h.tile.read_with(&cx, |t, _| match &t.tile_as_of {
+            TileAsOf::Pinned(AsOf::At(at)) => *at,
+            other => panic!("expected a pinned instant, got {other:?}"),
+        });
+
+        // Back-date the cache as if it were last built yesterday — the
+        // guard must notice on the very next render.
+        h.tile.update(&mut cx, |t, _| {
+            t.asof_chip_date = t.asof_chip_date.pred_opt().unwrap();
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let today = chrono::Local::now().date_naive();
+        h.tile.read_with(&cx, |t, _| {
+            assert_eq!(t.asof_chip_date, today, "the guard rebuilt today's date");
+            assert_eq!(
+                t.asof_chip.to_string(),
+                pinned_chip_text(at, chrono::Utc::now()),
+                "and the chip text with it"
+            );
+        });
     }
 
     /// The refusals (spec §5) reach the trader as the parser's message,
