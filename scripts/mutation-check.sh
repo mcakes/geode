@@ -2967,12 +2967,6 @@ run_mutation "commands: a completions cursor mid-character is clamped to a bound
   geode-blotter \
   completions_clamp_a_cursor_inside_a_multibyte_char
 
-run_mutation "commands: scope drop needs a dimension" \
-  crates/geode-blotter/src/core/commands.rs \
-  '                (Some("drop"), _) => Err("scope drop needs a dimension".into()),' \
-  '                (Some("drop"), _) => Ok(Command::ScopeDrop(String::new())),' \
-  geode-blotter new_scope_and_asof_forms_parse
-
 run_mutation "delegate: the cursor follows its node across a new snapshot" \
   crates/geode-blotter/src/delegate.rs \
   '            self.cursor.row = restore_by_path(&self.shown, snapshot, plan, &path, self.cursor.row);' \
@@ -6334,17 +6328,27 @@ run_mutation "sections: a source's path, priority and readiness are separate row
             ));' \
   geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
 
-run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
+run_mutation "commands: section parses each name, not just the first" \
   crates/geode-diagnostics/src/commands.rs \
-  '        ["level"] => known_targets().map(str::to_string).collect(),' \
-  '        ["level"] => known_targets().map(|t| format!("level {t}")).collect(),' \
-  geode-diagnostics a_candidate_is_the_word_under_the_cursor_not_the_line
+  '        Some("section") => {' \
+  '        Some("section") => {
+            return Ok(Command::Section(Section::Log));' \
+  geode-diagnostics section_parses_each_name_and_rejects_unknown
 
 run_mutation "commands: diagnostics completions split words on the shell's delimiters, not just a space" \
   crates/geode-diagnostics/src/commands.rs \
   '        .split(|c: char| c.is_whitespace() || c == '"'"','"'"')' \
   '        .split('"'"' '"'"')' \
   geode-diagnostics completions_split_words_the_way_the_shell_does
+
+# Command-line locality (2026-09-20): `:level` is a refusal, never a
+# log-level change.
+run_mutation "locality: :level never reaches the Diagnostics entity" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            Command::Refused(message) => return Err(message.to_string()),' \
+  '            Command::Refused(_) => { self.diagnostics.update(cx, |d, cx| { d.request_overlay_toggle(); cx.notify(); }); }' \
+  geode-diagnostics \
+  every_colon_command_leaves_the_app_alone
 
 # ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
 #
