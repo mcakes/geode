@@ -1998,10 +1998,11 @@ impl DataService {
         {
             worker.shutdown();
         }
-        // Subscriptions first: each one's receiver thread submits
-        // documents into the ingest runner, so stopping the runner while
-        // a worker is still delivering would leave work queued behind a
-        // shut-down consumer.
+        // Then the subscriptions, for the same reason as the fetch
+        // workers above: each one's receiver thread submits documents
+        // into the ingest runner, so stopping the runner while a worker
+        // is still delivering would leave work queued behind a shut-down
+        // consumer.
         for worker in self
             .subscriptions
             .lock()

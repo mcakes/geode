@@ -48,10 +48,10 @@ pub struct SourceSummary {
     /// described every source as a directory one — it had only `paths`
     /// and `readiness` to go on, and a subscribed source has neither.
     pub adapter: String,
-    /// The topic patterns a subscribed source subscribes to, and EMPTY
-    /// for a directory source — which is how a reader tells the two
-    /// apart (a subscribed source is refused at load without at least
-    /// one topic).
+    /// The topic patterns a subscribed source subscribes to; empty for a
+    /// directory or a fetch source. Never how a reader tells the shapes
+    /// apart — `shape` below is (a subscribed source is refused at load
+    /// without at least one topic, but a fetch source has none by design).
     pub topics: Vec<String>,
     /// Which of the three pipelines this source rides. `SourceSpec::
     /// shape` is the one answer, but it needs the `SchemaSpec` (a fetch
