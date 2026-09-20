@@ -32,6 +32,9 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         | "dimensions" => Some(1),
         // colours (Part 2c §2.1): one named colour per table
         "colours" => Some(1),
+        // pricer_views (line-pricer spec §6.5): one table per view name,
+        // like `views` — a desk or user layer overrides a view whole.
+        "pricer_views" => Some(1),
         // `overrides` (4c §19.6): one entry per forked object, keyed
         // "<doc>.<object>"; user layer only.
         "overrides" => Some(1),
@@ -194,6 +197,22 @@ mod tests {
         );
         assert_eq!(merged.provenance.get("keymap.mod"), Some(&Layer::User));
         assert_eq!(merged.provenance.get("theme.name"), Some(&Layer::Builtin));
+    }
+
+    #[test]
+    fn pricer_views_is_atomic_by_view_name() {
+        let desk =
+            LayerDoc::builtin("pricer_views", "[v]\ncolumns = [\"qty\", \"price\"]\n").unwrap();
+        let mut user = LayerDoc::builtin("pricer_views", "[v]\ncolumns = [\"delta\"]\n").unwrap();
+        user.layer = Layer::User;
+        let merged = merge_docs("pricer_views", &[desk, user]);
+        let cols = merged.value["v"]["columns"].as_array().unwrap();
+        assert_eq!(
+            cols.len(),
+            1,
+            "the user's view replaced the desk's whole: {cols:?}"
+        );
+        assert_eq!(merged.provenance.get("v"), Some(&Layer::User));
     }
 
     #[test]
