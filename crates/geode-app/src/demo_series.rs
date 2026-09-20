@@ -183,6 +183,56 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
+    /// A characterisation test: these are whatever the walk produced when
+    /// it was written. A change here means the generator changed and
+    /// every --demo chart looks different — update the values
+    /// deliberately, never to make a refactor pass.
+    ///
+    /// The sanity band below is wider than a naive "close to the
+    /// identity's level" guess: `EPOCH` is 2020-01-06 and this pins
+    /// 2026-01-05, about 1,565 weekdays later, and `SPX.close`'s own
+    /// `drift` (0.0003/weekday) alone compounds that gap to
+    /// `exp(1565 * 0.0003) ≈ 1.6×` the level (5600.0) before the random
+    /// walk contributes anything — so a tight ±20% band would fail on
+    /// correct code. What a wide-but-real band still catches: a swapped
+    /// `drift`/`vol` (`SPX.close`'s `vol` is 0.010; used as a per-day
+    /// drift it compounds to `exp(1565 * 0.010) ≈ e^15.65`, many orders
+    /// of magnitude off) or a dropped `sqrt(BARS_PER_DAY)` divisor on the
+    /// intraday step (which would blow up every bar-to-bar move, not
+    /// just this one bar's level).
+    #[test]
+    fn the_first_bars_of_spx_for_seed_42_are_pinned() {
+        let rows = bars(
+            42,
+            "SPX.close",
+            t("2026-01-05T00:00:00Z"),
+            t("2026-01-06T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(rows.ts[0], t("2026-01-05T14:30:00Z"));
+        let expected_v0 = 10138.916524726075_f64;
+        let expected_v1 = 10142.944253043792_f64;
+        assert!(
+            (rows.value[0] - expected_v0).abs() < 1e-6,
+            "v0 = {}",
+            rows.value[0]
+        );
+        assert!(
+            (rows.value[1] - expected_v1).abs() < 1e-6,
+            "v1 = {}",
+            rows.value[1]
+        );
+        let level = 5600.0_f64;
+        for v in [rows.value[0], rows.value[1]] {
+            assert!(
+                (0.5 * level..3.0 * level).contains(&v),
+                "SPX.close bar {v} is not within a sane multiple of its level {level} — \
+                 a magnitude bug (a swapped drift/vol, a dropped sqrt divisor) would fail \
+                 this; six years of legitimate compounding drift would not"
+            );
+        }
+    }
+
     #[test]
     fn the_same_span_always_yields_the_same_bars() {
         let a = bars(
