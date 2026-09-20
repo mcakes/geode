@@ -532,6 +532,57 @@ underlying picker, key, drafts-per-underlying, update policy, session
 and header carry over untouched. The row-label column paints the id —
 the honest identity for an index schedule; a minted row reads `new-1`.
 
+### 6.6 As built (2026-09-19)
+
+Tasks 1–12 of `docs/superpowers/plans/2026-09-19-dividend-schedule.md`.
+§4–§6 above shipped as drafted, with three refinements the plan's own
+review rounds settled and this note records as rulings:
+
+- **§5.3's anchor rule is sharper than drafted.** The draft text said
+  `o` "anchors on the cursor row" and `shift+o` "anchors on the row
+  painted above it" without saying what happens to a follower already
+  hanging off either row. The controller ruling (Task 7, refined by
+  Task 8's review): an anchor may itself be an inserted row, and
+  `Draft::rehang_followers`/`reanchor_row` are the one mechanism for
+  moving a follower, used in both directions — `o` on a row re-hangs
+  that row's EXISTING follower onto the new row before anchoring the
+  new row on the cursor, so the new row lands IMMEDIATELY below the
+  cursor rather than beside its earlier sibling in label order (where a
+  later rename would re-sort the pair); `shift+o` on an inserted row
+  takes that row's own anchor and re-anchors the row onto the new one,
+  so a chain paints new-above-old; and `delete_row` on a dropped
+  `Inserted` row hands its followers to ITS OWN anchor rather than to
+  the top. Without this, `o` then `shift+o` under one anchor could not
+  land `[D1, new-2, new-1, D2]` in that painted order (Task 7's own
+  note to Task 8).
+- **§6.3's status rule is applied at creation, not deferred to
+  republish.** The drafted generator description left status
+  ambiguous about when the past/near/far rule first applies; the
+  review ruling (Task 10) is that `new_row` applies the full three-way
+  rule (past → `paid`, within 30 days → `declared`, else `estimated`,
+  one in twenty `cancelled`) at CREATION, so a fresh panel's first
+  document is never dishonestly `estimated` on a near-dated row.
+  `republish`'s own promotion step is narrowed to what creation's
+  static rule cannot do — every THIRD republish promotes the single
+  nearest-dated `estimated` row to `declared` — rather than "each
+  republish promotes one estimated row" as §6.3 first said.
+- **A restored or update-policy rebase runs against a clean model**,
+  never the tile's own painted `self.model` — which already carries
+  the draft's own spliced-in rows and would read each inserted row as
+  a document row the newer generation "now carries" (a phantom
+  conflict) and key a cell edit by its post-splice position rather
+  than the document position `Draft::edits` holds. One extra
+  `MatrixModel::build(snapshot, spec, &Draft::default())`, once per
+  restore or rebase, never per delivery — not specified in §5.4, since
+  the trap only surfaces once row edits exist to be misread this way.
+
+`Draft::rebase`'s row handling from §5.1 shipped exactly as drafted
+(a vanished anchor re-anchors to the top and is named; an `Inserted`
+label the newer document now carries is dropped as a conflict), with
+one added case the review found: a row anchored on ANOTHER surviving
+inserted row must keep that anchor rather than being re-anchored to the
+top on a spurious "dropped" report (Task 7's review).
+
 ## 7. Amendments to earlier specs
 
 - **Market-data documents design §3 / §6:** a document `value` may be
