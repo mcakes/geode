@@ -271,8 +271,8 @@ records the archive growth rate at the demo cadence.
   it**), and requires every key column to be `utf8` (error at
   `{ds}.key`, dataset dropped: the key is joined into the `batch
   VARCHAR` column by `join_key` and bound back as `Value::Text`, so any
-  other declared type compiles and selects nothing). Widen the refusal
-  further only when a THIRD type joins `Column`/`Value`.
+  other declared type compiles and selects nothing). Widen it only when
+  `Column`/`Value` gain a type.
 - The catalog's `live_rows`/`archive_rows` are summed over
   `store::ddl::table_pairs(ds)`, not `ds.grains()`: a document dataset
   has no grain and reported 0 rows beside a real list of live
@@ -1092,13 +1092,21 @@ underlying at all. Tests: `parked_drafts_ride_the_session`,
     draft)`, which re-prepares that ONE cell's text, value and state
     (identical to what a rebuild would paint there, on both shapes;
     `patch_cell_matches_a_rebuild`/`_under_a_pivot`/`_with_rows_spliced`
-    prove it) instead of calling `rebuild_model`. `commit_edit` and
-    `:bump` both go through it now, so the flat build's 8.18 ms is a
-    per-delivery and per-row-edit cost only — row insert/delete and a
-    delivery still rebuild wholesale — never a per-keystroke one; the
-    dividend-schedule design's own `docs/perf.md` numbers for
-    `patch_cell` at both shapes, and for `build` with 100 rows spliced
-    in, are what replaces the "not yet built" reading here.
+    prove it) instead of calling `rebuild_model` — but **only for a
+    cell commit** (`MarketDataTile::commit_cell_value`, `patch_cell`'s
+    one production call site). `:bump` still calls `rebuild_model`
+    unconditionally (controller ruling: a row or column bump touches
+    many cells at once, so `Draft::bump` and one model rebuild together
+    in a single call is what shipped here — patching each touched cell
+    individually is a perf follow-up, not this plan's), and so do row
+    insert/delete and a delivery, as before. So the flat build's 8.18 ms
+    is no longer a per-CELL-COMMIT cost, but it is still a per-`:bump`,
+    per-row-edit and per-delivery one — a column `:bump` on a
+    10,000-row schedule pays the full flat-build cost exactly as a
+    delivery does. The dividend-schedule design's own `docs/perf.md`
+    numbers for `patch_cell` at both shapes, and for `build` with 100
+    rows spliced in, are what replaces the "not yet built" reading
+    here.
 14. **`MarketDataTile` answers the flip barrier honestly, in the
     blotter's own shape**, which §8.2/§8.6 did not specify:
     `self_arrive` on a change it does not requery for, staging a

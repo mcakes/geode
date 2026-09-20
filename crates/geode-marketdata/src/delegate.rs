@@ -60,9 +60,13 @@ pub(crate) const LABEL_COL: usize = 0;
 /// What the tile's open editor looks like from the delegate: which cell it
 /// sits in (`col: None` is the row-label column, Task 8's row-label
 /// editor — built into the type and painted by `render_td`'s label arm
-/// now so the two arms cannot drift, though nothing opens it yet) and what
-/// to paint there — the text `Input`, or the segmented date field's
-/// prepared segments plus the focus handle its keys route through.
+/// through the same `render_editor` a value cell's editor uses, so the
+/// two arms cannot drift. `MarketDataTile::begin_label_edit` opens it on
+/// `o`/`shift+o` for a `RowIdentity::Typed` axis — CVI's `term`, a
+/// `Date` — landing on today's local date; `commit_row_label` renames
+/// the provisional row and opens its first cell) and what to paint
+/// there — the text `Input`, or the segmented date field's prepared
+/// segments plus the focus handle its keys route through.
 ///
 /// A paint-time COPY, like the cursor mirror beside it: the tile's
 /// `Editing` is the truth, and `MarketDataTile::sync_cursor`/`sync_editor`
