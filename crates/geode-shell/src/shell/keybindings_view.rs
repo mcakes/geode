@@ -28,46 +28,63 @@
 //! own doc comment for why claiming, not just ignoring, is what actually
 //! makes them inert).
 //!
-//! ## The two verbs (spec §8)
+//! ## The three verbs (spec §8, §20.1; reset-all 2026-09-19)
 //!
-//! `d` **unbinds** the selected row's currently-effective binding and
-//! `r` **resets** it — the capability that could not exist while the
-//! filter owned every letter, and the reason this dialog went modal at
-//! all. Both write through [`crate::keymap_edit::apply_unbind`], which
-//! only ever edits the *user* layer, so the two verbs differ exactly
-//! where the layers do:
+//! `d` **unbinds** the selected row's currently-effective binding, `r`
+//! **resets** the row's action to what the layers beneath say, and
+//! `shift+r` **resets every action** — the capability that could not exist
+//! while the filter owned every letter, and the reason this dialog went
+//! modal at all. All three write only the *user* layer
+//! (`crate::keymap_edit`), so they differ exactly where the layers do:
 //!
 //! - a binding from builtin or desk cannot be removed, so `d` silences
-//!   it with the documented `"none"` shadow in the user entry;
-//! - a binding that IS the user's own is removed outright, which is also
-//!   the whole of what `r` does — `r` is the removal branch on its own,
-//!   guarded by the row's binding actually coming from the user layer.
+//!   it with the documented `"none"` shadow in the user entry
+//!   ([`crate::keymap_edit::apply_unbind`]); a binding that IS the user's
+//!   own is removed outright. Which branch is decided by
+//!   [`BoundKey::layer`], carried onto the row by [`derive_rows`] from the
+//!   very [`Binding`] the row displays — never re-inferred at the call
+//!   site. See [`unbind_selected`] for why getting that backwards is
+//!   destructive in two different directions;
+//! - `r` removes **every** user-layer entry that overrides the row's
+//!   action ([`KeybindingRow::overrides`], from
+//!   [`crate::keymap::user_overrides_for`] over the whole keymap): a
+//!   rebind's new key AND the `"none"` shadow the rebind left over the
+//!   old one, or the bare shadow a `d` left. This is not the row's
+//!   displayed binding — that is `None` on a shadowed row and only the new
+//!   key on a rebound one, and a reset that read it (the rule before
+//!   2026-09-19) removed the new key alone and left the action *unbound*
+//!   rather than reset. One [`crate::keymap_edit::apply_reset`] write,
+//!   keyed by the file's own key spelling ([`Binding::key_source`]), so
+//!   `mod+h` is removed as `mod+h`, not as the `alt+h` it renders to;
+//! - `shift+r` drops every `[[bindings]]` entry from the user keymap
+//!   ([`crate::keymap_edit::apply_reset_all`]) — dialog-written and
+//!   hand-written alike, by user ruling, since nothing tells them apart —
+//!   and leaves the rest of the file (`config_version`, `mod`, comments
+//!   outside the entries) as it was. Desk and builtin are never touched.
 //!
-//! Which branch a write takes is decided by [`BoundKey::layer`], carried
-//! onto the row by [`derive_rows`] from the very [`Binding`] the row
-//! displays — never re-inferred at the call site. See
-//! [`unbind_selected`] for why getting that backwards is destructive in
-//! two different directions.
+//! Every verb reports in [`KeybindingsState::notice`], a line painted in
+//! the footer and dropped at the next keystroke or click, and uses it to
+//! acknowledge the write *immediately*, naming the key(s) and, for `d`,
+//! the way back ([`recovery`]) — a disk write needs an acknowledgement
+//! that does not wait on the ~500ms reload before the row relabels.
+//! Those acknowledgements are in the present tense ("silencing …",
+//! "removing …") on purpose: the write is on the background executor and
+//! can still come back short, so a completed tense would assert an
+//! outcome the dialog has not confirmed. A verb that finds nothing to do
+//! writes nothing and says that instead — `r` on a row with no user
+//! override, `shift+r` with no user bindings. A key that visibly does
+//! nothing is the defect class this interaction model exists to remove,
+//! so "nothing happened" is stated in the footer rather than left to be
+//! inferred from an unchanged screen.
 //!
-//! Both verbs report in [`KeybindingsState::notice`], a line painted in
-//! the footer and dropped at the next keystroke or click. Both use it to
-//! acknowledge the write *immediately*, naming the key and the way back
-//! ([`recovery`]) — one bare, unmodified key performing a disk write
-//! needs an acknowledgement that does not wait on the ~500ms reload
-//! before the row relabels. Those acknowledgements are in the present
-//! tense ("silencing …", "removing …") on purpose: the write is on the
-//! background executor and can still come back `removed: false`, so a
-//! completed tense would assert an outcome the dialog has not confirmed.
-//! A verb that finds nothing to do writes nothing and says that instead.
-//! A key that visibly does nothing is the defect class this interaction
-//! model exists to remove, so "nothing happened" is stated in the footer
-//! rather than left to be inferred from an unchanged screen.
-//!
-//! Neither verb prompts for confirmation. `d` is recoverable — in the
-//! dialog itself for a binding with no context ([`RECOVERY`]), by hand
-//! in `keymap.toml` for a contexted one ([`RECOVERY_CONTEXTED`], the
-//! common case) — so a confirm step would tax every deliberate unbind to
-//! guard against a mistake that can be undone.
+//! Each verb asks first where it would write ([`KeybindingConfirm`],
+//! spec §20.1: `y`/`enter` or the yes button; `n`/`escape` withdraws),
+//! and is unarmed — notice only — where it would not. The question is
+//! [`confirm_prompt`]'s sentence, from the row and the live keymap, so
+//! `r` names the key it removes (or how many) and `shift+r` the count.
+//! The action bar paints each verb as a button only while it can act:
+//! `d` on a bound row, `r` on a row with overrides, `shift+r` while the
+//! user layer binds anything.
 //!
 //! `escape` walks the ladder of [`crate::dialogmode::escape_step`], one
 //! visible change per press: filter → normal (keeping the query
