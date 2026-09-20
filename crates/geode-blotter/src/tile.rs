@@ -2,7 +2,7 @@
 //! submits keyed queries through `DataHandle`, applies outcomes, records
 //! timing, and paints the header strip, the table, and the footer.
 
-use crate::core::commands::{Command, Vocabulary, completions, parse, parse_as_of};
+use crate::core::commands::{AsOfArg, Command, Vocabulary, completions, parse, parse_as_of};
 use crate::core::cursor::{Mode, selection};
 use crate::core::find::FindState;
 use crate::core::flatten::{SortOrder, SortSpec};
@@ -92,6 +92,18 @@ pub enum Pin {
     Slot(u8),
 }
 
+/// The tile's as-of (command-line locality spec §3): the third override
+/// beside [`Pin`] (grouping) and `tile_scope`/`unscoped` (scope). A
+/// pinned tile queries at its own instant and does not follow the
+/// frame's `as_of` counter; `:asof clear` returns it to `Follow`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TileAsOf {
+    /// Query at the frame's as-of; requery when it changes.
+    Follow,
+    /// Query at this instant regardless of the frame.
+    Pinned(AsOf),
+}
+
 pub struct BlotterTile {
     tile: TileId,
     frame: Entity<Frame>,
@@ -122,6 +134,9 @@ pub struct BlotterTile {
     /// unscoped-{id}"`), built once here since it depends only on the
     /// tile id, never per render.
     unscoped_tip_selector: SharedString,
+    /// The as-of override (spec §3.1); `Follow` on a fresh tile. Tests
+    /// read it directly, the way they read `pin`.
+    pub(crate) tile_as_of: TileAsOf,
     tile_scope: Scope,
     /// [`filter_summary`] of `tile_scope`, cached so the `filtered`
     /// pill's tooltip clones a `SharedString` at paint time rather than
@@ -260,6 +275,7 @@ impl BlotterTile {
                 Some(scope)
             })
             .unwrap_or_default();
+        let tile_as_of = TileAsOf::Follow;
         let unscoped_tip_selector: SharedString = format!("tip-blotter-unscoped-{}", tile.0).into();
         let filter_tip_selector: SharedString = format!("tip-blotter-filtered-{}", tile.0).into();
         let filter_tip: SharedString = filter_summary(&tile_scope).into();
@@ -324,6 +340,7 @@ impl BlotterTile {
             pin,
             unscoped,
             unscoped_tip_selector,
+            tile_as_of,
             tile_scope,
             filter_tip,
             filter_tip_selector,
@@ -394,6 +411,16 @@ impl BlotterTile {
         self.tile_scope = scope;
     }
 
+    /// Change the as-of override; `true` when it changed. The one door,
+    /// so Task 3's chip cache cannot go stale.
+    fn set_tile_as_of(&mut self, next: TileAsOf) -> bool {
+        if self.tile_as_of == next {
+            return false;
+        }
+        self.tile_as_of = next;
+        true
+    }
+
     fn grouping(&self, frame: &Frame, view: &ViewSpec) -> Vec<String> {
         match &self.pin {
             Pin::Grouping(g) => g.clone(),
@@ -423,7 +450,8 @@ impl BlotterTile {
 
     /// Whether `versions` and `now` disagree on any counter THIS tile
     /// follows — `scope` unless it is unscoped, `grouping` unless it is
-    /// pinned, and always `as_of`/`data`/`config`. The one comparison
+    /// pinned, `as_of` unless the tile's own as-of is pinned (spec
+    /// §3.3), and always `data`/`config`. The one comparison
     /// [`Self::follows_changed`] and [`Self::promote`]'s gate both go
     /// through (I-1, final whole-branch review), so "what this tile
     /// requeries for" and "what invalidates something it has already
@@ -431,7 +459,7 @@ impl BlotterTile {
     fn differs_on_followed(&self, versions: FrameVersions, now: FrameVersions) -> bool {
         (!self.unscoped && versions.scope != now.scope)
             || (self.pin == Pin::None && versions.grouping != now.grouping)
-            || versions.as_of != now.as_of
+            || (matches!(self.tile_as_of, TileAsOf::Follow) && versions.as_of != now.as_of)
             || versions.data != now.data
             || versions.config != now.config
     }
@@ -556,7 +584,11 @@ impl BlotterTile {
             } else {
                 frame.effective_scope(&self.tile_scope)
             };
-            (grouping, scope, frame.as_of().clone(), frame.versions())
+            let as_of = match &self.tile_as_of {
+                TileAsOf::Follow => frame.as_of().clone(),
+                TileAsOf::Pinned(pinned) => pinned.clone(),
+            };
+            (grouping, scope, as_of, frame.versions())
         };
         let max_depth = self.table.update(cx, |t, _| {
             let d = t.delegate_mut();
@@ -936,18 +968,6 @@ impl BlotterTile {
                 self.pin = Pin::Slot(n);
                 self.requery(cx);
             }
-            Command::GroupSave(n) => {
-                let grouping = self.last_grouping.clone();
-                if grouping.is_empty() {
-                    return Err("nothing grouped yet".into());
-                }
-                let result = self.frame.update(cx, |f, cx| {
-                    let r = f.save_slot(n, grouping);
-                    cx.notify();
-                    r
-                });
-                result?;
-            }
             Command::Unpin => {
                 self.pin = Pin::None;
                 self.requery(cx);
@@ -975,103 +995,18 @@ impl BlotterTile {
                 self.set_tile_scope(Scope::default());
                 self.requery(cx);
             }
-            Command::ScopeExpr(text) => {
-                let expr = parse_expr(&text)
-                    .map_err(|e| format!("{} at column {}", e.message, e.caret + 1))?;
-                self.frame.update(cx, |f, cx| {
-                    let mut scope = f.scope().clone();
-                    scope.expression = Some(expr);
-                    if f.set_scope(scope) {
-                        cx.notify();
+            Command::Refused(message) => return Err(message.to_string()),
+            Command::AsOf(arg) => {
+                let next = match arg {
+                    AsOfArg::At(text) => {
+                        TileAsOf::Pinned(AsOf::At(parse_as_of(&text, chrono::Utc::now())?))
                     }
-                });
-            }
-            Command::ScopeText(words) => {
-                self.frame.update(cx, |f, cx| {
-                    let mut scope = f.scope().clone();
-                    scope.text = (!words.is_empty()).then_some(words);
-                    if f.set_scope(scope) {
-                        cx.notify();
-                    }
-                });
-            }
-            Command::ScopeClear => {
-                self.frame.update(cx, |f, cx| {
-                    if f.clear_scope() {
-                        cx.notify();
-                    }
-                });
-            }
-            Command::ScopeUndo => {
-                let undone = self.frame.update(cx, |f, cx| {
-                    let r = f.undo_scope();
-                    cx.notify();
-                    r
-                });
-                if !undone {
-                    return Err("nothing to undo".into());
+                    AsOfArg::Live => TileAsOf::Pinned(AsOf::Live),
+                    AsOfArg::Clear => TileAsOf::Follow,
+                };
+                if self.set_tile_as_of(next) {
+                    self.requery(cx);
                 }
-            }
-            Command::ScopeRedo => {
-                let redone = self.frame.update(cx, |f, cx| {
-                    let r = f.redo_scope();
-                    cx.notify();
-                    r
-                });
-                if !redone {
-                    return Err("nothing to redo".into());
-                }
-            }
-            Command::ScopeDrop(d) => {
-                let dropped = self.frame.update(cx, |f, cx| {
-                    let r = f.drop_dimension(&d);
-                    if r {
-                        cx.notify();
-                    }
-                    r
-                });
-                if !dropped {
-                    return Err(format!("no selection on '{d}'"));
-                }
-            }
-            Command::ScopeSave(name) => {
-                self.frame.update(cx, |f, cx| {
-                    let r = f.save_scope(&name);
-                    cx.notify();
-                    r
-                })?;
-            }
-            Command::ScopeLoad(name) => {
-                self.frame.update(cx, |f, cx| {
-                    let r = f.load_scope(&name);
-                    cx.notify();
-                    r
-                })?;
-            }
-            Command::AsOf(text) => {
-                let at = parse_as_of(&text, chrono::Utc::now())?;
-                self.frame.update(cx, |f, cx| {
-                    if f.set_as_of(AsOf::At(at)) {
-                        cx.notify();
-                    }
-                });
-            }
-            Command::AsOfUndo => {
-                let undone = self.frame.update(cx, |f, cx| {
-                    let r = f.undo_as_of();
-                    cx.notify();
-                    r
-                });
-                if !undone {
-                    return Err("no previous as-of".into());
-                }
-            }
-            Command::Live => {
-                self.frame.update(cx, |f, cx| {
-                    if f.set_as_of(AsOf::Live) {
-                        cx.notify();
-                    }
-                });
             }
             Command::View(name) => {
                 if !self.views.borrow().iter().any(|v| v.name == name) {
@@ -1143,8 +1078,8 @@ impl BlotterTile {
         // that carries it, so this can no longer be read off the column
         // plan/view above, which only ever lists what's *displayed*),
         // plus every derived dimension — `columns` is what `sort` can
-        // rank; `dimensions` is what `group`/`scope drop`/`scope`/
-        // `filter` complete from (`core::commands::completions`).
+        // rank; `dimensions` is what `group`/`filter` complete from
+        // (`core::commands::completions`).
         let mut dimensions: Vec<String> = match self.view() {
             Some(v) => {
                 let schema = self.schema.borrow();
@@ -1169,7 +1104,6 @@ impl BlotterTile {
             }
         }
         let views = self.views.borrow().iter().map(|v| v.name.clone()).collect();
-        let scopes = self.frame.read(cx).saved_scopes().keys().cloned().collect();
         completions(
             line,
             cursor,
@@ -1177,7 +1111,6 @@ impl BlotterTile {
                 columns,
                 dimensions,
                 views,
-                scopes,
             },
         )
     }
@@ -2391,30 +2324,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn scope_asof_and_sort_commands_and_completions(cx: &mut gpui::TestAppContext) {
+    fn asof_and_sort_commands_and_completions(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests);
-        h.tile
-            .update(&mut cx, |t, cx| t.command("scope lhu = 'L1'", cx).unwrap());
-        let p = next_query(&h.requests);
-        assert!(p.scope.expression.is_some());
-        let err = h
-            .tile
-            .update(&mut cx, |t, cx| t.command("scope lhu = ", cx))
-            .unwrap_err();
-        assert!(err.contains("at column"), "{err}");
         h.tile
             .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
         let p = next_query(&h.requests);
         assert!(matches!(p.as_of, geode_core::query::AsOf::At(_)));
         h.tile
-            .update(&mut cx, |t, cx| t.command("live", cx).unwrap());
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
         let p = next_query(&h.requests);
         assert!(p.as_of.is_live());
-        h.tile
-            .update(&mut cx, |t, cx| t.command("scope undo", cx).unwrap());
-        let _ = next_query(&h.requests);
 
         let err = h
             .tile
@@ -2798,6 +2719,128 @@ mod tests {
         assert!(
             p.scope.dimensions.is_empty(),
             "no frame dimensions leaked in"
+        );
+    }
+
+    /// Command-line locality spec §3: `:asof <time>` pins THIS tile, the
+    /// frame's own as-of untouched; `:asof live` pins it to live under a
+    /// historical frame; `:asof clear` follows again.
+    #[gpui::test]
+    fn asof_pins_the_tile_and_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        let frame_as_of_version = h.frame.read_with(&cx, |f, _| f.versions().as_of);
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert!(
+            matches!(p.as_of, AsOf::At(_)),
+            "the request carries the pin"
+        );
+        assert!(
+            h.frame.read_with(&cx, |f, _| f.as_of().is_live()),
+            "the frame is still live"
+        );
+        assert_eq!(
+            h.frame.read_with(&cx, |f, _| f.versions().as_of),
+            frame_as_of_version,
+            "the frame's as-of counter did not move"
+        );
+        assert!(matches!(
+            h.tile.read_with(&cx, |t, _| t.tile_as_of.clone()),
+            TileAsOf::Pinned(AsOf::At(_))
+        ));
+
+        // Pinning the same value again is a no-op: no requery.
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert!(
+            p.as_of.is_live(),
+            "following again queries at the frame's (live) as-of"
+        );
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof clear", cx).unwrap());
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "clearing an already-following tile requeries nothing"
+        );
+
+        // Live under a historical frame.
+        h.frame.update(&mut cx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            cx.notify();
+        });
+        let p = next_query(&h.requests);
+        assert!(matches!(p.as_of, AsOf::At(_)), "a following tile follows");
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert!(p.as_of.is_live(), "pinned to live under a historical frame");
+        assert!(
+            matches!(
+                h.frame.read_with(&cx, |f, _| f.as_of().clone()),
+                AsOf::At(_)
+            ),
+            "the frame stayed historical"
+        );
+    }
+
+    /// A pinned tile does not follow the frame's as-of (spec §3.3): a
+    /// frame change neither requeries it nor holds the barrier for it —
+    /// the tile self-arrives through `Frame::arrived`, as a pinned-
+    /// grouping tile does.
+    #[gpui::test]
+    fn a_pinned_tile_ignores_the_frames_as_of_and_answers_the_barrier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        h.tile
+            .update(&mut cx, |t, cx| t.command("asof 14:05", cx).unwrap());
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        h.frame.update(&mut cx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.open_flip([QueryKey(7)], std::time::Instant::now());
+            cx.notify();
+        });
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a pinned tile does not requery on a frame as-of change"
+        );
+        assert!(
+            !h.frame.read_with(&cx, |f, _| f.barrier_open()),
+            "and it answered the barrier without a query"
+        );
+    }
+
+    /// The refusals (spec §5) reach the trader as the parser's message,
+    /// and touch nothing.
+    #[gpui::test]
+    fn refused_words_error_inline_with_the_doors_name(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        for (line, expected) in [
+            ("scope lhu = 'L1'", crate::core::commands::REFUSED_SCOPE),
+            ("asof undo", crate::core::commands::REFUSED_ASOF_UNDO),
+            ("live", crate::core::commands::REFUSED_LIVE),
+            ("group save 2", crate::core::commands::REFUSED_GROUP_SAVE),
+        ] {
+            let err = h
+                .tile
+                .update(&mut cx, |t, cx| t.command(line, cx))
+                .unwrap_err();
+            assert_eq!(err, expected, "`:{line}`");
+        }
+        assert!(
+            h.requests.try_recv().is_err(),
+            "a refusal requeries nothing"
         );
     }
 
@@ -4064,11 +4107,11 @@ mod tests {
 
     /// Regression: `BlotterTile::completions` used to build its
     /// `Vocabulary` from the column plan/view alone (what's
-    /// *displayed*), so `:group `/`:scope drop `/`:filter ` never
-    /// offered a dimension the current view does not show —
-    /// `model_code` here (`schema()`'s carried dimension, `grain =
-    /// "instrument"`) is exactly that shape. `delta01`/`daily_trading_
-    /// pnl` are measures and must never appear for `group`.
+    /// *displayed*), so `:group `/`:filter ` never offered a dimension
+    /// the current view does not show — `model_code` here (`schema()`'s
+    /// carried dimension, `grain = "instrument"`) is exactly that shape.
+    /// `delta01`/`daily_trading_pnl` are measures and must never appear
+    /// for `group`.
     #[gpui::test]
     fn completions_offer_dataset_dimensions_not_just_displayed_columns(
         cx: &mut gpui::TestAppContext,
@@ -4086,11 +4129,6 @@ mod tests {
             !group.contains(&"delta01".to_string()),
             "a measure must not complete `group`: {group:?}"
         );
-        let drop = h
-            .tile
-            .read_with(&vcx, |t, cx| t.completions("scope drop ", 11, cx));
-        assert!(drop.contains(&"model_code".to_string()));
-        assert!(!drop.contains(&"daily_trading_pnl".to_string()));
     }
 
     /// 2c §6.2: the definitions travel from the factory's shared cell to
