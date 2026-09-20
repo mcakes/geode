@@ -14519,8 +14519,8 @@ run_mutation "bridge: a local publish bumps the frame" \
 
 run_mutation "shell: a Price delivery is routed to the wrong key" \
   crates/geode-shell/src/module.rs \
-  '            Delivery::Price(outcome) => outcome.key,' \
-  '            Delivery::Price(outcome) => QueryKey(outcome.key.0 + 1),' \
+  '            Delivery::Price(outcome) => Some(outcome.key),' \
+  '            Delivery::Price(outcome) => Some(QueryKey(outcome.key.0 + 1)),' \
   geode-shell a_price_delivery_is_routed_by_key_like_a_query
 
 run_mutation "shell: a pricing change needs no restart" \
