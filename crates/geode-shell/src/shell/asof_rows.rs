@@ -749,4 +749,72 @@ mod tests {
         assert_eq!(s.highlighted(), 0);
         assert_eq!(s.painted()[0].label, "EOD T-1");
     }
+
+    /// Task 1 coverage minor: the `Live` row has no instant of its own
+    /// (`instant_of` answers `None` for it, same as `Custom`) — `tab`
+    /// from it must fall through to the PIN (`.or(self.pinned)`), not
+    /// `now`. `tab_seeds_the_field_from_the_highlighted_row_or_the_pin_
+    /// or_now` only exercises the pin fallback from `Current` (row 0);
+    /// this is the sibling row that shares the same fallback for a
+    /// different reason.
+    #[test]
+    fn tab_from_the_live_row_while_pinned_seeds_the_pin() {
+        let pinned = Utc.with_ymd_and_hms(2026, 9, 18, 16, 0, 0).unwrap();
+        let mut s = state(AsOf::At(pinned), &[]);
+        assert!(s.set_highlighted(1));
+        assert!(matches!(s.painted()[1].row, Row::Live));
+        s.open_field();
+        assert_eq!(
+            s.field().unwrap().text(),
+            "2026-09-18 16:00:00",
+            "Live has no instant of its own — tab seeds the pin"
+        );
+    }
+
+    /// Task 1 coverage minor: committing a highlighted `Publish` row
+    /// answers that publish's OWN `at`, via `instant_of`'s `Row::
+    /// Publish(i) => self.publishes.get(*i)` arm.
+    #[test]
+    fn commit_on_a_highlighted_publish_row_equals_that_publishs_at() {
+        let at = now() - chrono::Duration::hours(3);
+        let pubs = [publish("risk", "EOD", 12, at)];
+        let mut s = state(AsOf::Live, &pubs);
+        let row = s
+            .painted()
+            .iter()
+            .position(|p| matches!(p.row, Row::Publish(0)))
+            .expect("the publish row is painted");
+        assert!(s.set_highlighted(row));
+        assert_eq!(s.commit().unwrap(), Commit::At(at));
+    }
+
+    /// Task 1 coverage minor: `Custom` has no instant of its own, and
+    /// `commit` with no field open refuses it explicitly rather than
+    /// falling through to `instant_of` (which would answer `None` too,
+    /// but the `Row::Custom` arm is its own, more specific refusal).
+    #[test]
+    fn commit_on_custom_with_no_field_open_is_an_error() {
+        let mut s = state(AsOf::Live, &[]);
+        let custom_row = s
+            .painted()
+            .iter()
+            .position(|p| matches!(p.row, Row::Custom))
+            .expect("the custom row is painted");
+        assert!(s.set_highlighted(custom_row));
+        assert!(s.commit().is_err());
+    }
+
+    /// Task 1 coverage minor: `set_highlighted` past the end of the
+    /// painted list is refused and leaves the highlight untouched.
+    #[test]
+    fn set_highlighted_out_of_range_is_refused() {
+        let mut s = state(AsOf::Live, &[]);
+        let len = s.painted().len();
+        assert!(!s.set_highlighted(len), "one past the end must be refused");
+        assert_eq!(
+            s.highlighted(),
+            0,
+            "a refused set must not move the highlight"
+        );
+    }
 }

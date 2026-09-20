@@ -4063,34 +4063,21 @@ run_mutation "toolbar: the chip body click never opens the picker" \
 
 # ---- Phase 4a Task 6: the as-of selector and the historical indicator
 # (spec §3.6, §3.11)
-
-run_mutation "as-of: a bad time never sets the frame" \
-  crates/geode-shell/src/shell/asof_view.rs \
-  '            Err(msg) => {
-                if let Some(state) = shell.as_of_dialog.as_mut() {
-                    state.error = Some(msg);
-                    state.resolved = None;
-                }
-                cx.notify();
-            }' \
-  '            Err(msg) => {
-                if let Some(state) = shell.as_of_dialog.as_mut() {
-                    state.error = Some(msg);
-                    state.resolved = None;
-                }
-                shell.frame.update(cx, |f, cx| {
-                    if f.set_as_of(AsOf::At(Utc::now())) {
-                        cx.notify();
-                    }
-                });
-            }' \
-  geode-shell a_bad_time_shows_inline_and_enter_does_nothing
+#
+# "as-of: a bad time never sets the frame" and the M9 presets-cache entry
+# (further down, Phase 4b Task 1 review fix round 1) were removed here:
+# both defended the free-text grammar's own `Err(msg)`/`cached_presets`
+# machinery, deleted wholesale by the as-of dialog Part 3 rewrite
+# (2026-09-20) — there is no equivalent site left to re-anchor to. The
+# rewrite's own "asof: ..." entries above cover the redesigned dialog;
+# finding 5's "asof: a data version bump refreshes the open dialog" is
+# the M9 entry's spiritual successor.
 
 run_mutation "as-of: the stripe is painted only when historical" \
   crates/geode-shell/src/shell/render.rs \
   '        let is_historical = matches!(self.frame.read(cx).as_of(), AsOf::At(_));' \
   '        let is_historical = true;' \
-  geode-shell typing_a_time_and_enter_sets_as_of_and_paints_the_stripe_and_segment
+  geode-shell typing_eod_and_enter_commits_eod_t_minus_one
 
 # ---- Phase 4a Task 8: the flip barrier (spec §3.10)
 
@@ -5098,22 +5085,9 @@ run_mutation "M6: an explicit default view wins over the alphabetical first" \
   '                Some(_v) => {}' \
   geode-blotter a_fresh_tile_opens_on_the_explicit_default_view_not_the_alphabetical_first
 
-run_mutation "M9: the as-of presets cache is keyed on the frame's data version" \
-  crates/geode-shell/src/shell/asof_view.rs \
-  '    let v = frame.versions().data;
-    if let Some((cached_v, cached_clock, cached)) = state.presets_cache.borrow().as_ref()
-        && *cached_v == v
-        && *cached_clock == clock
-    {
-        return Rc::clone(cached);
-    }' \
-  '    let v = frame.versions().data;
-    if let Some((_cached_v, cached_clock, cached)) = state.presets_cache.borrow().as_ref()
-        && *cached_clock == clock
-    {
-        return Rc::clone(cached);
-    }' \
-  geode-shell cached_presets_rebuilds_only_when_the_frames_data_version_changes
+# M9's own entry ("the as-of presets cache is keyed on the frame's data
+# version") was removed with `cached_presets` — see the note beside
+# "as-of: the stripe is painted only when historical" above.
 
 # ---- Phase 4b Task 2: the tracing foundation (the ring, [log]) --------
 
@@ -8079,10 +8053,20 @@ run_mutation "dialog: the sync focuses the Input in filter mode" \
 # the write leaves a cleared query still painted in the field — the exact
 # "every clear had to be written twice, and one cut forgot one" defect the
 # amendment exists to remove. Every `state.query` assertion stays green.
+# Anchored past the mode-based arms' own closing brace and into the
+# `match dialogmode::focus_target(..)` line right after (as-of dialog
+# Part 3, review round 2, finding 1): the as-of arm ABOVE this one in the
+# function now has a byte-identical `input.update(..)` line of its own,
+# so the bare single-line anchor became ambiguous — matching the FIRST
+# occurrence (the as-of arm) rather than this one.
 run_mutation "dialog: the sync writes the Input from the query" \
   crates/geode-shell/src/shell/dialog.rs \
-  '        input.update(cx, |i, cx| i.set_value(query, window, cx));' \
-  '        let _ = query;' \
+  '        input.update(cx, |i, cx| i.set_value(query, window, cx));
+    }
+    match dialogmode::focus_target(mode, listening) {' \
+  '        let _ = query;
+    }
+    match dialogmode::focus_target(mode, listening) {' \
   geode-shell \
   focus_and_text_follow_the_pure_state_through_every_transition
 
@@ -13689,12 +13673,27 @@ run_mutation "picker: a values row click selects, only the tick toggles (spec §
   geode-shell \
   a_values_row_click_selects_and_only_the_tick_toggles
 
+# As-of dialog Part 3 (2026-09-20) replaced the calendar and free-text
+# grammar wholesale — the entries that used to defend `compose_with_date`,
+# `shows_calendar`, the calendar-hides-under-live mirror, the calendar
+# click-hitbox column and the day-grid reset on open were removed along
+# with the code (and `geode-shell` no longer depends on `gpui-base` at
+# all). The two END_OF_DAY entries below are untouched: `parse_as_of`
+# remains live for the tile-local `:asof` command.
+#
+# Spec §20.5: every list takes the whole nav set through one rule —
+# ctrl+n/ctrl+p move, ctrl+u/d/b/f and pageup/pagedown page-step; a
+# multi-step Move CLAMPS rather than wraps (vimnav's own contract). The
+# window test that used to catch this (`the_as_of_list_takes_ctrl_n_and_
+# clamps_a_page_step`) was deleted with the free-text-grammar era; the
+# scroll-follow test's own 15×ctrl-d clamp-to-the-bottom assertion is the
+# surviving proof.
 run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
   crates/geode-shell/src/shell/asof_view.rs \
   '    if let Some(cmd) = listfilter::nav_command(ks) {' \
   '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, vimnav::NavCommand::Move(1 | -1))) {' \
   geode-shell \
-  the_as_of_list_takes_ctrl_n_and_clamps_a_page_step
+  nav_past_the_visible_rows_scrolls_the_highlight_into_view
 
 # As-of date picker (2026-09-18): a bare YYYY-MM-DD is the END of that
 # day — the newest generation of the day — not its start. Resolving to
@@ -13706,39 +13705,6 @@ run_mutation "asof: a bare date resolves to the end of the day" \
   '        return resolve(d, NaiveTime::MIN);' \
   geode-core \
   a_bare_date_resolves_to_the_end_of_that_local_day
-
-# A day click must keep a typed time: dropping it silently turns
-# "14:05 on the 9th" into "end of the 9th".
-run_mutation "asof: a day click keeps the typed time" \
-  crates/geode-shell/src/shell/asof_view.rs \
-  '    if keeps_time {' \
-  '    if false {' \
-  geode-shell \
-  compose_keeps_a_typed_time_and_replaces_or_adds_the_date
-
-# The calendar is hidden under `live`: painting it there invites a click
-# that silently turns "now" into a historical day.
-run_mutation "asof: the calendar hides under live" \
-  crates/geode-shell/src/shell/asof_view.rs \
-  '    !text.trim().eq_ignore_ascii_case("live")' \
-  '    true' \
-  geode-shell \
-  the_calendar_hides_only_under_live
-
-# Display check 2026-09-19: the preset list painted at the dialog's full
-# WIDTH ran on under the calendar, and gpui hit-tests a plain div behind
-# another — so a day click also fired the covered preset row's own
-# on_mouse_down (commit_at → close_modal). Only the bounds assertion plus
-# a real click through the pane sees it; the entity-driven day-click
-# tests never go through the hitbox at all.
-run_mutation "asof: the preset list stays in its own column" \
-  crates/geode-shell/src/shell/asof_view.rs \
-  '        .id("as-of-presets")
-        .w_full()' \
-  '        .id("as-of-presets")
-        .w(px(WIDTH))' \
-  geode-shell \
-  a_calendar_click_over_the_preset_list_neither_commits_nor_closes
 
 # Final whole-branch review, finding 2: END_OF_DAY must be the LAST
 # MICROSECOND of the day, not the last whole second — a subscribed
@@ -13752,30 +13718,163 @@ run_mutation "asof: END_OF_DAY is the last microsecond, not the last whole secon
   geode-core \
   a_bare_date_resolves_to_the_end_of_that_local_day
 
-# Final whole-branch review, finding 4: the field-to-calendar mirror must
-# ignore a failed intermediate parse (a trader mid-edit backspacing
-# through a date) — mirroring unconditionally snaps the calendar to
-# today on every invalid partial date, discarding whatever day it showed.
-run_mutation "asof: the mirror ignores a failed parse" \
-  crates/geode-shell/src/shell/mod.rs \
-  '                if let Some(state) = view.as_of_dialog.as_ref()
-                    && state.resolved.is_some()
-                {' \
-  '                if let Some(state) = view.as_of_dialog.as_ref()
-                    && true
-                {' \
+# As-of dialog Part 3 (2026-09-20): the dialog rewritten as one ranked
+# list over `asof_rows::AsOfState`. Current/Live only while pinned —
+# under live, `Live` is a no-op row and `Current` has no instant.
+run_mutation "asof: current and live rows only while pinned" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '        if let Some(t) = pinned {' \
+  '        if let Some(t) = pinned.or(Some(now)) {' \
   geode-shell \
-  an_invalid_intermediate_keystroke_leaves_the_calendar_where_it_was
+  under_live_the_rows_are_presets_custom_and_publishes_in_section_order
 
-# As-of picker (2026-09-19): every open puts the calendar back on the day
-# grid, so a close from the month/year picker is not what the next open
-# shows.
-run_mutation "asof: open returns the calendar to the day grid" \
-  crates/geode-shell/src/shell/asof_view.rs \
-  '        c.set_view(gpui_base::CalendarView::Day);' \
-  '        let _ = gpui_base::CalendarView::Day;' \
+# A digit jumps only on an EMPTY query; typed, it is a filter character.
+run_mutation "asof: the digit jump is gated on an empty query" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '        if !self.query.is_empty() {
+            return None;
+        }' \
+  '        let _ = &self.query;' \
   geode-shell \
-  reopening_the_dialog_returns_the_calendar_to_the_day_grid
+  a_digit_jumps_only_on_an_empty_query
+
+# `tab` seeds the field from the highlighted row, not from now.
+run_mutation "asof: tab seeds the field from the highlighted row" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '            .and_then(|p| self.instant_of(&p.row))
+            .or(self.pinned)' \
+  '            .and_then(|_p| None::<DateTime<Utc>>)' \
+  geode-shell \
+  tab_seeds_the_field_from_the_highlighted_row_or_the_pin_or_now
+
+# Task 1 coverage: `Live` has no instant of its own (`instant_of`
+# answers `None` for it, same as `Custom`) — `tab` from it must fall
+# through to the PIN, not `now`, the same fallback `Current` shares for
+# a different reason (its own harness entry above covers the fallback
+# CHAIN; this one covers the specific `Live` case that reaches it).
+run_mutation "asof: tab from the live row seeds the pin" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '            Row::Live | Row::Custom => None,' \
+  '            Row::Live | Row::Custom => Some(self.now),' \
+  geode-shell \
+  tab_from_the_live_row_while_pinned_seeds_the_pin
+
+# Task 1 coverage: committing a highlighted Publish row answers THAT
+# publish's own instant, via `instant_of`'s own arm.
+run_mutation "asof: commit on a publish row uses that publish's own instant" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '            Row::Publish(i) => self.publishes.get(*i).copied(),' \
+  '            Row::Publish(_i) => None,' \
+  geode-shell \
+  commit_on_a_highlighted_publish_row_equals_that_publishs_at
+
+# The right column is paint, never matched: ranking over it would make
+# "18" light every preset.
+run_mutation "asof: the right column is not matched" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '            let texts: Vec<String> = members
+                .iter()
+                .map(|i| self.entries[*i].label.clone())
+                .collect();' \
+  '            let texts: Vec<String> = members
+                .iter()
+                .map(|i| format!("{} {}", self.entries[*i].label, self.entries[*i].right))
+                .collect();' \
+  geode-shell \
+  the_right_column_is_never_matched
+
+# A DST-gap value is refused with the field left open, never committed.
+run_mutation "asof: a DST-gap custom value is refused" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '            return match self.clock.resolve_local(v.date(), v.time()) {' \
+  '            return match self.clock.resolve_local(v.date(), v.time()).or_else(|_| Ok::<_, geode_core::clock::ClockError>(self.now)) {' \
+  geode-shell \
+  a_field_value_in_a_dst_gap_is_refused_and_named_on_the_row
+
+# Review round 2, finding 1 (Critical): the shared Input must be
+# reconciled with `AsOfState::query` on every seam — `dialog::
+# sync_dialog_text` is the ONLY writer, and until this round the
+# filter-only as-of dialog had no arm there at all. Dropping it leaves
+# `tab`'s cleared query stale in the field, so a later `enter` re-feeds
+# the OLD text and can commit the row under a stale filter instead of
+# the one under the highlight.
+run_mutation "asof: sync_dialog_text reconciles the shared Input" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    if let Some(state) = shell.as_of_dialog.as_ref() {
+        let query = state.query();
+        let input = shell.dialog_input.clone();
+        if input.read(cx).text() != query {
+            input.update(cx, |i, cx| i.set_value(query, window, cx));
+        }
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        return;
+    }' \
+  '    if false && shell.as_of_dialog.is_some() {
+        return;
+    }' \
+  geode-shell \
+  tab_then_escape_then_down_then_enter_commits_the_highlighted_row
+
+# Review round 2, finding 2 (Important): an unrouted, non-chord key must
+# be SWALLOWED while the Custom field is open, not left unclaimed to
+# reach the shared Input as typing — which would re-filter the list and
+# hide the Custom row out from under its own open field.
+run_mutation "asof: an unrouted key is swallowed while the field is open" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '            None => {}
+        }
+        return true;' \
+  '            None => return false,
+        }
+        return true;' \
+  geode-shell \
+  a_bare_key_the_field_does_not_own_is_swallowed_while_it_is_open
+
+# `escape` with the field open closes the FIELD, not the dialog.
+run_mutation "asof: escape closes the field before the dialog" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '            Some(FieldKey::Cancel) => {
+                state.close_field();
+                cx.notify();
+            }' \
+  '            Some(FieldKey::Cancel) => {
+                return false;
+            }' \
+  geode-shell \
+  escape_closes_the_field_first_and_the_dialog_second
+
+# Review round 2 re-review, finding 3a: `as_of_scroll` lives on
+# `ShellView` and keeps its offset across close/reopen — a fresh open
+# must reset it to the top rather than opening mid-scroll.
+run_mutation "asof: open resets the scroll to the top" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '    view.as_of_scroll.scroll_to_item(0);' \
+  '    let _ = &view.as_of_scroll;' \
+  geode-shell \
+  nav_past_the_visible_rows_scrolls_the_highlight_into_view
+
+# Review round 2, finding 5 (ruled in): a publish landing while the
+# dialog is open must refresh its row list — gated on the frame's `data`
+# version alone so a scope/grouping/as-of-only notify never rebuilds
+# rows a trader is actively filtering.
+run_mutation "asof: a data version bump refreshes the open dialog" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {' \
+  '        if false && self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {' \
+  geode-shell \
+  a_publish_while_open_adds_a_new_row
+
+# Review round 2 re-review, finding 3: two publishes can share a label
+# at different instants — `right` (the formatted timestamp) must join
+# `(section, label)` in `refresh`'s identity restore, or the highlight
+# always hops to the FIRST painted match regardless of which one was
+# actually selected.
+run_mutation "asof: refresh identity includes the right column" \
+  crates/geode-shell/src/shell/asof_rows.rs \
+  '                .position(|p| p.section == section && p.label == label && p.right == right)' \
+  '                .position(|p| p.section == section && p.label == label)' \
+  geode-shell \
+  refresh_identity_includes_right_so_same_labelled_publishes_dont_hop
 
 # Ingest progress (2026-09-19): `queued` is what still WAITS behind the
 # popped job. Counting the job itself (+1) would paint "1 queued" for a

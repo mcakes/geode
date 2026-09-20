@@ -142,6 +142,11 @@ fn state_of(
 fn typing_eod_and_enter_commits_eod_t_minus_one(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("as-of-stripe").is_none(),
+        "the frame is still live before committing — the stripe must not paint"
+    );
     vcx.simulate_input("eod");
     let s = state_of(&shell, &vcx);
     assert_eq!(s.painted()[0].label, "EOD T-1");
