@@ -15622,6 +15622,199 @@ run_mutation "pool: a series work item runs the view path" \
   geode-data \
   a_series_request_rides_the_pool_and_delivers_a_series_payload
 
+
+# --- geode-chart (spec §8, Part 3) ------------------------------------
+#
+# The chart is a lens over numbers the data tier already computed, so
+# these entries defend two things a green suite otherwise cannot see:
+# that a pixel is where the geometry says it is, and that the element's
+# two caches (paths, chrome) are keyed on everything that moves them. A
+# cache entry is the quiet one — a key missing a term keeps painting
+# LAST frame's path with every assertion about the current one still
+# green, which is why four entries below mutate a key rather than a
+# calculation.
+
+# Min-max decimation exists so a spike between two pixel columns is not
+# lost (spec §8.1). Drop the max and the polyline still paints, still
+# has the right point count, and quietly flattens every peak.
+run_mutation "chart: decimation drops the column maximum" \
+  crates/geode-chart/src/core/decimate.rs \
+  '                if v > *ymax {' \
+  '                if v > *ymax && false {' \
+  geode-chart \
+  decimation_keeps_every_columns_min_and_max
+
+# A NaN is a GAP, not a value: the decimator emits `Point::BREAK` so the
+# path builder starts a new subpath. Without the break the polyline
+# joins the two sides of an outage with a straight line a trader would
+# read as data.
+run_mutation "chart: a NaN no longer breaks the polyline" \
+  crates/geode-chart/src/core/decimate.rs \
+  '            if !out.is_empty() {
+                pending_break = true;' \
+  '            if !out.is_empty() {
+                pending_break = false;' \
+  geode-chart \
+  a_nan_breaks_the_polyline
+
+# A session tick sits where the unit's VALUE changes. Month must compare
+# (year, month): compare the year alone and a year of sessions has one
+# candidate, so the chooser falls through to a finer unit entirely.
+run_mutation "chart: session ticks compare the wrong unit for a month" \
+  crates/geode-chart/src/core/time.rs \
+  '            Unit::Month => (t.year(), t.month(), 0, 0, 0),' \
+  '            Unit::Month => (t.year(), 0, 0, 0, 0),' \
+  geode-chart \
+  session_ticks_fall_where_the_month_changes
+
+# Rule 1 of the chooser takes the finest unit that has MIN_TICKS
+# candidates AND already fits `tick_gap_px`. Drop the gap half and a
+# narrow plot takes the finest unit regardless, painting 250 day labels
+# into 300 px.
+run_mutation "chart: ticks ignore the gap" \
+  crates/geode-chart/src/core/time.rs \
+  '        .find(|&i| cands[i].len() >= MIN_TICKS && min_gap(&cands[i]) >= tick_gap_px)' \
+  '        .find(|&i| cands[i].len() >= MIN_TICKS)' \
+  geode-chart \
+  ticks_respect_the_gap
+
+# The resolution floor (Task 3 ruling): a unit finer than the data's own
+# step offers the SAME candidates as the step's unit and only a worse
+# label — on daily sessions every bucket is also a new minute, so
+# "finest" without the floor labels days "00:00".
+run_mutation "chart: the tick chooser has no resolution floor" \
+  crates/geode-chart/src/core/time.rs \
+  '    let floor = resolution_floor(scale, start, end);' \
+  '    let floor = Unit::Minute;' \
+  geode-chart \
+  ticks_respect_the_gap
+
+# The first visible bucket is the one unconditional candidate: without
+# it a view that opens mid-month has no tick until the next roll-over,
+# and a day of minute bars starts unlabelled.
+run_mutation "chart: the first bucket is not a tick candidate" \
+  crates/geode-chart/src/core/time.rs \
+  '                let is_tick = i == 0 || unit.value(&t)' \
+  '                let is_tick = i > 0 && unit.value(&t)' \
+  geode-chart \
+  a_day_of_minute_bars_shows_thinned_hours
+
+# The crosshair reads the NEAREST bucket centre, not the first one at or
+# past the cursor: the binary search lands on the latter, and the
+# readout would name the bucket to the right of the one under the
+# pointer for the whole left half of every slot.
+run_mutation "chart: the crosshair takes the first bucket at or past the cursor, not the nearest" \
+  crates/geode-chart/src/core/time.rs \
+  '        Some(if after < before { lo } else { lo - 1 })' \
+  '        Some(lo)' \
+  geode-chart \
+  the_crosshair_picks_the_nearest_bucket
+
+# A pan keeps its width and stops at the end of the loaded range. Lose
+# the right-hand clamp and a pan walks the view off the data, painting
+# an empty plot with a live axis.
+run_mutation "chart: the view does not clamp" \
+  crates/geode-chart/src/core/view.rs \
+  '        if self.lo + w > full.1 {' \
+  '        if false {' \
+  geode-chart \
+  a_pan_past_the_end_clamps
+
+# The lower pane exists only while a visible slot uses a bottom axis
+# (ruling 12). Open it unconditionally and every single-pane chart loses
+# 30% of its height to an empty pane.
+run_mutation "chart: the lower pane opens without a bottom slot" \
+  crates/geode-chart/src/core/layout.rs \
+  '        let has_lower = o.lower_left || o.lower_right;' \
+  '        let has_lower = true;' \
+  geode-chart \
+  the_lower_pane_exists_only_while_a_visible_slot_uses_a_bottom_axis
+
+run_mutation "chart: split is not clamped" \
+  crates/geode-chart/src/core/layout.rs \
+  'o.split.clamp(SPLIT_MIN, SPLIT_MAX)' \
+  'o.split' \
+  geode-chart \
+  split_is_clamped
+
+# An axis column is reserved when EITHER pane uses that side, which is
+# what gives the two panes one x mapping (ruling 12). Reserve per pane
+# and the lower pane's plot starts and ends somewhere else — two charts
+# with two different time axes stacked on one crosshair.
+run_mutation "chart: the panes reserve columns separately" \
+  crates/geode-chart/src/core/layout.rs \
+  '        let any_right = o.upper_right || o.lower_right;' \
+  '        let any_right = o.upper_right;' \
+  geode-chart \
+  both_panes_share_one_x_mapping
+
+# Every chart colour is floored to 3:1 against the background before it
+# is handed out; ten bundled themes ship a faint chart colour.
+run_mutation "chart: the palette skips the floor" \
+  crates/geode-chart/src/core/palette.rs \
+  'chart.map(|c| to_hsla(readable_on(to_rgb(c), bg, fg)))' \
+  'chart.map(|c| c)' \
+  geode-chart \
+  a_faint_chart_colour_is_floored_and_a_clear_one_kept
+
+# The four cache entries. A path cache key that is missing a term does
+# not fail, it SERVES — last frame's path at this frame's coordinates —
+# so each of these is only visible through `rebuilds()`/`chrome_rebuilds()`.
+run_mutation "chart: the path key ignores the view" \
+  crates/geode-chart/src/element.rs \
+  '                let key = ShapeKey::new((model.version, slot.number, pane as u8, view.key()))' \
+  '                let key = ShapeKey::new((model.version, slot.number, pane as u8, (0u64, 0u64)))' \
+  geode-chart \
+  an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds
+
+# A percentile line's y is the only term of its key that a zoom moves
+# (the model version and the plot rect do not), so without it the nine
+# dashed lines stay where the LAST view put them while the polylines
+# they annotate move under them.
+run_mutation "chart: the percentile key ignores its y" \
+  crates/geode-chart/src/element.rs \
+  '                    let key = ShapeKey::new((model.version, slot.number, j))
+                        .f32(y)' \
+  '                    let key = ShapeKey::new((model.version, slot.number, j))
+                        .f32(0.0f32)' \
+  geode-chart \
+  an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds
+
+# A percentile is computed over the QUERY window while its pane's domain
+# comes from the VISIBLE slice, so one can fall outside the pane —
+# and `paint_path` is masked to the element, not the pane. Skipping
+# before the cache `get` is what makes "never built" mean "never
+# painted across the other pane or the x-axis strip".
+run_mutation "chart: an out-of-pane percentile is still built" \
+  crates/geode-chart/src/element.rs \
+  '                    let y = scale_y.y(*value);
+                    if !inside(y, plot) {' \
+  '                    let y = scale_y.y(*value);
+                    if false {' \
+  geode-chart \
+  a_percentile_outside_its_panes_domain_is_neither_built_nor_painted
+
+# The chrome cache is the other half of "nothing O(the data) runs on an
+# unchanged frame": the four side scales scan every visible value and
+# every y tick label is a fresh String. Re-derive them per frame and the
+# render thread pays ~2M comparisons at the 500,000-point cap, with
+# every painted pixel identical.
+run_mutation "chart: the chrome is re-derived every frame" \
+  crates/geode-chart/src/element.rs \
+  '            let warm = b.chrome_key == Some(chrome_key);' \
+  '            let warm = false;' \
+  geode-chart \
+  an_unchanged_frame_rebuilds_nothing_and_a_moved_view_rebuilds
+
+# gpui's PathBuilder has no dash style, so a percentile line is one
+# move_to/line_to pair per dash. One dash is a solid line — which is
+# what a series line looks like.
+run_mutation "chart: the dashes are one solid line" \
+  crates/geode-chart/src/element.rs \
+  '    (width / period).ceil() as usize' \
+  '    1' \
+  geode-chart \
+  a_percentile_line_is_dashed_at_dash_and_gap
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
