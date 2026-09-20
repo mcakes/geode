@@ -84,7 +84,8 @@ pub enum DataEvent {
     /// than the asking tile: two tiles holding `SPX.close@kdb_hist` both
     /// learn the outcome of the one fetch that answered them. `Ok(appended)`
     /// may be `Ok(0)` — a covered span, or an overlapping refetch — and
-    /// the tile must requery on it all the same, since coverage changed.
+    /// the tile must requery on it all the same: the span is covered,
+    /// whether it was covered just now or already.
     SeriesFetched {
         source: String,
         identity: String,
