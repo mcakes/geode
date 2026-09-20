@@ -518,4 +518,56 @@ mod tests {
         assert!(!labels.contains(&"SOD T"), "{labels:?}");
         assert!(labels.contains(&"EOD T-1"), "{labels:?}");
     }
+
+    /// Every crate's `src/**/*.rs` — chrono's own machine-zone clock is
+    /// banned (spec §6.3): a stray site is silent wrong-time on every
+    /// zone but the machine's, which no fixture on a developer's machine
+    /// would catch. The scanner is checked against a planted line first,
+    /// so an emptied pattern list cannot make this pass vacuously — and
+    /// `PATTERNS` plus the planted string are both built with `concat!`
+    /// so the literal substrings never appear contiguous in THIS file's
+    /// own source, which the scan below also reads.
+    #[test]
+    fn no_crate_uses_chrono_local() {
+        const PATTERNS: [&str; 4] = [
+            concat!("chrono", "::Local"),
+            concat!("Local", "::now"),
+            concat!("with_timezone(&", "Local)"),
+            concat!("use chrono::{", "Local"),
+        ];
+        fn hits(text: &str) -> usize {
+            text.lines()
+                .filter(|l| PATTERNS.iter().any(|p| l.contains(p)))
+                .count()
+        }
+        let planted = concat!("let t = chrono", "::", "Local", "::now();");
+        assert_eq!(hits(planted), 1, "the scanner must see a planted site");
+        assert_eq!(hits("use chrono::{DateTime, Utc};"), 0);
+
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut offenders = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>, hits: &dyn Fn(&str) -> usize) {
+            for entry in std::fs::read_dir(dir).expect("readable dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target") {
+                        continue;
+                    }
+                    walk(&path, out, hits);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("readable file");
+                    let n = hits(&text);
+                    if n > 0 {
+                        out.push(format!("{}: {n}", path.display()));
+                    }
+                }
+            }
+        }
+        walk(&crates, &mut offenders, &hits);
+        assert!(
+            offenders.is_empty(),
+            "a banned chrono clock is in use; use geode_core::clock::Clock instead:\n{}",
+            offenders.join("\n")
+        );
+    }
 }

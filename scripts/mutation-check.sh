@@ -15611,6 +15611,70 @@ run_mutation "pool: a series work item runs the view path" \
   geode-data \
   a_series_request_rides_the_pool_and_delivers_a_series_payload
 
+# As-of dialog Part 2 (2026-09-20): one clock. A weekend must not count.
+run_mutation "clock: business days skip the weekend" \
+  crates/geode-core/src/clock.rs \
+  '        if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {' \
+  '        {' \
+  geode-core \
+  business_days_back_skips_weekends_and_snaps_a_weekend_start_to_friday
+
+# A preset after `now` means live and must be dropped, not offered.
+run_mutation "clock: a future preset is dropped" \
+  crates/geode-core/src/clock.rs \
+  '            Ok(at) if at <= now => Some(Preset { label, at }),' \
+  '            Ok(at) => Some(Preset { label, at }),' \
+  geode-core \
+  presets_resolve_on_business_days_in_order_and_drop_a_future_one
+
+# The guard's scanner must actually see a banned chrono clock: an emptied
+# pattern list passes the tree vacuously and the self-check is what
+# catches it.
+run_mutation "clock: the Local guard sees a planted site" \
+  crates/geode-core/src/clock.rs \
+  '                .filter(|l| PATTERNS.iter().any(|p| l.contains(p)))' \
+  '                .filter(|_l| false)' \
+  geode-core \
+  no_crate_uses_chrono_local
+
+# HH:MM resolves on the CLOCK's date: on UTC's date a New York trader at
+# 21:00 typing "14:05" would get tomorrow.
+run_mutation "clock: parse_as_of resolves on the clock's date" \
+  crates/geode-core/src/query.rs \
+  '    let today = clock.today(now);' \
+  '    let today = now.date_naive();' \
+  geode-core \
+  as_of_resolves_on_the_clocks_date_not_utcs
+
+# A bad zone is an ERROR, not a silent fallback. This is the non-string
+# `time.zone` arm specifically (`zone = 42`) — the sibling "not an IANA
+# name" arm a few lines up sits at a different indent and is a separate
+# anchor's business.
+run_mutation "clock: a bad zone name is an error diagnostic" \
+  crates/geode-core/src/clock.rs \
+  '                        Severity::Error,
+                        "zone",' \
+  '                        Severity::Warning,
+                        "zone",' \
+  geode-core \
+  a_non_string_zone_is_an_error_and_the_machine_zone_applies
+
+# A reload must republish the global or every module keeps the old zone.
+run_mutation "clock: a reload republishes AppClock" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                cx.set_global(crate::clock::AppClock(clock));' \
+  '                let _ = clock;' \
+  geode-shell \
+  a_time_zone_reload_republishes_the_clock_without_a_requery
+
+# The blotter's freshness readout formats on the clock, not by slicing UTC.
+run_mutation "clock: the blotter's short_time reads on the clock" \
+  crates/geode-blotter/src/tile.rs \
+  '        Ok(at) => clock.hm(at.to_utc()),' \
+  '        Ok(at) => at.format("%H:%M").to_string(),' \
+  geode-blotter \
+  short_time_formats_an_rfc3339_instant_on_the_clock_and_echoes_garbage
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
