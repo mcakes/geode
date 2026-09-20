@@ -1159,6 +1159,80 @@ mod tests {
         assert_eq!(docs[0].file.to_string_lossy(), "<module:timeseries>");
     }
 
+    /// Task 11 fix round 1, Minor 4: **every** key in the production
+    /// keymap SPELLS. `build_keymap` drops a binding whose keystroke it
+    /// cannot parse and reports an error diagnostic — a loud one, in the
+    /// trader's diagnostics tile, but only at runtime, and until now
+    /// nothing checked it anywhere. `geode-timeseries` shipped
+    /// `"+" = "timeseries::zoom_in"` for five tasks that way: a fragment
+    /// is checked by `check_fragment` for its PREDICATES and by each
+    /// module's own test for its ACTION IDS, and neither of those ever
+    /// parses a key.
+    ///
+    /// This is `run`'s own pipeline as far as line 913 — the shipped
+    /// builtin keymap, the demo layer over it, the full registry (the
+    /// shell's builtins, the pickers' per-column actions, the saved
+    /// scopes, the add-tile rows) and the full roster's fragments
+    /// spliced in — and it catches the next `+` for every module at
+    /// once, rather than one crate-local net per module.
+    #[gpui::test]
+    fn the_whole_production_keymap_builds_with_no_diagnostics(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builtin = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
+        builtin.extend(demo::layer(&dir.path().join("src")));
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin,
+            ..ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+
+        // The registry in `run`'s own order.
+        let mut registry = ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        register_pick_actions(&mut registry, &pickable_columns(&config));
+        register_scope_actions(&mut registry, &saved_scopes(&config, false));
+
+        // The roster as `run` finally has it: the diagnostics module,
+        // then everything the bridge carries. Built through the real
+        // `bridge::start`, so this is the production factory list rather
+        // than a hand-kept copy of it — a module added to `run` and not
+        // here would be invisible, which is exactly the failure this
+        // test exists to prevent.
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            pricers,
+        )
+        .expect("the demo layer declares datasets and views");
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(DiagnosticsFactoryHandle(Rc::new(
+            DiagnosticsFactory::new(Arc::new(Ring::new(16)), config.clone()),
+        ))));
+        roster.add(Box::new(BlotterFactoryHandle(bridge.factory.clone())));
+        roster.add(Box::new(MarketDataFactoryHandle(bridge.marketdata.clone())));
+        roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
+        roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
+        register_add_actions(&mut registry, &roster.kinds());
+        roster.register_actions(&mut registry);
+
+        let (fragments, frag_diags) = roster.keymap_fragments();
+        assert!(frag_diags.is_empty(), "{frag_diags:?}");
+        let layered = fragments::splice(config.layered_docs("keymap"), &fragments);
+        let (mod_alias, mod_diags) = mod_alias_from_config(&config);
+        assert!(mod_diags.is_empty(), "{mod_diags:?}");
+        let (_keymap, keymap_diags) = build_keymap(&layered, mod_alias, &registry);
+        assert!(
+            keymap_diags.is_empty(),
+            "every shipped binding must name a parseable keystroke and a \
+             registered action: {keymap_diags:?}"
+        );
+    }
+
     /// Phase 4b Task 2's migration invariant, kept true rather than
     /// merely checked once: every `crates/*/src/**/*.rs` file outside a
     /// `tests/` directory or an inline `#[cfg(test)] mod ... { ... }`
