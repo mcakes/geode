@@ -192,7 +192,7 @@ fn tint_sign_of(draft: &Draft) -> bool {
 }
 
 /// The draft as `colours.toml` holds it: `draft.source` with every key
-/// the field vocabulary owns (`hue`, `tone`, `token`) removed and then
+/// the field vocabulary owns (`hue`, `tone`, `token`, `tint_sign`) removed and then
 /// rewritten from the current choice alone — this module's own doc
 /// comment has the "only the keys in force" reasoning. Anything
 /// the vocabulary does not model survives untouched, the same

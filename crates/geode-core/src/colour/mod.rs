@@ -349,7 +349,7 @@ pub struct Tokens {
     pub bearish: Rgb,
     /// The theme's own background — not a [`Token`] a `colours.toml`
     /// definition can name (there is no `token = "background"`); it is
-    /// the surface [`readable_on`] measures every generated `Definition::Hue`
+    /// the surface [`readable_on`] measures every generated `Base::Hue`
     /// against.
     pub background: Rgb,
 }
@@ -405,7 +405,7 @@ pub fn interpolate_hue(degrees: f32, tone: Tone, anchors: &Anchors) -> Rgb {
     to_srgb_in_gamut(lch)
 }
 
-/// The WCAG contrast ratio every resolved `Definition::Hue` must clear
+/// The WCAG contrast ratio every resolved `Base::Hue` must clear
 /// against the theme's background (spec §7), enforced by [`readable_on`].
 pub const READABLE_RATIO: f32 = 3.0;
 
@@ -451,11 +451,13 @@ pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
 /// [`Anchors`]/[`Tokens`]. §2.2's identity rule: an anchor hue resolves
 /// to the theme's own colour exactly — unless that colour is unreadable
 /// on the theme's background, in which case only its lightness moves,
-/// via [`readable_on`]. `Definition::Token` is never floored: a token
+/// via [`readable_on`]. A `Base::Token` is never floored here: a token
 /// names one of the theme author's own deliberate semantic colours
 /// (danger, a chart series, …), not a generated point on the hue wheel
 /// that might land anywhere — the floor exists to guard the generated
-/// case, not to second-guess a theme's own design.
+/// case, not to second-guess a theme's own design. (`tint_sign` is not
+/// read here; [`resolve_signed`] is where a tinted colour becomes a
+/// generated one.)
 pub fn resolve(def: &Definition, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     match &def.base {
         Base::Hue { degrees, tone } => readable_on(
@@ -467,14 +469,23 @@ pub fn resolve(def: &Definition, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     }
 }
 
-/// [`resolve`] for a cell holding a number of `sign`: the base colour,
-/// shifted by [`tint`] when the definition has `tint_sign` and the sign
-/// is not zero. A tinted variant is floored like a generated hue, base
-/// token or not — the floor guards what this module generates, and a
-/// rotated token is no longer the theme author's own colour.
+/// [`resolve`] for a cell holding a number of `sign`. Without
+/// `tint_sign` it IS [`resolve`], sign ignored. With it, the colour is a
+/// generated triad — the base for zero, the base shifted by [`tint`]
+/// for either sign — and all three go through the floor, base token or
+/// not: the floor guards what this module generates, and once the
+/// trader asked for a tint the whole triad is generated. Flooring only
+/// the two shifted variants would paint a faint token's zero cells and
+/// header dim beside floored-bright ± cells (ten bundled themes ship
+/// `warning` faint), a lightness split reading as a third state.
+///
+/// A grey token (`foreground` on most themes, often `muted`) has no
+/// hue to shift, so its tint is invisible: the triad is three of the
+/// same grey, floored. Deliberately not a diagnostic — the dialog's
+/// triad swatch shows it.
 pub fn resolve_signed(def: &Definition, sign: Sign, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     let base = resolve(def, anchors, tokens);
-    if !def.tint_sign || sign == Sign::Zero {
+    if !def.tint_sign {
         return base;
     }
     readable_on(tint(base, sign), tokens.background, tokens.foreground)
@@ -493,9 +504,10 @@ pub const COOL_POLE_DEGREES: f32 = 230.0;
 /// positive sign or the warm pole for a negative one, along the shorter
 /// arc, stopping at the pole; lightness and chroma are kept (re-clipped
 /// to gamut). `Sign::Zero` is `rgb` itself. Sitting exactly on the pole
-/// it moves away from, the shorter arc is a tie and the wrap arithmetic
-/// resolves it toward decreasing hue — deterministic, and both variants
-/// still differ from the base by a full step.
+/// it moves away from, the shorter arc is a tie: the wrap arithmetic
+/// picks a side (which one depends on the last bit of the round-tripped
+/// hue, so the direction is not a contract), and both variants still
+/// differ from the base by a full step, which is.
 pub fn tint(rgb: Rgb, sign: Sign) -> Rgb {
     let pole = match sign {
         Sign::Zero => return rgb,
@@ -1024,10 +1036,14 @@ mod tests {
         assert_ne!(positive, negative);
     }
 
-    /// A base token is the theme author's own colour and is never
-    /// floored; its tinted variants are generated here, and are.
+    /// An untinted token is the theme author's own colour and is never
+    /// floored; a tinted one is a generated triad, and all THREE of it
+    /// are — the zero/header colour included, or a faint token would
+    /// paint its zero cells and header dim beside floored-bright ± cells
+    /// (review finding on the ten bundled themes whose `warning` is
+    /// faint).
     #[test]
-    fn a_tinted_token_variant_is_floored_but_the_base_token_is_not() {
+    fn a_tinted_token_is_floored_as_a_whole_triad_but_an_untinted_one_is_not() {
         let (a, mut t) = (anchors(), tokens());
         t.background = grey(0.95);
         t.foreground = grey(0.05);
@@ -1039,18 +1055,29 @@ mod tests {
         };
         assert!(contrast_ratio(faint, t.background) < READABLE_RATIO);
         t.chart[0] = faint;
-        let def = Definition::token(Token::Chart(1)).tinted();
-        assert_eq!(
-            resolve_signed(&def, Sign::Zero, &a, &t),
-            faint,
-            "the base token is untouched"
-        );
-        for sign in [Sign::Negative, Sign::Positive] {
-            let got = resolve_signed(&def, sign, &a, &t);
+        let plain = Definition::token(Token::Chart(1));
+        for sign in [Sign::Negative, Sign::Zero, Sign::Positive] {
+            assert_eq!(
+                resolve_signed(&plain, sign, &a, &t),
+                faint,
+                "{sign:?}: an untinted token is the author's own colour"
+            );
+        }
+        let tinted = plain.tinted();
+        for sign in [Sign::Negative, Sign::Zero, Sign::Positive] {
+            let got = resolve_signed(&tinted, sign, &a, &t);
             assert!(
                 contrast_ratio(got, t.background) >= READABLE_RATIO,
                 "{sign:?}: {got:?}"
             );
         }
+        let (zero, orig) = (
+            lab_to_lch(srgb_to_oklab(resolve_signed(&tinted, Sign::Zero, &a, &t))),
+            lab_to_lch(srgb_to_oklab(faint)),
+        );
+        assert!(
+            (zero.h - orig.h).abs() < 0.02 && zero.l < orig.l,
+            "the zero variant is the base with only its lightness moved: {zero:?} vs {orig:?}"
+        );
     }
 }

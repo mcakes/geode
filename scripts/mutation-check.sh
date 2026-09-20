@@ -10618,19 +10618,24 @@ run_mutation "tint: the rotation stops at the pole" \
 # tint_sign: a definition without it resolves to the base for every sign.
 run_mutation "tint: an untinted definition ignores the sign" \
   crates/geode-core/src/colour/mod.rs \
-  '    if !def.tint_sign || sign == Sign::Zero {' \
-  '    if sign == Sign::Zero {' \
+  '    if !def.tint_sign {
+        return base;
+    }' \
+  '    if false {
+        return base;
+    }' \
   geode-core \
   resolve_signed_is_the_base_unless_the_definition_tints_and_the_sign_is_nonzero
 
-# tint_sign: a tinted variant is a generated colour and goes through the
-# readability floor even when its base is an unfloored token.
-run_mutation "tint: a tinted variant is floored" \
+# tint_sign: a tinted colour is a generated triad and every one of its
+# three goes through the readability floor — the zero/header colour
+# included — even when its base is a token `resolve` leaves unfloored.
+run_mutation "tint: a tinted triad is floored" \
   crates/geode-core/src/colour/mod.rs \
   '    readable_on(tint(base, sign), tokens.background, tokens.foreground)' \
   '    tint(base, sign)' \
   geode-core \
-  a_tinted_token_variant_is_floored_but_the_base_token_is_not
+  a_tinted_token_is_floored_as_a_whole_triad_but_an_untinted_one_is_not
 
 # tint_sign: the key is read beside either base, not only under hue.
 run_mutation "colour: tint_sign is read from the doc" \
@@ -10640,9 +10645,9 @@ run_mutation "colour: tint_sign is read from the doc" \
   geode-core \
   reads_tint_sign_beside_a_hue_or_a_token_and_warns_on_a_non_bool
 
-# tint_sign: the dialog writes the key only when ticked — an explicit
+# tint_sign: the dialog writes the key only when on — an explicit
 # false is a no-op key the reader defaults anyway.
-run_mutation "colours: tint_sign is written only when ticked" \
+run_mutation "colours: tint_sign is written only when on" \
   crates/geode-shell/src/shell/objectdialog/colours.rs \
   '    if tint_sign_of(draft) {
         table["tint_sign"] = toml_edit::value(true);

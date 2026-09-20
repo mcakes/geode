@@ -1243,12 +1243,23 @@ precisely so a token tints identically to a hue.
 `resolve_signed(def, sign, anchors, tokens)` is `resolve` plus the tint
 for a non-zero sign when `tint_sign` is set.
 
-**Floor.** §7's rule keeps its reasoning and gains a clause: a base
-token is still never floored, but a tinted variant of either shape is a
-colour this module generated and goes through `readable_on`.
+**Floor.** §7's rule keeps its reasoning and gains a clause: an
+untinted token is still never floored, but a `tint_sign` colour is a
+generated triad and all three of it — the zero/header colour included —
+go through `readable_on`. The first cut floored only the two shifted
+variants; the review found that on the ten bundled themes whose
+`warning` is faint that paints zero cells and the header dim beside
+floored-bright ± cells, a lightness split reading as a third state, so
+the base joins the floor the moment the trader turns the tint on (a
+deviation from the approved design's "base token stays unfloored",
+taken on the review finding and recorded here for reversal).
 `every_bundled_theme_keeps_generated_hues_readable` sweeps both variants
 of every hue/tone pair and every token on every bundled theme, no
 exception list.
+
+**Grey tokens.** A token with no chroma (`foreground` on most themes,
+`muted` on many) has no hue to shift: its triad is three of the same
+grey. Not a diagnostic — the dialog's triad swatch shows it plainly.
 
 **Blotter.** `ColourCache` resolves a `Resolved { base, positive,
 negative }` on the miss (three `resolve_signed` calls; an untinted
@@ -1259,7 +1270,7 @@ the triple; `render_td`'s named arm paints `for_sign(cell.sign)` and
 **Dialog.** A fourth row, "Tint by sign" (`FieldKind::Bool`), after
 `token` — it applies to either base, and the existing double-click test
 addresses `token` as `Field(2)`. `to_table` removes all four keys and
-writes `tint_sign = true` only when ticked. While ticked, the edit
+writes `tint_sign = true` only when on. While it is on, the edit
 header's swatch is a triad: `objectdialog-swatch-header-negative`, the
 base, `objectdialog-swatch-header-positive`. Help: "Positive numbers
 shift the hue toward cool, negative toward warm — a hint of sign".
@@ -1267,12 +1278,15 @@ shift the hue toward cool, negative toward warm — a hint of sign".
 **Harness.** `tint: positive is cooler, negative warmer`, `tint: the
 rotation stops at the pole`, `tint: an untinted definition ignores the
 sign`, `tint: a tinted variant is floored`, `colour: tint_sign is read
-from the doc`, `colours: tint_sign is written only when ticked`,
+from the doc`, `colours: tint_sign is written only when on`,
 `colours: the swatch triad follows tint_sign`, `blotter: the colour cache
 resolves the sign variants`. The `colour: both hue and token is refused`
 mutant was re-spelled to `Base::Token`. Deliberately not entries: the
 `for_sign(sign)` pick and the header's `.base` in `render_td`/`render_th`
-— a painted `text_color` is not observable in a `TestAppContext`.
+— a painted `text_color` is not observable in a `TestAppContext` — and,
+for the same reason, which colour each triad swatch paints
+(`dialog::swatch` records no `Hsla`; the window test pins presence,
+absence before the step, order and the written file).
 
 **Display check pending:** the triad in the header, and a tinted column
 in a blotter (no demo `colours.toml` exists; define one in the user

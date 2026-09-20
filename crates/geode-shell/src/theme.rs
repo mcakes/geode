@@ -876,7 +876,7 @@ mod gpui_tests {
 
     /// 2c §7 fix round 2 (controller ruling, 2026-09-13): the exception
     /// list from fix round 1 is gone. [`geode_core::colour::resolve`]
-    /// itself now floors every `Definition::Hue` against the theme's
+    /// itself now floors every `Base::Hue` against the theme's
     /// own background (`readable_on`, spec §2.2/§7), so every bundled
     /// theme clears `READABLE_RATIO` at every generated hue, in both
     /// tones, with no exceptions — asserted here unconditionally, the
