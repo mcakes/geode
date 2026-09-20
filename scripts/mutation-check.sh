@@ -3646,7 +3646,7 @@ run_mutation "distinct: a derived dimension groups by its own labels, not the so
 # payload actually looks like.
 run_mutation "distinct: the sink maps a Distinct result to a Distinct event" \
   crates/geode-data/src/service.rs \
-  '                    values: r.snapshot.map(|s| {
+  '                    values: r.payload.and_then(view_snapshot).map(|s| {
                         let v = s.column_index("value").expect("distinct selects value");
                         let n = s.column_index("n").expect("distinct selects n");
                         (0..s.rows())
