@@ -570,13 +570,14 @@ fn run(
         // — the strip tolerates a `LoadEnded` with no matching `Started`.
         let item = match work {
             Work::Document(job) => {
-                if job.source != LOCAL_SOURCE
-                    && !sink(IngestEvent::Started {
-                        source: job.source.clone(),
-                        path: format!("document://{}/{}", job.source, job.dataset),
-                        queued,
-                    })
-                {
+                if job.source == LOCAL_SOURCE {
+                    // no Started/Loading for a local publish — see the
+                    // doc comment above.
+                } else if !sink(IngestEvent::Started {
+                    source: job.source.clone(),
+                    path: format!("document://{}/{}", job.source, job.dataset),
+                    queued,
+                }) {
                     log_refused_event(&refusal_logged, "a load-started announcement");
                 }
                 publish_one_document(&store, &schema, &sink, publish, &refusal_logged, job);

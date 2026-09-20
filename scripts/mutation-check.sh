@@ -13581,8 +13581,8 @@ run_mutation "shell: a pricing refresh change asks for a restart" \
 # the emit must be caught by the extended service-level test.
 run_mutation "runner: a local publish reports Loading" \
   crates/geode-data/src/ingest/runner.rs \
-  '                if job.source != LOCAL_SOURCE' \
-  '                if false && job.source != LOCAL_SOURCE' \
+  '                if job.source == LOCAL_SOURCE {' \
+  '                if false && job.source == LOCAL_SOURCE {' \
   geode-data a_local_publish_emits_no_health_event_and_a_load_ended
 
 # Overrides (Task 7b, ruling 1 amended): stateful, batch-scoped. A no-op
