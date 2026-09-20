@@ -6,6 +6,7 @@
 
 pub mod actions;
 pub mod choice;
+pub mod clock;
 pub mod commandline;
 pub mod config_write;
 pub mod defaults;

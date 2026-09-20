@@ -1601,3 +1601,31 @@ fn a_dropped_fragment_bindings_diagnostic_survives_a_reload(cx: &mut gpui::TestA
         diagnostics.read_with(&vcx, |d, _| d.config.clone())
     );
 }
+
+/// `[time] zone` is live (as-of dialog spec §6.1): a reload with a new
+/// zone re-publishes `AppClock`, and nothing requeries — the frame's
+/// data and as-of versions are untouched.
+#[gpui::test]
+fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    let before = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
+    let versions_before = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
+
+    std::fs::write(
+        dir.path().join("app.toml"),
+        "config_version = 1\n[time]\nzone = \"Asia/Tokyo\"\n",
+    )
+    .unwrap();
+    let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
+    let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    let after = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
+    assert_ne!(before, after);
+    assert_eq!(after.zone_name(), "Asia/Tokyo");
+    let versions_after = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
+    assert_eq!(versions_before.data, versions_after.data);
+    assert_eq!(versions_before.as_of, versions_after.as_of);
+}

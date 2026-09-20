@@ -145,7 +145,7 @@ pub struct ShellServices {
     /// against the `ActionRegistry` as it stood at startup, after the
     /// roster's and the pick/scope/add registrations. Carrying the list
     /// is what lets `ShellView::new` seed the diagnostics entity's config
-    /// section with the same four groups `apply_reload` extends, in the
+    /// section with the same five groups `apply_reload` extends, in the
     /// same order — otherwise a keymap diagnostic (a binding naming an
     /// action nothing registered, say) was logged at startup and then
     /// invisible in the diagnostics tile until some later hot reload.
@@ -1337,8 +1337,11 @@ impl ShellView {
                 // day. Only notifies when the date actually moved on —
                 // any other trigger repaints "for free" with the fresh
                 // value already in place.
-                let Ok(changed) = this.update(cx, |view, _cx| {
-                    let today = chrono::Local::now().date_naive();
+                let Ok(changed) = this.update(cx, |view, cx| {
+                    let today = cx
+                        .global::<crate::clock::AppClock>()
+                        .0
+                        .today(chrono::Utc::now());
                     let changed = view.today != today;
                     view.today = today;
                     changed
@@ -1446,6 +1449,11 @@ impl ShellView {
         let line_numbers = crate::linenumbers::LineNumbers::from_config(&services.config);
         cx.set_global(crate::linenumbers::UiSettings { line_numbers });
 
+        // The app-wide clock (`crate::clock::AppClock`, the workspace's
+        // third global — see its own doc comment).
+        let (clock, clock_diags) = geode_core::clock::Clock::from_config(&services.config);
+        cx.set_global(crate::clock::AppClock(clock));
+
         // The keymap's bindings for module-visible chord lookup
         // (`tips::Chords`, the workspace's second global — see its doc).
         cx.set_global(crate::tips::Chords(Arc::new(
@@ -1519,17 +1527,19 @@ impl ShellView {
         // mid-session saw neither in the diagnostics tile — while
         // `apply_reload` had been folding both in all along, meaning the
         // tile's contents depended on whether a reload had happened yet.
-        // Same four groups `apply_reload` extends, in the same order
-        // (config, mod alias, `modules.default`, keymap), so the section
-        // reads the same whichever path filled it. The first two are pure
-        // over `&Config` and recomputed here; the keymap diagnostics are
-        // not — `build_keymap` needs the startup registry — so they ride
-        // on `ShellServices::keymap_diagnostics`, which `main.rs` fills.
+        // Same five groups `apply_reload` extends, in the same order
+        // (config, mod alias, `modules.default`, `[time]`, keymap), so
+        // the section reads the same whichever path filled it. The first
+        // three are pure over `&Config` and recomputed here; the keymap
+        // diagnostics are not — `build_keymap` needs the startup
+        // registry — so they ride on `ShellServices::keymap_diagnostics`,
+        // which `main.rs` fills.
         let startup_diagnostics = {
             let cfg = &services.config;
             let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
             diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags.extend(clock_diags.iter().cloned());
             diags.extend(services.keymap_diagnostics.iter().cloned());
             diags
         };
@@ -1648,7 +1658,7 @@ impl ShellView {
             pending_config_write: None,
             config_write_seq: 0,
             config_write_error: None,
-            today: chrono::Local::now().date_naive(),
+            today: clock.today(chrono::Utc::now()),
         }
     }
 
@@ -1900,6 +1910,11 @@ impl ShellView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn dialog_input(&self) -> &Entity<InputState> {
         &self.dialog_input
+    }
+
+    /// The configured clock (`AppClock`), for the shell's own painters.
+    pub fn clock(&self, cx: &gpui::App) -> geode_core::clock::Clock {
+        cx.global::<crate::clock::AppClock>().0
     }
 
     /// The as-of dialog's calendar entity (Task 3) — cross-module test
