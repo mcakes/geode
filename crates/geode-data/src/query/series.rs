@@ -11,12 +11,15 @@
 //! statement would take it if it ever matters.
 
 use crate::store::StoreError;
-use crate::store::series::{coverage_table, micros, series_table};
+use crate::store::series::{coverage_table, from_micros, micros, series_table};
 use duckdb::types::Value;
 use geode_core::query::AsOf;
 use geode_core::schema::SchemaSpec;
 use geode_core::series::expr::{Ast, Expr, Op, expression_order};
-use geode_core::series::{BucketRule, MAX_BINS, MIN_BINS, SeriesParams, SlotKind};
+use geode_core::series::{
+    BucketRule, MAX_BINS, MIN_BINS, SeriesParams, SeriesResult, SlotKind, SlotProvenance,
+    SlotResult,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
@@ -343,6 +346,122 @@ pub fn compile_series(
         bins,
         coverage,
     })
+}
+
+/// A NULL value column is a bucket this slot has no point in, and
+/// `SlotResult::values` is a dense `Vec<f64>` the length of `buckets` —
+/// so the gap has to be a float. `NaN` is that float, as that field's
+/// own contract says: a gap must not arrive as a zero a chart would
+/// draw, nor as a number any later arithmetic could absorb.
+fn nan_if_null(v: Option<f64>) -> f64 {
+    v.unwrap_or(f64::NAN)
+}
+
+/// Run one compiled plan on a connection. The points statement is read
+/// once into a column per slot, then each slot's stats and coverage
+/// statements follow — every one of them a plain read, so this may run
+/// on a pool connection with no lock of its own.
+pub fn run_series(
+    conn: &duckdb::Connection,
+    plan: &SeriesPlan,
+) -> Result<SeriesResult, duckdb::Error> {
+    let k = plan.slots.len();
+    let mut buckets: Vec<i64> = Vec::new();
+    let mut values: Vec<Vec<f64>> = vec![Vec::new(); k];
+    {
+        let mut stmt = conn.prepare(&plan.points.sql)?;
+        let mut rows = stmt.query(duckdb::params_from_iter(plan.points.params.iter()))?;
+        while let Some(row) = rows.next()? {
+            buckets.push(row.get::<_, i64>(0)?);
+            for (i, col) in values.iter_mut().enumerate() {
+                col.push(nan_if_null(row.get::<_, Option<f64>>(i + 1)?));
+            }
+        }
+    }
+
+    let mut slots = Vec::with_capacity(k);
+    for (i, slot) in plan.slots.iter().enumerate() {
+        // One NULL means the window held nothing at all, so the slot
+        // reports no percentiles rather than a partial list.
+        let mut percentiles = Vec::new();
+        if let Some((_, st)) = plan.percentiles.iter().find(|(s, _)| s == slot) {
+            let mut stmt = conn.prepare(&st.sql)?;
+            let mut rows = stmt.query(duckdb::params_from_iter(st.params.iter()))?;
+            if let Some(row) = rows.next()? {
+                for (j, f) in plan.fractions.iter().enumerate() {
+                    match row.get::<_, Option<f64>>(j)? {
+                        Some(v) => percentiles.push((*f, v)),
+                        None => {
+                            percentiles.clear();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The statement emits only the non-empty bins; the zero-count
+        // ones in between are filled here, and the edges come from the
+        // `(lo, hi)` every row repeats. No rows at all means the window
+        // held fewer than two distinct values, and there are no bins.
+        let mut bins = Vec::new();
+        if let Some((_, st)) = plan.bins.iter().find(|(s, _)| s == slot) {
+            let n = plan.bin_count as usize;
+            let mut stmt = conn.prepare(&st.sql)?;
+            let mut rows = stmt.query(duckdb::params_from_iter(st.params.iter()))?;
+            let mut counts = vec![0u32; n];
+            let mut edges: Option<(f64, f64)> = None;
+            while let Some(row) = rows.next()? {
+                let lo: f64 = row.get(0)?;
+                let hi: f64 = row.get(1)?;
+                let kk: i64 = row.get(2)?;
+                let c: i64 = row.get(3)?;
+                edges = Some((lo, hi));
+                if (1..=n as i64).contains(&kk) {
+                    counts[(kk - 1) as usize] = c as u32;
+                }
+            }
+            if let Some((lo, hi)) = edges {
+                let w = (hi - lo) / n as f64;
+                bins = counts
+                    .iter()
+                    .enumerate()
+                    .map(|(b, c)| (lo + b as f64 * w, lo + (b as f64 + 1.0) * w, *c))
+                    .collect();
+            }
+        }
+
+        // An expression slot has no coverage statement and so keeps the
+        // all-`None` provenance; `health` is the service's to fill
+        // (Task 6), never this function's.
+        let mut provenance = SlotProvenance {
+            loaded: None,
+            latest_received_at: None,
+            health: None,
+        };
+        if let Some((_, st)) = plan.coverage.iter().find(|(s, _)| s == slot) {
+            let mut stmt = conn.prepare(&st.sql)?;
+            let mut rows = stmt.query(duckdb::params_from_iter(st.params.iter()))?;
+            if let Some(row) = rows.next()? {
+                let from: Option<i64> = row.get(0)?;
+                let to: Option<i64> = row.get(1)?;
+                let latest: Option<i64> = row.get(2)?;
+                if let (Some(f), Some(t)) = (from, to) {
+                    provenance.loaded = Some((from_micros(f), from_micros(t)));
+                }
+                provenance.latest_received_at = latest.map(from_micros);
+            }
+        }
+
+        slots.push(SlotResult {
+            slot: *slot,
+            values: std::mem::take(&mut values[i]),
+            percentiles,
+            bins,
+            provenance,
+        });
+    }
+    Ok(SeriesResult { buckets, slots })
 }
 
 #[cfg(test)]
@@ -680,5 +799,323 @@ mod tests {
             expr(3, "s2"),
         ]));
         assert!(e.contains("cycle"), "{e}");
+    }
+
+    // The end-to-end half: every statement above run against a real
+    // DuckDB store, so a plan that reads plausibly but answers wrongly
+    // has nowhere to hide.
+
+    use crate::adapter::SeriesRows;
+    use crate::store::Store;
+    use crate::store::catalog::Catalog;
+    use crate::store::series::{SeriesAppendRequest, append_series};
+    use geode_core::series::SeriesResult;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        store.apply_schema(&series_dataset()).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        (dir, store)
+    }
+
+    /// `values` at one-minute steps from `start`, appended for `identity`
+    /// under `demo_kdb` with the given `received_at`.
+    fn append(store: &Store, identity: &str, start: &str, values: &[f64], received: &str) {
+        let start_t = ts(start);
+        let rows = SeriesRows {
+            ts: (0..values.len())
+                .map(|i| start_t + chrono::Duration::minutes(i as i64))
+                .collect(),
+            value: values.to_vec(),
+        };
+        let ds = series_dataset();
+        append_series(
+            store,
+            &SeriesAppendRequest {
+                dataset: &ds,
+                source: "demo_kdb",
+                identity,
+                rows: &rows,
+                span: (start_t, start_t + chrono::Duration::days(1)),
+                received_at: ts(received),
+            },
+        )
+        .unwrap();
+    }
+
+    fn run(store: &Store, p: &SeriesParams) -> SeriesResult {
+        let plan = compile_series(&schema(), p).unwrap();
+        run_series(store.writer(), &plan).unwrap()
+    }
+
+    fn nan_or(v: f64) -> Option<f64> {
+        if v.is_nan() { None } else { Some(v) }
+    }
+
+    #[test]
+    fn daily_buckets_apply_every_rule_over_the_live_rows() {
+        let (_d, store) = store();
+        // Jan 5: 1,2,3,4 (minutes 14:30..14:33); Jan 6: 10,20
+        append(
+            &store,
+            "A",
+            "2026-01-05T14:30:00Z",
+            &[1.0, 2.0, 3.0, 4.0],
+            "2026-01-06T09:00:00Z",
+        );
+        append(
+            &store,
+            "A",
+            "2026-01-06T14:30:00Z",
+            &[10.0, 20.0],
+            "2026-01-07T09:00:00Z",
+        );
+        for (rule, day1, day2) in [
+            (BucketRule::Last, 4.0, 20.0),
+            (BucketRule::First, 1.0, 10.0),
+            (BucketRule::Mean, 2.5, 15.0),
+            (BucketRule::Min, 1.0, 10.0),
+            (BucketRule::Max, 4.0, 20.0),
+        ] {
+            let r = run(&store, &params(vec![source(1, "A", rule)]));
+            assert_eq!(
+                r.buckets,
+                vec![
+                    crate::store::series::micros(ts("2026-01-05T00:00:00Z")),
+                    crate::store::series::micros(ts("2026-01-06T00:00:00Z"))
+                ],
+                "{rule:?}"
+            );
+            assert_eq!(r.slots.len(), 1);
+            assert_eq!(r.slots[0].slot, 1);
+            assert_eq!(r.slots[0].values, vec![day1, day2], "{rule:?}");
+        }
+    }
+
+    #[test]
+    fn the_bucket_set_is_the_union_and_a_missing_bucket_is_nan() {
+        let (_d, store) = store();
+        append(
+            &store,
+            "A",
+            "2026-01-05T14:30:00Z",
+            &[1.0],
+            "2026-01-06T09:00:00Z",
+        );
+        append(
+            &store,
+            "A",
+            "2026-01-07T14:30:00Z",
+            &[3.0],
+            "2026-01-08T09:00:00Z",
+        );
+        append(
+            &store,
+            "B",
+            "2026-01-06T14:30:00Z",
+            &[5.0],
+            "2026-01-07T09:00:00Z",
+        );
+        append(
+            &store,
+            "B",
+            "2026-01-07T14:30:00Z",
+            &[7.0],
+            "2026-01-08T09:00:00Z",
+        );
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                source(2, "B", BucketRule::Last),
+                expr(3, "s1 + s2"),
+            ]),
+        );
+        assert_eq!(r.buckets.len(), 3, "Jan 5, 6, 7");
+        let a: Vec<Option<f64>> = r.slots[0].values.iter().copied().map(nan_or).collect();
+        let b: Vec<Option<f64>> = r.slots[1].values.iter().copied().map(nan_or).collect();
+        let e: Vec<Option<f64>> = r.slots[2].values.iter().copied().map(nan_or).collect();
+        assert_eq!(a, vec![Some(1.0), None, Some(3.0)]);
+        assert_eq!(b, vec![None, Some(5.0), Some(7.0)]);
+        assert_eq!(
+            e,
+            vec![None, None, Some(10.0)],
+            "an expression exists only where every operand does"
+        );
+    }
+
+    #[test]
+    fn a_zero_denominator_is_a_gap_not_an_infinity() {
+        let (_d, store) = store();
+        append(
+            &store,
+            "A",
+            "2026-01-05T14:30:00Z",
+            &[6.0],
+            "2026-01-06T09:00:00Z",
+        );
+        append(
+            &store,
+            "B",
+            "2026-01-05T14:30:00Z",
+            &[0.0],
+            "2026-01-06T09:00:00Z",
+        );
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                source(2, "B", BucketRule::Last),
+                expr(3, "s1 / s2"),
+            ]),
+        );
+        assert!(r.slots[2].values[0].is_nan());
+    }
+
+    #[test]
+    fn an_as_of_before_a_correction_sees_the_original_value() {
+        let (_d, store) = store();
+        append(
+            &store,
+            "A",
+            "2026-01-05T14:30:00Z",
+            &[100.0],
+            "2026-01-06T09:00:00Z",
+        );
+        append(
+            &store,
+            "A",
+            "2026-01-05T14:30:00Z",
+            &[101.0],
+            "2026-01-07T09:00:00Z",
+        );
+        let live = run(&store, &params(vec![source(1, "A", BucketRule::Last)]));
+        assert_eq!(live.slots[0].values, vec![101.0]);
+        let mut p = params(vec![source(1, "A", BucketRule::Last)]);
+        p.as_of = AsOf::At(ts("2026-01-06T12:00:00Z"));
+        let then = run(&store, &p);
+        assert_eq!(then.slots[0].values, vec![100.0]);
+        // and an as-of before the bar's own ts hides it entirely
+        p.as_of = AsOf::At(ts("2026-01-05T12:00:00Z"));
+        let earlier = run(&store, &p);
+        assert!(earlier.buckets.is_empty());
+    }
+
+    #[test]
+    fn percentiles_and_bins_are_computed_over_the_window_only() {
+        let (_d, store) = store();
+        // Jan 5 (outside the window): 1000. Jan 6..8 (inside, 1m
+        // buckets): 1..=8 at 14:30..14:37 on Jan 6.
+        append(
+            &store,
+            "A",
+            "2026-01-05T14:30:00Z",
+            &[1000.0],
+            "2026-01-06T09:00:00Z",
+        );
+        append(
+            &store,
+            "A",
+            "2026-01-06T14:30:00Z",
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "2026-01-07T09:00:00Z",
+        );
+        let mut p = params(vec![source(1, "A", BucketRule::Last)]);
+        p.frequency = Frequency::M1;
+        p.percentiles = vec![0.5];
+        p.bins = Some(4);
+        let r = run(&store, &p);
+        assert_eq!(
+            r.slots[0].percentiles,
+            vec![(0.5, 4.5)],
+            "the 1000 outside the window is not counted"
+        );
+        let bins = &r.slots[0].bins;
+        assert_eq!(bins.len(), 4);
+        assert_eq!(
+            bins.iter().map(|b| b.2).collect::<Vec<_>>(),
+            vec![2, 2, 2, 2],
+            "{bins:?}"
+        );
+        assert!(
+            (bins[0].0 - 1.0).abs() < 1e-9 && (bins[3].1 - 8.0).abs() < 1e-9,
+            "{bins:?}"
+        );
+        assert!((bins[1].0 - bins[0].1).abs() < 1e-9, "bins are contiguous");
+        // Two fractions, so that column j being fraction j is pinned by
+        // a value and not only by the one-column case.
+        p.percentiles = vec![0.25, 0.75];
+        let r = run(&store, &p);
+        assert_eq!(
+            r.slots[0].percentiles,
+            vec![(0.25, 2.75), (0.75, 6.25)],
+            "each fraction reads its own column"
+        );
+    }
+
+    #[test]
+    fn an_empty_window_has_no_stats_and_a_constant_series_has_no_bins() {
+        let (_d, store) = store();
+        append(
+            &store,
+            "A",
+            "2026-01-05T14:30:00Z",
+            &[5.0, 5.0, 5.0],
+            "2026-01-06T09:00:00Z",
+        );
+        let mut p = params(vec![source(1, "A", BucketRule::Last)]);
+        p.frequency = Frequency::M1;
+        p.percentiles = vec![0.5];
+        p.bins = Some(4);
+        p.window = (ts("2026-01-08T00:00:00Z"), ts("2026-01-09T00:00:00Z"));
+        let r = run(&store, &p);
+        assert!(r.slots[0].percentiles.is_empty());
+        assert!(r.slots[0].bins.is_empty());
+        p.window = (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z"));
+        let r = run(&store, &p);
+        assert_eq!(r.slots[0].percentiles, vec![(0.5, 5.0)]);
+        assert!(r.slots[0].bins.is_empty(), "fewer than two distinct values");
+    }
+
+    #[test]
+    fn provenance_carries_the_coverage_hull_for_a_source_slot_and_nothing_for_an_expression() {
+        let (_d, store) = store();
+        append(
+            &store,
+            "A",
+            "2026-01-05T14:30:00Z",
+            &[1.0],
+            "2026-01-06T09:00:00Z",
+        );
+        append(
+            &store,
+            "A",
+            "2026-01-07T14:30:00Z",
+            &[2.0],
+            "2026-01-08T09:00:00Z",
+        );
+        let r = run(
+            &store,
+            &params(vec![source(1, "A", BucketRule::Last), expr(2, "s1 * 2")]),
+        );
+        let p = &r.slots[0].provenance;
+        assert_eq!(
+            p.loaded,
+            Some((ts("2026-01-05T14:30:00Z"), ts("2026-01-08T14:30:00Z")))
+        );
+        assert_eq!(p.latest_received_at, Some(ts("2026-01-08T09:00:00Z")));
+        assert_eq!(p.health, None, "the service fills health");
+        let e = &r.slots[1].provenance;
+        assert_eq!(
+            (e.loaded, e.latest_received_at, e.health.clone()),
+            (None, None, None)
+        );
+        let r = run(&store, &params(vec![source(1, "NEVER", BucketRule::Last)]));
+        assert!(r.buckets.is_empty());
+        assert_eq!(
+            r.slots[0].provenance.loaded, None,
+            "an unfetched pair has no hull"
+        );
     }
 }

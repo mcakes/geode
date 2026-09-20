@@ -36,4 +36,4 @@ pub mod catalog;
 pub use catalog::build_catalog;
 pub mod series;
 
-pub use series::{SeriesPlan, Statement, compile_series};
+pub use series::{SeriesPlan, Statement, compile_series, run_series};
