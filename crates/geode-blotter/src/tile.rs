@@ -306,6 +306,13 @@ impl BlotterTile {
             .detach();
         cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
+        // `AppClock` (as-of dialog spec §6.1): the header's freshness
+        // readouts and the `AS OF` chip read the global at paint time
+        // (see `render`); this just needs to repaint on a `[time]`
+        // reload — nothing here is cached the way `UiSettings`' render
+        // is.
+        cx.observe_global::<geode_shell::clock::AppClock>(|_this, cx| cx.notify())
+            .detach();
 
         let title = Self::compute_title(&view_name, &[]);
 
@@ -1049,13 +1056,14 @@ impl BlotterTile {
                 })?;
             }
             Command::AsOf(text) => {
-                // Part 2 interim: the machine clock, as `Local` was, until
-                // Task 6/7 thread `AppClock`
-                let at = parse_as_of(
-                    &text,
-                    chrono::Utc::now(),
-                    &geode_core::clock::Clock::machine().0,
-                )?;
+                // `try_global`, not the bare `cx.global` (Task 5 ruling,
+                // `geode_shell::clock`'s own module doc): a module test
+                // fixture may never have installed `AppClock`.
+                let clock = cx
+                    .try_global::<geode_shell::clock::AppClock>()
+                    .map(|c| c.0)
+                    .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
+                let at = parse_as_of(&text, chrono::Utc::now(), &clock)?;
                 self.frame.update(cx, |f, cx| {
                     if f.set_as_of(AsOf::At(at)) {
                         cx.notify();
@@ -1292,16 +1300,16 @@ impl BlotterTile {
     }
 }
 
-/// The `HH:MM` slice of an RFC-3339 `as_of` timestamp, for the header's
-/// per-dataset freshness readout. `str::get` rather than direct
-/// indexing (`&t[11..16]`), so an `as_of` string shorter than 11 bytes
-/// (start > end — a panic on direct indexing, not just a truncation) or
-/// one whose 11/16 byte offsets don't land on a char boundary both fall
-/// back to the whole string instead of panicking on the render thread —
-/// a malformed freshness timestamp must never be able to take the
-/// render thread down with it.
-fn short_time(t: &str) -> &str {
-    t.get(11..16.min(t.len())).unwrap_or(t)
+/// The `HH:MM` of an RFC 3339 `as_of` on the trader's clock, for the
+/// header's per-dataset freshness readout; a string that is not an
+/// instant is echoed whole rather than sliced (a `&t[11..16]` panicked
+/// on short input once — a malformed freshness timestamp must never be
+/// able to take the render thread down with it).
+fn short_time(t: &str, clock: geode_core::clock::Clock) -> String {
+    match chrono::DateTime::parse_from_rfc3339(t) {
+        Ok(at) => clock.hm(at.to_utc()),
+        Err(_) => t.to_string(),
+    }
 }
 
 /// One line for the `filtered` pill's tooltip: the tile's own filter
@@ -1334,6 +1342,12 @@ impl gpui::Render for BlotterTile {
                 .update(cx, |f, _| f.requery.record_snapshot_to_paint(micros));
         }
         let theme = cx.theme();
+        // `try_global`, not the bare `cx.global` (Task 5 ruling): a
+        // module test fixture may never have installed `AppClock`.
+        let clock = cx
+            .try_global::<geode_shell::clock::AppClock>()
+            .map(|c| c.0)
+            .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
         let delegate = self.table.read(cx).delegate();
         let snapshot = delegate.snapshot.clone();
         // One door for every semantic chip and warning run in this header
@@ -1433,20 +1447,23 @@ impl gpui::Render for BlotterTile {
             let now = chrono::Utc::now();
             for f in datasets {
                 let text = match &f.as_of {
-                    Some(t) => format!("{} {}", f.dataset, short_time(t)),
+                    Some(t) => format!("{} {}", f.dataset, short_time(t, clock)),
                     None => format!("{} —", f.dataset),
                 };
                 let stale = self.is_stale(f.as_of.as_deref(), now);
                 header = header.child(div().when(stale, |el| el.text_color(warn_text)).child(text));
             }
             if let Some(req) = &p.as_of_request {
+                let text = chrono::DateTime::parse_from_rfc3339(req)
+                    .map(|t| format!("AS OF {}", clock.local(t.to_utc()).format("%Y-%m-%d %H:%M")))
+                    .unwrap_or_else(|_| format!("AS OF {}", req.get(..16).unwrap_or(req)));
                 header = header.child(
                     div()
                         .text_color(warn_chip.text)
                         .when_some(warn_chip.fill, |el, fill| el.bg(fill))
                         .px_1()
                         .rounded(theme.radius_tokens().sm)
-                        .child(format!("AS OF {}", &req[..16.min(req.len())])),
+                        .child(text),
                 );
             }
         }
@@ -1510,15 +1527,19 @@ impl gpui::Render for BlotterTile {
 }
 
 #[test]
-fn short_time_falls_back_to_the_whole_string_instead_of_panicking() {
-    assert_eq!(short_time("2026-08-30T14:32:00Z"), "14:32");
-    // Shorter than the 11-byte offset the slice starts at: direct
-    // indexing (`&t[11..16.min(t.len())]`) would panic here (start >
-    // end); `short_time` falls back to the whole string.
-    assert_eq!(short_time("2026"), "2026");
-    assert_eq!(short_time(""), "");
-    // Exactly 11 bytes: the slice is `11..11`, valid but empty.
-    assert_eq!(short_time("2026-08-30T"), "");
+fn short_time_formats_an_rfc3339_instant_on_the_clock_and_echoes_garbage() {
+    use geode_core::clock::Clock;
+    let utc = Clock::utc();
+    assert_eq!(short_time("2026-08-30T14:32:00Z", utc), "14:32");
+    let shifted = Clock::in_zone_named("Asia/Tokyo");
+    assert_eq!(
+        short_time("2026-08-30T14:32:00Z", shifted),
+        "23:32",
+        "Tokyo is UTC+9"
+    );
+    // Not a time: echoed, never a panic.
+    assert_eq!(short_time("2026", utc), "2026");
+    assert_eq!(short_time("", utc), "");
 }
 
 #[cfg(test)]
