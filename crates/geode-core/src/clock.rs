@@ -70,6 +70,18 @@ impl Clock {
         }
     }
 
+    /// `zone`, named — for a test in a downstream crate that wants a
+    /// specific non-UTC zone without depending on `chrono-tz` itself
+    /// directly (this crate is the one place in the workspace that
+    /// names a `Tz`; see the module doc). Panics on a name the IANA
+    /// database doesn't have — every call site names a real zone
+    /// literally, so an unknown name is a typo in the test, not
+    /// something to route through `Result`.
+    #[doc(hidden)]
+    pub fn in_zone_named(name: &str) -> Clock {
+        Clock::in_zone(Tz::from_str(name).expect("test names a valid IANA zone"))
+    }
+
     pub fn with_times(mut self, sod: NaiveTime, eod: NaiveTime) -> Clock {
         self.sod = sod;
         self.eod = eod;

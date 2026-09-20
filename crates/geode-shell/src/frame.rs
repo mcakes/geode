@@ -157,6 +157,17 @@ struct ScopeSession {
     redo_snapshot: Vec<Scope>,
 }
 
+/// [`Frame::bar_cache`]'s value type — named so clippy's `type_complexity`
+/// lint doesn't fire on the field declaration.
+type BarCache = RefCell<
+    Option<(
+        FrameVersions,
+        geode_core::clock::Clock,
+        chrono::NaiveDate,
+        Rc<ScopeBarModel>,
+    )>,
+>;
+
 #[derive(Debug)]
 pub struct Frame {
     scope: Scope,
@@ -196,18 +207,21 @@ pub struct Frame {
     /// background write with [`persist_slot_to_user_config`] (§4.2).
     pending_persist: Option<(u8, Vec<String>)>,
     /// Lazy cache for [`bar_model`](Self::bar_model), keyed on
-    /// `(versions(), today)` (carried over from the Phase 3c `readout`
-    /// cache this replaces — same reasoning; the `today` half of the key
-    /// is Phase 4b M12 — see `bar_model`'s own doc comment for why
-    /// `versions()` alone wasn't enough): `render` calls `bar_model`
-    /// every frame (`shell/render.rs`), and building one fresh each time
-    /// allocates a `Vec<Chip>`, several `String`s, for a value that's
-    /// almost always identical to the previous frame's. `RefCell`
-    /// because `bar_model` takes `&self` (every other read-only accessor
-    /// on `Frame` does) but still needs to update this cache;
-    /// `Rc<ScopeBarModel>` rather than an owned clone so a cache hit
-    /// costs a refcount bump, not a fresh allocation.
-    bar_cache: RefCell<Option<(FrameVersions, chrono::NaiveDate, Rc<ScopeBarModel>)>>,
+    /// `(versions(), clock, today)` (carried over from the Phase 3c
+    /// `readout` cache this replaces — same reasoning; the `today` half
+    /// of the key is Phase 4b M12 — see `bar_model`'s own doc comment
+    /// for why `versions()` alone wasn't enough; the `clock` half is
+    /// as-of dialog spec §6.1, for the same reason `today` is there — a
+    /// `[time]` reload must not hand a trader a stale-zone label):
+    /// `render` calls `bar_model` every frame (`shell/render.rs`), and
+    /// building one fresh each time allocates a `Vec<Chip>`, several
+    /// `String`s, for a value that's almost always identical to the
+    /// previous frame's. `RefCell` because `bar_model` takes `&self`
+    /// (every other read-only accessor on `Frame` does) but still needs
+    /// to update this cache; `Rc<ScopeBarModel>` rather than an owned
+    /// clone so a cache hit costs a refcount bump, not a fresh
+    /// allocation.
+    bar_cache: BarCache,
     /// The open flip barrier (Phase 4 §3.10), if any — see
     /// [`FlipBarrier`]'s own doc comment. `None` when no scope/grouping/
     /// as-of mutation has a barrier waiting on it right now.
@@ -610,36 +624,45 @@ impl Frame {
     }
 
     /// What the toolbar's scope bar shows (spec §3.1/§3.6/§4.4). Cached
-    /// (see `bar_cache`'s doc comment) keyed on `versions()` AND
-    /// `today`'s local date (Phase 4b M12): an as-of formats as bare
-    /// `HH:MM` when its date is today (`scopebar::build_model`'s own doc
-    /// comment) — keying on `FrameVersions` alone meant that label
-    /// stayed stale past midnight, showing `HH:MM` for a now-yesterday
-    /// instant until the next unrelated mutation happened to invalidate
-    /// the cache. `today` is a parameter (rather than read from the
-    /// clock in here), same testability reason `scopebar::build_model`
-    /// already takes it explicitly — and passed straight through, so
-    /// this itself never touches the clock. Phase 4b Task 1 fix round 1
+    /// (see `bar_cache`'s doc comment) keyed on `versions()`, `clock`
+    /// AND `today`'s date on that clock (Phase 4b M12; as-of dialog spec
+    /// §6.1 added `clock`): an as-of formats as bare `HH:MM` when its
+    /// date is today (`scopebar::build_model`'s own doc comment) —
+    /// keying on `FrameVersions` alone meant that label stayed stale
+    /// past midnight, showing `HH:MM` for a now-yesterday instant until
+    /// the next unrelated mutation happened to invalidate the cache, and
+    /// a `[time]` reload that changed the zone alone (no version bump)
+    /// would otherwise keep painting the OLD zone's label. Both `clock`
+    /// and `today` are parameters (rather than read from `AppClock` in
+    /// here), same testability reason `scopebar::build_model` already
+    /// takes them explicitly — and passed straight through, so this
+    /// itself never touches the global. Phase 4b Task 1 fix round 1
     /// (MIN-9) moved the clock read itself off the render path
-    /// entirely: `shell::render` used to call `chrono::Local::now()`
-    /// fresh on every single paint just to hand this the date; it now
-    /// passes `ShellView::today`, refreshed once per ~500ms reload-poll
-    /// tick instead.
-    pub fn bar_model(&self, today: chrono::NaiveDate) -> Rc<ScopeBarModel> {
+    /// entirely: `shell::render` used to call the machine clock fresh on
+    /// every single paint just to hand this the date; it now passes
+    /// `ShellView::today`, refreshed once per ~500ms reload-poll tick
+    /// instead (and `ShellView::clock`, the `AppClock` global).
+    pub fn bar_model(
+        &self,
+        clock: geode_core::clock::Clock,
+        today: chrono::NaiveDate,
+    ) -> Rc<ScopeBarModel> {
         // `flip` alone never changes what the bar shows — keyed out here
         // (rather than relying on it happening to already match) so a
         // flip costs a refcount bump like any other unrelated notify,
         // not a rebuild.
         let mut versions = self.versions();
         versions.flip = 0;
-        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+        if let Some((cached_versions, cached_clock, cached_today, cached)) =
+            self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_clock == clock
             && *cached_today == today
         {
             return Rc::clone(cached);
         }
-        let built = Rc::new(scopebar::build_model(self, today));
-        *self.bar_cache.borrow_mut() = Some((versions, today, Rc::clone(&built)));
+        let built = Rc::new(scopebar::build_model(self, clock, today));
+        *self.bar_cache.borrow_mut() = Some((versions, clock, today, Rc::clone(&built)));
         built
     }
 
@@ -773,7 +796,12 @@ pub fn persist_scope_to_user_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::clock::Clock;
     use geode_core::scope::{DimensionSelection, Scope};
+
+    fn hm(h: u32, m: u32) -> chrono::NaiveTime {
+        chrono::NaiveTime::from_hms_opt(h, m, 0).unwrap()
+    }
 
     fn slots() -> GroupingSlots {
         let mut s = GroupingSlots::default();
@@ -1181,9 +1209,10 @@ mod tests {
         s.text = Some("spx".into());
         s.expression = Some(geode_core::scope::parse_expr("npv > 0").unwrap());
         f.set_scope(s);
-        let today = chrono::Local::now().date_naive();
-        let m1 = f.bar_model(today);
-        let m2 = f.bar_model(today);
+        let clock = Clock::utc();
+        let today = clock.today(chrono::Utc::now());
+        let m1 = f.bar_model(clock, today);
+        let m2 = f.bar_model(clock, today);
         assert!(Rc::ptr_eq(&m1, &m2));
         assert_eq!(m1.slot, Some((1, "book / lhu".into())));
         assert_eq!(m1.chips[0].summary, "book ∈ BK001, BK002");
@@ -1192,7 +1221,18 @@ mod tests {
         assert_eq!(m1.expr.as_deref(), Some("npv > 0"));
         assert_eq!(m1.as_of, None);
         f.set_text(None);
-        assert!(!Rc::ptr_eq(&m1, &f.bar_model(today)));
+        assert!(!Rc::ptr_eq(&m1, &f.bar_model(clock, today)));
+
+        // A different clock rebuilds too, even with versions AND today
+        // both unchanged (Task 6: the cache key gained `clock` so a
+        // `[time]` reload can't hand a trader a stale-zone label).
+        let m3 = f.bar_model(clock, today);
+        let other_clock = Clock::utc().with_times(hm(7, 0), hm(17, 0));
+        let m4 = f.bar_model(other_clock, today);
+        assert!(
+            !Rc::ptr_eq(&m3, &m4),
+            "a different clock must rebuild even with versions and today unchanged"
+        );
     }
 
     #[test]
@@ -1204,10 +1244,11 @@ mod tests {
         // the cache was built.
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         f.set_scope(book_scope("A"));
-        let day1 = chrono::Local::now().date_naive();
-        let m1 = f.bar_model(day1);
+        let clock = Clock::utc();
+        let day1 = clock.today(chrono::Utc::now());
+        let m1 = f.bar_model(clock, day1);
         let day2 = day1 + chrono::Duration::days(1);
-        let m2 = f.bar_model(day2);
+        let m2 = f.bar_model(clock, day2);
         assert!(
             !Rc::ptr_eq(&m1, &m2),
             "versions unchanged but the date moved on: must rebuild"
@@ -1220,8 +1261,9 @@ mod tests {
         let s = book_scope("A").and_then(&book_scope("B"));
         assert!(s.impossible);
         f.set_scope(s);
+        let clock = Clock::utc();
         assert_eq!(
-            f.bar_model(chrono::Local::now().date_naive())
+            f.bar_model(clock, clock.today(chrono::Utc::now()))
                 .impossible
                 .as_deref(),
             Some("∅ book")

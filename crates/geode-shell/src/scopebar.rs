@@ -1,13 +1,16 @@
 //! The scope bar's pure model (Phase 4 spec §3.1, §3.6, §4.4): what the
 //! toolbar shows for the frame's active slot, scope, and as-of. Built
 //! fresh by [`build_model`] and cached on `Frame::bar_model` (keyed on
-//! `(Frame::versions(), today)` — Phase 4b M12 added the date half of
-//! the key so the cache doesn't hold a stale `HH:MM` label past
-//! midnight) — this module has no `gpui` dependency of its own;
-//! `shell::toolbar` is the one place that paints it.
+//! `(Frame::versions(), clock, today)` — Phase 4b M12 added the date
+//! half of the key so the cache doesn't hold a stale `HH:MM` label past
+//! midnight, and as-of dialog spec §6.1 added the clock half so a
+//! `[time]` reload can't hand a trader a stale-zone label either) — this
+//! module has no `gpui` dependency of its own; `shell::toolbar` is the
+//! one place that paints it.
 
 use crate::frame::Frame;
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
+use geode_core::clock::Clock;
 use gpui::SharedString;
 
 /// One dimension's chip in the scope bar (Task 4 renders these
@@ -91,7 +94,7 @@ pub struct ScopeBarModel {
     /// `as_of` drops the date on today and always drops seconds, which is
     /// fine for a glance at the badge but not for a hover that exists to
     /// answer "exactly when". Built alongside `as_of` from the same
-    /// `DateTime<Local>` conversion (final review, spec §5.1): the
+    /// clock conversion (final review, spec §5.1): the
     /// toolbar's AS OF badge and the status bar's as-of segment both use
     /// this as their tooltip TITLE, with the elided `as_of_badge`/segment
     /// text moved to the tooltip's detail line instead.
@@ -108,14 +111,15 @@ pub struct ScopeBarModel {
     pub savable: bool,
 }
 
-/// Build the scope bar model for `frame`, given today's local date (for
-/// deciding whether an as-of falls on today) — passed in rather than
-/// read from the clock, both so this stays a pure function callers can
-/// test without a wall-clock dependency and so a caller with its own
-/// cached `today` (Phase 4b Task 1 fix round 1, MIN-9 — `ShellView::
-/// today`, refreshed once per reload-poll tick) never needs to read the
-/// clock again just to call this.
-pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
+/// Build the scope bar model for `frame` on `clock` (as-of dialog spec
+/// §6.1), given today's date on that clock (for deciding whether an
+/// as-of falls on today) — both passed in rather than read from
+/// `AppClock` directly, so this stays a pure function callers can test
+/// without a `gpui` dependency, and so a caller with its own cached
+/// `today` (Phase 4b Task 1 fix round 1, MIN-9 — `ShellView::today`,
+/// refreshed once per reload-poll tick) never needs to read the clock
+/// again just to call this.
+pub fn build_model(frame: &Frame, clock: Clock, today: NaiveDate) -> ScopeBarModel {
     let scope = frame.scope();
     let slot = frame
         .active_slot()
@@ -152,7 +156,7 @@ pub fn build_model(frame: &Frame, today: NaiveDate) -> ScopeBarModel {
     let (as_of, as_of_full) = match frame.as_of() {
         geode_core::query::AsOf::Live => (None, None),
         geode_core::query::AsOf::At(t) => {
-            let local = t.with_timezone(&Local);
+            let local = clock.local(*t);
             let elided = if local.date_naive() == today {
                 local.format("%H:%M").to_string()
             } else {
@@ -205,7 +209,8 @@ mod tests {
             }],
             ..Scope::default()
         });
-        let m = build_model(&f, chrono::Local::now().date_naive());
+        let clock = geode_core::clock::Clock::utc();
+        let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
         assert_eq!(m.chips[0].summary, "book ∈ {3}");
         assert_eq!(m.chips[0].full, "book ∈ A, B, C");
     }
@@ -225,7 +230,8 @@ mod tests {
             expression: Some(expr.clone()),
             ..Scope::default()
         });
-        let m = build_model(&f, chrono::Local::now().date_naive());
+        let clock = geode_core::clock::Clock::utc();
+        let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
         assert!(m.expr.as_deref().unwrap().ends_with('…'));
         assert_eq!(m.expr_full.as_deref(), Some(expr.to_string().as_str()));
     }
@@ -251,11 +257,12 @@ mod tests {
             ..Scope::default()
         };
         f.set_scope(s);
-        let at = Local.with_ymd_and_hms(2026, 9, 8, 14, 5, 0).unwrap();
-        f.set_as_of(AsOf::At(at.with_timezone(&chrono::Utc)));
-        let today = at.date_naive();
+        let clock = geode_core::clock::Clock::utc();
+        let at = chrono::Utc.with_ymd_and_hms(2026, 9, 8, 14, 5, 0).unwrap();
+        f.set_as_of(AsOf::At(at));
+        let today = clock.today(at);
 
-        let m = build_model(&f, today);
+        let m = build_model(&f, clock, today);
         assert_eq!(
             m.text.as_deref(),
             Some("spx"),
@@ -285,11 +292,12 @@ mod tests {
     #[test]
     fn as_of_full_is_the_unelided_local_timestamp_while_as_of_elides_it() {
         let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
-        let at = Local.with_ymd_and_hms(2026, 9, 8, 14, 5, 30).unwrap();
-        f.set_as_of(AsOf::At(at.with_timezone(&chrono::Utc)));
-        let today = at.date_naive();
+        let clock = geode_core::clock::Clock::utc();
+        let at = chrono::Utc.with_ymd_and_hms(2026, 9, 8, 14, 5, 30).unwrap();
+        f.set_as_of(AsOf::At(at));
+        let today = clock.today(at);
 
-        let m = build_model(&f, today);
+        let m = build_model(&f, clock, today);
         assert_eq!(m.as_of.as_deref(), Some("14:05"), "the elided badge form");
         assert_eq!(
             m.as_of_full.as_deref(),
@@ -301,12 +309,39 @@ mod tests {
     #[test]
     fn no_active_slot_labels_as_view_default() {
         let f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
-        let m = build_model(&f, chrono::Local::now().date_naive());
+        let clock = geode_core::clock::Clock::utc();
+        let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
         assert_eq!(m.slot, None);
         assert_eq!(m.slot_label, "view default");
         assert_eq!(m.text, None);
         assert_eq!(m.as_of_badge, None);
         assert_eq!(m.as_of_full, None);
         assert!(!m.savable, "an empty scope has nothing to save");
+    }
+
+    /// As-of dialog spec §6.1: the chip reads on the CONFIGURED clock, not
+    /// hard-coded UTC and not the machine's own zone — `build_model`
+    /// takes the clock explicitly (same testability reason `today` is
+    /// already a parameter) so this holds for any zone a trader configures.
+    #[test]
+    fn the_as_of_chip_reads_on_the_clock_not_utc() {
+        use chrono::TimeZone;
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        let t = chrono::Utc.with_ymd_and_hms(2026, 9, 18, 22, 0, 0).unwrap();
+        f.set_as_of(geode_core::query::AsOf::At(t));
+        let utc = geode_core::clock::Clock::utc();
+        let m = build_model(&f, utc, utc.today(t));
+        assert_eq!(
+            m.as_of.as_deref(),
+            Some("22:00"),
+            "today on the clock: HH:MM alone"
+        );
+        let m = build_model(&f, utc, utc.today(t).succ_opt().unwrap());
+        assert_eq!(
+            m.as_of.as_deref(),
+            Some("2026-09-18 22:00"),
+            "another day: dated"
+        );
+        assert_eq!(m.as_of_full.as_deref(), Some("2026-09-18 22:00:00"));
     }
 }

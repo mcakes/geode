@@ -1505,7 +1505,7 @@ fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
 
-    let real_today = chrono::Local::now().date_naive();
+    let real_today = shell.read_with(&vcx, |s, cx| s.clock(cx).today(chrono::Utc::now()));
     let stale = real_today - chrono::Duration::days(1);
     shell.update(&mut vcx, |s, _cx| s.today = stale);
     assert_eq!(shell.read_with(&vcx, |s, _| s.today), stale);

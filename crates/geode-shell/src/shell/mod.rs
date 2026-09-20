@@ -994,15 +994,15 @@ pub struct ShellView {
     /// commonest way to reach the failure path with no dialog left on
     /// screen to carry a notice.
     pub(crate) config_write_error: Option<String>,
-    /// Today's local date (Phase 4b Task 1 fix round 1, MIN-9) —
-    /// refreshed once per reload-poll tick (~500ms, alongside the flip
-    /// sweep and the dirty-session flush) rather than read fresh on
-    /// every paint. Before this, `render`'s own `chrono::Local::now()`
-    /// call (feeding `Frame::bar_model`'s `(versions, today)` cache key,
-    /// M12) ran on every single render — including every one of the
-    /// ~100% of frames that hit the cache — new per-frame clock-read
-    /// work on the render path for a value that only meaningfully
-    /// changes once a day.
+    /// Today's date on the configured clock (Phase 4b Task 1 fix round
+    /// 1, MIN-9) — refreshed once per reload-poll tick (~500ms,
+    /// alongside the flip sweep and the dirty-session flush) rather than
+    /// read fresh on every paint. Before this, `render`'s own fresh
+    /// clock-read call (feeding `Frame::bar_model`'s `(versions, today)`
+    /// cache key, M12) ran on every single render — including every one
+    /// of the ~100% of frames that hit the cache — new per-frame
+    /// clock-read work on the render path for a value that only
+    /// meaningfully changes once a day.
     pub(super) today: chrono::NaiveDate,
 }
 
@@ -1190,13 +1190,21 @@ impl ShellView {
                 state.list.set_query(&query);
                 view.choice_dialog_scroll
                     .scroll_to_item(state.list.ranked_highlighted());
-            } else if let Some(state) = view.as_of_dialog.as_mut() {
+            } else if view.as_of_dialog.is_some() {
                 // Unlike the three dialogs above, this field's raw text IS
                 // the value being edited (spec §3.6), not a filter over
                 // something else — re-resolve it and store the outcome
                 // (`resolved`/`error`) for `build` to show; see
-                // `asof_view::on_query_changed`'s own doc comment.
-                asof_view::on_query_changed(state, &query, chrono::Utc::now());
+                // `asof_view::on_query_changed`'s own doc comment. The
+                // clock is read BEFORE `as_of_dialog.as_mut()`'s borrow
+                // (`ShellView::clock` needs `&self`/`&App`, which a `&mut
+                // AsOfState` borrowed out of `view` would otherwise
+                // conflict with).
+                let clock = view.clock(cx);
+                let now = chrono::Utc::now();
+                if let Some(state) = view.as_of_dialog.as_mut() {
+                    asof_view::on_query_changed(state, &query, now, clock);
+                }
                 // Typing mirrors onto the calendar (spec §5.2): the parsed
                 // day, and ONLY the parsed day — final review, finding 4.
                 // `calendar_date` falls back to today when `resolved` is
@@ -1207,8 +1215,10 @@ impl ShellView {
                 // to today on every invalid partial date, discarding
                 // whatever day it was showing. `set_date` notifies the
                 // calendar only.
-                if state.resolved.is_some() {
-                    let day = asof_view::calendar_date(state, chrono::Utc::now());
+                if let Some(state) = view.as_of_dialog.as_ref()
+                    && state.resolved.is_some()
+                {
+                    let day = asof_view::calendar_date(state, now, clock);
                     view.as_of_calendar.update(cx, |c, cx| {
                         if c.date().start() != Some(day) {
                             c.set_date(day, window, cx);
@@ -1331,7 +1341,7 @@ impl ShellView {
                 // changed" shape as the sweep just above — this is the
                 // one clock read the whole ~500ms tick needs; `render`
                 // (and therefore `Frame::bar_model`'s cache key) reads
-                // `self.today` rather than calling `chrono::Local::now()`
+                // `self.today` rather than reading the clock fresh
                 // itself, so a held key no longer pays a clock read on
                 // every repaint for a value that only changes once a
                 // day. Only notifies when the date actually moved on —
