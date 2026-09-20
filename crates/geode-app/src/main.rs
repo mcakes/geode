@@ -139,25 +139,48 @@ fn main() {
             let (mut services, desk, user, bridge, diagnostics_factory) =
                 build_shell_services(demo_root.as_deref(), log_ring, log_control, adapters, cx);
 
-            // The demo bus itself (Task 10): spawned once, right after
-            // the services it feeds exist. `geode_demo_data::
-            // demo_underlyings()` is the risk generator's own
-            // vocabulary, so the CVI documents this bus publishes never
-            // drift from the desk names `--demo`'s risk snapshot already
-            // uses. Kept alive as `demo_bus` until the app quits (below)
-            // — dropping it early would stop the thread and close its
-            // `ChannelFeed`, which would in turn close the bus's inbound
-            // channel out from under the data service's own subscription.
+            // The demo bus itself (Task 10; a second producer added by
+            // Task 11): spawned once, right after the services it feeds
+            // exist. `geode_demo_data::demo_underlyings()` is the risk
+            // generator's own vocabulary, so the documents this bus
+            // publishes never drift from the desk names `--demo`'s risk
+            // snapshot already uses — both the CVI and the dividend
+            // producer are built over it. Kept alive as `demo_bus` until
+            // the app quits (below) — dropping it early would stop the
+            // thread and close its `ChannelFeed`, which would in turn
+            // close the bus's inbound channel out from under the data
+            // service's own subscription.
             let mut demo_bus = demo_feed.map(|feed| {
-                let generator = geode_demo_data::documents::cvi::CviGenerator::new(
+                let today = chrono::Local::now().date_naive();
+                let underlyings = geode_demo_data::demo_underlyings();
+                let mut cvi_generator = geode_demo_data::documents::cvi::CviGenerator::new(
                     42,
-                    geode_demo_data::demo_underlyings(),
-                    chrono::Local::now().date_naive(),
+                    underlyings.clone(),
+                    today,
                 );
+                let mut dividend_generator =
+                    geode_demo_data::documents::dividend::DividendGenerator::new(
+                        42,
+                        underlyings.clone(),
+                        today,
+                    );
+                let producers = vec![
+                    demo_bus::Producer {
+                        kind: Arc::new(geode_documents::CviKind),
+                        topic_prefix: "marketdata/cvi/",
+                        keys: underlyings.clone(),
+                        next: Box::new(move |key| cvi_generator.next_document(key)),
+                    },
+                    demo_bus::Producer {
+                        kind: Arc::new(geode_documents::DividendKind),
+                        topic_prefix: "marketdata/dividend/",
+                        keys: underlyings,
+                        next: Box::new(move |key| dividend_generator.next_document(key)),
+                    },
+                ];
                 demo_bus::spawn(
                     feed,
-                    Arc::new(geode_documents::CviKind),
-                    generator,
+                    producers,
                     Duration::from_secs(5),
                     Duration::from_secs(2),
                     42,

@@ -382,3 +382,42 @@ role = "attribute"                # document-level: constant within one document
 [cvi_params.columns.spot_ref]
 type = "f64"
 role = "attribute"
+
+# ---- Dividend schedules (dividend-schedule plan, design spec §6.1). ----
+# `--demo`'s bus (`geode-app::demo_bus`) feeds this through the
+# `[dividend]` source `demo.rs::layer` declares, round-robinning
+# publishes with `[cvi]` above.
+
+[dividend_schedule]
+family = "document"
+key = ["underlying_ref"]          # one document per key value
+axes = ["dividend_id"]            # identifies a row within a document
+
+[dividend_schedule.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[dividend_schedule.columns.dividend_id]
+type = "utf8"
+role = "axis"
+[dividend_schedule.columns.ex_date]
+type = "date"
+role = "value"
+[dividend_schedule.columns.announced_date]
+type = "date"
+role = "value"
+[dividend_schedule.columns.pay_date]
+type = "date"
+role = "value"
+[dividend_schedule.columns.amount]
+type = "f64"
+role = "value"
+[dividend_schedule.columns.status]
+type = "utf8"
+role = "value"                    # one of DividendKind::STATUSES
+[dividend_schedule.columns.currency]
+type = "utf8"
+role = "attribute"                # document-level: constant within one document
+[dividend_schedule.columns.schedule_date]
+type = "date"
+role = "attribute"

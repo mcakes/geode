@@ -38,10 +38,12 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 
 /// The demo layer: every doc under `examples/demo-config`, compiled in,
 /// plus a `sources` doc over `source_dir` polled every two seconds so a
-/// file dropped into it shows up while you watch, and a `[cvi]` source
+/// file dropped into it shows up while you watch, a `[cvi]` source
 /// subscribing to `geode_app::demo_bus`'s CVI documents (market-data-
-/// documents plan, Task 10) — a subscribed source, so none of the
-/// directory-only keys `[demo]` carries apply to it.
+/// documents plan, Task 10), and a `[dividend]` source subscribing to
+/// its dividend-schedule documents (dividend-schedule plan, Task 11) —
+/// both subscribed sources, so none of the directory-only keys `[demo]`
+/// carries applies to either.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
@@ -49,7 +51,10 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          pending_timeout = \"1m\"\nbatch_pattern = '^risk_\\d{{4}}-\\d{{2}}-\\d{{2}}_(?P<batch>.+)$'\n\
          [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
          topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
-         priority = \"latest_other\"\n",
+         priority = \"latest_other\"\n\
+         [dividend]\nadapter = \"demo_bus\"\ndataset = \"dividend_schedule\"\n\
+         document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/>\"]\n\
+         coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n",
         source_dir.join("*.csv").to_string_lossy()
     );
     let docs = [
@@ -137,7 +142,43 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 2);
+        assert_eq!(sources.len(), 3);
+    }
+
+    /// Task 11 (the demo bus's second producer): the `[dividend]` source
+    /// is declared with every field a subscribed source needs, alongside
+    /// `[demo]` and `[cvi]` — same shape as
+    /// `the_demo_layer_declares_the_cvi_source`, over the dividend
+    /// vocabulary.
+    #[test]
+    fn the_demo_layer_declares_the_dividend_source() {
+        let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
+        let sources = docs.iter().find(|d| d.name == "sources").unwrap();
+        let dividend = &sources.table["dividend"];
+        assert_eq!(dividend["adapter"].as_str(), Some("demo_bus"));
+        assert_eq!(dividend["dataset"].as_str(), Some("dividend_schedule"));
+        assert_eq!(dividend["document"].as_str(), Some("dividend_schedule"));
+        assert_eq!(
+            dividend["topics"].as_array().unwrap()[0].as_str(),
+            Some("marketdata/dividend/>")
+        );
+        assert_eq!(dividend["coalesce"].as_str(), Some("500ms"));
+        assert_eq!(dividend["priority"].as_str(), Some("latest_other"));
+
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(
+            d.is_empty(),
+            "SourceSpec::from_doc found diagnostics: {d:?}"
+        );
+        assert_eq!(sources.len(), 3);
     }
 
     #[test]
@@ -195,21 +236,28 @@ mod demo_config_integration {
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "spec §6.6's 100-column view");
-        // [demo] (a csv_dir source over risk_snapshot) and [cvi] (a
-        // subscribed source over cvi_params, Task 10) — both parse with
-        // no diagnostics, per this same fixture's own
-        // the_demo_layer_declares_the_cvi_source.
-        assert_eq!(setup.config.sources.len(), 2);
-        // Task 11 carry-in: the demo schema's own `cvi_params` dataset
-        // must agree with the built-in `CviKind`'s column set (spec
-        // §6.4) — the same check `DataService::open` runs per subscribed
-        // source at open time, pinned here so a demo-config edit that
-        // drifts the two apart fails this fixture rather than only ever
-        // failing silently as a discovery-lane `Failed` a trader has to
-        // notice at runtime.
+        // [demo] (a csv_dir source over risk_snapshot), [cvi] (a
+        // subscribed source over cvi_params, Task 10) and [dividend] (a
+        // subscribed source over dividend_schedule, Task 11) — all three
+        // parse with no diagnostics, per this same fixture's own
+        // the_demo_layer_declares_the_cvi_source and
+        // the_demo_layer_declares_the_dividend_source.
+        assert_eq!(setup.config.sources.len(), 3);
+        // The demo schema's own `cvi_params` and `dividend_schedule`
+        // datasets must each agree with their built-in kind's column set
+        // (spec §6.4) — the same check `DataService::open` runs per
+        // subscribed source at open time, pinned here so a demo-config
+        // edit that drifts the two apart fails this fixture rather than
+        // only ever failing silently as a discovery-lane `Failed` a
+        // trader has to notice at runtime.
         geode_core::document::check_kind_against(
             &geode_documents::CviKind,
             setup.config.schema.dataset("cvi_params").unwrap(),
+        )
+        .unwrap();
+        geode_core::document::check_kind_against(
+            &geode_documents::DividendKind,
+            setup.config.schema.dataset("dividend_schedule").unwrap(),
         )
         .unwrap();
     }
