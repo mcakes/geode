@@ -198,6 +198,15 @@ impl ShellView {
         // file and silent rot. An `Option` extends as zero or one.
         let modules_default = crate::defaults::modules_default_diagnostic(&new_config);
         new_config.diagnostics.extend(modules_default);
+        // And the same for `[timeseries] default_source` naming no
+        // configured fetch source (timeseries spec §9.12): pure over
+        // `&Config`, a warning, extended in exactly where
+        // `modules_default` is so the diagnostics tile reads the same
+        // whether it was filled by `ShellView::new`'s startup batch or
+        // by a reload. A warning never rejects a reload (`decide` looks
+        // at errors), so its position ahead of `decide` costs nothing.
+        let default_source = crate::series::default_source_diagnostic(&new_config);
+        new_config.diagnostics.extend(default_source);
         new_config.diagnostics.extend(keymap_diags);
 
         let outcome = reload::decide(&new_config);
@@ -398,6 +407,19 @@ impl ShellView {
             if line_numbers != self.line_numbers {
                 self.line_numbers = line_numbers;
                 cx.set_global(crate::linenumbers::UiSettings { line_numbers });
+            }
+            // `[timeseries] default_source` and the fetch sources beside
+            // it, re-derived and republished only on a change — a
+            // `set_global` on every reload poll would wake every
+            // `observe_global` subscriber for nothing.
+            let series = crate::series::SeriesSettings::from_config(&self.services.config);
+            if cx
+                .try_global::<crate::series::SeriesSettings>()
+                .is_none_or(|global| *global != series)
+            {
+                self.default_source = series.default_source.clone();
+                self.fetch_sources = series.names();
+                cx.set_global(series);
             }
 
             if pickable_changed {

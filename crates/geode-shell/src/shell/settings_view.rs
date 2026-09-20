@@ -150,6 +150,7 @@ pub enum SettingId {
     FindStyle,
     LineNumbers,
     AddDirection,
+    DefaultSource,
 }
 
 /// One row of the settings dialog: an enumerated setting — its displayed
@@ -165,17 +166,30 @@ pub struct SettingRow {
     pub current: usize,
 }
 
-/// Build the dialog's four rows from plain inputs (no gpui, no
-/// `ShellView` — [`rows_for`] is the thin shell-reading wrapper), in the
-/// dialog's fixed display order: the Appearance rows first (Theme, Font
-/// size), then Keyboard (Find style), then Line numbers and Add tile in
-/// the order they were added. A two-value setting (Find style) needs no
-/// special case — wrapping a two-element list IS a toggle.
+/// Build the dialog's rows from plain inputs (no gpui, no `ShellView` —
+/// [`rows_for`] is the thin shell-reading wrapper), in the dialog's
+/// fixed display order: the Appearance rows first (Theme, Font size),
+/// then Keyboard (Find style), then Line numbers, Add tile and the
+/// timeseries default source in the order they were added. A two-value
+/// setting (Find style) needs no special case — wrapping a two-element
+/// list IS a toggle.
 ///
 /// An `active_theme` not present in `theme_names` (impossible via the UI —
 /// `ThemeService::apply` only ever activates a bundled name — but cheap to
 /// be deterministic about) marks the first theme as current rather than
 /// panicking or carrying an out-of-range index into [`step`].
+///
+/// `default_source` naming nothing in `fetch_sources` (a stale
+/// `[timeseries] default_source`, which the startup/reload diagnostic
+/// already warns about) shows as `(none)` — the same deterministic
+/// fallback rather than an out-of-range index.
+///
+/// Eight plain inputs rather than a bundling struct (clippy's
+/// `too_many_arguments`, `-D warnings`-enforced) — `status_bar`'s own
+/// reasoning: [`rows_for`], the one production call site, already holds
+/// each of these as its own field on `ShellView`, and this body treats
+/// every one independently.
+#[allow(clippy::too_many_arguments)]
 pub fn derive_rows(
     theme_names: &[String],
     active_theme: &str,
@@ -183,6 +197,8 @@ pub fn derive_rows(
     find_style: FindStyle,
     line_numbers: LineNumbers,
     add_direction: AddDirection,
+    default_source: Option<&str>,
+    fetch_sources: &[String],
 ) -> Vec<SettingRow> {
     vec![
         SettingRow {
@@ -247,8 +263,27 @@ pub fn derive_rows(
                 .position(|&d| d == add_direction)
                 .expect("add_direction is always one of AddDirection::ALL"),
         },
+        SettingRow {
+            id: SettingId::DefaultSource,
+            title: "Default series source",
+            category: "Timeseries",
+            values: std::iter::once(NO_DEFAULT_SOURCE.to_string())
+                .chain(fetch_sources.iter().cloned())
+                .collect(),
+            current: default_source
+                .and_then(|d| fetch_sources.iter().position(|s| s == d))
+                .map_or(0, |i| i + 1),
+        },
     ]
 }
+
+/// The first value of the Default series source row: no default at all,
+/// which is the `[timeseries] default_source` key ABSENT (what
+/// `series::persist_to_user_config(.., None)` writes). It is identified
+/// by INDEX (`value_ix == 0`), never by comparing the label, so a source
+/// somehow named `(none)` would still step to itself rather than to no
+/// default.
+const NO_DEFAULT_SOURCE: &str = "(none)";
 
 /// Which way a value step goes — `tab` (forward, `Right`) vs. `shift+tab`
 /// (back, `Left`), and the value chip's click (forward, mirroring `tab`)
@@ -578,6 +613,18 @@ fn apply_setting(
                 set_add_direction_on(shell, d, cx);
             }
         }
+        SettingId::DefaultSource => {
+            // Value 0 is `(none)`; the rest index the fetch sources in
+            // the same order `derive_rows` chained them on. An
+            // out-of-range index is a no-op like every other arm — not a
+            // clear, which is what `get(..).cloned()` alone would make
+            // it.
+            if value_ix == 0 {
+                shell.set_default_source(None, cx);
+            } else if let Some(name) = shell.fetch_sources.get(value_ix - 1).cloned() {
+                shell.set_default_source(Some(name), cx);
+            }
+        }
     }
 }
 
@@ -684,9 +731,9 @@ fn mod_alias_label(mods: Modifiers) -> &'static str {
 /// muted category) — same non-load-bearing caveat as
 /// `keybindings_view::ROW_HEIGHT`.
 const ROW_HEIGHT: f32 = 44.0;
-/// Rows visible before the list scrolls. Five rows today, so nothing
+/// Rows visible before the list scrolls. Six rows today, so nothing
 /// scrolls — kept anyway so the list's sizing arithmetic stays identical
-/// to keybindings' and a sixth setting never needs layout thought.
+/// to keybindings' and a seventh setting never needs layout thought.
 const VISIBLE_ROWS: usize = 10;
 /// Target dialog content width in pixels — same as the keybinding
 /// dialog's, so the two sibling dialogs read as one family.
@@ -704,6 +751,8 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
         shell.find_style,
         shell.line_numbers,
         shell.add_direction,
+        shell.default_source.as_deref(),
+        &shell.fetch_sources,
     )
 }
 
@@ -1294,6 +1343,8 @@ mod tests {
             FindStyle::Vim,
             LineNumbers::Off,
             AddDirection::Auto,
+            None,
+            &names(&["demo_kdb", "demo_rest"]),
         )
     }
 
@@ -1312,6 +1363,11 @@ mod tests {
                 (SettingId::FindStyle, "Find style", "Keyboard"),
                 (SettingId::LineNumbers, "Line numbers", "Appearance"),
                 (SettingId::AddDirection, "Add tile", "Tiling"),
+                (
+                    SettingId::DefaultSource,
+                    "Default series source",
+                    "Timeseries"
+                ),
             ]
         );
     }
@@ -1329,6 +1385,39 @@ mod tests {
         assert_eq!(rows[3].current, 0, "LineNumbers::Off is ALL[0]");
         assert_eq!(rows[4].values, vec!["Horizontal", "Vertical", "Auto"]);
         assert_eq!(rows[4].current, 2, "AddDirection::Auto is ALL[2]");
+        assert_eq!(rows[5].values, names(&["(none)", "demo_kdb", "demo_rest"]));
+        assert_eq!(rows[5].current, 0, "no default source is `(none)`");
+    }
+
+    #[test]
+    fn the_default_source_row_offers_none_then_every_fetch_source() {
+        let row = |default: Option<&str>, sources: &[&str]| {
+            derive_rows(
+                &names(&["A"]),
+                "A",
+                FontSize::Medium,
+                FindStyle::Vim,
+                LineNumbers::Off,
+                AddDirection::Auto,
+                default,
+                &names(sources),
+            )[5]
+            .clone()
+        };
+        let r = row(Some("demo_rest"), &["demo_kdb", "demo_rest"]);
+        assert_eq!(r.id, SettingId::DefaultSource);
+        assert_eq!(r.current, 2, "the configured source, offset past (none)");
+        let r = row(Some("gone"), &["demo_kdb"]);
+        assert_eq!(
+            r.current, 0,
+            "a default naming no configured source falls back to (none), never out of range"
+        );
+        let r = row(None, &[]);
+        assert_eq!(r.values, names(&["(none)"]));
+        assert_eq!(
+            r.current, 0,
+            "with no fetch sources the row is (none) alone — stepping it is a no-op cycle"
+        );
     }
 
     #[test]
@@ -1340,6 +1429,8 @@ mod tests {
             FindStyle::Fzf,
             LineNumbers::Relative,
             AddDirection::Auto,
+            None,
+            &[],
         );
         assert_eq!(rows[1].current, 0, "FontSize::Small is ALL[0]");
         assert_eq!(rows[2].current, 1, "FindStyle::Fzf is ALL[1]");
@@ -1365,6 +1456,8 @@ mod tests {
             FindStyle::Vim,
             LineNumbers::Off,
             AddDirection::Auto,
+            None,
+            &[],
         );
         assert_eq!(
             rows[0].current, 0,
@@ -1373,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn the_last_row_is_the_add_direction_in_the_tiling_category() {
+    fn the_add_direction_row_is_the_fifth_in_the_tiling_category() {
         let rows = derive_rows(
             &names(&["A"]),
             "A",
@@ -1381,8 +1474,10 @@ mod tests {
             FindStyle::Vim,
             LineNumbers::Off,
             AddDirection::Vertical,
+            None,
+            &[],
         );
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
         let row = &rows[4];
         assert_eq!(row.id, SettingId::AddDirection);
         assert_eq!(row.title, "Add tile");

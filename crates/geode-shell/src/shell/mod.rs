@@ -805,6 +805,16 @@ pub struct ShellView {
     /// `linenumbers::UiSettings` global on every change so a module
     /// (the blotter) can read and observe it — see that module's doc.
     pub(super) line_numbers: crate::linenumbers::LineNumbers,
+    /// `[timeseries] default_source` (timeseries spec §9.12): same
+    /// lifecycle as `line_numbers`, published with it as the
+    /// `series::SeriesSettings` global so a timeseries tile can read the
+    /// source `:add` means without a path to `ShellView`.
+    pub(super) default_source: Option<String>,
+    /// The configured fetch source names, re-derived beside
+    /// `default_source` (startup and hot reload) — the settings row's
+    /// value list, kept on the view because `settings_view::rows_for`
+    /// reads `&ShellView` alone and has no `App` to ask the global.
+    pub(super) fetch_sources: Vec<String>,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
@@ -1465,6 +1475,15 @@ impl ShellView {
         let line_numbers = crate::linenumbers::LineNumbers::from_config(&services.config);
         cx.set_global(crate::linenumbers::UiSettings { line_numbers });
 
+        // `[timeseries] default_source` plus the fetch sources it names,
+        // the workspace's third global (see `series`'s module doc). Set
+        // here and re-derived on reload; the settings row writes both
+        // through `set_default_source`.
+        let series = crate::series::SeriesSettings::from_config(&services.config);
+        let default_source = series.default_source.clone();
+        let fetch_sources = series.names();
+        cx.set_global(series);
+
         // The keymap's bindings for module-visible chord lookup
         // (`tips::Chords`, the workspace's second global — see its doc).
         cx.set_global(crate::tips::Chords(Arc::new(
@@ -1534,26 +1553,34 @@ impl ShellView {
         // has it from the very first frame, not only from the first live
         // reload (`apply_reload`'s own `note_config` call, `hot_reload.rs`).
         //
-        // Plus the two diagnostics that are NOT in that list, because
+        // Plus the three diagnostics that are NOT in that list, because
         // they are computed from the config rather than by loading it:
-        // the refused `keymap.mod` alias (Phase 4a Task 4b, an error) and
+        // the refused `keymap.mod` alias (Phase 4a Task 4b, an error),
         // the retired `[app] modules.default` key (spec 2026-09-08
-        // add-tile §7.1, a warning). `main.rs` only logged those at
-        // startup, so before this a trader who never edited config
-        // mid-session saw neither in the diagnostics tile — while
-        // `apply_reload` had been folding both in all along, meaning the
-        // tile's contents depended on whether a reload had happened yet.
-        // Same four groups `apply_reload` extends, in the same order
-        // (config, mod alias, `modules.default`, keymap), so the section
-        // reads the same whichever path filled it. The first two are pure
-        // over `&Config` and recomputed here; the keymap diagnostics are
-        // not — `build_keymap` needs the startup registry — so they ride
-        // on `ShellServices::keymap_diagnostics`, which `main.rs` fills.
+        // add-tile §7.1, a warning) and a `[timeseries] default_source`
+        // naming no fetch source (timeseries spec §9.12, a warning).
+        // `main.rs` only logged the first two at startup, so before this
+        // a trader who never edited config mid-session saw neither in
+        // the diagnostics tile — while `apply_reload` had been folding
+        // them in all along, meaning the tile's contents depended on
+        // whether a reload had happened yet. Same five groups
+        // `apply_reload` extends, in the same order (config, mod alias,
+        // `modules.default`, `default_source`, keymap), so the section
+        // reads the same whichever path filled it. The first four are
+        // pure over `&Config` and recomputed here; the keymap
+        // diagnostics are not — `build_keymap` needs the startup
+        // registry — so they ride on `ShellServices::keymap_diagnostics`,
+        // which `main.rs` fills.
         let startup_diagnostics = {
             let cfg = &services.config;
             let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
             diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            // And the third of the same shape: `[timeseries]
+            // default_source` naming no configured fetch source
+            // (timeseries spec §9.12) — pure over `&Config`, a warning,
+            // folded in here and in `apply_reload` alike.
+            diags.extend(crate::series::default_source_diagnostic(cfg));
             diags.extend(services.keymap_diagnostics.iter().cloned());
             diags
         };
@@ -1646,6 +1673,8 @@ impl ShellView {
             unplaced_records: crate::session::TileRecords::new(),
             add_direction,
             line_numbers,
+            default_source,
+            fetch_sources,
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),

@@ -569,6 +569,8 @@ fn slash_enters_settings_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppCo
             s.find_style,
             s.line_numbers,
             s.add_direction,
+            s.default_source.as_deref(),
+            &s.fetch_sources,
         );
         (
             state.query.clone(),
@@ -1985,6 +1987,86 @@ fn a_modules_default_key_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::
     );
 }
 
+/// `[timeseries] default_source` (timeseries spec §9.12) resolves at
+/// startup and re-resolves on hot reload — the two paths `line_numbers`
+/// rides — and a default naming no configured fetch source is a
+/// *warning* in the diagnostics entity from BOTH, the third diagnostic
+/// of `modules_default_diagnostic`'s shape.
+#[gpui::test]
+fn a_stale_default_source_warns_at_startup_and_clears_on_reload(cx: &mut gpui::TestAppContext) {
+    use crate::series::SeriesSettings;
+    const DATASETS: &str = "[series]\nfamily = \"series\"\n";
+    const SOURCES: &str = "[demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n";
+    let config = |app: &str| {
+        Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("datasets", DATASETS).unwrap(),
+                LayerDoc::builtin("sources", SOURCES).unwrap(),
+                LayerDoc::builtin("app", app).unwrap(),
+            ],
+            desk: None,
+            user: None,
+        })
+    };
+
+    let mut services = test_services();
+    services.config = config("[timeseries]\ndefault_source = \"nope\"\n");
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    let hit = config_diags
+        .iter()
+        .find(|d| d.message.contains("default_source"))
+        .unwrap_or_else(|| panic!("expected a default_source diagnostic, got {config_diags:?}"));
+    assert_eq!(
+        hit.severity,
+        geode_core::config::Severity::Warning,
+        "a stale default costs one explicit @source, it does not invalidate config: {hit:?}"
+    );
+
+    shell.update(&mut cx, |shell, cx| {
+        shell.apply_reload(config("[timeseries]\ndefault_source = \"demo_kdb\"\n"), cx)
+    });
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.default_source.clone()),
+        Some("demo_kdb".to_string()),
+        "the reload re-resolves the field"
+    );
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<SeriesSettings>().default_source.clone()),
+        Some("demo_kdb".to_string()),
+        "and republishes the global"
+    );
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    assert!(
+        !config_diags
+            .iter()
+            .any(|d| d.message.contains("default_source")),
+        "the reload's own diagnostics replace the stale warning: {config_diags:?}"
+    );
+
+    // And the reload computes the diagnostic itself, rather than only
+    // ever inheriting one from startup: a reload INTO a stale default
+    // warns again.
+    shell.update(&mut cx, |shell, cx| {
+        shell.apply_reload(config("[timeseries]\ndefault_source = \"gone\"\n"), cx)
+    });
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    assert!(
+        config_diags
+            .iter()
+            .any(|d| d.message.contains("'gone'") && d.message.contains("demo_kdb")),
+        "a reload into a stale default must warn, naming it and what is configured: {config_diags:?}"
+    );
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<SeriesSettings>().default_source.clone()),
+        Some("gone".to_string()),
+        "the global carries what config says; the diagnostic is how the trader learns it is stale"
+    );
+}
+
 /// The other half of the startup seeding: the refused `keymap.mod =
 /// "ctrl"` alias (Phase 4a Task 4b) is an *error*, and the diagnostics
 /// tile is where a trader would look to find out why their mod key is
@@ -2186,6 +2268,92 @@ fn tab_steps_the_line_numbers_row_and_publishes_the_global(cx: &mut gpui::TestAp
         cx.update(|_, cx| cx.global::<UiSettings>().line_numbers),
         LineNumbers::Off,
         "the row wraps"
+    );
+}
+
+/// `[timeseries] default_source` (timeseries spec §9.12): the settings
+/// row steps `(none)` → every configured fetch source → back to
+/// `(none)`, and every step is published as the `SeriesSettings` global
+/// — the only door a timeseries tile has to the value, exactly as
+/// `UiSettings` is the blotter's.
+#[gpui::test]
+fn the_default_source_row_steps_over_the_fetch_sources_and_publishes_the_global(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::series::SeriesSettings;
+    // Two fetch sources (a non-directory adapter over a `series`
+    // dataset) plus one directory source that must NOT show up.
+    let mut services = test_services();
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin(
+                "datasets",
+                "[series]\nfamily = \"series\"\n[risk]\n[risk.columns]\n\
+                 book = { type = \"utf8\", role = \"key\" }\npv = { type = \"f64\", role = \"value\" }\n",
+            )
+            .unwrap(),
+            LayerDoc::builtin(
+                "sources",
+                "[demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
+                 [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n\
+                 [files]\ndataset = \"risk\"\npaths = [\"/tmp/*.csv\"]\n",
+            )
+            .unwrap(),
+        ],
+        desk: None,
+        user: None,
+    });
+    let (shell, mut cx) = dialog_test_shell_with(cx, services, "settings::open");
+    cx.update(|_, cx| {
+        let series = cx.global::<SeriesSettings>();
+        assert_eq!(
+            series.default_source, None,
+            "sanity: nothing configured, so the global is seeded with no default"
+        );
+        assert_eq!(
+            series.names(),
+            vec!["demo_kdb", "demo_rest"],
+            "the directory source is not a fetch source"
+        );
+    });
+
+    cx.simulate_keystrokes("down down down down down");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected),
+        5,
+        "sanity: five downs land on the Default series source row"
+    );
+
+    cx.simulate_keystrokes("space");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.default_source.clone()),
+        Some("demo_kdb".to_string())
+    );
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<SeriesSettings>().default_source.clone()),
+        Some("demo_kdb".to_string()),
+        "the step reached the global"
+    );
+    cx.simulate_keystrokes("space");
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<SeriesSettings>().default_source.clone()),
+        Some("demo_rest".to_string())
+    );
+    cx.simulate_keystrokes("space");
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<SeriesSettings>().default_source.clone()),
+        None,
+        "the row wraps back to (none)"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.default_source.clone()),
+        None,
+        "and the view's own field with it"
+    );
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<SeriesSettings>().names()),
+        vec!["demo_kdb", "demo_rest"],
+        "stepping the default never disturbs the fetch-source list"
     );
 }
 

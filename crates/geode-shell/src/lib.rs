@@ -26,6 +26,7 @@ pub mod palette_usage;
 pub mod perf;
 pub mod reload;
 pub mod scopebar;
+pub mod series;
 pub mod session;
 pub mod shell;
 pub mod theme;
