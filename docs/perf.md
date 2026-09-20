@@ -1594,3 +1594,66 @@ one CTE materialised and read three times) so the bucketing happens
 once; it is not done now because the measured cost is a third of the
 budget and the per-statement shape is what makes each slot's stats
 independently testable.
+
+## Timeseries chart (spec §8, Part 3)
+
+What one **cache miss** costs the render thread in `geode-chart`: the
+two halves of turning a slot's values into a painted polyline —
+min-max decimation (`core::decimate`), and decimation plus the path
+rebuild through `gpui::PathBuilder`, which is lyon tessellating the
+decimated points into the vertex buffer a frame submits. Spec §8.4
+names the shape and the budget: 500,000 points — the series query's own
+point cap — decimated into 1,600 columns, the width of a maximised plot
+on a 4K screen, with a `NaN` hole every 5,000 points so the polyline
+breaks like a real one. Under 2 ms for the second is the contract.
+
+A cache **hit** costs neither. Both halves sit behind gpui-component's
+`PathCache`, keyed on `(model.version, view, bounds, rem)` plus the
+slot's own rect, so a repaint of an unchanged chart never reaches this
+code at all (`geode_chart::rebuilds()` is the counter a test reads).
+This is the price of the frame after a pan, a zoom, a resize or a
+delivery — once per visible slot — and nothing else.
+
+**Bench** (`cargo bench -p geode-chart`, criterion medians, the `bench`
+profile — `--release` plus debug symbols — on an Apple M5 Pro):
+
+| Benchmark | Result |
+|---|---|
+| `decimate/500k_into_1600` (decimation alone, into a reused buffer) | 847 µs |
+| `decimate_and_path/500k_into_1600` (the same decimation plus the `PathBuilder` rebuild of its ~3,200 points) | 1.51 ms |
+
+**§8.4's 2 ms holds**, at 1.51 ms — but with under half a millisecond
+of headroom, and criterion's own upper bound for that row is 1.58 ms.
+Two thirds of the budget is decimation, which is a linear scan of half
+a million `f64`s; the tessellation of what comes out of it is the
+cheaper half (about 660 µs). The honest reading is that the miss is
+inside budget at the widest shape the spec names and is not comfortable
+there: a slot near the cap that misses the cache on every frame of a
+drag would spend most of a 60 Hz frame in this path, and three of them
+would not fit. What makes it safe in practice is the cache, not the
+margin — a pan invalidates the key once per gesture step, not per
+slot-per-frame — and the first lever if it ever bites is the visible
+slice (the element already decimates only `visible`, so a zoomed chart
+pays for a fraction of the 500,000).
+
+**What is NOT measured here: a painted frame.** The implementation
+sandbox has no window, so every number above is CPU work measured
+headless — `PathBuilder::build` tessellates without a GPU, which is why
+the second row is measurable at all. The cost of submitting those
+vertices, of the quads and the labels, and of the whole element's
+`prepaint`/`paint` is unmeasured and belongs to the display check
+(`cargo run -p geode-chart --example chart`, the example kept for
+exactly that).
+
+**The per-frame allocation exception.** PHILOSOPHY's "per-frame heap
+churn is a defect" is met on the data path — the `xs` buffer and the
+decimated points are element-owned and reused, and the paths are cached
+— but *not* on the chrome: `Grid` takes its lines as `Vec`s and
+`PlotAxis`/`PlotLabel` each collect a small `Vec` per frame, because
+that is the shape of gpui-component's own painters, shared with every
+chart it ships. Those allocations are bounded by the tick count (tens),
+not by the data, and are deliberately left alone rather than forked;
+the derivation *behind* them — the side scales, the ticks and their
+formatted labels, which IS O(the data) — is cached behind its own key
+and counted by `geode_chart::chrome_rebuilds()`, so a frame that
+changed nothing moves neither counter.
