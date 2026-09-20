@@ -14519,12 +14519,14 @@ run_mutation "series query: as-of drops the received_at filter" \
   an_as_of_before_a_correction_sees_the_original_value
 
 # An expression is an INNER join of its operands (spec §6.2): it exists
-# only in buckets where every operand does. A `left join` is caught by
-# the SQL-text test alone and that is not an accident — arithmetic over
-# a NULL is NULL either way, and the points statement left-joins the
-# expression CTE from the bucket set regardless, so the VALUES are
-# identical. What changes is the shape of the statement, and with it
-# what a later reader may assume about the CTE's rows.
+# only in buckets where every operand does. This one is caught by the
+# SQL-TEXT test alone, and that was measured rather than assumed:
+# `the_bucket_set_is_the_union_and_a_missing_bucket_is_nan` passes with
+# `left join` in place, because arithmetic over a NULL is NULL either
+# way and the points statement left-joins the expression CTE from the
+# bucket set regardless — the values are identical. What changes is the
+# shape of the statement, and with it what a later reader may assume
+# about the CTE's rows; do not "fix" this entry onto a value test.
 run_mutation "series query: an expression is an outer join of its operands" \
   crates/geode-data/src/query/series.rs \
   '.map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))' \
@@ -14534,13 +14536,16 @@ run_mutation "series query: an expression is an outer join of its operands" \
 
 # The zero guard: a bucket whose denominator vanished is a gap, and the
 # `case when` is what makes it one. Removing it hands the answer to
-# whatever DuckDB does with a zero denominator instead of to the spec.
+# DuckDB, which divides two DOUBLEs into `inf` rather than NULL —
+# measured, not assumed: the VALUE test is what catches this, and the
+# SQL-text assertion beside it would have "caught" it for the shape of
+# the statement rather than for the number a chart would draw.
 run_mutation "series query: division by zero is not guarded" \
   crates/geode-data/src/query/series.rs \
   'format!("(case when ({r}) = 0 then null else ({l}) / ({r}) end)")' \
   'format!("(({l}) / ({r}))")' \
   geode-data \
-  an_expression_is_an_inner_join_of_its_operands_with_a_guarded_division
+  a_zero_denominator_is_a_gap_not_an_infinity
 
 # The bucket set is the union of the SOURCE slots' buckets alone. Let an
 # expression into it and a chart grows rows no source ever carried —
