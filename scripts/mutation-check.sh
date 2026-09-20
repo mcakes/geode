@@ -5711,8 +5711,8 @@ run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
   '        if self.pending_tiles.values().any(|p| p.kind == kind) {
             return;
         }
-        self.add_tile(kind, None, None, window, cx);' \
-  '        self.add_tile(kind, None, None, window, cx);' \
+        self.add_tile(kind, AddPlacement::Split(None), None, window, cx);' \
+  '        self.add_tile(kind, AddPlacement::Split(None), None, window, cx);' \
   geode-shell two_open_module_calls_for_the_same_kind_before_any_render_add_only_once
 
 run_mutation "diagnostics module: MIN-11 — the header never shows the filtered pill" \
@@ -6117,8 +6117,20 @@ run_mutation "add-tile: the pending request is keyed by the id split_active retu
 
 run_mutation "add-tile: duplicate carries the focused tile's serialized state" \
   crates/geode-shell/src/shell/add_tile.rs \
-  '        self.add_tile(&kind, Some(direction), Some(state), window, cx);' \
-  '        let _ = state; self.add_tile(&kind, Some(direction), None, window, cx);' \
+  '        self.add_tile(
+            &kind,
+            AddPlacement::Split(Some(direction)),
+            Some(state),
+            window,
+            cx,
+        );' \
+  '        let _ = state; self.add_tile(
+            &kind,
+            AddPlacement::Split(Some(direction)),
+            None,
+            window,
+            cx,
+        );' \
   geode-shell shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
 
 # Two-line anchor on purpose (final review, Minor 2): the bare
@@ -6184,15 +6196,15 @@ run_mutation "add-tile: filling a placeholder in place drops its unplaced record
 
 run_mutation "add-tile: the _vertical suffix means stacked" \
   crates/geode-shell/src/defaults.rs \
-  '        (k, Some(Orientation::Vertical))' \
-  '        (k, Some(Orientation::Horizontal))' \
+  '        (k, AddPlacement::Split(Some(Orientation::Vertical)))' \
+  '        (k, AddPlacement::Split(Some(Orientation::Horizontal)))' \
   geode-shell parse_add_action_peels_the_direction_suffix_before_the_kind
 
 run_mutation "add-tile: register_add_actions registers the suffixed pair too" \
   crates/geode-shell/src/defaults.rs \
   '            &format!("tile::add_{kind}_vertical"),' \
   '            &format!("tile::add_{kind}_vertical_"),' \
-  geode-shell register_add_actions_registers_three_rows_per_kind_in_the_tiles_category
+  geode-shell register_add_actions_registers_four_rows_per_kind_in_the_tiles_category
 
 # ---- a refused event never stops a producer (Phase 4b follow-up, Task 1)
 
@@ -11546,8 +11558,11 @@ run_mutation "final: a restored draft's dropped edits are named" \
 # into the abandoned cell, count prefix and all.
 run_mutation "final: a keyboard focus move hands the keyboard back to the shell" \
   crates/geode-shell/src/shell/input.rs \
-  '            self.note_keyboard_focus_move(window, cx);' \
-  '' \
+  '            // own, which is exactly the kind of drift the mechanism rule
+            // is against.
+            self.note_keyboard_focus_move(window, cx);' \
+  '            // own, which is exactly the kind of drift the mechanism rule
+            // is against.' \
   geode-shell \
   a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell
 
@@ -13547,6 +13562,184 @@ run_mutation "mdpark: the picker opens while the draft has edits" \
         }' \
   geode-marketdata \
   the_picker_opens_while_the_draft_has_edits
+
+# ---- tile stacks (spec 2026-09-19-geode-tile-stacks-design.md)
+#
+# `Node::Stack` folds several tiles into one slot, painting only the
+# active member; every other verb (focus, close, move, session restore,
+# the transient member list, the centre drop) has to keep that one
+# member and the stack's own bookkeeping in step with each other. Every
+# entry here breaks one of those seams.
+
+run_mutation "stacks: layout emits the active member" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        Node::Stack { children, active } => out.push((children[*active], rect)),' \
+  '        Node::Stack { children, active } => out.push((children[0], rect)),' \
+  geode-shell \
+  layout_emits_only_the_active_member_over_the_whole_slot
+
+run_mutation "stacks: step wraps" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        let next = (*active as i64 + delta).rem_euclid(len) as usize;' \
+  '        let next = (*active as i64 + delta).min(len - 1) as usize;' \
+  geode-shell \
+  stack_step_cycles_with_wrap_and_a_count
+
+run_mutation "stacks: fullscreen follows a cycle" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        if self.fullscreen == Some(outgoing) {
+            self.fullscreen = Some(id);
+        }' \
+  '' \
+  geode-shell \
+  fullscreen_follows_a_cycle
+
+# Whole-branch review, Important 1: `stack_after`'s own `insert` sets
+# `active` to the new member's index before `set_focus` calls
+# `activate`, so `activate`'s outgoing-member check never fires and a
+# fullscreen held by the stack's old active member survives hidden.
+run_mutation "stacks: stacking onto a fullscreen tile exits fullscreen" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        // hidden — `Tree::layout` paints it (any tile `contains(fs)`).
+        self.fullscreen = None;' \
+  '        // hidden — `Tree::layout` paints it (any tile `contains(fs)`).' \
+  geode-shell \
+  stacking_onto_a_fullscreen_tile_exits_fullscreen
+
+# Brief's original pick (drop the `ix < active` branch entirely) turned
+# out unreachable: both `remove_focused` and `pop_out` always target
+# `self.focused`, which the `set_focus`/`activate` invariant guarantees is
+# already its stack's active member — so `ix < active` never holds and no
+# test, however written, can see that branch break. The clamp itself
+# (`active.min(n - 1)`) IS reachable, on the boundary case this test
+# builds (the active member is also the LAST one): forcing the whole
+# expression to `0` (both arms of the `if`/`else` are `usize`, so this
+# still compiles) picks the WRONG in-bounds member instead of panicking
+# — the review round found `active.min(n)` here instead, which is only
+# ever caught by an index-out-of-bounds panic on the very next lookup,
+# never by the test's own `focused() == Some(TileId(2))` assertion.
+run_mutation "stacks: closing the last member activates the previous" \
+  crates/geode-shell/src/tiling/tree.rs \
+  'active.min(n - 1)' \
+  '0' \
+  geode-shell \
+  closing_the_last_member_activates_the_previous_one
+
+# Same reassignment as the entry above, same reason: this only differs
+# from the tree-order-neighbour fallback at the boundary this test
+# builds (the closed member was its stack's last), where the fallback
+# would hop to the tile AFTER the stack instead of staying on the
+# stack's own new active member — `closing_the_active_member_...`'s
+# scenario closes a MIDDLE member, where both rules coincide.
+run_mutation "stacks: closing a member refocuses its own stack" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '            Some(s) if self.contains(s) => {' \
+  '            Some(s) if false && self.contains(s) => {' \
+  geode-shell \
+  closing_the_last_member_activates_the_previous_one
+
+run_mutation "stacks: move pops a member out" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        if self.stack_position(focused).is_some() {' \
+  '        if false {' \
+  geode-shell \
+  move_direction_pops_a_member_out_beside_its_stack
+
+run_mutation "stacks: a focused member is activated" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        self.activate(id);' \
+  '' \
+  geode-shell \
+  focusing_a_hidden_member_activates_it
+
+run_mutation "stacks: restore dedupes members" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '                if !seen.contains(&id) && !kept.contains(&id) {' \
+  '                if true {' \
+  geode-shell \
+  from_parts_heals_a_stack_rather_than_refusing_it
+
+# Mutated away, an out-of-range `active` restored from a hostile session
+# survives into the tree; `visible_tiles()`/`layout_node` index `children`
+# by it unchecked, and the fixture's third case (a two-member stack with
+# `active: 9`) panics on the very next read — caught here as a test
+# failure, not a wrong-data survival.
+run_mutation "stacks: restore clamps active" \
+  crates/geode-shell/src/tiling/tree.rs \
+  'if active < n { active } else { 0 }' \
+  'active' \
+  geode-shell \
+  from_parts_heals_a_stack_rather_than_refusing_it
+
+run_mutation "stacks: session writes members" \
+  crates/geode-shell/src/session.rs \
+  '"members".to_string()' \
+  '"children".to_string()' \
+  geode-shell \
+  round_trips_a_stack_in_the_main_tree_and_in_a_dock
+
+run_mutation "stacks: set_stack is sent once per change" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            if self.stack_sent.get(id) == Some(&now) {
+                continue;
+            }' \
+  '' \
+  geode-shell \
+  a_stacked_add_tells_both_members_their_position_once_and_hides_the_old_one
+
+run_mutation "stacks: a replaced occupant is re-told its position" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            self.stack_sent.remove(id);' \
+  '' \
+  geode-shell \
+  a_replaced_occupant_is_re_told_its_position
+
+run_mutation "stacks: hidden members leave the visible set" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        out.extend(ws.tree().visible_tiles());' \
+  '        out.extend(ws.tree().tiles());' \
+  geode-shell \
+  a_stacked_add_tells_both_members_their_position_once_and_hides_the_old_one
+
+run_mutation "stacks: a stacked add joins the stack" \
+  crates/geode-shell/src/shell/add_tile.rs \
+  'placement == AddPlacement::Stacked' \
+  'false' \
+  geode-shell \
+  a_stacked_add_on_a_member_lands_after_it
+
+run_mutation "stacks: a centre drop stacks" \
+  crates/geode-shell/src/shell/drag.rs \
+  'ws.drop_stack(drag.tile, id)' \
+  'ws.drop_split(drag.tile, id, crate::tiling::Direction::Right)' \
+  geode-shell \
+  mod_dragging_onto_a_tiles_center_stacks_the_pair
+
+run_mutation "stacks: the list opens on the active member" \
+  crates/geode-shell/src/shell/occupants.rs \
+  'highlighted: index - 1,' \
+  'highlighted: 0,' \
+  geode-shell \
+  stack_pick_opens_the_list_highlighting_the_active_member
+
+run_mutation "stacks: a digit activates" \
+  crates/geode-shell/src/shell/input.rs \
+  '                        super::stacklist::jump(&list, u32::from(d.as_bytes()[0] - b'"'"'0'"'"'))
+                        {
+                            self.activate_stack_member(id, window, cx);
+                        }' \
+  '                        super::stacklist::jump(&list, u32::from(d.as_bytes()[0] - b'"'"'0'"'"'))
+                        {
+                        }' \
+  geode-shell \
+  a_digit_enter_and_escape_do_what_the_spec_says
+
+run_mutation "stacks: the marker is gated on len > 1" \
+  crates/geode-blotter/src/tile.rs \
+  '.filter(|s| s.len > 1)' \
+  '.filter(|_| true)' \
+  geode-blotter \
+  the_stack_marker_paints_only_while_a_member
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

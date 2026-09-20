@@ -174,6 +174,18 @@ pub fn paint(theme: &Theme, rest: Rest, surface: Hsla, text: Hsla) -> ControlPai
     control_paint(&ControlInputs::new(theme, rest, surface, text))
 }
 
+/// The pointer states for a clickable [`super::chip`] chip — the stack
+/// marker every occupant's header paints (`Tone::Neutral`) — sitting on
+/// `surface`: a tinted chip is a [`Rest::Filled`] control with its own
+/// text, a text-only one is bare.
+pub fn for_chip(theme: &Theme, chip: &super::chip::ChipPaint, surface: Hsla) -> ControlPaint {
+    let rest = match chip.fill {
+        Some(fill) => Rest::Filled(fill),
+        None => Rest::Bare,
+    };
+    paint(theme, rest, surface, chip.text)
+}
+
 /// The one place a control's states are decided. Cost when every token
 /// is already distinct and every text already readable: three
 /// `Hsla -> Rgb` conversions and five contrast checks; when one is not,
@@ -298,6 +310,15 @@ mod tests {
             (
                 ControlInputs::new(theme, muted, theme.popover, theme.secondary_foreground),
                 "secondary_foreground on popover",
+            ),
+            (
+                ControlInputs::new(
+                    theme,
+                    Rest::Filled(theme.secondary),
+                    theme.background,
+                    theme.secondary_foreground,
+                ),
+                "stack marker (Tone::Neutral on a tile header)",
             ),
         ]
     }

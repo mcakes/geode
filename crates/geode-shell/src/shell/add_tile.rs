@@ -7,6 +7,7 @@
 
 use gpui::{Context, Window};
 
+use crate::defaults::AddPlacement;
 use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::tileadd::AddDirection;
 use crate::tiling::{DockSide, Orientation, TileId};
@@ -15,18 +16,21 @@ use super::{PendingTile, ShellView, render::content_area};
 
 impl ShellView {
     /// Create (or fill an empty pane with) a tile of `kind`, carrying
-    /// `state` as the factory's `restored` record when given. Direction:
-    /// `direction` if given, else the `[tiles] add` setting, with `Auto`
-    /// reading the focused tile's painted shape (§4.1). Placement (§4.2),
-    /// first match wins: a focused placeholder is filled in place; an
-    /// empty focused region gets the tile as its root (`Tree::split` on
-    /// an empty tree); otherwise the focused tile is split. Every path
-    /// dirties the session and notifies, so `ensure_occupants` sees the
-    /// request on the very next render.
+    /// `state` as the factory's `restored` record when given. `placement`
+    /// (tile-stacks spec §6.1): a split in an explicit or setting-resolved
+    /// direction (`Auto` reading the focused tile's painted shape, §4.1),
+    /// or stacked onto the focused tile. Placement (§4.2), first match
+    /// wins: a focused placeholder is filled in place; a stacked add onto
+    /// a real focused tile stacks after it; an empty focused region gets
+    /// the tile as its root (`Tree::split` on an empty tree, which is
+    /// also where a stacked add with nothing focused falls through — a
+    /// stack of one is meaningless); otherwise the focused tile is split.
+    /// Every path dirties the session and notifies, so `ensure_occupants`
+    /// sees the request on the very next render.
     pub fn add_tile(
         &mut self,
         kind: &str,
-        direction: Option<Orientation>,
+        placement: AddPlacement,
         state: Option<toml::Table>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -53,6 +57,24 @@ impl ShellView {
             cx.notify();
             return;
         }
+        if placement == AddPlacement::Stacked
+            && let Some(id) = self.services.workspaces.stack_active()
+        {
+            self.pending_tiles.insert(
+                id,
+                PendingTile {
+                    kind: kind.to_string(),
+                    state,
+                },
+            );
+            self.session_dirty = true;
+            cx.notify();
+            return;
+        }
+        let direction = match placement {
+            AddPlacement::Split(d) => d,
+            AddPlacement::Stacked => None,
+        };
         // The rect is only computed when the setting actually needs it —
         // a layout pass on dispatch is cheap but not free.
         let rect = if direction.is_none() && self.add_direction == AddDirection::Auto {
@@ -100,7 +122,13 @@ impl ShellView {
         }
         let kind = o.kind.to_string();
         let state = o.content.serialize(cx);
-        self.add_tile(&kind, Some(direction), Some(state), window, cx);
+        self.add_tile(
+            &kind,
+            AddPlacement::Split(Some(direction)),
+            Some(state),
+            window,
+            cx,
+        );
     }
 
     /// Focus an existing occupant of `kind` wherever it lives in the
@@ -149,6 +177,6 @@ impl ShellView {
         if self.pending_tiles.values().any(|p| p.kind == kind) {
             return;
         }
-        self.add_tile(kind, None, None, window, cx);
+        self.add_tile(kind, AddPlacement::Split(None), None, window, cx);
     }
 }

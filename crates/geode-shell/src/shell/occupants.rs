@@ -82,14 +82,16 @@ impl ShellView {
     }
 
     /// The tiles of the active workspace: what is on screen. Same
-    /// out-parameter shape as `fill_all_tiles`, same reason.
+    /// out-parameter shape as `fill_all_tiles`, same reason. `visible_
+    /// tiles()` (tile-stacks spec §3), not `tiles()`: a hidden stack
+    /// member is not on screen and must not be told `set_visible(true)`.
     fn fill_active_tiles(&self, out: &mut HashSet<TileId>) {
         out.clear();
         let ws = self.services.workspaces.active();
-        out.extend(ws.tree().tiles());
+        out.extend(ws.tree().visible_tiles());
         for (_, dock) in ws.docks().iter() {
             if dock.visible() {
-                out.extend(dock.tree().tiles());
+                out.extend(dock.tree().visible_tiles());
             }
         }
     }
@@ -119,7 +121,7 @@ impl ShellView {
         let ws = self.services.workspaces.active();
         out.extend(
             ws.tree()
-                .tiles()
+                .visible_tiles()
                 .into_iter()
                 .filter(has_real_occupant)
                 .map(|id| QueryKey(id.0)),
@@ -128,7 +130,7 @@ impl ShellView {
             if dock.visible() {
                 out.extend(
                     dock.tree()
-                        .tiles()
+                        .visible_tiles()
                         .into_iter()
                         .filter(has_real_occupant)
                         .map(|id| QueryKey(id.0)),
@@ -274,6 +276,14 @@ impl ShellView {
             // set_visible`'s doc comment) for the rest of the process.
             occupant.content.set_visible(active.contains(id), cx);
             self.occupants.insert(*id, occupant);
+            // A fresh occupant under this id must hear its stack position
+            // even when a previous occupant under the SAME id already did
+            // — `add_tile` fills a placeholder in place by removing its
+            // occupant and letting this loop recreate one, and without
+            // this the delivery loop below sees `stack_sent` still
+            // holding the old occupant's last-sent value and skips the
+            // new one as already told.
+            self.stack_sent.remove(id);
         }
         // A request whose tile closed before this render is dropped, not
         // re-aimed (spec 2026-09-08 add-tile §4.3).
@@ -305,6 +315,41 @@ impl ShellView {
                 o.content.set_visible(true, cx);
             }
         }
+
+        // Stack positions (tile-stacks spec §5.1): every occupant is told
+        // its `(index, len)` on its first render and on every change,
+        // never on an unrelated render — `stack_sent` remembers the last
+        // value sent per tile, and a missing entry means "unsent", so a
+        // fresh occupant always hears once, `None` included. The record
+        // is written only AFTER the delivery actually reaches an
+        // occupant (fix round 1): a tile with no occupant yet (defensive
+        // — every id in `creation_order` has one by this point) is left
+        // unrecorded so the next render retries it, rather than being
+        // marked "sent" for a delivery that never happened.
+        for id in &creation_order {
+            let now = self.services.workspaces.stack_position(*id);
+            if self.stack_sent.get(id) == Some(&now) {
+                continue;
+            }
+            let Some(o) = self.occupants.get(id) else {
+                continue;
+            };
+            // The weak handle is only needed to build a member's `open_
+            // list` closure, so it is downgraded here rather than once
+            // per render regardless of whether any tile is stacked.
+            let handle = now.map(|(index, len)| {
+                let weak = cx.entity().downgrade();
+                let tile = *id;
+                crate::module::StackHandle::new(index, len, move |window, cx| {
+                    let _ = weak.update(cx, |view, cx| view.open_stack_list(tile, window, cx));
+                })
+            });
+            o.content.set_stack(handle, cx);
+            self.stack_sent.insert(*id, now);
+        }
+        self.stack_sent
+            .retain(|id, _| self.scratch_all_tiles.contains(id));
+
         // The focus backstop (review finding, Important 1). A tile that
         // leaves the visible set is unmounted as an *element* but keeps
         // its occupant: `fill_all_tiles` spans every workspace, so a
@@ -346,6 +391,105 @@ impl ShellView {
         self.visible_tiles.clear();
         self.visible_tiles.extend(active.iter().copied());
         self.scratch_active_tiles = active;
+    }
+
+    /// Open the member list on `tile` (spec §5.2): focus that tile first
+    /// (a marker click on an unfocused tile must open THAT tile's list),
+    /// refuse with the notice if it is not a member, close the palette
+    /// and any command line, and highlight the active member.
+    /// `StackHandle::open_list` and `stack::pick` both call this door.
+    pub(super) fn open_stack_list(
+        &mut self,
+        tile: TileId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ws = self.services.workspaces.active_mut();
+        let was_focused = ws.focused_tile();
+        let moved = match ws.region_of(tile) {
+            Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(tile),
+            Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, tile),
+            None => return,
+        };
+        // The same "a click that actually moved focus dirties the
+        // session" rule the tile mouse-down handlers follow (`render.rs`)
+        // — `focus_main_tile`/`focus_dock_tile` answer `true` whenever
+        // `tile` is simply present, focused already or not, so the dirty
+        // flag is gated on the tile actually differing too (fix round 1,
+        // Minor 5).
+        if moved && was_focused != Some(tile) {
+            self.session_dirty = true;
+        }
+        let Some((index, _)) = self.services.workspaces.active().stack_position(tile) else {
+            self.notice = Some(super::input::NOT_IN_A_STACK);
+            cx.notify();
+            return;
+        };
+        let members = self.stack_members_of(tile);
+        self.close_palette(window, cx);
+        self.leave_command_line(window, cx);
+        self.stack_list = Some(super::stacklist::StackList {
+            tile,
+            members,
+            highlighted: index - 1,
+        });
+        // The list owns the keyboard the instant it opens (fix round 1,
+        // Ruling 5 — Important): `close_palette` above can hand focus
+        // BACK to the scope bar's own text field (`return_focus_from_
+        // overlay`'s `overlay_return_to_filter` arm), which is a shell
+        // surface `note_keyboard_focus_move`'s own `holds_shell_focus`
+        // check treats as perfectly legitimate — so that call alone
+        // cannot fix this. Take the shell root's focus directly whenever
+        // it isn't already there, unconditionally of which surface (shell
+        // or occupant) currently holds it, so `j`/`k`/digits/`escape`
+        // resolve against the list rather than typing into — or being
+        // eaten by — whatever held the keyboard a moment ago.
+        if !window
+            .focused(cx)
+            .is_some_and(|focused| focused == self.focus_handle)
+        {
+            self.focus_handle.focus(window, cx);
+        }
+        self.note_keyboard_focus_move(window, cx);
+        cx.notify();
+    }
+
+    /// The members of `tile`'s stack in stack order (`Tree::stack_members`
+    /// over `Workspace::stack_members`).
+    fn stack_members_of(&self, tile: TileId) -> Vec<TileId> {
+        self.services
+            .workspaces
+            .active()
+            .stack_members(tile)
+            .unwrap_or_default()
+    }
+
+    /// Close the list, if open (spec §5.2's `escape`/click-outside/any-
+    /// dispatch/`ctrl+k` doors, all funnelled here).
+    pub(super) fn close_stack_list(&mut self, cx: &mut Context<Self>) {
+        if self.stack_list.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Make `id` the painted, focused member and close the list.
+    pub(super) fn activate_stack_member(
+        &mut self,
+        id: TileId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ws = self.services.workspaces.active_mut();
+        let moved = match ws.region_of(id) {
+            Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(id),
+            Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, id),
+            None => false,
+        };
+        if moved {
+            self.session_dirty = true;
+            self.note_keyboard_focus_move(window, cx);
+        }
+        self.close_stack_list(cx);
     }
 
     /// A keyboard verb moved which TILE has focus — hand the keyboard

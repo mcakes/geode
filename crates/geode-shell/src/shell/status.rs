@@ -77,7 +77,7 @@ pub fn height(window: &Window) -> f32 {
 /// colors come from `cx.theme()`; no other input is read, so the same
 /// call always renders the same tree for the same arguments.
 ///
-/// Ten plain, independently-`Option`al inputs rather than a bundling
+/// Eleven plain, independently-`Option`al inputs rather than a bundling
 /// struct (clippy's `too_many_arguments`, `-D warnings`-enforced):
 /// `render.rs`'s one call site already has each of these as its own
 /// separate local (`self.matcher.pending()`, `self.last_reload.
@@ -92,6 +92,9 @@ pub fn status_bar(
     reload_message: Option<&str>,
     write_error_message: Option<&str>,
     restart_message: Option<&str>,
+    // A stack verb's one-line refusal (tile-stacks spec §4), cleared by
+    // the next dispatch.
+    notice: Option<&str>,
     diagnostics_summary: Option<&str>,
     on_diagnostics_click: impl Fn(&mut Window, &mut App) + 'static,
     // What the ingest runner is loading right now, or `None` while idle
@@ -155,6 +158,16 @@ pub fn status_bar(
             div()
                 .text_color(theme.warning)
                 .debug_selector(|| "restart-required".to_string())
+                .child(message.to_string()),
+        );
+    }
+    if let Some(message) = notice {
+        // A verb's one-line refusal (tile stacks spec §4): muted, cleared
+        // by the next dispatch.
+        bar = bar.left(
+            div()
+                .text_color(theme.muted_foreground)
+                .debug_selector(|| "shell-notice".to_string())
                 .child(message.to_string()),
         );
     }

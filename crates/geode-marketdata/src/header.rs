@@ -10,6 +10,8 @@ use crate::delegate::{CellPaint, cell_paint};
 use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
 use geode_shell::fonts;
+use geode_shell::module::StackHandle;
+use geode_shell::shell::chip;
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tips;
@@ -294,6 +296,7 @@ pub(crate) fn render(
     tile_id: u64,
     menu_tip_selector: SharedString,
     state_tip_selector: SharedString,
+    stack: Option<&StackHandle>,
 ) -> impl IntoElement {
     let muted = theme.muted_foreground;
     let mut row = h_flex()
@@ -307,6 +310,36 @@ pub(crate) fn render(
         .border_b_1()
         .border_color(theme.border)
         .debug_selector(move || format!("marketdata-header-{tile_id}"));
+
+    // 0. The stack marker (tile-stacks spec §5.1), first in the strip —
+    // identical to the blotter's and the diagnostics tile's own, since a
+    // trader reading the chip should not have to learn a second shape
+    // per module.
+    if let Some(stack) = stack.filter(|s| s.len > 1) {
+        let neutral_chip = chip::chip_paint(theme, chip::Tone::Neutral);
+        let open = stack.clone();
+        row = row.child(
+            div()
+                .id(ElementId::NamedInteger(
+                    SharedString::new_static("stack-marker"),
+                    tile_id,
+                ))
+                .text_color(neutral_chip.text)
+                .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .font_family(fonts::MONO)
+                .debug_selector(move || format!("stack-marker-{tile_id}"))
+                .child(stack.text.clone())
+                // A clickable chip on the tile surface: pointer states through
+                // the control door (`control::for_chip`), hover and pressed.
+                .pointer_states(control::for_chip(theme, &neutral_chip, theme.background))
+                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    open.open_list(window, cx);
+                }),
+        );
+    }
 
     // 1. Kind badge.
     row = row.child(

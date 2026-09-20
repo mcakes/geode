@@ -70,7 +70,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::FindEvent;
+use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -499,6 +499,14 @@ pub struct MarketDataTile {
     /// The `Behind` state run's tooltip selector (`"tip-marketdata-
     /// state-{id}"`), built once alongside `menu_tip_selector`.
     state_tip_selector: SharedString,
+    /// This tile's place in its stack (tile-stacks spec §5.1), painted in
+    /// the header (Task 9); `None` while not a stack member.
+    stack: Option<StackHandle>,
+    /// [`Self::title`]'s cache (whole-branch review, Minor 5), same
+    /// shape as the blotter's own `title` field — a pure function of
+    /// `spec.title` and `key`, replaced only in `set_key`, never
+    /// `format!`-ed in `title()` itself.
+    title: SharedString,
 }
 
 impl MarketDataTile {
@@ -717,6 +725,7 @@ impl MarketDataTile {
             diagnostics,
             data,
             model: Rc::new(MatrixModel::empty(spec, key.as_deref().unwrap_or(&[]))),
+            title: Self::compute_title(spec, key.as_deref()),
             unresolved_restore: !draft.is_empty(),
             parked,
             key,
@@ -752,6 +761,7 @@ impl MarketDataTile {
             popup: None,
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
             state_tip_selector: format!("tip-marketdata-state-{}", id.0).into(),
+            stack: None,
         };
         this.rebuild_chrome();
         // The delegate starts with the model this tile starts with (review
@@ -1238,6 +1248,22 @@ impl MarketDataTile {
             self.acted = None;
         }
         self.changed(cx);
+    }
+
+    pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
+        self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn compute_title(spec: &PanelSpec, key: Option<&[String]>) -> SharedString {
+        match key {
+            Some(k) => format!("{} · {}", spec.title, display_key(k)).into(),
+            None => spec.title.into(),
+        }
     }
 
     // ---- the model ---------------------------------------------------
@@ -2969,6 +2995,7 @@ impl MarketDataTile {
         }
         self.unresolved_restore = !self.draft.is_empty();
         self.key = Some(key);
+        self.title = Self::compute_title(self.spec, self.key.as_deref());
         self.snapshot = None;
         self.base_snapshot = None;
         // Including anything STAGED for the old key: a key change bumps no
@@ -3392,6 +3419,7 @@ impl gpui::Render for MarketDataTile {
             self.id.0,
             self.menu_tip_selector.clone(),
             self.state_tip_selector.clone(),
+            self.stack.as_ref(),
         );
         // The popup is anchored off a zero-size, absolutely positioned
         // sibling at the header's own right edge (spec §6.1) — `relative`
@@ -4468,6 +4496,42 @@ mod tests {
         assert!(
             chips.iter().any(|c| c == &local),
             "the source time on the trader's own clock ({local}): {chips:?}"
+        );
+    }
+
+    /// The stack marker (tile-stacks spec §5.1) paints only while the
+    /// tile is a stack member with more than one member, first in the
+    /// header strip.
+    #[gpui::test]
+    fn the_stack_marker_paints_only_while_a_member(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert!(vcx.debug_bounds("stack-marker-3").is_none());
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_stack(Some(StackHandle::new(2, 4, |_, _| {})), cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let marker = vcx.debug_bounds("stack-marker-3").expect("painted");
+        let header = vcx.debug_bounds("marketdata-header-3").unwrap();
+        assert!(
+            marker.left() - header.left() < gpui::px(20.0),
+            "first in the strip"
+        );
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.title()).as_ref(), "CVI");
+    }
+
+    /// Whole-branch review, Minor 7: the title's cache (`Self::title`,
+    /// `compute_title`) must follow a real key change too, not just read
+    /// correctly with no underlying set.
+    #[gpui::test]
+    fn title_follows_the_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.title()).as_ref(),
+            "CVI · NKY.Z"
         );
     }
 
