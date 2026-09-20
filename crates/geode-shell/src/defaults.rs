@@ -335,6 +335,17 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // chord because naming a colour is an occasional act of desk
     // configuration, not something reached for mid-session.
     action(reg, "config::colours", "Edit colours…", "Configuration");
+    // Open the user config directory in the OS file manager (Finder /
+    // Explorer) — the door to the files behind every `config::*` dialog,
+    // for the edits the dialogs do not cover. Palette-only like its
+    // siblings. No `…`: it opens a system window, not a dialog of
+    // Geode's own.
+    action(
+        reg,
+        "config::open_directory",
+        "Open config directory",
+        "Configuration",
+    );
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no
@@ -736,6 +747,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} not registered"));
             assert_eq!(def.category, "Dock", "{id}");
         }
+    }
+
+    /// `config::open_directory` sits beside the six `Edit …` dialogs in
+    /// the palette's Configuration category, and its title carries no
+    /// `…` — it opens a system window, not a dialog of Geode's own (the
+    /// `…` rule in CLAUDE.md is "opens a dialog").
+    #[test]
+    fn open_config_directory_is_registered_under_configuration_without_ellipsis() {
+        use crate::actions::ActionId;
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        let def = reg
+            .get(&ActionId("config::open_directory".to_string()))
+            .expect("config::open_directory registered");
+        assert_eq!(def.category, "Configuration");
+        assert_eq!(def.title, "Open config directory");
     }
 
     /// Review finding: `Frame::save_scope`/`Domain::Scopes` reserve
