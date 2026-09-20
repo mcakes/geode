@@ -67,21 +67,16 @@ impl ShellView {
     /// subscription and requery on `set_visible(true)`. The app bridge
     /// calls this.
     pub fn deliver(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
-        match delivery.key() {
-            Some(key) => {
-                if let Some(o) = self.occupants.get(&TileId(key.0)) {
-                    o.content.deliver(delivery, window, cx);
-                }
-            }
-            None => {
-                let Delivery::SeriesFetched {
-                    source,
-                    identity,
-                    result,
-                } = delivery
-                else {
-                    unreachable!("the only key-less delivery is SeriesFetched");
-                };
+        // Matched on the VARIANT, not on `key()`: a new key-less variant
+        // added later falls into the `keyed` arm, whose `key()` answers
+        // `None`, and is silently DROPPED. Give such a variant its own
+        // arm here.
+        match delivery {
+            Delivery::SeriesFetched {
+                source,
+                identity,
+                result,
+            } => {
                 // `visible_tile_keys` already filters placeholders and
                 // covers visible docks — the same visible set the flip
                 // barrier waits on.
@@ -99,6 +94,13 @@ impl ShellView {
                             cx,
                         );
                     }
+                }
+            }
+            keyed => {
+                if let Some(key) = keyed.key()
+                    && let Some(o) = self.occupants.get(&TileId(key.0))
+                {
+                    o.content.deliver(keyed, window, cx);
                 }
             }
         }

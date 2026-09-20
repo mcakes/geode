@@ -10993,12 +10993,19 @@ run_mutation "parked: the expiry ladder never skips a month whose third Friday a
   '        if false {' \
   geode-demo-data expiries_skip_a_month_whose_third_friday_has_already_passed
 
+# Re-anchored 2026-09-20 (final review): `deliver` matches the VARIANT
+# now, so the keyed arm is a let-chain over `keyed.key()` and the bare
+# `self.occupants.get(&TileId(key.0))` line appears twice in the
+# function — the two-line chain below is the unambiguous anchor.
 run_mutation "delivery: ShellView::deliver routes to the tile addressed by delivery.key(), not always tile 0" \
   crates/geode-shell/src/shell/occupants.rs \
-  '                if let Some(o) = self.occupants.get(&TileId(key.0)) {
-                    o.content.deliver(delivery, window, cx);' \
-  '                if let Some(o) = self.occupants.get(&TileId(0)) {
-                    o.content.deliver(delivery, window, cx);' \
+  '                if let Some(key) = keyed.key()
+                    && let Some(o) = self.occupants.get(&TileId(key.0))' \
+  '                if let Some(key) = keyed.key()
+                    && let Some(o) = self.occupants.get(&TileId({
+                        let _ = key;
+                        0
+                    }))' \
   geode-shell a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other
 
 # ---- Part 3 Task 3: keymap fragments (market-data documents §8.4) ----
@@ -14447,9 +14454,12 @@ run_mutation "hosting: a key-less delivery reaches only the visible occupants" \
 # The other half of the same routing rule: a `Series` outcome is
 # ADDRESSED, like a `Query`, so it must not fall into the broadcast arm.
 # The mutation makes `key()` answer `None` for it, which is exactly the
-# defect the name claims; `deliver`'s own `unreachable!` guard is what
-# the named test then trips, having asked for one tile and been handed
-# the key-less path.
+# defect the name claims. `deliver` matches the VARIANT now (the final
+# review's Important: the `let … else unreachable!` is gone, so a future
+# key-less variant is dropped rather than aborting the app), so the
+# mutated outcome is silently dropped and the named test's routing
+# assertion — `delivered == vec![(target, 42)]` — fails on an empty log.
+# Caught by that assertion, not by a panic.
 run_mutation "hosting: a series outcome is routed by its key, not broadcast" \
   crates/geode-shell/src/module.rs \
   '            Delivery::Series(outcome) => Some(outcome.key),' \
@@ -14683,6 +14693,20 @@ run_mutation "expr: a function call is accepted" \
   '                let _ = ();' \
   geode-core \
   foreign_tokens_are_refused_with_the_arithmetic_only_message
+
+# The final review's Important: `MAX_DEPTH` bounds NESTING, and
+# `expr`/`term` fold left-deep iteratively, so `1 + 1 + …` builds a tree
+# as deep as it is long while nesting nothing. The token bound is what
+# caps the node count, and hence `resolve`, `collect_slots`, the
+# compiler's `lower` and the `Box` drop glue — every one of which
+# recurses over that tree. Turn the check off and a pasted chain
+# overflows the stack: an abort, which `contained` cannot catch.
+run_mutation "expr: the token bound is off" \
+  crates/geode-core/src/series/expr.rs \
+  '    if toks.len() > MAX_TOKENS {' \
+  '    if false {' \
+  geode-core \
+  a_long_chain_is_refused_by_the_token_bound
 
 # A handle is `s` followed by digits and NOTHING else: `spx_1y` is an
 # identity a desk really uses, and `s999` is an identity too (past u8).

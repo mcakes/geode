@@ -68,10 +68,19 @@ pub const ARITHMETIC_ONLY: &str = "arithmetic only: + - * / and parentheses";
 /// The deepest a unary-minus/parenthesis nest may go before `parse`
 /// refuses it. Bounds the recursion in `Parser::factor` (a pasted wall
 /// of parentheses would otherwise overflow the stack — an abort, not a
-/// panic, nothing can contain) and, because the tree it produces can
-/// then be no deeper than this, bounds the recursion in `Ast::resolve`
-/// and `Expr::slots` too.
+/// panic, nothing can contain). It does NOT bound the tree on its own:
+/// `expr`/`term` fold left-deep iteratively, so `1+1+…` builds a tree
+/// as deep as it is long while nesting nothing. `MAX_TOKENS` is what
+/// bounds the node count, and with it every recursion OVER the tree —
+/// `Ast::resolve`, `Expr::collect_slots`, the compiler's `lower` and
+/// the `Box` drop glue. The two bounds together are the guarantee;
+/// this one is kept because it gives the better message for nesting.
 pub const MAX_DEPTH: usize = 64;
+
+/// The most tokens an expression may carry. The tree has at most one
+/// node per token, so this bounds its depth however it is shaped — a
+/// left-deep chain included, which `MAX_DEPTH` cannot see.
+pub const MAX_TOKENS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -310,6 +319,12 @@ impl<'a> Parser<'a> {
 
 pub fn parse(text: &str) -> Result<Ast<RefName>, ParseError> {
     let toks = tokenize(text)?;
+    if toks.len() > MAX_TOKENS {
+        return Err(ParseError {
+            position: text.len(),
+            message: format!("expression is too long (more than {MAX_TOKENS} tokens)"),
+        });
+    }
     let mut p = Parser {
         toks: &toks,
         pos: 0,
@@ -529,7 +544,10 @@ mod tests {
 
     #[test]
     fn nesting_deeper_than_the_cap_is_a_parse_error() {
-        let text = "(".repeat(200) + "s1" + &")".repeat(200);
+        // 100 levels: past `MAX_DEPTH` and inside `MAX_TOKENS`, so the
+        // nesting message is the one a trader sees (the token bound is
+        // checked first, and a wall of 200 parens would trip that one).
+        let text = "(".repeat(100) + "s1" + &")".repeat(100);
         let err = parse(&text).unwrap_err();
         assert_eq!(
             err.message,
@@ -537,6 +555,29 @@ mod tests {
         );
         let text = "(".repeat(60) + "s1" + &")".repeat(60);
         assert!(parse(&text).is_ok(), "60 levels must still parse");
+    }
+
+    #[test]
+    fn a_long_chain_is_refused_by_the_token_bound() {
+        // `expr`/`term` fold left-deep iteratively, so a chain nests
+        // nothing and `MAX_DEPTH` never fires — but the tree is as deep
+        // as the chain is long, and `resolve`, `collect_slots`, the
+        // compiler's `lower` and the `Box` drop glue all recurse on it.
+        let text = "s1".to_string() + &" + 1".repeat(200);
+        let err = parse(&text).unwrap_err();
+        assert_eq!(
+            err.message,
+            format!("expression is too long (more than {MAX_TOKENS} tokens)")
+        );
+        let text = "s1".to_string() + &" + 1".repeat(100);
+        let ast = parse(&text).expect("100 terms are inside the bound");
+        let expr = ast
+            .resolve(&mut |r: &RefName| match r {
+                RefName::Handle(n) => Some(*n),
+                _ => None,
+            })
+            .expect("every reference is a handle");
+        assert_eq!(expr.slots(), vec![1]);
     }
 
     #[test]

@@ -206,7 +206,14 @@ fn ctes(params: &SeriesParams, order: &[u8]) -> Result<(String, Vec<Value>), Sto
             unreachable!("order lists expressions only")
         };
         let deps = e.slots();
-        let anchor = deps[0];
+        // `validate` already refuses a slot-less expression; this is the
+        // second line of defence, with the same message rather than a
+        // panic on an empty `deps`.
+        let Some(&anchor) = deps.first() else {
+            return Err(refuse(format!(
+                "slot {slot}: an expression must reference at least one slot"
+            )));
+        };
         let joins: String = deps[1..]
             .iter()
             .map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))

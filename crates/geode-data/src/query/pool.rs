@@ -63,7 +63,7 @@ pub enum Payload {
 /// The work a request carries: a compiled statement that yields a
 /// `Snapshot`, or a series plan that yields a `SeriesResult`. The pool's
 /// coalescing, interruption and containment never look inside.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Work {
     Query(CompiledQuery),
     Series(Box<SeriesPlan>),

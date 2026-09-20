@@ -1604,7 +1604,7 @@ fn a_key_less_delivery_reaches_every_visible_occupant_and_no_hidden_one(
         });
     });
 
-    let seen: Vec<TileId> = log
+    let mut seen: Vec<TileId> = log
         .borrow()
         .iter()
         .filter_map(|r| match r {
@@ -1612,7 +1612,13 @@ fn a_key_less_delivery_reaches_every_visible_occupant_and_no_hidden_one(
             _ => None,
         })
         .collect();
-    assert_eq!(seen.len(), 2, "both visible tiles, once each: {seen:?}");
+    seen.sort();
+    let mut expected = visible.clone();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "exactly the two visible tiles, once each, and no other"
+    );
     assert!(
         !seen.contains(&hidden),
         "a tile on a switched-away workspace is not told: {seen:?}"

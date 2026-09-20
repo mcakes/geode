@@ -731,12 +731,20 @@ specification now.
   immediately after a word is a function call and earns the
   "arithmetic only" message at the point a trader would cross the
   boundary; a second `@` earns it too.
-- **Expression nesting is capped at `MAX_DEPTH = 64` (new, amends
-  §7).** `Parser::factor` recurses on `-` and `(`, and a pasted wall of
-  parentheses would overflow the stack — an abort, not a panic, and
-  nothing can contain it. Because the tree it produces can then be no
-  deeper than the cap, the same bound covers `Ast::resolve` and
-  `Expr::slots`. Sixty levels still parse.
+- **An expression is bounded twice: `MAX_DEPTH = 64` levels of nesting
+  and `MAX_TOKENS = 256` tokens (new, amends §7).** `Parser::factor`
+  recurses on `-` and `(`, and a pasted wall of parentheses would
+  overflow the stack — an abort, not a panic, and nothing can contain
+  it; `MAX_DEPTH` refuses that with the message about nesting, and
+  sixty levels still parse. The depth cap alone is NOT the whole bound
+  (final review, Important): `expr`/`term` fold left-deep
+  *iteratively*, so `1 + 1 + …` builds a tree as deep as it is long
+  while nesting nothing at all. The token bound, checked in `parse`
+  right after tokenizing, is what caps the tree's node count and hence
+  every recursion OVER the tree — `Ast::resolve`, `Expr::collect_slots`,
+  the compiler's `lower` and the `Box` drop glue. The two together are
+  the guarantee; a chain past 256 tokens earns "expression is too long
+  (more than 256 tokens)".
 - **A non-finite literal is refused by the compiler (new).** Rust's own
   `str::parse` answers `Ok(inf)` on overflow rather than an error, so a
   400-digit literal reaches `lower` as `Ast::Num(inf)` and `{x:?}`
@@ -805,7 +813,8 @@ boundary is stated at the point a trader would cross it.
 Built in Part 2, with §6.6 the record: the parser, `Ast::resolve` and
 `expression_order` are in `geode_core::series::expr`; the identity
 grammar, the handle rule for an identity outside it, the `MAX_DEPTH`
-nesting cap and the non-finite literal refusal are all there. The
+nesting cap, the `MAX_TOKENS` length bound and the non-finite literal
+refusal are all there. The
 *resolution* rules above — a bare identity by the default source,
 ambiguity, removing an operand's dependants — are the module's and
 belong to Part 4.
