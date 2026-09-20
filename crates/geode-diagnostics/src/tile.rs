@@ -216,6 +216,13 @@ impl DiagnosticsTile {
             }
         })
         .detach();
+        // `AppClock` (as-of dialog spec §6.1): every section reads the
+        // clock inside `rebuild` (`try_global`, since a module test
+        // fixture may never install the global), so a `[time]` reload
+        // just needs to trigger the one rebuild it already knows how to
+        // do.
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| this.rebuild(cx))
+            .detach();
         // MIN-7 (final review): the `Config` `Section::Config` rebuilds
         // from (`self.config`, below) is the SAME `Rc<RefCell<Config>>`
         // `geode-app::main`'s own `cx.observe(&frame, ..)` refreshes on
@@ -350,13 +357,21 @@ impl DiagnosticsTile {
             }
         }
         let now = SystemTime::now();
+        // `try_global`, not the bare `cx.global` (Task 5 ruling): a
+        // module test fixture may never have installed `AppClock`.
+        let clock = cx
+            .try_global::<geode_shell::clock::AppClock>()
+            .map(|c| c.0)
+            .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
         let new_rows: Vec<Row> = {
             let d = self.diagnostics.read(cx);
             let frame = self.frame.read(cx);
             match self.section {
-                Section::Sources => sections::sources_rows(d, now),
-                Section::Data => sections::data_rows(d, frame.as_of(), &self.collapsed),
-                Section::Config => sections::config_rows(d, &self.config.borrow(), &self.filter),
+                Section::Sources => sections::sources_rows(d, now, clock),
+                Section::Data => sections::data_rows(d, frame.as_of(), &self.collapsed, clock),
+                Section::Config => {
+                    sections::config_rows(d, &self.config.borrow(), &self.filter, clock)
+                }
                 Section::Log => {
                     // MAJ-5 (fix round 1): `make_contiguous` hands back a
                     // slice of the existing `VecDeque` storage — no clone
@@ -365,7 +380,7 @@ impl DiagnosticsTile {
                     // rebuilds that have nothing to do with the log (a
                     // health note, a poll, ...).
                     let records = self.records.make_contiguous();
-                    let mut rows = sections::log_rows(records, &self.filter);
+                    let mut rows = sections::log_rows(records, &self.filter, clock);
                     if self.lost_records > 0 {
                         rows.insert(
                             0,
