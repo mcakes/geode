@@ -25,9 +25,11 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
 use gpui::prelude::*;
 use gpui::{App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div};
-use gpui_component::{Theme, h_flex};
+use gpui_component::input::Input;
+use gpui_component::{Theme, h_flex, v_flex};
 
 use crate::core::model::{Colour, Model, SlotState};
+use crate::popup::ExprField;
 use crate::tile::TimeseriesTile;
 
 /// The header strip's height at the design rem, and the footer's — both
@@ -292,6 +294,26 @@ pub(crate) fn render_notice(notice: &SharedString, theme: &Theme) -> impl IntoEl
         .text_xs()
         .text_color(paint.text)
         .child(notice.clone())
+}
+
+/// The expression field's strip (spec §9.7), between the header and the
+/// chart: a one-line borderless `Input` with its parse error under it —
+/// inline, in the notice line's own danger text, because a bad
+/// expression keeps the field open and the reason belongs beside what
+/// caused it rather than in the tile's standing notice.
+pub(crate) fn render_expr_field(f: &ExprField, theme: &Theme) -> impl IntoElement {
+    let paint = chip_paint(theme, Tone::DangerText);
+    v_flex()
+        .w_full()
+        .px_2()
+        .py_1()
+        .gap_0p5()
+        .border_b_1()
+        .border_color(theme.border)
+        .child(Input::new(&f.input).appearance(false).w_full())
+        .when_some(f.error.clone(), |el, e| {
+            el.child(div().text_xs().text_color(paint.text).child(e))
+        })
 }
 
 pub(crate) fn render_footer(text: SharedString, theme: &Theme) -> impl IntoElement {

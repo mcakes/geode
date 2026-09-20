@@ -48,15 +48,19 @@ use geode_shell::shell::colours::{
 };
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
+use geode_shell::vimnav::NavCommand;
 use gpui::prelude::*;
-use gpui::{App, Context, ElementId, Entity, Hsla, SharedString, Window, div};
+use gpui::{App, Context, ElementId, Entity, Focusable as _, Hsla, SharedString, Window, div};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
 use crate::core::model::{Changed, Colour, Model, SlotState};
 use crate::core::{Range, chart, request, resolve, session};
 use crate::header::{self, HeaderModel};
-use crate::popup::{Popup, SeriesPopup, render_series_popup};
+use crate::popup::{
+    ExprField, PickerStage, PickerState, Popup, SeriesPopup, render_picker, render_series_popup,
+};
 
 /// Exactly what [`chart::build`] reads, and nothing else — the memo key
 /// that decides whether a chrome rebuild also rebuilds the chart model
@@ -268,6 +272,38 @@ impl TimeseriesTile {
             } else {
                 this.self_arrive(now, cx);
             }
+        })
+        .detach();
+
+        // A fresh catalogue matters LIVE only while the picker's
+        // identities stage is open (spec §9.6): a closed picker asks for
+        // one on the way in, and the sources stage ranks over the
+        // config, not the catalogue. This observer fires on EVERY
+        // notification the entity emits (a source's health ticks about
+        // twice a second with a diagnostics tile open), so the common
+        // case is one `matches!` and nothing else, and even an open
+        // picker compares the option list before touching the ranking —
+        // re-ranking would move a highlight the trader had placed.
+        cx.observe(&diagnostics, |this, _diagnostics, cx| {
+            if !matches!(
+                this.popup,
+                Some(Popup::Picker(PickerState {
+                    stage: PickerStage::Identities,
+                    ..
+                }))
+            ) {
+                return;
+            }
+            let options = this.catalog_options(cx);
+            let loaded = this.loaded_marks(&options);
+            let Some(Popup::Picker(p)) = &mut this.popup else {
+                return;
+            };
+            if p.list.options() == options.as_slice() {
+                return;
+            }
+            p.set_options(options, loaded);
+            cx.notify();
         })
         .detach();
 
@@ -628,9 +664,9 @@ impl TimeseriesTile {
         true
     }
 
-    /// Every popup verb. The series list is built here; Tasks 9–10 add
-    /// the add picker, the expression editor and the range dialog, whose
-    /// verbs still answer `false`.
+    /// Every popup verb. The series list, the add picker and the
+    /// expression field are built here; Task 10 adds the range dialog,
+    /// whose verb still answers `false`.
     ///
     /// `e`'s refusal on a SOURCE slot stays this method's: there is no
     /// expression to open, and a trader who pressed it deserves the
@@ -672,13 +708,68 @@ impl TimeseriesTile {
                 self.close_popup_with_window(window, cx);
                 true
             }
+            // `a` and `x` open their own field, closing whatever was up
+            // first: a trader who pressed one with the list open meant
+            // the new field, and two popups at a time is the thing this
+            // enum exists to forbid.
+            "add" => {
+                self.open_picker(window, cx);
+                true
+            }
+            "expr" => {
+                self.open_expr(None, window, cx);
+                true
+            }
             "edit" => {
                 if let Some(number) = header::cursor_is_source(&self.model) {
                     self.notice = Some(format!("s{number} is not an expression").into());
                     cx.notify();
+                    return false;
                 }
-                false
+                // `e` is `x` prefilled: the cursor's own expression, with
+                // its number carried so a commit REPLACES rather than
+                // adds (and so `resolve` excludes it from what the text
+                // may reference).
+                let Some(slot) = self.model.cursor_slot() else {
+                    return false;
+                };
+                let seed = (
+                    slot.number,
+                    slot.text.clone().unwrap_or_default().to_string(),
+                );
+                self.open_expr(Some(seed), window, cx);
+                true
             }
+            "commit" => match &self.popup {
+                Some(Popup::Picker(_)) => self.commit_picker(window, cx),
+                Some(Popup::Expr(_)) => self.commit_expr(window, cx),
+                _ => false,
+            },
+            "cancel" if self.popup.as_ref().is_some_and(Popup::is_insert) => {
+                self.close_popup_with_window(window, cx);
+                true
+            }
+            // The picker's own rule is CLAMPED stepping (header spec §7,
+            // the underlying picker's): a bare step at either end stays
+            // put rather than wrapping round to the far end of a list
+            // the trader is reading top-down.
+            "insert_up" | "insert_down" => match &mut self.popup {
+                Some(Popup::Picker(p)) => {
+                    let delta = if verb == "insert_up" {
+                        -(n as i64)
+                    } else {
+                        n as i64
+                    };
+                    p.list.nav_clamped(NavCommand::Move(delta));
+                    cx.notify();
+                    true
+                }
+                // The expression field has no list to step; the keys are
+                // CONSUMED rather than passed on, so an arrow cannot pan
+                // the chart behind an open field.
+                Some(Popup::Expr(_)) => true,
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -693,6 +784,315 @@ impl TimeseriesTile {
         cx.notify();
     }
 
+    // ---- the add picker (spec §9.6) ----------------------------------
+
+    /// `a`: the typeahead over every catalogued `identity@source`, its
+    /// field holding the keyboard (which is what `mode == insert` and
+    /// `holds_focus` both report off).
+    ///
+    /// The catalogue is re-requested on the way in when there is none to
+    /// rank (the market-data picker's rule, and CLAUDE.md's trap:
+    /// `request_catalog()` queues but never notifies, so the caller must
+    /// — in the same update); one that lands WHILE this is open is
+    /// folded in by the `Diagnostics` observer in `new`.
+    fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup.is_some() {
+            self.close_popup_with_window(window, cx);
+        }
+        self.request_catalog(cx);
+        let options = self.catalog_options(cx);
+        let loaded = self.loaded_marks(&options);
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("identity@source"));
+        cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
+            // The LIVE path, for a trader actually typing.
+            // `InputState::set_value` emits no `Change` at all, which is
+            // why `commit_picker` re-feeds the field's own text as well
+            // rather than trusting this subscription alone.
+            if let InputEvent::Change = event {
+                let query = input.read(cx).value().to_string();
+                if let Some(Popup::Picker(p)) = &mut this.popup {
+                    p.list.set_query(&query);
+                    p.refresh_add_row();
+                }
+                cx.notify();
+            }
+        })
+        .detach();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.popup = Some(Popup::Picker(PickerState::new(input, options, loaded)));
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// Ask for a catalogue when there is nothing to rank. Queued AND
+    /// notified in one update: `Diagnostics::request_catalog` never
+    /// notifies on its own (CLAUDE.md), so without this the bridge would
+    /// not drain the request until something else woke the entity.
+    fn request_catalog(&self, cx: &mut Context<Self>) {
+        let have = self
+            .diagnostics
+            .read(cx)
+            .catalog
+            .as_ref()
+            .is_some_and(|c| !c.identities.is_empty());
+        if have {
+            return;
+        }
+        self.diagnostics.update(cx, |d, cx| {
+            d.request_catalog();
+            cx.notify();
+        });
+    }
+
+    /// Every `identity@source` the picker ranks: the catalogue's own
+    /// rows, restricted to sources this build actually has configured
+    /// (a catalogue outlives a `sources` edit), sorted so the list is
+    /// stable across deliveries.
+    fn catalog_options(&self, cx: &App) -> Vec<String> {
+        let Some(settings) = cx.try_global::<SeriesSettings>() else {
+            return Vec::new();
+        };
+        let diagnostics = self.diagnostics.read(cx);
+        let Some(catalog) = diagnostics.catalog.as_ref() else {
+            return Vec::new();
+        };
+        let mut options: Vec<String> = catalog
+            .identities
+            .iter()
+            .filter(|(source, _)| settings.dataset_of(source).is_some())
+            .flat_map(|(source, ids)| ids.iter().map(move |id| format!("{id}@{source}")))
+            .collect();
+        options.sort();
+        options
+    }
+
+    /// Which of `options` this tile already holds — the `•` mark. A
+    /// marked row is still pickable (spec §9.6).
+    fn loaded_marks(&self, options: &[String]) -> Vec<bool> {
+        options
+            .iter()
+            .map(|o| {
+                let (identity, source) = split_option(o);
+                self.model.holds_pair(source, identity)
+            })
+            .collect()
+    }
+
+    /// `enter` with the picker open, and the mouse form of the `add`
+    /// row: re-feed the field's LIVE text first (`set_value` emits no
+    /// `Change`, so the last ranking may never have been run), then
+    /// resolve what the stage says the commit means.
+    ///
+    /// The popup closes BEFORE the add, the way the market-data
+    /// picker's `picker_pick` does: adding needs no keyboard, and the
+    /// field is done being useful the moment a pair is chosen.
+    pub(crate) fn commit_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(Popup::Picker(p)) = &mut self.popup else {
+            return false;
+        };
+        let text = p.input.read(cx).value().to_string();
+        if p.list.set_query(&text) {
+            p.refresh_add_row();
+        }
+        let decision = match &p.stage {
+            PickerStage::Identities => match &p.add_row {
+                // Nothing matched: either the text already names a pair
+                // outright, or the source stage asks which source it
+                // belongs to.
+                Some(_) => match text.trim() {
+                    // A query of nothing but spaces ranks nothing and so
+                    // offers the add row; it still names no identity.
+                    "" => Commit::Nothing,
+                    typed => match parse_pair(typed) {
+                        Some((identity, source))
+                            if cx
+                                .try_global::<SeriesSettings>()
+                                .is_some_and(|s| s.dataset_of(source).is_some()) =>
+                        {
+                            Commit::Add(identity.to_string(), source.to_string())
+                        }
+                        // Anything else is an identity awaiting a source
+                        // — including a text carrying an `@` whose right
+                        // half names no configured source, which a REST
+                        // path may legitimately do.
+                        _ => Commit::Stage(typed.to_string()),
+                    },
+                },
+                None => match p.list.pick() {
+                    // An OPTION was built here as `{identity}@{source}`,
+                    // so its source is the last `@` piece — an identity
+                    // that carries an `@` of its own (a REST path from a
+                    // catalogue) still splits correctly.
+                    Some(i) => {
+                        let (identity, source) = split_option(p.option(i));
+                        Commit::Add(identity.to_string(), source.to_string())
+                    }
+                    // Nothing ranked and nothing typed: inert, and the
+                    // picker stays open (the market-data rule).
+                    None => Commit::Nothing,
+                },
+            },
+            PickerStage::Sources { identity } => match p.list.pick() {
+                Some(i) => Commit::Add(identity.clone(), p.option(i).to_string()),
+                None => Commit::Nothing,
+            },
+        };
+        match decision {
+            Commit::Nothing => {}
+            Commit::Add(identity, source) => {
+                self.close_popup_with_window(window, cx);
+                if let Err(e) = self.add_pair(&identity, &source, cx) {
+                    self.notice = Some(e.into());
+                    cx.notify();
+                }
+            }
+            Commit::Stage(identity) => {
+                let settings = cx
+                    .try_global::<SeriesSettings>()
+                    .cloned()
+                    .unwrap_or_default();
+                let sources: Vec<String> = settings.names();
+                let default_source = settings.default_source.clone();
+                if let Some(Popup::Picker(p)) = &mut self.popup {
+                    p.enter_sources(identity, sources, default_source.as_deref());
+                    // The field is the STAGE's filter now, not the
+                    // identity it carries — and it keeps the keyboard.
+                    let input = p.input.clone();
+                    input.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+                cx.notify();
+            }
+        }
+        true
+    }
+
+    /// A click on painted row `row` (WINDOW-relative, matching
+    /// [`geode_shell::choice::ChoiceList::highlighted`]): light it, then
+    /// take exactly the path `enter` takes.
+    pub(crate) fn picker_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Picker(p)) = &mut self.popup else {
+            return;
+        };
+        if !p.list.set_highlighted(row) {
+            return;
+        }
+        self.commit_picker(window, cx);
+    }
+
+    // ---- the expression field (spec §9.7) ----------------------------
+
+    /// `x` (empty) or `e` (prefilled with the cursor's expression and
+    /// its slot number). The field is tile-owned and focused, like the
+    /// picker's.
+    fn open_expr(
+        &mut self,
+        seed: Option<(u8, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.popup.is_some() {
+            self.close_popup_with_window(window, cx);
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("s1 / s2"));
+        if let Some((_, text)) = &seed {
+            let text = text.clone();
+            input.update(cx, |s, cx| s.set_value(text, window, cx));
+        }
+        cx.subscribe_in(&input, window, |this, _input, event, _window, cx| {
+            // A typed character answers the error under the field: it
+            // describes text that is no longer what is there.
+            if let InputEvent::Change = event
+                && let Some(Popup::Expr(f)) = &mut this.popup
+                && f.error.take().is_some()
+            {
+                cx.notify();
+            }
+        })
+        .detach();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.popup = Some(Popup::Expr(ExprField {
+            input,
+            editing: seed.map(|(number, _)| number),
+            error: None,
+        }));
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// `enter` with the expression field open (spec §9.7): parse against
+    /// this tile's own slots (§7). An error paints INLINE under the
+    /// field and the field stays open and focused — a parse error is
+    /// about the text still on screen, and closing would throw it away.
+    /// A success adds or replaces, then closes.
+    fn commit_expr(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(Popup::Expr(f)) = &self.popup else {
+            return false;
+        };
+        let text = f.input.read(cx).value().to_string();
+        let editing = f.editing;
+        let default_source = cx
+            .try_global::<SeriesSettings>()
+            .and_then(|s| s.default_source.clone());
+        match resolve(
+            &text,
+            self.model.slots(),
+            default_source.as_deref(),
+            editing,
+        ) {
+            Err(e) => {
+                if let Some(Popup::Expr(f)) = &mut self.popup {
+                    f.error = Some(e.into());
+                }
+                cx.notify();
+            }
+            Ok(expr) => {
+                let written = match editing {
+                    Some(number) => self.model.replace_expr(number, &text, expr),
+                    None => self.model.add_expr(&text, expr).map(|(_, changed)| changed),
+                };
+                self.close_popup_with_window(window, cx);
+                match written {
+                    Ok(changed) => self.apply_changed(changed, cx),
+                    // A refusal the parser could not see (a slot budget,
+                    // a vanished number) is the tile's own notice, not
+                    // an inline error under a field that is now gone.
+                    Err(e) => {
+                        self.notice = Some(e.into());
+                        cx.notify();
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// The ONE door a `(identity, source)` pair is added by — the `:add`
+    /// line's and the picker's both, so the dataset check, its message
+    /// and the `apply_changed` tail cannot drift between them.
+    fn add_pair(
+        &mut self,
+        identity: &str,
+        source: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let settings = cx
+            .try_global::<SeriesSettings>()
+            .cloned()
+            .unwrap_or_default();
+        let dataset = settings
+            .dataset_of(source)
+            .ok_or_else(|| {
+                format!(
+                    "'{source}' is not a fetch source (have: {})",
+                    settings.names().join(", ")
+                )
+            })?
+            .to_string();
+        let changed = self.model.add_source(identity, source, &dataset)?.1;
+        self.apply_changed(changed, cx);
+        Ok(())
+    }
+
     /// The ONE closer (the market-data panel's rule): every path that
     /// drops a popup comes through here, because a popup whose own field
     /// holds the keyboard has to be blurred BEFORE it is dropped — an
@@ -700,14 +1100,16 @@ impl TimeseriesTile {
     /// nothing for the rest of the session, and the shell's focus-return
     /// net never fires.
     ///
-    /// The series list holds no field, so today the blur is a no-op;
-    /// Tasks 9–10's variants are what make the `window` parameter earn
-    /// its keep, and the door exists now so they add an arm rather than
-    /// a second closer.
+    /// The series list holds no field, so for it the blur is a no-op;
+    /// the picker's and the expression field's are what make the
+    /// `window` parameter earn its keep. The blur is conditional on the
+    /// popup's OWN field holding focus: a field orphaned by a tile-focus
+    /// move, closed from a `:` line, must not blur the command line.
     pub(crate) fn close_popup_with_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let own_field_focused = match &self.popup {
-            Some(Popup::Series(_)) | None => false,
-        };
+        let own_field_focused = self
+            .popup
+            .as_ref()
+            .is_some_and(|p| p.holds_focus(window, cx));
         if own_field_focused {
             window.blur(cx);
         }
@@ -752,16 +1154,10 @@ impl TimeseriesTile {
                         ));
                     }
                 };
-                let dataset = settings
-                    .dataset_of(&source)
-                    .ok_or_else(|| {
-                        format!(
-                            "'{source}' is not a fetch source (have: {})",
-                            settings.names().join(", ")
-                        )
-                    })?
-                    .to_string();
-                self.model.add_source(&identity, &source, &dataset)?.1
+                // The picker's door too (`Self::add_pair`), which is why
+                // this arm returns rather than falling through to the
+                // shared tail: the door applies its own change.
+                return self.add_pair(&identity, &source, cx);
             }
             Command::Expr(text) => {
                 let e = resolve(
@@ -1308,9 +1704,23 @@ impl Render for TimeseriesTile {
         // makes that position read against the HEADER rather than the
         // window, and `deferred` inside it is what lifts the list above
         // the chart and the neighbouring tiles.
-        let popup = self.popup.as_ref().map(|p| match p {
-            Popup::Series(s) => render_series_popup(s, self.header.cursor, &tile, tile_id, cx),
-        });
+        let popup = match self.popup.as_ref() {
+            Some(Popup::Series(s)) => Some(render_series_popup(
+                s,
+                self.header.cursor,
+                &tile,
+                tile_id,
+                cx,
+            )),
+            Some(Popup::Picker(p)) => Some(render_picker(p, &tile, tile_id, cx)),
+            // The expression field is not an overlay: it is a strip in
+            // the body, below.
+            Some(Popup::Expr(_)) | None => None,
+        };
+        let expr_field = match self.popup.as_ref() {
+            Some(Popup::Expr(f)) => Some(header::render_expr_field(f, theme)),
+            _ => None,
+        };
         let header = div()
             .relative()
             .w_full()
@@ -1337,9 +1747,40 @@ impl Render for TimeseriesTile {
             .when_some(self.notice.clone(), |el, n| {
                 el.child(header::render_notice(&n, theme))
             })
+            .when_some(expr_field, |el, f| el.child(f))
             .child(body)
             .child(header::render_footer(self.footer.clone(), theme))
     }
+}
+
+/// What one `enter` in the picker turns out to mean, decided while the
+/// popup is borrowed and acted on once it is not.
+enum Commit {
+    /// Inert: nothing ranked and nothing typed. The picker stays open.
+    Nothing,
+    Add(String, String),
+    /// The typed identity opens the source stage.
+    Stage(String),
+}
+
+/// One of the picker's OWN options, built here as `{identity}@{source}`:
+/// the source is the last `@` piece, so an identity carrying an `@` (a
+/// REST path a catalogue offered) splits correctly. A bare option — the
+/// sources stage's — is its own identity with no source, which only the
+/// `loaded` marks ever ask about.
+fn split_option(option: &str) -> (&str, &str) {
+    option.rsplit_once('@').unwrap_or((option, ""))
+}
+
+/// `identity@source` as a trader TYPED it: exactly one `@`, both sides
+/// non-empty. Anything else is not a pair — a text with no `@` is an
+/// identity awaiting a source, and one with two is neither.
+fn parse_pair(text: &str) -> Option<(&str, &str)> {
+    let (identity, source) = text.split_once('@')?;
+    if identity.is_empty() || source.is_empty() || source.contains('@') {
+        return None;
+    }
+    Some((identity, source))
 }
 
 /// Build a [`ChartKey`] from everything `chart::build` will read. A free
@@ -1422,7 +1863,7 @@ mod tests {
     use crate::content::{ACTIONS, DEFAULT_KEYMAP, TimeseriesFactory};
     use crate::core::model::SlotState;
     use crate::core::{Colour, Model, Preset, Range};
-    use crate::popup::SeriesRow;
+    use crate::popup::{PickerStage, SeriesRow};
     use geode_chart::{Axis, ChartModel};
     use geode_core::colour::NamedColours;
     use geode_core::groupings::GroupingSlots;
@@ -1560,6 +2001,28 @@ mod tests {
         h.frame.update(vcx, |f, cx| {
             f.set_as_of(AsOf::At(at));
             f.open_flip(keys, std::time::Instant::now());
+            cx.notify();
+        });
+    }
+
+    /// A catalogue delivery, as the bridge makes one: the snapshot into
+    /// `Diagnostics` plus the `cx.notify()` that is the only way an OPEN
+    /// picker ever hears about it.
+    fn seed_catalog(h: &Harness, vcx: &mut gpui::VisualTestContext, sources: &[(&str, &[&str])]) {
+        let identities: Vec<(String, Vec<String>)> = sources
+            .iter()
+            .map(|(source, ids)| {
+                (
+                    source.to_string(),
+                    ids.iter().map(|i| i.to_string()).collect(),
+                )
+            })
+            .collect();
+        h.diagnostics.update(vcx, |d, cx| {
+            d.set_catalog(geode_core::query::CatalogSnapshot {
+                identities,
+                ..Default::default()
+            });
             cx.notify();
         });
     }
@@ -1839,8 +2302,86 @@ mod tests {
         fn series_rows(&self, vcx: &gpui::VisualTestContext) -> Vec<SeriesRow> {
             self.tile.read_with(vcx, |t, _| match t.popup() {
                 Some(Popup::Series(p)) => p.rows.clone(),
-                None => Vec::new(),
+                _ => Vec::new(),
             })
+        }
+        /// The picker's ranked options, as spelled — the picker's own
+        /// "painted text", read the way [`Harness::series_rows`] reads
+        /// the list's rows.
+        fn picker_rows(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+            self.tile.read_with(vcx, |t, _| match t.popup() {
+                Some(Popup::Picker(p)) => p.ranked_options(),
+                _ => Vec::new(),
+            })
+        }
+        /// The already-loaded mark for each RANKED row, in the order
+        /// [`Harness::picker_rows`] hands them back.
+        fn picker_loaded_marks(&self, vcx: &gpui::VisualTestContext) -> Vec<bool> {
+            self.tile.read_with(vcx, |t, _| match t.popup() {
+                Some(Popup::Picker(p)) => p.ranked_loaded(),
+                _ => Vec::new(),
+            })
+        }
+        fn picker_add_row(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+            self.tile.read_with(vcx, |t, _| match t.popup() {
+                Some(Popup::Picker(p)) => p.add_row.clone(),
+                _ => None,
+            })
+        }
+        fn picker_is_source_stage(&self, vcx: &gpui::VisualTestContext) -> bool {
+            self.tile.read_with(vcx, |t, _| {
+                matches!(
+                    t.popup(),
+                    Some(Popup::Picker(p)) if matches!(p.stage, PickerStage::Sources { .. })
+                )
+            })
+        }
+        fn picker_highlighted(&self, vcx: &gpui::VisualTestContext) -> String {
+            self.tile.read_with(vcx, |t, _| match t.popup() {
+                Some(Popup::Picker(p)) => p.list.highlighted_text().unwrap_or("").to_string(),
+                _ => String::new(),
+            })
+        }
+        fn popup_is_expr(&self, vcx: &gpui::VisualTestContext) -> bool {
+            self.tile
+                .read_with(vcx, |t, _| matches!(t.popup(), Some(Popup::Expr(_))))
+        }
+        /// The expression field's inline parse error.
+        fn expr_error(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+            self.tile.read_with(vcx, |t, _| match t.popup() {
+                Some(Popup::Expr(f)) => f.error.as_ref().map(|e| e.to_string()),
+                _ => None,
+            })
+        }
+        /// The open popup's own field, as it reads right now.
+        fn input_text(&self, vcx: &gpui::VisualTestContext) -> String {
+            self.tile
+                .read_with(vcx, |t, cx| match t.popup() {
+                    Some(Popup::Picker(p)) => Some(p.input.read(cx).value().to_string()),
+                    Some(Popup::Expr(f)) => Some(f.input.read(cx).value().to_string()),
+                    _ => None,
+                })
+                .expect("a field popup is open")
+        }
+        /// Write the field the way nothing in the app does — through
+        /// `InputState::set_value`, which emits NO `Change` event
+        /// (CLAUDE.md's trap): every commit path has to re-feed the
+        /// field's live text itself, and this is what proves it does.
+        fn set_input_text(&self, vcx: &mut gpui::VisualTestContext, text: &str) {
+            let text = text.to_string();
+            vcx.update(|window, cx| {
+                let input = self
+                    .tile
+                    .read(cx)
+                    .popup()
+                    .and_then(|p| match p {
+                        Popup::Picker(p) => Some(p.input.clone()),
+                        Popup::Expr(f) => Some(f.input.clone()),
+                        Popup::Series(_) => None,
+                    })
+                    .expect("a field popup is open");
+                input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+            });
         }
         /// One pair off the tile's live key context. `KeyContext` reads a
         /// pair BY KEY and offers no iterator over its pairs, so this
@@ -2091,10 +2632,10 @@ mod tests {
         // A verb this tile does not handle leaves the notice on screen:
         // clearing it in state while the old text is still painted is a
         // lie (review round 1, MIN-3).
-        // (`list` is no longer one of those: Task 8 built it, and a
-        // handled verb clears the notice — `add` and `range` are the
-        // ones still waiting for Tasks 9–10.)
-        h.dispatch(&mut vcx, "add", None);
+        // (`list` is no longer one of those, and neither are `add` and
+        // `expr`: Tasks 8 and 9 built all three, and a handled verb
+        // clears the notice — `range` is the one still waiting for Task
+        // 10.)
         h.dispatch(&mut vcx, "range", None);
         assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
         // A handled one takes it away and speaks for itself.
@@ -2751,5 +3292,176 @@ mod tests {
                 "{tone:?}"
             );
         }
+    }
+
+    // ---- the picker and the expression field (spec §9.6, §9.7) --------
+
+    #[gpui::test]
+    fn a_opens_the_picker_over_the_catalogue_and_enter_adds_the_highlighted_pair(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        seed_catalog(
+            &h,
+            &mut vcx,
+            &[("demo_kdb", &["SPX.close", "VIX", "NKY.close"])],
+        ); // demo_rest has no catalogue
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "add", None);
+        assert_eq!(h.key_context_mode(&mut vcx), "insert");
+        assert!(
+            vcx.update(|w, cx| h.content.holds_focus(w, cx)),
+            "the picker's field holds the keyboard"
+        );
+        assert_eq!(
+            h.picker_rows(&vcx),
+            vec!["NKY.close@demo_kdb", "SPX.close@demo_kdb", "VIX@demo_kdb"],
+            "identity first, sorted, every fetch source with a catalogue"
+        );
+        // The field has to be PAINTED before a keystroke can reach it:
+        // gpui dispatches against the focus path of the last frame.
+        h.draw(&mut vcx);
+        vcx.simulate_input("vi");
+        assert_eq!(h.picker_rows(&vcx)[0], "VIX@demo_kdb");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.popup_is_none(&vcx));
+        assert_eq!(h.key_context_mode(&mut vcx), "normal");
+        assert!(
+            !vcx.update(|w, cx| h.content.holds_focus(w, cx)),
+            "blurred before the drop"
+        );
+        assert!(h.model(&vcx).holds_pair("demo_kdb", "VIX"));
+        assert!(h.fetch_request().is_some());
+        // The loaded row is marked and still pickable.
+        h.dispatch(&mut vcx, "add", None);
+        assert!(h.picker_loaded_marks(&vcx).contains(&true));
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(h.popup_is_none(&vcx));
+        assert_eq!(h.model(&vcx).slots().len(), 1);
+    }
+
+    #[gpui::test]
+    fn an_unmatched_text_offers_the_add_row_which_opens_the_source_stage(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        seed_catalog(&h, &mut vcx, &[("demo_kdb", &["SPX.close"])]);
+        h.dispatch(&mut vcx, "add", None);
+        h.draw(&mut vcx);
+        vcx.simulate_input("/v1/px?sym=SPX");
+        assert!(h.picker_rows(&vcx).is_empty());
+        assert_eq!(
+            h.picker_add_row(&vcx).as_deref(),
+            Some("add \"/v1/px?sym=SPX\"…")
+        );
+        // Painted, not merely in state — `centre_of` panics on an
+        // element the frame does not carry.
+        let _ = centre_of(&mut vcx, &format!("ts-picker-add-{TILE}"));
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.picker_is_source_stage(&vcx));
+        let _ = centre_of(&mut vcx, &format!("ts-picker-row-{TILE}-0"));
+        assert_eq!(h.picker_rows(&vcx), vec!["demo_kdb", "demo_rest"]);
+        assert_eq!(
+            h.picker_highlighted(&vcx),
+            "demo_kdb",
+            "the default source is highlighted"
+        );
+        assert_eq!(h.input_text(&vcx), "", "the field is cleared for the stage");
+        h.dispatch(&mut vcx, "insert_down", None);
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.model(&vcx).holds_pair("demo_rest", "/v1/px?sym=SPX"));
+        // A text already spelled identity@known-source skips the stage.
+        h.dispatch(&mut vcx, "add", None);
+        h.draw(&mut vcx);
+        vcx.simulate_input("EURUSD@demo_rest");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.model(&vcx).holds_pair("demo_rest", "EURUSD"));
+        assert!(h.popup_is_none(&vcx));
+    }
+
+    #[gpui::test]
+    fn opening_the_picker_asks_for_a_catalog_and_re_ranks_when_it_lands(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "add", None);
+        assert!(
+            h.diagnostics
+                .update(&mut vcx, |d, _| d.take_pending_catalog_request()),
+            "no catalog yet: one is requested (with cx.notify, the CLAUDE.md trap)"
+        );
+        assert!(h.picker_rows(&vcx).is_empty());
+        seed_catalog(&h, &mut vcx, &[("demo_kdb", &["VIX"])]);
+        assert_eq!(
+            h.picker_rows(&vcx),
+            vec!["VIX@demo_kdb"],
+            "the open picker re-ranked on the Diagnostics notify"
+        );
+    }
+
+    #[gpui::test]
+    fn x_opens_the_expression_field_and_enter_adds_or_reports_inline(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.command(&mut vcx, "add VIX").unwrap();
+        h.dispatch(&mut vcx, "expr", None);
+        assert_eq!(h.key_context_mode(&mut vcx), "insert");
+        h.draw(&mut vcx);
+        vcx.simulate_input("s1 ^ s2");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.popup_is_expr(&vcx), "a parse error keeps the field open");
+        assert!(h.expr_error(&vcx).unwrap().contains("arithmetic only"));
+        assert_eq!(h.model(&vcx).slots().len(), 2);
+        h.set_input_text(&mut vcx, "s1 / s2");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.popup_is_none(&vcx));
+        assert_eq!(h.model(&vcx).slots()[2].text.as_deref(), Some("s1 / s2"));
+        // `e` reopens the cursor's expression prefilled; `escape`
+        // discards.
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.input_text(&vcx), "s1 / s2");
+        h.draw(&mut vcx);
+        vcx.simulate_input(" * 2");
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(
+            h.model(&vcx).slots()[2].text.as_deref(),
+            Some("s1 / s2"),
+            "escape discards"
+        );
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_input_text(&mut vcx, "s1 - s2");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.model(&vcx).slots()[2].text.as_deref(),
+            Some("s1 - s2"),
+            "replaced in place, same number"
+        );
+        assert_eq!(h.model(&vcx).slots()[2].number, 3);
+        h.dispatch(&mut vcx, "prev", None);
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(h.popup_is_none(&vcx), "`e` on a source slot does nothing");
+        assert_eq!(h.notice(&vcx).as_deref(), Some("s2 is not an expression"));
+    }
+
+    #[gpui::test]
+    fn both_closers_blur_before_dropping_the_input(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "add", None);
+        assert!(vcx.update(|w, cx| w.focused(cx).is_some()));
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(
+            vcx.update(|w, cx| w.focused(cx).is_none()),
+            "picker: blurred, then dropped"
+        );
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.dispatch(&mut vcx, "expr", None);
+        assert!(vcx.update(|w, cx| w.focused(cx).is_some()));
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(
+            vcx.update(|w, cx| w.focused(cx).is_none()),
+            "expression field: blurred, then dropped"
+        );
     }
 }

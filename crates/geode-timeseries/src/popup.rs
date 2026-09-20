@@ -1,6 +1,16 @@
 //! The tile's one overlay (spec §9.5–§9.8): the add picker, the
-//! expression editor, the series list, the range dialog. Tasks 8–10
-//! build them; this task builds the series list ([`Popup::Series`]).
+//! expression editor, the series list, the range dialog. Task 8 built
+//! the series list ([`Popup::Series`]), Task 9 the add picker
+//! ([`Popup::Picker`], §9.6) and the expression field ([`Popup::Expr`],
+//! §9.7); the range dialog is Task 10.
+//!
+//! **Two of the three hold the keyboard.** The picker's and the
+//! expression field's `InputState`s are tile-owned and focused, which
+//! is what puts the tile's key context into `insert` mode — and what
+//! makes `TimeseriesTile::close_popup_with_window` the ONE closer:
+//! a focused `InputState` dropped without a blur leaves `Window::
+//! focused` pointing at a dead handle for the rest of the session
+//! (CLAUDE.md).
 //!
 //! **One popup at a time, and it is prepared, never formatted.** The
 //! list's rows are built in the tile's `rebuild_chrome` — the same door
@@ -21,12 +31,14 @@
 
 use geode_core::health::Health;
 use geode_core::series::{SeriesResult, SlotKind};
+use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{
-    Anchor, AnchoredPositionMode, App, Deferred, Div, Entity, Hsla, MouseButton, SharedString,
-    anchored, deferred, div, px,
+    Anchor, AnchoredPositionMode, App, Deferred, Div, Entity, Focusable as _, Hsla, MouseButton,
+    SharedString, anchored, deferred, div, px,
 };
+use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
 
 use crate::core::model::{Colour, Model, SlotState};
@@ -47,11 +59,15 @@ const SWATCH: f32 = 8.0;
 /// What the tile currently has open. `Series` is the series list (spec
 /// §9.5) — it holds no field, so it is NOT an insert-mode popup: the key
 /// context stays `normal` and gains a `popup == series` pair, which is
-/// what its three keys bind against. Tasks 9–10 add the add picker, the
-/// expression editor and the range dialog, whose fields DO hold the
-/// keyboard.
+/// what its three keys bind against. `Picker` (§9.6) and `Expr` (§9.7)
+/// each own a focused field, so both report `insert` and neither takes
+/// a `popup` pair: their keys are the shared `mode == insert` layer's
+/// (`enter`/`escape`/`up`/`down`), the market-data panel's own split.
+/// Task 10 adds the range dialog.
 pub(crate) enum Popup {
     Series(SeriesPopup),
+    Picker(PickerState),
+    Expr(ExprField),
 }
 
 impl Popup {
@@ -60,17 +76,21 @@ impl Popup {
     pub(crate) fn is_insert(&self) -> bool {
         match self {
             Popup::Series(_) => false,
+            Popup::Picker(_) | Popup::Expr(_) => true,
         }
     }
 
     /// Whether one of this popup's own inputs holds WINDOW focus right
     /// now (`TileContent::holds_focus`'s ownership half) — answered off
-    /// the focus handle, never off the mode.
-    pub(crate) fn holds_focus(&self, _window: &gpui::Window, _cx: &gpui::App) -> bool {
+    /// the focus handle, never off the mode: a tile-focus move can leave
+    /// a field open without the keyboard (the market-data panel's I-3).
+    pub(crate) fn holds_focus(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
         match self {
             // No field: the tile itself keeps the keyboard, which is
             // what lets `j`/`k` reach the matcher at all.
             Popup::Series(_) => false,
+            Popup::Picker(p) => p.input.read(cx).focus_handle(cx).is_focused(window),
+            Popup::Expr(f) => f.input.read(cx).focus_handle(cx).is_focused(window),
         }
     }
 
@@ -80,8 +100,146 @@ impl Popup {
     pub(crate) fn context_pair(&self) -> Option<&'static str> {
         match self {
             Popup::Series(_) => Some("series"),
+            Popup::Picker(_) | Popup::Expr(_) => None,
         }
     }
+}
+
+/// Which of the picker's two lists is up (spec §9.6). `Sources` carries
+/// the identity the trader typed — it is not in any catalogue, so the
+/// second step is the only place it can be paired with a source.
+pub(crate) enum PickerStage {
+    Identities,
+    Sources { identity: String },
+}
+
+/// The add picker's state (spec §9.6): a tile-owned field that holds the
+/// keyboard, one [`ChoiceList`] beneath it (the 2026-09-19 choice core —
+/// one ranking, one identity-across-a-re-rank rule, one twelve-row
+/// painted window), and the two things this surface adds to a plain
+/// choice field.
+///
+/// `loaded` and `labels` run PARALLEL to `list.options()` and are both
+/// prepared here, never in `render`: a row paints `identity` and
+/// `@source` as two columns, and splitting the option string per painted
+/// row per frame is the allocation the market-data picker's own review
+/// took out (IMPORTANT-3 there).
+pub(crate) struct PickerState {
+    pub input: Entity<InputState>,
+    pub list: ChoiceList,
+    pub stage: PickerStage,
+    /// `model.holds_pair(source, identity)` per option — a marked row is
+    /// still pickable (a second slot over the same pair with another
+    /// rule is legitimate, spec §9.6).
+    pub loaded: Vec<bool>,
+    /// The prepared `(identity, @source)` pair per option; the second
+    /// half is empty in the `Sources` stage, whose options are bare
+    /// source names.
+    pub labels: Vec<(SharedString, SharedString)>,
+    /// `add "<text>"…` while the typed text matches nothing — the door
+    /// to the `Sources` stage, recomputed on every keystroke.
+    pub add_row: Option<String>,
+}
+
+impl PickerState {
+    /// The identities stage, ranked over `options` under an empty query.
+    pub(crate) fn new(input: Entity<InputState>, options: Vec<String>, loaded: Vec<bool>) -> Self {
+        PickerState {
+            input,
+            labels: labels_for(&options),
+            list: ChoiceList::new(options, DEFAULT_CAP),
+            stage: PickerStage::Identities,
+            loaded,
+            add_row: None,
+        }
+    }
+
+    /// Swap in a fresh catalogue, keeping the live query and the
+    /// highlighted option by TEXT ([`ChoiceList::replace_options`]).
+    pub(crate) fn set_options(&mut self, options: Vec<String>, loaded: Vec<bool>) {
+        self.labels = labels_for(&options);
+        self.loaded = loaded;
+        self.list.replace_options(options);
+        self.refresh_add_row();
+    }
+
+    /// Step into the source stage: the sources become the options, the
+    /// default is highlighted, and the typed identity is carried.
+    pub(crate) fn enter_sources(
+        &mut self,
+        identity: String,
+        sources: Vec<String>,
+        default_source: Option<&str>,
+    ) {
+        self.stage = PickerStage::Sources { identity };
+        self.labels = labels_for(&sources);
+        self.loaded = vec![false; sources.len()];
+        self.list = ChoiceList::new(sources, DEFAULT_CAP);
+        self.list.place(default_source);
+        self.add_row = None;
+    }
+
+    /// `add "<text>"…` exactly while the ranked list is empty and the
+    /// query is not — the identities stage only: a source that matches
+    /// nothing cannot be invented here.
+    pub(crate) fn refresh_add_row(&mut self) {
+        let text = self.list.query();
+        self.add_row = (matches!(self.stage, PickerStage::Identities)
+            && self.list.ranked().is_empty()
+            && !text.is_empty())
+        .then(|| format!("add \"{text}\"…"));
+    }
+
+    /// The option at declared index `i`.
+    pub(crate) fn option(&self, i: usize) -> &str {
+        &self.list.options()[i]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ranked_options(&self) -> Vec<String> {
+        self.list
+            .ranked()
+            .iter()
+            .map(|r| self.list.options()[r.row].clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ranked_loaded(&self) -> Vec<bool> {
+        self.list
+            .ranked()
+            .iter()
+            .map(|r| self.loaded[r.row])
+            .collect()
+    }
+}
+
+/// The expression field (spec §9.7): a one-line tile-owned `Input` on
+/// the strip below the header, its parse error painted under it. `error`
+/// is the inline half — a bad expression keeps the field open, exactly
+/// as a cell parse error keeps the market-data editor open; it is the
+/// tile's `notice` that a REFUSED model write goes to instead.
+pub(crate) struct ExprField {
+    pub input: Entity<InputState>,
+    /// The slot being replaced (`e`), or `None` for a fresh one (`x`) —
+    /// what `core::resolve` excludes from the references the text may
+    /// name and checks for a cycle through.
+    pub editing: Option<u8>,
+    pub error: Option<SharedString>,
+}
+
+/// Split each option into the two columns a picker row paints. The
+/// options this surface builds are `{identity}@{source}`, so the source
+/// is the LAST `@`-separated piece; a bare option (the sources stage)
+/// paints its whole self in the first column.
+fn labels_for(options: &[String]) -> Vec<(SharedString, SharedString)> {
+    options
+        .iter()
+        .map(|o| match o.rsplit_once('@') {
+            Some((identity, source)) => (identity.into(), format!("@{source}").into()),
+            None => (o.clone().into(), SharedString::default()),
+        })
+        .collect()
 }
 
 /// The series list, prepared (spec §9.5): one row per slot, in slot
@@ -296,6 +454,116 @@ fn anchor_popup(list: Div) -> Deferred {
             .child(list),
     )
     .with_priority(1)
+}
+
+/// Paint the add picker (spec §9.6) on the series list's own surface:
+/// the field on top, one row per PAINTED option below — `identity` in
+/// the first column, `@source` muted in the second, a `•` where this
+/// tile already holds the pair — and, where the typed text matches
+/// nothing, the single `add "<text>"…` row that opens the source stage.
+///
+/// Every row is a click door into the same `picker_pick` `enter` takes,
+/// by the same WINDOW-relative index [`ChoiceList::highlighted`] is in.
+pub(crate) fn render_picker(
+    p: &PickerState,
+    tile: &Entity<TimeseriesTile>,
+    tile_id: u64,
+    cx: &App,
+) -> Deferred {
+    let theme = cx.theme();
+    let mut list = popover_surface(cx)
+        .debug_selector(move || format!("ts-picker-{tile_id}"))
+        // The series list's reasons, exactly (see `render_series_popup`).
+        .occlude()
+        .on_mouse_down_out({
+            let tile = tile.clone();
+            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
+        })
+        .child(
+            div()
+                .w_full()
+                .pb_1()
+                .mb_1()
+                .border_b_1()
+                .border_color(theme.border)
+                // The placeholder is set once on the `InputState`, at
+                // open: an `Input` element has no builder for it.
+                .child(Input::new(&p.input).appearance(false).w_full()),
+        );
+    for (row, ranked) in p.list.painted().iter().enumerate() {
+        let (identity, source) = p.labels[ranked.row].clone();
+        let loaded = p.loaded[ranked.row];
+        let highlighted = row == p.list.highlighted();
+        list = list.child(
+            h_flex()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .gap_2()
+                .rounded(theme.radius)
+                .items_center()
+                .when(highlighted, |d| {
+                    d.bg(theme.accent).text_color(theme.accent_foreground)
+                })
+                .when(!highlighted, |d| d.text_color(theme.popover_foreground))
+                .debug_selector(move || format!("ts-picker-row-{tile_id}-{row}"))
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        tile.update(cx, |t, cx| t.picker_pick(row, window, cx));
+                    }
+                })
+                .child(div().flex_1().child(identity))
+                .child(
+                    div()
+                        .text_xs()
+                        .when(!highlighted, |d| d.text_color(theme.muted_foreground))
+                        .child(source),
+                )
+                // Already on this tile — still pickable, since a second
+                // slot over one pair with another rule is legitimate.
+                .child(
+                    div()
+                        .w(scale::design(SWATCH))
+                        .child(if loaded { "•" } else { "" }),
+                ),
+        );
+    }
+    if let Some(add) = &p.add_row {
+        list = list.child(
+            h_flex()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .rounded(theme.radius)
+                .items_center()
+                // The only thing `enter` can take while it is up, so it
+                // paints lit.
+                .bg(theme.accent)
+                .text_color(theme.accent_foreground)
+                .debug_selector(move || format!("ts-picker-add-{tile_id}"))
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        tile.update(cx, |t, cx| t.commit_picker(window, cx));
+                    }
+                })
+                .child(add.clone()),
+        );
+    } else if p.list.painted_len() == 0 {
+        // "Asked and answered", never a blank rectangle — the series
+        // list's own empty-state rule.
+        list = list.child(
+            div()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .flex()
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child("no identities known"),
+        );
+    }
+    anchor_popup(list)
 }
 
 #[cfg(test)]
