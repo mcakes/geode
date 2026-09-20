@@ -161,6 +161,17 @@ mod demo_config_integration {
     use super::*;
     use geode_core::config::{Config, ConfigSources};
 
+    /// A registry holding the mock pricer, matching what `main.rs`
+    /// builds before calling `data_setup` — without it, the demo
+    /// config's implicit `[pricing] adapter = "mock"` default would
+    /// resolve to nothing and every fixture below would gain a spurious
+    /// "pricer" diagnostic.
+    fn test_pricers() -> geode_data::PricerRegistry {
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
+        pricers
+    }
+
     /// Self-review / headless verification (Task 8): the demo layer's
     /// docs are not just individually well-formed TOML (`layer` already
     /// panics otherwise) — merged through the real `Config` loader and
@@ -188,6 +199,7 @@ mod demo_config_integration {
             &config,
             "/tmp/geode-demo/100000-42/geode.duckdb".into(),
             geode_data::adapter::AdapterRegistry::default(),
+            test_pricers(),
         )
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -231,6 +243,7 @@ mod demo_config_integration {
             &config,
             "/tmp/geode-demo/100000-42/geode.duckdb".into(),
             geode_data::adapter::AdapterRegistry::default(),
+            test_pricers(),
         )
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);

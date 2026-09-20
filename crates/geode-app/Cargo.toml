@@ -32,6 +32,10 @@ geode-core.workspace = true
 # and the data layer meet — it replaced the throwaway probe deleted in
 # Phase 3c.
 geode-data = { path = "../geode-data" }
+# Every build has the mock pricer registered into the PricerRegistry
+# beside the AdapterRegistry (line-pricer spec §5.5); a vendor crate,
+# when one exists, registers itself behind its own feature gate.
+geode-pricing.workspace = true
 geode-blotter = { path = "../geode-blotter" }
 # The market-data panel (market-data spec §8): one roster factory per
 # panel spec, built beside the blotter's in `bridge::start` because it

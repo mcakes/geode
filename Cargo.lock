@@ -2501,6 +2501,7 @@ dependencies = [
  "geode-diagnostics",
  "geode-documents",
  "geode-marketdata",
+ "geode-pricing",
  "geode-shell",
  "gpui-base",
  "gpui-component",
