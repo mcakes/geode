@@ -2817,6 +2817,65 @@ run_mutation "commands: a bare sort abs is abs desc" \
   geode-blotter \
   every_command_parses
 
+# Command-line locality (2026-09-20) ---------------------------------------
+
+# A refusal must stay a refusal: mutated back into a frame write, the
+# sweep sees the frame's as-of move.
+run_mutation "locality: a refused word never writes the frame" \
+  crates/geode-blotter/src/tile.rs \
+  '            Command::Refused(message) => return Err(message.to_string()),' \
+  '            Command::Refused(_) => { self.frame.update(cx, |f, cx| { if f.set_as_of(AsOf::At(chrono::Utc::now())) { cx.notify(); } }); }' \
+  geode-blotter \
+  every_colon_command_leaves_the_frame_alone
+
+# A refused word is never offered as a completion.
+run_mutation "locality: refusals are not completions" \
+  crates/geode-blotter/src/core/commands.rs \
+  '        ["asof"] => vec!["clear".into(), "live".into()],' \
+  '        ["asof"] => vec!["clear".into(), "live".into(), "undo".into()],' \
+  geode-blotter \
+  frame_wide_words_are_refusals_that_name_their_door
+
+# The request carries the pin, not the frame's as-of.
+run_mutation "asof-pin: the request carries the pin" \
+  crates/geode-blotter/src/tile.rs \
+  '                TileAsOf::Pinned(pinned) => pinned.clone(),' \
+  '                TileAsOf::Pinned(_) => frame.as_of().clone(),' \
+  geode-blotter \
+  asof_pins_the_tile_and_leaves_the_frame_alone
+
+# A pinned tile does not follow the frame's as-of counter.
+run_mutation "asof-pin: a pinned tile does not follow the frame's as-of" \
+  crates/geode-blotter/src/tile.rs \
+  '            || (matches!(self.tile_as_of, TileAsOf::Follow) && versions.as_of != now.as_of)' \
+  '            || versions.as_of != now.as_of' \
+  geode-blotter \
+  a_pinned_tile_ignores_the_frames_as_of_and_answers_the_barrier
+
+# The record carries as_of only while pinned.
+run_mutation "asof-pin: the session writes as_of only while pinned" \
+  crates/geode-blotter/src/tile.rs \
+  '            TileAsOf::Follow => None,' \
+  '            TileAsOf::Follow => Some(toml::Value::String("live".into())),' \
+  geode-blotter \
+  as_of_round_trips_through_the_session_record
+
+# The pinned chip paints from the tile's own state.
+run_mutation "asof-pin: the pinned chip paints" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let TileAsOf::Pinned(_) = &self.tile_as_of {' \
+  '        if let TileAsOf::Pinned(_) = &TileAsOf::Follow {' \
+  geode-blotter \
+  a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
+
+# The provenance warning chip is suppressed while pinned.
+run_mutation "asof-pin: the frame chip hides while pinned" \
+  crates/geode-blotter/src/tile.rs \
+  '            if matches!(self.tile_as_of, TileAsOf::Follow)' \
+  '            if true' \
+  geode-blotter \
+  a_pinned_tile_paints_the_neutral_chip_and_hides_the_frame_one
+
 run_mutation "flatten: the absolute orders compare magnitudes, not signed values" \
   crates/geode-blotter/src/core/flatten.rs \
   '    let key = |v: f64| if absolute { v.abs() } else { v };' \

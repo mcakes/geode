@@ -1680,49 +1680,70 @@ mod tests {
         assert_eq!(filter_summary(&Scope::default()), "");
     }
 
-    /// Root; L1, L2; L1/SPX. Trading PnL is NonAttributable at depth 2.
-    fn snapshot() -> Arc<Snapshot> {
+    /// The column shape `snapshot` builds — factored out so
+    /// `snapshot_with_as_of_request` can reuse it with a different
+    /// `Provenance` rather than duplicating the columns.
+    fn snapshot_columns() -> Vec<(ColumnMeta, TestColumn)> {
         let meta = |n: &str, by_depth: Vec<Attribution>| ColumnMeta {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
         };
-        Arc::new(Snapshot::for_tests(
-            vec![
-                (
-                    meta("lhu", vec![Attribution::Additive; 3]),
-                    TestColumn::Dict(vec![
-                        None,
-                        Some("L1".into()),
-                        Some("L2".into()),
-                        Some("L1".into()),
-                    ]),
+        vec![
+            (
+                meta("lhu", vec![Attribution::Additive; 3]),
+                TestColumn::Dict(vec![
+                    None,
+                    Some("L1".into()),
+                    Some("L2".into()),
+                    Some("L1".into()),
+                ]),
+            ),
+            (
+                meta("underlying_ref", vec![Attribution::Additive; 3]),
+                TestColumn::Dict(vec![None, None, None, Some("SPX".into())]),
+            ),
+            (
+                meta("row_depth", vec![Attribution::Additive; 3]),
+                TestColumn::I32(vec![0, 1, 1, 2]),
+            ),
+            (
+                meta("delta01", vec![Attribution::Additive; 3]),
+                TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0), Some(5.0)]),
+            ),
+            (
+                meta(
+                    "daily_trading_pnl",
+                    vec![
+                        Attribution::Additive,
+                        Attribution::Additive,
+                        Attribution::NonAttributable,
+                    ],
                 ),
-                (
-                    meta("underlying_ref", vec![Attribution::Additive; 3]),
-                    TestColumn::Dict(vec![None, None, None, Some("SPX".into())]),
-                ),
-                (
-                    meta("row_depth", vec![Attribution::Additive; 3]),
-                    TestColumn::I32(vec![0, 1, 1, 2]),
-                ),
-                (
-                    meta("delta01", vec![Attribution::Additive; 3]),
-                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0), Some(5.0)]),
-                ),
-                (
-                    meta(
-                        "daily_trading_pnl",
-                        vec![
-                            Attribution::Additive,
-                            Attribution::Additive,
-                            Attribution::NonAttributable,
-                        ],
-                    ),
-                    TestColumn::F64(vec![Some(7.0), Some(7.0), Some(7.0), None]),
-                ),
-            ],
+                TestColumn::F64(vec![Some(7.0), Some(7.0), Some(7.0), None]),
+            ),
+        ]
+    }
+
+    /// Root; L1, L2; L1/SPX. Trading PnL is NonAttributable at depth 2.
+    fn snapshot() -> Arc<Snapshot> {
+        Arc::new(Snapshot::for_tests(snapshot_columns(), 2))
+    }
+
+    /// Same shape as `snapshot`, but with a provenance carrying an
+    /// `as_of_request` — the archive-read marker the frame's historical
+    /// warning chip reads (`blotter-asof-frame-…`). `snapshot`'s default
+    /// provenance never sets this, so a test asserting that chip stays
+    /// hidden while pinned needs this fixture to be a real check rather
+    /// than one where the guard's `&&` right-hand side is already false.
+    fn snapshot_with_as_of_request(req: &str) -> Arc<Snapshot> {
+        Arc::new(Snapshot::for_tests_with_provenance(
+            snapshot_columns(),
             2,
+            geode_core::snapshot::Provenance {
+                datasets: vec![],
+                as_of_request: Some(req.into()),
+            },
         ))
     }
 
@@ -3001,7 +3022,16 @@ mod tests {
         h.tile
             .update(&mut cx, |t, cx| t.command("asof live", cx).unwrap());
         let p = next_query(&h.requests);
-        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        // A provenance carrying `as_of_request` — otherwise the frame
+        // chip's `&& let Some(req) = &p.as_of_request` is already false
+        // and the assertion below would pass whether or not the pinned
+        // guard ahead of it does its job.
+        deliver(
+            &h,
+            &mut cx,
+            p.tag,
+            Ok(snapshot_with_as_of_request("2026-01-01T00:00:00Z")),
+        );
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
@@ -4498,5 +4528,73 @@ mod tests {
             Some(geode_shell::shell::colours::to_hsla(danger)),
             "the tile's own colours must reach the delegate with the plan"
         );
+    }
+
+    /// The rule (command-line locality spec §2): a `:` line changes only
+    /// this tile. Every word the parser accepts — with a valid argument
+    /// where one is needed — plus every refusal, runs against a tile
+    /// while the frame's scope/grouping/as-of counters, its slot set and
+    /// its pending slot persist are watched. `COMMANDS` is read so a word
+    /// added there without a line here fails.
+    #[gpui::test]
+    fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        let lines = [
+            "group lhu",
+            "group slot 1",
+            "unpin",
+            "unscoped",
+            "unscoped",
+            "filter lhu = 'L1'",
+            "filter text spx",
+            "filter clear",
+            "asof 14:05",
+            "asof live",
+            "asof clear",
+            "view wide",
+            "sort delta01 desc",
+            "sort clear",
+            // The refusals.
+            "scope lhu = 'L1'",
+            "scope clear",
+            "scope undo",
+            "asof undo",
+            "live",
+            "group save 1",
+        ];
+        for word in crate::core::commands::COMMANDS {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.split_whitespace().next() == Some(word)),
+                "no sweep line for `:{word}`"
+            );
+        }
+        let read = |cx: &gpui::VisualTestContext| {
+            h.frame.read_with(cx, |f, _| {
+                (
+                    f.versions().scope,
+                    f.versions().grouping,
+                    f.versions().as_of,
+                    f.slots().clone(),
+                    f.scope().clone(),
+                    f.as_of().clone(),
+                )
+            })
+        };
+        let before = read(&cx);
+        for line in lines {
+            let _ = h.tile.update(&mut cx, |t, cx| t.command(line, cx));
+            while h.requests.try_recv().is_ok() {}
+            assert_eq!(read(&cx), before, "`:{line}` reached the frame");
+            assert!(
+                h.frame
+                    .update(&mut cx, |f, _| f.take_pending_persist())
+                    .is_none(),
+                "`:{line}` queued a slot write"
+            );
+        }
     }
 }
