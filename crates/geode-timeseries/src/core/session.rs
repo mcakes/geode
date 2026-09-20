@@ -202,8 +202,12 @@ pub fn from_table(
         match resolve(text, m.slots(), default_source, None) {
             Ok(expr) => {
                 m.set_next_number(number);
-                m.add_expr(text, expr).unwrap();
-                apply_look(&mut m, number, r);
+                match m.add_expr(text, expr) {
+                    Ok(_) => apply_look(&mut m, number, r),
+                    Err(e) => {
+                        notices.push(format!("expression s{number} `{text}` was dropped: {e}"))
+                    }
+                }
             }
             Err(e) => notices.push(format!("expression s{number} `{text}` was dropped: {e}")),
         }
@@ -371,5 +375,29 @@ mod tests {
         let (m, n) = from_table(&toml::Table::new(), &dataset_of, None);
         assert!(m.slots().is_empty() && n.is_empty());
         assert_eq!(m.frequency(), Frequency::D1);
+    }
+
+    #[test]
+    fn an_expression_slot_numbered_255_heals_with_a_notice_instead_of_panicking() {
+        let text = r#"
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "SPX.close"
+            source = "demo_kdb"
+            [[slots]]
+            number = 255
+            kind = "expr"
+            text = "s1 * 2"
+        "#;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (m, notices) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert_eq!(m.slots().len(), 1, "the source slot restores");
+        assert_eq!(m.slots()[0].number, 1);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("255") || notices[0].contains("every slot number"),
+            "{notices:?}"
+        );
     }
 }

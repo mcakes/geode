@@ -7,12 +7,16 @@ use geode_core::series::{SeriesParams, SeriesSpec};
 
 use super::model::Model;
 
-/// The visible span (ruling 10: stats are over the VISIBLE window). With
-/// no buckets yet the window is the range. Under `Session` the view is
-/// an index window; the span runs from the first visible bucket to the
-/// last visible bucket plus one frequency step (half-open). Under
-/// `Continuous` the view IS micros.
-pub fn window(model: &Model, buckets: &[i64]) -> (DateTime<Utc>, DateTime<Utc>) {
+/// The visible span (ruling 10: stats are over the VISIBLE window).
+/// `None` when there are no buckets yet — this function cannot know the
+/// range to fall back to, so `params` is the one that does. Under
+/// `Session` the view is an index window; the span runs from the first
+/// visible bucket to the last visible bucket plus one frequency step
+/// (half-open). Under `Continuous` the view IS micros.
+pub fn window(model: &Model, buckets: &[i64]) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    if buckets.is_empty() {
+        return None;
+    }
     let step = model.frequency().seconds() * 1_000_000;
     let at = |us: i64| {
         Utc.timestamp_micros(us)
@@ -20,14 +24,14 @@ pub fn window(model: &Model, buckets: &[i64]) -> (DateTime<Utc>, DateTime<Utc>) 
             .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
     };
     let v = model.view();
-    match model.axis_mode() {
+    Some(match model.axis_mode() {
         AxisMode::Session => {
-            let lo = (v.lo.floor().max(0.0) as usize).min(buckets.len().saturating_sub(1));
-            let hi = (v.hi.ceil().max(0.0) as usize).clamp(lo + 1, buckets.len().max(1));
+            let lo = (v.lo.floor().max(0.0) as usize).min(buckets.len() - 1);
+            let hi = (v.hi.ceil().max(0.0) as usize).clamp(lo + 1, buckets.len());
             (at(buckets[lo]), at(buckets[hi - 1] + step))
         }
         AxisMode::Continuous => (at(v.lo as i64), at(v.hi as i64)),
-    }
+    })
 }
 
 pub fn params(
@@ -43,11 +47,12 @@ pub fn params(
         return None;
     }
     let range = model.range().resolve(now, as_of);
-    let window = if buckets.is_empty() {
-        range
-    } else {
-        let (a, b) = window(model, buckets);
-        (a.max(range.0), b.min(range.1).max(a))
+    let window = match window(model, buckets) {
+        Some((a, b)) => {
+            let a = a.max(range.0);
+            (a, b.min(range.1).max(a))
+        }
+        None => range,
     };
     Some(SeriesParams {
         key,
@@ -129,7 +134,7 @@ mod tests {
             .collect();
         m.set_full((0.0, 10.0));
         m.zoom_in(1); // 10 → 8 wide, centred: [1, 9)
-        let (from, to) = window(&m, &buckets);
+        let (from, to) = window(&m, &buckets).unwrap();
         assert_eq!(from, Utc.timestamp_micros(buckets[1]).unwrap());
         assert_eq!(
             to,
@@ -140,12 +145,31 @@ mod tests {
         m.set_full((buckets[0] as f64, buckets[9] as f64 + 86_400_000_000.0));
         m.reset_view();
         m.zoom_in(1);
-        let (from, to) = window(&m, &buckets);
+        let (from, to) = window(&m, &buckets).unwrap();
         assert_eq!(from.timestamp_micros(), m.view().lo as i64);
         assert_eq!(to.timestamp_micros(), m.view().hi as i64);
         // A full view is the whole range.
         m.reset_view();
         let p = params(&m, QueryKey(1), 1, now(), &AsOf::Live, &buckets).unwrap();
         assert_eq!(p.window.0.timestamp_micros(), buckets[0]);
+    }
+
+    #[test]
+    fn window_answers_none_on_no_buckets_and_a_span_on_one() {
+        let mut m = Model::new();
+        m.add_source("A", "demo_kdb", "series").unwrap();
+        assert_eq!(window(&m, &[]), None, "Session, no buckets");
+        m.set_axis_mode(AxisMode::Continuous);
+        assert_eq!(window(&m, &[]), None, "Continuous, no buckets");
+        m.set_axis_mode(AxisMode::Session);
+        let one = [us("2026-01-05T00:00:00Z")];
+        m.set_full((0.0, 1.0));
+        let (from, to) = window(&m, &one).unwrap();
+        assert_eq!(from, Utc.timestamp_micros(one[0]).unwrap());
+        assert_eq!(
+            to,
+            Utc.timestamp_micros(one[0]).unwrap() + chrono::Duration::days(1),
+            "a one-bucket slice is [b0, b0 + step)"
+        );
     }
 }
