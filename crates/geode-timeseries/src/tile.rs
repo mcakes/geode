@@ -16,12 +16,17 @@
 //!   would throw away every cached path for a frame that only scrolled.
 //! - a refusal — the notice, and nothing else.
 //!
-//! Task 7 fills the data half in: `apply_changed`'s FETCH and QUERY
-//! arms, `deliver`, `on_fetched`'s requery, the frame observer and the
-//! flip barrier. Every field those need is already here, so Task 7 adds
-//! method bodies and no fields.
+//! **The data half** hangs off the first two: a FETCH asks the data tier
+//! for every pair still waiting (`fetch_pending`), a `SeriesFetched Ok`
+//! sends the query, a QUERY asks for points over the range and stats
+//! over the visible window (`requery`), and the answer lands through
+//! `deliver` — staged behind the flip barrier when one is open over this
+//! tile, painted at once when it is not. `as_of` is the only frame
+//! counter followed (spec §6.5); `flip` is read in the frame observer
+//! and nowhere else, where it means "you may promote".
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -29,9 +34,9 @@ use chrono::{DateTime, Utc};
 use geode_chart::core::palette::Palette;
 use geode_chart::{Axis, AxisMode, ChartElement, ChartModel};
 use geode_core::colour::NamedColours;
-use geode_core::query::AsOf;
-use geode_core::series::{Frequency, SeriesOutcome, SeriesResult};
-use geode_data::DataHandle;
+use geode_core::query::{AsOf, QueryKey};
+use geode_core::series::{Frequency, SeriesOutcome, SeriesResult, SlotKind};
+use geode_data::{DataHandle, FetchParams};
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions};
@@ -48,7 +53,7 @@ use gpui_component::{ActiveTheme as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
 use crate::core::model::{Changed, Colour, Model, SlotState};
-use crate::core::{chart, resolve, session};
+use crate::core::{Range, chart, request, resolve, session};
 use crate::header::{self, HeaderModel};
 use crate::popup::Popup;
 
@@ -75,10 +80,13 @@ use crate::popup::Popup;
 /// `result`), and the view (the element takes it beside the model).
 #[derive(Clone, PartialEq)]
 struct ChartKey {
-    /// The result's identity. A pointer, not the data: a `SeriesResult`
-    /// is installed whole and never mutated in place, so a new pointer
-    /// is exactly "new data". `0` for no result.
-    result: usize,
+    /// The result's identity: [`TimeseriesTile::result_seq`], bumped on
+    /// every install. A monotonic counter and NOT the `Arc`'s address,
+    /// which is ABA-prone — the allocator hands the same block back when
+    /// one result replaces another between two frames, and the chart
+    /// would then paint the old points at the new model's key. `0` for
+    /// no result.
+    result: u64,
     /// Per slot: everything `chart::build` copies out of it.
     slots: Vec<(u8, Colour, Axis, bool, Option<String>)>,
     frequency: Frequency,
@@ -100,19 +108,20 @@ struct ChartKey {
 pub struct TimeseriesTile {
     id: TileId,
     frame: Entity<Frame>,
-    /// Task 7: the catalog (a fetch source's identities) the add picker
-    /// ranks over, and the health a slot's chip reports.
+    /// Tasks 8–10: the catalog (a fetch source's identities) the add
+    /// picker ranks over, and the health a slot's chip reports.
     #[allow(dead_code)]
     diagnostics: Entity<Diagnostics>,
-    /// Task 7: `Request::Fetch` and `Request::Series` go through it.
-    #[allow(dead_code)]
+    /// `Request::Fetch`, `Request::Series` and `Request::Cancel` go
+    /// through it.
     data: DataHandle,
     colours: Rc<RefCell<Arc<NamedColours>>>,
     model: Model,
     /// The last good result; the chart model is built from it.
-    /// Task 7 installs one per delivery.
-    #[allow(dead_code)]
     result: Option<Arc<SeriesResult>>,
+    /// Bumped on every install, and the result's identity in
+    /// [`ChartKey`].
+    result_seq: u64,
     chart: Arc<ChartModel>,
     chart_version: u64,
     /// What [`Self::chart`] was built from. `rebuild_chrome` rebuilds the
@@ -122,26 +131,33 @@ pub struct TimeseriesTile {
     /// chips' swatches and the chart model's line colours are both
     /// resolved against it.
     theme_key: Option<[Hsla; 28]>,
-    /// Task 7: the tag of the request in flight, so a stale answer is
-    /// dropped.
-    #[allow(dead_code)]
+    /// The tag of the request in flight, so a stale answer is dropped.
     tag: u64,
-    /// Task 7: the frame versions the request in flight was made under.
-    #[allow(dead_code)]
+    /// The frame versions the request in flight was made under.
     acted: Option<FrameVersions>,
-    /// Task 7: a delivery staged behind the flip barrier.
-    #[allow(dead_code)]
+    /// A delivery staged behind the flip barrier.
     staged: Option<(SeriesResult, FrameVersions)>,
-    /// Task 7: the last flip counter this tile promoted at.
-    #[allow(dead_code)]
+    /// The last flip counter this tile promoted at.
     last_flip: u64,
-    /// Task 7 requeries on the first `set_visible(true)`; until then
-    /// this only records what the shell said.
-    #[allow(dead_code)]
     visible: bool,
-    /// Task 7: the next delivery resets the view to the new full range.
-    #[allow(dead_code)]
+    /// The next delivery resets the view to the new full range.
     reset_view: bool,
+    /// The `(source, identity)` pairs whose fetch has been submitted and
+    /// not yet answered.
+    ///
+    /// `SlotState::Fetching` alone cannot decide what to ask for: it
+    /// means "this slot is waiting for data", and an `add` leaves every
+    /// EARLIER unanswered slot in that state too, so a second add would
+    /// re-ask for the first one's span on every keystroke. This set is
+    /// the "already asked" half, cleared wherever the answer stops
+    /// applying — a hide (which drops what is in flight), a show (whose
+    /// contract is that every show refetches) and a range change
+    /// ([`Self::in_flight_range`], since the span itself moved).
+    in_flight: HashSet<(String, String)>,
+    /// The range [`Self::in_flight`] was populated under. A range change
+    /// asks for a different span, so an unanswered fetch over the old
+    /// one must not suppress it.
+    in_flight_range: Option<Range>,
     notice: Option<SharedString>,
     /// Prepared text: the range/frequency readout and one chip per slot.
     header: HeaderModel,
@@ -194,9 +210,33 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
-        // Task 7 adds the frame observer: promote a staged result when
-        // the flip releases, requery when `as_of`/`data` move, self-arrive
-        // otherwise.
+        cx.observe(&frame, |this, frame, cx| {
+            // A flip released (Phase 4a §3.10): promote whatever is
+            // staged, REGARDLESS of visibility — a tile hidden between
+            // staging and the flip must not come back showing the old
+            // as-of's points. `flip` is read here and nowhere else: it
+            // means "you may promote", never "requery" (CLAUDE.md).
+            let now = frame.read(cx).versions();
+            if now.flip != this.last_flip {
+                this.last_flip = now.flip;
+                this.promote(cx);
+            }
+            if !this.visible {
+                return;
+            }
+            // `as_of` is the ONLY followed counter (spec §6.5): a scope
+            // keystroke bumps `scope` on every character, and a CSV
+            // publish bumps `data` for datasets this chart never reads —
+            // neither may cost a series round trip.
+            if !this.model.slots().is_empty() && this.follows_changed(now) {
+                // The barrier is answered on delivery instead, under the
+                // versions this request was made with.
+                this.requery(cx);
+            } else {
+                this.self_arrive(now, cx);
+            }
+        })
+        .detach();
 
         // One derivation feeds both the chips' swatches and the chart
         // model's line colours — they are the same five colours, and
@@ -216,7 +256,7 @@ impl TimeseriesTile {
         ));
         let last_chart_key = Some(chart_key(
             &model,
-            None,
+            0,
             settings.default_source.clone(),
             theme_signature(cx.theme()),
             colours_ptr,
@@ -229,6 +269,7 @@ impl TimeseriesTile {
             colours,
             model,
             result: None,
+            result_seq: 0,
             chart,
             chart_version: 1,
             last_chart_key,
@@ -239,6 +280,8 @@ impl TimeseriesTile {
             last_flip: 0,
             visible: false,
             reset_view: false,
+            in_flight: HashSet::new(),
+            in_flight_range: None,
             notice: (!notices.is_empty()).then(|| notices.join("; ").into()),
             header,
             title,
@@ -284,10 +327,44 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// Task 7 refetches and requeries on the first `true`; here the flag
-    /// is only recorded and the chrome re-prepared.
+    /// Every show refetches and, once there is something to re-ask for,
+    /// requeries; a hide cancels what is in flight (spec §9.10).
+    ///
+    /// The refetch is cheap by construction: the data tier subtracts the
+    /// pair's existing coverage, so a span already held answers `Ok(0)`
+    /// without touching the upstream, and the `Ok` is what sends the
+    /// query. That is why a tile with no result yet does NOT requery
+    /// here — its first paint always arrives through `SeriesFetched`,
+    /// and asking before the fetch answers would only draw an empty
+    /// chart a beat sooner.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
+            return;
+        }
         self.visible = visible;
+        if visible {
+            if self.model.source_slots().next().is_some() {
+                self.in_flight.clear();
+                self.model.mark_all_fetching();
+                self.fetch_pending(cx);
+            }
+            let now = self.frame.read(cx).versions();
+            if self.result.is_some() && !self.model.slots().is_empty() && self.follows_changed(now)
+            {
+                self.requery(cx);
+            }
+        } else {
+            // An in-flight query nothing will paint is a round trip
+            // spent for nothing.
+            self.data.cancel(QueryKey(self.id.0));
+            // And the cancelled request's own `acted` goes with it: it
+            // records "this tile has already asked under these
+            // versions", which is no longer true of anything that will
+            // arrive. Left set, a tile hidden mid-round-trip comes back
+            // deciding it is up to date.
+            self.acted = None;
+            self.in_flight.clear();
+        }
         self.rebuild_chrome(cx);
         cx.notify();
     }
@@ -299,16 +376,63 @@ impl TimeseriesTile {
 
     // ---- deliveries --------------------------------------------------
 
-    /// Task 7 installs the result, promotes behind the flip barrier and
-    /// re-clamps the view. Until then a series answer changes nothing.
+    /// A series answer for this tile's key.
     pub fn deliver(&mut self, outcome: SeriesOutcome, cx: &mut Context<Self>) {
-        let _ = (outcome, cx);
+        if outcome.tag != self.tag {
+            // Stale: a newer request is out — and deliberately NOT an
+            // arrival. A barrier waits for the versions this tile last
+            // ACTED under, which is the newer request's; arriving here
+            // would answer for a question still in flight, and that
+            // outcome's own delivery is what answers it.
+            return;
+        }
+        let acted = self.acted;
+        match outcome.result {
+            Ok(result) => {
+                // Phase 4a §3.10: while a barrier still wants this key,
+                // STAGE rather than paint. A chart's own answer may land
+                // well before every blotter's, and a chart painting the
+                // new as-of beside a blotter still on the old one is
+                // exactly the half-updated screen the barrier exists to
+                // prevent.
+                let wants = acted.is_some_and(|acted| {
+                    self.frame
+                        .read(cx)
+                        .barrier_wants(QueryKey(self.id.0), acted)
+                });
+                if wants {
+                    let acted = acted.expect("`wants` is false without one");
+                    self.staged = Some((result, acted));
+                    // `arrived` may empty the barrier right here — when
+                    // it does, promote at once rather than waiting for
+                    // the `flip` bump to reach this tile's own observer
+                    // on a later notify pass.
+                    if self.arrive_and_release(cx) {
+                        self.promote(cx);
+                    }
+                } else {
+                    self.apply_result(result, cx);
+                    self.arrive(cx);
+                }
+            }
+            Err(e) => {
+                // Last good stays on screen: a failed query says nothing
+                // about the points already painted. It still counts as
+                // an arrival — one broken tile must never hold every
+                // other tile open until the deadline.
+                self.notice = Some(e.into());
+                self.arrive(cx);
+            }
+        }
+        cx.notify();
     }
 
-    /// A fetch finished for one `(source, identity)` pair — the STATE
-    /// half (Task 7 adds the requery an `Ok` owes). Keyed by the pair,
-    /// so a tile that holds it marks every slot over it and a tile that
-    /// does not is left alone by `set_pair_state`'s own `NONE`.
+    /// A fetch finished for one `(source, identity)` pair. Keyed by the
+    /// pair, so a tile that holds it marks every slot over it and a tile
+    /// that does not is left alone by `set_pair_state`'s own `NONE`.
+    ///
+    /// Any `Ok` requeries — `Ok(0)` included, which means the span was
+    /// already covered rather than that nothing is there.
     pub fn on_fetched(
         &mut self,
         source: &str,
@@ -324,8 +448,11 @@ impl TimeseriesTile {
         if changed.is_none() {
             return;
         }
-        // Task 7 adds the requery: an `Ok` — `Ok(0)` included — means the
-        // span is covered and the tile should ask for its points again.
+        self.in_flight
+            .remove(&(source.to_string(), identity.to_string()));
+        if result.is_ok() && self.visible {
+            self.requery(cx);
+        }
         self.rebuild_chrome(cx);
         cx.notify();
     }
@@ -500,7 +627,22 @@ impl TimeseriesTile {
                 let colour = self.colour_named(&name)?;
                 self.model.set_colour(n, colour)?
             }
-            Command::AxisMode(m) => self.model.set_axis_mode(m),
+            Command::AxisMode(m) => {
+                let changed = self.model.set_axis_mode(m);
+                // `full` is in the axis mode's own units — indices under
+                // a session axis, micros under a continuous one — so the
+                // extent has to be re-derived from the points already
+                // held rather than waiting for the next delivery, which
+                // a mode change does not ask for.
+                if !changed.is_none()
+                    && let Some(result) = self.result.clone()
+                {
+                    let full = self.full_of(&result);
+                    self.model.set_full(full);
+                    self.model.reset_view();
+                }
+                changed
+            }
             Command::Freq(f) => self.model.set_frequency(f, now, &as_of)?,
             Command::Range(r) => self.model.set_range(r, now, &as_of)?,
             Command::Pct(p) => self.model.set_percentiles(p)?,
@@ -542,13 +684,30 @@ impl TimeseriesTile {
 
     // ---- the tails ---------------------------------------------------
 
-    /// A change to WHAT is plotted. Task 7 adds the FETCH arm (fetch
-    /// every source slot over the new range, and set `reset_view`) and
-    /// the QUERY arm (requery); the SESSION bit needs nothing here — the
-    /// shell serialises on its own schedule.
+    /// A change to WHAT is plotted. The SESSION bit needs nothing here —
+    /// the shell serialises on its own schedule.
+    ///
+    /// FETCH runs BEFORE QUERY, and a range change carries both: the
+    /// gaps are asked for and the part already cached is re-queried in
+    /// the same breath, so the chart repaints over what is held while
+    /// the rest arrives (§9.10). An `add` carries FETCH without QUERY on
+    /// purpose — its slot has no points yet, and `SeriesFetched Ok` is
+    /// what sends the query.
     fn apply_changed(&mut self, changed: Changed, cx: &mut Context<Self>) {
         if let Some(n) = self.model.take_notice() {
             self.notice = Some(n.into());
+        }
+        if changed.fetch() {
+            // The full range is about to change under the next delivery,
+            // so the view follows it rather than staying where a
+            // narrower range left it.
+            self.reset_view = true;
+            if self.visible {
+                self.fetch_pending(cx);
+            }
+        }
+        if changed.query() && self.visible && !self.model.slots().is_empty() {
+            self.requery(cx);
         }
         if changed.chrome() || changed.query() || changed.fetch() {
             self.rebuild_chrome(cx);
@@ -560,11 +719,229 @@ impl TimeseriesTile {
     /// header does not read the view and neither does the chart model,
     /// so rebuilding either would bump `ChartModel::version` and throw
     /// away every cached path in `geode-chart` for a frame that only
-    /// scrolled. Task 7 adds the requery `changed.query()` asks for when
-    /// the stats are on (they are computed over the VISIBLE window).
+    /// scrolled. It DOES requery when `changed.query()` says so: the
+    /// percentiles and the density are computed over the VISIBLE window,
+    /// so with either on a pan is a new question (and with both off, the
+    /// model answers CHROME alone and nothing is asked).
     fn view_moved(&mut self, changed: Changed, cx: &mut Context<Self>) {
-        let _ = changed;
+        if changed.query() && self.visible && !self.model.slots().is_empty() {
+            self.requery(cx);
+        }
         cx.notify();
+    }
+
+    // ---- the data flow -----------------------------------------------
+
+    /// Ask for every source slot that is waiting for data and has no
+    /// fetch out already (see [`Self::in_flight`]), one request per
+    /// PAIR: two slots over the same `identity@source` are one span.
+    ///
+    /// The whole visible range is asked for every time; the data tier
+    /// subtracts what a pair already covers and queues one span per gap,
+    /// so re-asking costs a round trip to `DataService` and nothing
+    /// upstream.
+    fn fetch_pending(&mut self, cx: &mut Context<Self>) {
+        if self.in_flight_range.as_ref() != Some(self.model.range()) {
+            self.in_flight.clear();
+            self.in_flight_range = Some(self.model.range().clone());
+        }
+        let (now, as_of) = self.now_and_as_of(cx);
+        let (from, to) = self.model.range().resolve(now, &as_of);
+        let mut pending: Vec<(String, String)> = Vec::new();
+        for slot in self.model.slots() {
+            let SlotKind::Source {
+                source, identity, ..
+            } = &slot.kind
+            else {
+                continue;
+            };
+            if slot.state != SlotState::Fetching {
+                continue;
+            }
+            let pair = (source.clone(), identity.clone());
+            if self.in_flight.contains(&pair) || pending.contains(&pair) {
+                continue;
+            }
+            pending.push(pair);
+        }
+        for (source, identity) in pending {
+            let queued = self.data.fetch(FetchParams {
+                key: QueryKey(self.id.0),
+                source: source.clone(),
+                identity: identity.clone(),
+                from,
+                to,
+            });
+            if queued {
+                self.in_flight.insert((source, identity));
+            } else {
+                // Nothing is coming, and a chip left `Fetching` for ever
+                // would say the opposite.
+                self.model.set_pair_state(
+                    &source,
+                    &identity,
+                    SlotState::Failed("fetch refused: the data service is busy or gone".into()),
+                );
+            }
+        }
+    }
+
+    /// Submit this tile's series request, keyed by the tile so two
+    /// charts never supersede each other. The stats ride over the
+    /// VISIBLE window and the points over the whole range, which is what
+    /// `request::params` builds from the current result's buckets.
+    fn requery(&mut self, cx: &mut Context<Self>) {
+        // A fresh question supersedes whatever was staged for the old
+        // one, whether or not `promote`'s own version check would have
+        // caught it.
+        self.staged = None;
+        let (as_of, versions) = {
+            let frame = self.frame.read(cx);
+            (frame.as_of().clone(), frame.versions())
+        };
+        self.tag += 1;
+        self.acted = Some(versions);
+        let params = {
+            let buckets = self.result.as_ref().map(|r| r.buckets.as_slice());
+            request::params(
+                &self.model,
+                QueryKey(self.id.0),
+                self.tag,
+                Utc::now(),
+                &as_of,
+                buckets.unwrap_or(&[]),
+            )
+        };
+        let submitted = match params {
+            Some(params) => {
+                let queued = self.data.series(params);
+                if !queued {
+                    self.notice =
+                        Some("series request refused: the data service is busy or gone".into());
+                }
+                queued
+            }
+            // Nothing to ask about (no slot, or no dataset yet).
+            None => false,
+        };
+        if !submitted {
+            // Nothing is coming: arrive, or an open barrier holds every
+            // other tile to the 250 ms deadline waiting for an outcome
+            // that will never exist — then clear `acted`, so the next
+            // frame change retries rather than deciding this tile is
+            // already up to date. In that order: `arrive` reads `acted`.
+            self.arrive(cx);
+            self.acted = None;
+        }
+        cx.notify();
+    }
+
+    /// Whether the frame has moved in a way a series request depends on.
+    /// `None` (nothing asked yet) is always a change.
+    fn follows_changed(&self, now: FrameVersions) -> bool {
+        let Some(acted) = self.acted else {
+            return true;
+        };
+        Self::differs_on_followed(acted, now)
+    }
+
+    /// `as_of` and nothing else (spec §6.5). The one comparison
+    /// [`Self::follows_changed`] and [`Self::promote`]'s own gate both go
+    /// through, so "what this tile requeries for" and "what invalidates
+    /// something it has already staged" cannot drift apart.
+    fn differs_on_followed(versions: FrameVersions, now: FrameVersions) -> bool {
+        versions.as_of != now.as_of
+    }
+
+    /// Answer an open flip barrier for a change this tile is NOT going to
+    /// requery for (a scope or grouping bump, or no slot to ask about).
+    ///
+    /// `ShellView::visible_tile_keys` cannot know which tiles follow
+    /// which counters, so every visible occupant is in the barrier's key
+    /// set. Left unanswered, this tile would hold every blotter on
+    /// screen open until `FLIP_DEADLINE` — 250 ms — on every scope
+    /// keystroke, with nothing of its own coming.
+    fn self_arrive(&mut self, now: FrameVersions, cx: &mut Context<Self>) {
+        let key = QueryKey(self.id.0);
+        if self.frame.read(cx).barrier_wants(key, now) {
+            self.frame.update(cx, |f, cx| {
+                if f.arrived(key, now) {
+                    cx.notify();
+                }
+            });
+        }
+    }
+
+    /// Tell an open barrier this tile's own outcome has landed, under the
+    /// versions the request was made with — a failed outcome counts too.
+    fn arrive(&mut self, cx: &mut Context<Self>) {
+        let _ = self.arrive_and_release(cx);
+    }
+
+    /// [`Self::arrive`], answering whether this arrival is what EMPTIED
+    /// the barrier — the caller uses that to promote its own staged
+    /// result at once rather than waiting for the `flip` bump to reach
+    /// its observer on a later notify pass.
+    fn arrive_and_release(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(acted) = self.acted else {
+            return false;
+        };
+        let key = QueryKey(self.id.0);
+        self.frame.update(cx, |f, cx| {
+            let released = f.arrived(key, acted);
+            if released {
+                cx.notify();
+            }
+            released
+        })
+    }
+
+    /// Put a staged result on screen once the flip released it — unless a
+    /// counter this tile follows moved under it, in which case it answers
+    /// a question nobody is asking any more (reachable while hidden,
+    /// where no requery replaces it).
+    fn promote(&mut self, cx: &mut Context<Self>) {
+        let Some((result, versions)) = self.staged.take() else {
+            return;
+        };
+        if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {
+            self.apply_result(result, cx);
+            cx.notify();
+        }
+    }
+
+    /// Install a delivered result: the new full extent, the view, the
+    /// points and the chart model built from them.
+    fn apply_result(&mut self, result: SeriesResult, cx: &mut Context<Self>) {
+        let full = self.full_of(&result);
+        self.model.set_full(full);
+        if std::mem::take(&mut self.reset_view) {
+            self.model.reset_view();
+        }
+        // Assigned OVER the old `Arc`, never through a `None` first: a
+        // tile that dropped its only result mid-update would paint an
+        // empty chart on any frame drawn in between.
+        self.result_seq += 1;
+        self.result = Some(Arc::new(result));
+        self.notice = None;
+        self.rebuild_chrome(cx);
+    }
+
+    /// The x extent a result spans, in the units the current axis mode
+    /// counts in: bucket INDICES under a session axis, epoch micros
+    /// under a continuous one (where the last bucket's own width is part
+    /// of the extent, since a bucket is drawn from its start).
+    fn full_of(&self, result: &SeriesResult) -> (f64, f64) {
+        match self.model.axis_mode() {
+            AxisMode::Session => (0.0, result.buckets.len() as f64),
+            AxisMode::Continuous => {
+                let step = (self.model.frequency().seconds() * 1_000_000) as f64;
+                (
+                    result.buckets.first().copied().unwrap_or(0) as f64,
+                    result.buckets.last().copied().unwrap_or(0) as f64 + step,
+                )
+            }
+        }
     }
 
     /// A refused verb: the reason becomes the notice and the tile
@@ -630,7 +1007,7 @@ impl TimeseriesTile {
         self.title = header::title_text(&self.model);
         let key = chart_key(
             &self.model,
-            self.result.as_ref(),
+            self.result_seq,
             default_source.clone(),
             theme,
             colours_ptr,
@@ -752,13 +1129,13 @@ impl Render for TimeseriesTile {
 /// — records the same key the first model was built from.
 fn chart_key(
     model: &Model,
-    result: Option<&Arc<SeriesResult>>,
+    result: u64,
     default_source: Option<String>,
     theme: [Hsla; 28],
     colours: usize,
 ) -> ChartKey {
     ChartKey {
-        result: result.map(|r| Arc::as_ptr(r) as usize).unwrap_or(0),
+        result,
         slots: model
             .slots()
             .iter()
@@ -831,8 +1208,9 @@ mod tests {
     use geode_core::colour::NamedColours;
     use geode_core::groupings::GroupingSlots;
     use geode_core::log::LogLevels;
+    use geode_core::query::QueryKey;
     use geode_core::scopes::SavedScopes;
-    use geode_core::series::{BucketRule, Frequency, SlotKind};
+    use geode_core::series::{BucketRule, Frequency, SlotKind, SlotProvenance, SlotResult};
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::{ActionId, ActionRegistry};
     use geode_shell::diagnostics::Diagnostics;
@@ -866,9 +1244,10 @@ mod tests {
         frame: Entity<Frame>,
         diagnostics: Entity<Diagnostics>,
         factory: Rc<TimeseriesFactory>,
-        /// Held, never read here: dropping the receiver would close the
-        /// request channel, and Task 7's tests drain it.
-        _rx: Receiver<Request>,
+        /// Every `Request` the tile submitted, in order. Held for the
+        /// whole harness's life: dropping the receiver would close the
+        /// channel and `DataHandle::send` would start answering `false`.
+        rx: Receiver<Request>,
     }
 
     /// A `Box<dyn ModuleFactory>` over the harness's own `Rc` — the
@@ -906,6 +1285,64 @@ mod tests {
     /// A `colours.toml` holding one name, `spx`, at `degrees` on the
     /// wheel — what `:colour s1 spx` resolves against, and what a
     /// reload redefines.
+    /// `n` HOURLY buckets ending an hour before the current hour, one
+    /// `SlotResult` per number. Hourly and recent on purpose: every
+    /// range this module's tests use (`1y`, `1w`) contains the span, and
+    /// the last bucket sits strictly inside `range.1 = now`, so a zoomed
+    /// window really is a proper subset of the range.
+    fn result_with(slots: &[u8], n: usize) -> SeriesResult {
+        const STEP: i64 = 3_600_000_000;
+        let last = (chrono::Utc::now().timestamp_micros() / STEP) * STEP - STEP;
+        SeriesResult {
+            buckets: (0..n)
+                .map(|i| last - (n as i64 - 1 - i as i64) * STEP)
+                .collect(),
+            slots: slots
+                .iter()
+                .map(|&slot| SlotResult {
+                    slot,
+                    values: (0..n).map(|i| i as f64).collect(),
+                    percentiles: vec![(0.05, 1.0), (0.5, 2.0), (0.95, 3.0)],
+                    bins: Vec::new(),
+                    provenance: SlotProvenance {
+                        loaded: None,
+                        latest_received_at: None,
+                        health: None,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    /// The tag of the LAST series request in a drained batch.
+    fn h_last_tag(reqs: &[Request]) -> u64 {
+        reqs.iter()
+            .rev()
+            .find_map(|r| match r {
+                Request::Series(p) => Some(p.tag),
+                _ => None,
+            })
+            .expect("a series request in the batch")
+    }
+
+    /// The `as_of` mutation plus the `open_flip` a scope-bar as-of change
+    /// makes, in ONE update block — the shell's own frame observer is
+    /// registered before any occupant's, so this is the order a tile
+    /// really sees.
+    fn open_barrier_on_as_of(
+        h: &Harness,
+        vcx: &mut gpui::VisualTestContext,
+        keys: &[QueryKey],
+        at: DateTime<Utc>,
+    ) {
+        let keys = keys.to_vec();
+        h.frame.update(vcx, |f, cx| {
+            f.set_as_of(AsOf::At(at));
+            f.open_flip(keys, std::time::Instant::now());
+            cx.notify();
+        });
+    }
+
     fn named_colours(degrees: f32) -> NamedColours {
         let mut c = NamedColours::default();
         c.insert(
@@ -1002,7 +1439,7 @@ mod tests {
                 frame: built.frame,
                 diagnostics: built.diagnostics,
                 factory,
-                _rx: rx,
+                rx,
             },
             vcx,
         )
@@ -1015,6 +1452,68 @@ mod tests {
         fn dispatch(&self, vcx: &mut gpui::VisualTestContext, verb: &str, count: Option<u32>) {
             let id = ActionId(format!("timeseries::{verb}"));
             vcx.update(|window, cx| self.content.dispatch(&id, count, window, cx));
+        }
+        fn visible(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
+            vcx.update(|_, cx| self.content.set_visible(visible, cx));
+        }
+        /// Everything submitted since the last drain, `Cancel` included.
+        fn raw_requests(&self) -> Vec<Request> {
+            self.rx.try_iter().collect()
+        }
+        /// Everything submitted since the last drain except a `Cancel` —
+        /// what a test asserting on ORDER reads, since a hide's cancel is
+        /// housekeeping rather than a question.
+        fn requests(&self) -> Vec<Request> {
+            self.raw_requests()
+                .into_iter()
+                .filter(|r| !matches!(r, Request::Cancel { .. }))
+                .collect()
+        }
+        /// The FIRST fetch submitted since the last drain, skipping (and
+        /// consuming) every other kind. Never panics: `None` means none
+        /// was sent, which is a claim tests make as often as its
+        /// opposite.
+        fn fetch_request(&self) -> Option<geode_data::FetchParams> {
+            while let Ok(request) = self.rx.try_recv() {
+                if let Request::Fetch(params) = request {
+                    return Some(params);
+                }
+            }
+            None
+        }
+        /// [`Self::fetch_request`]'s twin for a series query.
+        fn series_request(&self) -> Option<geode_core::series::SeriesParams> {
+            while let Ok(request) = self.rx.try_recv() {
+                if let Request::Series(params) = request {
+                    return Some(params);
+                }
+            }
+            None
+        }
+        fn deliver_series(
+            &self,
+            vcx: &mut gpui::VisualTestContext,
+            tag: u64,
+            result: SeriesResult,
+        ) {
+            self.deliver_outcome(vcx, tag, Ok(result));
+        }
+        fn deliver_series_err(&self, vcx: &mut gpui::VisualTestContext, tag: u64, text: &str) {
+            self.deliver_outcome(vcx, tag, Err(text.to_string()));
+        }
+        fn deliver_outcome(
+            &self,
+            vcx: &mut gpui::VisualTestContext,
+            tag: u64,
+            result: Result<SeriesResult, String>,
+        ) {
+            let outcome = SeriesOutcome {
+                key: QueryKey(TILE),
+                tag,
+                submitted: std::time::Instant::now(),
+                result,
+            };
+            vcx.update(|window, cx| self.content.deliver(Delivery::Series(outcome), window, cx));
         }
         fn deliver_fetched(
             &self,
@@ -1416,6 +1915,263 @@ mod tests {
         assert_eq!(m.range(), &Range::Relative(Preset::M3));
         assert_eq!(vcx2.update(|_, cx| h2.content.serialize(cx)), table);
         assert!(h2.painted_text(&mut vcx2).contains("s1 / s2"));
+    }
+
+    // ---- the data flow (Task 7) --------------------------------------
+
+    #[gpui::test]
+    fn an_add_fetches_the_resolved_range_when_visible_and_defers_while_hidden(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        assert!(h.fetch_request().is_none(), "hidden: nothing is asked");
+        h.visible(&mut vcx, true);
+        let f = h.fetch_request().expect("shown: the pending fetch");
+        assert_eq!(
+            (f.source.as_str(), f.identity.as_str(), f.key),
+            ("demo_kdb", "SPX.close", QueryKey(TILE))
+        );
+        assert!((f.to - chrono::Utc::now()).num_seconds().abs() < 5);
+        assert_eq!(
+            f.to.checked_sub_months(chrono::Months::new(12)).unwrap(),
+            f.from,
+            "1y"
+        );
+        assert!(
+            h.series_request().is_none(),
+            "no query until the fetch answers"
+        );
+        h.command(&mut vcx, "add VIX").unwrap();
+        let f = h.fetch_request().unwrap();
+        assert_eq!(f.identity, "VIX");
+        assert!(
+            h.fetch_request().is_none(),
+            "only the NEW slot: SPX's own fetch is still in flight"
+        );
+    }
+
+    #[gpui::test]
+    fn a_fetched_ok_marks_the_pair_idle_and_queries_once_and_an_err_marks_it_failed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.command(&mut vcx, "add SPX.close").unwrap(); // a second slot of the same pair (§9.6)
+        h.requests(); // drain the fetch
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(0));
+        let m = h.model(&vcx);
+        assert!(m.slots().iter().all(|s| s.state == SlotState::Idle));
+        let q = h
+            .series_request()
+            .expect("Ok(0) still requeries: the span is covered");
+        assert_eq!(q.series.len(), 2);
+        assert_eq!(q.dataset, "series");
+        assert!(
+            h.series_request().is_none(),
+            "ONE query for the pair, not one per slot"
+        );
+        h.deliver_fetched(&mut vcx, "demo_kdb", "NKY.close", Ok(9));
+        assert!(
+            h.series_request().is_none(),
+            "a pair this tile does not hold is ignored"
+        );
+        h.deliver_fetched(
+            &mut vcx,
+            "demo_kdb",
+            "SPX.close",
+            Err("kdb: timeout".into()),
+        );
+        assert!(
+            matches!(&h.model(&vcx).slots()[0].state, SlotState::Failed(e) if e == "kdb: timeout")
+        );
+        assert!(h.series_request().is_none(), "nothing is sent on Err");
+    }
+
+    #[gpui::test]
+    fn a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.requests();
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+        let tag = h.series_request().unwrap().tag;
+        h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
+        let c = h.chart(&vcx);
+        assert_eq!(c.buckets.len(), 5);
+        assert_eq!(c.slots[0].values.len(), 5);
+        assert_eq!(
+            (h.model(&vcx).view().lo, h.model(&vcx).view().hi),
+            (0.0, 5.0),
+            "the view is the whole range"
+        );
+        h.deliver_series(&mut vcx, tag - 1, result_with(&[1], 50));
+        assert_eq!(h.chart(&vcx).buckets.len(), 5, "stale");
+        h.deliver_series_err(
+            &mut vcx,
+            tag,
+            "1m over 3y is 1,170,000 points; the cap is 500,000",
+        );
+        assert_eq!(h.chart(&vcx).buckets.len(), 5, "last good stays");
+        assert!(h.notice(&vcx).unwrap().contains("the cap is 500,000"));
+    }
+
+    #[gpui::test]
+    fn a_query_change_requeries_and_a_range_change_fetches_and_queries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.requests();
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+        h.requests();
+        h.dispatch(&mut vcx, "rule", None);
+        let q = h.series_request().expect("a rule change is a query");
+        assert!(matches!(
+            q.series[0].kind,
+            SlotKind::Source {
+                rule: BucketRule::First,
+                ..
+            }
+        ));
+        h.dispatch(&mut vcx, "axis_next", None);
+        assert!(h.series_request().is_none(), "an axis is chrome");
+        // Hourly, so the buckets `result_with` builds are a frequency
+        // step wide and a zoomed window lands strictly inside `1w`.
+        h.command(&mut vcx, "freq 1h").unwrap();
+        h.requests();
+        h.command(&mut vcx, "range 1w").unwrap();
+        let reqs = h.requests();
+        assert!(
+            matches!(reqs[0], Request::Fetch(_)),
+            "the range fetches the gaps…"
+        );
+        assert!(
+            matches!(reqs[1], Request::Series(_)),
+            "…and queries the cached part at once (§9.10)"
+        );
+        // Stats over the visible window: a pan requeries while
+        // percentiles are on.
+        h.deliver_series(&mut vcx, h_last_tag(&reqs), result_with(&[1], 20));
+        h.dispatch(&mut vcx, "zoom_in", None);
+        let q = h.series_request().expect("stats follow the view");
+        assert!(q.window.0 > q.range.0 && q.window.1 < q.range.1);
+        h.dispatch(&mut vcx, "percentiles", None);
+        h.series_request().unwrap();
+        h.dispatch(&mut vcx, "density", None);
+        h.series_request().unwrap();
+        h.dispatch(&mut vcx, "zoom_out", None);
+        assert!(
+            h.series_request().is_none(),
+            "with both off, a view move asks nothing"
+        );
+    }
+
+    #[gpui::test]
+    fn the_tile_follows_as_of_only_and_stages_under_an_open_barrier(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.requests();
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+        let tag = h.series_request().unwrap().tag;
+        h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
+        // A scope bump: nothing, and it must not hold the barrier either.
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_scope(geode_core::scope::Scope {
+                text: Some("spx".into()),
+                ..Default::default()
+            });
+            f.open_flip([QueryKey(TILE)], std::time::Instant::now());
+            cx.notify();
+        });
+        assert!(h.series_request().is_none(), "scope is not followed");
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "and the tile self-arrives rather than holding every other tile to the deadline"
+        );
+        // An as-of change opens a barrier over this tile and requeries.
+        let at = chrono::Utc::now() - chrono::Duration::days(30);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
+        let q = h.series_request().expect("as-of is followed");
+        assert_eq!(q.as_of, AsOf::At(at));
+        assert!(q.range.1 <= at, "the as-of clips the visible end");
+        h.deliver_series(&mut vcx, q.tag, result_with(&[1], 3));
+        assert_eq!(
+            h.chart(&vcx).buckets.len(),
+            3,
+            "the only awaited tile: arriving released the barrier and promoted at once"
+        );
+        // With a second awaited key the delivery is STAGED until the flip.
+        open_barrier_on_as_of(
+            &h,
+            &mut vcx,
+            &[QueryKey(TILE), QueryKey(99)],
+            at - chrono::Duration::days(1),
+        );
+        let q = h.series_request().unwrap();
+        h.deliver_series(&mut vcx, q.tag, result_with(&[1], 7));
+        assert_eq!(h.chart(&vcx).buckets.len(), 3, "staged");
+        h.frame.update(&mut vcx, |f, cx| {
+            f.sweep(std::time::Instant::now() + geode_shell::frame::FLIP_DEADLINE);
+            cx.notify();
+        });
+        assert_eq!(h.chart(&vcx).buckets.len(), 7, "promoted on the flip");
+    }
+
+    #[gpui::test]
+    fn a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.requests();
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+        let tag = h.series_request().unwrap().tag;
+        // A tile with a result on screen is what a hide/show round trip
+        // is about; a tile that has never been answered comes back
+        // through its fetch, which the restore half below pins.
+        h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
+        h.requests();
+        h.visible(&mut vcx, false);
+        assert!(
+            matches!(h.raw_requests().last(), Some(Request::Cancel { key }) if *key == QueryKey(TILE))
+        );
+        h.visible(&mut vcx, true);
+        let reqs = h.requests();
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::Fetch(_))),
+            "shown: refetch (§9.10)…"
+        );
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::Series(_))),
+            "…and requery"
+        );
+        let table = vcx.update(|_, cx| h.content.serialize(cx));
+        let (h2, mut vcx2) = open_with(cx, Some(table));
+        assert!(
+            matches!(h2.model(&vcx2).slots()[0].state, SlotState::Idle),
+            "restored: not yet asked"
+        );
+        h2.visible(&mut vcx2, true);
+        assert!(matches!(
+            h2.model(&vcx2).slots()[0].state,
+            SlotState::Fetching
+        ));
+        let f = h2.fetch_request().expect("a restored tile refetches once");
+        assert_eq!(f.identity, "SPX.close");
+        assert!(h2.fetch_request().is_none());
+        h2.visible(&mut vcx2, false);
+        h2.visible(&mut vcx2, true);
+        assert!(
+            h2.fetch_request().is_some(),
+            "every show refetches (coverage subtraction makes it cheap)"
+        );
     }
 
     #[gpui::test]
