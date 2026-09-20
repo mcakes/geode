@@ -554,3 +554,93 @@ as direct children of one `h_flex` as before the migration — the panel's
 own selector-keyed tests all still find every segment and click target,
 but nobody has yet looked at the nested row on a real window to confirm
 it reads identically to the pre-migration layout.
+
+## As built (Part 2)
+
+`geode_core::clock::Clock` (§3.2), `[time] zone/sod/eod` config loading
+(§3.1), `presets` (§3.3) and the workspace-wide `AppClock` global (§6)
+shipped as designed, plus a whole-branch final review's fixes after the
+merge to main. Eight tasks, `docs/phase-history.md`'s "As-of dialog Part
+2" entry has the day-by-day record including the final review's own
+findings. Part 3 (the dialog itself) is next and unstarted.
+
+**`Clock`'s two fields differ in visibility on purpose**: `sod`/`eod`
+are `pub` (a trader-facing config value with no invariant to protect),
+`zone: Tz` is PRIVATE behind `zone()`/`zone_name()` readers — a `Tz` is
+`Copy` and free to construct badly (`Tz::UTC` bypasses every diagnostic
+`Clock::from_config` would have raised), so the only doors that can name
+one are `Clock::in_zone`, `Clock::utc`, `Clock::machine` and
+`Clock::from_config` itself, all of which either take a validated `Tz`
+or resolve one with diagnostics.
+
+**`Clock::in_zone_named(name: &str) -> Clock`** is `#[doc(hidden)]`, not
+private and not `#[cfg(test)]`: it exists so a crate that depends on
+`geode-core` but not `chrono-tz` directly — every module crate — can
+build a specific non-UTC `Clock` in its own tests (`Clock::in_zone_named
+("Asia/Tokyo")`) without a `chrono-tz` dependency of its own. It panics
+on an unrecognised name, since every call site names a real zone
+literally — an unknown name there is a typo in the test, never a value
+worth threading through a `Result`.
+
+**`Clock::from_config(&Config) -> (Clock, Vec<Diagnostic>)`** is the one
+door `[time]` is read through — `ShellView::new` and `apply_reload` both
+call it and neither re-derives the zone by hand. A non-string
+`time.zone`, an unrecognised zone NAME and a malformed `time.sod`/`eod`
+are each a `Severity::Error` diagnostic at their own `time.<key>` and
+fall back to the default; the machine zone itself being unreadable is a
+`Severity::Warning` at `time.zone`, never an error (there is no config
+key the trader mistyped).
+
+**`presets`'s `SOD T` deviates from §3.3's table on purpose**:
+`sod_of(business_days_back(today, 0))`, not the bare `sod_of(today)`
+the table above shows — `business_days_back(.., 0)` snaps a WEEKEND
+`today` to the preceding Friday (its own documented contract), so `SOD
+T` on a Saturday offers Friday's open rather than a `sod_of` refusal for
+a date that never had one. The table is the design intent (a trader
+never sees a `SOD T` gap on a weekend); this is the implementation
+detail that delivers it.
+
+**`resolve_local(date: NaiveDate, time: NaiveTime)` takes TWO arguments**,
+not the single `value` §5.4 writes for illustration — Part 3's `Custom`
+row commit is `clock.resolve_local(v.date(), v.time())` where `v` is
+whatever `NaiveDateTime` the completed field yields, not a direct
+`clock.resolve_local(value)` call.
+
+**§5.1's right-column formats are NOT `Clock` methods.** `Clock::full`
+(`%Y-%m-%d %H:%M:%S %Z`) covers Current and Custom exactly as designed,
+but the preset row's `Ddd D Mon HH:MM` and the publish row's `Ddd
+HH:MM:SS` are Part 3's OWN format strings over `clock.local(t).format
+(..)` — `Clock` was deliberately kept to the small, load-bearing set of
+formatters every module already needs (`hm`, `hms`, `full`,
+`abbreviation`), not grown a method per dialog row shape.
+
+**The machine zone is memoised once per process** (final review, Minor
+2): `Clock::machine()` is read on the paint path by every module's
+`try_global` fallback, and `iana_time_zone::get_timezone()` is an OS
+call this crate cannot assume is free — a `std::sync::OnceLock` behind
+it now means the real lookup happens at most once, ever, per process.
+Its two fallback arms (a zone the OS could not report, a zone name the
+IANA database does not recognise) are provoked directly through a pure
+seam, `machine_from(Result<String, impl Display>) -> (Clock,
+Option<String>)`, rather than left as untestable branches of `machine()`
+itself.
+
+**A known gap, left as is:** the blotter's per-dataset freshness readout
+(`short_time`) still formats inline in `render` on every paint, unlike
+every other clock read in this branch, which goes through a prepare
+step and a stored field (`HeaderModel::prepare` in market-data, `Row
+.text` at `rebuild` in diagnostics). The blotter's PINNED `AS OF` chip
+was given exactly that shape by the final review (`asof_chip`/
+`asof_chip_date`/`asof_chip_clock`, cached and rebuilt only on a real
+change) — but the freshness readout was not, since it has no analogous
+per-render cost concern its own review round ever raised, and giving it
+one now would be a prepare-step refactor with no attached finding to
+justify it. Revisit only alongside a broader blotter prepare-step pass,
+not in isolation.
+
+**The `gpui-base` exception sentence in `CLAUDE.md`'s workspace
+invariants** (`geode_core::clock` has nothing to do with it, but Part 2
+touched enough of the as-of surface to be worth recording here) is
+UNCHANGED by this work and stays until Part 3 removes the old as-of
+calendar pane (§5.5) — `CalendarView` is the one type that sentence
+names, and nothing in Part 3's design still needs it.
