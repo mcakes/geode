@@ -612,6 +612,28 @@ impl Draft {
         // A row edit's identity is its own label — the same `rows` index
         // built above for cell edits, since a row that exists in the
         // newer model is exactly a label that index carries (§5.1).
+        //
+        // An anchor can be a document row OR one of this draft's own
+        // inserted rows (`shift+o` on an inserted row chains the new row
+        // on it), and `model_of_newer` is the document's grid alone, so
+        // the second kind is never in `rows`. The inserted labels that
+        // SURVIVE this rebase are precomputed here rather than read off
+        // `rows_out` as it fills: label order visits `new-1` before the
+        // `new-2` it hangs off, so an as-you-go check would flatten every
+        // chain whose anchor sorts later. An anchor on an inserted row
+        // that this very rebase drops (upstream now carries its label) is
+        // a vanished anchor like a document row's.
+        // Owned labels, since the loop below takes `self.rows` by value.
+        let surviving: std::collections::HashSet<String> = self
+            .rows
+            .iter()
+            .filter(|(label, edit)| {
+                matches!(edit, RowEdit::Inserted { .. }) && !rows.contains_key(label.as_str())
+            })
+            .map(|(label, _)| label.clone())
+            .collect();
+        let anchor_survives =
+            |anchor: &str| rows.contains_key(anchor) || surviving.contains(anchor);
         let mut rows_out = BTreeMap::new();
         for (label, edit) in std::mem::take(&mut self.rows) {
             match edit {
@@ -631,14 +653,15 @@ impl Draft {
                 // this draft's own insert is dropped and named as a
                 // conflict rather than silently shadowing the real row.
                 // Otherwise it survives, but its anchor might not have:
-                // an `after` label the newer document no longer carries
-                // re-anchors to the top and is named too.
+                // an `after` label that is neither a row of the newer
+                // document nor a surviving inserted row re-anchors to the
+                // top and is named too.
                 RowEdit::Inserted { after, cells } => {
                     if rows.contains_key(label.as_str()) {
                         dropped.push((label, "row (the document now carries it)".to_string()));
                     } else {
                         let after = match after {
-                            Some(anchor) if !rows.contains_key(anchor.as_str()) => {
+                            Some(anchor) if !anchor_survives(&anchor) => {
                                 dropped.push((label.clone(), format!("anchor '{anchor}'")));
                                 None
                             }
@@ -1737,6 +1760,54 @@ mod tests {
         assert!(dropped.contains(&("GONE".into(), "row".into())));
         assert!(dropped.contains(&("D9".into(), "row (the document now carries it)".into())));
         assert!(dropped.contains(&("new-1".into(), "anchor 'GONE'".into())));
+    }
+
+    /// A chain — `D1 → new-2 → new-1`, the shape `shift+o` on an inserted
+    /// row builds — survives a rebase whole: `new-1`'s anchor is an
+    /// INSERTED row the newer model (the document's own grid) never
+    /// carries, and that is not a vanished anchor. Both rows kept, the
+    /// anchor untouched, nothing named dropped. The anchor's survival
+    /// must be decided from a precomputed set, since label order visits
+    /// `new-1` before the `new-2` it hangs off. An anchor on an inserted
+    /// row that the rebase DROPS as a conflict still resolves — the row is
+    /// dropped precisely because the document now carries that label, so
+    /// the chained row lands under the real row instead.
+    #[test]
+    fn rebase_keeps_a_chain_anchored_on_a_surviving_inserted_row() {
+        let mut d = Draft::default();
+        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("new-2".into()), "t0");
+        let (kept, dropped) = d.rebase(&flat_model_with_rows(&["D1"]));
+        assert_eq!(kept, 2);
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert!(matches!(
+            d.row_state("new-2"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D1"
+        ));
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "new-2"
+        ));
+
+        // The anchor itself dropped as a conflict: the document now
+        // carries `D7`, so the chained row hangs off the real one and
+        // only the conflict is named.
+        let mut d = Draft::default();
+        d.insert_row("D7".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("D7".into()), "t0");
+        let (_, dropped) = d.rebase(&flat_model_with_rows(&["D1", "D7"]));
+        assert!(d.row_state("D7").is_none());
+        assert!(matches!(
+            d.row_state("new-1"),
+            Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D7"
+        ));
+        assert_eq!(
+            dropped,
+            [(
+                "D7".to_string(),
+                "row (the document now carries it)".to_string()
+            )]
+        );
     }
 
     #[test]

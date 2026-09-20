@@ -6698,7 +6698,9 @@ edits = [["2026-11-20", "-1", 9.5]]
     /// than on whatever row took its old index. The restore's rebase runs
     /// against the DOCUMENT's own grid: against the spliced model it would
     /// read the draft's own `new-1` as a row the document now carries and
-    /// drop it as a conflict.
+    /// drop it as a conflict. A second inserted row chained on the first
+    /// (`new-2 after new-1`) rides through that rebase with its anchor
+    /// intact and paints directly under it.
     #[gpui::test]
     fn a_restored_draft_with_rows_splices_them_and_keeps_its_edits_in_place(
         cx: &mut gpui::TestAppContext,
@@ -6712,6 +6714,9 @@ edits = [["D2", "amount", 0.75]]
 [draft.rows.new-1]
 after = "D1"
 cells = {{ amount = 2.0 }}
+[draft.rows.new-2]
+after = "new-1"
+cells = {{ amount = 3.0 }}
 [draft.rows.D3]
 deleted = true
 "#
@@ -6731,29 +6736,55 @@ deleted = true
             ])),
         );
         assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t
+                .model()
+                .rows
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect::<Vec<_>>()),
+            ["D1", "new-1", "new-2", "D2", "D3"],
+            "the chain paints in place after the resolving delivery"
+        );
+        assert_eq!(
             h.col_texts(&vcx, 1),
-            ["1.2500", "2.0000", "0.7500", "0.9000"]
+            ["1.2500", "2.0000", "3.0000", "0.7500", "0.9000"]
         );
         let states: Vec<Option<RowState>> = h
             .tile
-            .read_with(&vcx, |t, _| (0..5).map(|r| t.row_state_at(r)).collect());
+            .read_with(&vcx, |t, _| (0..6).map(|r| t.row_state_at(r)).collect());
         assert_eq!(
             states,
             [
                 Some(RowState::Document),
+                Some(RowState::Inserted),
                 Some(RowState::Inserted),
                 Some(RowState::Document),
                 Some(RowState::Deleted),
                 None
             ]
         );
-        assert_eq!(h.cell(&vcx, 2, 1), ("0.7500".to_string(), true));
+        assert_eq!(h.cell(&vcx, 3, 1), ("0.7500".to_string(), true));
         assert_eq!(h.cell(&vcx, 1, 0), ("·".to_string(), true));
-        let (added, removed, edits) = h.tile.read_with(&vcx, |t, _| {
+        let (added, removed, edits, chained) = h.tile.read_with(&vcx, |t, _| {
             let d = t.draft();
-            (d.rows_added(), d.rows_removed(), d.edits.clone())
+            let chained = match d.row_state("new-2") {
+                Some(RowEdit::Inserted { after, .. }) => after.clone(),
+                _ => None,
+            };
+            (d.rows_added(), d.rows_removed(), d.edits.clone(), chained)
         });
-        assert_eq!((added, removed), (1, 1));
+        assert_eq!((added, removed), (2, 1));
+        assert_eq!(
+            chained.as_deref(),
+            Some("new-1"),
+            "the rebase kept the anchor on the surviving inserted row"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.notice().is_none()),
+            "nothing was named dropped: {:?}",
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string))
+        );
         assert_eq!(
             edits.keys().copied().collect::<Vec<_>>(),
             [(1, 1)],
@@ -6762,7 +6793,7 @@ deleted = true
         assert!(h.tile.read_with(&vcx, |t, _| t.header_dirty()));
         assert!(
             h.header_texts(&vcx)
-                .contains(&"1 row incomplete".to_string()),
+                .contains(&"2 rows incomplete".to_string()),
             "{:?}",
             h.header_texts(&vcx)
         );
