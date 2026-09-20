@@ -333,6 +333,40 @@ mod tests {
                 ),
                 "as-of chip (Tone::Warning on the title bar)",
             ),
+            (
+                // The timeseries tile's slot chips (timeseries spec
+                // §9.3): clickable — a click moves the cursor — and on
+                // the tile's own BACKGROUND rather than a chrome
+                // surface, which is a different ground from the as-of
+                // chip above and so a pairing of its own. A slot that
+                // is fetching wears `Tone::Warning`…
+                ControlInputs::new(
+                    theme,
+                    Rest::Filled(theme.warning.opacity(crate::shell::chip::FILL_ALPHA)),
+                    theme.background,
+                    theme.foreground,
+                ),
+                "timeseries slot chip (Tone::Warning on a tile background)",
+            ),
+            (
+                // …and one whose fetch failed wears `Tone::Danger`, the
+                // first clickable danger-toned chip in the codebase.
+                ControlInputs::new(
+                    theme,
+                    Rest::Filled(theme.danger.opacity(crate::shell::chip::FILL_ALPHA)),
+                    theme.background,
+                    theme.foreground,
+                ),
+                "timeseries slot chip (Tone::Danger on a tile background)",
+            ),
+            // An UNFILLED chip — the timeseries tile's idle slot away
+            // from the cursor — is a bare `muted_foreground` glyph on
+            // the tile background, which is the "market-data ⋯" pairing
+            // above; it needs no entry of its own. That it is muted and
+            // not the neutral chip's `secondary_foreground` is the whole
+            // point: `Tone::Neutral`'s readability is measured over its
+            // OWN fill, so a chip that drops the fill must drop the
+            // paired text with it.
         ]
     }
 
