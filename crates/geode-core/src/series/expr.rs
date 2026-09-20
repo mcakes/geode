@@ -65,6 +65,14 @@ pub struct ParseError {
 /// The boundary, said where a trader would cross it (spec §7).
 pub const ARITHMETIC_ONLY: &str = "arithmetic only: + - * / and parentheses";
 
+/// The deepest a unary-minus/parenthesis nest may go before `parse`
+/// refuses it. Bounds the recursion in `Parser::factor` (a pasted wall
+/// of parentheses would otherwise overflow the stack — an abort, not a
+/// panic, nothing can contain) and, because the tree it produces can
+/// then be no deeper than this, bounds the recursion in `Ast::resolve`
+/// and `Expr::slots` too.
+pub const MAX_DEPTH: usize = 64;
+
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Num(f64),
@@ -207,6 +215,7 @@ struct Parser<'a> {
     toks: &'a [(usize, Token)],
     pos: usize,
     end: usize,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -255,9 +264,16 @@ impl<'a> Parser<'a> {
     fn factor(&mut self) -> Result<Ast<RefName>, ParseError> {
         let at = self.here();
         match self.bump() {
-            Some(Token::Minus) => Ok(Ast::Neg(Box::new(self.factor()?))),
+            Some(Token::Minus) => {
+                self.enter_nest(at)?;
+                let inner = self.factor()?;
+                self.depth -= 1;
+                Ok(Ast::Neg(Box::new(inner)))
+            }
             Some(Token::LParen) => {
+                self.enter_nest(at)?;
                 let inner = self.expr()?;
+                self.depth -= 1;
                 match self.bump() {
                     Some(Token::RParen) => Ok(inner),
                     _ => Err(ParseError {
@@ -278,6 +294,18 @@ impl<'a> Parser<'a> {
             }),
         }
     }
+
+    /// Enters one level of `-`/`(` nesting, refusing past `MAX_DEPTH`.
+    fn enter_nest(&mut self, at: usize) -> Result<(), ParseError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(ParseError {
+                position: at,
+                message: format!("expression nests too deeply (more than {MAX_DEPTH} levels)"),
+            });
+        }
+        self.depth += 1;
+        Ok(())
+    }
 }
 
 pub fn parse(text: &str) -> Result<Ast<RefName>, ParseError> {
@@ -286,6 +314,7 @@ pub fn parse(text: &str) -> Result<Ast<RefName>, ParseError> {
         toks: &toks,
         pos: 0,
         end: text.len(),
+        depth: 0,
     };
     let ast = p.expr()?;
     if p.pos != toks.len() {
@@ -340,6 +369,8 @@ impl Expr {
 /// first, so the compiler can lower each expression over CTEs that
 /// already exist. `Err(slot)` is a slot on a cycle (a self-reference
 /// included). Source slots are leaves and are not listed.
+/// A reference to a slot absent from `specs` is treated as a leaf
+/// here; the compiler's validation, not this function, refuses it.
 pub fn expression_order(specs: &[SeriesSpec]) -> Result<Vec<u8>, u8> {
     #[derive(Clone, Copy, PartialEq)]
     enum Mark {
@@ -420,6 +451,15 @@ mod tests {
         // left-associative: a - b - c == (a - b) - c
         let ast = parse("s1 - s2 - s3").unwrap();
         assert!(matches!(ast, Ast::Bin(Op::Sub, ref l, _) if matches!(**l, Ast::Bin(Op::Sub, ..))));
+        assert_eq!(
+            parse("-s1 * 2").unwrap(),
+            Ast::Bin(
+                Op::Mul,
+                Box::new(Ast::Neg(Box::new(Ast::Ref(RefName::Handle(1))))),
+                Box::new(Ast::Num(2.0))
+            ),
+            "unary minus binds tighter than *"
+        );
     }
 
     #[test]
@@ -459,6 +499,11 @@ mod tests {
             Ast::Ref(id("s1x")),
             "a handle is s followed by digits and nothing else"
         );
+        assert_eq!(
+            parse("s999").unwrap(),
+            Ast::Ref(id("s999")),
+            "a handle past u8 is an identity, not an error"
+        );
     }
 
     #[test]
@@ -478,6 +523,20 @@ mod tests {
             assert!(parse(text).is_err(), "{text:?} must not parse");
         }
         assert_eq!(parse("s1 ^ 2").unwrap_err().position, 3);
+        assert_eq!(parse("a@b@c").unwrap_err().message, ARITHMETIC_ONLY);
+        assert_eq!(parse("a@b@c").unwrap_err().position, 3);
+    }
+
+    #[test]
+    fn nesting_deeper_than_the_cap_is_a_parse_error() {
+        let text = "(".repeat(200) + "s1" + &")".repeat(200);
+        let err = parse(&text).unwrap_err();
+        assert_eq!(
+            err.message,
+            format!("expression nests too deeply (more than {MAX_DEPTH} levels)")
+        );
+        let text = "(".repeat(60) + "s1" + &")".repeat(60);
+        assert!(parse(&text).is_ok(), "60 levels must still parse");
     }
 
     #[test]
