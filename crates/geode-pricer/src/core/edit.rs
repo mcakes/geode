@@ -399,7 +399,11 @@ impl Sheet {
     }
 
     /// Apply `undo`'s edits in order; the redo is their inverses in
-    /// reverse (the last one applied is the first to take back).
+    /// reverse (the last one applied is the first to take back). NOT
+    /// atomic: an inverse refused partway through leaves every earlier
+    /// inverse in `undo.inverse` already applied and answers that error —
+    /// there is no dry-run validation, and a redo is answered only on
+    /// full success.
     pub fn undo(&mut self, undo: &Undo) -> Result<Undo, EditError> {
         let mut inverses = Vec::with_capacity(undo.inverse.len());
         for edit in &undo.inverse {
@@ -509,6 +513,22 @@ impl Sheet {
         let count = legs.len();
         for r in legs {
             self.set_leg_marker(r, false);
+        }
+        // An empty package (planning decision 8) has no legs to re-group:
+        // `group` refuses `count == 0` (`EmptyInsert`), so `Group` cannot
+        // be its inverse. Restore the package's own row instead — a
+        // plain `Restore` whose own inverse, `Remove { at: row }`,
+        // removes the empty package again, so identity holds both ways.
+        if count == 0 {
+            let record = self.record(row);
+            self.take_out(row);
+            self.reindex_parents();
+            return Ok(Undo {
+                inverse: vec![Edit::Restore {
+                    at: row,
+                    rows: vec![record],
+                }],
+            });
         }
         let pkg_id = self.id(row);
         self.take_out(row);
@@ -1185,11 +1205,22 @@ mod tests {
             },
             "the template survives the round trip"
         );
-        // An empty package ungroups to nothing.
+        // An empty package ungroups to nothing, and undo restores it.
         s.apply(Edit::Remove { at: 2 }).unwrap();
         s.apply(Edit::Remove { at: 2 }).unwrap();
-        s.apply(Edit::Ungroup { row: 1 }).unwrap();
+        let undo = s.apply(Edit::Ungroup { row: 1 }).unwrap();
         assert_eq!(ids(&s), vec![1, 5]);
+        let redo = s.undo(&undo).unwrap();
+        assert_eq!(ids(&s), vec![1, 2, 5]);
+        assert_eq!(s.id(1), LineId(2), "the same package id returns");
+        assert_eq!(
+            s.kind(1),
+            RowKind::Package {
+                template: Template::CS
+            }
+        );
+        assert_eq!(s.children(1), 2..2, "still no legs");
+        assert_eq!(redo.inverse, vec![Edit::Remove { at: 1 }]);
     }
 
     /// Spec §12: `apply` then its `Undo` is identity for every `Edit`.
@@ -1217,6 +1248,12 @@ mod tests {
             for r in [0, 2, 3, 4, 5] {
                 s.deliver(s.id(r), 2, Ok(result(r as f64)), at(10 + r as i64));
             }
+            // An empty package (decision 8), at row 6: push one more
+            // callspread then remove both its legs, leaving the package
+            // row with no children.
+            push(&mut s, vec![callspread(1)]);
+            s.apply(Edit::Remove { at: 7 }).unwrap();
+            s.apply(Edit::Remove { at: 7 }).unwrap();
             s
         }
         fn snapshot(s: &Sheet) -> (Vec<RowRecord>, OwnShifts, Vec<(String, f64)>) {
@@ -1262,6 +1299,8 @@ mod tests {
                 id: None,
             },
             Edit::Ungroup { row: 1 },
+            Edit::Ungroup { row: 6 },
+            Edit::Remove { at: 6 },
             Edit::SetSheetShift(OwnShifts {
                 spot_pct: Some(3.0),
                 vol_pts: None,
