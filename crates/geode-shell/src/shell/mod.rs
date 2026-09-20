@@ -939,7 +939,21 @@ pub struct ShellView {
     /// by [`asof_view::open`] each time and cleared by
     /// [`close_modal`](Self::close_modal), same as the other three
     /// dialogs.
-    as_of_dialog: Option<asof_view::AsOfState>,
+    as_of_dialog: Option<asof_rows::AsOfState>,
+    /// Scroll state for the as-of dialog's `as-of-rows` list (review
+    /// round 2, finding 3) — the `choice_dialog_scroll` split, one
+    /// dialog over: `handle_key`'s nav/tab arms call `scroll_to_item`
+    /// with `asof_rows::child_index_of` on every highlight move, so
+    /// keyboard navigation past the visible window still scrolls the
+    /// list rather than moving an off-screen index.
+    as_of_scroll: ScrollHandle,
+    /// The frame `data` version the open as-of dialog last refreshed
+    /// against (review round 2, finding 5 — parity with the old
+    /// `cached_presets`) — `on_frame_changed` compares against this and
+    /// calls `AsOfState::refresh` only on an actual data-version bump
+    /// while the dialog is open, set at open time by [`asof_view::open`]
+    /// and never read while `as_of_dialog` is `None`.
+    as_of_data_version: u64,
     /// The open scope expression dialog's own pure state (command-line
     /// locality spec §4.1), or `None` when closed/never opened — the
     /// `picker`/`as_of_dialog` fields' own contract. Set fresh by
@@ -1637,6 +1651,8 @@ impl ShellView {
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
+            as_of_scroll: ScrollHandle::new(),
+            as_of_data_version: 0,
             scope_expr_dialog: None,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
@@ -1756,6 +1772,21 @@ impl ShellView {
             // tick instead, so the deadline is "released on the next
             // tick after `FLIP_DEADLINE`" rather than exactly on it —
             // see that loop's own comment and spec §3.10's as-built note.
+        }
+        // Review round 2, finding 5 (as-of dialog spec §5.1, parity with
+        // the old `cached_presets`): a publish landing while the dialog
+        // is open must show up in its row list without a close/reopen.
+        // Gated on the `data` version alone (never `scope`/`grouping`/
+        // `as_of`, which this method's own flip-barrier branch above
+        // already owns) so a scope edit elsewhere does not also rebuild
+        // rows a trader is actively filtering.
+        if self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {
+            self.as_of_data_version = now_v.data;
+            let as_of = frame.read(cx).as_of().clone();
+            let publishes: Vec<_> = frame.read(cx).recent_publishes().iter().cloned().collect();
+            if let Some(state) = self.as_of_dialog.as_mut() {
+                state.refresh(&as_of, &publishes, chrono::Utc::now());
+            }
         }
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
             && let Some(dir) = self.user_dir.clone()

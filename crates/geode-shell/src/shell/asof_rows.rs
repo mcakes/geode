@@ -72,6 +72,17 @@ struct Entry {
     section: Section,
 }
 
+/// [`AsOfState::rebuild`]'s return shape — entries, presets, publish
+/// instants, the pinned instant — named so clippy's `type_complexity`
+/// lint doesn't fire on the private helper both `build` and `refresh`
+/// share.
+type RebuiltRows = (
+    Vec<Entry>,
+    Vec<Preset>,
+    Vec<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+);
+
 #[derive(Debug, Clone)]
 pub struct AsOfState {
     entries: Vec<Entry>,
@@ -89,6 +100,34 @@ pub struct AsOfState {
 
 impl AsOfState {
     pub fn build(as_of: &AsOf, publishes: &[Publish], clock: Clock, now: DateTime<Utc>) -> Self {
+        let (entries, presets, instants, pinned) = Self::rebuild(as_of, publishes, clock, now);
+        let mut state = AsOfState {
+            entries,
+            presets,
+            publishes: instants,
+            ranked: Vec::new(),
+            highlighted: 0,
+            query: String::new(),
+            field: None,
+            refusal: None,
+            clock,
+            pinned,
+            now,
+        };
+        state.rerank();
+        state
+    }
+
+    /// The entries/presets/publish-instants/pinned quadruple `build` and
+    /// [`refresh`](Self::refresh) both need — pulled out so a refresh
+    /// rebuilds the ROWS exactly the way an open builds them, never a
+    /// second, drifting copy of the same shape.
+    fn rebuild(
+        as_of: &AsOf,
+        publishes: &[Publish],
+        clock: Clock,
+        now: DateTime<Utc>,
+    ) -> RebuiltRows {
         let pinned = match as_of {
             AsOf::Live => None,
             AsOf::At(t) => Some(*t),
@@ -139,21 +178,38 @@ impl AsOfState {
                 section: Section::Publishes,
             });
         }
-        let mut state = AsOfState {
-            entries,
-            presets,
-            publishes: instants,
-            ranked: Vec::new(),
-            highlighted: 0,
-            query: String::new(),
-            field: None,
-            refusal: None,
-            clock,
-            pinned,
-            now,
-        };
-        state.rerank();
-        state
+        (entries, presets, instants, pinned)
+    }
+
+    /// A publish landed (or the pin changed) while the dialog is open
+    /// (spec §5.1, parity with the old `cached_presets`): rebuild the
+    /// rows with the SAME query, keep the highlighted row by identity —
+    /// `(section, label)`, since a row's own index can shift when a new
+    /// publish is prepended — falling back to `0` when it no longer
+    /// exists, and leave an open Custom field's own edit state
+    /// untouched (`self.field` is never read or written here; the
+    /// Custom row itself is always present, so its identity survives a
+    /// refresh the same way any other row's does).
+    pub fn refresh(&mut self, as_of: &AsOf, publishes: &[Publish], now: DateTime<Utc>) {
+        let previous = self
+            .ranked
+            .get(self.highlighted)
+            .map(|p| (p.section, p.label.clone()));
+        let (entries, presets, instants, pinned) = Self::rebuild(as_of, publishes, self.clock, now);
+        self.entries = entries;
+        self.presets = presets;
+        self.publishes = instants;
+        self.pinned = pinned;
+        self.now = now;
+        self.rerank();
+        if let Some((section, label)) = previous
+            && let Some(i) = self
+                .ranked
+                .iter()
+                .position(|p| p.section == section && p.label == label)
+        {
+            self.highlighted = i;
+        }
     }
 
     /// Rank every section's labels against the query, sections in fixed
@@ -299,6 +355,14 @@ impl AsOfState {
         self.clock
     }
 
+    /// The `now` `build` (or the last [`refresh`](Self::refresh)) was
+    /// given — for a painter that needs a "current moment" without
+    /// paying for a fresh `Utc::now()` on every render (the Custom
+    /// row's zone-abbreviation suffix).
+    pub fn now(&self) -> DateTime<Utc> {
+        self.now
+    }
+
     /// What `enter` does: with the field open, its value resolved on the
     /// clock (a DST gap is the one refusal, kept on `refusal` for the row
     /// to paint); otherwise the highlighted row's own instant.
@@ -331,6 +395,26 @@ impl AsOfState {
                 .ok_or_else(|| "nothing to set".into()),
         }
     }
+}
+
+/// The CHILD index `scroll_to_item` must use for the row at
+/// `highlighted`, on the `as-of-rows` list `asof_view::build` paints:
+/// the eyebrow `div`s ahead of each section's first row (`Section::
+/// eyebrow`) are themselves children of that same list, so a painted
+/// row's child index is its own painted index plus one eyebrow for
+/// every section boundary already crossed by the time it is reached.
+pub fn child_index_of(painted: &[Painted], highlighted: usize) -> usize {
+    let mut eyebrows = 0;
+    let mut last: Option<Section> = None;
+    for p in painted.iter().take(highlighted + 1) {
+        if last != Some(p.section) {
+            if p.section.eyebrow().is_some() {
+                eyebrows += 1;
+            }
+            last = Some(p.section);
+        }
+    }
+    highlighted + eyebrows
 }
 
 #[cfg(test)]
@@ -545,5 +629,62 @@ mod tests {
         assert!(err.contains("does not name a valid local time"), "{err}");
         assert_eq!(s.field_refusal(), Some(err.as_str()));
         assert!(s.field().is_some(), "the field stays open");
+    }
+
+    #[test]
+    fn child_index_of_counts_the_eyebrows_before_the_highlighted_row() {
+        let pubs = [publish(
+            "risk",
+            "EOD",
+            12,
+            now() - chrono::Duration::hours(1),
+        )];
+        let s = state(AsOf::Live, &pubs);
+        // Under live: Presets, Custom, Publishes each paint an eyebrow —
+        // 3 eyebrows ahead of the one publish row.
+        let last = s.painted().len() - 1;
+        assert!(matches!(s.painted()[last].section, Section::Publishes));
+        assert_eq!(child_index_of(s.painted(), last), last + 3);
+        // Row 0 (the first preset) sits right after ITS OWN section's
+        // eyebrow — one eyebrow ahead of it, not zero.
+        assert_eq!(child_index_of(s.painted(), 0), 1);
+    }
+
+    #[test]
+    fn refresh_keeps_the_query_and_the_highlighted_row_and_shows_a_new_publish() {
+        let mut s = state(AsOf::Live, &[]);
+        assert!(s.set_query("eod"));
+        assert_eq!(s.painted()[0].label, "EOD T-1");
+        s.nav(NavCommand::Move(1)); // EOD T-2
+        assert_eq!(s.painted()[s.highlighted()].label, "EOD T-2");
+
+        let pubs = [publish("risk", "EOD", 12, now())];
+        s.refresh(&AsOf::Live, &pubs, now());
+
+        assert_eq!(s.query(), "eod", "refresh keeps the live query");
+        assert_eq!(
+            s.painted()[s.highlighted()].label,
+            "EOD T-2",
+            "refresh keeps the highlighted row by identity"
+        );
+        assert!(
+            s.painted()
+                .iter()
+                .any(|p| p.label == "risk / EOD \u{b7} 12 books"),
+            "the new publish is painted: {:?}",
+            s.painted()
+        );
+    }
+
+    #[test]
+    fn refresh_falls_back_to_zero_when_the_highlighted_row_is_gone() {
+        // Pinned, highlighted on `current` (row 0); refresh to Live drops
+        // both `current` and `live` — nothing to find by identity.
+        let pinned = Utc.with_ymd_and_hms(2026, 9, 18, 16, 0, 0).unwrap();
+        let mut s = state(AsOf::At(pinned), &[]);
+        assert_eq!(s.highlighted(), 0);
+        s.refresh(&AsOf::Live, &[], now());
+        assert_eq!(s.highlighted(), 0);
+        assert_eq!(s.painted()[0].label, "EOD T-1");
     }
 }

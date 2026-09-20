@@ -28,21 +28,25 @@ use crate::footer::{Hint, HintRow};
 use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter;
 
-use super::asof_rows::{Commit, Row, Section};
+use super::asof_rows::{self, AsOfState, Commit, Row, Section};
 use super::colours::{over, to_hsla, to_rgb};
 use super::{ShellView, dialog, scale};
-
-// Both the plain and the aliased name are re-exported: `asof_view::
-// AsOfState` is what `ShellView`'s `as_of_dialog` field is still typed
-// as (this type moved to `asof_rows` in Task 1, but nothing outside this
-// pair of modules needs to know that), and `asof_view::State` is kept as
-// the short alias the rest of this file's doc comments use.
-pub use super::asof_rows::AsOfState;
-pub use super::asof_rows::AsOfState as State;
 
 /// Dialog content width at the design rem (the picker's 480 was too
 /// narrow for a label and a dated right column side by side).
 const WIDTH: f32 = 640.0;
+
+/// A row's height at the design rem — the same 28 the picker's
+/// `choice_rows` and the palette's own row list use — and how many the
+/// `as-of-rows` viewport shows before it scrolls (review round 2,
+/// finding 3): without an explicit bound here `overflow_y_scroll` has
+/// nothing to overflow against (the list just grows to fit every row),
+/// so `ScrollHandle::scroll_to_item` would have nothing to do — the cap
+/// is what makes the list an actual independently-scrollable viewport,
+/// distinct from the dialog's header/footer, the same shape
+/// `dialog::choice_rows` already gives the choice dialogs.
+const ROW_HEIGHT: f32 = 28.0;
+const VISIBLE_ROWS: usize = crate::choice::DEFAULT_CAP;
 
 /// Open the dialog (`frame::as_of`, `mod+t`, the toolbar chip). A no-op
 /// if a modal is already open, like every other `open` here. The state is
@@ -61,6 +65,10 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         clock,
         chrono::Utc::now(),
     ));
+    // Review round 2, finding 5: the `data` version `on_frame_changed`
+    // compares against to decide whether a later notify is a publish
+    // landing while this dialog is open.
+    view.as_of_data_version = frame.versions().data;
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
@@ -99,8 +107,15 @@ fn apply_commit(
 
 /// The [`dialog::ModalKeyHandler`] for this modal. Every arm is a pure
 /// mutation of [`AsOfState`] plus, on a commit, `apply_commit`; the
-/// shared field's text is reconciled by `sync_dialog_text` after this
-/// returns, as for every dialog.
+/// shared field's text is reconciled by the as-of arm `sync_dialog_text`
+/// grew for it (review round 2, finding 1 — this dialog is filter-only
+/// and had none before) on every return from this handler, through the
+/// key-path seam `handle_key_down` already runs unconditionally after
+/// the modal's own key handler (`input.rs`), so a query the field's own
+/// mutations clear (`open_field`) or set (`set_query`) always reaches
+/// the shared `Input` back, and the `enter` arm's own re-feed below is
+/// the no-op compare it was meant to be rather than papering over a
+/// stale field.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -110,32 +125,45 @@ fn handle_key(
     let Some(state) = shell.as_of_dialog.as_mut() else {
         return false;
     };
-    // The field owns every bare key while it is open (§5.2): `route`
-    // decides, a chord answers `None` and is left to the shell.
+    // The field owns every key while it is open (§5.2) but a chord,
+    // which is never the field's own — `route` answers `None` for one
+    // too, but the check here comes FIRST so a chord still falls
+    // through to the shell even while the field is open (review round
+    // 2, finding 2). Anything else non-chord is claimed regardless of
+    // whether `route` recognizes it: an unclaimed key would otherwise
+    // reach the shared `Input` as typing (`input.rs`'s key-path seam),
+    // re-filtering the list and hiding the Custom row out from under
+    // its own open field.
     if state.field().is_some() {
-        if ks.mods == Modifiers::NONE && ks.key == "tab" {
+        if ks.mods.is_chord() {
+            return false;
+        }
+        if ks.key == "tab" {
+            // Bare `tab` AND `shift+tab` leave the field — `route` never
+            // claims "tab" (it is not a field key), so both spellings
+            // land here the same way.
             state.close_field();
             cx.notify();
             return true;
         }
-        let Some(key) = route(&ks.key, ks.mods.shift, ks.mods.is_chord()) else {
-            return false;
-        };
-        match key {
-            FieldKey::Commit => match state.commit() {
+        match route(&ks.key, ks.mods.shift, false) {
+            Some(FieldKey::Commit) => match state.commit() {
                 Ok(commit) => apply_commit(shell, commit, window, cx),
                 Err(_) => cx.notify(),
             },
-            FieldKey::Cancel => {
+            Some(FieldKey::Cancel) => {
                 state.close_field();
                 cx.notify();
             }
-            other => {
+            Some(other) => {
                 if let Some(field) = state.field_mut() {
                     field.apply(other);
                 }
                 cx.notify();
             }
+            // An unrouted, non-chord key belongs to nobody but this
+            // modal — swallowed, not left to fall through.
+            None => {}
         }
         return true;
     }
@@ -157,6 +185,10 @@ fn handle_key(
             }
             "tab" => {
                 state.open_field();
+                shell.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+                    state.painted(),
+                    state.highlighted(),
+                ));
                 cx.notify();
                 return true;
             }
@@ -170,6 +202,10 @@ fn handle_key(
     }
     if let Some(cmd) = listfilter::nav_command(ks) {
         state.nav(cmd);
+        shell.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+            state.painted(),
+            state.highlighted(),
+        ));
         cx.notify();
         return true;
     }
@@ -246,7 +282,9 @@ fn build(
         .id("as-of-rows")
         .w_full()
         .gap_0p5()
+        .max_h(scale::design(VISIBLE_ROWS as f32 * ROW_HEIGHT))
         .overflow_y_scroll()
+        .track_scroll(&shell.as_of_scroll)
         .debug_selector(|| "as-of-rows".to_string());
     if state.painted().is_empty() {
         list = list.child(
@@ -255,7 +293,7 @@ fn build(
                 .py_1()
                 .text_sm()
                 .text_color(muted)
-                .child("nothing matches — escape clears"),
+                .child("nothing matches — edit the filter"),
         );
     }
     let mut last_section: Option<Section> = None;
@@ -300,7 +338,7 @@ fn build(
         if is_custom {
             if let Some(field) = state.field() {
                 let segments = field.segments();
-                let suffix: SharedString = clock.abbreviation(chrono::Utc::now()).into();
+                let suffix: SharedString = clock.abbreviation(state.now()).into();
                 let seg_entity = entity.clone();
                 el = el.child(div().font_family(crate::fonts::MONO).child(
                     geode_widgets::datefield::paint(
@@ -360,6 +398,11 @@ fn build(
                     // field, like `tab`.
                     if state.field().is_none() {
                         state.open_field();
+                        // `open_field` clears the query — the row-click
+                        // seam of `sync_dialog_text`'s five seam classes
+                        // (review round 2, finding 1), same as `tab`'s
+                        // own key-path seam.
+                        dialog::sync_dialog_text(shell, window, cx);
                     }
                     cx.notify();
                     return;

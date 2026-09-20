@@ -556,8 +556,18 @@ pub fn open_shell_dialog_with_key<F>(
 /// each of these handlers is its transition's only tail; `press_verb`
 /// is the audited exception, since it can only arm a `Confirm` and
 /// moves neither mode nor query. A no-op when no modal dialog with a
-/// mode is open; the filter-only dialogs (picker, as-of) keep their own
-/// open-time focus (§16.4). The three `if let` arms below (the settings
+/// mode is open; the picker is the one filter-only dialog that still
+/// keeps its own open-time focus (§16.4) — the as-of dialog USED to as
+/// well, until review round 2's finding 1: its `tab`/`escape`/`enter`
+/// arms mutate `AsOfState::query` directly (`open_field` clears it,
+/// `set_query` re-feeds it), and nothing wrote that back to the shared
+/// `Input`, so the field kept showing stale typed text the model no
+/// longer held — `tab` then `down` then `enter` could commit the row
+/// under the STALE filter rather than the one under the highlight. The
+/// as-of arm below is checked first and returns unconditionally: this
+/// dialog has no `mode`/`listening` to weigh, so its query is always
+/// the truth and the field always follows it, focused, the whole time
+/// the dialog is open. The three `if let` arms below it (the settings
 /// dialog joined on 2026-09-12, spec §18) are mutually exclusive by
 /// `close_modal`'s contract (it clears every dialog state together), so
 /// their order carries no meaning.
@@ -574,6 +584,20 @@ pub(crate) fn sync_dialog_text(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
+    // The as-of dialog checked first and returned from unconditionally:
+    // it has no `DialogMode`/`listening` to route through the `mode`
+    // arms below, its query always lives in the shared field, and it is
+    // always focused while the dialog is open (review round 2, finding
+    // 1 — see this function's own doc comment).
+    if let Some(state) = shell.as_of_dialog.as_ref() {
+        let query = state.query();
+        let input = shell.dialog_input.clone();
+        if input.read(cx).text() != query {
+            input.update(cx, |i, cx| i.set_value(query, window, cx));
+        }
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        return;
+    }
     let (mode, listening, query) = if let Some(state) = shell.keybindings.as_ref() {
         (state.mode, state.listening.is_some(), state.query.as_str())
     } else if let Some(state) = shell.object_dialog.as_ref() {

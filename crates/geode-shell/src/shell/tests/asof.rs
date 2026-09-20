@@ -1,10 +1,10 @@
 //! The as-of selector and the historical indicator (Phase 4a §3.6,
-//! §3.11): the real key-dispatch pipeline through `frame::as_of`
-//! (`mod+t`), the field's live parse preview/error, preset selection, and
-//! `frame::live`/`frame::as_of_undo` — plus the window-wide warning
-//! stripe and the status-bar segment that must paint if and only if the
-//! frame is historical (spec §4.5: nothing on screen may look live when
-//! it is not).
+//! §3.11; rewritten as-of dialog spec 2026-09-20 §5): the real
+//! key-dispatch pipeline through `frame::as_of` (`mod+t`), the ranked
+//! row list and the Custom field, `frame::live`/`frame::as_of_undo` —
+//! plus the window-wide warning stripe and the status-bar segment that
+//! must paint if and only if the frame is historical (spec §4.5:
+//! nothing on screen may look live when it is not).
 //!
 //! `mod+t` is dispatched here as the literal `alt-t` — `test_services()`
 //! builds its keymap with `default_mod()` (spec §3.1: Alt), the same
@@ -233,7 +233,7 @@ fn escape_closes_the_field_first_and_the_dialog_second(cx: &mut gpui::TestAppCon
 }
 
 #[gpui::test]
-fn a_chord_inside_the_open_field_still_reaches_the_shell(cx: &mut gpui::TestAppContext) {
+fn a_chord_inside_the_open_field_is_not_the_fields(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
     vcx.simulate_keystrokes("tab");
     // `ctrl+n` is a nav chord, not the field's: the field stays open and
@@ -250,16 +250,22 @@ fn a_row_click_commits_it(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     vcx.run_until_parked();
+    // The CLICKED row's own instant, not just "some" `At(_)` — proves the
+    // click committed the row it landed on, not merely the highlighted
+    // one at open (minor, review round 2).
+    let mut clicked = state_of(&shell, &vcx);
+    assert!(clicked.set_highlighted(1), "row 1 must exist to click it");
+    let expected = clicked.commit().unwrap();
     let row = vcx.debug_bounds("as-of-row-1").expect("second row painted");
     vcx.simulate_mouse_down(
         row.center(),
         gpui::MouseButton::Left,
         gpui::Modifiers::none(),
     );
-    assert!(matches!(
-        frame.read_with(&vcx, |f, _| f.as_of().clone()),
-        AsOf::At(_)
-    ));
+    let crate::shell::asof_rows::Commit::At(t) = expected else {
+        panic!("row 1 expected to be an At commit")
+    };
+    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::At(t));
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
 }
 
@@ -291,6 +297,198 @@ fn the_footer_swaps_to_the_fields_keys_while_it_is_open(cx: &mut gpui::TestAppCo
     assert!(vcx.debug_bounds("as-of-hint-step").is_some());
     assert!(vcx.debug_bounds("as-of-hint-tab").is_none());
     let _ = shell;
+}
+
+/// Review round 2, finding 1 (Critical): before the fix, `tab` cleared
+/// `AsOfState::query` but left the shared `Input` showing the stale
+/// typed text — nothing wrote it back, since `dialog::sync_dialog_text`
+/// had no as-of arm. `escape` then closed the field without touching
+/// the query either way, so `enter`'s own `set_query(&live)` re-fed the
+/// STALE "eod" text from the field, re-filtering the list back down to
+/// the EOD presets and committing "EOD T-1" regardless of where `down`
+/// had actually moved the highlight. With the fix, `tab` reconciles the
+/// field to empty immediately (the key-path seam every modal's handler
+/// already runs through, `input.rs`), so `down` moves a genuinely
+/// unfiltered list and `enter` commits whatever row is under it.
+#[gpui::test]
+fn tab_then_escape_then_down_then_enter_commits_the_highlighted_row(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_as_of(cx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    vcx.simulate_input("eod");
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "",
+        "tab clears the model's query and the shared field must follow it"
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.simulate_keystrokes("down");
+    let s = state_of(&shell, &vcx);
+    let highlighted = s.highlighted();
+    let expected = s.clone().commit().unwrap();
+    vcx.simulate_keystrokes("enter");
+    let crate::shell::asof_rows::Commit::At(t) = expected else {
+        panic!("row {highlighted} expected to be an At commit")
+    };
+    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::At(t));
+}
+
+/// Review round 2, finding 2 (Important): `route` answers `None` both
+/// for a chord AND for any other key it does not recognize, so a bare
+/// unrecognized key (here, `x`) used to fall through exactly like a
+/// chord does — reaching the shared, still-focused `Input` as typing,
+/// re-filtering the list and hiding the Custom row out from under its
+/// own open field. The fix checks the chord case first and swallows
+/// every other unrouted key instead of leaving it unclaimed.
+#[gpui::test]
+fn a_bare_key_the_field_does_not_own_is_swallowed_while_it_is_open(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_as_of(cx);
+    vcx.simulate_keystrokes("tab");
+    vcx.simulate_keystrokes("x");
+    vcx.run_until_parked();
+    let s = state_of(&shell, &vcx);
+    assert_eq!(
+        s.query(),
+        "",
+        "the key must not have reached the shared field"
+    );
+    assert!(s.field().is_some(), "the field stays open");
+    assert!(
+        vcx.debug_bounds("as-of-custom-seg-2").is_some(),
+        "the Custom row's field is still painted, not hidden by a re-filter"
+    );
+}
+
+/// Review round 2, finding 3 (Important): keyboard navigation past the
+/// visible window must scroll the highlight into view, not just move an
+/// off-screen index. Checked directly on `ScrollHandle::offset()` — a
+/// `list_bounds.intersects(&row_bounds)` check (the palette's own
+/// scroll-follow proof, `palette.rs`'s `arrow_down_past_visible_rows_...`)
+/// is trivially true here on an UNBOUNDED list (every child's bounds sit
+/// inside its own unbounded parent's by construction, scrolled or not),
+/// so it would pass even with no `max_h`/`track_scroll` at all — proven
+/// by temporarily removing both during this fix's own RED pass, which
+/// left that assertion green. The offset is the one signal that can
+/// actually fail: it moves only if the list is both height-capped (so
+/// there is a `max_offset` to move within) and tracked (so
+/// `scroll_to_item` has a handle to act on).
+#[gpui::test]
+fn nav_past_the_visible_rows_scrolls_the_highlight_into_view(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let newest = chrono::Utc::now();
+    frame.update(&mut vcx, |f, _| {
+        for i in 0..20 {
+            f.note_published(Publish {
+                dataset: "risk".into(),
+                batch: "EOD".into(),
+                books: 1,
+                at: newest - chrono::Duration::seconds(i as i64),
+            });
+        }
+    });
+    vcx.simulate_keystrokes("alt-t");
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+    let before = shell.read_with(&vcx, |s, _| s.as_of_scroll.offset());
+
+    // 15 `ctrl-d` (+5 each, clamping at the end — vimnav's own contract
+    // for a multi-step `Move`) lands well past any reasonable visible
+    // window.
+    vcx.simulate_keystrokes(&vec!["ctrl-d"; 15].join(" "));
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+
+    let s = state_of(&shell, &vcx);
+    let last = s.painted().len() - 1;
+    assert_eq!(s.highlighted(), last, "clamped at the bottom of the list");
+
+    let after = shell.read_with(&vcx, |s, _| s.as_of_scroll.offset());
+    assert_ne!(
+        after, before,
+        "the list's own scroll offset must have moved to follow the \
+         highlight past the visible window"
+    );
+
+    let last_selector: &'static str = Box::leak(format!("as-of-row-{last}").into_boxed_str());
+    let list_bounds = vcx.debug_bounds("as-of-rows").expect("list painted");
+    let row_bounds = vcx
+        .debug_bounds(last_selector)
+        .expect("the last row should still be part of the layout tree (no virtualization)");
+    assert!(
+        list_bounds.intersects(&row_bounds),
+        "row {last} {row_bounds:?} should be scrolled into the visible list \
+         viewport {list_bounds:?}, not left below it with only its index \
+         having changed"
+    );
+}
+
+/// Review round 2, finding 5 (ruled in): a publish landing while the
+/// dialog is open must show up in its row list — parity with the old
+/// `cached_presets` (spec §5.1) — without a close/reopen.
+#[gpui::test]
+fn a_publish_while_open_adds_a_new_row(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_as_of(cx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    vcx.run_until_parked();
+    let before = state_of(&shell, &vcx).painted().len();
+
+    frame.update(&mut vcx, |f, cx| {
+        f.note_published(Publish {
+            dataset: "greeks".into(),
+            batch: "INTRADAY".into(),
+            books: 4,
+            at: chrono::Utc::now(),
+        });
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    let after = state_of(&shell, &vcx).painted().len();
+    assert_eq!(
+        after,
+        before + 1,
+        "the new publish must add exactly one row"
+    );
+    let new_row_selector: &'static str =
+        Box::leak(format!("as-of-row-{}", after - 1).into_boxed_str());
+    assert!(
+        vcx.debug_bounds(new_row_selector).is_some(),
+        "the new row must actually paint"
+    );
+}
+
+/// The dialog's own tests deleted `frame::live`/`frame::as_of_undo`'s one
+/// window test along with the free-text grammar it used to type through
+/// (Part 3's rewrite) — these two palette-only actions are otherwise
+/// untouched by this dialog and still need a real key-dispatch proof.
+#[gpui::test]
+fn frame_live_and_as_of_undo_still_dispatch(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_as_of(cx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    vcx.simulate_keystrokes("enter"); // EOD T-1
+    let pinned = frame.read_with(&vcx, |f, _| f.as_of().clone());
+    assert!(matches!(pinned, AsOf::At(_)));
+
+    vcx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("frame::live".to_string()), None, window, cx);
+        });
+    });
+    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::Live);
+
+    vcx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("frame::as_of_undo".to_string()), None, window, cx);
+        });
+    });
+    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), pinned);
 }
 
 /// Toolbar restyle (2026-09-19, option A): the AS OF chip leads the bar
