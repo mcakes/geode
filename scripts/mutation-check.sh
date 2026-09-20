@@ -10268,7 +10268,7 @@ run_mutation "colour: both hue and token is refused" \
   '                    refuse_both(&mut diags, &at, name);
                     continue;' \
   '                    let _ = &at;
-                    Definition::Token(Token::Danger)' \
+                    Base::Token(Token::Danger)' \
   geode-core \
   reads_hue_tone_and_token_and_refuses_both_or_neither
 
@@ -10594,6 +10594,86 @@ run_mutation "blotter: the theme-input memo re-derives on a changed theme" \
   'Some((_have, ..)) if true => {}' \
   geode-blotter \
   the_theme_input_memo_re_derives_only_when_a_theme_colour_moves
+
+# tint_sign (2026-09-20): a positive number moves the hue toward the cool
+# pole, a negative one toward the warm pole — never the other way round.
+run_mutation "tint: positive is cooler, negative warmer" \
+  crates/geode-core/src/colour/mod.rs \
+  '        Sign::Positive => COOL_POLE_DEGREES,
+        Sign::Negative => WARM_POLE_DEGREES,' \
+  '        Sign::Positive => WARM_POLE_DEGREES,
+        Sign::Negative => COOL_POLE_DEGREES,' \
+  geode-core \
+  tint_rotates_positive_toward_the_cool_pole_and_negative_toward_the_warm_pole
+
+# tint_sign: the rotation stops at the pole rather than overshooting it,
+# which is what keeps a colour near a pole from tinting past it.
+run_mutation "tint: the rotation stops at the pole" \
+  crates/geode-core/src/colour/mod.rs \
+  '    let step = TINT_DEGREES.to_radians().min(to_pole.abs());' \
+  '    let step = TINT_DEGREES.to_radians();' \
+  geode-core \
+  tint_stops_at_the_pole_it_is_moving_toward
+
+# tint_sign: a definition without it resolves to the base for every sign.
+run_mutation "tint: an untinted definition ignores the sign" \
+  crates/geode-core/src/colour/mod.rs \
+  '    if !def.tint_sign || sign == Sign::Zero {' \
+  '    if sign == Sign::Zero {' \
+  geode-core \
+  resolve_signed_is_the_base_unless_the_definition_tints_and_the_sign_is_nonzero
+
+# tint_sign: a tinted variant is a generated colour and goes through the
+# readability floor even when its base is an unfloored token.
+run_mutation "tint: a tinted variant is floored" \
+  crates/geode-core/src/colour/mod.rs \
+  '    readable_on(tint(base, sign), tokens.background, tokens.foreground)' \
+  '    tint(base, sign)' \
+  geode-core \
+  a_tinted_token_variant_is_floored_but_the_base_token_is_not
+
+# tint_sign: the key is read beside either base, not only under hue.
+run_mutation "colour: tint_sign is read from the doc" \
+  crates/geode-core/src/colour/mod.rs \
+  '            let tint_sign = match table.get("tint_sign") {' \
+  '            let tint_sign = match None::<&toml::Value> {' \
+  geode-core \
+  reads_tint_sign_beside_a_hue_or_a_token_and_warns_on_a_non_bool
+
+# tint_sign: the dialog writes the key only when ticked — an explicit
+# false is a no-op key the reader defaults anyway.
+run_mutation "colours: tint_sign is written only when ticked" \
+  crates/geode-shell/src/shell/objectdialog/colours.rs \
+  '    if tint_sign_of(draft) {
+        table["tint_sign"] = toml_edit::value(true);
+    }' \
+  '    table["tint_sign"] = toml_edit::value(tint_sign_of(draft));' \
+  geode-shell \
+  tint_sign_is_a_bool_row_written_only_when_true
+
+# tint_sign: the edit header's triad appears with the tick, not always.
+run_mutation "colours: the swatch triad follows tint_sign" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                .when(def.tint_sign, |el| {
+                    el.child(dialog::swatch(
+                        variant(geode_core::colour::Sign::Negative),' \
+  '                .when(false, |el| {
+                    el.child(dialog::swatch(
+                        variant(geode_core::colour::Sign::Negative),' \
+  geode-shell \
+  ticking_tint_by_sign_paints_the_two_variant_swatches
+
+# tint_sign: the blotter's cache resolves each variant under its own sign
+# — a base served as the positive variant would paint no tint at all.
+# The per-cell pick in `render_td` (`for_sign(sign)`) and the header's
+# `.base` are NOT entries: a rendered `text_color` is not observable in a
+# TestAppContext, so a mutation there would survive by construction.
+run_mutation "blotter: the colour cache resolves the sign variants" \
+  crates/geode-blotter/src/colour_cache.rs \
+  '            positive: to_hsla(resolve_signed(def, Sign::Positive, anchors, tokens)),' \
+  '            positive: to_hsla(resolve_signed(def, Sign::Zero, anchors, tokens)),' \
+  geode-blotter \
+  a_tinted_definition_resolves_three_variants_and_an_untinted_one_three_of_the_base
 
 run_mutation "objectdialog: d and r are refused in the column stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \

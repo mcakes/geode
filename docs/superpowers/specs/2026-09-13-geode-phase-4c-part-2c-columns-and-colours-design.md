@@ -1207,3 +1207,73 @@ redundant `refresh_header_layout` the first cut had added. Pinned by
 harness entry `delegate: a presentation edit rebuilds the plan on a
 same-column snapshot`, whose mutation is exactly the old gate; the
 regroup entry is re-anchored on the new line. 746 entries.
+
+### 9.15 Amendment: tint by sign (2026-09-20)
+
+A fourth key on a colour, `tint_sign = true`, valid beside `hue` or
+`token` (a non-bool warns at `colours.<name>.tint_sign` and reads as
+false). A number painted in such a colour shifts its hue by sign —
+positive toward cool, negative toward warm — so a column keeps its
+categorical identity and still hints the sign, which `sign` (bullish/
+bearish) and a plain named colour each give up one half of.
+
+```toml
+[delta]
+hue = 240
+tint_sign = true     # positive cells cooler, negative warmer, zero the base
+
+[pnl]
+token = "chart.3"
+tint_sign = true     # a token tints the same way
+```
+
+**Model.** `Definition` is now `{ base: Base, tint_sign: bool }` with
+`Base::{Hue { degrees, tone }, Token(Token)}` — the tint is orthogonal
+to how the base is defined. `Definition::hue(..)`/`token(..)`/`tinted()`
+are the constructors every site uses; `summary` appends ` · ±sign`.
+
+**Rotation.** `geode_core::colour::tint(rgb, sign)` rotates the
+*resolved* colour's OKLCH hue by `TINT_DEGREES` (20°) toward
+`COOL_POLE_DEGREES` (230°) for `Sign::Positive` or `WARM_POLE_DEGREES`
+(50°) for `Sign::Negative`, along the shorter arc, stopping at the pole
+(so the two variants are always a full step apart, even for a colour
+sitting on a pole), keeping lightness and chroma and re-clipping to
+gamut. It works on the resolved colour rather than the wheel's `degrees`
+precisely so a token tints identically to a hue.
+`resolve_signed(def, sign, anchors, tokens)` is `resolve` plus the tint
+for a non-zero sign when `tint_sign` is set.
+
+**Floor.** §7's rule keeps its reasoning and gains a clause: a base
+token is still never floored, but a tinted variant of either shape is a
+colour this module generated and goes through `readable_on`.
+`every_bundled_theme_keeps_generated_hues_readable` sweeps both variants
+of every hue/tone pair and every token on every bundled theme, no
+exception list.
+
+**Blotter.** `ColourCache` resolves a `Resolved { base, positive,
+negative }` on the miss (three `resolve_signed` calls; an untinted
+definition's three are equal); `cell_colour`/`themed_cell_colour` return
+the triple; `render_td`'s named arm paints `for_sign(cell.sign)` and
+`render_th` paints `base`. The per-cell cost is one field read.
+
+**Dialog.** A fourth row, "Tint by sign" (`FieldKind::Bool`), after
+`token` — it applies to either base, and the existing double-click test
+addresses `token` as `Field(2)`. `to_table` removes all four keys and
+writes `tint_sign = true` only when ticked. While ticked, the edit
+header's swatch is a triad: `objectdialog-swatch-header-negative`, the
+base, `objectdialog-swatch-header-positive`. Help: "Positive numbers
+shift the hue toward cool, negative toward warm — a hint of sign".
+
+**Harness.** `tint: positive is cooler, negative warmer`, `tint: the
+rotation stops at the pole`, `tint: an untinted definition ignores the
+sign`, `tint: a tinted variant is floored`, `colour: tint_sign is read
+from the doc`, `colours: tint_sign is written only when ticked`,
+`colours: the swatch triad follows tint_sign`, `blotter: the colour cache
+resolves the sign variants`. The `colour: both hue and token is refused`
+mutant was re-spelled to `Base::Token`. Deliberately not entries: the
+`for_sign(sign)` pick and the header's `.base` in `render_td`/`render_th`
+— a painted `text_color` is not observable in a `TestAppContext`.
+
+**Display check pending:** the triad in the header, and a tinted column
+in a blotter (no demo `colours.toml` exists; define one in the user
+layer).
