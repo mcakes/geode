@@ -540,8 +540,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let diagnostics_for_drain = diagnostics.clone();
     let catalog_tag_for_drain = catalog_tag.clone();
     // Line-pricer spec §7.2: read once, up front, so the `Published` arm
-    // below can decide without touching `bridge` (moved out of scope by
-    // the time this task runs).
+    // below can decide without touching `bridge` — `attach` only borrows
+    // it (`&Bridge`), and that borrow ends when `attach` returns, well
+    // before the drain task below ever runs, so the `Rc` is cloned here
+    // rather than captured by reference.
     let local_datasets = Rc::clone(&bridge.local_datasets);
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
@@ -789,12 +791,14 @@ mod tests {
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use geode_shell::keymap::build_keymap;
+    use geode_shell::module::recording::{Recorded, RecordingFactory};
     use geode_shell::module::{ModuleFactory, ModuleRoster};
     use geode_shell::session::TileRecords;
     use geode_shell::shell::ShellServices;
     use geode_shell::tiling::{TileId, Workspaces};
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
+    use std::cell::RefCell;
 
     /// Records logged while `f` runs, on this thread only — the same
     /// scoped-subscriber pattern `geode-data`'s own test modules use.
@@ -931,6 +935,55 @@ role = "key"
         }
     }
 
+    /// [`test_shell_services`] with one `RecordingFactory` of kind "rec"
+    /// in the roster (`geode_shell::module::recording`, `test-support`
+    /// feature) — the neighbour the `Price` delivery test below opens
+    /// through `ShellView::open_module` so it has a real, focused,
+    /// non-placeholder tile whose id it can read back and whose log it
+    /// can inspect (the view type behind a roster's `&dyn ModuleFactory`
+    /// is private, so the recording factory's own `log` is the only
+    /// window into what a delivery actually did). No add actions are
+    /// registered for "rec" — `open_module` calls `ShellView::add_tile`
+    /// directly rather than through action dispatch, so nothing here
+    /// needs a keymap binding or a registry entry for the kind.
+    fn test_shell_services_with_rec_roster() -> (ShellServices, Rc<RefCell<Vec<Recorded>>>) {
+        let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
+        let mut registry = ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        let mod_alias = default_mod();
+        let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let (theme, warnings) = theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let recorder = RecordingFactory::new("rec");
+        let log = recorder.log.clone();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(recorder));
+        let services = ShellServices {
+            config,
+            builtin,
+            registry,
+            keymap,
+            mod_alias,
+            workspaces: Workspaces::new(),
+            theme,
+            session_path: None,
+            roster,
+            restored_tiles: TileRecords::new(),
+            restored_frame: None,
+            restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
+            log: None,
+            action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+                geode_shell::diagnostics::ActionTail::new(),
+            )),
+            keymap_diagnostics: Vec::new(),
+            keymap_fragments: Vec::new(),
+            keymap_fragment_diagnostics: Vec::new(),
+        };
+        (services, log)
+    }
+
     fn open_test_window(
         cx: &mut gpui::TestAppContext,
         services: ShellServices,
@@ -999,6 +1052,15 @@ role = "key"
                 .iter()
                 .any(|d| d.message.contains("pricer"))
         );
+        // Review finding, Important 2: this config declares no `local`
+        // dataset, so `DataSetup.local_datasets` must come back empty —
+        // `data_setup_names_every_local_dataset_and_only_those` (below)
+        // is where the non-empty case is pinned.
+        assert!(
+            setup.local_datasets.is_empty(),
+            "{:?}",
+            setup.local_datasets
+        );
 
         let config = config_with_app("[pricing]\nadapter = \"vendor\"\n");
         let setup = data_setup(
@@ -1021,6 +1083,61 @@ role = "key"
             "{}",
             d.message
         );
+    }
+
+    /// Line-pricer spec §7.2 (review finding, Important 2):
+    /// `DataSetup.local_datasets` must name every dataset whose spec is
+    /// `local` — and only those, so a non-local dataset (`risk`, here)
+    /// beside it isn't swept in by accident. `sheets` is the exact
+    /// document-family shape `local_is_read_on_a_document_dataset_and_
+    /// defaults_to_false` in `geode-core/src/schema/mod.rs` already
+    /// proves `SchemaSpec::from_doc` reads `local` correctly for; this
+    /// pins that `data_setup` carries that flag through to the field the
+    /// bridge's local-publish gate actually reads
+    /// (`a_local_publish_does_not_bump_the_frames_data_version_but_a_
+    /// normal_one_does`, below, which hand-picks its own dataset name
+    /// and so would not have caught a `local_datasets` that came back
+    /// empty, wrong, or as every dataset regardless of `local`).
+    #[test]
+    fn data_setup_names_every_local_dataset_and_only_those() {
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                     [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                     [sheets]\n\
+                     family = \"document\"\n\
+                     local = true\n\
+                     key = [\"sheet\"]\n\
+                     axes = [\"line\"]\n\
+                     [sheets.columns.sheet]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                     [sheets.columns.line]\ntype = \"i64\"\nrole = \"axis\"\n\
+                     [sheets.columns.qty]\ntype = \"i64\"\nrole = \"value\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                    .unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let setup = data_setup(
+            &config,
+            dir.path().join("c.duckdb"),
+            AdapterRegistry::default(),
+            pricers,
+        )
+        .unwrap();
+        assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
+        assert_eq!(
+            setup.local_datasets,
+            ["sheets".to_string()].into_iter().collect()
+        );
+        assert!(setup.config.schema.dataset("sheets").unwrap().local);
+        assert!(!setup.config.schema.dataset("risk").unwrap().local);
     }
 
     /// Line-pricer spec §7.2: a `local` dataset's publish must not bump
@@ -1099,14 +1216,54 @@ role = "key"
         assert_eq!(frame.read_with(&vcx, |f, _| f.versions().data), before + 1);
     }
 
-    /// Line-pricer spec §5.4: the bridge's `DataEvent::Price` arm exists
-    /// and routes to `ShellView::deliver` — a `Price` for a tile key
-    /// with no live occupant must be dropped by the router without
-    /// panicking (the router's own behaviour is Task 7's own test); this
-    /// only pins that the bridge arm is wired up at all.
+    /// Line-pricer spec §5.4: the bridge's `DataEvent::Price` arm must
+    /// actually reach the occupant, not merely fail to panic — a
+    /// reverted arm (the Task 6 placeholder `DataEvent::Price(_outcome)
+    /// => {}`) would leave a test that only sends-and-parks green too
+    /// (review finding, Important 1). A `RecordingFactory` tile is the
+    /// route: its `TileContent::deliver` pushes `Recorded::Priced(tile,
+    /// tag)` on a `Delivery::Price` (`crates/geode-shell/src/module.rs`),
+    /// and the factory's `log` is the one window a test outside
+    /// `geode-shell` has onto what a delivery actually did (the view
+    /// type behind a roster's `&dyn ModuleFactory` is private).
     #[gpui::test]
     fn a_price_event_is_delivered_to_the_shell_as_delivery_price(cx: &mut gpui::TestAppContext) {
-        let window = open_test_window(cx, test_shell_services());
+        let (services, log) = test_shell_services_with_rec_roster();
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+
+        // A fresh `Workspaces::new()` has no tiles at all yet (its tree
+        // is empty, not a lone placeholder); `open_module` finds nothing
+        // of kind "rec" and falls through to `add_tile`'s "empty region"
+        // branch, which splits the empty tree and hands the new root
+        // tile straight to the factory — no add action or keymap
+        // binding needed, since this calls the method directly rather
+        // than dispatching. `Workspaces::split_active`'s `next_tile`
+        // counter starts at 0 and is pre-incremented, so the very first
+        // tile a fresh workspace ever creates is deterministically
+        // `TileId(1)` (the same assumption every low-level tiling-tree
+        // test in `geode-shell` already makes); `occupant_kind` — the
+        // one tile accessor this crate can actually reach (`current_
+        // tiles` is `pub(super)`) — confirms it rather than trusting it
+        // blindly.
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| {
+                s.open_module("rec", window, cx);
+            });
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = TileId(1);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
+            Some("rec"),
+            "open_module(\"rec\", ..) must have created a tile at TileId(1)"
+        );
+
         let (handle, _rx) = DataHandle::for_tests();
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
@@ -1132,15 +1289,19 @@ role = "key"
             local_datasets: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
-        let vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         tx.try_send(DataEvent::Price(geode_core::pricing::PriceOutcome {
-            key: QueryKey(999),
-            tag: 1,
+            key: QueryKey(tile.0),
+            tag: 5,
             submitted: std::time::Instant::now(),
             results: Vec::new(),
         }))
         .unwrap();
-        vcx.run_until_parked(); // no panic, nothing to assert beyond arrival
+        vcx.run_until_parked();
+        assert!(
+            log.borrow().contains(&Recorded::Priced(tile, 5)),
+            "the Price delivery must reach the tile's occupant: {:?}",
+            log.borrow()
+        );
     }
 
     /// Finding 1 (fix round 1): every branch of the drain loop must
