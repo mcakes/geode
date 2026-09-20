@@ -232,10 +232,17 @@ impl RangePopup {
 
     /// Apply one key to the active field, re-preparing that field's
     /// segments. Answers whether anything moved.
+    ///
+    /// Only a key that MOVED something counts as an edit (Task 10
+    /// review): `right` on the last segment under `Precision::Date`, or
+    /// `backspace` with nothing typed, change nothing on screen, and a
+    /// trader who pressed one and then reached for a preset digit would
+    /// have found the digit typing itself into the day instead — the
+    /// popup looking exactly as it did when it opened.
     pub(crate) fn apply(&mut self, key: geode_widgets::datefield::FieldKey, tile_id: u64) -> bool {
-        self.edited = true;
         let which = self.active;
         let moved = self.active_field_mut().apply(key);
+        self.edited |= moved;
         self.reprepare(which, tile_id);
         moved
     }
@@ -763,10 +770,16 @@ fn segment_paint(theme: &Theme, live: bool) -> SegmentPaint {
             muted
         },
         rest_fill: None,
+        // The dimmed field's own active segment still wears a fill
+        // (`secondary`), so its text is that fill's own pair —
+        // `secondary_foreground`, a pairing `shell::control::shipped()`
+        // already sweeps on every bundled theme. `muted_foreground` is
+        // the colour of text on the SURFACE and read as low as 1.2:1 over
+        // `secondary` on several themes.
         active_text: if live {
             theme.primary_foreground
         } else {
-            muted
+            theme.secondary_foreground
         },
         active_fill: if live { theme.primary } else { theme.secondary },
         typing_text: if live { theme.accent_foreground } else { muted },

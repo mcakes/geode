@@ -1135,22 +1135,35 @@ impl TimeseriesTile {
     /// `r`: two segmented date fields seeded from the range the model
     /// holds now, with `from` active on its day segment.
     ///
-    /// The seed is the RESOLVED span, so a relative range opens as the
-    /// dates it currently means — and the `to` field shows the
-    /// INCLUSIVE last day, which `resolve`'s half-open end is a second
-    /// past (midnight after it for an absolute range, `now` for a
-    /// relative one). Hence the second back before the date is taken:
-    /// `Range::Absolute`'s own convention, read in reverse.
+    /// A `Relative` range is RESOLVED, so it opens as the dates it
+    /// currently means — and the `to` field shows the INCLUSIVE last
+    /// day, which `resolve`'s half-open end is a second past. Hence the
+    /// second back before the date is taken: `Range::Absolute`'s own
+    /// convention, read in reverse.
+    ///
+    /// An `Absolute` range instead seeds from its STORED dates, as typed
+    /// (ruling, Task 10 review). `resolve` clips its end to the frame's
+    /// as-of — right for what is fetched and queried (ruling 4), wrong
+    /// for a seed: reopening `r` under an as-of inside the stored span
+    /// would show a `to` the trader never typed, and `enter` would then
+    /// write it. Seeding from the stored pair makes the round trip
+    /// lossless under any as-of and across midnight.
     fn open_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.is_some() {
             self.close_popup_with_window(window, cx);
         }
-        let (now, as_of) = self.now_and_as_of(cx);
-        let (start, end) = self.model.range().resolve(now, &as_of);
-        let last = end
-            .checked_sub_signed(chrono::Duration::seconds(1))
-            .unwrap_or(end)
-            .max(start);
+        let (first, last) = match self.model.range() {
+            Range::Absolute { from, to } => (*from, *to),
+            relative => {
+                let (now, as_of) = self.now_and_as_of(cx);
+                let (start, end) = relative.resolve(now, &as_of);
+                let last = end
+                    .checked_sub_signed(chrono::Duration::seconds(1))
+                    .unwrap_or(end)
+                    .max(start);
+                (start.date_naive(), last.date_naive())
+            }
+        };
         let open = |date: chrono::NaiveDate| {
             DateTimeField::open(
                 date.and_hms_opt(0, 0, 0).expect("midnight exists"),
@@ -1158,8 +1171,8 @@ impl TimeseriesTile {
                 Segment::Day,
             )
         };
-        let from = open(start.date_naive());
-        let to = open(last.date_naive());
+        let from = open(first);
+        let to = open(last);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let id = self.id.0;
@@ -1205,6 +1218,11 @@ impl TimeseriesTile {
         if !chord && event.keystroke.key.as_str() == "tab" {
             if let Some(Popup::Range(r)) = &mut self.popup {
                 r.switch();
+                // A standing refusal names one of the two dates; the
+                // keyboard has just moved onto the other. Answered here
+                // for the same reason `apply_range_key` answers it —
+                // every field key clears it.
+                r.error = None;
             }
             cx.notify();
             return true;
@@ -4038,6 +4056,96 @@ mod tests {
     /// arrow means: `timeseries::insert_up` (the `mode == insert`
     /// fragment's `up`) and the listener's own `up`/`down` are the same
     /// `FieldKey::Step`.
+    #[gpui::test]
+    /// Task 10 review: `edited` is what turns the preset digits off, so
+    /// only a keystroke that actually MOVED something may set it — a key
+    /// that did nothing must leave the presets reachable. Two such keys,
+    /// both of which used to disable them:
+    ///
+    /// - `right` on `from`'s day, already the last segment under
+    ///   `Precision::Date` (`DateTimeField::apply` answers `false`), and
+    /// - `tab`, which `RangePopup::switch` has always documented as "a
+    ///   trader who tabbed over to read the other date has typed nothing"
+    ///   — pinned here, since nothing else would notice it starting to
+    ///   count.
+    #[gpui::test]
+    fn a_key_that_moves_nothing_leaves_the_preset_digits_live(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("right");
+        assert_eq!(
+            h.range_active_segment(&vcx),
+            (Which::From, Segment::Day),
+            "`right` on the last segment moves nothing"
+        );
+        vcx.simulate_keystrokes("3");
+        assert!(h.popup_is_none(&vcx));
+        assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M3));
+
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(h.range_active_segment(&vcx).0, Which::To);
+        vcx.simulate_keystrokes("4");
+        assert!(h.popup_is_none(&vcx), "`tab` is not an edit either");
+        assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M6));
+    }
+
+    /// `tab` answers a standing refusal, exactly as every other field key
+    /// does (`apply_range_key`'s own rule): the error names a date, and
+    /// the trader has just moved the keyboard onto the other one.
+    #[gpui::test]
+    fn tab_clears_the_inline_error(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "range", None);
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("0"); // no preset; a day mid-entry
+        vcx.simulate_keystrokes("enter");
+        assert!(h.range_error(&vcx).is_some(), "fixture check: refused");
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(h.range_error(&vcx), None);
+    }
+
+    /// Ruling (Task 10 review): an `Absolute` range seeds the popup from
+    /// its STORED dates, as typed, and only a `Relative` one resolves
+    /// against now/as-of — so reopening `r` under a historical as-of, or
+    /// after the clock has rolled over midnight, is lossless. Seeding
+    /// both through `resolve` used to round-trip an absolute range
+    /// through a half-open end and back.
+    #[gpui::test]
+    fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "range 2026-01-05 2026-02-05").unwrap();
+        h.dispatch(&mut vcx, "range", None);
+        let (from, to) = h.range_dates(&vcx);
+        assert_eq!(
+            (from.to_string(), to.to_string()),
+            ("2026-01-05".to_string(), "2026-02-05".to_string())
+        );
+        h.dispatch(&mut vcx, "cancel", None);
+
+        // The case the ruling is actually about: an as-of INSIDE the
+        // stored span. `Range::resolve` clips its end to the as-of by
+        // design (ruling 4) — which is right for what is fetched and
+        // queried, and wrong for what the popup seeds: a trader who
+        // opened `r` here and pressed `enter` would silently have their
+        // `to` rewritten to the as-of's own day.
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(AsOf::At(
+                "2026-01-20T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            ));
+            cx.notify();
+        });
+        h.dispatch(&mut vcx, "range", None);
+        let (from, to) = h.range_dates(&vcx);
+        assert_eq!(
+            (from.to_string(), to.to_string()),
+            ("2026-01-05".to_string(), "2026-02-05".to_string()),
+            "an absolute range seeds from its stored dates, as-of or not"
+        );
+    }
+
     #[gpui::test]
     fn an_arrow_steps_the_active_segment_through_either_door(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
