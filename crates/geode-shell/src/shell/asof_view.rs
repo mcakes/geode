@@ -133,13 +133,14 @@ fn handle_key(
     };
     // The field owns every key while it is open (§5.2) but a chord,
     // which is never the field's own — `route` answers `None` for one
-    // too, but the check here comes FIRST so a chord still falls
-    // through to the shell even while the field is open (review round
-    // 2, finding 2). Anything else non-chord is claimed regardless of
-    // whether `route` recognizes it: an unclaimed key would otherwise
-    // reach the shared `Input` as typing (`input.rs`'s key-path seam),
-    // re-filtering the list and hiding the Custom row out from under
-    // its own open field.
+    // too, but the check here comes FIRST so a chord is not the
+    // field's even while it is open (review round 2, finding 2); a
+    // modal owns the keyboard, so it goes where every modal chord
+    // goes — never to the matcher. Anything else non-chord is claimed
+    // regardless of whether `route` recognizes it: an unclaimed key
+    // would otherwise reach the shared `Input` as typing (`input.rs`'s
+    // key-path seam), re-filtering the list and hiding the Custom row
+    // out from under its own open field.
     if state.field().is_some() {
         if ks.mods.is_chord() {
             return false;
