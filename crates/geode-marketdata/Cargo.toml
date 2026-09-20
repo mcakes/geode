@@ -13,10 +13,13 @@ bench = false
 # `DataHandle` alone — the one door a module asks for data through (global
 # constraints: never `geode-blotter`, never `geode-diagnostics`) —
 # `gpui`/`gpui-component` for the tile itself, `chrono` for the local-clock
-# header and the staleness reading, `toml` for the session round trip.
+# header and the staleness reading, `toml` for the session round trip,
+# `geode-widgets` for the segmented date field (its core and painter live
+# there since the as-of dialog work, 2026-09-20).
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true
+geode-widgets.workspace = true
 geode-data = { path = "../geode-data" }
 gpui.workspace = true
 gpui-component.workspace = true

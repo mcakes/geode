@@ -1,0 +1,24 @@
+[package]
+name = "geode-widgets"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# Shared widgets: a pure core per widget plus a colour-parameterised gpui
+# painter (as-of dialog spec 2026-09-20 §4). Below the shell on purpose —
+# `geode-shell` and every module depend on this crate, never the reverse —
+# so two hosts paint one widget through one door and cannot drift.
+[dependencies]
+geode-core.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+chrono = "0.4.42"
+
+[dev-dependencies]
+# Test-feature parity (2026-09-19): match the workspace's `geode-*`
+# features so `cargo test -p geode-widgets` shares the workspace graph.
+geode-core = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
