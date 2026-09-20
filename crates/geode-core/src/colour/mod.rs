@@ -9,6 +9,7 @@
 pub mod oklab;
 
 use crate::config::{Diagnostic, MergedDoc, Severity, check_object_name};
+pub use crate::format::Sign;
 use oklab::{Lch, lab_to_lch, srgb_to_oklab, to_srgb_in_gamut};
 use std::collections::BTreeMap;
 use std::f32::consts::{PI, TAU};
@@ -86,26 +87,61 @@ impl Token {
     }
 }
 
+/// How a colour's base is defined: a point on the canonical wheel the
+/// theme's anchors transform, or one of the theme's own tokens.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Definition {
+pub enum Base {
     Hue { degrees: f32, tone: Tone },
     Token(Token),
 }
 
+/// A named colour: its [`Base`] plus whether a signed number painted in
+/// it shifts its hue by sign (`tint_sign`, see [`tint`]). The tint is
+/// orthogonal to how the base is defined — a hue and a token both tint
+/// — which is why it is a field beside the base rather than a variant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Definition {
+    pub base: Base,
+    pub tint_sign: bool,
+}
+
 impl Definition {
-    /// The browse summary: `hue 240`, `hue 210 · light`, `token chart.bullish`.
+    pub fn hue(degrees: f32, tone: Tone) -> Definition {
+        Definition {
+            base: Base::Hue { degrees, tone },
+            tint_sign: false,
+        }
+    }
+    pub fn token(token: Token) -> Definition {
+        Definition {
+            base: Base::Token(token),
+            tint_sign: false,
+        }
+    }
+    /// The same colour with `tint_sign` on.
+    pub fn tinted(mut self) -> Definition {
+        self.tint_sign = true;
+        self
+    }
+
+    /// The browse summary: `hue 240`, `hue 210 · light`, `token chart.bullish`,
+    /// each with ` · ±sign` appended when the colour tints by sign.
     pub fn summary(&self) -> String {
-        match self {
-            Definition::Hue {
+        let mut out = match &self.base {
+            Base::Hue {
                 degrees,
                 tone: Tone::Normal,
             } => format!("hue {}", *degrees as i64),
-            Definition::Hue {
+            Base::Hue {
                 degrees,
                 tone: Tone::Light,
             } => format!("hue {} · light", *degrees as i64),
-            Definition::Token(t) => format!("token {}", t.name()),
+            Base::Token(t) => format!("token {}", t.name()),
+        };
+        if self.tint_sign {
+            out.push_str(" · ±sign");
         }
+        out
     }
 }
 
@@ -175,7 +211,25 @@ impl NamedColours {
             };
             let hue = table.get("hue");
             let token = table.get("token");
-            let definition = match (hue, token) {
+            // Read ahead of the hue/token split: the key is valid beside
+            // either, so neither arm owns it.
+            let tint_sign = match table.get("tint_sign") {
+                None => false,
+                Some(v) => match v.as_bool() {
+                    Some(b) => b,
+                    None => {
+                        diags.push(diag(
+                            Severity::Warning,
+                            at("tint_sign"),
+                            format!(
+                                "colour '{name}': 'tint_sign' must be true or false (got {v}); using false"
+                            ),
+                        ));
+                        false
+                    }
+                },
+            };
+            let base = match (hue, token) {
                 (Some(_), Some(_)) => {
                     refuse_both(&mut diags, &at, name);
                     continue;
@@ -222,7 +276,7 @@ impl NamedColours {
                             Tone::Normal
                         }
                     };
-                    Definition::Hue {
+                    Base::Hue {
                         degrees: (degrees % 360.0) as f32,
                         tone,
                     }
@@ -238,7 +292,7 @@ impl NamedColours {
                         ));
                     }
                     match t.as_str().and_then(Token::parse) {
-                        Some(token) => Definition::Token(token),
+                        Some(token) => Base::Token(token),
                         None => {
                             diags.push(diag(
                                 Severity::Error,
@@ -250,7 +304,8 @@ impl NamedColours {
                     }
                 }
             };
-            out.by_name.insert(name.clone(), definition);
+            out.by_name
+                .insert(name.clone(), Definition { base, tint_sign });
         }
         (out, diags)
     }
@@ -402,14 +457,60 @@ pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
 /// that might land anywhere — the floor exists to guard the generated
 /// case, not to second-guess a theme's own design.
 pub fn resolve(def: &Definition, anchors: &Anchors, tokens: &Tokens) -> Rgb {
-    match def {
-        Definition::Hue { degrees, tone } => readable_on(
+    match &def.base {
+        Base::Hue { degrees, tone } => readable_on(
             interpolate_hue(*degrees, *tone, anchors),
             tokens.background,
             tokens.foreground,
         ),
-        Definition::Token(token) => tokens.get(*token),
+        Base::Token(token) => tokens.get(*token),
     }
+}
+
+/// [`resolve`] for a cell holding a number of `sign`: the base colour,
+/// shifted by [`tint`] when the definition has `tint_sign` and the sign
+/// is not zero. A tinted variant is floored like a generated hue, base
+/// token or not — the floor guards what this module generates, and a
+/// rotated token is no longer the theme author's own colour.
+pub fn resolve_signed(def: &Definition, sign: Sign, anchors: &Anchors, tokens: &Tokens) -> Rgb {
+    let base = resolve(def, anchors, tokens);
+    if !def.tint_sign || sign == Sign::Zero {
+        return base;
+    }
+    readable_on(tint(base, sign), tokens.background, tokens.foreground)
+}
+
+/// How far [`tint`] rotates a hue, in OKLCH degrees: a hint of sign
+/// beside the colour's own identity, not a second colour.
+pub const TINT_DEGREES: f32 = 20.0;
+/// The warm pole of the OKLCH wheel (orange) a negative number moves
+/// toward, and the cool pole (azure) a positive one moves toward — one
+/// axis, 180° apart.
+pub const WARM_POLE_DEGREES: f32 = 50.0;
+pub const COOL_POLE_DEGREES: f32 = 230.0;
+
+/// Rotate `rgb`'s OKLCH hue [`TINT_DEGREES`] toward the cool pole for a
+/// positive sign or the warm pole for a negative one, along the shorter
+/// arc, stopping at the pole; lightness and chroma are kept (re-clipped
+/// to gamut). `Sign::Zero` is `rgb` itself. Sitting exactly on the pole
+/// it moves away from, the shorter arc is a tie and the wrap arithmetic
+/// resolves it toward decreasing hue — deterministic, and both variants
+/// still differ from the base by a full step.
+pub fn tint(rgb: Rgb, sign: Sign) -> Rgb {
+    let pole = match sign {
+        Sign::Zero => return rgb,
+        Sign::Positive => COOL_POLE_DEGREES,
+        Sign::Negative => WARM_POLE_DEGREES,
+    };
+    let lch = lab_to_lch(srgb_to_oklab(rgb));
+    let to_pole = (pole.to_radians() - lch.h + PI).rem_euclid(TAU) - PI; // the shorter arc
+    let step = TINT_DEGREES.to_radians().min(to_pole.abs());
+    let dh = if to_pole < 0.0 { -step } else { step };
+    to_srgb_in_gamut(Lch {
+        l: lch.l,
+        c: lch.c,
+        h: (lch.h + dh).rem_euclid(TAU),
+    })
 }
 
 /// WCAG contrast ratio, `1..=21`.
@@ -504,25 +605,16 @@ mod tests {
         ));
         assert_eq!(
             colours.get("delta"),
-            Some(&Definition::Hue {
-                degrees: 240.0,
-                tone: Tone::Normal
-            })
+            Some(&Definition::hue(240.0, Tone::Normal))
         );
         assert_eq!(
             colours.get("gamma"),
-            Some(&Definition::Hue {
-                degrees: 210.0,
-                tone: Tone::Light
-            })
+            Some(&Definition::hue(210.0, Tone::Light))
         );
-        assert_eq!(colours.get("pnl"), Some(&Definition::Token(Token::Bullish)));
+        assert_eq!(colours.get("pnl"), Some(&Definition::token(Token::Bullish)));
         assert_eq!(
             colours.get("wrap"),
-            Some(&Definition::Hue {
-                degrees: 0.0,
-                tone: Tone::Normal
-            }),
+            Some(&Definition::hue(0.0, Tone::Normal)),
             "360 is 0"
         );
         assert!(colours.get("both").is_none() && colours.get("neither").is_none());
@@ -551,7 +643,7 @@ mod tests {
         );
         assert_eq!(
             colours.get("tone"),
-            Some(&Definition::Token(Token::Danger)),
+            Some(&Definition::token(Token::Danger)),
             "tone beside token is ignored with a warning"
         );
         let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
@@ -619,22 +711,15 @@ mod tests {
     fn resolve_uses_the_token_field_and_the_tone_anchors() {
         let (a, t) = (anchors(), tokens());
         assert_eq!(
-            resolve(&Definition::Token(Token::Bearish), &a, &t),
+            resolve(&Definition::token(Token::Bearish), &a, &t),
             t.bearish
         );
         assert_eq!(
-            resolve(&Definition::Token(Token::Chart(3)), &a, &t),
+            resolve(&Definition::token(Token::Chart(3)), &a, &t),
             t.chart[2]
         );
         assert_eq!(
-            resolve(
-                &Definition::Hue {
-                    degrees: 120.0,
-                    tone: Tone::Light
-                },
-                &a,
-                &t
-            ),
+            resolve(&Definition::hue(120.0, Tone::Light), &a, &t),
             a.light[2]
         );
     }
@@ -756,28 +841,14 @@ mod tests {
 
         // Already readable: resolve is the anchor itself, exactly.
         assert_eq!(
-            resolve(
-                &Definition::Hue {
-                    degrees: 0.0,
-                    tone: Tone::Normal
-                },
-                &a,
-                &t
-            ),
+            resolve(&Definition::hue(0.0, Tone::Normal), &a, &t),
             readable_anchor
         );
 
         // Not readable: resolve clears the floor and differs only in
         // lightness — hue and chroma (within the gamut clip's own
         // tolerance) are kept, unlike the raw anchor.
-        let floored = resolve(
-            &Definition::Hue {
-                degrees: 60.0,
-                tone: Tone::Normal,
-            },
-            &a,
-            &t,
-        );
+        let floored = resolve(&Definition::hue(60.0, Tone::Normal), &a, &t);
         assert_ne!(floored, faint_anchor);
         assert!(contrast_ratio(floored, background) >= READABLE_RATIO);
         let orig = lab_to_lch(srgb_to_oklab(faint_anchor));
@@ -800,16 +871,186 @@ mod tests {
         }
         assert_eq!(Token::parse("chart.6"), None);
         assert_eq!(
-            Definition::Hue {
-                degrees: 210.0,
-                tone: Tone::Light
-            }
-            .summary(),
+            Definition::hue(210.0, Tone::Light).summary(),
             "hue 210 · light"
         );
         assert_eq!(
-            Definition::Token(Token::Bullish).summary(),
+            Definition::token(Token::Bullish).summary(),
             "token chart.bullish"
         );
+        assert_eq!(
+            Definition::hue(210.0, Tone::Light).tinted().summary(),
+            "hue 210 · light · ±sign"
+        );
+        assert_eq!(
+            Definition::token(Token::Chart(3)).tinted().summary(),
+            "token chart.3 · ±sign"
+        );
+    }
+
+    #[test]
+    fn reads_tint_sign_beside_a_hue_or_a_token_and_warns_on_a_non_bool() {
+        let (colours, diags) = NamedColours::from_doc(&doc(
+            "[delta]\nhue = 240\ntint_sign = true\n[pnl]\ntoken = \"chart.3\"\ntint_sign = true\n\
+             [off]\nhue = 10\ntint_sign = false\n[bad]\nhue = 20\ntint_sign = \"yes\"\n",
+        ));
+        assert_eq!(
+            colours.get("delta"),
+            Some(&Definition::hue(240.0, Tone::Normal).tinted())
+        );
+        assert_eq!(
+            colours.get("pnl"),
+            Some(&Definition::token(Token::Chart(3)).tinted()),
+            "a token tints too"
+        );
+        assert_eq!(
+            colours.get("off"),
+            Some(&Definition::hue(10.0, Tone::Normal))
+        );
+        assert_eq!(
+            colours.get("bad"),
+            Some(&Definition::hue(20.0, Tone::Normal)),
+            "a non-bool is a warning and off, never a dropped colour"
+        );
+        let warning = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("colours.bad.tint_sign"))
+            .expect("a diagnostic at the key");
+        assert_eq!(warning.severity, crate::config::Severity::Warning);
+    }
+
+    /// An in-gamut colour at OKLCH hue `degrees`, moderate chroma.
+    fn at_hue(degrees: f32) -> Rgb {
+        oklab::oklab_to_srgb(oklab::lch_to_lab(Lch {
+            l: 0.6,
+            c: 0.1,
+            h: degrees.to_radians(),
+        }))
+    }
+    fn hue_of(rgb: Rgb) -> f32 {
+        lab_to_lch(srgb_to_oklab(rgb))
+            .h
+            .to_degrees()
+            .rem_euclid(360.0)
+    }
+
+    #[test]
+    fn tint_rotates_positive_toward_the_cool_pole_and_negative_toward_the_warm_pole() {
+        // Green (142°): the cool pole (230°) is anticlockwise of it, the
+        // warm pole (50°) clockwise — so positive raises the hue and
+        // negative lowers it, each by exactly TINT_DEGREES.
+        let green = at_hue(142.0);
+        let positive = tint(green, Sign::Positive);
+        let negative = tint(green, Sign::Negative);
+        assert!(
+            (hue_of(positive) - (142.0 + TINT_DEGREES)).abs() < 0.5,
+            "cooler: {}",
+            hue_of(positive)
+        );
+        assert!(
+            (hue_of(negative) - (142.0 - TINT_DEGREES)).abs() < 0.5,
+            "warmer: {}",
+            hue_of(negative)
+        );
+        assert_eq!(tint(green, Sign::Zero), green, "zero is the base itself");
+        // Red (29°): the cool pole is now reached the OTHER way round the
+        // wheel (29 → 9 is the shorter arc to 230), and warm is upward.
+        let red = at_hue(29.0);
+        assert!(
+            (hue_of(tint(red, Sign::Positive)) - (29.0 - TINT_DEGREES)).abs() < 0.5,
+            "cooler from red goes down, magenta-ward: {}",
+            hue_of(tint(red, Sign::Positive))
+        );
+        assert!(
+            (hue_of(tint(red, Sign::Negative)) - (29.0 + TINT_DEGREES)).abs() < 0.5,
+            "warmer from red goes up toward orange: {}",
+            hue_of(tint(red, Sign::Negative))
+        );
+        // Lightness and chroma are kept, not traded for the rotation.
+        let (base, got) = (
+            lab_to_lch(srgb_to_oklab(green)),
+            lab_to_lch(srgb_to_oklab(positive)),
+        );
+        assert!((base.l - got.l).abs() < 0.01, "{base:?} vs {got:?}");
+        assert!((base.c - got.c).abs() < 0.01, "{base:?} vs {got:?}");
+    }
+
+    #[test]
+    fn tint_stops_at_the_pole_it_is_moving_toward() {
+        // 220° is 10° short of the cool pole: positive lands ON the pole
+        // (not 10° past it), negative moves the full step away.
+        let azure = at_hue(220.0);
+        assert!(
+            (hue_of(tint(azure, Sign::Positive)) - COOL_POLE_DEGREES).abs() < 0.5,
+            "{}",
+            hue_of(tint(azure, Sign::Positive))
+        );
+        assert!(
+            (hue_of(tint(azure, Sign::Negative)) - (220.0 - TINT_DEGREES)).abs() < 0.5,
+            "{}",
+            hue_of(tint(azure, Sign::Negative))
+        );
+        // Sitting exactly on the warm pole, negative is the base itself
+        // and positive moves the full step away.
+        let orange = at_hue(WARM_POLE_DEGREES);
+        assert!((hue_of(tint(orange, Sign::Negative)) - WARM_POLE_DEGREES).abs() < 0.5);
+        assert!(
+            (hue_of(tint(orange, Sign::Positive)) - WARM_POLE_DEGREES).abs() > TINT_DEGREES - 0.5
+        );
+    }
+
+    #[test]
+    fn resolve_signed_is_the_base_unless_the_definition_tints_and_the_sign_is_nonzero() {
+        let (a, mut t) = (anchors(), tokens());
+        t.chart[2] = at_hue(142.0);
+        let plain = Definition::token(Token::Chart(3));
+        for sign in [Sign::Negative, Sign::Zero, Sign::Positive] {
+            assert_eq!(
+                resolve_signed(&plain, sign, &a, &t),
+                resolve(&plain, &a, &t),
+                "{sign:?}: an untinted definition ignores the sign"
+            );
+        }
+        let tinted = plain.clone().tinted();
+        assert_eq!(
+            resolve_signed(&tinted, Sign::Zero, &a, &t),
+            resolve(&tinted, &a, &t),
+            "zero is the base"
+        );
+        let positive = resolve_signed(&tinted, Sign::Positive, &a, &t);
+        let negative = resolve_signed(&tinted, Sign::Negative, &a, &t);
+        assert_eq!(positive, tint(t.chart[2], Sign::Positive));
+        assert_eq!(negative, tint(t.chart[2], Sign::Negative));
+        assert_ne!(positive, negative);
+    }
+
+    /// A base token is the theme author's own colour and is never
+    /// floored; its tinted variants are generated here, and are.
+    #[test]
+    fn a_tinted_token_variant_is_floored_but_the_base_token_is_not() {
+        let (a, mut t) = (anchors(), tokens());
+        t.background = grey(0.95);
+        t.foreground = grey(0.05);
+        // Faint on the light background: unreadable as the author left it.
+        let faint = Rgb {
+            r: 0.92,
+            g: 0.88,
+            b: 0.7,
+        };
+        assert!(contrast_ratio(faint, t.background) < READABLE_RATIO);
+        t.chart[0] = faint;
+        let def = Definition::token(Token::Chart(1)).tinted();
+        assert_eq!(
+            resolve_signed(&def, Sign::Zero, &a, &t),
+            faint,
+            "the base token is untouched"
+        );
+        for sign in [Sign::Negative, Sign::Positive] {
+            let got = resolve_signed(&def, sign, &a, &t);
+            assert!(
+                contrast_ratio(got, t.background) >= READABLE_RATIO,
+                "{sign:?}: {got:?}"
+            );
+        }
     }
 }
