@@ -12293,12 +12293,14 @@ run_mutation "mdattr: the strip clears the table selection" \
                 let d = t.delegate_mut();
                 d.cursor = None;
                 d.editor = editor;
+                d.choice = choice;
                 t.clear_selection(cx);
             }),' \
   '            Cursor::Attr(_) => self.table.update(cx, |t, cx| {
                 let d = t.delegate_mut();
                 d.cursor = None;
                 d.editor = editor;
+                d.choice = choice;
             }),' \
   geode-marketdata k_from_the_top_row_enters_the_strip_and_i_edits_the_attribute
 
@@ -12424,14 +12426,10 @@ run_mutation "mdpark: the menu's load row stays live on a dirty draft" \
 # (`render`'s `focused(cx).is_none()`) never fires.
 run_mutation "mdpicker: closing the picker blurs before dropping" \
   crates/geode-marketdata/src/tile.rs \
-  '        if let Some(Popup::Picker(p)) = &self.popup
-            && p.input.read(cx).focus_handle(cx).is_focused(window)
-        {
+  '        if own_field_focused {
             window.blur(cx);
         }' \
-  '        if let Some(Popup::Picker(p)) = &self.popup
-            && p.input.read(cx).focus_handle(cx).is_focused(window)
-        {
+  '        if own_field_focused {
         }' \
   geode-marketdata escape_closes_the_picker_and_gives_focus_up
 
@@ -12443,14 +12441,16 @@ run_mutation "mdpicker: closing the picker blurs before dropping" \
 # command line, and the trader's find dies after one character.
 run_mutation "mdmenu: closing an orphaned picker never blurs a foreign field" \
   crates/geode-marketdata/src/tile.rs \
-  '        if let Some(Popup::Picker(p)) = &self.popup
-            && p.input.read(cx).focus_handle(cx).is_focused(window)
-        {
-            window.blur(cx);
-        }' \
-  '        if matches!(self.popup, Some(Popup::Picker(_))) {
-            window.blur(cx);
-        }' \
+  '            Some(Popup::Picker(p)) => p.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Choice(c)) => c.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Menu(_)) | None => false,
+        };
+        if own_field_focused {' \
+  '            Some(Popup::Picker(_)) => true,
+            Some(Popup::Choice(c)) => c.input.read(cx).focus_handle(cx).is_focused(window),
+            Some(Popup::Menu(_)) | None => false,
+        };
+        if own_field_focused {' \
   geode-marketdata a_find_keystroke_with_an_orphaned_picker_keeps_the_foreign_focus
 
 # Review fix round 1, CRITICAL's harness half (the finding that the
@@ -13553,6 +13553,100 @@ run_mutation "tile: a commit patches the model in place" \
   '            t.delegate_mut().model = Rc::new(MatrixModel::default());' \
   '            let _ = t.delegate_mut();' \
   geode-marketdata a_cell_commit_patches_the_model_in_place
+
+# Dividend spec §4.4 (Task 5): `space`/`shift+space` step a choice cell
+# through its options, wrapping. Mutated to never advance, every step
+# re-writes the option already painted — the draft is dirtied with the
+# same value and the cell never reads `paid`.
+run_mutation "tile: space steps a choice cell" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Some(i) => (i as isize + delta).rem_euclid(len),' \
+  '            Some(i) => i as isize,' \
+  geode-marketdata space_steps_a_choice_cell_and_refuses_elsewhere
+
+# A NULL choice cell has no current option: a step back lands on the
+# LAST option. Mutated to land on the first either way, `shift+space`
+# on a hole reads `estimated` where the trader asked for the end of the
+# vocabulary.
+run_mutation "tile: a step back on a null choice cell lands on the last option" \
+  crates/geode-marketdata/src/tile.rs \
+  '            None if delta > 0 => 0,
+            None => len - 1,' \
+  '            None => 0,' \
+  geode-marketdata a_step_on_a_null_choice_cell_lands_on_the_first_or_last_option
+
+# `enter` in the choice popup writes the LIT option. Mutated to always
+# pick option 0, typing `can` then `enter` commits `estimated` — the
+# rank ran, the highlight moved, and the wrong option was written.
+run_mutation "tile: enter in the choice popup picks the lit option" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let Some(i) = c.list.pick() else {
+            self.notice = Some("no option matches".into());
+            return true;
+        };
+        let option = c.list.options()[i].clone();' \
+  '        let Some(_i) = c.list.pick() else {
+            self.notice = Some("no option matches".into());
+            return true;
+        };
+        let option = c.list.options()[0].clone();' \
+  geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
+
+# `commit_choice` re-ranks from the field's LIVE text before picking
+# (`set_value` emits no `Change`). Mutated to trust the last ranking, a
+# field seeded with `zzz` still picks `declared` — the highlight of a
+# rank that was never run against what the field holds.
+run_mutation "tile: the choice popup re-ranks from the live text at commit" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let query = c.input.read(cx).value().to_string();
+        if c.list.set_query(&query) {
+            c.prepare();
+        }
+        let Some(i) = c.list.pick() else {' \
+  '        let Some(i) = c.list.pick() else {' \
+  geode-marketdata the_choice_popup_ranks_from_the_live_text_and_escape_writes_nothing
+
+# A keystroke in the popup's field re-mirrors the delegate's paint on
+# the same keystroke. Mutated to rank without re-mirroring, the tile's
+# list narrows to `cancelled` while the delegate keeps painting the
+# whole vocabulary under the cell.
+run_mutation "tile: typing in the choice popup re-mirrors the delegate" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    c.prepare();
+                    this.sync_editor(cx);
+                }
+                cx.notify();' \
+  '                }
+                cx.notify();' \
+  geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
+
+# A close from the popup's own mouse door (`on_mouse_down_out`) ends in
+# no `dispatch` tail, so `close_popup_with_window` re-mirrors itself.
+# Mutated not to, the delegate keeps painting the popup under the cell
+# after a click elsewhere closed it.
+run_mutation "tile: closing the choice popup re-mirrors the delegate" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if was_choice {
+            self.sync_editor(cx);
+        }' \
+  '        if was_choice {
+        }' \
+  geode-marketdata the_choice_popup_hangs_under_its_cell_and_a_row_click_picks
+
+# `i` on a `Choice` cell opens the popup, never the text input. Mutated
+# to fall through to the text editor, `edit` on `status` opens an
+# `Input` seeded with `declared` and no popup at all.
+run_mutation "tile: i on a choice cell opens the popup" \
+  crates/geode-marketdata/src/tile.rs \
+  '                if let Some(CellKind::Choice(options)) = self.model.kind_of(col) {
+                    self.open_choice(cell, labels, &text, options, window, cx);
+                    return;
+                }' \
+  '                if let Some(CellKind::Choice(options)) = None::<&CellKind> {
+                    self.open_choice(cell, labels, &text, options, window, cx);
+                    return;
+                }' \
+  geode-marketdata i_on_a_choice_cell_opens_a_typeahead_and_enter_picks
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
