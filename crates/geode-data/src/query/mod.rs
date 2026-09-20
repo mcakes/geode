@@ -34,3 +34,6 @@ pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, Resul
 pub mod catalog;
 
 pub use catalog::build_catalog;
+pub mod series;
+
+pub use series::{SeriesPlan, Statement, compile_series};
