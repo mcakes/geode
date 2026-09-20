@@ -67,10 +67,10 @@ impl ShellView {
     /// subscription and requery on `set_visible(true)`. The app bridge
     /// calls this.
     pub fn deliver(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
-        // Matched on the VARIANT, not on `key()`: a new key-less variant
-        // added later falls into the `keyed` arm, whose `key()` answers
-        // `None`, and is silently DROPPED. Give such a variant its own
-        // arm here.
+        // Matched on the VARIANT, not on `key()`, and with every keyed
+        // variant named rather than a wildcard: a new variant — keyed
+        // or not — fails to compile here until it is given an arm, the
+        // same rule every occupant's `deliver` follows.
         match delivery {
             Delivery::SeriesFetched {
                 source,
@@ -96,7 +96,9 @@ impl ShellView {
                     }
                 }
             }
-            keyed => {
+            // Every keyed variant, named: a new variant fails to compile
+            // here rather than falling into a wildcard and being dropped.
+            keyed @ (Delivery::Query(_) | Delivery::Series(_)) => {
                 if let Some(key) = keyed.key()
                     && let Some(o) = self.occupants.get(&TileId(key.0))
                 {

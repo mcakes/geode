@@ -64,7 +64,8 @@ pub enum Delivery {
 impl Delivery {
     /// The tile id (as a bare `QueryKey`) this delivery is addressed to,
     /// or `None` for one addressed to every visible tile.
-    /// `ShellView::deliver` routes on this alone, never on the variant.
+    /// `ShellView::deliver` matches the variant first — the key-less
+    /// `SeriesFetched` is broadcast — and routes the keyed ones on this.
     pub fn key(&self) -> Option<QueryKey> {
         match self {
             Delivery::Query(outcome) => Some(outcome.key),
