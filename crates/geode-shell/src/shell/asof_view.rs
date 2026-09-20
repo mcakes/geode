@@ -143,7 +143,8 @@ pub fn resolve_input(text: &str, now: DateTime<Utc>) -> Result<AsOf, String> {
     if trimmed.eq_ignore_ascii_case("live") {
         return Ok(AsOf::Live);
     }
-    parse_as_of(trimmed, now).map(AsOf::At)
+    // Part 2 interim: Task 6 threads the real clock
+    parse_as_of(trimmed, now, &geode_core::clock::Clock::utc()).map(AsOf::At)
 }
 
 /// The `InputEvent::Change` handler's pure half (shared dialog-input
