@@ -9500,6 +9500,19 @@ run_mutation "dividend: write refuses an unknown status" \
   '    if let Some(bad) = statuses.iter().find(|_s| false) {' \
   geode-documents write_refuses_an_unknown_status
 
+# demo dividend: an index underlying (SPX/NDX/RUT) always forces two or
+# three same-ex-date pairs into its schedule (Task 10 brief) — the id
+# axis's own reason to exist, since a schedule with no repeated ex date
+# never exercises picking one row of several sharing a key. Forcing the
+# pair count to zero leaves the row count untouched (only the shape a
+# trader would actually see collapses), so only the same-day-pairs
+# assertion can catch it.
+run_mutation "demo dividend: an index schedule carries same-day pairs" \
+  crates/geode-demo-data/src/documents.rs \
+  '            let pairs = rng.random_range(2..=3);' \
+  '            let pairs = 0;' \
+  geode-demo-data an_index_schedule_has_same_day_pairs
+
 # ---- sources.toml grows an adapter (market-data-documents plan, Task 5) ----
 
 # A subscribed source (`adapter != "csv_dir"`) with no `topics` is

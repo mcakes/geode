@@ -1,13 +1,29 @@
-//! Synthetic market-data documents (market-data-documents plan, Task 10).
+//! Synthetic market-data documents (market-data-documents plan, Task 10;
+//! `dividend` added by the dividend-schedule plan, Task 10).
 //! `geode-demo-data` depends on `geode-core` alone here — it produces
 //! [`geode_core::document::DocumentRows`] and never writes XML; turning
 //! those rows into wire bytes is `geode-documents`' job
-//! (`geode_documents::CviKind::write`), called from `geode-app`'s demo
-//! bus, not from here.
+//! (`geode_documents::CviKind::write`/`DividendKind::write`), called from
+//! `geode-app`'s demo bus, not from here.
+
+/// FNV-1a: a small, stable (not `HashMap`'s randomised default) string
+/// hash, shared by both generators below to seed a key's own RNG and, in
+/// `cvi`, to spread `base_spot_ref`'s "other" branch — nothing here
+/// needs cryptographic strength, only that the same key always hashes
+/// the same way across processes, which `RandomState` does not promise.
+fn fnv1a(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
 
 /// The CVI document kind (spec §6.3): a seeded generator over a fixed
 /// node ladder and eight listed monthly expiries.
 pub mod cvi {
+    use super::fnv1a;
     use chrono::{Datelike, NaiveDate};
     use geode_core::document::{Column, DocumentRows, Value};
     use rand::rngs::StdRng;
@@ -58,20 +74,6 @@ pub mod cvi {
             "RUT" => 2300.0,
             other => 1000.0 + (fnv1a(other) % 5_000) as f64,
         }
-    }
-
-    /// FNV-1a: a small, stable (not `HashMap`'s randomised default)
-    /// string hash, used only to seed a key's own RNG and to spread
-    /// `base_spot_ref`'s "other" branch — nothing here needs
-    /// cryptographic strength, only that the same key always hashes the
-    /// same way across processes, which `RandomState` does not promise.
-    fn fnv1a(s: &str) -> u64 {
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for b in s.bytes() {
-            hash ^= u64::from(b);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        hash
     }
 
     /// The smile/skew a key's very first document starts from: a
@@ -521,6 +523,512 @@ pub mod cvi {
                 "September's own third Friday (the 18th) is already behind the \
                  anchor, so the ladder must open on October's"
             );
+        }
+    }
+}
+
+/// The dividend-schedule document kind (dividend-schedule plan, spec
+/// §6.3): a seeded generator producing one schedule per underlying,
+/// walked and occasionally extended on every subsequent call so the
+/// panel's rebase-by-label path (the design spec's §5.1) has real
+/// mismatches to rebase against, not merely a reshuffled copy of the
+/// same rows.
+pub mod dividend {
+    use super::fnv1a;
+    use chrono::{Days, NaiveDate};
+    use geode_core::document::{Column, DocumentRows, Value};
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use std::collections::HashMap;
+
+    /// The dividend status vocabulary (design spec §6.1), copied here
+    /// verbatim rather than imported: `geode-demo-data` must not depend
+    /// on `geode-documents` (workspace layering rule), so this crate
+    /// keeps its own copy of the four words. A `geode-app` test (Task
+    /// 11) asserts this array equals `geode_documents::DividendKind::
+    /// STATUSES` so the two cannot drift apart unnoticed — nothing here
+    /// needs to know that; this is simply where the demo side of the
+    /// truth lives.
+    pub const STATUSES: [&str; 4] = ["estimated", "declared", "paid", "cancelled"];
+
+    /// The three index underlyings that get a 30–40-row schedule with a
+    /// couple of same-ex-date pairs (Task 10 brief); every other name
+    /// gets a plain 8–12-row quarterly schedule.
+    fn is_index(key: &str) -> bool {
+        matches!(key, "SPX" | "NDX" | "RUT")
+    }
+
+    /// The largest a single walk step ever moves one row's `amount`
+    /// between two successive republishes for the same key, and the
+    /// smallest — mirrors CVI's `MAX_WALK_STEP`/`MIN_WALK_STEP` pair, at
+    /// a scale that suits a per-share cash amount rather than a vol
+    /// point. `MIN_AMOUNT` is the floor an amount is clamped to rather
+    /// than ever crossing into zero or negative (Task 10 brief).
+    const MAX_WALK_STEP: f64 = 0.05;
+    const MIN_WALK_STEP: f64 = 0.001;
+    const MIN_AMOUNT: f64 = 0.01;
+
+    /// A row is a candidate for the one-per-republish promotion only
+    /// while its `ex_date` is this close to `today` — the "near" half of
+    /// the brief's "past → paid, near → declared, far → estimated" rule.
+    const NEAR_DAYS: i64 = 30;
+
+    /// Every fifth republish appends one new row to the schedule (Task
+    /// 10 brief) — the upstream-insert-under-a-draft case the design
+    /// spec's §5.1 wants exercised for real.
+    const APPEND_EVERY: u32 = 5;
+
+    /// One in twenty rows is cancelled, drawn once at creation.
+    const CANCEL_CHANCE: f64 = 0.05;
+
+    /// One dividend row's fixed identity (`ordinal`, its three dates)
+    /// and its slowly-drifting state (`amount`, `status`) — a
+    /// republish either leaves a row untouched or nudges it by one small
+    /// step; nothing here is ever regenerated, so an id and its dates
+    /// are stable for the life of the generator.
+    struct Row {
+        /// This row's position in creation order for its key — the
+        /// `<n>` half of its id (`D<hash>-<n>`), assigned once and never
+        /// reused: an append after a schedule already has N rows always
+        /// gets ordinal N, regardless of the schedule's ex-date order.
+        ordinal: usize,
+        ex_date: NaiveDate,
+        announced_date: NaiveDate,
+        pay_date: NaiveDate,
+        amount: f64,
+        status: String,
+        /// Drawn once at creation: a cancelled row's status never
+        /// changes again, promotion included, however close its
+        /// `ex_date` sits to `today`.
+        cancelled: bool,
+    }
+
+    /// One seeded walk step of at most `MAX_WALK_STEP`, floored at
+    /// `MIN_AMOUNT` rather than reflected — the same clamp-not-reflect
+    /// choice `cvi::walk_within` makes, and for the same reason: a demo
+    /// amount sitting at its floor for a publish or two is what a real
+    /// feed does too.
+    fn walk_amount(rng: &mut StdRng, amount: f64) -> f64 {
+        let magnitude = rng.random_range(MIN_WALK_STEP..MAX_WALK_STEP);
+        let sign: f64 = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+        (amount + magnitude * sign).max(MIN_AMOUNT)
+    }
+
+    /// A freshly drawn row for `ex_date`: `announced_date` 30–60 days
+    /// before it, `pay_date` 14–28 days after it (Task 10 brief), an
+    /// amount in a plausible per-share range, a one-in-twenty chance of
+    /// being cancelled outright, and otherwise `paid` if `ex_date` has
+    /// already passed `today` or `estimated` if it has not — the
+    /// "near → declared" half of the brief's status rule is not applied
+    /// here; it is what `republish`'s promotion step exists to do; a row
+    /// created near-term still starts life as a still-being-firmed-up
+    /// `estimated`, the same as any other future row.
+    fn new_row(rng: &mut StdRng, ordinal: usize, today: NaiveDate, ex_date: NaiveDate) -> Row {
+        let announced_date = ex_date - Days::new(rng.random_range(30..=60));
+        let pay_date = ex_date + Days::new(rng.random_range(14..=28));
+        let amount = rng.random_range(0.15..=2.50);
+        let cancelled = rng.random_bool(CANCEL_CHANCE);
+        let status = if cancelled {
+            "cancelled"
+        } else if ex_date < today {
+            "paid"
+        } else {
+            "estimated"
+        }
+        .to_string();
+        Row {
+            ordinal,
+            ex_date,
+            announced_date,
+            pay_date,
+            amount,
+            status,
+            cancelled,
+        }
+    }
+
+    /// `count` ex dates roughly `step_days` apart, starting a little
+    /// before `today` so the schedule carries a few already-paid rows
+    /// alongside its future ones, each with a few days of jitter so two
+    /// schedules of the same shape never land on the exact same grid.
+    fn spaced_dates(
+        rng: &mut StdRng,
+        today: NaiveDate,
+        count: usize,
+        step_days: f64,
+    ) -> Vec<NaiveDate> {
+        let lookback: i64 = rng.random_range(0..=(step_days as i64).max(1));
+        let mut date = today - Days::new(lookback as u64);
+        let mut dates = Vec::with_capacity(count);
+        for _ in 0..count {
+            let jitter: i64 = rng.random_range(-3..=3);
+            let jittered = if jitter >= 0 {
+                date + Days::new(jitter as u64)
+            } else {
+                date - Days::new((-jitter) as u64)
+            };
+            dates.push(jittered);
+            let step: i64 = (step_days as i64 + rng.random_range(-5..=5)).max(1);
+            date = date + Days::new(step as u64);
+        }
+        dates
+    }
+
+    /// `count` distinct indices in `0..bound`, drawn by rejection
+    /// sampling and kept in the order they were drawn — never a
+    /// `HashSet`'s, which is not a deterministic function of its
+    /// content: `RandomState::new()` perturbs its hasher on every call
+    /// (a DoS mitigation, not a documented guarantee), so two
+    /// separately-constructed `HashSet`s holding the exact same values
+    /// can iterate in different orders even in the same thread. That
+    /// bit two identically-seeded generators here — `same_seed_
+    /// same_documents`'s own failure before this helper existed —
+    /// because which base date a duplicate landed on, and so which row
+    /// got which ordinal, depended on iteration order rather than only
+    /// on the rng draws.
+    fn distinct_indices(rng: &mut StdRng, count: usize, bound: usize) -> Vec<usize> {
+        let mut chosen = Vec::with_capacity(count);
+        while chosen.len() < count {
+            let candidate = rng.random_range(0..bound);
+            if !chosen.contains(&candidate) {
+                chosen.push(candidate);
+            }
+        }
+        chosen
+    }
+
+    /// A fresh schedule for a key that has never been seen before: the
+    /// index shape (30–40 rows, two or three forced same-ex-date pairs)
+    /// or the regular shape (8–12 quarterly rows plus an occasional
+    /// special), per the Task 10 brief. `pairs` picks its base dates by
+    /// **distinct** index so a duplicate never lands on an already-
+    /// duplicated date — without that, two duplicates could collide on
+    /// the same base date and leave only one same-ex-date group instead
+    /// of the two or three the shape promises.
+    fn build_schedule(rng: &mut StdRng, today: NaiveDate, key: &str) -> Vec<Row> {
+        let mut rows = Vec::new();
+        if is_index(key) {
+            let pairs = rng.random_range(2..=3);
+            let total = rng.random_range(30..=40);
+            let distinct = total - pairs;
+            let mut dates = spaced_dates(rng, today, distinct, 24.0);
+            for i in distinct_indices(rng, pairs, dates.len()) {
+                dates.push(dates[i]);
+            }
+            for ex_date in dates {
+                rows.push(new_row(rng, rows.len(), today, ex_date));
+            }
+        } else {
+            let count = rng.random_range(8..=12);
+            let dates = spaced_dates(rng, today, count, 91.0);
+            for ex_date in dates {
+                rows.push(new_row(rng, rows.len(), today, ex_date));
+            }
+            if rng.random_bool(0.3) {
+                // An occasional special: one further-out row off the
+                // regular quarterly grid.
+                let offset = rng.random_range(400..=700);
+                let ex_date = today + Days::new(offset);
+                rows.push(new_row(rng, rows.len(), today, ex_date));
+            }
+        }
+        rows
+    }
+
+    /// One republish for a key already seeded: walks one or two
+    /// amounts and promotes at most one near-term `estimated` row to
+    /// `declared`. Appending a row is a separate, caller-driven step
+    /// (`append_row`) — it depends on a republish *count* kept per key,
+    /// not on anything this one walk step alone can see.
+    fn republish(rng: &mut StdRng, today: NaiveDate, rows: &mut [Row]) {
+        let n = if rows.len() >= 2 && rng.random_bool(0.5) {
+            2
+        } else {
+            1
+        };
+        for i in distinct_indices(rng, n, rows.len()) {
+            rows[i].amount = walk_amount(rng, rows[i].amount);
+        }
+
+        // Promote the single nearest-dated `estimated`, non-cancelled
+        // row still outside 30 days of `today` — never more than one
+        // per republish, mirroring the brief's "promotes one".
+        if let Some(row) = rows
+            .iter_mut()
+            .filter(|r| {
+                !r.cancelled
+                    && r.status == "estimated"
+                    && (r.ex_date - today).num_days() <= NEAR_DAYS
+            })
+            .min_by_key(|r| r.ex_date)
+        {
+            row.status = "declared".to_string();
+        }
+    }
+
+    /// Appends one new row to an already-seeded schedule, dated after
+    /// its latest existing row — the every-fifth-republish case (Task 10
+    /// brief), simulating the issuer adding a fresh future dividend to a
+    /// schedule a trader is already watching.
+    fn append_row(rng: &mut StdRng, today: NaiveDate, rows: &mut Vec<Row>) {
+        let last_ex = rows.iter().map(|r| r.ex_date).max().unwrap_or(today);
+        let ex_date = last_ex + Days::new(rng.random_range(60..=120));
+        let ordinal = rows.len();
+        rows.push(new_row(rng, ordinal, today, ex_date));
+    }
+
+    /// Builds the outgoing document from a key's current schedule: rows
+    /// in `DividendKind::COLUMNS` order (key `underlying_ref`; axis
+    /// `dividend_id`; values `ex_date`, `announced_date`, `pay_date`,
+    /// `amount`, `status`; attributes `currency`, `schedule_date`),
+    /// sorted by `(ex_date, id)` — never the schedule's own creation
+    /// order, which only an id's ordinal relies on.
+    fn build_document(key: &str, today: NaiveDate, rows: &[Row]) -> DocumentRows {
+        let hash = fnv1a(key) % 100_000;
+        let ids: Vec<String> = rows
+            .iter()
+            .map(|r| format!("D{hash}-{}", r.ordinal))
+            .collect();
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        order.sort_by(|&a, &b| (rows[a].ex_date, &ids[a]).cmp(&(rows[b].ex_date, &ids[b])));
+
+        let mut sorted_ids = Vec::with_capacity(rows.len());
+        let mut ex_dates = Vec::with_capacity(rows.len());
+        let mut announced_dates = Vec::with_capacity(rows.len());
+        let mut pay_dates = Vec::with_capacity(rows.len());
+        let mut amounts = Vec::with_capacity(rows.len());
+        let mut statuses = Vec::with_capacity(rows.len());
+        for i in order {
+            sorted_ids.push(ids[i].clone());
+            ex_dates.push(rows[i].ex_date);
+            announced_dates.push(rows[i].announced_date);
+            pay_dates.push(rows[i].pay_date);
+            amounts.push(rows[i].amount);
+            statuses.push(rows[i].status.clone());
+        }
+
+        DocumentRows {
+            key: vec![key.to_string()],
+            attributes: vec![
+                ("currency".to_string(), Value::Utf8("USD".to_string())),
+                ("schedule_date".to_string(), Value::Date(today)),
+            ],
+            axes: vec![("dividend_id".to_string(), Column::Utf8(sorted_ids))],
+            values: vec![
+                ("ex_date".to_string(), Column::Date(ex_dates)),
+                ("announced_date".to_string(), Column::Date(announced_dates)),
+                ("pay_date".to_string(), Column::Date(pay_dates)),
+                ("amount".to_string(), Column::F64(amounts)),
+                ("status".to_string(), Column::Utf8(statuses)),
+            ],
+        }
+    }
+
+    /// A seeded dividend-schedule generator (Task 10): one schedule per
+    /// key, built on that key's first call and walked/occasionally
+    /// extended on every call after — everything else (the node/term
+    /// analogue here is the row set itself) held identical between
+    /// documents, so two successive documents for one key are visibly
+    /// the same schedule, just nudged.
+    pub struct DividendGenerator {
+        seed: u64,
+        underlyings: Vec<String>,
+        today: NaiveDate,
+        /// One schedule per key, in creation order — never resorted;
+        /// `build_document` sorts a fresh copy for every call instead.
+        rows: HashMap<String, Vec<Row>>,
+        rngs: HashMap<String, StdRng>,
+        /// Republishes served for this key so far (the very first,
+        /// schedule-building call does not count) — compared against
+        /// `APPEND_EVERY` to decide whether this call also appends.
+        republishes: HashMap<String, u32>,
+    }
+
+    impl DividendGenerator {
+        /// Seeded; `today` is the business date every document this
+        /// generator produces carries as its `schedule_date` attribute,
+        /// and the date every row's status is judged past/near/far
+        /// against.
+        pub fn new(seed: u64, underlyings: Vec<String>, today: NaiveDate) -> DividendGenerator {
+            DividendGenerator {
+                seed,
+                underlyings,
+                today,
+                rows: HashMap::new(),
+                rngs: HashMap::new(),
+                republishes: HashMap::new(),
+            }
+        }
+
+        pub fn underlyings(&self) -> &[String] {
+            &self.underlyings
+        }
+
+        /// The next document for `key`: a freshly built schedule on the
+        /// first call, or the existing one walked (and, every fifth
+        /// republish, extended) on every call after.
+        pub fn next_document(&mut self, key: &str) -> DocumentRows {
+            if !self.rows.contains_key(key) {
+                // First call for this key: seed its own RNG from a
+                // stable hash of the key (never the process's random
+                // `HashMap` state) and draw the whole starting schedule
+                // from it.
+                let mut rng = StdRng::seed_from_u64(self.seed ^ fnv1a(key));
+                let rows = build_schedule(&mut rng, self.today, key);
+                self.rows.insert(key.to_string(), rows);
+                self.rngs.insert(key.to_string(), rng);
+                self.republishes.insert(key.to_string(), 0);
+            } else {
+                let rng = self
+                    .rngs
+                    .get_mut(key)
+                    .expect("an rng is seeded alongside every key's schedule");
+                let rows = self
+                    .rows
+                    .get_mut(key)
+                    .expect("checked present by the branch above");
+                republish(rng, self.today, rows);
+                let count = self
+                    .republishes
+                    .get_mut(key)
+                    .expect("seeded alongside the schedule");
+                *count += 1;
+                if count.is_multiple_of(APPEND_EVERY) {
+                    append_row(rng, self.today, rows);
+                }
+            }
+            build_document(key, self.today, &self.rows[key])
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::collections::HashSet;
+
+        fn today() -> NaiveDate {
+            NaiveDate::from_ymd_opt(2026, 9, 19).unwrap()
+        }
+
+        fn underlyings() -> Vec<String> {
+            vec!["SPX".to_string(), "NDX".to_string(), "XYZ".to_string()]
+        }
+
+        fn ex_dates_of(doc: &DocumentRows) -> &[NaiveDate] {
+            assert_eq!(doc.values[0].0, "ex_date");
+            match &doc.values[0].1 {
+                Column::Date(v) => v,
+                other => panic!("value 0 is ex_date, a date column, got {other:?}"),
+            }
+        }
+
+        fn ids_of(doc: &DocumentRows) -> &[String] {
+            match &doc.axes[0].1 {
+                Column::Utf8(v) => v,
+                other => panic!("axis 0 is dividend_id, a utf8 column, got {other:?}"),
+            }
+        }
+
+        fn statuses_of(doc: &DocumentRows) -> &[String] {
+            assert_eq!(doc.values[4].0, "status");
+            match &doc.values[4].1 {
+                Column::Utf8(v) => v,
+                other => panic!("value 4 is status, a utf8 column, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn same_seed_same_documents() {
+            let mut a = DividendGenerator::new(42, underlyings(), today());
+            let mut b = DividendGenerator::new(42, underlyings(), today());
+            assert_eq!(a.next_document("SPX"), b.next_document("SPX"));
+            assert_eq!(a.next_document("XYZ"), b.next_document("XYZ"));
+            // A second call for the same key on two identically-seeded
+            // generators must also agree — the same walk, promotion and
+            // append decisions, not just the same starting schedule.
+            assert_eq!(a.next_document("SPX"), b.next_document("SPX"));
+        }
+
+        #[test]
+        fn an_index_schedule_has_same_day_pairs() {
+            let mut g = DividendGenerator::new(1, underlyings(), today());
+            let doc = g.next_document("SPX");
+            let ex_dates = ex_dates_of(&doc);
+            assert!(
+                (30..=40).contains(&ex_dates.len()),
+                "expected 30-40 rows, got {}",
+                ex_dates.len()
+            );
+            let mut counts: HashMap<NaiveDate, usize> = HashMap::new();
+            for d in ex_dates {
+                *counts.entry(*d).or_insert(0) += 1;
+            }
+            let paired = counts.values().filter(|&&c| c > 1).count();
+            assert!(
+                paired >= 2,
+                "expected at least two same-ex-date pairs, got {paired}"
+            );
+        }
+
+        #[test]
+        fn ids_are_stable_across_republishes() {
+            let mut g = DividendGenerator::new(9, underlyings(), today());
+            let first = g.next_document("XYZ");
+            let first_ids: HashSet<String> = ids_of(&first).iter().cloned().collect();
+            for _ in 0..3 {
+                g.next_document("XYZ");
+            }
+            let fifth = g.next_document("XYZ");
+            let fifth_ids: HashSet<String> = ids_of(&fifth).iter().cloned().collect();
+            assert!(
+                first_ids.is_subset(&fifth_ids),
+                "every id in the first document must still be present in the fifth: \
+                 missing {:?}",
+                first_ids.difference(&fifth_ids).collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn a_republish_appends_by_the_fifth() {
+            let mut g = DividendGenerator::new(11, underlyings(), today());
+            let first_rows = g.next_document("XYZ").rows();
+            let mut last_rows = first_rows;
+            for _ in 0..5 {
+                last_rows = g.next_document("XYZ").rows();
+            }
+            assert!(
+                last_rows > first_rows,
+                "expected a row appended by the fifth republish: {first_rows} -> {last_rows}"
+            );
+        }
+
+        #[test]
+        fn rows_are_sorted_by_ex_date_then_id() {
+            let mut g = DividendGenerator::new(5, underlyings(), today());
+            let doc = g.next_document("SPX");
+            let ex_dates = ex_dates_of(&doc);
+            let ids = ids_of(&doc);
+            for i in 1..ex_dates.len() {
+                let prev = (ex_dates[i - 1], &ids[i - 1]);
+                let curr = (ex_dates[i], &ids[i]);
+                assert!(prev <= curr, "row {i} out of order: {prev:?} > {curr:?}");
+            }
+        }
+
+        #[test]
+        fn every_status_is_in_the_closed_set() {
+            let mut g = DividendGenerator::new(3, underlyings(), today());
+            for key in ["SPX", "NDX", "XYZ"] {
+                for _ in 0..8 {
+                    let doc = g.next_document(key);
+                    for s in statuses_of(&doc) {
+                        assert!(
+                            STATUSES.contains(&s.as_str()),
+                            "status '{s}' is not one of {STATUSES:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
