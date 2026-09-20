@@ -489,19 +489,15 @@ impl Sheet {
         self.parent[row] = if leg { Some(u32::MAX) } else { None };
     }
 
-    // Task 5's `SetInstrument`/`SetQty`/`SetShift` arms in `edit.rs` are
-    // the only callers; until they land these are unreachable.
-    #[allow(dead_code)]
+    // `edit.rs`'s `SetInstrument`/`SetQty`/`SetShift` arms are the callers.
     pub(crate) fn set_instrument(&mut self, row: usize, instrument: Instrument) {
         self.instrument[row] = Some(instrument);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn set_qty(&mut self, row: usize, qty: i64) {
         self.qty[row] = qty;
     }
 
-    #[allow(dead_code)]
     pub(crate) fn set_shift(&mut self, row: usize, shift: OwnShifts) {
         self.shift[row] = shift;
     }

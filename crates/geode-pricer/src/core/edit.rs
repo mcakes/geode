@@ -166,18 +166,48 @@ impl Sheet {
             Edit::Insert { place, rows } => self.insert(place, rows),
             Edit::Remove { at } => self.remove(at),
             Edit::Restore { at, rows } => self.restore(at, rows),
-            Edit::SetInstrument {
-                row: _row,
-                instrument: _instrument,
-            } => todo!("Task 5"),
-            Edit::SetQty {
-                row: _row,
-                qty: _qty,
-            } => todo!("Task 5"),
-            Edit::SetShift {
-                row: _row,
-                shift: _shift,
-            } => todo!("Task 5"),
+            Edit::SetInstrument { row, instrument } => {
+                self.row_exists(row)?;
+                if !self.is_line(row) {
+                    return Err(EditError::NotALine(row));
+                }
+                let old = self
+                    .instrument(row)
+                    .cloned()
+                    .expect("a line has an instrument");
+                self.set_instrument(row, instrument);
+                Ok(Undo {
+                    inverse: vec![Edit::SetInstrument {
+                        row,
+                        instrument: old,
+                    }],
+                })
+            }
+            Edit::SetQty { row, qty } => {
+                self.row_exists(row)?;
+                if !self.is_line(row) {
+                    return Err(EditError::NotALine(row));
+                }
+                if qty == 0 {
+                    return Err(EditError::ZeroQty);
+                }
+                let old = self.qty(row);
+                self.set_qty(row, qty);
+                Ok(Undo {
+                    inverse: vec![Edit::SetQty { row, qty: old }],
+                })
+            }
+            Edit::SetShift { row, shift } => {
+                self.row_exists(row)?;
+                if !self.is_line(row) {
+                    return Err(EditError::NotALine(row));
+                }
+                let old = self.shift(row);
+                self.set_shift(row, shift);
+                Ok(Undo {
+                    inverse: vec![Edit::SetShift { row, shift: old }],
+                })
+            }
             Edit::Move {
                 row: _row,
                 delta: _delta,
@@ -189,11 +219,43 @@ impl Sheet {
                 id: _id,
             } => todo!("Task 6"),
             Edit::Ungroup { row: _row } => todo!("Task 6"),
-            Edit::SetSheetShift(_shift) => todo!("Task 5"),
-            Edit::SetSpotOverride {
-                underlying: _underlying,
-                level: _level,
-            } => todo!("Task 5"),
+            Edit::SetSheetShift(shift) => {
+                let old = self.sheet_shift;
+                self.sheet_shift = shift;
+                Ok(Undo {
+                    inverse: vec![Edit::SetSheetShift(old)],
+                })
+            }
+            Edit::SetSpotOverride { underlying, level } => {
+                let key = underlying.to_ascii_uppercase();
+                let old = self.overrides.spot.get(&key).copied();
+                if old != level {
+                    match level {
+                        Some(l) => {
+                            self.overrides.spot.insert(key.clone(), l);
+                        }
+                        None => {
+                            self.overrides.spot.remove(&key);
+                        }
+                    }
+                    // The request is unchanged by design (§9.3: overrides
+                    // ride in `PriceParams`), so the compare in `apply`
+                    // cannot see this; stale the lines explicitly.
+                    for row in 0..self.len() {
+                        if self.is_line(row)
+                            && self.instrument(row).is_some_and(|i| i.underlying() == key)
+                        {
+                            self.touch(row);
+                        }
+                    }
+                }
+                Ok(Undo {
+                    inverse: vec![Edit::SetSpotOverride {
+                        underlying: key,
+                        level: old,
+                    }],
+                })
+            }
         }
     }
 
@@ -405,6 +467,295 @@ mod tests {
             .unwrap_err(),
             EditError::NoSuchParent(LineId(60))
         );
+    }
+
+    #[test]
+    fn set_instrument_bumps_the_revision_and_stales_only_that_line() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(5000.0, OptionKind::Call), 1),
+                line(spx(5100.0, OptionKind::Call), 1),
+            ],
+        );
+        s.deliver(s.id(0), 1, Ok(result(1.0)), at(0));
+        s.deliver(s.id(1), 1, Ok(result(2.0)), at(0));
+        assert_eq!(s.stale_lines().count(), 0);
+        let undo = s
+            .apply(Edit::SetInstrument {
+                row: 0,
+                instrument: spx(5050.0, OptionKind::Call),
+            })
+            .unwrap();
+        assert_eq!(s.revision(0), 2);
+        assert_eq!(s.state(0), &LineState::Stale);
+        assert_eq!(
+            s.result(0),
+            Some(&result(1.0)),
+            "the old result stays painted, muted, until the new one lands"
+        );
+        assert_eq!(s.revision(1), 1);
+        assert_eq!(s.state(1), &LineState::Fresh);
+        assert_eq!(
+            undo.inverse,
+            vec![Edit::SetInstrument {
+                row: 0,
+                instrument: spx(5000.0, OptionKind::Call)
+            }]
+        );
+        // The same instrument again is no change: no bump.
+        s.apply(Edit::SetInstrument {
+            row: 0,
+            instrument: spx(5050.0, OptionKind::Call),
+        })
+        .unwrap();
+        assert_eq!(s.revision(0), 2);
+        // Undo restores the old instrument, which IS a request change: re-requested (spec §9.3).
+        for e in undo.inverse {
+            s.apply(e).unwrap();
+        }
+        assert_eq!(s.revision(0), 3);
+        assert_eq!(s.state(0), &LineState::Stale);
+        // On a package it is refused.
+        push(&mut s, vec![callspread(1)]);
+        assert_eq!(
+            s.apply(Edit::SetInstrument {
+                row: 2,
+                instrument: spx(1.0, OptionKind::Call)
+            })
+            .unwrap_err(),
+            EditError::NotALine(2)
+        );
+        assert_eq!(
+            s.apply(Edit::SetInstrument {
+                row: 9,
+                instrument: spx(1.0, OptionKind::Call)
+            })
+            .unwrap_err(),
+            EditError::NoSuchRow(9)
+        );
+    }
+
+    #[test]
+    fn set_qty_and_move_change_no_request() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![line(spx(5000.0, OptionKind::Call), 1), callspread(1)],
+        );
+        for r in [0, 2, 3] {
+            s.deliver(s.id(r), 1, Ok(result(10.0)), at(0));
+        }
+        let undo = s.apply(Edit::SetQty { row: 0, qty: -3 }).unwrap();
+        assert_eq!(s.qty(0), -3);
+        assert_eq!(s.revision(0), 1);
+        assert_eq!(s.state(0), &LineState::Fresh);
+        assert_eq!(undo.inverse, vec![Edit::SetQty { row: 0, qty: 1 }]);
+        // A leg's qty re-sums the package at once (a 1×2 ratio, spec §6.4).
+        s.apply(Edit::SetQty { row: 3, qty: -2 }).unwrap();
+        assert_eq!(s.result(1).unwrap().price, 10.0 - 20.0);
+        assert_eq!(s.state(1), &LineState::Fresh);
+        assert_eq!(
+            s.apply(Edit::SetQty { row: 0, qty: 0 }).unwrap_err(),
+            EditError::ZeroQty
+        );
+        assert_eq!(
+            s.apply(Edit::SetQty { row: 1, qty: 2 }).unwrap_err(),
+            EditError::NotALine(1)
+        );
+        assert_eq!(
+            s.stale_lines().count(),
+            0,
+            "nothing was re-requested by any of it"
+        );
+    }
+
+    #[test]
+    fn set_shift_changes_the_request_only_when_the_effective_value_moves() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        s.deliver(s.id(0), 1, Ok(result(1.0)), at(0));
+        let undo = s
+            .apply(Edit::SetShift {
+                row: 0,
+                shift: OwnShifts {
+                    spot_pct: Some(2.0),
+                    vol_pts: None,
+                },
+            })
+            .unwrap();
+        assert_eq!(s.revision(0), 2);
+        assert_eq!(s.state(0), &LineState::Stale);
+        assert_eq!(
+            undo.inverse,
+            vec![Edit::SetShift {
+                row: 0,
+                shift: OwnShifts::default()
+            }]
+        );
+        s.deliver(s.id(0), 2, Ok(result(1.0)), at(1));
+        // Setting the own value to what the sheet already gives changes nothing.
+        s.apply(Edit::SetSheetShift(OwnShifts {
+            spot_pct: Some(2.0),
+            vol_pts: None,
+        }))
+        .unwrap();
+        assert_eq!(
+            s.revision(0),
+            2,
+            "own 2.0 over sheet 2.0: the effective value did not move"
+        );
+        s.apply(Edit::SetShift {
+            row: 0,
+            shift: OwnShifts::default(),
+        })
+        .unwrap();
+        assert_eq!(
+            s.revision(0),
+            2,
+            "clearing the own value: still 2.0 through the sheet"
+        );
+        assert_eq!(s.state(0), &LineState::Fresh);
+    }
+
+    #[test]
+    fn a_sheet_shift_reprices_only_lines_that_inherit_it() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(5000.0, OptionKind::Call), 1),
+                line(spx(5100.0, OptionKind::Call), 1),
+                callspread(1),
+            ],
+        );
+        for r in [0, 1, 3, 4] {
+            s.deliver(s.id(r), 1, Ok(result(1.0)), at(0));
+        }
+        s.apply(Edit::SetShift {
+            row: 1,
+            shift: OwnShifts {
+                spot_pct: Some(5.0),
+                vol_pts: None,
+            },
+        })
+        .unwrap();
+        s.deliver(s.id(1), 2, Ok(result(1.0)), at(1));
+        assert_eq!(s.stale_lines().count(), 0);
+        let undo = s
+            .apply(Edit::SetSheetShift(OwnShifts {
+                spot_pct: Some(2.0),
+                vol_pts: None,
+            }))
+            .unwrap();
+        assert_eq!(
+            s.sheet_shift,
+            OwnShifts {
+                spot_pct: Some(2.0),
+                vol_pts: None
+            }
+        );
+        assert_eq!(
+            s.stale_lines().collect::<Vec<_>>(),
+            vec![0, 3, 4],
+            "row 1 has its own spot shift"
+        );
+        assert_eq!(s.revision(1), 2);
+        assert_eq!(
+            s.state(2),
+            &LineState::Stale,
+            "the package follows its legs"
+        );
+        assert_eq!(
+            undo.inverse,
+            vec![Edit::SetSheetShift(OwnShifts::default())]
+        );
+        // Vol alone touches the rows that inherit vol — all of them here.
+        for r in [0, 3, 4] {
+            s.deliver(s.id(r), 2, Ok(result(1.0)), at(2));
+        }
+        s.apply(Edit::SetSheetShift(OwnShifts {
+            spot_pct: Some(2.0),
+            vol_pts: Some(-1.0),
+        }))
+        .unwrap();
+        assert_eq!(s.stale_lines().collect::<Vec<_>>(), vec![0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn a_spot_override_stales_every_line_on_that_underlying_and_only_a_changed_level_does() {
+        let mut s = Sheet::new("t");
+        let ndx = crate::core::shorthand::parse("NDX Z26 20000 C").unwrap();
+        push(
+            &mut s,
+            vec![line(spx(5000.0, OptionKind::Call), 1), ndx, callspread(1)],
+        );
+        for r in [0, 1, 3, 4] {
+            s.deliver(s.id(r), 1, Ok(result(1.0)), at(0));
+        }
+        let undo = s
+            .apply(Edit::SetSpotOverride {
+                underlying: "SPX".into(),
+                level: Some(5100.0),
+            })
+            .unwrap();
+        assert_eq!(s.overrides.spot.get("SPX"), Some(&5100.0));
+        assert_eq!(
+            s.stale_lines().collect::<Vec<_>>(),
+            vec![0, 3, 4],
+            "NDX is untouched"
+        );
+        assert_eq!(s.revision(0), 2);
+        assert_eq!(s.revision(1), 1);
+        assert_eq!(
+            undo.inverse,
+            vec![Edit::SetSpotOverride {
+                underlying: "SPX".into(),
+                level: None
+            }]
+        );
+        for r in [0, 3, 4] {
+            s.deliver(s.id(r), 2, Ok(result(1.0)), at(1));
+        }
+        // The same level again is no change.
+        s.apply(Edit::SetSpotOverride {
+            underlying: "SPX".into(),
+            level: Some(5100.0),
+        })
+        .unwrap();
+        assert_eq!(s.stale_lines().count(), 0);
+        // Clearing an override that is not set is no change either.
+        s.apply(Edit::SetSpotOverride {
+            underlying: "RTY".into(),
+            level: None,
+        })
+        .unwrap();
+        assert_eq!(s.stale_lines().count(), 0);
+        assert!(!s.overrides.spot.contains_key("RTY"));
+        // Clearing SPX stales SPX again and the inverse carries the old level.
+        let undo = s
+            .apply(Edit::SetSpotOverride {
+                underlying: "SPX".into(),
+                level: None,
+            })
+            .unwrap();
+        assert_eq!(s.stale_lines().collect::<Vec<_>>(), vec![0, 3, 4]);
+        assert_eq!(
+            undo.inverse,
+            vec![Edit::SetSpotOverride {
+                underlying: "SPX".into(),
+                level: Some(5100.0)
+            }]
+        );
+        // The underlying is matched case-insensitively, stored upper-case.
+        s.apply(Edit::SetSpotOverride {
+            underlying: "ndx".into(),
+            level: Some(1.0),
+        })
+        .unwrap();
+        assert_eq!(s.overrides.spot.get("NDX"), Some(&1.0));
+        assert_eq!(s.state(1), &LineState::Stale);
     }
 
     #[test]
