@@ -1497,3 +1497,45 @@ thread, so nothing is done about it now — but an index on `(source,
 series_id, ts)` or partitioning the series table is what would be
 reached for if a desk ever reports an append that drags, and this is the
 line it would be measured against.
+
+## Timeseries series query (spec §6, Part 2)
+
+What a chart tile's round trip costs at a million rows, `--release`,
+DuckDB 1.10505 bundled, criterion medians, an M-series Mac (`cargo bench
+-p geode-data --bench series_query`, new). One temporary store per bench
+process holds four identities of one-minute bars over a year — 250
+sessions × 1,000 bars each, 1,000,000 rows — appended through
+`append_series` in day-sized chunks in the untimed setup, the shape a
+fetch source produces. The schema is the minimal `[series] family =
+"series"` rather than the demo config's, because that one declares
+`retention`/`history` and the history sweep would delete a year of 2025
+bars out from under the bench.
+
+The **timed** half is `DataService::series` plus the wait for its
+`DataEvent::Series`: compilation, the cap check, the pool hop, DuckDB's
+work, the struct-of-arrays read and the sink's per-slot health lookup —
+the whole trip a tile pays, which is what the §7.1 50 ms requery budget
+is written about. Every request is `AsOf::Live`; `window` is the range,
+so the stats case computes over every bucket it paints.
+
+| Benchmark | Result |
+|---|---|
+| `series_query/1_slot_1d_1y` (one slot, `1d` over the year: 365 buckets over 250,000 rows) | 3.64 ms |
+| `series_query/4_slots_plus_ratio_1d_1y` (four slots plus an `s1 / s2` expression, `1d` over the year: the whole million rows) | 9.56 ms |
+| `series_query/2_slots_1m_1mo_with_stats` (two slots, `1m` over a month — 44,640 buckets — with three percentiles and 40 bins) | 14.5 ms |
+
+All three are inside §7.1's 50 ms, the widest by a factor of three. The
+`1d` pair is the shape a trader holds open all day; the `1m` one is the
+zoomed case, and it is the only one that pays for stats.
+
+**Known gap, recorded rather than fixed here:** every stats statement
+carries the same CTE prefix as the points statement and so **re-runs the
+bucketing**. A request with percentiles and density on runs `1 + 2k`
+bucketing passes for `k` slots — the third row above is five passes over
+its month, not one, and is still 14.5 ms because the month is small
+relative to the table. The fix, if a desk ever asks for stats over a
+range where this bites, is a single statement with `grouping sets` (or
+one CTE materialised and read three times) so the bucketing happens
+once; it is not done now because the measured cost is a third of the
+budget and the per-statement shape is what makes each slot's stats
+independently testable.
