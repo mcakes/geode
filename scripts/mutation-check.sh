@@ -6050,23 +6050,23 @@ run_mutation "sections: the resolved-generation marker requires the snapshot's o
 
 run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
   crates/geode-diagnostics/src/sections.rs \
-  '        out.push(row(format!("path: {paths}"), 1, Tone::Muted));
-        out.push(row(
-            format!(
-                "adapter: {} · priority: {} · readiness: {}",
-                spec.adapter, spec.priority, spec.readiness
-            ),
-            1,
-            Tone::Muted,
-        ));' \
-  '        out.push(row(
-            format!(
-                "path: {paths} · adapter: {} · priority: {} · readiness: {}",
-                spec.adapter, spec.priority, spec.readiness
-            ),
-            1,
-            Tone::Muted,
-        ));' \
+  '            out.push(row(format!("path: {paths}"), 1, Tone::Muted));
+            out.push(row(
+                format!(
+                    "adapter: {} · priority: {} · readiness: {}",
+                    spec.adapter, spec.priority, spec.readiness
+                ),
+                1,
+                Tone::Muted,
+            ));' \
+  '            out.push(row(
+                format!(
+                    "path: {paths} · adapter: {} · priority: {} · readiness: {}",
+                    spec.adapter, spec.priority, spec.readiness
+                ),
+                1,
+                Tone::Muted,
+            ));' \
   geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
 
 run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
@@ -9939,9 +9939,18 @@ run_mutation "sources: a subscribed source stores the paths it just said it igno
 
 run_mutation "sections: a subscribed source is described as a directory one (path and readiness)" \
   crates/geode-diagnostics/src/sections.rs \
-  '    if spec.adapter == geode_core::source_config::CSV_DIR_ADAPTER {' \
-  '    if true {' \
+  '    match spec.shape {' \
+  '    match SourceShape::Directory {' \
   geode-diagnostics a_subscribed_source_shows_its_adapter_and_topics_not_paths
+
+# The third shape (timeseries spec §5.4). Mutated to paint the subscribed
+# rows, a fetch source shows `topics: ` — an empty list for a source
+# nothing is ever pushed to, which is what it did before the arm existed.
+run_mutation "sections: a fetch source is described as a subscribed one (empty topics)" \
+  crates/geode-diagnostics/src/sections.rs \
+  '            out.push(row("fetch", 1, Tone::Muted));' \
+  '            out.push(row(format!("topics: {}", spec.topics.join(", ")), 1, Tone::Muted));' \
+  geode-diagnostics a_fetch_source_shows_its_adapter_and_that_it_is_fetched
 
 run_mutation "cvi: a second <term> inside one slice wins silently instead of being refused" \
   crates/geode-documents/src/cvi.rs \
@@ -10651,10 +10660,14 @@ run_mutation "objectdialog: a column stage offers no destructive action" \
 
 # ---- Part 2 residuals, fixed at Part 3's opening (Task 1) ----
 
-run_mutation "parked: sections discriminates a subscribed source by adapter, not by topics.is_empty()" \
+# Re-anchored 2026-09-19 (timeseries Part 1): the discriminator is the
+# source's SHAPE now, not its adapter — a fetch source is "not a
+# directory" too — so the mutation derives one from `topics.is_empty()`
+# instead, which is the residual this entry has always guarded against.
+run_mutation "parked: sections discriminates a source by shape, not by topics.is_empty()" \
   crates/geode-diagnostics/src/sections.rs \
-  '    if spec.adapter == geode_core::source_config::CSV_DIR_ADAPTER {' \
-  '    if spec.adapter != geode_core::source_config::CSV_DIR_ADAPTER {' \
+  '    match spec.shape {' \
+  '    match (if spec.topics.is_empty() { SourceShape::Directory } else { SourceShape::Subscribed }) {' \
   geode-diagnostics a_subscribed_source_with_no_topics_still_shows_the_subscribed_shape
 
 run_mutation "parked: a topic pattern with a non-final '>' is accepted rather than refused" \
@@ -13469,6 +13482,32 @@ run_mutation "series: history keeps the coverage rows it should drop" \
   geode-data \
   history_deletes_rows_and_coverage_whose_ts_is_too_old
 
+# The history sweep deletes the ROWS as well as their coverage, and the
+# two are separate statements. Mutated inert, the coverage goes but the
+# rows it covered stay, so a chart keeps painting values the dataset's
+# own history window says are gone and nothing will ever delete them.
+run_mutation "series: history keeps the rows it should drop" \
+  crates/geode-data/src/store/series.rs \
+  'format!("delete from {table} where source = ? and series_id = ? and epoch_us(ts) < ?");' \
+  'format!("delete from {table} where source = ? and series_id = ? and epoch_us(ts) < ? and 1 = 0");' \
+  geode-data \
+  history_deletes_rows_and_coverage_whose_ts_is_too_old
+
+# A window is user-configured and unbounded in magnitude (`parse_duration`
+# accepts `y`), so its micros need not fit an i64. Mutated back to the
+# wrapping cast, `"300000000y"` wraps NEGATIVE, the cutoff lands tens of
+# thousands of years in the future, and the retention sweep deletes every
+# superseded row the pair has — inside the append's own transaction.
+run_mutation "series: an unrepresentable window is treated as zero" \
+  crates/geode-data/src/store/series.rs \
+  '    if let Some(window) = policy.retention
+        && let Some(cutoff) = cutoff(now, window)
+    {' \
+  '    if let Some(window) = policy.retention {
+        let cutoff = micros(now) - window.as_micros() as i64;' \
+  geode-data \
+  an_unrepresentable_window_sweeps_nothing
+
 # Subtracting coverage is the whole point of the coverage table. Mutated
 # to ignore what is loaded, every request re-fetches its entire span.
 run_mutation "series: missing_spans ignores loaded spans" \
@@ -13500,6 +13539,17 @@ run_mutation "service: the history clip is skipped" \
   crates/geode-data/src/service.rs \
   '            from = from.max(cutoff);' \
   '            let _ = cutoff;' \
+  geode-data \
+  a_fetch_older_than_the_history_window_is_answered_without_asking_the_source
+
+# The clip RAISES `from` to the window's cutoff; it never lowers it.
+# Mutated to `min`, a request inside the window is widened to the whole
+# history before coverage is subtracted, so every look fetches the dead
+# span ahead of it — appended and swept in the same breath, forever.
+run_mutation "service: the history clip goes the wrong way" \
+  crates/geode-data/src/service.rs \
+  '            from = from.max(cutoff);' \
+  '            from = from.min(cutoff);' \
   geode-data \
   a_fetch_older_than_the_history_window_is_answered_without_asking_the_source
 
