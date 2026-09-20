@@ -299,6 +299,16 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
             .map(|d| d.naming_seed.clone())),
         Some(objectdialog::NameSeed::FromFrame)
     );
+    // The naming field keeps the focus the open gave it through the rest
+    // of the mouse-down (`open_shell_dialog_with_key`'s `prevent_default`,
+    // grouping-picker work 2026-09-19) — the same defect the `+` chip had.
+    vcx.simulate_input("eu");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "eu",
+        "typing after the click reaches the naming field"
+    );
 }
 
 /// The `+` pick chip paints regardless of the scope's own state — picking

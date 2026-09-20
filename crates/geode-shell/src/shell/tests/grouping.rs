@@ -221,6 +221,31 @@ fn enter_re_feeds_the_fields_live_text_before_picking(cx: &mut gpui::TestAppCont
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
 }
 
+/// A slot emptied under the open picker (a `groupings.toml` reload —
+/// `replace_slots`) commits nothing and says so on the status bar: the
+/// rows claimed the slot existed, so silence would read as a pick.
+#[gpui::test]
+fn picking_a_slot_emptied_under_the_picker_says_so(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = open_with_slots(cx);
+    vcx.simulate_keystrokes("alt-g");
+    vcx.run_until_parked();
+    frame.update(&mut vcx, |f, cx| {
+        let mut only_one = GroupingSlots::default();
+        only_one.set(1, vec!["book".into()]);
+        assert!(f.replace_slots(only_one));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("3");
+    vcx.run_until_parked();
+    assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.notice),
+        Some(crate::shell::groupingpicker::SLOT_GONE)
+    );
+}
+
 /// `tab` completes the field to the highlighted row and keeps typing
 /// there — the choice core's rule, with the filter-only dialog writing
 /// the field itself.

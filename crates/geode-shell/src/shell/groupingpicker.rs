@@ -167,6 +167,12 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     );
 }
 
+/// The status-bar notice when a picked slot was emptied under the open
+/// picker (a `groupings.toml` reload — `Frame::replace_slots` — while
+/// the rows still listed it): the chord ignores the same case silently,
+/// but the chord never showed a list claiming the slot existed.
+pub(super) const SLOT_GONE: &str = "that grouping slot is no longer configured";
+
 /// Activate `slot` (`None` = the views' own grouping) and close — the
 /// enter arm's, the digit jump's and a row click's one commit path, the
 /// same door `frame::slot_N`/`frame::slot_clear` take.
@@ -176,11 +182,16 @@ fn commit(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    shell.frame.update(cx, |f, cx| {
-        if f.set_active_slot(slot) {
+    let (changed, still_there) = shell.frame.update(cx, |f, cx| {
+        let changed = f.set_active_slot(slot);
+        if changed {
             cx.notify();
         }
+        (changed, slot.is_none_or(|n| f.slots().get(n).is_some()))
     });
+    if !changed && !still_there {
+        shell.notice = Some(SLOT_GONE);
+    }
     shell.close_modal(window, cx);
 }
 

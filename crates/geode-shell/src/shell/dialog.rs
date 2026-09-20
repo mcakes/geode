@@ -516,10 +516,14 @@ pub fn open_shell_dialog_with_key<F>(
     // before the shell root's, so without this the root took the field's
     // focus back a moment after the dialog opened and typing went
     // nowhere (`the_pick_chip_is_always_present_and_opens_the_picker`
-    // pins it on the `+` chip). Outside a mouse dispatch the flag is
-    // inert — only `div`'s mouse listeners read it, and every dispatch
-    // resets it first — so the key paths pay nothing for sharing the
-    // door.
+    // pins it on the `+` chip). On a KEY dispatch the flag is inert for
+    // this shell: every dispatch resets it first, the only key-event
+    // readers are `div`'s enter/space keyboard-click emulation for a
+    // FOCUSED element with click listeners (nothing in the shell is
+    // one), and neither platform crate reads `DispatchEventResult::
+    // default_prevented` — so the key paths pay nothing for sharing the
+    // door. gpui-component's own `Button` does the same in its
+    // mouse-down ("avoid focus on mouse down").
     window.prevent_default();
     // The open-door seam of [`sync_dialog_text`]'s five seam classes
     // (spec §16.1/§16.6, folded to five by §17.3): a no-op for the

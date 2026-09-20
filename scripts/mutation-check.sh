@@ -13778,6 +13778,14 @@ run_mutation "grouping: enter picks the HIGHLIGHTED row, re-fed from the live te
   geode-shell \
   enter_re_feeds_the_fields_live_text_before_picking
 
+# A slot emptied under the open picker commits nothing AND says so.
+run_mutation "grouping: a vanished slot is reported on the status bar" \
+  crates/geode-shell/src/shell/groupingpicker.rs \
+  '    if !changed && !still_there {' \
+  '    if false {' \
+  geode-shell \
+  picking_a_slot_emptied_under_the_picker_says_so
+
 # A digit jumps only on an EMPTY field — typed after text it is text.
 run_mutation "grouping: the digit jump needs an empty field" \
   crates/geode-shell/src/shell/groupingpicker.rs \
