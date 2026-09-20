@@ -175,19 +175,30 @@ impl Clock {
             message: format!("app: time.{key}: {message}"),
             path: Some(format!("time.{key}")),
         };
-        let zone_value = config.get("app", "time.zone").and_then(|v| v.as_str());
-        let mut clock = match zone_value {
-            Some(name) => match Tz::from_str(name) {
-                Ok(zone) => Clock::in_zone(zone),
-                Err(_) => {
-                    diags.push(diag(
+        let mut clock = match config.get("app", "time.zone") {
+            Some(v) => {
+                match v.as_str() {
+                    Some(name) => match Tz::from_str(name) {
+                        Ok(zone) => Clock::in_zone(zone),
+                        Err(_) => {
+                            diags.push(diag(
+                            Severity::Error,
+                            "zone",
+                            format!("'{name}' is not an IANA zone name (e.g. \"America/New_York\") — using the machine's zone"),
+                        ));
+                            Clock::machine().0
+                        }
+                    },
+                    None => {
+                        diags.push(diag(
                         Severity::Error,
                         "zone",
-                        format!("'{name}' is not an IANA zone name (e.g. \"America/New_York\") — using the machine's zone"),
+                        format!("expected an IANA zone name string, got {v} — using the machine's zone"),
                     ));
-                    Clock::machine().0
+                        Clock::machine().0
+                    }
                 }
-            },
+            }
             None => {
                 let (machine, warning) = Clock::machine();
                 if let Some(w) = warning {
@@ -371,6 +382,16 @@ mod tests {
             "the machine's zone"
         );
         assert_eq!(clock.sod, Clock::DEFAULT_SOD);
+    }
+
+    #[test]
+    fn a_non_string_zone_is_an_error_and_the_machine_zone_applies() {
+        let cfg = config_from("app", "[time]\nzone = 42\n");
+        let (clock, diags) = Clock::from_config(&cfg);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].path.as_deref(), Some("time.zone"));
+        assert_eq!(clock.zone_name(), Clock::machine().0.zone_name());
     }
 
     #[test]
