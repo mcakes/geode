@@ -8,36 +8,10 @@
 //! A tenor (`3m`) is validated by `Expiry::tenor` and never resolved —
 //! that is the library's calendar.
 
+use crate::core::sheet::{LineSpec, OwnShifts, RowSpec};
 use crate::core::template::Template;
 use chrono::{Datelike, NaiveDate, Weekday};
 use geode_core::pricing::{Barrier, BarrierKind, Expiry, Instrument, OptionKind, Strike, Vanilla};
-
-/// A line's own shifts; `None` inherits the sheet's (spec ruling 8).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct OwnShifts {
-    pub spot_pct: Option<f64>,
-    pub vol_pts: Option<f64>,
-}
-
-/// One line as the parser or a caller describes it, before it has an id.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LineSpec {
-    pub instrument: Instrument,
-    /// Signed; a sell is negative; never zero.
-    pub qty: i64,
-    pub shift: OwnShifts,
-}
-
-/// What one shorthand line means: a line, or a package with its legs
-/// (planning decision 1).
-#[derive(Debug, Clone, PartialEq)]
-pub enum RowSpec {
-    Line(LineSpec),
-    Package {
-        template: Template,
-        legs: Vec<LineSpec>,
-    },
-}
 
 /// `offset` is the byte offset of the offending token in the text the
 /// caller passed (`text.len()` when a token is missing), for the footer's

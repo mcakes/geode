@@ -3,11 +3,15 @@
 //! package templates, the column vocabulary, the views doc and the
 //! storage row shape. No gpui type appears here.
 
+pub mod edit;
+pub mod sheet;
 pub mod shorthand;
 pub mod template;
 
-pub use shorthand::{
-    LineSpec, OwnShifts, ParseError, RowSpec, parse, render_expiry, render_line, render_package,
-    render_strike,
+pub use edit::{Edit, EditError, Undo};
+pub use sheet::{
+    Delivered, LineId, LineSpec, LineState, OwnShifts, Place, Refresh, RowKind, RowRecord, RowSpec,
+    Sheet,
 };
+pub use shorthand::{ParseError, parse, render_expiry, render_line, render_package, render_strike};
 pub use template::{LegSpec, Template};
