@@ -622,6 +622,140 @@ nothing else, `flip` excluded as everywhere. A delivery is staged and
 promoted per the barrier, as the market-data panel's is; a delivery
 whose tag is stale is dropped. `set_visible(false)` cancels in flight.
 
+### 6.6 As built (Part 2)
+
+Part 2 (the series query and the expression language) is built; §8–§10
+are not. Where the code differs from §6 and §7 above, the code is the
+specification now.
+
+- **The pinned DuckDB has no `width_bucket`, so the bin index is that
+  function's definition written out (amends §6.2).** `Catalog Error:
+  Scalar Function with name width_bucket does not exist!` is what the
+  spec's form earns. The statement now reads
+  `cast(least(floor((w.v - m.lo) / (m.hi - m.lo) * k) + 1, k) as
+  bigint) as k`, over `w` (the window's non-NULL values) and `m` (its
+  `min`/`max`), with `where m.lo < m.hi` making the division safe and
+  standing in for "fewer than two distinct values yields no bins". The
+  `least` is load-bearing and not decoration: `hi` itself lands in bin
+  `k + 1`, which `run_series`'s `1..=k` range check would silently
+  DISCARD — the histogram short by however many rows sit exactly on the
+  maximum, with no error anywhere. The `cast` pins the column to BIGINT
+  whatever `floor` returns, because the reader binds it as one.
+- **`SeriesParams`, `SeriesOutcome` and every type around them live in
+  `geode_core::series`, not `geode_core::query` (clarifies §6.1).**
+  Same reason `query.rs` gives for its own contents: the module builds
+  these and the compiler consumes them, and `geode-shell` and
+  `geode-data` may never depend on each other. `expr::Expr` is
+  `Ast<u8>` — the parsed tree is `Ast<RefName>` and `resolve` is the
+  one door between them.
+- **Both carry `submitted: Instant` (amends §6.1, §6.4).** The view
+  path grew it for the §7.1 timing readout and the series path is
+  measured the same way; it is echoed back untouched, like `tag`.
+- **`SlotProvenance` is filled from two places (clarifies §6.4).**
+  `run_series` fills `loaded` (the coverage hull, `min(from_ts)` /
+  `max(to_ts)`) and `latest_received_at` (`max(received_at)`) from the
+  per-source-slot coverage statement, and leaves `health` `None`; the
+  service's result sink fills `health` from the tracker's load lane.
+  An expression slot has no coverage statement and keeps all three
+  `None`.
+- **The coverage statement ignores as-of — a known gap, left for Part 4
+  (amends §6.4).** It reads the coverage table for the pair with no
+  time bound, so a historical as-of reports LIVE freshness: the hull
+  and the newest fetch as they stand now, not as they stood then. The
+  honest fix is a `received_at <= t` bound on the coverage read, but
+  what a tile should *show* under an as-of (the span it is painting, or
+  the span the pair holds today) is a display question no section here
+  answers — §9.3 and §9.5 spell out health, not freshness — so nothing
+  is guessed at from the data tier. Part 4 decides it.
+- **Health reaches the outcome through `RequestKind::Series { pairs }`,
+  matched BY SLOT NUMBER (clarifies §6.4).** The request carries every
+  SOURCE slot's `(slot, source, identity)`; the result sink looks each
+  one's `"{identity}@{source}"` up in the load lane and files it on the
+  slot with that number. `SeriesResult::slots` holds every slot in
+  request order, expression slots included, while `pairs` holds only
+  the source ones, so the two lists differ in length the moment a
+  request has an expression — a positional zip marks the wrong pane in
+  both directions, and `health_is_attached_by_slot_number_not_position`
+  is the test that would see it.
+- **The pool carries a second payload kind (clarifies §6.1).**
+  `Work::{Query(CompiledQuery), Series(Box<SeriesPlan>)}` and
+  `Payload::{Snapshot, Series}`; the pool's coalescing, interruption
+  and containment never look inside either. `DataService::series`
+  checks the cap, compiles, and submits a `QueryRequest` with an empty
+  grouping and a default `Provenance` — a series has no tree and its
+  provenance is per slot.
+- **The result sink reads the health tracker under the pool's queue
+  lock (a lock-order rule, new).** The order is pool queue lock →
+  tracker lock, never the reverse, and nothing reachable from a
+  `report_*_and_emit` emit closure may touch the pool.
+  `HealthTracker::load_lane` is a read that neither stamps nor offers,
+  so asking it per slot cannot disturb the transition bookkeeping the
+  two report doors own.
+- **The cap is refused on the service thread and becomes the asking
+  key's own outcome on the handle (clarifies §6.3).**
+  `DataService::series` returns `Err(StoreError::Series(..))` before
+  `compile_series` runs; `DataHandle::series` is `-> bool` as §6.1
+  says, and the serve loop turns that `Err` — a cap refusal or a
+  compile refusal alike — into a `DataEvent::Series` whose `result` is
+  `Err(text)`, so the asking tile always hears back.
+- **`Delivery::key()` is `Option<QueryKey>`, and a key-less delivery is
+  broadcast to the VISIBLE occupants (amends §5.4, §6.4).**
+  `Delivery::Series` answers `Some(outcome.key)` and is routed to the
+  tile whose id it is, dropped if that tile is gone.
+  `Delivery::SeriesFetched` answers `None`, and `ShellView::deliver`
+  hands every occupant of a tile on screen (`visible_tile_keys` — the
+  same visible set the flip barrier waits on, placeholders filtered,
+  visible docks covered) its own copy, since `Delivery` is not `Clone`.
+  Hidden tiles are skipped on purpose: they hold no subscription and
+  requery on `set_visible(true)`.
+- **The identity grammar is spelled out, and an identity outside it is
+  referenced by its handle (clarifies §7).** An identity is
+  `[A-Za-z_][A-Za-z0-9_.]*` and a source is `@[A-Za-z0-9_-]+`, so
+  `SPX.close@kdb_hist` parses and a REST-path identity
+  (`/v1/px?sym=SPX`) does not — such a pair is referenced by its slot
+  handle, `s3`, which every loaded slot has. A handle is `s` followed
+  by digits and NOTHING else, so `spx_1y` and `s1x` are identities, and
+  `s999` (past `u8`) is an identity rather than an error. A `(`
+  immediately after a word is a function call and earns the
+  "arithmetic only" message at the point a trader would cross the
+  boundary; a second `@` earns it too.
+- **Expression nesting is capped at `MAX_DEPTH = 64` (new, amends
+  §7).** `Parser::factor` recurses on `-` and `(`, and a pasted wall of
+  parentheses would overflow the stack — an abort, not a panic, and
+  nothing can contain it. Because the tree it produces can then be no
+  deeper than the cap, the same bound covers `Ast::resolve` and
+  `Expr::slots`. Sixty levels still parse.
+- **A non-finite literal is refused by the compiler (new).** Rust's own
+  `str::parse` answers `Ok(inf)` on overflow rather than an error, so a
+  400-digit literal reaches `lower` as `Ast::Num(inf)` and `{x:?}`
+  would format the bare word `inf` into the SQL text. `lower` refuses
+  it with "literal … is not a finite number".
+- **The resolution rules of §7 are the module's, and are not built
+  here.** The parser resolves what it is handed through a caller's
+  closure (`Ast::resolve`, `Err` naming the first reference that
+  missed) and `expression_order` answers the operands-first order with
+  `Err(slot)` for a cycle; "a bare identity by the default source",
+  ambiguity, and removing an operand's dependants all belong to Part 4
+  and `[timeseries] default_source`, which does not exist yet. The
+  compiler's own `validate` refuses an expression with no references,
+  a reference to a slot the request lacks, and a cycle.
+- **The bench is `benches/series_query.rs` (amends §11.3's
+  `benches/series.rs`).** It reads beside `append_series` that way. The
+  timed half is the round trip a tile pays — `DataService::series` plus
+  the wait for its `DataEvent::Series` — over four identities of
+  one-minute bars for a year (1,000,000 rows): **3.64 ms** for one slot
+  at `1d` over the year (that slot's 250,000 rows into 250 daily
+  buckets), **9.56 ms** for four slots plus an `s1 / s2` expression
+  (the whole million), **14.5 ms** for two slots at `1m` over a month
+  with three percentiles and 40 bins. All three are inside §7.1's 50 ms, the
+  widest by a factor of three. **Known gap:** every stats statement
+  carries the same CTE prefix as the points statement and so re-runs
+  the bucketing — a request with percentiles and density on runs
+  `1 + 2k` bucketing passes for `k` slots. A single `grouping sets`
+  statement is where that goes if a desk ever asks for stats over a
+  range where it bites; `docs/perf.md` has the conditions and the
+  measurement.
+
 ## 7. The expression language
 
 Grammar (in `geode_core::series::expr`, a hand-written recursive
@@ -654,6 +788,14 @@ handle := 's' digit+
 Tokens that are not in the grammar (`^`, a function name, `%`) are a
 parse error saying "arithmetic only: + - * / and parentheses", so the
 boundary is stated at the point a trader would cross it.
+
+Built in Part 2, with §6.6 the record: the parser, `Ast::resolve` and
+`expression_order` are in `geode_core::series::expr`; the identity
+grammar, the handle rule for an identity outside it, the `MAX_DEPTH`
+nesting cap and the non-finite literal refusal are all there. The
+*resolution* rules above — a bare identity by the default source,
+ambiguity, removing an operand's dependants — are the module's and
+belong to Part 4.
 
 ## 8. `geode-chart`
 
