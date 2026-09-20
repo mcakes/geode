@@ -2619,6 +2619,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-pricer"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "geode-core",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
 name = "geode-pricing"
 version = "0.1.0"
 dependencies = [

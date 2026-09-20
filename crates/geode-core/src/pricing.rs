@@ -102,7 +102,8 @@ pub enum Instrument {
 }
 
 impl Instrument {
-    fn vanilla(&self) -> &Vanilla {
+    /// The vanilla every variant is built on (a barrier wraps one).
+    pub fn vanilla(&self) -> &Vanilla {
         match self {
             Instrument::Vanilla(v) => v,
             Instrument::Barrier(b) => &b.vanilla,
@@ -111,6 +112,10 @@ impl Instrument {
 
     pub fn underlying(&self) -> &str {
         &self.vanilla().underlying
+    }
+
+    pub fn expiry(&self) -> &Expiry {
+        &self.vanilla().expiry
     }
 
     pub fn kind(&self) -> OptionKind {
@@ -291,5 +296,24 @@ mod tests {
         b.spot.insert("SPX".into(), 5000.0);
         assert_ne!(a, b);
         assert_eq!(b.clone(), b);
+    }
+
+    #[test]
+    fn an_instrument_answers_its_expiry_and_vanilla_through_a_barrier() {
+        let call = spx_call();
+        let b = Instrument::Barrier(Barrier {
+            vanilla: match &call {
+                Instrument::Vanilla(v) => v.clone(),
+                _ => unreachable!(),
+            },
+            level: 4200.0,
+            barrier: BarrierKind::DownOut,
+        });
+        assert_eq!(
+            b.expiry(),
+            &Expiry::Date(NaiveDate::from_ymd_opt(2026, 12, 18).unwrap())
+        );
+        assert_eq!(b.vanilla().strike, Strike::Absolute(5000.0));
+        assert_eq!(call.expiry(), b.expiry());
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "geode-pricer"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# Part 2 (line-pricer spec §14): the pure core alone. `geode-core` for the
+# pricing vocabulary, `ColumnFormat`/`format_number`, `DocumentRows` and
+# the config model; `chrono` for the third-Friday rule and `priced_at`;
+# `toml` for the views doc. Part 3 adds `geode-shell` and gpui with the
+# tile. Never `geode-pricing`: a module reaches the pricer only through
+# the data tier's request door (PHILOSOPHY §1, "In-process calculation").
+[dependencies]
+geode-core.workspace = true
+chrono = "0.4.42"
+toml = "1.1.4"
+
+# Dev-dependencies ask for the same geode-* features `--workspace`
+# resolves (test-feature parity, 2026-09-19), or this crate builds a
+# private copy of the stack.
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+criterion = "0.8.2"
+
+[[bench]]
+name = "core"
+harness = false
