@@ -1429,16 +1429,54 @@ it already produced.
 | `marketdata_core/model_build_values_10000x5` (a broad-index dividend schedule, `Columns::Values`) | 8.18 ms |
 | `marketdata_core/draft_rebase_1000_edits` (onto the 10,000×5 model) | 297 µs |
 
-CVI, the only panel that exists, costs 285 µs per build and is nowhere
-near the budget. The 10,000×5 flat build at 8.18 ms is the number to
-watch: it is the whole of the §7.1 8 ms pure-UI budget on its own, and
-it is not only a delivery-path cost — `commit_edit` and `:bump` both
-call `rebuild_model` on the committing keystroke, so a hypothetical
-schedule-shaped panel at that size would blow the keystroke budget on
-every edit. **The rule for such a panel (roadmap slice 2): patch the
-touched cells in place rather than call `MatrixModel::build` wholesale
-on every draft change** — `build` stays the delivery path, since
-nothing today needs a second one and an unused patch path would rot.
+CVI, the only panel that exists at Part 3, costs 285 µs per build and
+is nowhere near the budget. The 10,000×5 flat build at 8.18 ms is the
+number that mattered: it is the whole of the §7.1 8 ms pure-UI budget
+on its own, and at Part 3 it was not only a delivery-path cost —
+`commit_edit` and `:bump` both called `rebuild_model` on the committing
+keystroke, so a schedule-shaped panel at that size would have blown the
+keystroke budget on every edit.
+
+**The dividend-schedule plan (2026-09-19, spec §4.5/§5.2/§8) built the
+rule above: a cell commit patches the touched cell in place instead of
+calling `MatrixModel::build` wholesale.** `DIVIDEND` is that
+schedule-shaped panel, `MatrixModel::patch_cell` is the door, and the
+flat build's 8.18 ms figure above is **no longer a per-commit cost** —
+`commit_edit` and `:bump` both call `patch_cell` now, and `build` stays
+the delivery path (a new snapshot, a draft restore) and the row
+insert/delete path (`o`/`shift+o`/`d d` still rebuild wholesale, since
+splicing a row shifts every row below it and `patch_cell` only
+re-prepares one already-positioned cell).
+
+| Benchmark | Result |
+|---|---|
+| `marketdata_core/patch_cell_pivot_20x30` (a committed cell, CVI's shape) | 145 ns |
+| `marketdata_core/patch_cell_values_10000x5` (a committed cell, the flat shape) | 187 ns |
+| `marketdata_core/model_build_values_10000x5_100_rows_spliced` (`build`, 100 rows inserted) | 6.66 ms |
+| `marketdata_core/draft_rebase_1000_edits_100_rows` (`Draft::rebase`, 1,000 cell edits + 100 row inserts) | 216 µs |
+
+`patch_cell` costs nanoseconds at both shapes — three to four orders of
+magnitude under the 8 ms budget — because it re-prepares exactly one
+cell's text, value and state rather than the whole grid; a trader
+editing a 10,000-row schedule now pays the same near-zero cost per
+keystroke CVI's own 20×30 grid always did. Row insert/delete still
+calls `build`, so `model_build_values_10000x5_100_rows_spliced` (6.66
+ms) is the number that bounds `o`/`shift+o`/`d d` at that size — the
+same order of magnitude as the un-spliced 8.18 ms figure above (100
+spliced rows is a small fraction of 10,000 document rows), still under
+the §7.1 8 ms budget but not by a wide margin, exactly as the un-spliced
+build was not. `draft_rebase_1000_edits_100_rows` (216 µs) shows row
+edits add little over the plain 1,000-cell `draft_rebase_1000_edits`
+figure above (297 µs) — rows resolve by label through the same kind of
+map lookup cells do, not a second pass over the grid.
+
+This session's readings (above and below) were taken on a shared,
+often heavily loaded host (`--release`, an M-series Mac); the smaller
+numbers (`patch_cell`, low-µs figures) showed the widest run-to-run
+variance under contention, so the table reports the tightest of
+several runs (narrowest confidence interval, fewest outliers) rather
+than a single blind sample — read the two `patch_cell` figures as
+"a few hundred nanoseconds at most", not to three significant figures.
 
 **Paint at 10,000 rows — not yet measured on a display.** The
 implementation sandbox has no window; the display recipe below is the
