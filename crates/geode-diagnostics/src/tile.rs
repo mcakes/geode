@@ -18,13 +18,12 @@ use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::chip;
-use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{
-    App, Context, ElementId, Entity, IntoElement, ScrollStrategy, SharedString,
-    UniformListScrollHandle, Window, div, uniform_list,
+    App, Context, Entity, IntoElement, ScrollStrategy, SharedString, UniformListScrollHandle,
+    Window, div, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -711,30 +710,11 @@ impl gpui::Render for DiagnosticsTile {
             .border_b_1()
             .border_color(theme.border)
             .debug_selector(|| format!("diagnostics-header-{}", self.tile.0));
-        if let Some(stack) = self.stack.as_ref().filter(|s| s.len > 1) {
-            let open = stack.clone();
-            header = header.child(
-                div()
-                    .id(ElementId::NamedInteger(
-                        SharedString::new_static("stack-marker"),
-                        self.tile.0,
-                    ))
-                    .text_color(neutral_chip.text)
-                    .when_some(neutral_chip.fill, |el, fill| el.bg(fill))
-                    .px_1()
-                    .rounded(theme.radius_tokens().sm)
-                    .debug_selector(|| format!("stack-marker-{}", self.tile.0))
-                    .child(stack.text.clone())
-                    // A clickable chip on the tile surface: pointer states through
-                    // the control door (`control::for_chip`), hover and pressed.
-                    .pointer_states(control::for_chip(theme, &neutral_chip, theme.background))
-                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                        cx.stop_propagation();
-                        open.open_list(window, cx);
-                    }),
-            );
-        }
-        header = header.child(self.header_text.clone());
+        // The stack marker paints first, through the one builder every
+        // module uses (`StackHandle::marker`, spec §5.1).
+        header = header
+            .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
+            .child(self.header_text.clone());
         // MIN-11 (fix round 1): a tile restored from a session with a
         // saved `filter` used to paint a narrowed list with no on-screen
         // indication why — same "filtered" pill the blotter's own header

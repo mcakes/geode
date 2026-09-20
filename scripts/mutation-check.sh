@@ -13734,10 +13734,13 @@ run_mutation "stacks: a digit activates" \
   geode-shell \
   a_digit_enter_and_escape_do_what_the_spec_says
 
+# The gate lives in the one builder every module paints through
+# (`StackHandle::marker`, geode-shell); the blotter's test still sees it
+# because the blotter paints through that builder.
 run_mutation "stacks: the marker is gated on len > 1" \
-  crates/geode-blotter/src/tile.rs \
-  '.filter(|s| s.len > 1)' \
-  '.filter(|_| true)' \
+  crates/geode-shell/src/module.rs \
+  '        if self.len <= 1 {' \
+  '        if false {' \
   geode-blotter \
   the_stack_marker_paints_only_while_a_member
 

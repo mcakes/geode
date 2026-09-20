@@ -181,10 +181,15 @@ A fresh occupant is told its stack position on the same first render
 `set_visible` is delivered on, under the same contract.
 
 The marker is one chip, painted first in the header strip at the
-position the module's own layout gives it: text `{index}/{len}` in the
-mono face, `Tone::Neutral` through `chip_paint` (it is a state the
-trader chose, like `pinned`), theme radius, painted only while
-`len > 1`. Its mouse-down calls `open_list` and stops propagation, so
+position the module's own layout gives it, and built by ONE door —
+`StackHandle::marker(theme, tile)` in `geode_shell::module`, which every
+module calls with `.children(stack.as_ref().and_then(|s| s.marker(..)))`
+(a follow-up to the whole-branch review, 2026-09-19: the first build
+hand-copied the chip at four sites): text `{index}/{len}` in the mono
+face, `Tone::Neutral` through `chip_paint` (it is a state the trader
+chose, like `pinned`), theme radius, and `None` — nothing painted —
+unless `len > 1`, so the gate lives in the builder and not at the call
+sites. Its mouse-down calls `open_list` and stops propagation, so
 the click that opens the list is not also a tile click-to-focus with a
 drag arm behind it (the tile is already focused by the time the list
 matters; `open_list` focuses it first regardless, §5.2). The placeholder
