@@ -244,6 +244,58 @@ fn log_health_event(source: &str, worst: &Health, detail: &str) {
     }
 }
 
+/// The LOAD lane's door for a source whose content arrives over an
+/// adapter rather than off disk — the subscribed receiver's document
+/// outcomes and the fetch worker's failures, which are the same event
+/// one hop apart: something that did arrive could not be stored.
+///
+/// One function rather than a closure built per arm of `open`'s
+/// resolution loop (Task 8 review, Important 1). The two were
+/// byte-identical, 175 lines apart, on the seam this crate has had to
+/// fix five times — see [`HealthTracker`]'s own doc for what each of
+/// those fixes was. A single door is what keeps a later correction from
+/// landing on one caller and not the other.
+///
+/// `batch` is whatever key that source's outcomes are filed under: the
+/// document's key (or its raw topic, unparsed) for a subscribed source,
+/// the `"{identity}@{source}"` pair for a fetch source. A failure is
+/// logged by `log_ingest_failure` and a recovery by `log_health_event`,
+/// never both — a failure already had its line.
+fn load_report_sink(
+    spec: &SourceSpec,
+    sink: &EventSink,
+    health_tracker: &Arc<HealthTracker>,
+) -> LoadReportSink {
+    let sink = Arc::clone(sink);
+    let health_tracker = Arc::clone(health_tracker);
+    let source = spec.name.clone();
+    let dataset_name = spec.dataset.clone();
+    Arc::new(move |batch: &str, health: Health, detail: String| {
+        let failed = match &health {
+            Health::Degraded { reason } | Health::Failed { reason } => {
+                log_ingest_failure(&dataset_name, batch, reason);
+                true
+            }
+            _ => false,
+        };
+        health_tracker.report_load_and_emit(&source, batch, health, detail, |reported| {
+            match reported {
+                Some((worst, detail)) => {
+                    if !failed {
+                        log_health_event(&source, &worst, &detail);
+                    }
+                    sink(DataEvent::Health {
+                        source: source.clone(),
+                        worst,
+                        detail,
+                    })
+                }
+                None => true,
+            }
+        });
+    })
+}
+
 /// One source's health along two independent lanes (final review round
 /// 3, NEW-4) — round 2's fix (`HealthTracker` as a single shared
 /// last-value map, keyed only by source) closed MAJ-2's original latch
@@ -1151,45 +1203,12 @@ impl DataService {
                         report_unservable(format!("adapter '{}' has no fetch side", spec.adapter));
                         continue;
                     };
-                    // The subscribed arm's `report_load`, verbatim: a
-                    // fetch that failed is a content-aware outcome, so it
-                    // is the LOAD lane — keyed here by the PAIR, which is
-                    // the same key `ingest_sink`'s two series arms use, so
-                    // a later success clears this failure.
-                    let report_load: LoadReportSink = {
-                        let sink = Arc::clone(&sink);
-                        let health_tracker = Arc::clone(&health_tracker);
-                        let source = spec.name.clone();
-                        let dataset_name = spec.dataset.clone();
-                        Arc::new(move |batch: &str, health: Health, detail: String| {
-                            let failed = match &health {
-                                Health::Degraded { reason } | Health::Failed { reason } => {
-                                    log_ingest_failure(&dataset_name, batch, reason);
-                                    true
-                                }
-                                _ => false,
-                            };
-                            health_tracker.report_load_and_emit(
-                                &source,
-                                batch,
-                                health,
-                                detail,
-                                |reported| match reported {
-                                    Some((worst, detail)) => {
-                                        if !failed {
-                                            log_health_event(&source, &worst, &detail);
-                                        }
-                                        sink(DataEvent::Health {
-                                            source: source.clone(),
-                                            worst,
-                                            detail,
-                                        })
-                                    }
-                                    None => true,
-                                },
-                            );
-                        })
-                    };
+                    // The same load-lane door the subscribed arm below
+                    // uses: a fetch that failed is a content-aware
+                    // outcome, keyed here by the PAIR — the same key
+                    // `ingest_sink`'s two series arms use, so a later
+                    // success clears this failure.
+                    let report_load = load_report_sink(spec, &sink, &health_tracker);
                     // What a fetch worker's outcome becomes: rows go to
                     // the ingest runner (the one door storage is entered
                     // by), a failure is the load lane plus the asking
@@ -1219,18 +1238,11 @@ impl DataService {
                             }
                             FetchOutcome::Failed { identity, reason } => {
                                 let pair = format!("{identity}@{source}");
-                                // The asking tile's answer goes FIRST, the
-                                // source's health after it: the fetch's
-                                // outcome belongs to this pair, and the
-                                // `Health` beside it is the wider fact a
-                                // diagnostics reader follows. Pinned by
-                                // `a_failed_fetch_is_a_load_lane_failure…`,
-                                // which reads the two in that order.
-                                let _ = sink(DataEvent::SeriesFetched {
-                                    source: source.clone(),
-                                    identity,
-                                    result: Err(reason.clone()),
-                                });
+                                // Health first, then the asking tile's
+                                // answer — the order the runner's own
+                                // `SeriesAppended`/`SeriesFailed` arms
+                                // report in, so every path this lane has
+                                // reads the same way.
                                 report_load(
                                     &pair,
                                     Health::Failed {
@@ -1238,6 +1250,11 @@ impl DataService {
                                     },
                                     format!("{pair}: {reason}"),
                                 );
+                                let _ = sink(DataEvent::SeriesFetched {
+                                    source: source.clone(),
+                                    identity,
+                                    result: Err(reason),
+                                });
                             }
                             FetchOutcome::Identities(Some(mut ids)) => {
                                 ids.sort();
@@ -1257,11 +1274,34 @@ impl DataService {
                         Ok(worker) => {
                             // Servable: the discovery lane's clean state,
                             // so a later failure reads as a transition.
+                            //
+                            // Emitted through the same closure every other
+                            // report here uses, never a `|_| true` that
+                            // drops it (Task 8 review, Important 2): the
+                            // tracker commits a transition only when its
+                            // emit says DELIVERED, so discarding this one
+                            // would both hide the source's `ok` and mark
+                            // as reported a value nothing ever saw —
+                            // including, if the load-lane seed above was
+                            // refused, swallowing the re-offer of a
+                            // seeded `Failed`.
+                            let source = spec.name.clone();
+                            let sink = Arc::clone(&sink);
                             health_tracker.report_discovery_and_emit(
                                 &spec.name,
                                 Health::Ok,
                                 String::new(),
-                                |_| true,
+                                |reported| match reported {
+                                    Some((worst, detail)) => {
+                                        log_health_event(&source, &worst, &detail);
+                                        sink(DataEvent::Health {
+                                            source: source.clone(),
+                                            worst,
+                                            detail,
+                                        })
+                                    }
+                                    None => true,
+                                },
                             );
                             worker.request(FetchWork::Identities);
                             fetch_datasets.insert(spec.name.clone(), spec.dataset.clone());
@@ -1316,12 +1356,13 @@ impl DataService {
                 ));
                 continue;
             };
-            // The ingest sink's own two arms, verbatim: a document that
-            // did not publish is the same event as a file that did not
-            // load, so a failure is logged by `log_ingest_failure` (the
-            // `Failed` arm) and filed on the LOAD lane keyed by the batch
-            // the receiver names — the document's key, or the raw topic
-            // when the bytes never yielded one.
+            // The ingest sink's own two arms, through the one load-lane
+            // door (`load_report_sink`): a document that did not publish
+            // is the same event as a file that did not load, so a failure
+            // is logged by `log_ingest_failure` (the `Failed` arm) and
+            // filed on the LOAD lane keyed by the batch the receiver
+            // names — the document's key, or the raw topic when the bytes
+            // never yielded one.
             //
             // The receiver reports the HEALTH, not just a reason, because
             // it also reports the `Ok` that clears a topic-keyed failure
@@ -1331,40 +1372,7 @@ impl DataService {
             // That recovery gets the ordinary transition line instead —
             // the same `log_health_event` the `Published` arm uses, and
             // never both, since a failure already had its own line above.
-            let report_load: LoadReportSink = {
-                let sink = Arc::clone(&sink);
-                let health_tracker = Arc::clone(&health_tracker);
-                let source = spec.name.clone();
-                let dataset_name = spec.dataset.clone();
-                Arc::new(move |batch: &str, health: Health, detail: String| {
-                    let failed = match &health {
-                        Health::Degraded { reason } | Health::Failed { reason } => {
-                            log_ingest_failure(&dataset_name, batch, reason);
-                            true
-                        }
-                        _ => false,
-                    };
-                    health_tracker.report_load_and_emit(
-                        &source,
-                        batch,
-                        health,
-                        detail,
-                        |reported| match reported {
-                            Some((worst, detail)) => {
-                                if !failed {
-                                    log_health_event(&source, &worst, &detail);
-                                }
-                                sink(DataEvent::Health {
-                                    source: source.clone(),
-                                    worst,
-                                    detail,
-                                })
-                            }
-                            None => true,
-                        },
-                    );
-                })
-            };
+            let report_load = load_report_sink(spec, &sink, &health_tracker);
             let on_connection: HealthSink = {
                 let sink = Arc::clone(&sink);
                 let health_tracker = Arc::clone(&health_tracker);
@@ -2437,6 +2445,20 @@ mod tests {
         assert_eq!(calls.lock().unwrap().len(), 0);
     }
 
+    /// A servable fetch source's clean discovery lane is DELIVERED at
+    /// open, not merely committed (Task 8 review, Important 2): the
+    /// tracker treats a report as made only once its emit says the event
+    /// landed, so an emit that drops it would both hide the source's
+    /// `ok` and mark as reported a value nothing ever saw.
+    #[test]
+    fn a_servable_fetch_source_reports_ok_on_the_discovery_lane_at_open() {
+        let (_d, _calls, service, rx) = fetch_service(None);
+        let (source, worst, _) = next_health(&rx);
+        assert_eq!(source, "kdb_hist");
+        assert_eq!(worst, Health::Ok);
+        service.shutdown();
+    }
+
     #[test]
     fn a_failed_fetch_is_a_load_lane_failure_keyed_by_the_pair_and_clears_on_success() {
         let (_d, _calls, service, rx) = fetch_service(None);
@@ -2445,19 +2467,33 @@ mod tests {
             "2026-01-05T00:00:00Z",
             "2026-01-06T00:00:00Z",
         ));
-        let (_, identity, result) = next_series_fetched(&rx);
-        assert_eq!(identity, "broken");
-        assert_eq!(result, Err("no such symbol".to_string()));
-        let health = loop {
+        // Both events are collected in ONE drain, in whichever order they
+        // arrive: a loop that scans for one of them discards the other,
+        // and a test written that way pins an accidental ordering rather
+        // than the two facts it means to check (Task 8 review, ruling on
+        // Important 3 — production order is health first, here and on the
+        // runner's own two series arms).
+        let mut fetched = None;
+        let mut health = None;
+        while fetched.is_none() || health.is_none() {
             match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::SeriesFetched {
+                    source,
+                    identity,
+                    result,
+                } => fetched = Some((source, identity, result)),
                 DataEvent::Health {
                     source,
                     worst,
                     detail,
-                } => break (source, worst, detail),
+                } if worst != Health::Ok => health = Some((source, worst, detail)),
                 _ => continue,
             }
-        };
+        }
+        let (_, identity, result) = fetched.unwrap();
+        assert_eq!(identity, "broken");
+        assert_eq!(result, Err("no such symbol".to_string()));
+        let health = health.unwrap();
         assert_eq!(health.0, "kdb_hist");
         assert!(matches!(health.1, Health::Failed { .. }));
         assert!(health.2.starts_with("broken@kdb_hist:"), "{}", health.2);
