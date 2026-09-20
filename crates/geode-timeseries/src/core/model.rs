@@ -149,8 +149,8 @@ impl Model {
     pub fn slots(&self) -> &[Slot] {
         &self.slots
     }
-    /// For Task 3's session restore; unused until that task lands.
-    #[allow(dead_code)]
+    /// For `session::from_table`, to clear a restored slot's state
+    /// (§9.11: slot state is not persisted).
     pub(crate) fn slots_mut(&mut self) -> &mut [Slot] {
         &mut self.slots
     }
@@ -250,8 +250,8 @@ impl Model {
         self.next_number += 1;
         Ok(n)
     }
-    /// For Task 3's session restore; unused until that task lands.
-    #[allow(dead_code)]
+    /// For `session::from_table`: a restored slot takes its recorded
+    /// number, so `add_source`/`add_expr` then bump `next_number` past it.
     pub(crate) fn set_next_number(&mut self, n: u8) {
         self.next_number = n;
     }
