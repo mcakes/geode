@@ -140,6 +140,18 @@ fn generation_summary_insert(req: &PublishRequest) -> String {
 }
 
 pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOutcome, StoreError> {
+    let tx = super::begin_transaction(conn)?;
+    let outcome = publish_in_transaction(&tx, req)?;
+    super::commit_transaction(tx)?;
+    Ok(outcome)
+}
+
+/// Publish one grain inside its owner's complete file/document transaction.
+/// Requiring a transaction prevents accidentally committing a partial file.
+pub(crate) fn publish_in_transaction(
+    conn: &duckdb::Transaction<'_>,
+    req: &PublishRequest,
+) -> Result<PublishOutcome, StoreError> {
     let live = &req.tables.live;
     let archive = &req.tables.archive;
     // The tables used to be *derived* from `req.dataset`, so the rows and
@@ -190,21 +202,18 @@ pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOu
     };
 
     if superseded {
-        // In its own transaction, same as the normal branch below: the
+        // In the caller's transaction, same as the normal branch below: the
         // generation must not be recorded in the summary unless the
         // archive insert it describes actually committed.
         let sql = format!(
-            "begin;
-             insert into {archive} select *, {}, '{}'::timestamptz from {};
-             {summary}
-             commit;",
+            "insert into {archive} select *, {}, '{}'::timestamptz from {};
+             {summary}",
             req.gen_id,
             req.source_time.to_rfc3339(),
             req.staging_table,
             summary = generation_summary_insert(req),
         );
         if let Err(source) = conn.execute_batch(&sql) {
-            let _ = conn.execute_batch("rollback;");
             return Err(StoreError::Sql {
                 statement: sql,
                 source,
@@ -230,20 +239,17 @@ pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOu
     // incoming generation instead would make as-of to any moment when the
     // older generation was live return nothing (spec §4.4).
     let sql = format!(
-        "begin;
-         insert into {archive} select * from {live} where {predicate};
+        "insert into {archive} select * from {live} where {predicate};
          delete from {live} where {predicate};
          insert into {live}
              select *, {gen}, '{time}'::timestamptz from {staging};
-         {summary}
-         commit;",
+         {summary}",
         gen = req.gen_id,
         time = req.source_time.to_rfc3339(),
         staging = req.staging_table,
         summary = generation_summary_insert(req),
     );
     if let Err(source) = conn.execute_batch(&sql) {
-        let _ = conn.execute_batch("rollback;");
         return Err(StoreError::Sql {
             statement: sql,
             source,

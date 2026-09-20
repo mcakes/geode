@@ -534,49 +534,18 @@ run_mutation "generations: the publish insert removed from the normal branch" \
 # row" the review named runs the summary insert unconditionally, outside
 # the transaction's own success/failure, after the main statement --
 # leaving a summary row for a generation whose data never committed.
-run_mutation "generations: the publish insert survives a rolled-back transaction" \
+run_mutation 'generations: the publish insert survives a rolled-back transaction' \
   crates/geode-data/src/store/publish.rs \
-  '    let sql = format!(
-        "begin;
-         insert into {archive} select * from {live} where {predicate};
-         delete from {live} where {predicate};
-         insert into {live}
-             select *, {gen}, '"'"'{time}'"'"'::timestamptz from {staging};
-         {summary}
-         commit;",
-        gen = req.gen_id,
-        time = req.source_time.to_rfc3339(),
-        staging = req.staging_table,
-        summary = generation_summary_insert(req),
-    );
-    if let Err(source) = conn.execute_batch(&sql) {
-        let _ = conn.execute_batch("rollback;");
-        return Err(StoreError::Sql {
-            statement: sql,
-            source,
-        });
-    }' \
-  '    let sql = format!(
-        "begin;
-         insert into {archive} select * from {live} where {predicate};
-         delete from {live} where {predicate};
-         insert into {live}
-             select *, {gen}, '"'"'{time}'"'"'::timestamptz from {staging};
-         commit;",
-        gen = req.gen_id,
-        time = req.source_time.to_rfc3339(),
-        staging = req.staging_table,
-    );
-    let result = conn.execute_batch(&sql);
-    if result.is_err() {
-        let _ = conn.execute_batch("rollback;");
-    }
-    let _ = conn.execute_batch(&generation_summary_insert(req));
-    if let Err(source) = result {
-        return Err(StoreError::Sql {
-            statement: sql,
-            source,
-        });
+  '    let outcome = publish_in_transaction(&tx, req)?;
+    super::commit_transaction(tx)?;
+    Ok(outcome)' \
+  '    match publish_in_transaction(&tx, req) {
+        Ok(outcome) => { super::commit_transaction(tx)?; Ok(outcome) }
+        Err(error) => {
+            drop(tx);
+            conn.execute_batch(&generation_summary_insert(req)).unwrap();
+            Err(error)
+        }
     }' \
   geode-data a_failed_publish_leaves_no_summary_row
 
@@ -686,24 +655,18 @@ run_mutation "as-of: error propagation" \
 # (`left: Some("2026-08-30T00:00:00+00:00")` -- the request --
 # `right: Some("2026-07-01T00:00:00+00:00")` -- the generation actually
 # read), verified by hand.
-run_mutation "provenance: resolved vs requested time" \
-  crates/geode-data/src/service.rs \
-  'AsOf::At(_) => Freshness {
-                    dataset: dataset.clone(),
-                    // The newest generation actually resolved, not the
-                    // instant requested. Labelling every dataset with the
-                    // request makes them all equal, and `stalest()` then
-                    // cannot show that one side of a join is a month
-                    // behind the other — which is all §5.4 is for.
-                    as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
-                    // Per-partition, so no single number describes it.
-                    generation: 0,
-                },' \
-  'AsOf::At(t) => Freshness {
-                    dataset: dataset.clone(),
-                    as_of: Some(t.to_rfc3339()),
-                    generation: 0,
-                },' \
+run_mutation 'provenance: resolved vs requested time' \
+  crates/geode-data/src/query/read.rs \
+  '                        AsOf::At(_) => Freshness {
+                            dataset: dataset.clone(),
+                            as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
+                            generation: 0,
+                        },' \
+  '                        AsOf::At(t) => Freshness {
+                            dataset: dataset.clone(),
+                            as_of: Some(t.to_rfc3339()),
+                            generation: 0,
+                        },' \
   geode-data a_historical_result_is_labelled_with_the_data_it_actually_read
 
 run_mutation "provenance: a join is labelled with its own instant" \
@@ -9154,10 +9117,14 @@ run_mutation "document query: no generation as of t is no rows, not every row" \
   '                None => (relation, String::new()),' \
   geode-data an_as_of_before_the_first_publish_compiles_and_returns_no_rows
 
-run_mutation "service: a live document's freshness is its own, not the dataset's stalest" \
-  crates/geode-data/src/service.rs \
-  '                    .live_source_time(&params.dataset, &join_key(&params.document_key), None)?' \
-  '                    .dataset_as_of(&params.dataset, &[])?' \
+run_mutation 'service: a live document'"'"'s freshness is its own, not the dataset'"'"'s stalest' \
+  crates/geode-data/src/query/read.rs \
+  '                            .live_source_time(
+                                &params.dataset,
+                                &join_key(&params.document_key),
+                                None,
+                            )?' \
+  '                            .dataset_as_of(&params.dataset, &[])?' \
   geode-data a_live_document_request_reports_its_own_documents_freshness
 
 # ---- final fix wave: validate_document's rules, one entry per rule
@@ -16271,6 +16238,93 @@ run_mutation "chart: the density bound is not enforced" \
   '                        if false {' \
   geode-chart \
   a_frame_paints_at_most_the_density_bound
+
+# Publication/read consistency and reliable delivery (2026-09-20).
+
+run_mutation 'consistency: all file grains commit together' \
+  crates/geode-data/src/ingest/load.rs \
+  '    for (grain, staging_table) in &split.staged {' \
+  '    for (grain, staging_table) in &split.staged {
+        conn.execute_batch("commit; begin;").unwrap();' \
+  geode-data failed_second_grain_rolls_back_the_whole_file
+
+run_mutation 'consistency: document metadata commits with rows and enums' \
+  crates/geode-data/src/store/document.rs \
+  '    catalog.record(&FileGeneration {' \
+  '    conn.execute_batch("commit; begin;").unwrap();
+    catalog.record(&FileGeneration {' \
+  geode-data catalog_failure_rolls_back_document_rows_history_and_dictionary
+
+run_mutation 'consistency: planning and execution share a snapshot' \
+  crates/geode-data/src/query/read.rs \
+  '        after_plan();' \
+  '        tx.execute_batch("commit; begin;").unwrap();
+        after_plan();' \
+  geode-data document_rows_and_freshness_share_the_planning_snapshot
+
+run_mutation 'consistency: series points stats and coverage share a snapshot' \
+  crates/geode-data/src/query/series.rs \
+  '    after_points();' \
+  '    conn.execute_batch("commit; begin;")?;
+    after_points();' \
+  geode-data points_stats_and_coverage_share_one_snapshot
+
+run_mutation 'consistency: catalog datasets share a snapshot' \
+  crates/geode-data/src/query/catalog.rs \
+  '        after_dataset();' \
+  '        conn.execute_batch("commit; begin;").unwrap();
+        after_dataset();' \
+  geode-data catalog_datasets_share_one_snapshot
+
+run_mutation 'consistency: fetch panics deliver failures' \
+  crates/geode-data/src/ingest/fetch.rs \
+  '                if let Some(identity) = identity {' \
+  '                if let Some(identity) = identity.filter(|_| false) {' \
+  geode-data fetch_panic_delivers_a_failure_outcome
+
+run_mutation 'consistency: full request queue retains a view reload' \
+  crates/geode-data/src/handle.rs \
+  '        *pending = Some(ViewReplacement { views, dimensions });' \
+  '        let _ = (views, dimensions);' \
+  geode-data view_reload_survives_a_full_request_queue_and_keeps_the_latest
+
+run_mutation 'consistency: terminal outcomes survive a UI burst' \
+  crates/geode-app/src/events.rs \
+  '        let key = key(&event);' \
+  '        if pending.events.len() == 1 { return Err(async_channel::TrySendError::Full(())); }
+        let key = key(&event);' \
+  geode-app a_burst_retains_terminal_results_and_all_publication_books
+
+run_mutation 'consistency: older terminal result cannot replace newer' \
+  crates/geode-app/src/events.rs \
+  '            if tag(old) > tag(&event) {' \
+  '            if false {' \
+  geode-app a_burst_retains_terminal_results_and_all_publication_books
+
+run_mutation 'consistency: publication coalescing retains changed books' \
+  crates/geode-app/src/events.rs \
+  '                books.extend(previous.iter().cloned());' \
+  '                let _ = previous;' \
+  geode-app a_burst_retains_terminal_results_and_all_publication_books
+
+run_mutation 'consistency: fetch failure cannot erase a success invalidation' \
+  crates/geode-app/src/events.rs \
+  '        } => Key::Fetched(source.clone(), identity.clone(), result.is_ok()),' \
+  '        } => Key::Fetched(source.clone(), identity.clone(), true),' \
+  geode-app a_failed_fetch_cannot_erase_a_successful_spans_invalidation
+
+run_mutation 'consistency: final event wakes an idle receiver' \
+  crates/geode-app/src/events.rs \
+  '        let _ = self.wake.try_send(());' \
+  '        // wakeup removed' \
+  geode-app an_idle_receiver_is_woken_by_the_final_event
+
+run_mutation 'consistency: diagnostics preserve earlier pending errors' \
+  crates/geode-app/src/events.rs \
+  '                let mut merged = previous.clone();' \
+  '                let mut merged = Vec::new();' \
+  geode-app diagnostics_coalesce_in_history_order_with_the_shells_bound
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

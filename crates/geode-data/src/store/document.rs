@@ -12,7 +12,7 @@
 
 use crate::store::catalog::{Catalog, FileGeneration};
 use crate::store::ddl::{self, TablePair};
-use crate::store::publish::{Partition, PublishOutcome, PublishRequest, publish_file};
+use crate::store::publish::{Partition, PublishOutcome, PublishRequest, publish_in_transaction};
 use crate::store::{Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::document::{Column, DocumentRows, Value, join_key};
@@ -206,9 +206,12 @@ pub fn publish_document(
     // the same way `load_file` does — for the one partition this writes,
     // so a document older than what is live becomes history instead of
     // overwriting it.
+    let tx = crate::store::begin_transaction(conn)?;
+    let conn = &tx;
+    let catalog = Catalog::new(conn);
     let live_source_time = catalog.live_source_time(&ds.name, &batch, None)?;
     let tables = TablePair::for_document(&ds.name);
-    let outcome = publish_file(
+    let outcome = publish_in_transaction(
         conn,
         &PublishRequest {
             dataset: ds.name.clone(),
@@ -234,8 +237,7 @@ pub fn publish_document(
         ddl::refresh_enum(conn, &ds.name, col, &tables.live, &tables.archive)?;
     }
 
-    // 4. Provenance, recorded after the rows are committed so the catalog
-    // can never claim a generation the publish rolled back. A document
+    // 4. Provenance commits together with the rows and dictionaries. A document
     // that went straight to the archive is recorded all the same — the
     // load happened — but flagged, because a generation that was never
     // live cannot be what freshness measures staleness from (§4.5).
@@ -257,6 +259,8 @@ pub fn publish_document(
         archived_only: matches!(outcome, PublishOutcome::ArchivedOnly { .. }),
         health: Health::Ok,
     })?;
+
+    crate::store::commit_transaction(tx)?;
 
     Ok(DocumentPublished {
         batch,
@@ -338,6 +342,56 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn catalog_failure_rolls_back_document_rows_history_and_dictionary() {
+        let (_dir, store, ds) = fixture();
+        publish(
+            &store,
+            &ds,
+            &cvi_doc("SPX.Z", [1.; 6]),
+            "2026-09-12T14:00:00Z",
+        );
+        // The second catalog insert fails only after rows and enums changed.
+        store
+            .writer()
+            .execute_batch(
+                "create unique index one_generation_for_test on file_generations(dataset)",
+            )
+            .unwrap();
+        for key in ["SPX.Z", "NDX.Z"] {
+            let result = publish_document(
+                &store,
+                &DocumentPublishRequest {
+                    dataset: &ds,
+                    source: "test",
+                    rows: &cvi_doc(key, [2.; 6]),
+                    source_time: ts("2026-09-12T14:05:00Z"),
+                    received_at: ts("2026-09-12T14:05:00Z"),
+                    bytes: 0,
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(live_params(&store, "SPX.Z"), vec![1.; 6]);
+            assert!(live_params(&store, "NDX.Z").is_empty());
+            let archived: i64 = store
+                .writer()
+                .query_row(
+                    "select count(*) from cvi_params_document_archive",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(archived, 0);
+            let new_key: i64 = store.writer().query_row("select count(*) from (select unnest(enum_range(NULL::cvi_params_underlying_ref_enum)) v) where v = 'NDX.Z'", [], |r| r.get(0)).unwrap();
+            assert_eq!(new_key, 0);
+            assert_generations_match_tables(
+                store.writer(),
+                &ds.name,
+                &crate::store::ddl::history_of(&ds.name, &ds),
+            );
+        }
     }
 
     fn live_params(store: &Store, key: &str) -> Vec<f64> {

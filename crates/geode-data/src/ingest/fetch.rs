@@ -114,6 +114,10 @@ impl Drop for FetchWorker {
 /// leaves the thread (and the app) running.
 fn run(mut fetch: Box<dyn Fetch>, rx: Receiver<FetchWork>, sink: FetchOutcomeSink) {
     while let Ok(work) = rx.recv() {
+        let identity = match &work {
+            FetchWork::Span { identity, .. } => Some(identity.clone()),
+            FetchWork::Identities => None,
+        };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| match work {
                 FetchWork::Identities => FetchOutcome::Identities(fetch.catalogue()),
@@ -155,6 +159,12 @@ fn run(mut fetch: Box<dyn Fetch>, rx: Receiver<FetchWork>, sink: FetchOutcomeSin
             Err(payload) => {
                 let message = crate::ingest::runner::panic_payload_message(payload.as_ref());
                 tracing::error!(target: "geode::ingest", "a fetch panicked: {message}");
+                if let Some(identity) = identity {
+                    sink(FetchOutcome::Failed {
+                        identity,
+                        reason: format!("fetch panicked: {message}"),
+                    });
+                }
             }
         }
     }

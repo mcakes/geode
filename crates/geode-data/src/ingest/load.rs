@@ -14,7 +14,7 @@ use crate::ingest::split::{Conflict, SplitRequest, split_by_grain};
 use crate::source::Sentinel;
 use crate::store::catalog::{Catalog, FileGeneration, FileId};
 use crate::store::ddl::TablePair;
-use crate::store::publish::{Partition, PublishOutcome, PublishRequest, publish_file};
+use crate::store::publish::{Partition, PublishOutcome, PublishRequest, publish_in_transaction};
 use crate::store::{Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::schema::DatasetSpec;
@@ -165,6 +165,12 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         },
     )?;
 
+    // Staging is complete. Publish every grain, its dictionaries and catalog
+    // metadata atomically; an error or unwind rolls the whole generation back.
+    let tx = crate::store::begin_transaction(conn)?;
+    let conn = &tx;
+    let catalog = Catalog::new(conn);
+
     // 4. Publish each grain, guarded against backfill.
     //
     // The books come from the staged rows, not the sentinel: the sentinel's
@@ -225,7 +231,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
 
     let mut published = Vec::new();
     for (grain, staging_table) in &split.staged {
-        published.push(publish_file(
+        published.push(publish_in_transaction(
             conn,
             &PublishRequest {
                 dataset: req.dataset_name.to_string(),
@@ -355,6 +361,8 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         cross_file.extend(catalog.attribute_conflicts(req.dataset_name, req.dataset, grain)?);
     }
     catalog.record_attribute_conflicts(req.dataset_name, &cross_file, Utc::now())?;
+
+    crate::store::commit_transaction(tx)?;
 
     Ok(LoadOutcome {
         file_id,

@@ -8,6 +8,7 @@ mod crash;
 mod demo;
 mod demo_bus;
 mod demo_series;
+mod events;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;

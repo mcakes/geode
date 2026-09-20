@@ -58,12 +58,9 @@ pub struct ScopeSql {
 /// type is `pub` with `pub` fields precisely so a future optimisation
 /// (reading only `live` when every resolved generation is current) can
 /// reach for it directly. Under `Archive`, both sides are always read,
-/// filtered independently, because `publish_file` is one transaction *per
-/// grain* while compile (the resolve) and execution run on separate
-/// connections: a publish landing between them can move a generation from
-/// live to archive at one grain and not another, so a relation that
-/// trusted which side the resolve saw would silently miss that partition
-/// for one frame.
+/// filtered independently: a historical answer can include both currently
+/// live generations and older archived ones. Production planning and execution
+/// now share one read transaction, as do all grains of a file publication.
 #[derive(Clone, Copy)]
 pub struct Era<'a> {
     pub kind: TableKind,

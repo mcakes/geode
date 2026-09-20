@@ -366,12 +366,22 @@ fn nan_if_null(v: Option<f64>) -> f64 {
 
 /// Run one compiled plan on a connection. The points statement is read
 /// once into a column per slot, then each slot's stats and coverage
-/// statements follow — every one of them a plain read, so this may run
-/// on a pool connection with no lock of its own.
+/// statements follow in the same read transaction. A concurrent publication
+/// cannot make points, statistics and coverage describe different snapshots.
 pub fn run_series(
     conn: &duckdb::Connection,
     plan: &SeriesPlan,
 ) -> Result<SeriesResult, duckdb::Error> {
+    run_series_with(conn, plan, || {})
+}
+
+fn run_series_with(
+    conn: &duckdb::Connection,
+    plan: &SeriesPlan,
+    after_points: impl FnOnce(),
+) -> Result<SeriesResult, duckdb::Error> {
+    let tx = conn.unchecked_transaction()?;
+    let conn = &tx;
     let k = plan.slots.len();
     let mut buckets: Vec<i64> = Vec::new();
     let mut values: Vec<Vec<f64>> = vec![Vec::new(); k];
@@ -386,6 +396,7 @@ pub fn run_series(
         }
     }
 
+    after_points();
     let mut slots = Vec::with_capacity(k);
     for (i, slot) in plan.slots.iter().enumerate() {
         // One NULL means the window held nothing at all, so the slot
@@ -468,6 +479,7 @@ pub fn run_series(
             provenance,
         });
     }
+    tx.commit()?;
     Ok(SeriesResult { buckets, slots })
 }
 
@@ -1159,5 +1171,52 @@ mod tests {
             r.slots[0].provenance.loaded, None,
             "an unfetched pair has no hull"
         );
+    }
+}
+
+#[cfg(test)]
+mod consistency_tests {
+    use super::*;
+
+    #[test]
+    fn points_stats_and_coverage_share_one_snapshot() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch("create table t as select 1::bigint i, 1.0::double v")
+            .unwrap();
+        let writer = conn.try_clone().unwrap();
+        let statement = |sql: &str| Statement {
+            sql: sql.into(),
+            params: vec![],
+        };
+        let plan = SeriesPlan {
+            slots: vec![1],
+            points: statement("select i, v from t"),
+            fractions: vec![0.5],
+            percentiles: vec![(1, statement("select quantile_cont(v, 0.5) from t"))],
+            bin_count: 1,
+            bins: vec![(1, statement("select v, v+1, 1::bigint, 1::bigint from t"))],
+            coverage: vec![(1, statement("select i, i, i from t"))],
+        };
+        let first = run_series_with(&conn, &plan, || {
+            writer.execute_batch("update t set v = 2, i = 2").unwrap();
+        })
+        .unwrap();
+        assert_eq!(first.slots[0].values[0], 1.);
+        assert_eq!(first.slots[0].percentiles[0].1, 1.);
+        assert_eq!(first.slots[0].bins, vec![(1., 2., 1)]);
+        assert_eq!(
+            first.slots[0].provenance.latest_received_at,
+            Some(from_micros(1))
+        );
+        let next = run_series(&conn, &plan).unwrap();
+        assert_eq!(next.slots[0].values[0], 2.);
+        assert_eq!(next.slots[0].percentiles[0].1, 2.);
+        assert_eq!(next.slots[0].bins, vec![(2., 3., 1)]);
+        assert_ne!(first.slots[0].provenance, next.slots[0].provenance);
+        // Failed statements must release the transaction before this worker's next request.
+        let mut bad = plan.clone();
+        bad.percentiles[0].1.sql = "select missing from t".into();
+        assert!(run_series(&conn, &bad).is_err());
+        assert!(run_series(&conn, &plan).is_ok());
     }
 }

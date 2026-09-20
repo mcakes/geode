@@ -33,14 +33,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-/// Outbound events queued before the sink refuses (§7.3). Tiles × a
-/// small burst; a full channel is counted by the bridge's own
-/// `dropped` counter. The sink handed to `DataService::spawn` must
-/// `try_send`, never block, and a refusal is counted rather than
-/// silently lost — surfaced through `Diagnostics::note_dropped` (Phase
-/// 4b §4.4; was `ShellView::set_data_status` before that entity existed).
-const EVENT_BOUND: usize = 256;
-
 pub struct DataSetup {
     pub config: DataServiceConfig,
     pub views: Vec<ViewSpec>,
@@ -206,21 +198,10 @@ pub fn stale_after_from_config(config: &Config) -> Duration {
         .unwrap_or(geode_blotter::tile::DEFAULT_STALE_AFTER)
 }
 
-/// The sink `DataService::spawn` is given: `try_send` onto `tx`, never
-/// blocking the caller (query-pool worker or ingest thread), and a
-/// refusal bumps `dropped` rather than being lost silently (§7.3).
-/// Factored out of `start` so it's unit-testable without a real service
-/// thread. `false` means "this event was not delivered", never "stop
-/// producing" — no producer inside the service exits on one (Phase 4b
-/// follow-up, Task 1).
-///
-/// Both refusals are counted, because both lose an event, but they are
-/// different facts: a FULL channel means the UI is momentarily behind a
-/// burst and is already surfaced through `Diagnostics::note_dropped`,
-/// while a CLOSED one means the receiver really is gone — worth one
-/// line in the log, latched so a busy producer cannot fill the ring
-/// with it.
-fn make_sink(tx: async_channel::Sender<DataEvent>, dropped: Arc<AtomicU64>) -> EventSink {
+/// Workers offer state without waiting for the UI. Bursts coalesce in the
+/// mailbox; only a closed receiver refuses delivery. Count each refusal and
+/// log closure once, while allowing producers to continue their work.
+fn make_sink(tx: crate::events::Sender, dropped: Arc<AtomicU64>) -> EventSink {
     let warned_closed = Arc::new(AtomicBool::new(false));
     Arc::new(move |e| match tx.try_send(e) {
         Ok(()) => true,
@@ -253,7 +234,7 @@ pub struct Bridge {
     /// `marketdata` above ships the fragment; this one still registers
     /// its own actions and reads its own reloaded `stale_after`.
     pub dividend: Rc<MarketDataFactory>,
-    events: async_channel::Receiver<DataEvent>,
+    events: crate::events::Receiver,
     dropped: Arc<AtomicU64>,
     /// The sources the running service was actually built from (Phase 4b
     /// §4.4), each with the shape it rides (timeseries spec §5.1) —
@@ -291,7 +272,7 @@ pub fn start(
     for d in &setup.diagnostics {
         tracing::warn!(target: "geode::query", "{d}");
     }
-    let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+    let (tx, rx) = crate::events::channel();
     let dropped = Arc::new(AtomicU64::new(0));
     let sink = make_sink(tx, dropped.clone());
     // Cloned before the move into `DataService::spawn` below — the
@@ -972,23 +953,19 @@ family = "series"
     }
 
     #[test]
-    fn a_full_channel_is_counted_but_not_reported_as_a_gone_receiver() {
-        // A momentarily full channel and a closed one both refuse, but
-        // only one of them means the receiver is gone (Phase 4b
-        // follow-up, Task 1). A full one is already surfaced through
-        // `Diagnostics::note_dropped`; claiming the receiver had gone
-        // would be a lie in the log.
-        let (tx, _rx) = async_channel::bounded::<DataEvent>(1);
+    fn a_burst_is_coalesced_without_a_delivery_refusal() {
+        // A busy UI retains the latest state without refusing the producer.
+        let (tx, _rx) = crate::events::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let sink = make_sink(tx, dropped.clone());
         let records = logged(|| {
             assert!(sink(DataEvent::Diagnostics(Vec::new())), "the first fits");
             assert!(
-                !sink(DataEvent::Diagnostics(Vec::new())),
-                "the second finds it full"
+                sink(DataEvent::Diagnostics(Vec::new())),
+                "the latest state is retained"
             );
         });
-        assert_eq!(dropped.load(Ordering::Relaxed), 1, "the refusal is counted");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
         assert!(
             !records.iter().any(|r| r.message.contains("receiver")),
             "a full channel must not be logged as a gone receiver: {records:?}"
@@ -997,7 +974,7 @@ family = "series"
 
     #[test]
     fn a_closed_channel_is_counted_and_logged_once() {
-        let (tx, rx) = async_channel::bounded::<DataEvent>(4);
+        let (tx, rx) = crate::events::channel();
         drop(rx);
         let dropped = Arc::new(AtomicU64::new(0));
         let sink = make_sink(tx, dropped.clone());
@@ -1319,7 +1296,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (tx, rx) = crate::events::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
@@ -1436,7 +1413,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -1505,7 +1482,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (tx, rx) = crate::events::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
@@ -1632,7 +1609,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -1694,7 +1671,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -1753,7 +1730,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (tx, rx) = crate::events::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
@@ -1828,7 +1805,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -1906,7 +1883,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -1974,7 +1951,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -2036,7 +2013,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -2136,7 +2113,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -2208,7 +2185,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -2308,7 +2285,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let (_tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -2607,16 +2584,16 @@ role = "key"
     }
 
     #[test]
-    fn a_refused_event_is_counted_as_dropped_rather_than_lost_silently() {
-        let (tx, rx) = async_channel::bounded::<DataEvent>(1);
+    fn a_closed_receiver_is_counted_as_dropped_rather_than_lost_silently() {
+        let (tx, rx) = crate::events::channel();
         let dropped = Arc::new(AtomicU64::new(0));
         let sink = make_sink(tx, dropped.clone());
         assert!(sink(DataEvent::Diagnostics(Vec::new())), "the first fits");
+        drop(rx);
         assert!(
             !sink(DataEvent::Diagnostics(Vec::new())),
-            "the channel is now full"
+            "the receiver is now closed"
         );
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
-        drop(rx);
     }
 }

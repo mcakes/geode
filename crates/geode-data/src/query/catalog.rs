@@ -23,14 +23,27 @@ pub fn build_catalog(
     schema: &SchemaSpec,
     as_of: &AsOf,
 ) -> Result<CatalogSnapshot, StoreError> {
+    build_catalog_with(conn, schema, as_of, || {})
+}
+
+fn build_catalog_with(
+    conn: &Connection,
+    schema: &SchemaSpec,
+    as_of: &AsOf,
+    mut after_dataset: impl FnMut(),
+) -> Result<CatalogSnapshot, StoreError> {
+    let tx = crate::store::begin_transaction(conn)?;
+    let conn = &tx;
     let sizes = table_sizes(conn)?;
     let mut datasets = Vec::with_capacity(schema.datasets.len());
     for ds in &schema.datasets {
         datasets.push(dataset_catalog(conn, ds, as_of, &sizes)?);
+        after_dataset();
     }
     let (database_bytes, used_blocks, block_size) = database_size(conn)?;
     let memory_bytes = memory_bytes(conn)?;
     let threads = threads(conn)?;
+    crate::store::commit_transaction(tx)?;
     Ok(CatalogSnapshot {
         as_of: as_of.clone(),
         datasets,
@@ -327,6 +340,33 @@ mod tests {
     use super::*;
     use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc, ts};
     use geode_core::config::{LayerDoc, merge_docs};
+
+    #[test]
+    fn catalog_datasets_share_one_snapshot() {
+        let f = fixture_with_two_generations();
+        let mut schema = f.schema.clone();
+        schema.datasets.push(schema.datasets[0].clone());
+        let reader = f.store.reader().unwrap();
+        let mut changed = false;
+        let snapshot = build_catalog_with(&reader, &schema, &AsOf::Live, || {
+            if !changed {
+                f.store
+                    .writer()
+                    .execute_batch(
+                        "update generations set source_time = '2030-01-01T00:00:00Z'::timestamptz",
+                    )
+                    .unwrap();
+                changed = true;
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            snapshot.datasets[0].partitions,
+            snapshot.datasets[1].partitions
+        );
+        let next = build_catalog(&reader, &schema, &AsOf::Live).unwrap();
+        assert_ne!(snapshot.datasets[0].partitions, next.datasets[0].partitions);
+    }
 
     /// `risk_snapshot` with a single declared grain (Position) — matches
     /// `store::retention::tests::position_only_dataset`'s shape, kept

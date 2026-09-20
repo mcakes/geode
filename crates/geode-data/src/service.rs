@@ -15,12 +15,10 @@ use crate::ingest::{DocumentJob, IngestEvent, IngestHandle, IngestRunner, Ingest
 use crate::pricing::{PriceSink, PricerConfig, PricingWorker};
 use crate::query::as_of::AsOf;
 use crate::query::catalog::build_catalog;
-use crate::query::compile::compile_view;
-use crate::query::distinct::compile_distinct;
-use crate::query::document::compile_document;
 use crate::query::pool::{
     Payload, QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId, Work,
 };
+use crate::query::read::{ReadConfig, ReadQuery};
 use crate::query::series::compile_series;
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
@@ -28,7 +26,7 @@ use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::document::{check_kind_against, join_key};
+use geode_core::document::check_kind_against;
 use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
@@ -37,7 +35,7 @@ use geode_core::query::{
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::series::{SERIES_POINT_CAP, SeriesOutcome, SeriesParams, SlotKind, cap_message};
-use geode_core::snapshot::{Freshness, Provenance};
+use geode_core::snapshot::Provenance;
 use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
 use std::path::PathBuf;
@@ -115,17 +113,8 @@ pub enum DataEvent {
         path: String,
         queued: usize,
     },
-    /// Sent after every `Published`, every `Failed`, and at every queue
-    /// drain (`IngestEvent::PlanComplete`) — so a dropped end event (the
-    /// event channel refused it) is repaired at the latest when the
-    /// queue empties, and `note_load_ended` is a no-op when nothing is
-    /// recorded, so the runner's startup drain costs nothing. Carries no
-    /// `source`: nothing reads it (`Diagnostics::note_load_ended` clears
-    /// whatever is currently recorded, since one runner on one FIFO
-    /// channel makes loads sequential) and the `PlanComplete` arm has
-    /// none to offer. Sent unconditionally from `Published`/`Failed`,
-    /// because a failed load's `Health` is deduplicated by the tracker
-    /// and may never reach the shell, and the strip must not stick.
+    /// Ends the ingest progress state. Coalesces with `Loading` in the app's
+    /// mailbox, so even a burst ending while the UI is busy clears the strip.
     LoadEnded,
     /// The worst state discovery found for a source on its last poll.
     Health {
@@ -147,31 +136,14 @@ pub enum DataEvent {
     Diagnostics(Vec<Diagnostic>),
 }
 
-/// Where events go. `false` means "this event was not delivered" — the
-/// caller's channel was full, or its receiver is gone. The two are the
-/// same answer here on purpose, because the rule is the same for both:
-/// **no producer inside the service may stop on a refusal** (Phase 4b
-/// follow-up, Task 1). The ingest runner carries on to its next item, the
-/// discovery scheduler re-arms its poll, and a query worker takes its next
-/// request; each logs the refusal once and drops the event. Nothing is
-/// retried — a health transition the caller missed is re-offered by
-/// `HealthTracker` on the next report, and a missed query result is
-/// requeried by the tile that wanted it. Shutdown is `IngestHandle::
-/// shutdown`, the scheduler's stop condvar, and the pool's `shutdown`,
-/// never a `false` from here.
+/// Nonblocking delivery into the caller's latest-state mailbox. `false` means
+/// the receiver is gone or an alternate caller refused the event; producers
+/// continue running after a refusal. The app retains terminal outcomes per key
+/// and publication invalidations per partition until its UI drains them.
 ///
-/// Called synchronously from inside the query pool's worker delivery
-/// site, which holds the pool's queue lock (see `pool::ResultSink`), so
-/// an `EventSink` must not block and must not call back into
-/// `DataService`: a channel `send`/`try_send` is fine, a call into
-/// `DataService::query` or `cancel` from inside the sink is not.
-///
-/// The caller owns the outbound channel this closes over, and that
-/// channel must be bounded (spec §7.3) and fed with `try_send` — never
-/// `send` — so a slow or gone receiver cannot block the query worker
-/// that calls this. A refused event is counted and surfaced as a
-/// diagnostic on the caller's side; the service itself never blocks on
-/// delivery and never retries one.
+/// Called under the query pool queue lock, so this callback must not wait for
+/// the UI or call back into `DataService`. Coalescing state plus a bounded
+/// wakeup channel keeps memory proportional to recipients, not event rate.
 pub type EventSink = Arc<dyn Fn(DataEvent) -> bool + Send + Sync>;
 
 /// One query, as a module asks for it.
@@ -676,6 +648,7 @@ impl HealthTracker {
 }
 
 pub struct DataService {
+    read_config: Arc<ReadConfig>,
     config: DataServiceConfig,
     /// Captured from `open`'s `sink` argument before it is cloned into
     /// the ingest/pool/scheduler closures, so `publish` can send a
@@ -740,7 +713,7 @@ pub struct DataService {
     pricing: PricingWorker,
     scheduler: Scheduler,
     ingest: Arc<IngestHandle>,
-    /// A dedicated read connection for compilation and catalog reads.
+    /// A dedicated read connection for service-side catalog and coverage reads.
     conn: duckdb::Connection,
 }
 
@@ -1624,6 +1597,10 @@ impl DataService {
             .flat_map(|v| v.validate(&config.schema, &config.dimensions))
             .collect();
         Ok(DataService {
+            read_config: Arc::new(ReadConfig {
+                schema: Arc::new(config.schema.clone()),
+                dimensions: config.dimensions.clone(),
+            }),
             config,
             sink: stored_sink,
             diagnostics,
@@ -1664,6 +1641,10 @@ impl DataService {
         views: Vec<ViewSpec>,
         dimensions: DerivedDimensions,
     ) -> Vec<Diagnostic> {
+        self.read_config = Arc::new(ReadConfig {
+            schema: Arc::clone(&self.read_config.schema),
+            dimensions: dimensions.clone(),
+        });
         self.config.dimensions = dimensions;
         let diagnostics: Vec<Diagnostic> = views
             .iter()
@@ -1684,7 +1665,8 @@ impl DataService {
         }
     }
 
-    /// Compile and submit. Results arrive on the sink `open` was given;
+    /// Submit for planning and execution on one worker snapshot. Compilation
+    /// errors and results arrive on the sink `open` was given;
     /// a newer query for the same key supersedes an older one.
     /// `max_depth` is the deepest grouping level to materialize. Pass one
     /// more than what the tree has expanded: a single-step expand is then
@@ -1728,64 +1710,20 @@ impl DataService {
             }
         };
 
-        let compiled = compile_view(
-            &self.conn,
-            spec,
-            &self.config.schema,
-            &params.scope,
-            &self.config.dimensions,
-            &params.as_of,
-            params.max_depth,
-        )?;
-
-        // Freshness travels with the result, so §5.4's stalest-input rule
-        // reaches the UI without every module reimplementing it.
-        let mut provenance = Provenance {
-            as_of_request: match &params.as_of {
-                AsOf::Live => None,
-                AsOf::At(t) => Some(t.to_rfc3339()),
-            },
-            ..Provenance::default()
-        };
-        let catalog = Catalog::new(&self.conn);
-        for dataset in &compiled.stalest_input {
-            // A historical result must not be labelled with today's
-            // freshness. `dataset_as_of` reads the live catalog and
-            // `latest_gen_id` is the newest generation in the database, so
-            // both describe *now* — reporting them beside an as-of result
-            // inverts the very rule §5.4 exists for.
-            let freshness = match &params.as_of {
-                AsOf::Live => Freshness {
-                    dataset: dataset.clone(),
-                    as_of: catalog.dataset_as_of(dataset, &[])?.map(|t| t.to_rfc3339()),
-                    generation: catalog.latest_gen_id()?,
-                },
-                AsOf::At(_) => Freshness {
-                    dataset: dataset.clone(),
-                    // The newest generation actually resolved, not the
-                    // instant requested. Labelling every dataset with the
-                    // request makes them all equal, and `stalest()` then
-                    // cannot show that one side of a join is a month
-                    // behind the other — which is all §5.4 is for.
-                    as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
-                    // Per-partition, so no single number describes it.
-                    generation: 0,
-                },
-            };
-            provenance.datasets.push(freshness);
-        }
-
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
             tag: params.tag,
             submitted: params.submitted,
             view: ViewId(view.to_string()),
-            // Cloned ahead of `compiled` below, which moves it: the field
-            // order here is why this line precedes `compiled` rather than
-            // sitting next to its other fields.
-            grouping: compiled.grouping.clone(),
-            work: Work::Query(compiled),
-            provenance,
+            grouping: spec.grouping.clone(),
+            work: Work::Read(Box::new(ReadQuery::view(
+                Arc::clone(&self.read_config),
+                spec.clone(),
+                params.scope.clone(),
+                params.as_of.clone(),
+                params.max_depth,
+            ))),
+            provenance: Provenance::default(),
             kind: RequestKind::Query,
         }))
     }
@@ -1795,19 +1733,16 @@ impl DataService {
     /// that carries the column. The caller has already removed the
     /// column's own selection from `params.scope`.
     pub fn distinct(&self, params: &DistinctParams) -> Result<QueryId, StoreError> {
-        let compiled = compile_distinct(
-            &self.conn,
-            &self.config.schema,
-            &self.config.dimensions,
-            params,
-        )?;
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
             tag: params.tag,
             submitted: Instant::now(),
             view: ViewId(format!("distinct:{}", params.column)),
             grouping: Vec::new(),
-            work: Work::Query(compiled),
+            work: Work::Read(Box::new(ReadQuery::distinct(
+                Arc::clone(&self.read_config),
+                params.clone(),
+            ))),
             provenance: Provenance::default(),
             kind: RequestKind::Distinct {
                 column: params.column.clone(),
@@ -1820,50 +1755,6 @@ impl DataService {
     /// the pool's cancellation and per-key coalescing and comes back as
     /// an ordinary `DataEvent::Query` — the tile route is unchanged.
     pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {
-        let compiled = compile_document(&self.conn, &self.config.schema, params)?;
-        let catalog = Catalog::new(&self.conn);
-        let freshness = match &params.as_of {
-            AsOf::Live => Freshness {
-                dataset: params.dataset.clone(),
-                // Per-document, not `dataset_as_of`/`book_freshness`: a
-                // document's `book` is always `None` (spec §4.1), so
-                // every document in the dataset collapses into the same
-                // one `book_freshness` group and the MIN across all of
-                // them would label a just-published document with some
-                // *other* document's staler time (Task 8 review, Major).
-                // `live_source_time` scoped to this document's own batch
-                // is the same honest per-partition reading the as-of arm
-                // below already takes.
-                as_of: catalog
-                    .live_source_time(&params.dataset, &join_key(&params.document_key), None)?
-                    .map(|t| t.to_rfc3339()),
-                generation: catalog.latest_gen_id()?,
-            },
-            AsOf::At(_) => Freshness {
-                dataset: params.dataset.clone(),
-                // The generation actually resolved for *this* document,
-                // never the requested instant — the same stalest-input
-                // rule live freshness applies elsewhere (§5.4).
-                as_of: compiled
-                    .resolved_as_of
-                    .get(&params.dataset)
-                    .map(|t| t.to_rfc3339()),
-                // No per-document generation id is threaded out of
-                // `compile_document` (only its `source_time` is, above);
-                // `0` here matches the view path's own as-of arm, which
-                // reports the same placeholder for the identical reason
-                // (`query` above, a few lines up: "Per-partition, so no
-                // single number describes it").
-                generation: 0,
-            },
-        };
-        let provenance = Provenance {
-            datasets: vec![freshness],
-            as_of_request: match &params.as_of {
-                AsOf::Live => None,
-                AsOf::At(t) => Some(t.to_rfc3339()),
-            },
-        };
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
             tag: params.tag,
@@ -1874,8 +1765,11 @@ impl DataService {
                 params.document_key.join("/")
             )),
             grouping: Vec::new(),
-            work: Work::Query(compiled),
-            provenance,
+            work: Work::Read(Box::new(ReadQuery::document(
+                Arc::clone(&self.read_config),
+                params.clone(),
+            ))),
+            provenance: Provenance::default(),
             kind: RequestKind::Query,
         }))
     }
@@ -3780,7 +3674,8 @@ mod tests {
             dataset: "nonesuch".into(),
             ..p.clone()
         };
-        assert!(svc.document(&bad).is_err());
+        svc.document(&bad).unwrap();
+        assert!(next(&rx).snapshot.unwrap_err().contains("unknown dataset"));
         svc.shutdown();
     }
 

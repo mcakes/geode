@@ -60,14 +60,21 @@ pub enum Request {
     Cancel {
         key: QueryKey,
     },
-    ReplaceViews {
-        views: Vec<ViewSpec>,
-        dimensions: DerivedDimensions,
-    },
+    /// Wake the service to apply its latest pending view configuration.
+    ReplaceViews,
     Shutdown,
 }
 
+#[derive(Debug)]
+struct ViewReplacement {
+    views: Vec<ViewSpec>,
+    dimensions: DerivedDimensions,
+}
+
+type PendingViews = Arc<Mutex<Option<ViewReplacement>>>;
+
 struct Inner {
+    pending_views: PendingViews,
     tx: Mutex<Option<SyncSender<Request>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     dropped: AtomicU64,
@@ -210,9 +217,28 @@ impl DataHandle {
     }
 
     /// The safe hot-reload path for views (foundation §8). Diagnostics
-    /// come back on the sink.
+    /// come back on the sink. Latest configuration wins even when the request
+    /// queue is full; false means the service is gone, never temporary pressure.
     pub fn replace_views(&self, views: Vec<ViewSpec>, dimensions: DerivedDimensions) -> bool {
-        self.send(Request::ReplaceViews { views, dimensions })
+        let guard = self.inner.tx.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tx) = guard.as_ref() else {
+            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
+        let mut pending = self
+            .inner
+            .pending_views
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *pending = Some(ViewReplacement { views, dimensions });
+        match tx.try_send(Request::ReplaceViews) {
+            Ok(()) | Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => {
+                pending.take();
+                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                false
+            }
+        }
     }
 
     /// Requests refused so far. A diagnostic, not a UI condition.
@@ -245,6 +271,7 @@ impl DataHandle {
         (
             DataHandle {
                 inner: Arc::new(Inner {
+                    pending_views: Arc::default(),
                     tx: Mutex::new(Some(tx)),
                     thread: Mutex::new(None),
                     dropped: AtomicU64::new(0),
@@ -262,12 +289,15 @@ impl DataService {
     /// the sink as a diagnostic and the handle then refuses everything.
     pub fn spawn(config: DataServiceConfig, sink: EventSink) -> DataHandle {
         let (tx, rx) = sync_channel(REQUEST_BOUND);
+        let pending_views = PendingViews::default();
+        let service_views = Arc::clone(&pending_views);
         let thread = std::thread::Builder::new()
             .name("geode-data".into())
-            .spawn(move || serve(config, sink, rx))
+            .spawn(move || serve(config, sink, rx, service_views))
             .expect("spawning the data service thread");
         DataHandle {
             inner: Arc::new(Inner {
+                pending_views,
                 tx: Mutex::new(Some(tx)),
                 thread: Mutex::new(Some(thread)),
                 dropped: AtomicU64::new(0),
@@ -276,7 +306,12 @@ impl DataService {
     }
 }
 
-fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
+fn serve(
+    config: DataServiceConfig,
+    sink: EventSink,
+    rx: Receiver<Request>,
+    pending_views: PendingViews,
+) {
     let mut service = match DataService::open(config, Arc::clone(&sink)) {
         Ok(s) => s,
         Err(e) => {
@@ -295,6 +330,18 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
     }
 
     while let Ok(req) = rx.recv() {
+        // Check before every request: a full request queue is already a wakeup.
+        // The latest configuration therefore cannot be lost behind a burst.
+        let replacement = pending_views
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(ViewReplacement { views, dimensions }) = replacement {
+            let diags = service.replace_views(views, dimensions);
+            if !diags.is_empty() {
+                sink(DataEvent::Diagnostics(diags));
+            }
+        }
         match req {
             Request::Query(params) => {
                 if let Err(e) = service.query(&params) {
@@ -360,12 +407,7 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
                 }
             }
             Request::Cancel { key } => service.cancel(key),
-            Request::ReplaceViews { views, dimensions } => {
-                let diags = service.replace_views(views, dimensions);
-                if !diags.is_empty() {
-                    sink(DataEvent::Diagnostics(diags));
-                }
-            }
+            Request::ReplaceViews => {}
             Request::Shutdown => break,
         }
     }
@@ -381,6 +423,53 @@ mod tests {
     use geode_core::scope::Scope;
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn view_reload_survives_a_full_request_queue_and_keeps_the_latest() {
+        let (handle, requests) = DataHandle::for_tests();
+        for _ in 0..REQUEST_BOUND - 1 {
+            assert!(handle.send(Request::Cancel { key: QueryKey(1) }));
+        }
+        assert!(handle.query(params(2, "reloaded")));
+        assert!(handle.replace_views(Vec::new(), DerivedDimensions::default()));
+        let mut view = crate::ingest::load::tests_support::tree_view();
+        view.name = "reloaded".into();
+        assert!(handle.replace_views(vec![view], DerivedDimensions::default()));
+        assert_eq!(handle.dropped_requests(), 0);
+
+        let (db, _src, store, ds, _emitted) = crate::ingest::load::tests_support::fixture();
+        drop(store);
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(ds);
+        let config = DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: vec![crate::ingest::load::tests_support::tree_view()],
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: crate::adapter::AdapterRegistry::default(),
+            documents: crate::documents::DocumentRegistry::default(),
+            pricer: PricerConfig::default(),
+        };
+        let (tx, outcomes) = channel();
+        let sink: EventSink = Arc::new(move |event| tx.send(event).is_ok());
+        let pending = Arc::clone(&handle.inner.pending_views);
+        // The service starts only after the queue filled and both reloads arrived.
+        let service = std::thread::spawn(move || serve(config, sink, requests, pending));
+        loop {
+            if let DataEvent::Query(outcome) =
+                outcomes.recv_timeout(Duration::from_secs(60)).unwrap()
+            {
+                assert_eq!(outcome.key, QueryKey(2));
+                assert!(outcome.snapshot.is_ok(), "{:?}", outcome.snapshot);
+                break;
+            }
+        }
+        handle.shutdown();
+        service.join().unwrap();
+        assert!(!handle.replace_views(Vec::new(), DerivedDimensions::default()));
+    }
 
     fn params(key: u64, view: &str) -> QueryParams {
         QueryParams {

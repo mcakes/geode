@@ -67,6 +67,8 @@ pub enum Payload {
 pub enum Work {
     Query(CompiledQuery),
     Series(Box<SeriesPlan>),
+    /// Database-dependent compilation and execution share one read transaction.
+    Read(Box<super::read::ReadQuery>),
 }
 
 /// What kind of request this is, carried through to the result so the
@@ -381,8 +383,8 @@ fn worker(
 }
 
 /// A refused result is one dropped frame of data, not the end of this
-/// worker (Phase 4b follow-up, Task 1). The requesting tile requeries;
-/// nothing is retried here. Logged once per worker — `latched` (final
+/// worker. The app mailbox retains results while its UI is busy; alternate
+/// sinks own their recovery from refusals. Nothing is retried here. Logged once per worker — `latched` (final
 /// review, MIN-3) — and a free function so a test can reach it without a
 /// pool thread.
 fn log_refused_result(latched: &AtomicBool, view: &str) {
@@ -416,25 +418,36 @@ pub(crate) fn run_one(
 ) -> Result<Payload, duckdb::Error> {
     match &req.work {
         Work::Series(plan) => run_series(conn, plan).map(Payload::Series),
+        Work::Read(query) => query
+            .run(conn)
+            .map(Payload::Snapshot)
+            .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
         Work::Query(compiled) => {
-            let mut stmt = conn.prepare(&compiled.sql)?;
-            let batches: Vec<duckdb::arrow::record_batch::RecordBatch> = stmt
-                .query_arrow(duckdb::params_from_iter(compiled.params.iter()))?
-                .collect();
-            let meta: Vec<ColumnMeta> = compiled
-                .columns
-                .iter()
-                .map(|c| ColumnMeta {
-                    name: c.name.clone(),
-                    attribution_by_depth: c.attribution_by_depth.clone(),
-                    scope_semantics: c.scope_semantics.clone(),
-                })
-                .collect();
-            Snapshot::from_batches(batches, meta, req.grouping.clone(), req.provenance.clone())
-                .map(Payload::Snapshot)
-                .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string()))
+            run_snapshot(conn, compiled, req.provenance.clone()).map(Payload::Snapshot)
         }
     }
+}
+
+pub(crate) fn run_snapshot(
+    conn: &duckdb::Connection,
+    compiled: &CompiledQuery,
+    provenance: Provenance,
+) -> Result<Snapshot, duckdb::Error> {
+    let mut stmt = conn.prepare(&compiled.sql)?;
+    let batches: Vec<duckdb::arrow::record_batch::RecordBatch> = stmt
+        .query_arrow(duckdb::params_from_iter(compiled.params.iter()))?
+        .collect();
+    let meta: Vec<ColumnMeta> = compiled
+        .columns
+        .iter()
+        .map(|c| ColumnMeta {
+            name: c.name.clone(),
+            attribution_by_depth: c.attribution_by_depth.clone(),
+            scope_semantics: c.scope_semantics.clone(),
+        })
+        .collect();
+    Snapshot::from_batches(batches, meta, compiled.grouping.clone(), provenance)
+        .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string()))
 }
 
 #[cfg(test)]

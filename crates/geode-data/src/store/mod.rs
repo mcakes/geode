@@ -70,6 +70,22 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+/// RAII rollback also covers panics caught at the worker boundary.
+pub(crate) fn begin_transaction(conn: &Connection) -> Result<duckdb::Transaction<'_>, StoreError> {
+    conn.unchecked_transaction()
+        .map_err(|source| StoreError::Sql {
+            statement: "begin transaction".into(),
+            source,
+        })
+}
+
+pub(crate) fn commit_transaction(tx: duckdb::Transaction<'_>) -> Result<(), StoreError> {
+    tx.commit().map_err(|source| StoreError::Sql {
+        statement: "commit transaction".into(),
+        source,
+    })
+}
+
 pub struct Store {
     writer: Connection,
     path: PathBuf,
