@@ -38,6 +38,7 @@ geode-widgets.workspace = true
 toml = "1.1.4"
 serde_json = "1.0.151"
 toml_edit = "0.25.13"
+async-channel = "2.5"
 # Phase 4a (M6's earlier "test-only" note no longer holds): `Frame::
 # note_published`'s `Publish::at`, `scopebar::build_model`'s "is the as-of
 # date today" check (`chrono::Local::now()`), and the scope bar's as-of

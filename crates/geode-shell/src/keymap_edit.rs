@@ -81,15 +81,9 @@
 //! fresh with `config_version = 1` at the top, matching every other config
 //! document in this codebase.
 //!
-//! Both of those guarantees are now [`crate::config_write`]'s, not this
-//! module's: the read-or-create-and-parse half comes from
-//! `config_write::open` (which is also where the `config_version = 1`
-//! stamp and the untouched-on-parse-failure refusal live), and the write
-//! from `config_write::write`. This module keeps only the one refusal
-//! that is genuinely keymap-shaped — a `bindings` key of the wrong TOML
-//! shape, see [`open_doc_with_bindings`] — which is exactly why it uses
-//! `open`/`write` rather than `config_write::edit`: `edit`'s closure
-//! cannot fail, and this one must.
+//! `config_write::try_edit` holds the complete read, validation, mutation and
+//! atomic write under one directory lock. [`ensure_bindings`] adds the
+//! keymap-specific shape check; an error leaves the original file untouched.
 //!
 //! Phase 4c collapsed the three `write_atomic` copies (this module's,
 //! `theme`'s and `session`'s) into that one door. The earlier note here
@@ -173,36 +167,37 @@ pub struct RebindOutcome {
 /// [`RebindOutcome`] instead (see [`Displacement::OldKeyNotFound`]), since
 /// `new_key` still gets bound either way.
 pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, String> {
-    let mut doc = open_doc_with_bindings(user_dir)?;
-    let bindings = doc["bindings"]
-        .as_array_of_tables_mut()
-        .expect("open_doc_with_bindings just ensured this");
+    crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
+        ensure_bindings(user_dir, doc)?;
+        let bindings = doc["bindings"]
+            .as_array_of_tables_mut()
+            .expect("ensure_bindings just ensured this");
 
-    let keys = keys_table_for(bindings, rebind.context.as_deref());
+        let keys = keys_table_for(bindings, rebind.context.as_deref());
 
-    set_key(keys, rebind.new_key.as_str(), value(rebind.action.as_str()));
+        set_key(keys, rebind.new_key.as_str(), value(rebind.action.as_str()));
 
-    // Same-key edge case (module doc): skip displacement entirely when it
-    // would touch the key `new_key` just wrote.
-    let displacement = match &rebind.old_key {
-        Some(old_key) if old_key != &rebind.new_key => {
-            if rebind.old_key_is_user_layer {
-                if keys.contains_key(old_key) {
-                    keys.remove(old_key);
-                    Displacement::Displaced
+        // Same-key edge case (module doc): skip displacement entirely when it
+        // would touch the key `new_key` just wrote.
+        let displacement = match &rebind.old_key {
+            Some(old_key) if old_key != &rebind.new_key => {
+                if rebind.old_key_is_user_layer {
+                    if keys.contains_key(old_key) {
+                        keys.remove(old_key);
+                        Displacement::Displaced
+                    } else {
+                        Displacement::OldKeyNotFound
+                    }
                 } else {
-                    Displacement::OldKeyNotFound
+                    set_key(keys, old_key.as_str(), value("none"));
+                    Displacement::Displaced
                 }
-            } else {
-                set_key(keys, old_key.as_str(), value("none"));
-                Displacement::Displaced
             }
-        }
-        _ => Displacement::NotRequested,
-    };
+            _ => Displacement::NotRequested,
+        };
 
-    crate::config_write::write(user_dir, Layer::User, KEYMAP_DOC, &doc.to_string())?;
-    Ok(RebindOutcome { displacement })
+        Ok(RebindOutcome { displacement })
+    })
 }
 
 /// One binding to silence, the displacement half of a [`Rebind`] performed
@@ -249,27 +244,28 @@ pub struct UnbindOutcome {
 /// module doc's "Semantics" section and [`Unbind::is_user_layer`]'s own
 /// doc for why getting that branch backwards is the dangerous case.
 pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, String> {
-    let mut doc = open_doc_with_bindings(user_dir)?;
-    let bindings = doc["bindings"]
-        .as_array_of_tables_mut()
-        .expect("open_doc_with_bindings just ensured this");
+    crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
+        ensure_bindings(user_dir, doc)?;
+        let bindings = doc["bindings"]
+            .as_array_of_tables_mut()
+            .expect("ensure_bindings just ensured this");
 
-    let keys = keys_table_for(bindings, unbind.context.as_deref());
+        let keys = keys_table_for(bindings, unbind.context.as_deref());
 
-    let removed = if unbind.is_user_layer {
-        if keys.contains_key(&unbind.key) {
-            keys.remove(&unbind.key);
-            true
+        let removed = if unbind.is_user_layer {
+            if keys.contains_key(&unbind.key) {
+                keys.remove(&unbind.key);
+                true
+            } else {
+                false
+            }
         } else {
+            set_key(keys, unbind.key.as_str(), value("none"));
             false
-        }
-    } else {
-        set_key(keys, unbind.key.as_str(), value("none"));
-        false
-    };
+        };
 
-    crate::config_write::write(user_dir, Layer::User, KEYMAP_DOC, &doc.to_string())?;
-    Ok(UnbindOutcome { removed })
+        Ok(UnbindOutcome { removed })
+    })
 }
 
 /// What [`apply_reset`]/[`apply_reset_all`] did: how many keys were
@@ -295,27 +291,28 @@ pub struct ResetOutcome {
 /// `keys_table_for` stops at the first). Entries emptied by the removal
 /// are left in place — a hand-written entry's comments are its owner's.
 pub fn apply_reset(user_dir: &Path, overrides: &[UserOverride]) -> Result<ResetOutcome, String> {
-    let mut doc = open_doc_with_bindings(user_dir)?;
-    let bindings = doc["bindings"]
-        .as_array_of_tables_mut()
-        .expect("open_doc_with_bindings just ensured this");
+    crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
+        ensure_bindings(user_dir, doc)?;
+        let bindings = doc["bindings"]
+            .as_array_of_tables_mut()
+            .expect("ensure_bindings just ensured this");
 
-    let mut removed = 0;
-    for o in overrides {
-        for entry in bindings.iter_mut().filter(|entry| {
-            entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
-        }) {
-            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
-                continue;
-            };
-            if keys.remove(&o.key).is_some() {
-                removed += 1;
+        let mut removed = 0;
+        for o in overrides {
+            for entry in bindings.iter_mut().filter(|entry| {
+                entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
+            }) {
+                let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                    continue;
+                };
+                if keys.remove(&o.key).is_some() {
+                    removed += 1;
+                }
             }
         }
-    }
 
-    crate::config_write::write(user_dir, Layer::User, KEYMAP_DOC, &doc.to_string())?;
-    Ok(ResetOutcome { removed })
+        Ok(ResetOutcome { removed })
+    })
 }
 
 /// Drop every `[[bindings]]` entry from `<user_dir>/keymap.toml` — the
@@ -328,25 +325,26 @@ pub fn apply_reset(user_dir: &Path, overrides: &[UserOverride]) -> Result<ResetO
 /// in those entries. `Err` only ever means the file read/parse/write
 /// itself failed, with the file left untouched.
 pub fn apply_reset_all(user_dir: &Path) -> Result<ResetOutcome, String> {
-    let mut doc = open_doc_with_bindings(user_dir)?;
-    let removed = doc["bindings"]
-        .as_array_of_tables()
-        .expect("open_doc_with_bindings just ensured this")
-        .iter()
-        .map(|entry| {
-            entry
-                .get("keys")
-                .and_then(Item::as_table_like)
-                .map_or(0, TableLike::len)
-        })
-        .sum();
-    doc.remove("bindings");
+    crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
+        ensure_bindings(user_dir, doc)?;
+        let removed = doc["bindings"]
+            .as_array_of_tables()
+            .expect("ensure_bindings just ensured this")
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("keys")
+                    .and_then(Item::as_table_like)
+                    .map_or(0, TableLike::len)
+            })
+            .sum();
+        doc.remove("bindings");
 
-    crate::config_write::write(user_dir, Layer::User, KEYMAP_DOC, &doc.to_string())?;
-    Ok(ResetOutcome { removed })
+        Ok(ResetOutcome { removed })
+    })
 }
 
-/// Read `<user_dir>/keymap.toml` through [`crate::config_write::open`]
+/// Validate the document inside [`crate::config_write::try_edit`]
 /// (which reads it if it exists, or starts a fresh document stamped with
 /// `config_version = 1` when it doesn't, and refuses an unparseable one
 /// without touching it), then ensure `bindings` is ready to index into as
@@ -364,9 +362,8 @@ pub fn apply_reset_all(user_dir: &Path) -> Result<ResetOutcome, String> {
 /// the corruption the module doc's "Corrupt file / atomicity" guarantee
 /// promises never happens. So this case is `Err`, same as a parse failure,
 /// and the file is left byte-for-byte untouched.
-fn open_doc_with_bindings(user_dir: &Path) -> Result<DocumentMut, String> {
+fn ensure_bindings(user_dir: &Path, doc: &mut DocumentMut) -> Result<(), String> {
     let path = crate::config_write::doc_path(user_dir, Layer::User, KEYMAP_DOC)?;
-    let mut doc = crate::config_write::open(user_dir, Layer::User, KEYMAP_DOC)?;
 
     match doc.get("bindings") {
         None => doc["bindings"] = Item::ArrayOfTables(ArrayOfTables::new()),
@@ -379,7 +376,7 @@ fn open_doc_with_bindings(user_dir: &Path) -> Result<DocumentMut, String> {
         Some(_) => {}
     }
 
-    Ok(doc)
+    Ok(())
 }
 
 /// Find the `[[bindings]]` entry whose `context` exactly matches `context`

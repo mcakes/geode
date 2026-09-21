@@ -1181,6 +1181,17 @@ fn a_stale_write_completion_does_not_erase_a_newer_edit(cx: &mut gpui::TestAppCo
     // keystroke had landed while that flush's write was in flight.
     shell.update(&mut cx, |shell, cx| {
         objectdialog::apply::finish_flush(shell, seq.wrapping_sub(1), Ok(()), None, cx);
+        objectdialog::apply::finish_flush(
+            shell,
+            seq.wrapping_sub(1),
+            Err("stale failure".into()),
+            None,
+            cx,
+        );
+        assert!(
+            shell.config_write_error.is_none(),
+            "stale failure must not replace current status"
+        );
     });
     assert!(
         shell.read_with(&cx, |shell, _| shell.pending_config_write.is_some()),

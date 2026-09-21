@@ -575,3 +575,63 @@ fn a_restored_frame_applies_to_the_frame_with_clean_history_and_the_first_flush_
     assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
     assert_eq!(restored.frame, Some(record));
 }
+
+#[gpui::test]
+fn rapid_settings_changes_persist_in_order_without_losing_other_keys(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let dir = tempfile::tempdir().unwrap();
+    let user_dir = dir.path().to_path_buf();
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| {
+                    ShellView::new(test_services(), None, Some(user_dir.clone()), window, cx)
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    assert!(
+        !user_dir.join("app.toml").exists(),
+        "sanity: nothing written before the pick"
+    );
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+    // All actions happen in one UI turn, before background tasks can run.
+    cx.update(|_window, cx| {
+        settings_view::set_theme(&shell, "Ayu Dark", cx);
+        settings_view::set_font_size(&shell, FontSize::Large, cx);
+        settings_view::set_theme(&shell, "Gruvbox Light", cx);
+        settings_view::set_find_style(&shell, FindStyle::Fzf, cx);
+        settings_view::set_font_size(&shell, FontSize::Small, cx);
+        shell.update(cx, |shell, cx| {
+            shell.set_line_numbers(crate::linenumbers::LineNumbers::Relative, cx);
+            shell.set_default_source(Some("demo_kdb".into()), cx);
+            shell.set_default_source(None, cx);
+        });
+    });
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(user_dir.join("app.toml")).unwrap();
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    assert_eq!(doc["theme"]["name"].as_str(), Some("Gruvbox Light"));
+    assert_eq!(doc["ui"]["font_size"].as_str(), Some("small"));
+    assert_eq!(doc["ui"]["find_style"].as_str(), Some("fzf"));
+    assert_eq!(doc["ui"]["line_numbers"].as_str(), Some("rel"));
+    assert!(doc["timeseries"].get("default_source").is_none());
+}

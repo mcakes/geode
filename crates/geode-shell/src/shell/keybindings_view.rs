@@ -1103,27 +1103,26 @@ fn spawn_rebind(
         }),
         old_key_is_user_layer: row.current.as_ref().is_some_and(|b| b.layer == Layer::User),
     };
-    cx.background_executor()
-        .spawn(async move {
-            match apply_rebind(&user_dir, &rebind) {
-                Ok(outcome) if outcome.displacement == Displacement::OldKeyNotFound => {
-                    tracing::warn!(
-                        target: "geode::config",
-                        "the previous binding for {} was not found where expected while \
-                         saving the new one — it may still be reachable from wherever it \
-                         actually lives",
-                        rebind.action
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(
+    crate::config_write::submit(&user_dir.clone(), cx.background_executor(), move || {
+        match apply_rebind(&user_dir, &rebind) {
+            Ok(outcome) if outcome.displacement == Displacement::OldKeyNotFound => {
+                tracing::warn!(
                     target: "geode::config",
-                    "failed to save the new binding for {}: {e}",
+                    "the previous binding for {} was not found where expected while \
+                     saving the new one — it may still be reachable from wherever it \
+                     actually lives",
                     rebind.action
-                ),
+                );
             }
-        })
-        .detach();
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                target: "geode::config",
+                "failed to save the new binding for {}: {e}",
+                rebind.action
+            ),
+        }
+    })
+    .detach();
 }
 
 /// How a silenced builtin or desk binding comes back: `r` on the same
@@ -1266,8 +1265,7 @@ fn reset_all(
     let Some(user_dir) = user_dir.clone() else {
         return Some(no_user_dir_notice("every binding"));
     };
-    cx.background_executor()
-        .spawn(async move {
+    crate::config_write::submit(&user_dir.clone(), cx.background_executor(), move || {
             match apply_reset_all(&user_dir) {
                 Ok(ResetOutcome { removed }) => {
                     tracing::info!(target: "geode::config",
@@ -1299,27 +1297,26 @@ fn spawn_reset(
     let Some(user_dir) = user_dir.clone() else {
         return Some(no_user_dir_notice(&action));
     };
-    cx.background_executor()
-        .spawn(async move {
-            let asked = overrides.len();
-            match apply_reset(&user_dir, &overrides) {
-                Ok(ResetOutcome { removed }) if removed == asked => {
-                    tracing::info!(target: "geode::config",
-                        "reset {action}: removed {removed} user overrides"
-                    );
-                }
-                Ok(ResetOutcome { removed }) => {
-                    tracing::warn!(target: "geode::config",
-                        "reset {action}: removed {removed} of {asked} user overrides — the \
-                         keymap on disk differs from the one loaded"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(target: "geode::config", "failed to reset {action}: {e}");
-                }
+    crate::config_write::submit(&user_dir.clone(), cx.background_executor(), move || {
+        let asked = overrides.len();
+        match apply_reset(&user_dir, &overrides) {
+            Ok(ResetOutcome { removed }) if removed == asked => {
+                tracing::info!(target: "geode::config",
+                    "reset {action}: removed {removed} user overrides"
+                );
             }
-        })
-        .detach();
+            Ok(ResetOutcome { removed }) => {
+                tracing::warn!(target: "geode::config",
+                    "reset {action}: removed {removed} of {asked} user overrides — the \
+                     keymap on disk differs from the one loaded"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(target: "geode::config", "failed to reset {action}: {e}");
+            }
+        }
+    })
+    .detach();
     None
 }
 
@@ -1357,23 +1354,22 @@ fn spawn_unbind(
     let Some(user_dir) = user_dir.clone() else {
         return Some(no_user_dir_notice(&action));
     };
-    cx.background_executor()
-        .spawn(async move {
-            match apply_unbind(&user_dir, &unbind) {
-                Ok(outcome) if unbind.is_user_layer && !outcome.removed => {
-                    tracing::warn!(target: "geode::config",
-                        "the binding for {action} was not found where \
-                         expected, so nothing was removed — it may still be reachable from \
-                         wherever it actually lives"
-                    )
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(target: "geode::config",
-                    "failed to change the binding for {action}: {e}"
-                ),
+    crate::config_write::submit(&user_dir.clone(), cx.background_executor(), move || {
+        match apply_unbind(&user_dir, &unbind) {
+            Ok(outcome) if unbind.is_user_layer && !outcome.removed => {
+                tracing::warn!(target: "geode::config",
+                    "the binding for {action} was not found where \
+                     expected, so nothing was removed — it may still be reachable from \
+                     wherever it actually lives"
+                )
             }
-        })
-        .detach();
+            Ok(_) => {}
+            Err(e) => tracing::warn!(target: "geode::config",
+                "failed to change the binding for {action}: {e}"
+            ),
+        }
+    })
+    .detach();
     None
 }
 

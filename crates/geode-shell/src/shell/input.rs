@@ -491,61 +491,45 @@ impl ShellView {
     /// no-op, checked before ever spawning: theme persistence, like session
     /// persistence, is best-effort, never load-bearing.
     ///
-    /// Raciness (Finding 1, acknowledged rather than engineered away): two
-    /// theme changes in quick succession spawn two independent
-    /// read-modify-write tasks against the same `app.toml`, with no
-    /// ordering guarantee between them beyond however the background
-    /// executor happens to schedule them — whichever task's rename lands
-    /// second wins the `[theme]` table. This is last-writer-wins on
-    /// `[theme]`, not a torn file (`persist_to_user_config`'s unique
-    /// pid+counter temp names already rule that out — each task only ever
-    /// touches its own temp file until its own rename), and in the
-    /// vanishingly rare case it's even reachable — two theme changes inside
-    /// one background-executor scheduling window — the on-disk value still
-    /// converges to *some* real, valid theme choice, never a corrupt one.
-    /// Accepted as-is rather than serialized through a dirty-flag/watcher-
-    /// tick queue: theme changes are rare UI actions, not the key-repeat-
-    /// speed churn the session path was built to survive.
+    /// Submissions enter the directory's FIFO before background execution,
+    /// so rapid choices persist in UI order and unrelated keys are preserved.
     pub(super) fn persist_theme(&self, cx: &mut Context<Self>) {
         let Some(dir) = self.user_dir.clone() else {
             return;
         };
         let name = self.services.theme.active_name().to_string();
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = theme::persist_to_user_config(&dir, &name) {
-                    tracing::warn!(target: "geode::theme", "{e}");
-                }
-            })
-            .detach();
+        crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+            if let Err(e) = theme::persist_to_user_config(&dir, &name) {
+                tracing::warn!(target: "geode::theme", "{e}");
+            }
+        })
+        .detach();
     }
 
     /// Persist the current font size to `<user_dir>/app.toml`'s `[ui]`
     /// table, off the UI thread — the exact contract of [`Self::
     /// persist_theme`] just above (missing `user_dir` = silently skipped;
-    /// failures are a `geode::config` warning; last-write-wins races
-    /// accepted for the same rare-UI-action reasons).
+    /// failures are a `geode::config` warning; writes run in submission order).
     pub(super) fn persist_font_size(&self, cx: &mut Context<Self>) {
         let Some(dir) = self.user_dir.clone() else {
             return;
         };
         let size = self.font_size;
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
-                    // MIN-2: `fontsize`/`vimfind`/`theme::persist_to_
-                    // user_config` all write the same `app.toml` and, on
-                    // a parse failure, return byte-identical text — a
-                    // bare `{e}` here and in `persist_find_style` below
-                    // would be indistinguishable at `geode::config`
-                    // (`persist_theme`'s own failure already reads
-                    // apart, since it logs at the `geode::theme` target
-                    // instead). The leading phrase is the only thing
-                    // that tells the two apart.
-                    tracing::warn!(target: "geode::config", "font size not saved: {e}");
-                }
-            })
-            .detach();
+        crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+            if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
+                // MIN-2: `fontsize`/`vimfind`/`theme::persist_to_
+                // user_config` all write the same `app.toml` and, on
+                // a parse failure, return byte-identical text — a
+                // bare `{e}` here and in `persist_find_style` below
+                // would be indistinguishable at `geode::config`
+                // (`persist_theme`'s own failure already reads
+                // apart, since it logs at the `geode::theme` target
+                // instead). The leading phrase is the only thing
+                // that tells the two apart.
+                tracing::warn!(target: "geode::config", "font size not saved: {e}");
+            }
+        })
+        .detach();
     }
 
     /// `config::open_directory`: open the user config directory in the
@@ -589,21 +573,19 @@ impl ShellView {
     /// Persist the current find style to `<user_dir>/app.toml`'s `[ui]`
     /// table, off the UI thread — the exact contract of [`Self::
     /// persist_font_size`] just above (missing `user_dir` = silently
-    /// skipped; failures are a `geode::config` warning; last-write-wins
-    /// races accepted for the same rare-UI-action reasons).
+    /// skipped; failures are a `geode::config` warning; writes run in submission order).
     pub(super) fn persist_find_style(&self, cx: &mut Context<Self>) {
         let Some(dir) = self.user_dir.clone() else {
             return;
         };
         let style = self.find_style;
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
-                    // MIN-2 — see `persist_font_size`'s comment just above.
-                    tracing::warn!(target: "geode::config", "find style not saved: {e}");
-                }
-            })
-            .detach();
+        crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+            if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
+                // MIN-2 — see `persist_font_size`'s comment just above.
+                tracing::warn!(target: "geode::config", "find style not saved: {e}");
+            }
+        })
+        .detach();
     }
 
     /// Set `[ui] line_numbers`, publish it to every module through the
@@ -630,13 +612,12 @@ impl ShellView {
             return;
         };
         let mode = self.line_numbers;
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = crate::linenumbers::persist_to_user_config(&dir, mode) {
-                    tracing::warn!(target: "geode::config", "line numbers not saved: {e}");
-                }
-            })
-            .detach();
+        crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+            if let Err(e) = crate::linenumbers::persist_to_user_config(&dir, mode) {
+                tracing::warn!(target: "geode::config", "line numbers not saved: {e}");
+            }
+        })
+        .detach();
     }
 
     /// Set `[timeseries] default_source`, publish it through the
@@ -663,13 +644,12 @@ impl ShellView {
             return;
         };
         let source = self.default_source.clone();
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = crate::series::persist_to_user_config(&dir, source.as_deref()) {
-                    tracing::warn!(target: "geode::config", "default source not saved: {e}");
-                }
-            })
-            .detach();
+        crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+            if let Err(e) = crate::series::persist_to_user_config(&dir, source.as_deref()) {
+                tracing::warn!(target: "geode::config", "default source not saved: {e}");
+            }
+        })
+        .detach();
     }
 
     /// Persist `[tiles] add`, off the UI thread — the exact contract of
@@ -679,13 +659,12 @@ impl ShellView {
             return;
         };
         let direction = self.add_direction;
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = crate::tileadd::persist_to_user_config(&dir, direction) {
-                    tracing::warn!(target: "geode::config", "add direction not saved: {e}");
-                }
-            })
-            .detach();
+        crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+            if let Err(e) = crate::tileadd::persist_to_user_config(&dir, direction) {
+                tracing::warn!(target: "geode::config", "add direction not saved: {e}");
+            }
+        })
+        .detach();
     }
 
     /// `mod+/` (spec §3.11): move focus into the scope bar's live text

@@ -53,12 +53,101 @@
 //! The temp name deliberately does not end in `.toml`: `reload::scan`'s
 //! `*.toml` glob must never observe a partial write mid-flight.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use geode_core::config::{CONFIG_VERSION, Layer};
 use toml_edit::{DocumentMut, value};
+
+// Directory-scoped: all windows writing the same configured directory share
+// ordering, while unrelated profiles (and test fixtures) remain independent.
+// No filesystem access on submission; callers use their configured directory
+// consistently. This does not coordinate other processes or symlink aliases.
+#[derive(Default)]
+struct Writer {
+    pending: Mutex<Pending>,
+    transaction: Mutex<()>,
+}
+
+#[derive(Default)]
+struct Pending {
+    jobs: VecDeque<Box<dyn FnOnce() + Send>>,
+    running: bool,
+}
+
+static WRITERS: LazyLock<Mutex<HashMap<PathBuf, Weak<Writer>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn writer(dir: &Path) -> Arc<Writer> {
+    let path = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut writers = WRITERS.lock().unwrap_or_else(|e| e.into_inner());
+    writers.retain(|_, writer| writer.strong_count() != 0);
+    let entry = writers.entry(path).or_default();
+    if let Some(writer) = entry.upgrade() {
+        return writer;
+    }
+    let writer = Arc::new(Writer::default());
+    *entry = Arc::downgrade(&writer);
+    writer
+}
+
+/// Accept a config mutation in calling order, before the executor can reorder
+/// tasks. The detached drain owns accepted writes even if the caller closes or
+/// drops its result task. Only the result waiter is cancellable. Disk I/O and
+/// parsing happen on the background executor; no queue lock covers either.
+///
+/// Submit a synchronous operation using `edit`/`try_edit`, never a pre-read
+/// document or an operation that waits on another submission to this directory.
+/// Errors are returned to the caller unchanged; a panicking operation cannot
+/// strand later jobs. Process exit remains best-effort, like existing saves.
+pub(crate) fn submit<T: Send + 'static>(
+    dir: &Path,
+    executor: &gpui::BackgroundExecutor,
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> gpui::Task<T> {
+    let writer = writer(dir);
+    let (tx, rx) = async_channel::bounded(1);
+    let start = {
+        let mut pending = writer.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.jobs.push_back(Box::new(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+            let _ = tx.try_send(result);
+        }));
+        !std::mem::replace(&mut pending.running, true)
+    };
+    if start {
+        executor
+            .spawn(async move {
+                loop {
+                    let job = {
+                        let mut pending = writer.pending.lock().unwrap_or_else(|e| e.into_inner());
+                        match pending.jobs.pop_front() {
+                            Some(job) => job,
+                            None => {
+                                pending.running = false;
+                                break;
+                            }
+                        }
+                    };
+                    job();
+                }
+            })
+            .detach();
+    }
+    executor.spawn(async move {
+        match rx
+            .recv()
+            .await
+            .expect("accepted config write has a completion")
+        {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
+}
 
 /// The path a layered config document lives at, refusing every layer but
 /// [`Layer::User`] *before* touching the filesystem.
@@ -87,18 +176,20 @@ pub(crate) fn doc_path(user_dir: &Path, layer: Layer, doc: &str) -> Result<PathB
 /// parses, or preserves whatever is on disk, so a user's comments, key
 /// order and unrelated tables are gone the moment it succeeds. That is
 /// right only when the caller already holds the complete document it
-/// means to write — [`open`] plus a mutation, which is how `keymap_edit`
-/// uses it. A caller setting one key wants [`edit`] instead; picking
-/// this one there silently discards hand-edits, with no failure to
-/// notice.
+/// means to write as a deliberate replacement. A caller setting one key
+/// wants [`edit`] instead; picking this one there silently discards hand-edits.
 pub fn write(user_dir: &Path, layer: Layer, doc: &str, text: &str) -> Result<(), String> {
     let path = doc_path(user_dir, layer, doc)?;
+    let writer = writer(user_dir);
+    let _guard = writer.transaction.lock().unwrap_or_else(|e| e.into_inner());
     write_file(&path, text)
 }
 
 /// Read (or create) one layered config document, apply `f` to it, and
 /// write it back atomically — the shape every keyed persist in this
-/// crate needs.
+/// crate needs. The directory lock covers the read through the final rename;
+/// the mutation closure must not recursively write config in that directory.
+/// UI callers submit this operation through the FIFO before spawning work.
 ///
 /// `toml_edit`, not the plain `toml` crate: a hand-written config can
 /// carry comments and keys this write knows nothing about, and only a
@@ -115,25 +206,28 @@ pub fn edit(
     doc: &str,
     f: impl FnOnce(&mut DocumentMut),
 ) -> Result<(), String> {
-    let path = doc_path(user_dir, layer, doc)?;
-    let mut document = open_at(&path)?;
-    f(&mut document);
-    write_file(&path, &document.to_string())
+    try_edit(user_dir, layer, doc, |document| {
+        f(document);
+        Ok(())
+    })
 }
 
-/// [`edit`] without the write: read-or-create and parse, handing back the
-/// document for the caller to mutate and then [`write`] itself.
-///
-/// Exists for `keymap_edit`, whose two writers need a *fallible* check
-/// between the parse and the mutation (a `bindings` key of the wrong
-/// shape is a refusal, not something to overwrite) and need a value out
-/// of the mutation (which binding was displaced) — neither of which fits
-/// `edit`'s infallible `FnOnce(&mut DocumentMut)`. Keeping it on this
-/// side of the door means the parse-refusal contract still has exactly
-/// one implementation.
-pub(crate) fn open(user_dir: &Path, layer: Layer, doc: &str) -> Result<DocumentMut, String> {
+/// A fallible mutation with a result, under the same read–modify–write lock.
+/// Validation failure or unwind leaves the original file untouched. The
+/// closure must not recursively write config in the same directory.
+pub(crate) fn try_edit<T>(
+    user_dir: &Path,
+    layer: Layer,
+    doc: &str,
+    f: impl FnOnce(&mut DocumentMut) -> Result<T, String>,
+) -> Result<T, String> {
     let path = doc_path(user_dir, layer, doc)?;
-    open_at(&path)
+    let writer = writer(user_dir);
+    let _guard = writer.transaction.lock().unwrap_or_else(|e| e.into_inner());
+    let mut document = open_at(&path)?;
+    let result = f(&mut document)?;
+    write_file(&path, &document.to_string())?;
+    Ok(result)
 }
 
 /// The read-or-create-and-parse half of [`edit`], by path.
@@ -180,12 +274,9 @@ fn open_at(path: &Path) -> Result<DocumentMut, String> {
 /// interleaving entirely: each writer only ever touches its own file
 /// until its own `rename`.
 ///
-/// The residual case stays honest rather than pretended away: two
-/// writers can still race the final `rename` itself (both succeed —
-/// `rename` is atomic per call — but whichever finishes second wins,
-/// since both target the same path). Every candidate `text` reaching
-/// here is a valid, self-consistent document, so the worst outcome is a
-/// slightly stale-but-valid file, never a torn one.
+/// Layered config mutations are serialized above this primitive. Raw whole-file
+/// replacements (session snapshots) and writers in other processes still rely
+/// only on atomic rename, not on a cross-process ordering guarantee.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Atomically write `text` to `path`: a unique temp file in the *same*
@@ -351,5 +442,125 @@ mod tests {
         .expect("edit");
         let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
         assert!(text.contains("large"), "{text}");
+    }
+    #[gpui::test]
+    async fn queued_edits_keep_submission_order_even_when_results_are_dropped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let executor = cx.update(|cx| cx.background_executor().clone());
+        // Queue the complete burst before the test executor runs any job.
+        // Dropping a result waiter must not cancel an accepted save.
+        for n in 0..32 {
+            let path = dir.path().to_path_buf();
+            drop(submit(dir.path(), &executor, move || {
+                edit(&path, Layer::User, "app", |doc| {
+                    doc["last"] = value(n);
+                    doc[&format!("key_{n}")] = value(n);
+                })
+                .unwrap();
+            }));
+        }
+        let path = dir.path().to_path_buf();
+        let text = submit(dir.path(), &executor, move || {
+            std::fs::read_to_string(path.join("app.toml")).unwrap()
+        })
+        .await;
+        let doc: DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["last"].as_integer(), Some(31));
+        for n in 0..32 {
+            assert_eq!(doc[&format!("key_{n}")].as_integer(), Some(n));
+        }
+        // The idle-to-running transition works again after the first drain.
+        let path = dir.path().to_path_buf();
+        submit(dir.path(), &executor, move || {
+            edit(&path, Layer::User, "app", |doc| doc["last"] = value(32))
+        })
+        .await
+        .unwrap();
+        let doc: DocumentMut = std::fs::read_to_string(dir.path().join("app.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(doc["last"].as_integer(), Some(32));
+    }
+
+    #[gpui::test]
+    async fn a_failed_or_panicking_save_does_not_strand_later_writes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let executor = cx.update(|cx| cx.background_executor().clone());
+        let path = dir.path().to_path_buf();
+        let failed = submit(dir.path(), &executor, move || {
+            try_edit(&path, Layer::User, "app", |doc| {
+                doc["uncommitted"] = value(true);
+                Err::<(), _>("rejected".to_string())
+            })
+        });
+        let path = dir.path().to_path_buf();
+        drop(submit(dir.path(), &executor, move || {
+            edit(&path, Layer::User, "app", |doc| {
+                doc["uncommitted"] = value(true);
+                panic!("injected config mutation panic");
+            })
+        }));
+        let path = dir.path().to_path_buf();
+        let saved = submit(dir.path(), &executor, move || {
+            edit(&path, Layer::User, "app", |doc| doc["saved"] = value(true))
+        });
+        assert_eq!(failed.await, Err("rejected".to_string()));
+        saved.await.unwrap();
+        let doc: DocumentMut = std::fs::read_to_string(dir.path().join("app.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(doc["saved"].as_bool(), Some(true));
+        assert!(doc.get("uncommitted").is_none());
+    }
+
+    #[test]
+    fn concurrent_edits_read_after_the_previous_commit() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let (entered, entry) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (second_entered, second_entry) = mpsc::channel();
+        let (starting, started) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(move || {
+                edit(path, Layer::User, "app", |doc| {
+                    doc["first"] = value(1);
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                })
+            });
+            entry.recv_timeout(Duration::from_secs(5)).unwrap();
+            let second = scope.spawn(move || {
+                starting.send(()).unwrap();
+                edit(path, Layer::User, "app", |doc| {
+                    second_entered.send(()).unwrap();
+                    doc["second"] = value(2);
+                })
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            let early = second_entry.recv_timeout(Duration::from_millis(100));
+            // Release even on a regression, so the failure never deadlocks.
+            release.send(()).unwrap();
+            first.join().unwrap().unwrap();
+            second.join().unwrap().unwrap();
+            assert!(
+                matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
+                "second edit entered before the first committed"
+            );
+        });
+        let doc: DocumentMut = std::fs::read_to_string(path.join("app.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(doc["first"].as_integer(), Some(1));
+        assert_eq!(doc["second"].as_integer(), Some(2));
     }
 }

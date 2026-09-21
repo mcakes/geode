@@ -820,9 +820,10 @@ fn schedule_flush(
         else {
             return;
         };
-        let outcome = cx
-            .background_executor()
-            .spawn(async move { run_writes(&user_dir, edits) })
+        let outcome =
+            config_write::submit(&user_dir.clone(), cx.background_executor(), move || {
+                run_writes(&user_dir, edits)
+            })
             .await;
         this.update(cx, |shell, cx| {
             finish_flush(shell, seq, outcome, rejected, cx)
@@ -878,7 +879,7 @@ fn promote(
 
 /// The write is done, one way or the other.
 ///
-/// **The sequence check on the success arm is load-bearing.** Clearing
+/// **The sequence check on every completion is load-bearing.** Clearing
 /// the batch unconditionally erases any edit that arrived while this
 /// write was in flight: that edit was folded into the pending batch, its
 /// own flush then finds nothing, and it reaches neither memory nor disk —
@@ -913,16 +914,15 @@ pub(crate) fn finish_flush(
     rejected: Option<usize>,
     cx: &mut Context<ShellView>,
 ) {
+    // Completion callbacks can be scheduled after a newer edit or completion.
+    // Neither an old failure nor an old success owns current memory/status.
+    if shell.config_write_seq != seq {
+        return;
+    }
     match outcome {
         Err(message) => revert_failed_write(shell, message, cx),
         Ok(()) => {
-            if shell
-                .pending_config_write
-                .as_ref()
-                .is_some_and(|pending| pending.seq == seq)
-            {
-                shell.pending_config_write = None;
-            }
+            shell.pending_config_write = None;
             // §19.6: the file is on disk either way; what differs is
             // whether memory took it. A rejected merge is said in the
             // same status slot a failed write uses, and cleared by the

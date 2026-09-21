@@ -1743,11 +1743,11 @@ run_mutation "keybindings: d removes where it should shadow a lower layer" \
 # it was asked to uncover. The writer is `apply_reset` since 2026-09-19.
 run_mutation "keybindings: r shadows instead of removing the user's override" \
   crates/geode-shell/src/keymap_edit.rs \
-  '            if keys.remove(&o.key).is_some() {
-                removed += 1;
-            }' \
-  '            set_key(keys, o.key.as_str(), value("none"));
-            removed += 1;' \
+  '                if keys.remove(&o.key).is_some() {
+                    removed += 1;
+                }' \
+  '                set_key(keys, o.key.as_str(), value("none"));
+                removed += 1;' \
   geode-shell \
   r_resets_a_user_override_by_removing_it
 
@@ -1819,22 +1819,22 @@ run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
 # behind on every miss.
 run_mutation "keymap_edit: a reset creates the entry it was going to remove from" \
   crates/geode-shell/src/keymap_edit.rs \
-  '        for entry in bindings.iter_mut().filter(|entry| {
-            entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
-        }) {
-            let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
-                continue;
-            };
-            if keys.remove(&o.key).is_some() {
-                removed += 1;
-            }
-        }' \
-  '        {
-            let keys = keys_table_for(bindings, o.context_source.as_deref());
-            if keys.remove(&o.key).is_some() {
-                removed += 1;
-            }
-        }' \
+  '            for entry in bindings.iter_mut().filter(|entry| {
+                entry.get("context").and_then(Item::as_str) == o.context_source.as_deref()
+            }) {
+                let Some(keys) = entry.get_mut("keys").and_then(Item::as_table_like_mut) else {
+                    continue;
+                };
+                if keys.remove(&o.key).is_some() {
+                    removed += 1;
+                }
+            }' \
+  '            {
+                let keys = keys_table_for(bindings, o.context_source.as_deref());
+                if keys.remove(&o.key).is_some() {
+                    removed += 1;
+                }
+            }' \
   geode-shell \
   resetting_a_key_that_is_not_there_counts_nothing_and_creates_no_entry
 
@@ -2657,6 +2657,35 @@ run_mutation "frame: bar_model is rebuilt when versions change" \
 # The layer guard is the only thing standing between a UI toggle and the
 # shared desk layer. Defeating it makes every layer writable, which is
 # silent: the write succeeds and the desk file is now the user's.
+# Ordered persistence: filesystem transactions and accepted UI submissions.
+run_mutation "config ordering: the read begins after the previous commit" \
+  crates/geode-shell/src/config_write.rs \
+  '    let mut document = open_at(&path)?;' \
+  '    drop(_guard);
+    let mut document = open_at(&path)?;' \
+  geode-shell concurrent_edits_read_after_the_previous_commit
+
+run_mutation "config ordering: pending writes run in submission order" \
+  crates/geode-shell/src/config_write.rs \
+  'match pending.jobs.pop_front() {' \
+  'match pending.jobs.pop_back() {' \
+  geode-shell queued_edits_keep_submission_order_even_when_results_are_dropped
+
+run_mutation "config ordering: dropping the waiter cannot cancel an accepted save" \
+  crates/geode-shell/src/config_write.rs \
+  '            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));' \
+  '            if tx.is_closed() { return; }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));' \
+  geode-shell queued_edits_keep_submission_order_even_when_results_are_dropped
+
+run_mutation "config ordering: validation errors leave the document untouched" \
+  crates/geode-shell/src/config_write.rs \
+  '    let result = f(&mut document)?;' \
+  '    let result = f(&mut document);
+    if result.is_err() { write_file(&path, &document.to_string())?; }
+    let result = result?;' \
+  geode-shell a_failed_or_panicking_save_does_not_strand_later_writes
+
 run_mutation "config_write: a non-user layer is writable" \
   crates/geode-shell/src/config_write.rs \
   '    if layer != Layer::User {' \
@@ -4604,15 +4633,8 @@ run_mutation "objectdialog: the config fan-out fires per keystroke instead of ri
 # reason.
 run_mutation "objectdialog: a stale write completion clears a newer edit's batch" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '            if shell
-                .pending_config_write
-                .as_ref()
-                .is_some_and(|pending| pending.seq == seq)
-            {
-                shell.pending_config_write = None;
-            }' \
-  '            let _ = seq;
-            shell.pending_config_write = None;' \
+  '    if shell.config_write_seq != seq {' \
+  '    if false {' \
   geode-shell \
   a_stale_write_completion_does_not_erase_a_newer_edit
 

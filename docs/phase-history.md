@@ -142,3 +142,12 @@ View reloads keep one pending configuration beside the bounded request queue; a 
 Regressions force a second-grain failure, a late catalog failure after document/ENUM mutation, a writer commit between planning and execution (including archive eviction), a commit between series statements and between catalog datasets, a full reload queue, thousands of undrained events, and an idle receiver awaiting the final event. Mutation entries under `consistency:` guard these boundaries; the existing provenance and summary-rollback entries moved with their code.
 
 The old full-versus-closed delivery mutation was retired because the mailbox now has a single `Closed` refusal type. The document-error mutation now targets worker delivery, where compilation happens. Displaced snapshots are dropped after releasing the mailbox mutex so their deallocation cannot hold up the UI receiver.
+
+
+### Ordered config persistence (2026-09-20, worktree)
+
+Config writes now enter a directory-scoped FIFO synchronously at submission, before background scheduling. Settings, log levels, saved scopes/groupings, keybindings and debounced object batches use it. The detached drain retains accepted writes when the result waiter or view disappears; errors and panics do not strand later jobs. All windows using the same configured directory share the queue. An idle directory has no retained worker; the registry holds weak references.
+
+`edit`/`try_edit` hold the entire read, validation, mutation and atomic replacement under a directory lock. Keymap mutations use the fallible transaction instead of separate open/write calls. Stale object-save completions, successful or failed, cannot clear a newer batch or change its status. Existing comment preservation, parse refusal, error reporting and object-edit debounce remain in force.
+
+This is in-process ordering, using the configured directory path; it does not lock out external editors/other processes or unify symlink aliases. Process shutdown remains best-effort. Session snapshots keep their existing separate flush lifecycle.

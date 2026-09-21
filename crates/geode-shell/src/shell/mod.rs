@@ -1836,14 +1836,12 @@ impl ShellView {
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
             && let Some(dir) = self.user_dir.clone()
         {
-            cx.background_executor()
-                .spawn(async move {
-                    if let Err(e) = crate::frame::persist_slot_to_user_config(&dir, slot, &grouping)
-                    {
-                        tracing::warn!(target: "geode::config", "{e}");
-                    }
-                })
-                .detach();
+            crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+                if let Err(e) = crate::frame::persist_slot_to_user_config(&dir, slot, &grouping) {
+                    tracing::warn!(target: "geode::config", "{e}");
+                }
+            })
+            .detach();
         }
         // A scope saved through `Frame::save_scope` (spec §3.9) is
         // persisted here too — same reasoning as the grouping slot above:
@@ -1857,14 +1855,12 @@ impl ShellView {
         if let Some((name, scope)) = frame.update(cx, |f, _| f.take_pending_scope_persist())
             && let Some(dir) = self.user_dir.clone()
         {
-            cx.background_executor()
-                .spawn(async move {
-                    if let Err(e) = crate::frame::persist_scope_to_user_config(&dir, &name, &scope)
-                    {
-                        tracing::warn!(target: "geode::config", "{e}");
-                    }
-                })
-                .detach();
+            crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+                if let Err(e) = crate::frame::persist_scope_to_user_config(&dir, &name, &scope) {
+                    tracing::warn!(target: "geode::config", "{e}");
+                }
+            })
+            .detach();
         }
         // Reflect the frame's text back into the field (Task 4, spec
         // §3.11): an unfocused field always shows the frame's truth — a
@@ -1910,15 +1906,14 @@ impl ShellView {
                 tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
             }
             if let Some(dir) = self.user_dir.clone() {
-                cx.background_executor()
-                    .spawn(async move {
-                        if let Err(e) =
-                            log_persist::persist_log_level_to_user_config(&dir, &target, level)
-                        {
-                            tracing::warn!(target: "geode::config", "failed to persist [log]: {e}");
-                        }
-                    })
-                    .detach();
+                crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+                    if let Err(e) =
+                        log_persist::persist_log_level_to_user_config(&dir, &target, level)
+                    {
+                        tracing::warn!(target: "geode::config", "failed to persist [log]: {e}");
+                    }
+                })
+                .detach();
             }
         }
         if pending_overlay {
