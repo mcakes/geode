@@ -367,10 +367,15 @@ impl Model {
         })
     }
 
+    /// A cleared tile is a fresh tile, numbering included: no slot
+    /// remains for `s1` to collide with, and `take_number`'s own
+    /// exhaustion message ("`:clear` starts again") is only true
+    /// because of this line.
     pub fn clear(&mut self) -> Changed {
         self.slots.clear();
         self.cursor = None;
         self.dataset = None;
+        self.next_number = 1;
         SETTING
     }
 
@@ -400,7 +405,9 @@ impl Model {
         }
         changed
     }
-    /// By slot number, for Task 3's session restore.
+    /// By slot number rather than by cursor, which is what the
+    /// session restore needs: it replays a recorded `visible` onto a
+    /// slot it has just added, with no cursor anywhere near it.
     pub fn set_visible(&mut self, number: u8, visible: bool) -> Result<Changed, String> {
         let i = self
             .index_of(number)
@@ -552,8 +559,9 @@ impl Model {
         }
         self.set_frequency(f, now, as_of)
     }
-    /// A range change refetches everything (Task 7 reads `SlotState`),
-    /// so every SOURCE slot's state moves to `Fetching` on success.
+    /// A range change refetches everything — `fetch_pending` selects
+    /// by `SlotState` — so every SOURCE slot's state moves to
+    /// `Fetching` on success.
     pub fn set_range(
         &mut self,
         range: Range,
@@ -1107,8 +1115,8 @@ mod tests {
         assert!(ch.query() && ch.chrome() && ch.session());
         assert_eq!(
             m.add_source("A", "demo_kdb", "series").unwrap().0,
-            3,
-            "numbers keep counting"
+            1,
+            "a cleared tile is a fresh tile: the numbering starts again, which is what `take_number`'s exhaustion message promises"
         );
     }
 }

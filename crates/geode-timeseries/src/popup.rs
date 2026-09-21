@@ -233,8 +233,8 @@ impl RangePopup {
     /// Apply one key to the active field, re-preparing that field's
     /// segments. Answers whether anything moved.
     ///
-    /// Only a key that MOVED something counts as an edit (Task 10
-    /// review): `right` on the last segment under `Precision::Date`, or
+    /// Only a key that MOVED something counts as an edit: `right` on
+    /// the last segment under `Precision::Date`, or
     /// `backspace` with nothing typed, change nothing on screen, and a
     /// trader who pressed one and then reached for a preset digit would
     /// have found the digit typing itself into the day instead — the
@@ -363,7 +363,7 @@ impl PickerState {
     /// query names something — the identities stage only: a source that
     /// matches nothing cannot be invented here.
     ///
-    /// The text is TRIMMED (Task 9 review, minor 2), and the trimmed
+    /// The text is TRIMMED, and the trimmed
     /// form is what the row shows, because it is what the commit stores
     /// as the identity: a query of nothing but spaces ranks nothing and
     /// would otherwise offer an `add "   "…` row that can only be inert.
@@ -627,9 +627,9 @@ pub(crate) fn render_series_popup(
     anchor_popup(list)
 }
 
-/// The anchored, deferred wrapper this popup and Tasks 9–10's will both
-/// take: `Local` position mode against the `relative()` wrapper the tile
-/// paints round its header, snapped inside the window.
+/// The anchored, deferred wrapper every one of this tile's popups
+/// takes: `Local` position mode against the `relative()` wrapper the
+/// tile paints round its header, snapped inside the window.
 fn anchor_popup(list: Div) -> Deferred {
     deferred(
         anchored()

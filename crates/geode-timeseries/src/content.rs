@@ -52,8 +52,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("timeseries::reset_view", "Reset view"),
     ("timeseries::jump_start", "Jump to start"),
     ("timeseries::jump_end", "Jump to end"),
-    // Popup verbs (Tasks 8–10): registered now so the fragment below
-    // binds them and the palette lists them from the first build.
+    // The popup verbs: registered beside the rest so the fragment
+    // below binds them and the palette lists them.
     ("timeseries::list_down", "Series list: down"),
     ("timeseries::list_up", "Series list: up"),
     ("timeseries::list_close", "Series list: close"),
@@ -135,8 +135,8 @@ impl TileContent for TimeseriesContent {
     }
 
     /// `window` is forwarded rather than dropped: the popup verbs
-    /// (Tasks 8–10) create a field, focus it and blur it, none of which
-    /// is reachable from `&mut App` alone.
+    /// create a field, focus it and blur it, none of which is
+    /// reachable from `&mut App` alone.
     fn dispatch(
         &self,
         action: &ActionId,
@@ -148,8 +148,10 @@ impl TileContent for TimeseriesContent {
             .update(cx, |t, cx| t.dispatch(action, count, window, cx))
     }
 
-    /// `window` for the same reason `dispatch`'s is: a `:` line may have
-    /// to close an open popup first.
+    /// `window` is unused here — no `:` verb this tile has touches a
+    /// popup — and stays only because [`TileContent::command`] is
+    /// spelled that way for every module; `TimeseriesTile::command`
+    /// discards it with a `let _`.
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String> {
         self.tile.update(cx, |t, cx| t.command(line, window, cx))
     }

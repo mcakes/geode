@@ -181,7 +181,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
 ///
 /// `sources` is accepted for symmetry with the `:add` form but the
 /// identity position offers nothing (the picker owns identities); keep
-/// the parameter, since Task 6's `completions` passes it and a later
+/// the parameter — the tile's own `completions` passes it and a later
 /// catalogue-backed completion is one arm away.
 pub fn completions(
     line: &str,

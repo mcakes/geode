@@ -117,9 +117,9 @@ struct ChartKey {
 pub struct TimeseriesTile {
     id: TileId,
     frame: Entity<Frame>,
-    /// Tasks 8–10: the catalog (a fetch source's identities) the add
-    /// picker ranks over, and the health a slot's chip reports.
-    #[allow(dead_code)]
+    /// The catalogue the add picker's identities stage ranks over, and
+    /// the load-lane health a slot's popup row reports. Observed as well
+    /// as read: a fresh catalogue while that stage is open re-ranks it.
     diagnostics: Entity<Diagnostics>,
     /// `Request::Fetch`, `Request::Series` and `Request::Cancel` go
     /// through it.
@@ -194,8 +194,9 @@ impl TimeseriesTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Tasks 8–10 open a field from here (a restored draft's editor);
-        // the parameter is kept so that arrives as a body change.
+        // Nothing here opens a field, so `window` is unused; the
+        // parameter is the roster's own `create` signature, kept so a
+        // tile that one day restores an open editor is a body change.
         let _ = window;
         let settings = cx
             .try_global::<SeriesSettings>()
@@ -252,8 +253,8 @@ impl TimeseriesTile {
                 // set only when the RANGE moved, and an as-of change
                 // leaves `Range` identical.
                 //
-                // Gated on a REAL as-of move, not on `follows_changed`
-                // (Task 8, folded review fix): that answers TRUE while
+                // Gated on a REAL as-of move, not on `follows_changed`:
+                // that answers TRUE while
                 // `acted` is `None` — a tile that has never asked a
                 // query — so on a freshly shown tile whose first fetch
                 // is still out, any frame notify at all (a scope
@@ -368,7 +369,8 @@ impl TimeseriesTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `insert` exactly while a popup holds a text field (Tasks 9–10);
+    /// `insert` exactly while a popup holds a text field (the picker,
+    /// the expression field and the range popup);
     /// `normal` otherwise — plus the `popup` pair a fieldless popup
     /// adds. The series list is the fieldless one: it keeps the tile's
     /// own keyboard, so `j`/`k`/`enter`/`escape` reach the matcher as
@@ -451,7 +453,8 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// This tile has no find; `/` belongs to the series list (Task 9).
+    /// This tile has no find of its own: `/` belongs to the series
+    /// list, which filters through its own `ChoiceList` field.
     pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
         let _ = (event, window, cx);
     }
@@ -546,8 +549,8 @@ impl TimeseriesTile {
 
     // ---- keys --------------------------------------------------------
 
-    /// `window` is forwarded for Tasks 8–10 alone: the popup verbs
-    /// create a field and give the keyboard back up, neither of which is
+    /// `window` is forwarded for the popup verbs alone: they create a
+    /// field and give the keyboard back up, neither of which is
     /// reachable from `&mut App`.
     pub fn dispatch(
         &mut self,
@@ -561,8 +564,8 @@ impl TimeseriesTile {
         };
         // A notice belongs to the last action that ACTED (review round
         // 1, MIN-3): the next handled verb clears it before it can set
-        // one of its own, but a verb this tile does NOT handle — every
-        // popup verb until Tasks 8–10, and anything unrecognised — must
+        // one of its own, but a verb this tile does NOT handle — a popup
+        // verb with no popup open, and anything unrecognised — must
         // leave the text still on screen alone, or the state says
         // "cleared" while the trader reads the old line. So it is taken
         // here and put back on the two unhandled paths.
@@ -573,7 +576,7 @@ impl TimeseriesTile {
         // with the list up meant the tile, not the list, and an overlay
         // left open over the answer is the confusing half.
         //
-        // The keep-list is STAGE-AWARE (Task 9 review, Important): a
+        // The keep-list is STAGE-AWARE: a
         // popup that holds the KEYBOARD keeps only its own four verbs.
         // Everything else — including the verbs the series list happily
         // stays open through — closes it first, because the palette can
@@ -1002,7 +1005,7 @@ impl TimeseriesTile {
                 let sources: Vec<String> = settings.names();
                 let default_source = settings.default_source.clone();
                 // A stage with nothing to choose from would be a dead
-                // end (Task 9 review, minor 3): say why and close, the
+                // end: say why and close, the
                 // way `:add` refuses an unconfigured source.
                 if sources.is_empty() {
                     self.close_popup_with_window(window, cx);
@@ -1105,8 +1108,7 @@ impl TimeseriesTile {
                 // was written, the field is still open on the text that
                 // caused it, and `dispatch`'s tail is what puts a
                 // standing notice back — answering `true` here dropped
-                // one for a keystroke that changed nothing (Task 9
-                // re-review).
+                // one for a keystroke that changed nothing.
                 return false;
             }
             Ok(expr) => {
@@ -1142,7 +1144,7 @@ impl TimeseriesTile {
     /// convention, read in reverse.
     ///
     /// An `Absolute` range instead seeds from its STORED dates, as typed
-    /// (ruling, Task 10 review). `resolve` clips its end to the frame's
+    /// (a ruling). `resolve` clips its end to the frame's
     /// as-of — right for what is fetched and queried (ruling 4), wrong
     /// for a seed: reopening `r` under an as-of inside the stored span
     /// would show a `to` the trader never typed, and `enter` would then
@@ -1440,6 +1442,9 @@ impl TimeseriesTile {
 
     // ---- the `:` line ------------------------------------------------
 
+    /// `window` is unused: no `:` verb this tile has touches a popup or
+    /// a field. It stays in the signature because
+    /// [`TileContent::command`] is spelled that way for every module.
     pub fn command(
         &mut self,
         line: &str,
@@ -2432,7 +2437,7 @@ mod tests {
                     // Wrapped in `Root`, exactly as `main.rs` wraps the
                     // shell: gpui-component registers the focused
                     // `InputState` on the `Root`, so a tile that opens a
-                    // field (Tasks 8–10) needs one for focus to behave
+                    // field needs one for focus to behave
                     // here as it does in the app.
                     cx.new(|cx| gpui_component::Root::new(tile, window, cx))
                 })
@@ -2863,7 +2868,7 @@ mod tests {
         // unparseable keystroke used to reach the running app and be
         // dropped there with an error diagnostic in the trader's
         // diagnostics tile — which is where `"+"` was found, on the
-        // first `--demo` boot after the module was registered (Task 11).
+        // first `--demo` boot after the module was registered.
         // `build_keymap` over the real spliced docs is the production
         // path and the one that reports it.
         let docs = geode_shell::keymap::fragments::splice(
@@ -2941,7 +2946,7 @@ mod tests {
         );
         // A count steps the cycle that many times: from `Right`, two
         // steps is `BottomLeft` then `BottomRight` (the brief's `Left`
-        // predates the four-axis cycle Task 2 built).
+        // predates the four-axis cycle the model builds).
         h.dispatch(&mut vcx, "axis_next", Some(2));
         assert_eq!(h.model(&vcx).slots()[1].axis, Axis::BottomRight);
         h.dispatch(&mut vcx, "prev", None);
@@ -3024,10 +3029,9 @@ mod tests {
         // A verb this tile does not handle leaves the notice on screen:
         // clearing it in state while the old text is still painted is a
         // lie (review round 1, MIN-3).
-        // (Every popup verb is built as of Task 10, so the unhandled
-        // one here is a list key with no list open — `popup_verb`'s
-        // guards fall through to `false` exactly as an unrecognised
-        // verb does.)
+        // (Every popup verb is handled somewhere, so the unhandled one
+        // here is a list key with no list open — `popup_verb`'s guards
+        // fall through to `false` exactly as an unrecognised verb does.)
         h.dispatch(&mut vcx, "list_down", None);
         assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
         // A handled one takes it away and speaks for itself.
@@ -3247,7 +3251,7 @@ mod tests {
         let first = h.fetch_request().expect("the add's own fetch");
         // A frame notify carrying nothing this tile follows, while that
         // first fetch is still unanswered, must not re-ask for the same
-        // span (Task 8, folded review fix): `acted` is `None` — this
+        // span: `acted` is `None` — this
         // tile has never asked a QUERY — so `follows_changed` says true,
         // and the refetch trio hanging off it alone fired a duplicate
         // `Fetch` per pair on the first scope keystroke after a show.
@@ -3272,6 +3276,53 @@ mod tests {
             .expect("the new span is asked for, answered or not");
         assert_eq!(second.identity, "SPX.close");
         assert!(second.from > first.from, "a narrower span");
+    }
+
+    /// The as-of observer's own `in_flight.clear()`. `fetch_pending`
+    /// drops the in-flight set only when the RANGE moved, and an as-of
+    /// change leaves `Range` identical — so without the explicit clear a
+    /// pair whose FIRST fetch is still unanswered as the as-of moves
+    /// keeps its entry, and the new span (`AsOf::At(t)` resolves to
+    /// `t − preset .. t`, a different left edge) is never asked for at
+    /// all: the chart paints a truncated left edge with nothing on
+    /// screen to say so.
+    #[gpui::test]
+    fn an_as_of_change_refetches_a_pair_whose_fetch_has_not_answered(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        // The first pair ANSWERS, which is what gives the tile an
+        // `acted` — the refetch trio is gated on a real as-of move
+        // against one, so a tile that has never queried never reaches
+        // the clear at all.
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+        // The second is deliberately left in flight: its entry is what
+        // the clear has to remove.
+        h.command(&mut vcx, "add VIX").unwrap();
+        h.requests();
+        let at = chrono::Utc::now() - chrono::Duration::days(30);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
+        let fetched: Vec<(String, chrono::DateTime<chrono::Utc>)> = h
+            .requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::Fetch(p) => Some((p.identity, p.to)),
+                _ => None,
+            })
+            .collect();
+        let vix = fetched
+            .iter()
+            .find(|(identity, _)| identity == "VIX")
+            .expect(
+                "the unanswered pair's new span is asked for, not suppressed by its stale \
+in-flight entry",
+            );
+        assert!(vix.1 <= at, "over the as-of's own span");
+        // And the answered pair, whose entry the answer already removed,
+        // is asked for too — one fetch each, no more.
+        assert_eq!(fetched.len(), 2, "one fetch per pair: {fetched:?}");
     }
 
     #[gpui::test]
@@ -3853,7 +3904,7 @@ mod tests {
     /// closes the palette and dispatches). A verb that ran with the
     /// field still installed would leave `key_context` reporting
     /// `insert` with nothing focused — a tile deaf to every bare key
-    /// until `escape` (Task 9 review, Important).
+    /// until `escape`.
     #[gpui::test]
     fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(
         cx: &mut gpui::TestAppContext,
@@ -3933,7 +3984,7 @@ mod tests {
     /// One keystroke, two halves: `L` over the picker closes the field
     /// (through the ONE closer, so the keyboard comes back) and opens
     /// the list — the gate runs first and `popup_verb` then sees an
-    /// empty slot (Task 9 re-review).
+    /// empty slot.
     #[gpui::test]
     fn l_over_an_open_picker_closes_it_and_opens_the_series_list(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -4070,7 +4121,7 @@ mod tests {
         );
     }
 
-    /// Task 10 review: `edited` is what turns the preset digits off, so
+    /// `edited` is what turns the preset digits off, so
     /// only a keystroke that actually MOVED something may set it — a key
     /// that did nothing must leave the presets reachable. Two such keys,
     /// both of which used to disable them:
@@ -4120,7 +4171,7 @@ mod tests {
         assert_eq!(h.range_error(&vcx), None);
     }
 
-    /// Ruling (Task 10 review): an `Absolute` range seeds the popup from
+    /// Ruling: an `Absolute` range seeds the popup from
     /// its STORED dates, as typed, and only a `Relative` one resolves
     /// against now/as-of — so reopening `r` under a historical as-of, or
     /// after the clock has rolled over midnight, is lossless. Seeding

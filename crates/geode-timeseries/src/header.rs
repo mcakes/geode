@@ -262,12 +262,24 @@ pub(crate) fn render_header(
                     .text_color(theme.muted_foreground)
                     .child(chip.axis),
             )
-            // The mouse's form of `tab`: a click moves the cursor. Stops
-            // propagation so the click is the chip's, not the chart's.
+            // The mouse's form of `tab`: a click moves the cursor.
+            //
+            // Deliberately no `cx.stop_propagation()` — the shell's own
+            // tile-level mouse-down (`leave_command_line`,
+            // `focus_main_tile`, the `pending_focus_restore` re-arm) must
+            // still run. Stopping here suppressed the shell's whole
+            // bubble phase for this click, so a chip click on an
+            // UNFOCUSED tile moved that tile's cursor while shell focus
+            // stayed elsewhere, and every bare key after it drove
+            // whichever tile the shell still had focused. Same finding,
+            // same fix as the market-data `⋯` button:
+            // `crates/geode-marketdata/src/header.rs:528-537`. The
+            // popup ROWS keep theirs — they sit on a `deferred`,
+            // occluding surface of their own, the market-data popup's
+            // shape.
             .on_mouse_down(MouseButton::Left, {
                 let tile = tile.clone();
                 move |_: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
                     tile.update(cx, |t, cx| t.chip_clicked(index, cx));
                 }
             });
