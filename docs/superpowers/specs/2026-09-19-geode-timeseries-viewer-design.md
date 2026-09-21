@@ -1481,11 +1481,14 @@ range change.
   monotonic `result_seq`, NOT the `Arc`'s address, which is ABA-prone
   — the allocator hands the same block back when one result replaces
   another between two frames, and the chart would then paint the old
-  points under the new model's key. One input is deliberately NOT in
-  the key: `offset_secs`, read from the local clock, so a DST
-  transition with a tile open is picked up at the next real rebuild
-  rather than at the transition — accepted, and no worse than the
-  chrome-rebuild-only refresh it replaced.
+  points under the new model's key. `offset_secs` is in the key too,
+  and it is the APP clock's (`geode_shell::clock::AppClock`, `[time]
+  zone`, as-of dialog spec §6.1), never `chrono::Local` — `geode_core::
+  clock`'s sweep bans the machine clock workspace-wide — read through
+  `try_global` with the machine fallback a module fixture needs; the
+  tile observes the global, so a `[time] zone` reload rebuilds the
+  chart model and repaints its axis labels (a DST transition still
+  waits for the next rebuild — nothing polls the clock).
 - **An unfilled chip drops its text colour with its fill, to
   `muted_foreground` (refines §9.3).** `Tone::Neutral`'s 3:1
   guarantee is measured over its OWN fill, so `secondary_foreground`

@@ -7373,18 +7373,15 @@ run_mutation "focus: the departed-tile backstop spares the shell's own surfaces"
 # unbound, and a compile error is reported as a plain `caught` with the
 # named test never run. The header's "an entry can lie" case, and the
 # reason an anchor must end somewhere no live line begins. Re-anchored
-# 2026-09-20 (timeseries Part 4): `series::default_source_diagnostic` now
-# sits between the two `defaults::` extends and the keymap one.
+# 2026-09-20 (timeseries Part 4 merge): the anchor spans the clone and the
+# two `defaults::` extends alone — `series::default_source_diagnostic` and
+# the `[time]` clock's extend follow behind their own comments.
 run_mutation "diagnostics: startup seeding folds in the computed config diagnostics" \
   crates/geode-shell/src/shell/mod.rs \
   '            let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
-            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
-            diags.extend(crate::series::default_source_diagnostic(cfg));
-            diags.extend(clock_diags.iter().cloned());
-            diags.extend(services.keymap_diagnostics.iter().cloned());' \
-  '            let mut diags = cfg.diagnostics.clone();
-            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+            diags.extend(crate::defaults::modules_default_diagnostic(cfg));' \
+  '            let mut diags = cfg.diagnostics.clone();' \
   geode-shell a_modules_default_key_is_in_the_diagnostics_entity_at_startup
 
 # The fourth group is the one that cannot be recomputed — it rides on
@@ -16753,10 +16750,12 @@ run_mutation "timeseries: a colours reload reaches an open tile" \
   crates/geode-timeseries/src/tile.rs \
   '        theme,
         colours,
+        offset_secs,
     }
 }' \
   '        theme,
         colours: 0,
+        offset_secs,
     }
 }' \
   geode-timeseries \

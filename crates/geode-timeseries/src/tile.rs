@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Offset as _, Utc};
 use geode_chart::core::palette::Palette;
 use geode_chart::{Axis, AxisMode, ChartElement, ChartModel};
 use geode_core::colour::NamedColours;
@@ -114,6 +114,10 @@ struct ChartKey {
     /// change.
     theme: [Hsla; 28],
     colours: usize,
+    /// The app clock's offset (`local_offset_secs`): a `[time] zone`
+    /// reload moves every displayed time, and `chart::build` bakes the
+    /// offset into the model.
+    offset_secs: i32,
 }
 
 pub struct TimeseriesTile {
@@ -227,6 +231,14 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
+        // The chart's displayed times follow the app clock (as-of dialog
+        // spec §6.1): a `[time] zone` reload moves `offset_secs`, which
+        // `ChartKey` carries, so this rebuild is a real one.
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.rebuild_chrome(cx);
+            cx.notify();
+        })
+        .detach();
         cx.observe(&frame, |this, frame, cx| {
             // A flip released (Phase 4a §3.10): promote whatever is
             // staged, REGARDLESS of visibility — a tile hidden between
@@ -324,11 +336,12 @@ impl TimeseriesTile {
         let colour_of = colour_fn(Arc::clone(&colours.borrow()), cx.theme());
         let header = HeaderModel::prepare(&model, settings.default_source.as_deref(), &colour_of);
         let title = header::title_text(&model);
+        let offset_secs = local_offset_secs(cx);
         let chart = Arc::new(chart::build(
             &SeriesResult::default(),
             &model,
             1,
-            local_offset_secs(),
+            offset_secs,
             &colour_of,
             settings.default_source.as_deref(),
         ));
@@ -338,6 +351,7 @@ impl TimeseriesTile {
             settings.default_source.clone(),
             theme_signature(cx.theme()),
             colours_ptr,
+            offset_secs,
         ));
         TimeseriesTile {
             id,
@@ -1900,12 +1914,14 @@ impl TimeseriesTile {
             );
             self.popup = Some(Popup::Series(rows));
         }
+        let offset_secs = local_offset_secs(cx);
         let key = chart_key(
             &self.model,
             self.result_seq,
             default_source.clone(),
             theme,
             colours_ptr,
+            offset_secs,
         );
         if self.last_chart_key.as_ref() == Some(&key) {
             return;
@@ -1917,7 +1933,7 @@ impl TimeseriesTile {
             result,
             &self.model,
             self.chart_version,
-            local_offset_secs(),
+            offset_secs,
             &colour_of,
             default_source.as_deref(),
         );
@@ -2110,6 +2126,7 @@ fn chart_key(
     default_source: Option<String>,
     theme: [Hsla; 28],
     colours: usize,
+    offset_secs: i32,
 ) -> ChartKey {
     ChartKey {
         result,
@@ -2133,6 +2150,7 @@ fn chart_key(
         default_source,
         theme,
         colours,
+        offset_secs,
     }
 }
 
@@ -2167,11 +2185,18 @@ fn colour_fn(colours: Arc<NamedColours>, theme: &Theme) -> impl Fn(&Colour) -> H
     }
 }
 
-/// The trader's own clock offset, for the chart's session axis — every
+/// The trader's clock offset, for the chart's displayed times — every
 /// DISPLAYED time is local (Phase 4a ruling), while everything stored
-/// and queried is UTC.
-fn local_offset_secs() -> i32 {
-    chrono::Local::now().offset().local_minus_utc()
+/// and queried is UTC. The clock is the app's (`[time] zone`, as-of
+/// dialog spec §6.1) through the `AppClock` global, never the machine's
+/// own clock (banned by `geode_core::clock`'s sweep); `try_global`
+/// because a module test fixture may never have installed it.
+fn local_offset_secs(cx: &App) -> i32 {
+    let clock = cx
+        .try_global::<geode_shell::clock::AppClock>()
+        .map(|c| c.0)
+        .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
+    clock.local(Utc::now()).offset().fix().local_minus_utc()
 }
 
 #[cfg(test)]
@@ -4273,5 +4298,28 @@ in-flight entry",
             vcx.update(|w, cx| w.focused(cx).is_none()),
             "range popup: the listener's escape takes the same closer"
         );
+    }
+
+    /// The chart's `offset_secs` is the APP clock's (`[time] zone`), never
+    /// the machine's: installing a Tokyo clock as `AppClock` moves the
+    /// offset to +9h and rebuilds the model (the offset is a `ChartKey`
+    /// input), so a zone reload repaints the axis labels.
+    #[gpui::test]
+    fn the_chart_offset_follows_the_app_clock(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "add SPX.close").unwrap();
+        let before = h.chart(&vcx);
+        vcx.update(|_, cx| {
+            cx.set_global(geode_shell::clock::AppClock(
+                geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+            ));
+        });
+        let after = h.chart(&vcx);
+        assert_eq!(after.offset_secs, 9 * 3600, "Tokyo has no DST");
+        assert!(
+            after.version > before.version,
+            "a moved offset is a real rebuild"
+        );
+        assert_ne!(before.offset_secs, after.offset_secs);
     }
 }
