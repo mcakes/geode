@@ -1775,3 +1775,8 @@ work.
 **Nothing painted here is measured.** The chips, the popups, the
 expression strip, the range popup and the chart inside a real tile are
 display-check items; the sandbox has no window.
+
+
+### Publication request fan-out (2026-09-21)
+
+The deterministic `publication_bursts_query_only_base_and_join_consumers` test drives two visible blotters through 128 publication notifications: 32 each for one view's base, its joined dataset, the other view's base, and an unrelated dataset. Targeted watches produce **96 query submissions (64 + 32), versus 256 under global invalidation**, a 62.5% reduction. The document-panel test produces zero document queries for 128 unrelated dataset/key publications, then one for the selected document. These are request counts through production tile handlers with a test data handle, not SQL execution timings or end-to-end frame latency measurements. Global frame observer dispatch and diagnostic catalog refresh remain outside this optimization.

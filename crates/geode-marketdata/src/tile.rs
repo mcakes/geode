@@ -17,8 +17,7 @@
 //! What this tile is NOT is a blotter. There is no view, no grouping and
 //! no scope: a document request is (dataset, key, as-of) and nothing else
 //! (Part 1 §7), so the only frame counters it follows are `as_of` and
-//! `data` — every publish bumps `data`, and a document select is one
-//! key's worth of rows, cheap enough to just re-run. `flip` is
+//! `data` — narrowed by a publication watch to this dataset and document key. `flip` is
 //! deliberately not among them, for the reason CLAUDE.md gives for the
 //! blotter: `flip` never means "requery".
 //!
@@ -72,7 +71,7 @@ use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::{Frame, FrameVersions};
+use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::colours::{to_hsla, to_rgb};
@@ -415,6 +414,8 @@ pub struct MarketDataTile {
     /// than two, because they are one fact: what the frame looked like
     /// when this panel last asked.
     acted: Option<FrameVersions>,
+    query_in_flight: bool,
+    publication: Option<PublicationWatch>,
     visible: bool,
     /// The newest delivered snapshot. While the draft is `Behind` this is
     /// the newer generation the panel is NOT painting — `base_snapshot`
@@ -721,14 +722,14 @@ impl MarketDataTile {
             }
         })
         .detach();
-        cx.observe(&frame, |this, frame, cx| {
+        cx.observe(&frame, |this, _frame, cx| {
             // A flip released (Phase 4 §3.10): promote whatever is staged,
             // and do it REGARDLESS of visibility — a panel hidden between
             // staging and the flip must not come back showing the old
             // generation. `flip` is checked here and never in
             // `follows_changed`: it means "you may promote", never
             // "requery" (CLAUDE.md).
-            let now = frame.read(cx).versions();
+            let now = this.versions(cx);
             if now.flip != this.last_flip {
                 this.last_flip = now.flip;
                 this.promote(cx);
@@ -808,6 +809,8 @@ impl MarketDataTile {
             key,
             tag: 0,
             acted: None,
+            query_in_flight: false,
+            publication: None,
             visible: false,
             snapshot: None,
             base_snapshot: None,
@@ -919,6 +922,10 @@ impl MarketDataTile {
 
     // ---- the request -------------------------------------------------
 
+    fn versions(&self, cx: &App) -> FrameVersions {
+        self.frame.read(cx).versions_for(&self.publication)
+    }
+
     /// Whether the frame has moved in a way a document request depends
     /// on — `as_of` and `data`, never `scope`/`grouping`/`config`/`flip`
     /// (the module doc says why for each). `None` (nothing asked yet) is
@@ -950,6 +957,15 @@ impl MarketDataTile {
     /// `on_frame_changed` has this exact branch, for the exact same
     /// reason (a pinned tile under a grouping change).
     fn self_arrive(&mut self, now: FrameVersions, cx: &mut Context<Self>) {
+        // An unrelated notification is not an answer to the query this
+        // barrier is already waiting for.
+        if self.query_in_flight
+            && self
+                .acted
+                .is_some_and(|acted| acted.same_flip_identity(now))
+        {
+            return;
+        }
         let key = QueryKey(self.id.0);
         if self.frame.read(cx).barrier_wants(key, now) {
             self.frame.update(cx, |f, cx| {
@@ -992,13 +1008,23 @@ impl MarketDataTile {
         let Some(document_key) = self.key.clone() else {
             return;
         };
+        let batch = geode_core::document::join_key(&document_key);
+        if self
+            .publication
+            .as_ref()
+            .is_none_or(|watch| !watch.matches(self.spec.dataset, Some(&batch)))
+        {
+            self.publication = Some(self.frame.update(cx, |frame, _| {
+                frame.watch_publications(self.spec.dataset, Some(&batch))
+            }));
+        }
         // A fresh question always supersedes whatever was staged for the
         // old one, whether or not `promote`'s own version check would
         // have caught it.
         self.staged = None;
         let (as_of, versions) = {
             let frame = self.frame.read(cx);
-            (frame.as_of().clone(), frame.versions())
+            (frame.as_of().clone(), frame.versions_for(&self.publication))
         };
         self.tag += 1;
         self.acted = Some(versions);
@@ -1010,6 +1036,7 @@ impl MarketDataTile {
             document_key,
             as_of,
         });
+        self.query_in_flight = queued;
         if !queued {
             self.notice = Some("document request refused: the data service is busy or gone".into());
             // A refused submit means nothing is coming (review fix round
@@ -1020,6 +1047,7 @@ impl MarketDataTile {
             // date. In that order: `arrive` reads `acted`.
             self.arrive(cx);
             self.acted = None;
+            self.query_in_flight = false;
         }
         self.changed(cx);
     }
@@ -1034,6 +1062,7 @@ impl MarketDataTile {
             // own delivery is what answers it.
             return;
         }
+        self.query_in_flight = false;
         let acted = self.acted;
         match outcome.snapshot {
             Ok(snapshot) => {
@@ -1329,7 +1358,7 @@ impl MarketDataTile {
         let Some((snapshot, versions)) = self.staged.take() else {
             return;
         };
-        if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {
+        if !Self::differs_on_followed(versions, self.versions(cx)) {
             self.apply(snapshot, cx);
             self.changed(cx);
         }
@@ -1344,7 +1373,7 @@ impl MarketDataTile {
             // The catalog is where `:key`'s completions come from, and
             // nothing else asks for one on this panel's behalf.
             self.request_catalog_if_needed(cx);
-            let now = self.frame.read(cx).versions();
+            let now = self.versions(cx);
             if self.key.is_some() && self.follows_changed(now) {
                 self.requery(cx);
             }
@@ -1360,6 +1389,7 @@ impl MarketDataTile {
             // paints the generation it had before it was hidden until the
             // next publish happens along.
             self.acted = None;
+            self.query_in_flight = false;
         }
         self.changed(cx);
     }
@@ -3967,6 +3997,8 @@ impl MarketDataTile {
         // A different document is a different question: the next
         // delivery is never the one already asked for.
         self.acted = None;
+        self.query_in_flight = false;
+        self.publication = None;
         // The tag moves on EVERY switch, visible or not (final review of
         // the per-underlying drafts branch, Minor 6): `requery` bumps it
         // on the visible path, but a hidden panel only `changed` — and an
@@ -11843,5 +11875,85 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
         assert_eq!(row_labels(&h, &vcx), ["100", "7", "110"]);
         assert_eq!(h.mode(&vcx), "normal");
+    }
+    fn publish_document_for(
+        h: &Harness,
+        vcx: &mut gpui::VisualTestContext,
+        dataset: &str,
+        batch: &str,
+    ) {
+        h.frame.update(vcx, |f, cx| {
+            f.note_published(Publish {
+                dataset: dataset.into(),
+                batch: batch.into(),
+                books: 0,
+                at: chrono::Utc::now(),
+            });
+            cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn publications_only_requery_the_selected_document(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap();
+        h.deliver(&mut vcx, first.tag, Arc::new(cvi(BASE)));
+        for _ in 0..64 {
+            publish_document_for(&h, &mut vcx, "cvi_params", "NDX.Z");
+            publish_document_for(&h, &mut vcx, "other", "SPX.Z");
+            assert!(h.document_request().is_none());
+        }
+        publish_document_for(&h, &mut vcx, "cvi_params", "SPX.Z");
+        assert!(h.document_request().unwrap().tag > first.tag);
+        h.command(&mut vcx, "key NDX.Z").unwrap();
+        h.document_request().unwrap();
+        publish_document_for(&h, &mut vcx, "cvi_params", "SPX.Z");
+        assert!(h.document_request().is_none());
+        publish_document_for(&h, &mut vcx, "cvi_params", "NDX.Z");
+        assert!(
+            h.document_request().is_some(),
+            "new document is watched before any rows arrive"
+        );
+    }
+
+    #[gpui::test]
+    fn unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        let other = QueryKey(TILE + 1);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), other], 60);
+        let tag = h.document_request().unwrap().tag;
+        publish_document_for(&h, &mut vcx, "cvi_params", "NDX.Z");
+        assert!(h.document_request().is_none());
+        assert!(
+            h.frame
+                .read_with(&vcx, |f, _| f.barrier_wants(QueryKey(TILE), f.versions())),
+            "the real query is still in flight"
+        );
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_of(&["t0", "t1", "t2", "t3", "t4"], &NODES, BASE)),
+        );
+        assert_eq!(h.rows(&vcx), 2, "staged");
+        publish_document_for(&h, &mut vcx, "other", "SPX.Z");
+        assert!(h.document_request().is_none());
+        let now = h.versions(&vcx);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.arrived(other, now);
+            cx.notify();
+        });
+        assert_eq!(
+            h.rows(&vcx),
+            5,
+            "the unrelated publication cannot invalidate staged rows"
+        );
     }
 }

@@ -165,6 +165,8 @@ Each bullet is a rule the code depends on and a test or harness entry usually pi
 - `Layout::solve` reserves an axis column when EITHER pane uses that side, so both panes share one x mapping; the lower pane exists only while a visible slot uses a bottom axis, the density strip only while a visible slot HAS bins, and `split` clamps to `0.2..=0.8`. Ticks are the finest unit with `MIN_TICKS` = 3 candidates that already fit `TICK_GAP`, else the coarsest that still keeps three once thinned, else the finest pair, else one day tick — and never a unit FINER than the data's own step (`resolution_floor`, or a daily chart labels its days `00:00`). A bucket's x is its slot's CENTRE, and a percentile line outside its pane is SKIPPED before the cache, line and tag together (the density bars clamp instead).
 - Each pane's data painting is clipped to its own rect through `Window::with_content_mask` — lines, percentile paths and tags to the plot, the density bars to the STRIP (a column beside the plot, so the plot's mask would erase them) — because the element's own mask is the whole element and a polyline built from bucket CENTRES overhangs by up to half a bucket, a quarter of the plot's width at the zoom floor. A tag whose lift would leave the pane drops below its line instead. **At most `MAX_DENSITY_QUADS` = 2,000 bars per FRAME** across both panes, in slot order: a bar is an uncached `paint_quad`, nothing in the model bounds slots × bins, and the spike disqualified per-cell quads past ~5,000 (`element::density_quads()` counts them; Part 4 owns the slot count). **`ChartElement::new`'s `ElementId` must be unique among the window's charts** — `Buffers` and both `PathCaches` hang off it, so two charts sharing an id serve each other's paths; a tile passes its `TileId`.
 
+Publication invalidation is consumer-specific: `Frame::watch_publications` retains a dataset or exact-document interest, and `versions_for` narrows only `data`. Blotters watch their base plus joined datasets; market-data panels watch `(dataset, encoded document key)`. Keep the same narrowed stamp at submission, follow checks, show and staged promotion. Watches stay alive while hidden and use weak registry entries when closed. Global data/history remains for chrome and the as-of picker. A tile ignoring an unrelated notification must not self-arrive while its current flip query is outstanding.
+
 ## Commands
 
 ```sh
@@ -181,7 +183,7 @@ cargo bench -p geode-blotter                           # run criterion benchmark
 cargo bench -p geode-documents                         # run criterion benchmarks (CVI parse/write — see docs/perf.md)
 cargo bench -p geode-marketdata                        # run criterion benchmarks (panel matrix model + draft — see docs/perf.md)
 cargo bench -p geode-timeseries                        # run criterion benchmarks (one delivery's chart model — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (1391 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (1402 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 zsh scripts/mutation-check.sh --anchors-only           # no cargo: stale or ambiguous anchors (<1 s, exits 1 on any) — run before every merge

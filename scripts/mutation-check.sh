@@ -4117,9 +4117,82 @@ run_mutation "flip: only scope/grouping/as-of open a barrier" \
         {' \
   geode-shell a_data_bump_opens_no_barrier
 
+# Targeted publication invalidation and outstanding-query barriers.
+run_mutation "publication routing: dataset watches advance" \
+  crates/geode-shell/src/frame.rs \
+  'if let Some(revision) = watches.dataset.upgrade() {' \
+  'if let Some(revision) = watches.dataset.upgrade().filter(|_| false) {' \
+  geode-shell publication_watches_are_exact_retained_and_reclaimed
+
+run_mutation "publication routing: document watches advance" \
+  crates/geode-shell/src/frame.rs \
+  '.get(&publish.batch)' \
+  '.get("never-a-document")' \
+  geode-shell publication_watches_are_exact_retained_and_reclaimed
+
+run_mutation "publication routing: consumer versions exclude unrelated publications" \
+  crates/geode-shell/src/frame.rs \
+  '.map(|watch| watch.revision.get())' \
+  '.map(|_watch| self.versions.data)' \
+  geode-shell publication_watches_are_exact_retained_and_reclaimed
+
+run_mutation "publication routing: closed interests are reclaimed" \
+  crates/geode-shell/src/frame.rs \
+  '.retain(|_, watch| watch.strong_count() != 0);' \
+  '.retain(|_, _watch| true);' \
+  geode-shell publication_watches_are_exact_retained_and_reclaimed
+
+run_mutation "publication routing: joined datasets invalidate the view" \
+  crates/geode-blotter/src/tile.rs \
+  '.chain(view.joins.iter().map(|join| join.dataset.as_str()))' \
+  '.chain(std::iter::empty())' \
+  geode-blotter publication_bursts_query_only_base_and_join_consumers
+
+run_mutation "publication routing: a blotter query must really arrive" \
+  crates/geode-blotter/src/tile.rs \
+  'if !awaiting && self.frame.read(cx).barrier_wants(key, now) {' \
+  'if self.frame.read(cx).barrier_wants(key, now) {' \
+  geode-blotter unrelated_publications_neither_answer_a_query_nor_discard_its_stage
+
+run_mutation "publication routing: blotter promotion uses its own dependencies" \
+  crates/geode-blotter/src/tile.rs \
+  'let now = self.versions(cx);
+        if !self.differs_on_followed(versions, now) {' \
+  'let now = self.frame.read(cx).versions();
+        if !self.differs_on_followed(versions, now) {' \
+  geode-blotter unrelated_publications_neither_answer_a_query_nor_discard_its_stage
+
+run_mutation "publication routing: panels watch an exact document" \
+  crates/geode-marketdata/src/tile.rs \
+  'frame.watch_publications(self.spec.dataset, Some(&batch))' \
+  'frame.watch_publications(self.spec.dataset, None)' \
+  geode-marketdata publications_only_requery_the_selected_document
+
+run_mutation "publication routing: a document query must really arrive" \
+  crates/geode-marketdata/src/tile.rs \
+  'if self.query_in_flight
+            && self' \
+  'if false
+            && self' \
+  geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
+
+run_mutation "publication routing: panel promotion uses its own dependencies" \
+  crates/geode-marketdata/src/tile.rs \
+  'if !Self::differs_on_followed(versions, self.versions(cx)) {' \
+  'if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {' \
+  geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
+
+run_mutation "publication routing: a series query must really arrive" \
+  crates/geode-timeseries/src/tile.rs \
+  'if self.query_in_flight
+            && self' \
+  'if false
+            && self' \
+  geode-timeseries a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped
+
 run_mutation "flip: a non-following tile still arrives on its own" \
   crates/geode-blotter/src/tile.rs \
-  '            if self.frame.read(cx).barrier_wants(key, now) {' \
+  '            if !awaiting && self.frame.read(cx).barrier_wants(key, now) {' \
   '            if false {' \
   geode-blotter a_pinned_tile_arrives_from_on_frame_changed_without_requerying
 
@@ -12005,7 +12078,7 @@ run_mutation "mdrevert: revert clears the behind-refusal notice it resolves" \
 # is current.
 run_mutation "final: a panel stage survives a barrier replaced by a change it does not follow" \
   crates/geode-marketdata/src/tile.rs \
-  '        if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {' \
+  '        if !Self::differs_on_followed(versions, self.versions(cx)) {' \
   '        if versions.same_flip_identity(self.frame.read(cx).versions()) {' \
   geode-marketdata \
   a_stage_survives_a_barrier_replaced_by_a_change_the_panel_does_not_follow
@@ -12016,7 +12089,7 @@ run_mutation "final: a panel stage survives a barrier replaced by a change it do
 # what keep the gate from being either half of a tautology.
 run_mutation "final: a panel stage is dropped once a counter it follows has moved" \
   crates/geode-marketdata/src/tile.rs \
-  '        if !Self::differs_on_followed(versions, self.frame.read(cx).versions()) {' \
+  '        if !Self::differs_on_followed(versions, self.versions(cx)) {' \
   '        if true {' \
   geode-marketdata \
   a_stage_is_dropped_when_a_counter_the_panel_follows_has_moved

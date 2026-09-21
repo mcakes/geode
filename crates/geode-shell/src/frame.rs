@@ -8,8 +8,8 @@
 //! Every mutation bumps exactly the counters it affects, so a tile can
 //! compare the fields it follows against the ones it last acted on with
 //! one integer compare each — a pinned tile ignores `grouping`, an
-//! unscoped tile ignores `scope`, every tile follows `as_of`, `data` and
-//! `config` (§4.1).
+//! unscoped tile ignores `scope`. Publication watches narrow `data` to the
+//! datasets/documents a consumer reads; other counters retain their contracts.
 
 use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
@@ -18,10 +18,10 @@ use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
-use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 use toml_edit::value;
 
@@ -54,11 +54,36 @@ pub struct Publish {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A tile's retained interest in a dataset, or one document within it.
+/// Hidden tiles keep their watches, so no event history or catch-up scan is
+/// needed. The frame retains only weak references; closed tiles release them.
+/// Read through `Frame::versions_for` wherever a request or staged result is
+/// compared, so requery and promotion use exactly the same dependency boundary.
+#[derive(Debug, Clone)]
+pub struct PublicationWatch {
+    dataset: String,
+    batch: Option<String>,
+    revision: Rc<Cell<u64>>,
+}
+
+impl PublicationWatch {
+    pub fn matches(&self, dataset: &str, batch: Option<&str>) -> bool {
+        self.dataset == dataset && self.batch.as_deref() == batch
+    }
+}
+
+#[derive(Debug, Default)]
+struct DatasetWatches {
+    dataset: Weak<Cell<u64>>,
+    documents: HashMap<String, Weak<Cell<u64>>>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameVersions {
     pub scope: u64,
     pub grouping: u64,
     pub as_of: u64,
+    /// Global on `Frame::versions`, dependency-specific on `Frame::versions_for`.
     pub data: u64,
     pub config: u64,
     /// Bumped by [`Frame::save_scope`] (Phase 4b M11) — deliberately NOT
@@ -189,6 +214,7 @@ pub struct Frame {
     /// The most recent publishes, newest first, capped at
     /// [`RECENT_PUBLISHES`] (spec §3.12).
     recent_publishes: VecDeque<Publish>,
+    publication_watches: HashMap<String, DatasetWatches>,
     saved_scopes: SavedScopes,
     /// A scope saved by `save_scope`, waiting to be written to the user
     /// layer's `scopes.toml` — drained by `ShellView`'s frame observer via
@@ -240,6 +266,7 @@ impl Frame {
             as_of: AsOf::Live,
             previous_as_of: None,
             recent_publishes: VecDeque::new(),
+            publication_watches: HashMap::new(),
             saved_scopes: saved,
             pending_scope_persist: None,
             versions: FrameVersions::default(),
@@ -531,13 +558,73 @@ impl Frame {
         true
     }
 
-    /// Record a file publish (spec §3.12): bumps `data` (every visible
-    /// tile requeries) and keeps it in `recent_publishes`, newest first,
-    /// capped at [`RECENT_PUBLISHES`].
+    /// Watch a whole dataset (`None`) or one document's encoded batch key.
+    /// Registration does not notify observers. A new watch starts at the current
+    /// revision; the consumer must issue its initial query when adopting it.
+    pub fn watch_publications(&mut self, dataset: &str, batch: Option<&str>) -> PublicationWatch {
+        // Reap on registration, not every feed update. Registry size follows
+        // live interests (including hidden tiles), not publication cardinality.
+        self.publication_watches.retain(|_, watches| {
+            watches
+                .documents
+                .retain(|_, watch| watch.strong_count() != 0);
+            watches.dataset.strong_count() != 0 || !watches.documents.is_empty()
+        });
+        let watches = self
+            .publication_watches
+            .entry(dataset.to_owned())
+            .or_default();
+        let slot = match batch {
+            Some(batch) => watches.documents.entry(batch.to_owned()).or_default(),
+            None => &mut watches.dataset,
+        };
+        let revision = slot.upgrade().unwrap_or_else(|| {
+            let revision = Rc::new(Cell::new(self.versions.data));
+            *slot = Rc::downgrade(&revision);
+            revision
+        });
+        PublicationWatch {
+            dataset: dataset.to_owned(),
+            batch: batch.map(str::to_owned),
+            revision,
+        }
+    }
+
+    /// Frame counters for one consumer. Only `data` is narrowed to its watched
+    /// publications; scope/grouping/as-of and flip identity remain unchanged.
+    /// Watches must come from this frame and remain alive with the consumer.
+    pub fn versions_for<'a>(
+        &self,
+        watches: impl IntoIterator<Item = &'a PublicationWatch>,
+    ) -> FrameVersions {
+        FrameVersions {
+            data: watches
+                .into_iter()
+                .map(|watch| watch.revision.get())
+                .max()
+                .unwrap_or(0),
+            ..self.versions
+        }
+    }
+
+    /// Record a publish for the global history and advance only matching tile
+    /// watches. Global `data` remains available to the as-of picker and chrome.
     pub fn note_published(&mut self, publish: Publish) {
+        self.versions.data += 1;
+        if let Some(watches) = self.publication_watches.get(&publish.dataset) {
+            if let Some(revision) = watches.dataset.upgrade() {
+                revision.set(self.versions.data);
+            }
+            if let Some(revision) = watches
+                .documents
+                .get(&publish.batch)
+                .and_then(Weak::upgrade)
+            {
+                revision.set(self.versions.data);
+            }
+        }
         self.recent_publishes.push_front(publish);
         self.recent_publishes.truncate(RECENT_PUBLISHES);
-        self.versions.data += 1;
     }
 
     pub fn recent_publishes(&self) -> &VecDeque<Publish> {
@@ -1392,5 +1479,45 @@ mod tests {
             at: chrono::Utc::now(),
         });
         assert!(!f2.barrier_open());
+    }
+    #[test]
+    fn publication_watches_are_exact_retained_and_reclaimed() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let risk = f.watch_publications("risk", None);
+        let spx = f.watch_publications("cvi", Some("SPX"));
+        let spx_twin = f.watch_publications("cvi", Some("SPX"));
+        let ndx = f.watch_publications("cvi", Some("NDX"));
+        let publish = |dataset: &str, batch: &str| Publish {
+            dataset: dataset.into(),
+            batch: batch.into(),
+            books: 0,
+            at: chrono::Utc::now(),
+        };
+        f.note_published(publish("cvi", "SPX"));
+        assert_eq!(f.versions_for([&spx]).data, 1);
+        assert_eq!(f.versions_for([&spx_twin]).data, 1);
+        assert_eq!(f.versions_for([&ndx, &risk]).data, 0);
+        // Updates outlive the recent-publish history, without storing interests
+        // for thousands of unrelated datasets or document keys.
+        for n in 0..1000 {
+            f.note_published(publish(&format!("other-{n}"), "SPX"));
+            f.note_published(publish("cvi", &format!("other-{n}")));
+        }
+        assert_eq!(f.versions_for([&spx]).data, 1);
+        assert_eq!(f.versions_for([&ndx, &risk]).data, 0);
+        assert_eq!(f.publication_watches.len(), 2);
+        assert_eq!(f.publication_watches["cvi"].documents.len(), 2);
+        assert_eq!(f.recent_publishes().len(), RECENT_PUBLISHES);
+        f.note_published(publish("risk", "EOD"));
+        assert_eq!(f.versions_for([&spx, &risk]).data, f.versions().data);
+        f.set_scope(book_scope("BK000"));
+        f.set_as_of(AsOf::At(chrono::Utc::now()));
+        assert!(f.versions_for([&spx]).same_flip_identity(f.versions()));
+        drop((risk, spx, ndx));
+        let _new = f.watch_publications("new", None);
+        assert!(!f.publication_watches.contains_key("risk"));
+        assert_eq!(f.publication_watches["cvi"].documents.len(), 1);
+        f.note_published(publish("cvi", "SPX"));
+        assert_eq!(f.versions_for([&spx_twin]).data, f.versions().data);
     }
 }

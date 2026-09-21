@@ -150,6 +150,7 @@ pub struct TimeseriesTile {
     tag: u64,
     /// The frame versions the request in flight was made under.
     acted: Option<FrameVersions>,
+    query_in_flight: bool,
     /// A delivery staged behind the flip barrier.
     staged: Option<(SeriesResult, FrameVersions)>,
     /// The last flip counter this tile promoted at.
@@ -368,6 +369,7 @@ impl TimeseriesTile {
             theme_key: None,
             tag: 0,
             acted: None,
+            query_in_flight: false,
             staged: None,
             last_flip: 0,
             visible: false,
@@ -463,6 +465,7 @@ impl TimeseriesTile {
             // arrive. Left set, a tile hidden mid-round-trip comes back
             // deciding it is up to date.
             self.acted = None;
+            self.query_in_flight = false;
             self.in_flight.clear();
         }
         self.rebuild_chrome(cx);
@@ -487,6 +490,7 @@ impl TimeseriesTile {
             // outcome's own delivery is what answers it.
             return;
         }
+        self.query_in_flight = false;
         let acted = self.acted;
         match outcome.result {
             Ok(result) => {
@@ -1719,6 +1723,7 @@ impl TimeseriesTile {
             // Nothing to ask about (no slot, or no dataset yet).
             None => false,
         };
+        self.query_in_flight = submitted;
         if !submitted {
             // Nothing is coming: arrive, or an open barrier holds every
             // other tile to the 250 ms deadline waiting for an outcome
@@ -1727,6 +1732,7 @@ impl TimeseriesTile {
             // already up to date. In that order: `arrive` reads `acted`.
             self.arrive(cx);
             self.acted = None;
+            self.query_in_flight = false;
         }
         cx.notify();
     }
@@ -1757,6 +1763,15 @@ impl TimeseriesTile {
     /// screen open until `FLIP_DEADLINE` — 250 ms — on every scope
     /// keystroke, with nothing of its own coming.
     fn self_arrive(&mut self, now: FrameVersions, cx: &mut Context<Self>) {
+        // An unrelated notification is not an answer to the query this
+        // barrier is already waiting for.
+        if self.query_in_flight
+            && self
+                .acted
+                .is_some_and(|acted| acted.same_flip_identity(now))
+        {
+            return;
+        }
         let key = QueryKey(self.id.0);
         if self.frame.read(cx).barrier_wants(key, now) {
             self.frame.update(cx, |f, cx| {
@@ -3409,6 +3424,23 @@ in-flight entry",
         let fresh = h.series_request().expect("the as-of change requeried").tag;
         let acted = h.acted(&vcx).expect("the request recorded its versions");
         assert!(h.barrier_wants(&vcx, acted), "the barrier is open over it");
+        h.frame.update(&mut vcx, |frame, cx| {
+            frame.note_published(geode_shell::frame::Publish {
+                dataset: "unrelated".into(),
+                batch: "EOD".into(),
+                books: 0,
+                at: chrono::Utc::now(),
+            });
+            cx.notify();
+        });
+        assert!(
+            h.series_request().is_none(),
+            "a publication is not a series dependency"
+        );
+        assert!(
+            h.barrier_wants(&vcx, acted),
+            "an unrelated publication cannot answer an in-flight query"
+        );
         h.deliver_series(&mut vcx, fresh - 1, result_with(&[1], 50));
         assert_eq!(h.chart(&vcx).buckets.len(), 5, "still stale");
         assert!(

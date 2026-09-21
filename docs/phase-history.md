@@ -151,3 +151,12 @@ Config writes now enter a directory-scoped FIFO synchronously at submission, bef
 `edit`/`try_edit` hold the entire read, validation, mutation and atomic replacement under a directory lock. Keymap mutations use the fallible transaction instead of separate open/write calls. Stale object-save completions, successful or failed, cannot clear a newer batch or change its status. Existing comment preservation, parse refusal, error reporting and object-edit debounce remain in force.
 
 This is in-process ordering, using the configured directory path; it does not lock out external editors/other processes or unify symlink aliases. Process shutdown remains best-effort. Session snapshots keep their existing separate flush lifecycle.
+
+
+### Targeted publication invalidation (2026-09-21, worktree)
+
+Frame publication watches replace global data invalidation for blotters and document panels. A blotter watches its base dataset and every declared join, refreshing those interests when its view changes. A document panel watches its dataset plus the store's encoded document key. Watches live with consumers, including hidden tiles; the registry holds weak references and reaps expired interests on registration. Publication traffic does not grow an event journal or a map of every historical document key. The global revision and recent-publication history remain unchanged for chrome and as-of discovery, and the bridge's local-dataset exclusion remains intact.
+
+Submission, follow checks, show and staged promotion all compare the same narrowed data stamp. Ignoring an unrelated notification must not self-arrive at an open barrier while a matching query is outstanding; that guard is shared in behavior by blotter, market-data and timeseries tiles. Scope/grouping/as-of barrier identity remains unchanged. Frame notifications still reach observers, but unrelated tiles neither requery nor rebuild their results; the blotter also avoids an unconditional repaint on an ignored notification.
+
+Regression coverage includes base/join changes on reload, exact document switches, updates while hidden beyond the recent-history bound, reclaimed interests, and unrelated publications before query completion and staged promotion. A former barrier fixture published `risk` against a `d` view; it now publishes `d` to keep testing a relevant change.

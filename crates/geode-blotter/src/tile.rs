@@ -20,7 +20,7 @@ use geode_core::view::ViewSpec;
 use geode_data::{DataHandle, QueryParams};
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
-use geode_shell::frame::{Frame, FrameVersions};
+use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
@@ -175,6 +175,7 @@ pub struct BlotterTile {
     filter_tip_selector: SharedString,
     /// The frame versions last acted on; `None` until the first query.
     acted: Option<FrameVersions>,
+    publications: Vec<PublicationWatch>,
     tag: u64,
     last_grouping: Vec<String>,
     /// [`Self::title`]'s answer, cached so a stack-list row (which reads
@@ -416,6 +417,7 @@ impl BlotterTile {
             filter_tip,
             filter_tip_selector,
             acted: None,
+            publications: Vec::new(),
             tag: 0,
             last_grouping: Vec::new(),
             title,
@@ -550,6 +552,31 @@ impl BlotterTile {
         }
     }
 
+    fn versions(&self, cx: &App) -> FrameVersions {
+        self.frame.read(cx).versions_for(&self.publications)
+    }
+
+    fn watch_view(&mut self, view: &ViewSpec, cx: &mut Context<Self>) {
+        let datasets = || {
+            std::iter::once(view.dataset.as_str())
+                .chain(view.joins.iter().map(|join| join.dataset.as_str()))
+        };
+        if self.publications.len() == 1 + view.joins.len()
+            && self
+                .publications
+                .iter()
+                .zip(datasets())
+                .all(|(watch, dataset)| watch.matches(dataset, None))
+        {
+            return;
+        }
+        self.publications = self.frame.update(cx, |frame, _| {
+            datasets()
+                .map(|dataset| frame.watch_publications(dataset, None))
+                .collect()
+        });
+    }
+
     /// Which counters this tile follows (§4.1). Deliberately does not
     /// compare `now.flip`/`acted.flip` (Phase 4 §3.10): `flip` never means
     /// "requery" — it means "a staged snapshot this tile already has may
@@ -565,7 +592,7 @@ impl BlotterTile {
     /// Whether `versions` and `now` disagree on any counter THIS tile
     /// follows — `scope` unless it is unscoped, `grouping` unless it is
     /// pinned, `as_of` unless the tile's own as-of is pinned (spec
-    /// §3.3), and always `data`/`config`. The one comparison
+    /// §3.3), and always watched `data`/`config`. The one comparison
     /// [`Self::follows_changed`] and [`Self::promote`]'s gate both go
     /// through (I-1, final whole-branch review), so "what this tile
     /// requeries for" and "what invalidates something it has already
@@ -591,7 +618,7 @@ impl BlotterTile {
         if !self.visible {
             return;
         }
-        let now = self.frame.read(cx).versions();
+        let now = self.versions(cx);
         if self.follows_changed(now) {
             self.requery(cx);
         } else {
@@ -602,7 +629,11 @@ impl BlotterTile {
             // Left unanswered, it would hold every other tile open until
             // `FLIP_DEADLINE`, for no reason: it has nothing new coming.
             let key = QueryKey(self.tile.0);
-            if self.frame.read(cx).barrier_wants(key, now) {
+            let awaiting = self.in_flight.is_some()
+                && self
+                    .acted
+                    .is_some_and(|acted| acted.same_flip_identity(now));
+            if !awaiting && self.frame.read(cx).barrier_wants(key, now) {
                 self.frame.update(cx, |f, cx| {
                     if f.arrived(key, now) {
                         cx.notify();
@@ -610,7 +641,6 @@ impl BlotterTile {
                 });
             }
         }
-        cx.notify();
     }
 
     /// Apply a staged snapshot, if any (Phase 4 §3.10) — `deliver` when
@@ -643,7 +673,7 @@ impl BlotterTile {
         let Some((snapshot, grouping, versions)) = self.staged.take() else {
             return;
         };
-        let now = self.frame.read(cx).versions();
+        let now = self.versions(cx);
         if !self.differs_on_followed(versions, now) {
             self.apply(snapshot, grouping, cx);
         }
@@ -690,6 +720,7 @@ impl BlotterTile {
             cx.notify();
             return;
         };
+        self.watch_view(&view, cx);
         let (grouping, scope, as_of, versions) = {
             let frame = self.frame.read(cx);
             let grouping = self.grouping(frame, &view);
@@ -702,7 +733,12 @@ impl BlotterTile {
                 TileAsOf::Follow => frame.as_of().clone(),
                 TileAsOf::Pinned(pinned) => pinned.clone(),
             };
-            (grouping, scope, as_of, frame.versions())
+            (
+                grouping,
+                scope,
+                as_of,
+                frame.versions_for(&self.publications),
+            )
         };
         let max_depth = self.table.update(cx, |t, _| {
             let d = t.delegate_mut();
@@ -817,7 +853,7 @@ impl BlotterTile {
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.visible = visible;
         if visible {
-            let now = self.frame.read(cx).versions();
+            let now = self.versions(cx);
             if self.follows_changed(now) {
                 self.requery(cx);
             }
@@ -4520,7 +4556,7 @@ mod tests {
         // requeries because `follows_changed` always compares `data`.
         frame3.update(&mut vcx3, |f, cx| {
             f.note_published(Publish {
-                dataset: "risk".into(),
+                dataset: "d".into(),
                 batch: "EOD".into(),
                 books: 1,
                 at: chrono::Utc::now(),
@@ -4860,5 +4896,149 @@ mod tests {
                 "`:{line}` queued a scope write"
             );
         }
+    }
+    fn publish_for(frame: &Entity<Frame>, vcx: &mut gpui::VisualTestContext, dataset: &str) {
+        frame.update(vcx, |f, cx| {
+            f.note_published(geode_shell::frame::Publish {
+                dataset: dataset.into(),
+                batch: "EOD".into(),
+                books: 1,
+                at: chrono::Utc::now(),
+            });
+            cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn publication_bursts_query_only_base_and_join_consumers(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_two(cx);
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        h.a.update(&mut vcx, |t, _| {
+            let mut views = t.views.borrow_mut();
+            views
+                .iter_mut()
+                .find(|v| v.name == "tree")
+                .unwrap()
+                .joins
+                .push(geode_core::view::JoinSpec {
+                    dataset: "joined".into(),
+                    on: vec!["lhu".into()],
+                });
+            views.iter_mut().find(|v| v.name == "wide").unwrap().dataset = "other".into();
+        });
+        h.b.update(&mut vcx, |t, _| t.view_name = "wide".into());
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        next_query(&h.requests);
+        next_query(&h.requests);
+        let mut counts = [0, 0];
+        for _ in 0..32 {
+            for (dataset, key) in [
+                ("d", Some(7)),
+                ("joined", Some(7)),
+                ("other", Some(8)),
+                ("unrelated", None),
+            ] {
+                publish_for(&frame, &mut vcx, dataset);
+                if let Some(key) = key {
+                    let request = next_query(&h.requests);
+                    assert_eq!(request.key, QueryKey(key));
+                    counts[(key - 7) as usize] += 1;
+                }
+                assert!(
+                    h.requests.try_recv().is_err(),
+                    "no unrelated tile requery for {dataset}"
+                );
+            }
+        }
+        assert_eq!(
+            counts,
+            [64, 32],
+            "96 queries for 128 publications, rather than 256"
+        );
+
+        // A reload can change the dependency graph. Both the removed join and
+        // the previous base must stop invalidating, and new dependencies start.
+        h.a.update(&mut vcx, |t, _| {
+            let mut views = t.views.borrow_mut();
+            let view = views.iter_mut().find(|v| v.name == "tree").unwrap();
+            view.dataset = "new_base".into();
+            view.joins[0].dataset = "new_join".into();
+        });
+        frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        next_query(&h.requests);
+        next_query(&h.requests);
+        for dataset in ["d", "joined"] {
+            publish_for(&frame, &mut vcx, dataset);
+            assert!(h.requests.try_recv().is_err());
+        }
+        for dataset in ["new_base", "new_join"] {
+            publish_for(&frame, &mut vcx, dataset);
+            assert_eq!(next_query(&h.requests).key, QueryKey(7));
+            assert!(h.requests.try_recv().is_err());
+        }
+        h.a.update(&mut vcx, |t, cx| t.set_visible(false, cx));
+        publish_for(&frame, &mut vcx, "new_base");
+        for _ in 0..64 {
+            publish_for(&frame, &mut vcx, "unrelated");
+        }
+        assert!(
+            h.requests.try_recv().is_err(),
+            "hidden consumers defer work"
+        );
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        assert_eq!(
+            next_query(&h.requests).key,
+            QueryKey(7),
+            "hidden consumer retained the relevant change"
+        );
+        assert!(h.requests.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn unrelated_publications_neither_answer_a_query_nor_discard_its_stage(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let a = next_query(&h.requests);
+        let b = next_query(&h.requests);
+        deliver_to(&h.a, QueryKey(7), &mut vcx, a.tag, Ok(snapshot()));
+        deliver_to(&h.b, QueryKey(8), &mut vcx, b.tag, Ok(snapshot()));
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("new scope".into()));
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now());
+            cx.notify();
+        });
+        let _a = next_query(&h.requests);
+        let b = next_query(&h.requests);
+        publish_for(&frame, &mut vcx, "unrelated");
+        assert!(h.requests.try_recv().is_err());
+        assert!(
+            frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(8), f.versions())),
+            "query still outstanding"
+        );
+        deliver_to(&h.b, QueryKey(8), &mut vcx, b.tag, Ok(snapshot2()));
+        assert!(h.b.read_with(&vcx, |t, _| t.staged.is_some()));
+        publish_for(&frame, &mut vcx, "unrelated");
+        assert!(h.requests.try_recv().is_err());
+        assert!(
+            frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "A is still outstanding"
+        );
+        frame.update(&mut vcx, |f, cx| {
+            f.arrived(QueryKey(7), f.versions());
+            cx.notify();
+        });
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            vec!["", "M1", "M2"],
+            "unrelated data must not discard a valid staged result"
+        );
     }
 }
