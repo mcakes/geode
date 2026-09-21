@@ -207,6 +207,13 @@ impl ShellView {
         // at errors), so its position ahead of `decide` costs nothing.
         let default_source = crate::series::default_source_diagnostic(&new_config);
         new_config.diagnostics.extend(default_source);
+        // `[time]` (as-of dialog spec §6.1), the fourth pure-over-`&Config`
+        // group, same reasoning and same fold point as `modules_default`
+        // just above: a bad zone/sod/eod is an error-severity diagnostic
+        // (`Clock::from_config`) and must reject the whole reload as
+        // last-good, exactly like the refused `keymap.mod` alias.
+        let (clock, clock_diags) = geode_core::clock::Clock::from_config(&new_config);
+        new_config.diagnostics.extend(clock_diags.iter().cloned());
         new_config.diagnostics.extend(keymap_diags);
 
         let outcome = reload::decide(&new_config);
@@ -420,6 +427,15 @@ impl ShellView {
                 self.default_source = series.default_source.clone();
                 self.fetch_sources = series.names();
                 cx.set_global(series);
+            }
+            // `[time] zone` is live (as-of dialog spec §6.1): a changed
+            // clock re-publishes `AppClock` and refreshes `self.today`
+            // from it — no requery, since nothing scope/grouping/as-of
+            // shaped changed.
+            if clock != cx.global::<crate::clock::AppClock>().0 {
+                cx.set_global(crate::clock::AppClock(clock));
+                self.today = clock.today(chrono::Utc::now());
+                cx.notify();
             }
 
             if pickable_changed {

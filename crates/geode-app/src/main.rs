@@ -179,7 +179,13 @@ fn main() {
             // close the bus's inbound channel out from under the data
             // service's own subscription.
             let mut demo_bus = demo_feed.map(|feed| {
-                let today = chrono::Local::now().date_naive();
+                // Every OTHER displayed time in this codebase reads the
+                // trader's clock (Phase 4a's ruling); the demo generators'
+                // "today" is no exception, even though it never paints —
+                // it seeds the synthetic documents' own dates.
+                let today = geode_core::clock::Clock::from_config(&services.config)
+                    .0
+                    .today(chrono::Utc::now());
                 let underlyings = geode_demo_data::demo_underlyings();
                 let mut cvi_generator = geode_demo_data::documents::cvi::CviGenerator::new(
                     42,
@@ -449,7 +455,8 @@ fn main() {
 /// MIN-7 (fix round 1): that date is `tracing-appender`'s own clock,
 /// which is UTC (`OffsetDateTime::now_utc`) — unlike every *displayed*
 /// time in this app (Phase 4a's ruling: "times are the trader's local
-/// clock throughout"), the log file's name is not local. West of UTC,
+/// clock throughout" — as originally worded; now the configured clock,
+/// `[time] zone`), the log file's name is not local. West of UTC,
 /// `geode.2026-09-08.log` can hold the evening of the 7th, local.
 /// `trim_log_files`'s seven-file cap still sorts and counts correctly
 /// (the names are still in age order relative to each other), only the

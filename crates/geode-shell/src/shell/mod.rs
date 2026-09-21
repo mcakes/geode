@@ -7,6 +7,7 @@
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
 mod add_tile;
+pub mod asof_rows;
 pub mod asof_view;
 pub mod chip;
 pub mod choicedialog;
@@ -149,7 +150,7 @@ pub struct ShellServices {
     /// against the `ActionRegistry` as it stood at startup, after the
     /// roster's and the pick/scope/add registrations. Carrying the list
     /// is what lets `ShellView::new` seed the diagnostics entity's config
-    /// section with the same four groups `apply_reload` extends, in the
+    /// section with the same five groups `apply_reload` extends, in the
     /// same order — otherwise a keymap diagnostic (a binding naming an
     /// action nothing registered, say) was logged at startup and then
     /// invisible in the diagnostics tile until some later hot reload.
@@ -942,26 +943,33 @@ pub struct ShellView {
     /// `picker::sync_picker_scroll`'s doc comment for the call sites that
     /// drive it).
     picker_scroll: UniformListScrollHandle,
-    /// The open as-of dialog's own pure state (Phase 4a §3.6), or `None`
-    /// when closed/never opened — the `picker`/`keybindings`/`settings`
-    /// fields' own contract. Set fresh by [`asof_view::open`] each time
-    /// and cleared by [`close_modal`](Self::close_modal), same as the
-    /// other three dialogs.
-    as_of_dialog: Option<asof_view::AsOfState>,
+    /// The open as-of dialog's own pure state (as-of dialog spec
+    /// 2026-09-20 §5), or `None` when closed/never opened — the
+    /// `picker`/`keybindings`/`settings` fields' own contract. Set fresh
+    /// by [`asof_view::open`] each time and cleared by
+    /// [`close_modal`](Self::close_modal), same as the other three
+    /// dialogs.
+    as_of_dialog: Option<asof_rows::AsOfState>,
+    /// Scroll state for the as-of dialog's `as-of-rows` list (review
+    /// round 2, finding 3) — the `choice_dialog_scroll` split, one
+    /// dialog over: `handle_key`'s nav/tab arms call `scroll_to_item`
+    /// with `asof_rows::child_index_of` on every highlight move, so
+    /// keyboard navigation past the visible window still scrolls the
+    /// list rather than moving an off-screen index.
+    as_of_scroll: ScrollHandle,
+    /// The frame `data` version the open as-of dialog last refreshed
+    /// against (review round 2, finding 5 — parity with the old
+    /// `cached_presets`) — `on_frame_changed` compares against this and
+    /// calls `AsOfState::refresh` only on an actual data-version bump
+    /// while the dialog is open, set at open time by [`asof_view::open`]
+    /// and never read while `as_of_dialog` is `None`.
+    as_of_data_version: u64,
     /// The open scope expression dialog's own pure state (command-line
     /// locality spec §4.1), or `None` when closed/never opened — the
     /// `picker`/`as_of_dialog` fields' own contract. Set fresh by
     /// [`scope_expr_view::open`] each time and cleared by
     /// [`close_modal`](Self::close_modal).
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
-    /// The as-of dialog's calendar (spec §5.2), built once here like
-    /// `dialog_input` — one entity, seeded on every open (`gpui` focus
-    /// handles are refcounted, so a fresh one per open would not have
-    /// leaked; it is built once regardless, the same contract every
-    /// other modal field on `ShellView` holds). It is painted only while
-    /// the dialog is open and the field does not read `live`; its
-    /// selection mirrors the field.
-    as_of_calendar: Entity<gpui_component::calendar::CalendarState>,
     /// The open choice dialog's own pure state (2026-09-19: the grouping
     /// picker — the toolbar readout's click and `frame::grouping` — and
     /// the tile picker — a placeholder's double-click and `tile::add`),
@@ -1019,15 +1027,15 @@ pub struct ShellView {
     /// commonest way to reach the failure path with no dialog left on
     /// screen to carry a notice.
     pub(crate) config_write_error: Option<String>,
-    /// Today's local date (Phase 4b Task 1 fix round 1, MIN-9) —
-    /// refreshed once per reload-poll tick (~500ms, alongside the flip
-    /// sweep and the dirty-session flush) rather than read fresh on
-    /// every paint. Before this, `render`'s own `chrono::Local::now()`
-    /// call (feeding `Frame::bar_model`'s `(versions, today)` cache key,
-    /// M12) ran on every single render — including every one of the
-    /// ~100% of frames that hit the cache — new per-frame clock-read
-    /// work on the render path for a value that only meaningfully
-    /// changes once a day.
+    /// Today's date on the configured clock (Phase 4b Task 1 fix round
+    /// 1, MIN-9) — refreshed once per reload-poll tick (~500ms,
+    /// alongside the flip sweep and the dirty-session flush) rather than
+    /// read fresh on every paint. Before this, `render`'s own fresh
+    /// clock-read call (feeding `Frame::bar_model`'s `(versions, today)`
+    /// cache key, M12) ran on every single render — including every one
+    /// of the ~100% of frames that hit the cache — new per-frame
+    /// clock-read work on the render path for a value that only
+    /// meaningfully changes once a day.
     pub(super) today: chrono::NaiveDate,
 }
 
@@ -1163,7 +1171,7 @@ impl ShellView {
         // same no-placeholder rule: `dialog::filter_row` puts a search
         // icon in the `Input`'s prefix slot instead.
         let dialog_input = cx.new(|cx| InputState::new(window, cx));
-        cx.subscribe_in(&dialog_input, window, |view, input, event, window, cx| {
+        cx.subscribe_in(&dialog_input, window, |view, input, event, _window, cx| {
             if !matches!(event, InputEvent::Change) {
                 return;
             }
@@ -1216,45 +1224,21 @@ impl ShellView {
                 view.choice_dialog_scroll
                     .scroll_to_item(state.list.ranked_highlighted());
             } else if let Some(state) = view.as_of_dialog.as_mut() {
-                // Unlike the three dialogs above, this field's raw text IS
-                // the value being edited (spec §3.6), not a filter over
-                // something else — re-resolve it and store the outcome
-                // (`resolved`/`error`) for `build` to show; see
-                // `asof_view::on_query_changed`'s own doc comment.
-                asof_view::on_query_changed(state, &query, chrono::Utc::now());
-                // Typing mirrors onto the calendar (spec §5.2): the parsed
-                // day, and ONLY the parsed day — final review, finding 4.
-                // `calendar_date` falls back to today when `resolved` is
-                // `None`, which is right for a genuinely blank field but
-                // wrong for a failed INTERMEDIATE parse (a trader mid-edit
-                // backspacing through a date): mirroring on every
-                // keystroke regardless of `resolved` snapped the calendar
-                // to today on every invalid partial date, discarding
-                // whatever day it was showing. `set_date` notifies the
-                // calendar only.
-                if state.resolved.is_some() {
-                    let day = asof_view::calendar_date(state, chrono::Utc::now());
-                    view.as_of_calendar.update(cx, |c, cx| {
-                        if c.date().start() != Some(day) {
-                            c.set_date(day, window, cx);
-                        }
-                    });
-                }
+                // The field's text is the query (spec §5.1); a re-rank
+                // resets the highlight to 0, so follow it the same way
+                // the sibling arms above do (review round 2 re-review,
+                // finding 3's second seam).
+                asof_view::on_query_changed(state, &query);
+                view.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+                    state.painted(),
+                    state.highlighted(),
+                ));
             } else if let Some(state) = view.scope_expr_dialog.as_mut() {
                 // The field IS the value (spec §4.1); typing clears the last
                 // failed commit's message.
                 scope_expr_view::on_query_changed(state);
             }
             cx.notify();
-        })
-        .detach();
-
-        let as_of_calendar = cx.new(|cx| gpui_component::calendar::CalendarState::new(window, cx));
-        cx.subscribe_in(&as_of_calendar, window, |view, _, event, window, cx| {
-            let gpui_component::calendar::CalendarEvent::Selected(date) = event;
-            if let Some(day) = date.start() {
-                asof_view::on_calendar_selected(view, day, window, cx);
-            }
         })
         .detach();
 
@@ -1360,14 +1344,17 @@ impl ShellView {
                 // changed" shape as the sweep just above — this is the
                 // one clock read the whole ~500ms tick needs; `render`
                 // (and therefore `Frame::bar_model`'s cache key) reads
-                // `self.today` rather than calling `chrono::Local::now()`
+                // `self.today` rather than reading the clock fresh
                 // itself, so a held key no longer pays a clock read on
                 // every repaint for a value that only changes once a
                 // day. Only notifies when the date actually moved on —
                 // any other trigger repaints "for free" with the fresh
                 // value already in place.
-                let Ok(changed) = this.update(cx, |view, _cx| {
-                    let today = chrono::Local::now().date_naive();
+                let Ok(changed) = this.update(cx, |view, cx| {
+                    let today = cx
+                        .global::<crate::clock::AppClock>()
+                        .0
+                        .today(chrono::Utc::now());
                     let changed = view.today != today;
                     view.today = today;
                     changed
@@ -1476,13 +1463,17 @@ impl ShellView {
         cx.set_global(crate::linenumbers::UiSettings { line_numbers });
 
         // `[timeseries] default_source` plus the fetch sources it names,
-        // the workspace's third global (see `series`'s module doc). Set
+        // one of the workspace's four globals (see `series`'s module doc). Set
         // here and re-derived on reload; the settings row writes both
         // through `set_default_source`.
         let series = crate::series::SeriesSettings::from_config(&services.config);
         let default_source = series.default_source.clone();
         let fetch_sources = series.names();
         cx.set_global(series);
+        // The app-wide clock (`crate::clock::AppClock`, another of the workspace's
+        // four globals — see its own doc comment).
+        let (clock, clock_diags) = geode_core::clock::Clock::from_config(&services.config);
+        cx.set_global(crate::clock::AppClock(clock));
 
         // The keymap's bindings for module-visible chord lookup
         // (`tips::Chords`, the workspace's second global — see its doc).
@@ -1557,17 +1548,18 @@ impl ShellView {
         // they are computed from the config rather than by loading it:
         // the refused `keymap.mod` alias (Phase 4a Task 4b, an error),
         // the retired `[app] modules.default` key (spec 2026-09-08
-        // add-tile §7.1, a warning) and a `[timeseries] default_source`
-        // naming no fetch source (timeseries spec §9.12, a warning).
+        // add-tile §7.1, a warning), a `[timeseries] default_source`
+        // naming no fetch source (timeseries spec §9.12, a warning) and
+        // the `[time]` clock's diagnostics (as-of dialog spec §6.1).
         // `main.rs` only logged the first two at startup, so before this
         // a trader who never edited config mid-session saw neither in
         // the diagnostics tile — while `apply_reload` had been folding
         // them in all along, meaning the tile's contents depended on
-        // whether a reload had happened yet. Same five groups
+        // whether a reload had happened yet. Same six groups
         // `apply_reload` extends, in the same order (config, mod alias,
-        // `modules.default`, `default_source`, keymap), so the section
-        // reads the same whichever path filled it. The first four are
-        // pure over `&Config` and recomputed here; the keymap
+        // `modules.default`, `default_source`, `[time]`, keymap), so the
+        // section reads the same whichever path filled it. The first five
+        // are pure over `&Config` and recomputed here; the keymap
         // diagnostics are not — `build_keymap` needs the startup
         // registry — so they ride on `ShellServices::keymap_diagnostics`,
         // which `main.rs` fills.
@@ -1581,6 +1573,7 @@ impl ShellView {
             // (timeseries spec §9.12) — pure over `&Config`, a warning,
             // folded in here and in `apply_reload` alike.
             diags.extend(crate::series::default_source_diagnostic(cfg));
+            diags.extend(clock_diags.iter().cloned());
             diags.extend(services.keymap_diagnostics.iter().cloned());
             diags
         };
@@ -1693,8 +1686,9 @@ impl ShellView {
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
+            as_of_scroll: ScrollHandle::new(),
+            as_of_data_version: 0,
             scope_expr_dialog: None,
-            as_of_calendar,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
             object_dialog: None,
@@ -1702,7 +1696,7 @@ impl ShellView {
             pending_config_write: None,
             config_write_seq: 0,
             config_write_error: None,
-            today: chrono::Local::now().date_naive(),
+            today: clock.today(chrono::Utc::now()),
         }
     }
 
@@ -1813,6 +1807,31 @@ impl ShellView {
             // tick instead, so the deadline is "released on the next
             // tick after `FLIP_DEADLINE`" rather than exactly on it —
             // see that loop's own comment and spec §3.10's as-built note.
+        }
+        // Review round 2, finding 5 (as-of dialog spec §5.1, parity with
+        // the old `cached_presets`): a publish landing while the dialog
+        // is open must show up in its row list without a close/reopen.
+        // Gated on the `data` version alone (never `scope`/`grouping`/
+        // `as_of`, which this method's own flip-barrier branch above
+        // already owns) so a scope edit elsewhere does not also rebuild
+        // rows a trader is actively filtering.
+        if self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {
+            self.as_of_data_version = now_v.data;
+            let as_of = frame.read(cx).as_of().clone();
+            let publishes: Vec<_> = frame.read(cx).recent_publishes().iter().cloned().collect();
+            if let Some(state) = self.as_of_dialog.as_mut() {
+                state.refresh(&as_of, &publishes, chrono::Utc::now());
+                // Final whole-branch review, finding M-10: the same
+                // scroll-follow every other seam that moves the
+                // highlight already owns (`input.rs`'s query-change arm,
+                // `handle_key`'s `tab` and nav arms) — a publish landing
+                // below the fold must not leave the restored highlight
+                // (`refresh`'s identity match) off-screen.
+                self.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+                    state.painted(),
+                    state.highlighted(),
+                ));
+            }
         }
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
             && let Some(dir) = self.user_dir.clone()
@@ -1962,20 +1981,16 @@ impl ShellView {
         self.picker.as_ref()
     }
 
-    /// The dialogs' shared filter field (Task 3, `asof_view`'s calendar
-    /// tests) — cross-module test reach the same as `picker()` above.
+    /// The configured clock (`AppClock`), for the shell's own painters.
+    pub fn clock(&self, cx: &gpui::App) -> geode_core::clock::Clock {
+        cx.global::<crate::clock::AppClock>().0
+    }
+
+    /// The dialogs' shared filter field — cross-module test reach the
+    /// same as `picker()` above.
     #[cfg(any(test, feature = "test-support"))]
     pub fn dialog_input(&self) -> &Entity<InputState> {
         &self.dialog_input
-    }
-
-    /// The as-of dialog's calendar entity (Task 3) — cross-module test
-    /// reach the same as `picker()` above, so a test can drive
-    /// `CalendarState::activate_date` exactly as the component's own day
-    /// cell does.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn as_of_calendar(&self) -> &Entity<gpui_component::calendar::CalendarState> {
-        &self.as_of_calendar
     }
 
     /// Deliver a `DataEvent::Distinct` outcome (spec §3.4), routed here by

@@ -175,6 +175,11 @@ pub struct DateTimeField {
   | `escape` | `Cancel` |
   | anything with ctrl/alt/cmd | `None` (a chord falls through to the shell) |
 
+  This table's own wording is design intent, not the as-built claim —
+  see "As built (Part 3)"'s note on `handle_key`'s chord check (§5's own
+  build) for the precise "not the field's" phrasing and finding M-9's
+  deferred consequence for the as-of dialog specifically.
+
   `apply(&mut self, key)` performs every arm but `Commit`/`Cancel`, which
   the host owns.
 
@@ -296,6 +301,12 @@ pub enum Row {
 | any key while the field is open | `widgets::route`: `Commit` commits the field's value, `Cancel` closes the field and returns focus to the filter, the rest `apply`; a chord falls through to the shell as everywhere |
 | `escape` | with the field open: close the field (as `Cancel`); otherwise close the dialog (the modal branch's own rule) |
 | typing | filters; the Custom row keeps its `custom` label so it is findable |
+
+The chord row above is design intent; see "As built (Part 3)" for the
+precise as-built phrasing (CLAUDE.md's load-bearing bullet: "not the
+field's", never "falls through to the shell" — the two read the same in
+outcome but the mechanism is a modal owning the keyboard, not a
+propagation escape) and finding M-9's deferred consequence.
 
 Focus: the field is keyboard-owned through the shell's modal key handler,
 not a focused gpui `Input` — the dialog's shared `Input` stays the focus
@@ -554,3 +565,320 @@ as direct children of one `h_flex` as before the migration — the panel's
 own selector-keyed tests all still find every segment and click target,
 but nobody has yet looked at the nested row on a real window to confirm
 it reads identically to the pre-migration layout.
+
+## As built (Part 2)
+
+`geode_core::clock::Clock` (§3.2), `[time] zone/sod/eod` config loading
+(§3.1), `presets` (§3.3) and the workspace-wide `AppClock` global (§6)
+shipped as designed, plus a whole-branch final review's fixes after the
+merge to main. Eight tasks, `docs/phase-history.md`'s "As-of dialog Part
+2" entry has the day-by-day record including the final review's own
+findings. Part 3 (the dialog itself) is next and unstarted.
+
+**`Clock`'s two fields differ in visibility on purpose**: `sod`/`eod`
+are `pub` (a trader-facing config value with no invariant to protect),
+`zone: Tz` is PRIVATE behind `zone()`/`zone_name()` readers — a `Tz` is
+`Copy` and free to construct badly (`Tz::UTC` bypasses every diagnostic
+`Clock::from_config` would have raised), so the only doors that can name
+one are `Clock::in_zone`, `Clock::utc`, `Clock::machine` and
+`Clock::from_config` itself, all of which either take a validated `Tz`
+or resolve one with diagnostics.
+
+**`Clock::in_zone_named(name: &str) -> Clock`** is `#[doc(hidden)]`, not
+private and not `#[cfg(test)]`: it exists so a crate that depends on
+`geode-core` but not `chrono-tz` directly — every module crate — can
+build a specific non-UTC `Clock` in its own tests (`Clock::in_zone_named
+("Asia/Tokyo")`) without a `chrono-tz` dependency of its own. It panics
+on an unrecognised name, since every call site names a real zone
+literally — an unknown name there is a typo in the test, never a value
+worth threading through a `Result`.
+
+**`Clock::from_config(&Config) -> (Clock, Vec<Diagnostic>)`** is the one
+door `[time]` is read through — `ShellView::new` and `apply_reload` both
+call it and neither re-derives the zone by hand. A non-string
+`time.zone`, an unrecognised zone NAME and a malformed `time.sod`/`eod`
+are each a `Severity::Error` diagnostic at their own `time.<key>` and
+fall back to the default; the machine zone itself being unreadable is a
+`Severity::Warning` at `time.zone`, never an error (there is no config
+key the trader mistyped).
+
+**`presets`'s `SOD T` deviates from §3.3's table on purpose**:
+`sod_of(business_days_back(today, 0))`, not the bare `sod_of(today)`
+the table above shows — `business_days_back(.., 0)` snaps a WEEKEND
+`today` to the preceding Friday (its own documented contract), so `SOD
+T` on a Saturday offers Friday's open rather than a `sod_of` refusal for
+a date that never had one. The table is the design intent (a trader
+never sees a `SOD T` gap on a weekend); this is the implementation
+detail that delivers it.
+
+**`resolve_local(date: NaiveDate, time: NaiveTime)` takes TWO arguments**,
+not the single `value` §5.4 writes for illustration — Part 3's `Custom`
+row commit is `clock.resolve_local(v.date(), v.time())` where `v` is
+whatever `NaiveDateTime` the completed field yields, not a direct
+`clock.resolve_local(value)` call.
+
+**§5.1's right-column formats are NOT `Clock` methods.** `Clock::full`
+(`%Y-%m-%d %H:%M:%S %Z`) covers Current and Custom exactly as designed,
+but the preset row's `Ddd D Mon HH:MM` and the publish row's `Ddd
+HH:MM:SS` are Part 3's OWN format strings over `clock.local(t).format
+(..)` — `Clock` was deliberately kept to the small, load-bearing set of
+formatters every module already needs (`hm`, `hms`, `full`,
+`abbreviation`), not grown a method per dialog row shape.
+
+**The machine zone is memoised once per process** (final review, Minor
+2): `Clock::machine()` is read on the paint path by every module's
+`try_global` fallback, and `iana_time_zone::get_timezone()` is an OS
+call this crate cannot assume is free — a `std::sync::OnceLock` behind
+it now means the real lookup happens at most once, ever, per process.
+Its two fallback arms (a zone the OS could not report, a zone name the
+IANA database does not recognise) are provoked directly through a pure
+seam, `machine_from(Result<String, impl Display>) -> (Clock,
+Option<String>)`, rather than left as untestable branches of `machine()`
+itself.
+
+**A known gap, left as is:** the blotter's per-dataset freshness readout
+(`short_time`) still formats inline in `render` on every paint, unlike
+every other clock read in this branch, which goes through a prepare
+step and a stored field (`HeaderModel::prepare` in market-data, `Row
+.text` at `rebuild` in diagnostics). The blotter's PINNED `AS OF` chip
+was given exactly that shape by the final review (`asof_chip`/
+`asof_chip_date`/`asof_chip_clock`, cached and rebuilt only on a real
+change) — but the freshness readout was not, since it has no analogous
+per-render cost concern its own review round ever raised, and giving it
+one now would be a prepare-step refactor with no attached finding to
+justify it. Revisit only alongside a broader blotter prepare-step pass,
+not in isolation.
+
+**The `gpui-base` exception sentence in `CLAUDE.md`'s workspace
+invariants** (`geode_core::clock` has nothing to do with it, but Part 2
+touched enough of the as-of surface to be worth recording here) is
+UNCHANGED by this work and stays until Part 3 removes the old as-of
+calendar pane (§5.5) — `CalendarView` is the one type that sentence
+names, and nothing in Part 3's design still needs it.
+
+**Done as of Part 3:** the sentence above is gone. `geode-shell` no
+longer depends on `gpui-base` at all — `geode-shell/Cargo.toml`'s
+dependency line and its comment were dropped along with the calendar
+pane, and the root `Cargo.toml` pin comment's mention of `geode-shell`'s
+one use was cut back to naming `geode-app` alone. §5.5's own "Removed"
+list is now fully shipped, not aspirational.
+
+## As built (Part 3)
+
+The dialog shipped as designed (§5): `asof_rows::AsOfState` (pure, no
+`gpui`) over five fixed sections, `asof_view` as the gpui half —
+`open`, the modal `handle_key`, `build`. Three tasks (the pure model,
+the rewritten view + calendar/grammar removal, harness/docs) plus two
+review rounds on Task 2, all merged; `docs/phase-history.md`'s "As-of
+dialog Part 3" entry has the day-by-day record including both rounds'
+findings. This is the last part of the as-of dialog feature and of the
+whole `2026-09-19-…dividend-schedule-and-choice`-adjacent run of
+2026-09-20 work; nothing further is planned against this spec.
+
+**The row model's private field list matches §5.1's sketch loosely, not
+literally** — `AsOfState` also carries `entries: Vec<Entry>` (the
+UNRANKED rows `rerank` ranks from, since re-deriving them from `Row`
+alone on every keystroke would mean re-walking `presets`/publishes),
+`presets: Vec<Preset>` and `publishes: Vec<DateTime<Utc>>` (so
+`instant_of` never re-fetches from the clock or the frame), `clock:
+Clock`, `pinned: Option<DateTime<Utc>>` and `now: DateTime<Utc>` (both
+captured once at `build`/`refresh` time, never re-read live), and
+`refusal: Option<String>` (the DST-gap message, separate from `field`
+so `field_mut()` can clear it independently of whether the field itself
+is being replaced). `AsOfState::rebuild` is the one place entries,
+presets and publish instants are constructed, shared verbatim by `build`
+and `refresh` — a second, drifting copy of the same shape was exactly
+the class of bug two review rounds spent finding elsewhere in this
+dialog.
+
+**The Custom row's seed chain is `.and_then(|p| self.instant_of(&p.row))
+.or(self.pinned).unwrap_or(self.now)`**, read right to left as
+"highlighted row's own instant, else the pin, else now" — `instant_of`
+answers `None` for both `Row::Live` and `Row::Custom` themselves, so
+`tab` FROM either one seeds the pin (while pinned) or now (while live),
+never its own non-existent instant. `Row::Current`'s own instant IS the
+pin, so seeding from it and seeding from the fallback land on the same
+value by construction — the row model does not special-case it. Final
+whole-branch review, finding M-3: the seed is truncated to the second
+(`.with_nanosecond(0)`) before it reaches the field — the field has no
+sub-second segment (`Segment::ALL` stops at `Second`), so a
+nanosecond-bearing seed (`now`, typically, since nothing else in this
+state carries one) used to sit dead inside the field's `NaiveDateTime`
+where nothing ever displayed or cleared it, and a bare `tab` then
+`enter` with no segment touched would silently commit
+`HH:MM:SS.<whatever now's nanoseconds happened to be>`.
+
+**The Custom row paints `tab edits` at rest, not an inline field**
+(final whole-branch review, finding M-1) — a deliberate deviation from
+both §5.1's sketch (a `Clock::full`-formatted right column, like every
+other row) and the mockups' at-rest field: the field's seed is not KNOWN
+until a source row is named (the seed chain above reads the
+HIGHLIGHTED row, and nothing is highlighted-onto-Custom until `tab` or a
+body click moves it there), so there is no instant to format into a
+right column, or a field state to paint, before that happens. The right
+column slot is genuinely empty for this one row until it is opened;
+`"tab edits"` names the door rather than leaving it blank.
+
+**`segment_paint`'s readability floor moves toward black or white, not
+through the `control`/`chip` doors §4.3 names** (final whole-branch
+review, finding M-2) — the same `FlooredTones::primary_text` pattern
+`geode-marketdata`'s own date field painter already uses for the
+identical `primary_foreground` over `primary` pairing, with its own
+no-exception sweep (`segment_colours_are_readable_on_every_bundled_
+theme`). `chip_paint`/`control::paint` answer a fixed vocabulary of
+rest/hover/pressed states for a chip or a button-like control; a
+segment's three states (rest, active, typing) are the date field's own
+vocabulary, painted by `geode_widgets::datefield::paint`, which takes
+its colours as a `SegmentPaint` and never reads a theme — there is no
+`control`/`chip` call this painter could make without either widening
+those doors' vocabulary to match a segment's states or hand-rolling the
+floor anyway. When the deferred hover/pressed work above lands, it adds
+its own pairing to `control::shipped()`'s sweep FROM this starting
+point (new `SegmentPaint` fields carrying the hover/pressed fills,
+derived the same floored way) rather than routing the whole painter
+through `control::paint`.
+
+**`AsOfState::refresh(as_of, publishes, now)`** is the ruled-in
+mechanism keeping the open dialog's rows live against a publish landing
+elsewhere (spec parity with `cached_presets`, which this dialog no
+longer has): it re-ranks with the SAME query and restores the
+highlighted row by `(section, label, right)` identity, falling back to
+index `0` when the identified row no longer exists after the rebuild —
+`right` (the formatted timestamp) is in the identity tuple because two
+publishes can share a label at different instants, which `(section,
+label)` alone cannot tell apart. `refresh` never reads or writes
+`self.field`, so an open Custom field's own in-progress edit survives a
+refresh untouched. Wired from `ShellView::on_frame_changed` behind a new
+`as_of_data_version: u64` field (set at open time, compared against
+`Frame::versions().data` on every notify), gated separately from that
+method's own flip-barrier `scope`/`grouping`/`as_of` comparison so a
+scope edit elsewhere never triggers an as-of rebuild.
+
+**Scroll-follow (`ShellView::as_of_scroll: ScrollHandle`)** touches
+FOUR seams, all through `asof_rows::child_index_of` (which turns a
+painted-row index into the `as-of-rows` list's actual child index,
+accounting for the eyebrow `div`s interleaved between sections):
+`handle_key`'s nav and `tab` branches, a reset to `scroll_to_item(0)` in
+`asof_view::open` (the handle persists on `ShellView` across
+close/reopen and otherwise keeps a previous session's offset), the
+query-change subscription arm in `shell/mod.rs` (a re-rank always resets
+`highlighted` to `0`), and — added in the final whole-branch review,
+finding M-10 — `on_frame_changed`'s own refresh arm, right after the
+`AsOfState::refresh` call: `refresh`'s identity restore (above) can land
+the SAME highlighted row at a much lower painted index when fresher
+publishes rank above it, and without this fourth seam the trader's own
+scroll position stayed put while the row it was following moved well
+below the fold. The `as-of-rows` list also needed an explicit `max_h`
+(12 rows at 28px, the same shape `dialog::choice_rows` gives the choice
+dialogs) that nothing in the original design called out — without a
+height bound, `overflow_y_scroll` has nothing to overflow against and
+the tracking is inert.
+
+**Selectors** (`debug_selector`, for `vcx.debug_bounds` in a window
+test): `as-of-rows` (the scrollable list container), `as-of-row-{N}`
+(`N` is the row's own position in `state.painted()` — `painted()` has no
+eyebrows in it at all, only `Painted` rows, so `{N}` is NOT shifted by
+one wherever an eyebrow is interleaved above it; final whole-branch
+review, finding M-5, corrects an earlier draft of this paragraph that
+had it backwards. The eyebrow SHIFT is real, but it lands on a different
+number entirely: the `as-of-rows` LIST's own CHILD index, which counts
+the eyebrow `div`s too — that mismatch between a painted row's number
+and its actual child position is exactly why `asof_rows::child_index_of`
+exists, translating one into the other for `scroll_to_item`), `as-of-
+custom-seg-{N}` (the Custom field's segments, `N` the segment's own
+`Segment::index()`) and `as-of-custom-seg-suffix` (the zone-abbreviation
+suffix), `as-of-custom-refusal` (the DST-gap message), `as-of-hint-tab`
+and `as-of-hint-step` (the footer's mutually-exclusive list/field hint
+rows, so a test can prove the footer actually swaps rather than just not
+changing height).
+
+**Nineteen `asof:` harness entries**, `--anchors-only` 0 stale/0
+ambiguous over the workspace's 1340 total, every one `caught` (none
+`caught*`). One deliberately unwritten: "a chord is not claimed while
+the field is open" has no test-observable difference in the current
+harness — the would-be mutation only flips `handle_key`'s own return
+value for a chord, never touches `AsOfState`, and a modal being open
+already suppresses the shell's normal keymap-bound chord dispatch
+regardless of the handler's own claim (`ctrl+k`, bound to
+`palette::toggle`, opens nothing while the as-of field is open even with
+the correct, unmutated code) — recorded in `docs/phase-history.md`
+rather than shipped as a lying entry. The final whole-branch review
+found three more load-bearing behaviours and one more Important wiring
+gap in this same style: the Custom field's seed is truncated to the
+second (M-3, `.with_nanosecond(0)`, a nanosecond-bearing `now` used to
+survive undetected into a committed value since the field has no
+sub-second segment to show or clear it); `enter` still commits the
+state's own highlighted row now that the redundant re-feed is gone
+(M-8, replaced with a `debug_assert_eq!` tripwire — the harness entry
+defends the surviving BEHAVIOUR, not the assert itself, which the
+review explicitly ruled out as "not a defence"); and a refreshed
+highlight scrolls into view too (M-10, the fourth scroll-follow seam
+beside `handle_key`'s nav/`tab` arms and the query-change arm, added to
+`ShellView::on_frame_changed` right after `AsOfState::refresh`).
+
+**Two findings investigated and found not to reproduce (I-1):** the
+review predicted the Custom row's segment-click and body-click callbacks
+losing window focus off the shared `Input` to gpui's default
+track-focus grab (the "+" chip's precedent, CLAUDE.md's
+`open_shell_dialog` bullet) when they mutate `AsOfState` without calling
+`dialog::sync_dialog_text`. Both fixes were made (the segment callback
+now takes `window` and calls it; the body-click arm's own call is
+hoisted out of the `field().is_none()` guard so a click on an
+ALREADY-open Custom row resyncs too) because they are still correct
+hygiene — every OTHER `AsOfState` mutation in this file reconciles on
+its own seam, and a segment select and an already-open body click had
+none. But empirical verification (temporarily reverting each fix and
+re-running its window test, both of which stayed green) found that
+`dialog::render_modal`'s panel already calls `cx.stop_propagation()` on
+every mouse-down anywhere inside an already-open modal — a blanket that
+predates this dialog and applies to all of them — which blocks gpui's
+default focus grab from ever reaching the shell root before either fix
+existed. The "+" chip's mechanism bites the mouse-down that OPENS a
+dialog, before any modal panel exists to intercept it; it cannot bite a
+click on a row already inside one. Both window tests (`clicking_a_
+segment_selects_it_and_the_field_still_hears_the_keyboard`,
+`clicking_the_custom_rows_body_while_open_keeps_the_field_focused`) say
+so in their own doc comments and stay in the suite as behavioural locks
+(segment selection, keyboard passthrough, focus stability), not as
+regression catches; no harness entry was written for either, the same
+honesty standard the chord entry above already set. M-4 (the row-height
+literal `28.` replaced with `scale::design(ROW_HEIGHT)`) and I-2 (the
+eyebrow `div`s gaining `.flex_shrink_0()`) are the same story without
+even a review-predicted mechanism behind them: pure hygiene, currently
+behaviourally invisible (`28.0 == ROW_HEIGHT`; nothing yet forces the
+list to actually shrink a child), so neither has a harness entry either.
+
+**Deferred, not built:** hover/pressed states on the Custom row's
+segments (§4's own Part 3 obligation from `geode-widgets`' "As built
+(Part 1)" — new `SegmentPaint` fields, a `.id()` per segment, a
+`control::shipped()` pairing — none of it built here either); an
+`as_of` change from another door (the blotter's own tile-local `:asof`,
+a saved-scope load) leaving the open dialog's `Current`/`Live` rows
+stale, since only a `data`-version bump drives `refresh`; a `[time]`
+clock reload while the dialog is open leaving its presets and
+right-column formatting on the OLD zone (the clock is captured once, at
+`build` time, and `refresh` reuses it rather than re-reading the
+`AppClock` global). Final whole-branch review, finding M-9: a chord the
+field does not own (`route` answers `None` for one — a bare `cmd+v`, say)
+still reaches the shared `Input` as typing while the Custom field is
+open, since `handle_key`'s field-open branch returns `false` for any
+chord (letting it fall through, per §5.2) rather than swallowing it the
+way an unrouted BARE key is swallowed (review round 2, finding 2) — an
+open-but-unpainted field (the row still reads "tab edits" until the next
+`escape`) can be re-filtered out from under a chord the trader likely
+did not mean for this dialog at all. Judged low-likelihood (the shared
+`Input` has no visible caret while the Custom row's own segments are
+what's focused-in-spirit) and deferred rather than fixed in this wave.
+
+## As built (§9 display checks — Part 3 additions)
+
+Beyond the four listed in §9 above (still pending): the scroll-follow
+behaviour on a real window (offset moving as the highlight passes the
+visible window, resetting to the top on reopen and on a filter after
+scrolling — all three window-tested, none pixel-verified); the empty-
+state copy (`"nothing matches — edit the filter"`); the Custom row's
+"tab edits" placeholder text when the field is closed; and the DST-gap
+refusal's placement (`ml_auto`, `danger` text) beside the Custom row's
+segments rather than below them. The implementation sandbox cannot
+paint a window, so every claim above rests on `debug_bounds`/window-test
+assertions, not an eye on the screen.

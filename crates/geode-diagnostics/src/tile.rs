@@ -216,6 +216,13 @@ impl DiagnosticsTile {
             }
         })
         .detach();
+        // `AppClock` (as-of dialog spec §6.1): every section reads the
+        // clock inside `rebuild` (`try_global`, since a module test
+        // fixture may never install the global), so a `[time]` reload
+        // just needs to trigger the one rebuild it already knows how to
+        // do.
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| this.rebuild(cx))
+            .detach();
         // MIN-7 (final review): the `Config` `Section::Config` rebuilds
         // from (`self.config`, below) is the SAME `Rc<RefCell<Config>>`
         // `geode-app::main`'s own `cx.observe(&frame, ..)` refreshes on
@@ -350,13 +357,21 @@ impl DiagnosticsTile {
             }
         }
         let now = SystemTime::now();
+        // `try_global`, not the bare `cx.global` (Task 5 ruling): a
+        // module test fixture may never have installed `AppClock`.
+        let clock = cx
+            .try_global::<geode_shell::clock::AppClock>()
+            .map(|c| c.0)
+            .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
         let new_rows: Vec<Row> = {
             let d = self.diagnostics.read(cx);
             let frame = self.frame.read(cx);
             match self.section {
-                Section::Sources => sections::sources_rows(d, now),
-                Section::Data => sections::data_rows(d, frame.as_of(), &self.collapsed),
-                Section::Config => sections::config_rows(d, &self.config.borrow(), &self.filter),
+                Section::Sources => sections::sources_rows(d, now, clock),
+                Section::Data => sections::data_rows(d, frame.as_of(), &self.collapsed, clock),
+                Section::Config => {
+                    sections::config_rows(d, &self.config.borrow(), &self.filter, clock)
+                }
                 Section::Log => {
                     // MAJ-5 (fix round 1): `make_contiguous` hands back a
                     // slice of the existing `VecDeque` storage — no clone
@@ -365,7 +380,7 @@ impl DiagnosticsTile {
                     // rebuilds that have nothing to do with the log (a
                     // health note, a poll, ...).
                     let records = self.records.make_contiguous();
-                    let mut rows = sections::log_rows(records, &self.filter);
+                    let mut rows = sections::log_rows(records, &self.filter, clock);
                     if self.lost_records > 0 {
                         rows.insert(
                             0,
@@ -1100,6 +1115,73 @@ mod tests {
             h.tile.read_with(&vcx, |t, _| t.rows()[0].tone),
             Tone::Warn,
             "the lost-records row leads, toned as a warning"
+        );
+    }
+
+    /// Review finding (Task 7): no test installed `AppClock`, so a tile
+    /// that hard-coded `Clock::machine()` — or whose `observe_global`
+    /// handler were deleted — would have passed everything else. The
+    /// log row's `HH:MM:SS` is baked into `Row.text` at `rebuild` time
+    /// (never reformatted at paint), so the "after" half specifically
+    /// pins the observer: without it, switching the global would leave
+    /// the stale Tokyo string sitting in `self.rows`. `2026-09-12T14:00:
+    /// 00Z` reads `23:00:00` in Tokyo (UTC+9) and `14:00:00` in UTC —
+    /// both spelled by hand, not derived through `Clock` (the thing
+    /// under test).
+    #[gpui::test]
+    fn the_log_section_reads_the_installed_app_clock_and_follows_a_later_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(geode_shell::clock::AppClock(
+                geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+            ))
+        });
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section log", cx).unwrap();
+        });
+        let at: SystemTime = chrono::DateTime::parse_from_rfc3339("2026-09-12T14:00:00Z")
+            .unwrap()
+            .to_utc()
+            .into();
+        h.ring.push(Record {
+            at,
+            level: Level::INFO,
+            target: "geode::shell",
+            message: "m".into(),
+            seq: 0,
+        });
+        // Ring pushes carry no notify of their own; `note_dropped` +
+        // `cx.notify()` is the existing tests' stand-in for the real
+        // caller (a health note, the reload-poll tick, …) that actually
+        // triggers the next rebuild — same trick as
+        // `the_log_section_follows_the_tail_until_the_cursor_moves`.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_dropped(1);
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let before = h
+            .tile
+            .read_with(&vcx, |t, _| t.rows().last().unwrap().text.to_string());
+        assert!(
+            before.starts_with("23:00:00"),
+            "Tokyo is UTC+9 on the 14:00:00Z fixture: {before}"
+        );
+
+        vcx.update(|_window, cx| {
+            cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc()))
+        });
+        vcx.run_until_parked();
+        let after = h
+            .tile
+            .read_with(&vcx, |t, _| t.rows().last().unwrap().text.to_string());
+        assert!(
+            after.starts_with("14:00:00"),
+            "the observer refreshed and repainted: {after}"
         );
     }
 

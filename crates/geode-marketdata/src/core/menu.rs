@@ -5,6 +5,7 @@
 
 use crate::core::draft::{DraftBadge, UpdatePolicy, local_hhmm};
 use crate::core::spec::KindAction;
+use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
 use gpui::SharedString;
 
@@ -80,7 +81,7 @@ fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = MenuRow> {
 /// a verb on the draft), then — only while the spec names any — a
 /// separator, the kind's own section header, and one row per
 /// [`KindAction`].
-pub fn rows(i: &MenuInputs) -> Vec<MenuRow> {
+pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<MenuRow> {
     let dirty = !matches!(i.badge, DraftBadge::Clean);
     let behind = matches!(i.badge, DraftBadge::Behind { .. });
     let mut out = vec![
@@ -108,7 +109,7 @@ pub fn rows(i: &MenuInputs) -> Vec<MenuRow> {
     if let DraftBadge::Behind { newer } = &i.badge {
         out.push(action(
             "marketdata::rebase",
-            format!("Rebase onto {}", local_hhmm(newer)),
+            format!("Rebase onto {}", local_hhmm(newer, clock)),
             ":rebase",
             Ok(()),
         ));
@@ -222,7 +223,7 @@ mod tests {
 
     #[test]
     fn a_clean_draft_offers_load_and_greys_upload_and_revert() {
-        let rows = rows(&inputs(DraftBadge::Clean));
+        let rows = rows(&inputs(DraftBadge::Clean), Clock::utc());
         assert_eq!(
             titles(&rows),
             vec![
@@ -252,14 +253,17 @@ mod tests {
     fn a_dirty_draft_leaves_load_live_and_a_built_upload_is_live() {
         let mut i = inputs(DraftBadge::Dirty);
         i.upload_built = true;
-        let dirty_rows = rows(&i);
+        let dirty_rows = rows(&i, Clock::utc());
         assert_eq!(enabled(&dirty_rows, "Load underlying…"), Ok(()));
         assert_eq!(enabled(&dirty_rows, "Upload"), Ok(()));
         assert_eq!(enabled(&dirty_rows, "Revert edits"), Ok(()));
-        let clean = rows(&MenuInputs {
-            upload_built: true,
-            ..inputs(DraftBadge::Clean)
-        });
+        let clean = rows(
+            &MenuInputs {
+                upload_built: true,
+                ..inputs(DraftBadge::Clean)
+            },
+            Clock::utc(),
+        );
         assert_eq!(enabled(&clean, "Upload"), Err("nothing to upload"));
     }
 
@@ -269,7 +273,7 @@ mod tests {
             newer: "2026-09-14T14:09:00Z".into(),
         });
         i.upload_built = true;
-        let rows = rows(&i);
+        let rows = rows(&i, Clock::utc());
         assert!(titles(&rows).iter().any(|t| t.starts_with("Rebase onto ")));
         assert_eq!(enabled(&rows, "Upload"), Err("rebase or revert first"));
     }
@@ -278,7 +282,7 @@ mod tests {
     fn a_spec_with_no_kind_actions_has_no_kind_section() {
         let mut i = inputs(DraftBadge::Clean);
         i.kind_actions = &[];
-        let rows = rows(&i);
+        let rows = rows(&i, Clock::utc());
         let t = titles(&rows);
         assert!(!t.iter().any(|t| t == "[CVI]"), "{t:?}");
         assert_eq!(
@@ -295,10 +299,13 @@ mod tests {
     #[test]
     fn exactly_one_policy_row_is_checked_and_it_follows_the_policy() {
         for policy in UpdatePolicy::ALL {
-            let rows = rows(&MenuInputs {
-                policy,
-                ..inputs(DraftBadge::Dirty)
-            });
+            let rows = rows(
+                &MenuInputs {
+                    policy,
+                    ..inputs(DraftBadge::Dirty)
+                },
+                Clock::utc(),
+            );
             let t = titles(&rows);
             let section = t.iter().position(|t| t == "[On new document]").unwrap();
             let kind = t.iter().position(|t| t == "[CVI]").unwrap();
@@ -325,7 +332,7 @@ mod tests {
 
     #[test]
     fn navigation_skips_separators_and_starts_on_the_first_enabled_row() {
-        let rows = rows(&inputs(DraftBadge::Clean));
+        let rows = rows(&inputs(DraftBadge::Clean), Clock::utc());
         assert_eq!(first_enabled(&rows), 0);
         let last_action = rows.len() - 1;
         assert_eq!(

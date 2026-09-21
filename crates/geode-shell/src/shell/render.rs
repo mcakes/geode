@@ -943,10 +943,11 @@ impl Render for ShellView {
         // Moved ahead of `status_bar`'s own construction (Phase 4a §3.6):
         // its `as_of` segment reads `bar_model.as_of`, the same formatted
         // text the toolbar's own AS OF badge shows. `self.today` (Phase 4b
-        // Task 1 fix round 1, MIN-9), not `chrono::Local::now()` — the
-        // clock read moved to the ~500ms reload-poll tick, so a held key
-        // no longer pays it on every repaint.
-        let bar_model = self.frame.read(cx).bar_model(self.today);
+        // Task 1 fix round 1, MIN-9), not a fresh clock read every paint —
+        // the date read moved to the ~500ms reload-poll tick, so a held key
+        // no longer pays it on every repaint. `self.clock(cx)` (as-of
+        // dialog spec §6.1) is the `AppClock` global.
+        let bar_model = self.frame.read(cx).bar_model(self.clock(cx), self.today);
         // Phase 4b §4.4: the status bar's diagnostics indicator now reads
         // `Diagnostics::summary()` (cached there, keyed on its own
         // version, and returning an `Rc<str>` — Task 4 fix round 1,

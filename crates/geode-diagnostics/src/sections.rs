@@ -8,7 +8,8 @@
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
+use geode_core::clock::Clock;
 use gpui::SharedString;
 
 use geode_core::config::{Config, Diagnostic, Severity};
@@ -49,18 +50,15 @@ fn row(text: impl Into<SharedString>, depth: u8, tone: Tone) -> Row {
     }
 }
 
-/// `HH:MM:SS` on the trader's local clock (Phase 4a's ruling: local time
-/// throughout) — the diagnostics tile's own convention for every
+/// `HH:MM:SS` on the trader's clock (`AppClock`, Phase 4a's ruling: local
+/// time throughout) — the diagnostics tile's own convention for every
 /// timestamp it shows, matching the frame's `short_time`-style readouts.
-fn local_hms(t: SystemTime) -> String {
-    DateTime::<Utc>::from(t)
-        .with_timezone(&Local)
-        .format("%H:%M:%S")
-        .to_string()
+fn local_hms(t: SystemTime, clock: Clock) -> String {
+    clock.hms(DateTime::<Utc>::from(t))
 }
 
-fn local_hms_utc(t: DateTime<Utc>) -> String {
-    t.with_timezone(&Local).format("%H:%M:%S").to_string()
+fn local_hms_utc(t: DateTime<Utc>, clock: Clock) -> String {
+    clock.hms(t)
 }
 
 /// The "sources" section (spec §4.6): name, path, priority, readiness
@@ -71,7 +69,7 @@ fn local_hms_utc(t: DateTime<Utc>) -> String {
 /// report yet" rather than counted as any particular health (matching
 /// `Diagnostics::summary`'s own CRIT-1 fix), and placed after every
 /// reported source.
-pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
+pub fn sources_rows(d: &Diagnostics, now: SystemTime, clock: Clock) -> Vec<Row> {
     let mut reported: Vec<(&String, &geode_shell::diagnostics::SourceState)> = d
         .sources
         .iter()
@@ -98,7 +96,7 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
             out.push(row(format!("{name}: no report yet"), 0, Tone::Muted));
             if let Some(a) = loading {
                 out.push(row(
-                    format!("loading {} since {}", a.path, local_hms(a.since)),
+                    format!("loading {} since {}", a.path, local_hms(a.since, clock)),
                     1,
                     Tone::Muted,
                 ));
@@ -113,7 +111,7 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
             Health::Degraded { .. } => Tone::Warn,
             Health::Failed { .. } => Tone::Error,
         };
-        let since = local_hms(state.since);
+        let since = local_hms(state.since, clock);
         let mut text = format!("{name}: {label}");
         if let Some(reason) = &reason
             && !reason.is_empty()
@@ -137,7 +135,7 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
         out.push(row(text, 0, tone));
         if let Some(a) = loading {
             out.push(row(
-                format!("loading {} since {}", a.path, local_hms(a.since)),
+                format!("loading {} since {}", a.path, local_hms(a.since, clock)),
                 1,
                 Tone::Muted,
             ));
@@ -145,13 +143,13 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
         push_spec_detail(&mut out, state);
         let mut poll = String::new();
         if let Some(last) = state.last_poll {
-            poll.push_str(&format!("last poll {}", local_hms(last)));
+            poll.push_str(&format!("last poll {}", local_hms(last, clock)));
         }
         if let Some(next) = state.next_poll {
             if !poll.is_empty() {
                 poll.push_str(" · ");
             }
-            poll.push_str(&format!("next poll {}", local_hms(next)));
+            poll.push_str(&format!("next poll {}", local_hms(next, clock)));
         }
         if !poll.is_empty() {
             poll.push_str(&format!(" · ready {}", state.last_ready));
@@ -214,7 +212,12 @@ fn push_spec_detail(out: &mut Vec<Row>, state: &geode_shell::diagnostics::Source
 /// generation with its id, published time, rows, live-or-archive, and the
 /// generation the current `as_of` resolves to marked `Tone::Marked`. A
 /// dataset in `collapsed` shows only its own header row.
-pub fn data_rows(d: &Diagnostics, as_of: &AsOf, collapsed: &BTreeSet<String>) -> Vec<Row> {
+pub fn data_rows(
+    d: &Diagnostics,
+    as_of: &AsOf,
+    collapsed: &BTreeSet<String>,
+    clock: Clock,
+) -> Vec<Row> {
     // MIN-5 (final review): the whole `CatalogSnapshot` carries the
     // `AsOf` it was resolved under (each `DatasetState::catalog` here is
     // only the per-dataset slice of that same snapshot, with no `as_of`
@@ -258,7 +261,7 @@ pub fn data_rows(d: &Diagnostics, as_of: &AsOf, collapsed: &BTreeSet<String>) ->
                 let tone = if marked { Tone::Marked } else { Tone::Normal };
                 let loaded = generation
                     .loaded_at
-                    .map(local_hms_utc)
+                    .map(|t| local_hms_utc(t, clock))
                     .unwrap_or_else(|| "?".to_string());
                 let rows = generation
                     .file_rows
@@ -269,7 +272,7 @@ pub fn data_rows(d: &Diagnostics, as_of: &AsOf, collapsed: &BTreeSet<String>) ->
                     format!(
                         "gen {} · {} · loaded {loaded} · rows {rows} · {kind}",
                         generation.gen_id,
-                        local_hms_utc(generation.source_time)
+                        local_hms_utc(generation.source_time, clock)
                     ),
                     2,
                     tone,
@@ -288,7 +291,7 @@ pub fn data_rows(d: &Diagnostics, as_of: &AsOf, collapsed: &BTreeSet<String>) ->
 /// every part of the section — so filtering to "theme" both narrows the
 /// explainer to matching leaves and drops diagnostics that don't mention
 /// it.
-pub fn config_rows(d: &Diagnostics, config: &Config, filter: &str) -> Vec<Row> {
+pub fn config_rows(d: &Diagnostics, config: &Config, filter: &str, clock: Clock) -> Vec<Row> {
     let mut out = Vec::new();
     out.push(row("current config diagnostics", 0, Tone::Muted));
     if d.config.is_empty() {
@@ -309,7 +312,11 @@ pub fn config_rows(d: &Diagnostics, config: &Config, filter: &str) -> Vec<Row> {
     if d.config_history.len() > 1 {
         out.push(row("history", 0, Tone::Muted));
         for (at, diags) in d.config_history.iter().skip(1) {
-            out.push(row(format!("batch at {}", local_hms(*at)), 1, Tone::Muted));
+            out.push(row(
+                format!("batch at {}", local_hms(*at, clock)),
+                1,
+                Tone::Muted,
+            ));
             for diag in diags {
                 out.push(diagnostic_row_at_depth(diag, 2));
             }
@@ -412,7 +419,7 @@ fn diagnostic_row_at_depth(diag: &Diagnostic, depth: u8) -> Row {
 /// is a plain substring match against the whole formatted row (so it
 /// catches both a target like `ingest` — matched inside `geode::ingest` —
 /// and a level like `WARN`).
-pub fn log_rows(records: &[Record], filter: &str) -> Vec<Row> {
+pub fn log_rows(records: &[Record], filter: &str, clock: Clock) -> Vec<Row> {
     records
         .iter()
         .map(|r| {
@@ -424,7 +431,7 @@ pub fn log_rows(records: &[Record], filter: &str) -> Vec<Row> {
             row(
                 format!(
                     "{} {:>5} {} {}",
-                    local_hms(r.at),
+                    local_hms(r.at, clock),
                     r.level,
                     r.target,
                     r.message
@@ -606,7 +613,7 @@ mod tests {
             },
         );
 
-        let rows = sources_rows(&d, t);
+        let rows = sources_rows(&d, t, Clock::utc());
         let headers: Vec<&str> = rows
             .iter()
             .filter(|r| r.depth == 0)
@@ -648,7 +655,7 @@ mod tests {
         d.note_health("risk", Health::Ok, "".into(), t);
         let at = SystemTime::now();
         d.note_loading("risk", "/data/risk/EOD.csv", 1, at);
-        let rows = sources_rows(&d, at);
+        let rows = sources_rows(&d, at, Clock::utc());
         let text: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
         assert!(
             text.iter()
@@ -656,7 +663,7 @@ mod tests {
             "{text:?}"
         );
         d.note_load_ended();
-        let rows = sources_rows(&d, at);
+        let rows = sources_rows(&d, at, Clock::utc());
         assert!(!rows.iter().any(|r| r.text.starts_with("loading ")));
     }
 
@@ -677,7 +684,7 @@ mod tests {
                 shape: SourceShape::Directory,
             },
         );
-        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH, Clock::utc());
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
         let path_row = texts
             .iter()
@@ -711,7 +718,7 @@ mod tests {
                 shape: SourceShape::Subscribed,
             },
         );
-        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH, Clock::utc());
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
         assert!(texts.contains(&"adapter: demo_bus"), "{texts:?}");
         assert!(texts.contains(&"topics: marketdata/cvi/>"), "{texts:?}");
@@ -745,7 +752,7 @@ mod tests {
                 shape: SourceShape::Subscribed,
             },
         );
-        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH, Clock::utc());
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
         assert!(texts.contains(&"adapter: demo_bus"), "{texts:?}");
         assert!(
@@ -782,7 +789,7 @@ mod tests {
                 shape: SourceShape::Fetch,
             },
         );
-        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH, Clock::utc());
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
         assert!(texts.contains(&"adapter: kdb"), "{texts:?}");
         assert!(texts.contains(&"fetch"), "{texts:?}");
@@ -814,7 +821,7 @@ mod tests {
                 shape: SourceShape::Directory,
             },
         );
-        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH, Clock::utc());
         assert_eq!(rows[0].text.as_ref(), "risk: no report yet");
         assert_eq!(rows[0].tone, Tone::Muted);
     }
@@ -840,16 +847,19 @@ mod tests {
         );
         let at = SystemTime::now();
         d.note_loading("risk", "/data/risk/EOD.csv", 1, at);
-        let rows = sources_rows(&d, at);
+        let rows = sources_rows(&d, at, Clock::utc());
         assert_eq!(rows[0].text.as_ref(), "risk: no report yet");
         assert_eq!(
             rows[1].text.as_ref(),
-            format!("loading /data/risk/EOD.csv since {}", local_hms(at)),
+            format!(
+                "loading /data/risk/EOD.csv since {}",
+                local_hms(at, Clock::utc())
+            ),
             "the loading row sits directly under the no-report-yet row"
         );
 
         d.note_load_ended();
-        let rows = sources_rows(&d, at);
+        let rows = sources_rows(&d, at, Clock::utc());
         assert!(!rows.iter().any(|r| r.text.starts_with("loading ")));
     }
 
@@ -896,7 +906,7 @@ mod tests {
             datasets: vec![dataset_catalog()],
             ..Default::default()
         });
-        let rows = data_rows(&d, &as_of, &BTreeSet::new());
+        let rows = data_rows(&d, &as_of, &BTreeSet::new(), Clock::utc());
         let gen1 = rows.iter().find(|r| r.text.contains("gen 1")).unwrap();
         assert_eq!(gen1.tone, Tone::Marked);
         let gen2 = rows.iter().find(|r| r.text.contains("gen 2")).unwrap();
@@ -920,7 +930,7 @@ mod tests {
             ..Default::default()
         });
         let current = AsOf::At(chrono::DateTime::UNIX_EPOCH + chrono::Duration::hours(1));
-        let rows = data_rows(&d, &current, &BTreeSet::new());
+        let rows = data_rows(&d, &current, &BTreeSet::new(), Clock::utc());
         let gen1 = rows.iter().find(|r| r.text.contains("gen 1")).unwrap();
         assert_eq!(
             gen1.tone,
@@ -938,7 +948,7 @@ mod tests {
         });
         let mut collapsed = BTreeSet::new();
         collapsed.insert("risk".to_string());
-        let rows = data_rows(&d, &AsOf::Live, &collapsed);
+        let rows = data_rows(&d, &AsOf::Live, &collapsed, Clock::utc());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].collapsible, Some(false));
     }
@@ -962,7 +972,7 @@ mod tests {
             desk: None,
             user: None,
         });
-        let rows = config_rows(&d, &config, "");
+        let rows = config_rows(&d, &config, "", Clock::utc());
         let joined: String = rows
             .iter()
             .map(|r| r.text.to_string())
@@ -972,7 +982,7 @@ mod tests {
         assert!(joined.contains("theme.name = \"Solarized\""));
         assert!(joined.contains("[builtin]"));
 
-        let filtered = config_rows(&d, &config, "theme");
+        let filtered = config_rows(&d, &config, "theme", Clock::utc());
         assert!(filtered.iter().all(|r| r.text.contains("theme")));
         assert!(!filtered.is_empty());
     }
@@ -995,7 +1005,7 @@ mod tests {
             desk: None,
             user: None,
         });
-        let rows = config_rows(&d, &config, "");
+        let rows = config_rows(&d, &config, "", Clock::utc());
         let texts: Vec<String> = rows.iter().map(|r| r.text.to_string()).collect();
         assert!(
             texts
@@ -1033,7 +1043,7 @@ mod tests {
             desk: None,
             user: None,
         });
-        let rows = config_rows(&d, &config, "");
+        let rows = config_rows(&d, &config, "", Clock::utc());
         let more_row = rows.iter().find(|r| r.text.contains("more"));
         assert!(more_row.is_some(), "expected a trailing '… N more' row");
         assert!(more_row.unwrap().text.contains("50"));
@@ -1096,7 +1106,7 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let rows = config_rows(&d, &config, "");
+        let rows = config_rows(&d, &config, "", Clock::utc());
         let elapsed = start.elapsed();
         println!(
             "config_rows on the demo config + builtin keymap: {} rows in {:?}",
@@ -1129,14 +1139,31 @@ mod tests {
                 seq: 2,
             },
         ];
-        let by_target = log_rows(&records, "ingest");
+        let by_target = log_rows(&records, "ingest", Clock::utc());
         assert_eq!(by_target.len(), 1);
         assert!(by_target[0].text.contains("geode::ingest"));
 
-        let by_level = log_rows(&records, "WARN");
+        let by_level = log_rows(&records, "WARN", Clock::utc());
         assert_eq!(by_level.len(), 1);
         assert!(by_level[0].text.contains("geode::query"));
         assert_eq!(by_level[0].tone, Tone::Warn);
+    }
+
+    #[test]
+    fn log_rows_stamp_each_record_on_the_clock() {
+        let at: SystemTime = chrono::DateTime::parse_from_rfc3339("2026-09-18T22:00:00Z")
+            .unwrap()
+            .to_utc()
+            .into();
+        let records = vec![Record {
+            at,
+            level: geode_core::log::Level::INFO,
+            target: "geode::ingest",
+            message: "loaded".into(),
+            seq: 1,
+        }];
+        let rows = log_rows(&records, "", Clock::in_zone_named("Asia/Tokyo"));
+        assert!(rows[0].text.starts_with("07:00:00"), "{}", rows[0].text);
     }
 
     #[test]
