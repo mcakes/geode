@@ -13081,10 +13081,10 @@ run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
                 cx.notify();
             }' \
   '            Err(reason) => {
+                let id = id.clone();
                 self.notice = Some((*reason).into());
                 self.rebuild_chrome();
                 cx.notify();
-                let id = id.clone();
                 self.close_popup_with_window(window, cx);
                 self.dispatch(&id, None, window, cx);
             }' \
