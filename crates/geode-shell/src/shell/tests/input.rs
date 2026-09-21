@@ -607,3 +607,53 @@ fn bare_shell_keys_are_text_in_insert_mode(cx: &mut gpui::TestAppContext) {
         "a typed `D` must not duplicate the tile"
     );
 }
+
+/// gpui-component's `Root` binds `tab`/`shift-tab` window-wide to its own
+/// focus cycling (`gpui-component-0.6.2/src/root.rs`, the `"Root"` key
+/// context), and gpui dispatches a MATCHED BINDING before any
+/// `on_key_down` listener — so before the shell root carried its own
+/// `"GeodeShell"` context and `init_reclaimed_keybindings` reclaimed both
+/// keys there, a bare `tab` never reached `ShellView::handle_key_down`
+/// while a tile was focused, and a module that binds `tab` in its own
+/// context (the timeseries tile's `tab = timeseries::next`, timeseries
+/// spec §9.4) was simply dead in the real app.
+///
+/// This is the end-to-end proof, in a real window inside a real `Root`:
+/// a user-layer binding puts `tab` on the recorder's own `rec` context,
+/// and the keystroke has to arrive as a dispatch on the focused tile.
+#[gpui::test]
+fn tab_reaches_a_focused_tiles_own_binding_rather_than_roots_focus_cycling(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut services, log) = test_services_with_log();
+    // `rec::down` is one of the five verbs `RecordingFactory` registers,
+    // so the binding really resolves (`build_keymap` drops a binding
+    // whose action nothing registered).
+    let tab_layer = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:tab>".into(),
+        table: "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"tab\" = \"rec::down\"\n"
+            .parse()
+            .unwrap(),
+    };
+    services.keymap = test_keymap(&services.registry, &[tab_layer]);
+
+    let (_window, mut vcx) = open_shell(cx, services);
+    vcx.simulate_keystrokes("ctrl-v"); // a recorder tile, focused
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    vcx.simulate_keystrokes("tab");
+
+    assert!(
+        log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Dispatch(_, a, _) if a.0 == "rec::down"
+        )),
+        "a bare `tab` must reach the focused tile's own binding, not `Root`'s \
+         focus cycling: {:?}",
+        log.borrow()
+    );
+}

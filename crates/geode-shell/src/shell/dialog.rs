@@ -349,6 +349,25 @@ pub fn set_title_extra(
 ///    different depths, same outcome — and neither is enabled with no
 ///    modal open, so `Root`'s cycling is untouched everywhere else.
 ///
+/// 6. **`tab`/`shift-tab`**, scoped to `"GeodeShell"` (controller ruling
+///    2026-09-20) — bullets 1, 4 and 5 generalised. Those three each
+///    reclaimed the key for one surface, which left the case none of them
+///    covers: a plain focused TILE, no modal, no overlay. There `Root`'s
+///    cycling won, so a bare `tab` never reached
+///    `ShellView::handle_key_down` and a module's own `tab` binding could
+///    not fire at all — found on the timeseries tile, whose `tab` steps
+///    the header's chip cursor (`timeseries::next`, timeseries spec §9.4)
+///    and whose keymap-level tests all passed while the real app did
+///    nothing. `"GeodeShell"` is `ShellView::render`'s unconditional key
+///    context on the root element, so this reclaim covers the whole shell
+///    and outranks `Root` by depth exactly as bullet 1 does. Bullets 1, 4
+///    and 5 are strictly redundant with it now and are kept: each states
+///    the reclaim its own surface depends on, and a surface that ever
+///    moves out from under the shell root must not lose `tab` silently.
+///    What is given up is `Root`'s focus cycling inside the shell — an
+///    affordance nothing in Geode's keyboard model uses, since focus is
+///    moved by the shell's own verbs.
+///
 /// Called once from `geode-app`'s `main` (after `gpui_component::init`,
 /// same ordering requirement — later registrations outrank earlier ones)
 /// AND from every test that opens a real modal window
@@ -393,6 +412,26 @@ pub fn init_reclaimed_keybindings(cx: &mut App) {
         // nothing is given up; a multi-line input would want these back.
         gpui::KeyBinding::new("shift-up", gpui::NoAction, Some("Input")),
         gpui::KeyBinding::new("shift-down", gpui::NoAction, Some("Input")),
+        // Controller ruling 2026-09-20: the same reclaim, widened from
+        // "while a modal is open" to the whole shell. `Root` binds
+        // `tab`/`shift-tab` to its own focus cycling in the `"Root"` key
+        // context (`gpui-component-0.6.2/src/root.rs`), gpui dispatches a
+        // matched binding before any `on_key_down` listener (bullet 1's
+        // mechanism), and the shell root sits BELOW `Root` on the dispatch
+        // stack — so a `NoAction` on the shell root's own `"GeodeShell"`
+        // context (carried unconditionally by `ShellView::render`) is the
+        // deeper match and suppresses the cycling everywhere inside the
+        // shell. Without it a bare `tab` never reached
+        // `ShellView::handle_key_down` while a tile was focused, and the
+        // timeseries tile's `tab = timeseries::next` — the chip cursor,
+        // timeseries spec §9.4 — was dead in the real app while every
+        // test that drove it through the keymap directly passed. The
+        // dialogs', command line's and palette's own reclaims above are
+        // now redundant with this one and kept anyway: each names the
+        // surface it belongs to, and a surface that ever stops being
+        // inside `GeodeShell` must not silently lose its `tab`.
+        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeShell")),
+        gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeShell")),
     ]);
 }
 

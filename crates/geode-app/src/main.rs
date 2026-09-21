@@ -120,6 +120,15 @@ fn main() {
             // ruling 2026-09-14), so it owes the same reclaim; binding the
             // same keys to `NoAction` twice is harmless.
             geode_marketdata::init(cx);
+            // The timeseries tile hosts no `DataTable`, but its range
+            // popup owns the keyboard across two segmented date fields
+            // and `tab` is how a trader moves between them (timeseries
+            // spec §9.8) — so it owes the same `NoAction` reclaim of
+            // `Root`'s focus cycling, scoped to the popup's own key
+            // context. (The shell root's own `GeodeShell` reclaim is
+            // what gets `tab` as far as a focused TILE at all; this one
+            // is the popup's, at its own depth.)
+            geode_timeseries::init(cx);
 
             // The demo bus's adapter (market-data-documents plan, Task
             // 10): registered only under `--demo`, since it is the
@@ -633,6 +642,48 @@ impl ModuleFactory for MarketDataFactoryHandle {
     }
 }
 
+/// Same shape as [`BlotterFactoryHandle`], for the timeseries viewer's
+/// factory (timeseries spec §9.1): the bridge's reload handler holds a
+/// clone for `set_colours`, so the roster gets a forwarder rather than
+/// the factory itself.
+///
+/// **Every defaulted trait method is forwarded**, for the reason
+/// [`BlotterFactoryHandle::contexts`] gives — `contexts()` included,
+/// even though this factory's kind and its key context are the same word
+/// (`timeseries`) and the trait default would therefore answer
+/// correctly today. A wrapper that forwards some methods and inherits
+/// others is a wrapper that lies the moment the wrapped factory changes
+/// one of them, and `MarketDataFactoryHandle` is what that failure looks
+/// like when it happens.
+struct TimeseriesFactoryHandle(Rc<geode_timeseries::content::TimeseriesFactory>);
+
+impl ModuleFactory for TimeseriesFactoryHandle {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    fn register_actions(&self, registry: &mut ActionRegistry) {
+        self.0.register_actions(registry)
+    }
+    fn contexts(&self) -> Vec<&'static str> {
+        self.0.contexts()
+    }
+    fn default_keymap(&self) -> Option<&'static str> {
+        self.0.default_keymap()
+    }
+    fn create(
+        &self,
+        tile: TileId,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> TileOccupant {
+        self.0
+            .create(tile, restored, frame, diagnostics, window, cx)
+    }
+}
+
 /// Same shape as [`BlotterFactoryHandle`], for the diagnostics factory:
 /// `main`'s config-reload subscription (set up once a window exists, in
 /// the `cx.spawn` block below) also holds a clone, for `set_config`.
@@ -821,6 +872,12 @@ fn build_shell_services(
         // defaulted trait method is, per `MarketDataFactoryHandle`'s own
         // doc comment) and simply answers `None` for this one.
         roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
+        // The timeseries viewer (timeseries spec §9), on the same
+        // condition and for the same reason as every module above: it
+        // fetches and queries its series through the bridge's
+        // `DataHandle`, so with no bridge there is nothing for it to ask
+        // and the palette lists no "Timeseries: Split" row either.
+        roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
         bridge
     });
 
@@ -1057,6 +1114,130 @@ mod tests {
                 .get(&ActionId("tile::add_cvi".to_string()))
                 .is_some(),
             "the cvi kind keeps its own row"
+        );
+    }
+
+    /// Task 11 (timeseries spec §9): the roster carries the timeseries
+    /// viewer's factory through `TimeseriesFactoryHandle`, exactly as
+    /// `run` wires it beside the blotter's and the two panels' — so
+    /// `register_add_actions` lists a "Timeseries: Split" row for it
+    /// (`register_add_actions`'s own `"{Kind}: Split"` pattern, user
+    /// ruling 2026-09-09) and the module's own actions are registered
+    /// through the forwarder rather than being silently dropped by a
+    /// wrapper that answered the trait's defaults.
+    ///
+    /// `timeseries::add` is the one asserted by name because it is the
+    /// action the tile's own `DEFAULT_KEYMAP` binds `a` to: a forwarder
+    /// whose `register_actions` did not reach the factory would leave
+    /// every one of the fragment's bindings pointing at nothing, and
+    /// `build_keymap` drops such a binding without a word.
+    #[test]
+    fn the_roster_lists_timeseries_and_registers_its_add_action() {
+        use geode_data::DataHandle;
+        use geode_shell::actions::ActionId;
+
+        let mut roster = ModuleRoster::new();
+        let (data, _rx) = DataHandle::for_tests();
+        roster.add(Box::new(TimeseriesFactoryHandle(Rc::new(
+            geode_timeseries::content::TimeseriesFactory::new(data, Default::default()),
+        ))));
+        assert!(roster.kinds().contains(&"timeseries"));
+
+        let mut registry = ActionRegistry::default();
+        register_add_actions(&mut registry, &roster.kinds());
+        roster.register_actions(&mut registry);
+        assert_eq!(
+            registry
+                .get(&ActionId("tile::add_timeseries".to_string()))
+                .expect("the timeseries kind gets an add-tile row")
+                .title,
+            "Timeseries: Split"
+        );
+        assert!(
+            registry
+                .get(&ActionId("timeseries::add".to_string()))
+                .is_some(),
+            "the forwarder's `register_actions` reaches the factory"
+        );
+        // And its keymap fragment: `contexts()` is forwarded, so
+        // `check_fragment` accepts a binding into `timeseries`.
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].file.to_string_lossy(), "<module:timeseries>");
+    }
+
+    /// Task 11 fix round 1, Minor 4: **every** key in the production
+    /// keymap SPELLS. `build_keymap` drops a binding whose keystroke it
+    /// cannot parse and reports an error diagnostic — a loud one, in the
+    /// trader's diagnostics tile, but only at runtime, and until now
+    /// nothing checked it anywhere. `geode-timeseries` shipped
+    /// `"+" = "timeseries::zoom_in"` for five tasks that way: a fragment
+    /// is checked by `check_fragment` for its PREDICATES and by each
+    /// module's own test for its ACTION IDS, and neither of those ever
+    /// parses a key.
+    ///
+    /// This is `run`'s own pipeline as far as line 913 — the shipped
+    /// builtin keymap, the demo layer over it, the full registry (the
+    /// shell's builtins, the pickers' per-column actions, the saved
+    /// scopes, the add-tile rows) and the full roster's fragments
+    /// spliced in — and it catches the next `+` for every module at
+    /// once, rather than one crate-local net per module.
+    #[gpui::test]
+    fn the_whole_production_keymap_builds_with_no_diagnostics(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builtin = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
+        builtin.extend(demo::layer(&dir.path().join("src")));
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin,
+            ..ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+
+        // The registry in `run`'s own order.
+        let mut registry = ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        register_pick_actions(&mut registry, &pickable_columns(&config));
+        register_scope_actions(&mut registry, &saved_scopes(&config, false));
+
+        // The roster as `run` finally has it: the diagnostics module,
+        // then everything the bridge carries. Built through the real
+        // `bridge::start`, so this is the production factory list rather
+        // than a hand-kept copy of it — a module added to `run` and not
+        // here would be invisible, which is exactly the failure this
+        // test exists to prevent.
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            pricers,
+        )
+        .expect("the demo layer declares datasets and views");
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(DiagnosticsFactoryHandle(Rc::new(
+            DiagnosticsFactory::new(Arc::new(Ring::new(16)), config.clone()),
+        ))));
+        roster.add(Box::new(BlotterFactoryHandle(bridge.factory.clone())));
+        roster.add(Box::new(MarketDataFactoryHandle(bridge.marketdata.clone())));
+        roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
+        roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
+        register_add_actions(&mut registry, &roster.kinds());
+        roster.register_actions(&mut registry);
+
+        let (fragments, frag_diags) = roster.keymap_fragments();
+        assert!(frag_diags.is_empty(), "{frag_diags:?}");
+        let layered = fragments::splice(config.layered_docs("keymap"), &fragments);
+        let (mod_alias, mod_diags) = mod_alias_from_config(&config);
+        assert!(mod_diags.is_empty(), "{mod_diags:?}");
+        let (_keymap, keymap_diags) = build_keymap(&layered, mod_alias, &registry);
+        assert!(
+            keymap_diags.is_empty(),
+            "every shipped binding must name a parseable keystroke and a \
+             registered action: {keymap_diags:?}"
         );
     }
 

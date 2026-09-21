@@ -8,6 +8,7 @@ members = [
     "crates/geode-blotter",
     "crates/geode-marketdata",
     "crates/geode-chart",
+    "crates/geode-timeseries",
     "crates/geode-diagnostics",
     "crates/geode-documents",
     "crates/geode-pricing",
@@ -27,6 +28,7 @@ geode-shell = { path = "crates/geode-shell" }
 geode-widgets = { path = "crates/geode-widgets" }
 geode-pricing = { path = "crates/geode-pricing" }
 geode-chart = { path = "crates/geode-chart" }
+geode-timeseries = { path = "crates/geode-timeseries" }
 
 # Phase 4b: the tracing foundation (`geode_core::log`). Versions pinned to
 # what gpui already resolves `tracing`/`tracing-subscriber` to in

@@ -43,7 +43,9 @@ crate, the module.
    `SPX.close / VIX` paints a third line; `D` and `p` paint the
    density strip and `p5 p50 p95`; `r` widens the range and only the
    missing span is fetched; `f` steps to `1h` and the query, not a
-   fetch, answers.
+   fetch, answers. **As built (Part 4): built; display check
+   pending** — the sandbox has no window, and §9.13 lists what to
+   look at.
 2. A series query over one million cached rows returns under 50 ms;
    decimating 500,000 points to pixel columns and rebuilding the paths
    takes under 2 ms; a frame with nothing changed allocates nothing
@@ -58,7 +60,10 @@ crate, the module.
 3. A corrected value for an existing `ts` wins live and loses under an
    as-of set before its `received_at`; an overlapping refetch does not
    grow the table; a tile restored from `session.toml` refetches once
-   and paints what it painted before.
+   and paints what it painted before. **As built (Part 4): built;
+   display check pending** — the first two clauses are pinned in
+   `geode-data`, the third by the tile's own
+   `a_hidden_tile_cancels_and_a_shown_one_requeries_and_a_restored_one_refetches_once`.
 4. Every behaviour in §11.2 has a harness entry naming its test, and
    `--anchors-only` is clean.
 
@@ -1195,7 +1200,7 @@ field and the picker's field).
 
 ```rust
 pub struct Model {
-    slots: Vec<Slot>,             // slot numbers are stable for the tile's life
+    slots: Vec<Slot>,             // slot numbers are stable for the life of its slots
     cursor: Option<usize>,        // index into slots
     range: Range,                 // Relative("1y") | Absolute(from, to)
     frequency: Frequency,
@@ -1235,7 +1240,7 @@ through `tips::Chords`.
 |---|---|
 | `a` | open the picker (§9.6) |
 | `x` | open the expression field (§9.7) |
-| `tab` / `shift+tab` | move the chip cursor (a count jumps that many) |
+| `tab` / `shift+tab` | move the chip cursor (a count jumps that many; **as built:** needs the shell's `GeodeShell` reclaim — §9.13) |
 | `v` | show/hide the cursor's slot |
 | `y` / `Y` | cycle the cursor's slot's axis forward / back through `left → right → bottomleft → bottomright` |
 | `[` / `]` | shrink / grow the upper pane by `SPLIT_STEP` = 0.05 while a lower pane exists |
@@ -1249,7 +1254,7 @@ through `tips::Chords`.
 | `D` | toggle density |
 | `p` | toggle percentiles |
 | `h` / `l` | pan the view by `PAN_FRACTION` = 0.1 of the window |
-| `=` `+` / `-` | zoom about the view centre by `ZOOM_FACTOR` = 1.25 |
+| `=` / `-` | zoom about the view centre by `ZOOM_FACTOR` = 1.25 (**as built:** `+` is unspellable in a keymap — §9.13) |
 | `0` | reset the view to the range |
 | `g` / `G` | jump the view to the start / end |
 
@@ -1347,6 +1352,291 @@ app-wide preference a module must read live: the settings row must
 reach an open tile, and neither `ConfigReloaded` (views and dimensions
 only) nor the factory (create time only) can carry it.
 
+### 9.13 As built (Part 4)
+
+Part 4 (the `geode-timeseries` module) is built, and with it §1.1.
+Where the code differs from §9 above, the code is the specification
+now. The crate depends on `geode-core`, `geode-shell`,
+`geode-widgets`, `geode-chart`, `geode-data` (for `DataHandle` alone,
+the one door a module asks for data through), `gpui`,
+`gpui-component`, `chrono` and `toml`; the `Axis` vocabulary is
+imported from `geode-chart` per §8.5 rather than declared a second
+time.
+
+Built as written: the roster entry and the `TileContent` contract
+(§9.1), the pure `Model` with its `Changed` bitset (§9.2), the header
+strip and its chips (§9.3), the key table (§9.4, with the two
+amendments below), the series popup (§9.5), the two-stage picker
+(§9.6), the expression field (§9.7), the range popup (§9.8), the `:`
+vocabulary and its completions (§9.9), the session round trip (§9.11)
+and the `[timeseries] default_source` global with its settings row and
+diagnostic (§9.12).
+
+**The nine controller decisions in the plan are all built as
+recorded.** One dataset per tile (`Model.dataset`, set by the first
+source slot and cleared with the last; the refusal reads `this tile
+plots 'series'; 'x' feeds 'other'`); the fetch-source list riding in
+the same global as the default source (`SeriesSettings` in
+`geode_shell::series`, config truth — a source the engine could not
+start answers `Err` on fetch and the slot paints `Failed`); the stats
+window
+following the VIEW (`Model::view_changed` answers `CHROME | QUERY`
+while percentiles or density are on, `CHROME` alone otherwise); the
+500,000-point cap pre-checked in the model with the service's own
+`cap_message`, so `f`/`F`/`:freq`/`:range` refuse in place; no
+coverage hull anywhere in the tile; a restored expression that no
+longer resolves dropped with a named notice (`core::session`, one
+notice per drop); `:colour` taking a `[colours]` name or a palette
+index `1`–`5` (`TimeseriesTile::colour_named`, which refuses with
+`no colour named 'x' — 1..5 or a [colours] entry`); the picker's
+`add "<text>"…` row going straight to the pair when the text already
+names one; and the view re-clamped on every delivery and reset on a
+range change.
+
+- **The tile paints no coverage hull, which closes §6.6's open
+  question.** §6.6 left "the coverage statement ignores as-of" for
+  this part to decide, on the grounds that what a tile should SHOW
+  under a historical as-of was a display question no section
+  answered. Controller decision 5 answers it: the only provenance any
+  surface reads is `SlotProvenance.health`, in the series popup's
+  state column (`popup::state_text`). Nothing paints `loaded` or
+  `latest_received_at`, so the coverage read's missing time bound has
+  no display consequence and stays a data-tier note.
+- **`Model::add_expr` returns `Result<(u8, Changed), String>`
+  (amends §9.2).** The plan's `(u8, Changed)` obliged every caller to
+  `expect` on `take_number()`, which panics at slot 255 — a tile that
+  has added and removed 255 slots in one session. Every caller now
+  propagates it, as `add_source` already did.
+- **`request::window` answers `Option<(DateTime, DateTime)>`.** It
+  read `buckets[lo]` and `buckets[hi - 1]` unguarded; a tile with a
+  result but no buckets (an empty first answer) panicked. `None`
+  means "there is no visible span to speak of", and `request::params`
+  falls back to the whole resolved RANGE as the stats window rather
+  than refusing to ask at all.
+- **`Changed::FETCH` means "fetch every source slot in the `Fetching`
+  state", and the tile keeps an `in_flight` pair set beside it
+  (amends §9.10).** §9.10 reads as one fetch per newly added slot;
+  taken literally, `fetch_pending` after `:add VIX` would re-ask for
+  SPX's whole span too. The state is what selects: `add_source` marks
+  only the new slot `Fetching`, `Model::set_range` and
+  `mark_all_fetching` mark every one. `in_flight` (a set of
+  `(source, identity)`) suppresses a second ask for a pair already
+  out, and `in_flight_range` is the range those asks were made under
+  — a range change is a different span, so the set is dropped and the
+  new span asked for. `prune_in_flight` drops an entry whenever slots
+  LEAVE (`remove`, which takes an operand's dependants with it, and
+  `:clear`), because an answer for a dropped pair never clears its
+  own entry and a stale one is indistinguishable from a live fetch:
+  the same pair, re-added, would be skipped for the tile's life.
+- **One fetch per PAIR, not per slot (amends §9.10).** Two slots over
+  the same `identity@source` — the same series at two bucket rules —
+  are one span, and the second request would be answered entirely out
+  of coverage. `fetch_pending` de-duplicates before it sends.
+- **`set_visible(true)` always refetches and requeries only when the
+  tile already has a result (amends §9.10's "refetch and requery").**
+  A never-fetched tile has nothing to query for: the first paint
+  always arrives through a `SeriesFetched Ok`, so querying on show
+  would spend a round trip to paint an empty chart a beat sooner.
+  Both halves matter for the restored tile of §9.10's last bullet,
+  which is exactly the never-fetched case.
+- **An as-of change REFETCHES as well as requeries, gated on a real
+  as-of move.** `AsOf::At(t)` resolves the range to `(t − preset, t)`,
+  and live fetching never covered anything before `now − preset`, so
+  a requery alone paints a truncated left edge with nothing on screen
+  to say so. The frame observer's followed branch clears `in_flight`
+  explicitly (`fetch_pending` drops the set only when the RANGE moved,
+  and an as-of change leaves `Range` identical), marks every slot
+  `Fetching` and fetches, then requeries. The gate is
+  `acted.is_some_and(|a| differs_on_followed(a, now))`, not
+  `follows_changed`: that answers true while `acted` is `None` — a
+  tile that has never asked — so on a freshly shown tile with its
+  first fetch still out, ANY frame notify (a scope keystroke) asked
+  for every pair's span a second time.
+- **`SeriesFetched Ok(0)` requeries like any other `Ok`.** Zero means
+  "the span is covered", not "there is nothing there": the data tier
+  subtracts coverage before it queues a span. Gated on `n > 0`, a
+  tile whose data is already local would never ask for it and would
+  paint the empty hint for ever.
+- **`Model::set_full` keeps a whole-range view whole (refines
+  controller decision 9).** A view that was showing the entire prior
+  range — a tile never zoomed, or one whose coverage just widened —
+  follows the new full range; a view the trader panned or zoomed is
+  only re-clamped into the new bounds. The reset on a range CHANGE is
+  the tile's, through `apply_changed`'s `reset_view` flag, so the two
+  answers are separable: redelivery tails, a range change resets.
+- **The chart model is rebuilt only when a field `chart::build`
+  actually reads has moved (`ChartKey` in `tile.rs`), and the version
+  is bumped only on a real rebuild (refines §8.5's contract).** §8.5
+  hands Part 4 "bump `ChartModel.version` on ANY model change", which
+  taken literally makes a cursor move copy every slot's values at the
+  500,000-point cap and flush every cached path for a model identical
+  to the one it replaced. `rebuild_chrome` therefore always
+  re-prepares the header, the title and an open series list, and
+  compares a `ChartKey` — the result's identity, each slot's
+  number/colour/axis/visibility/text, the frequency, the axis mode,
+  the split, whether density is on, the default source, the 28-value
+  theme signature and the named-colours `Arc` address — before
+  building anything. §8.5's contract is preserved exactly where it
+  bites: a rebuild bumps, a skip does not. The result's identity is a
+  monotonic `result_seq`, NOT the `Arc`'s address, which is ABA-prone
+  — the allocator hands the same block back when one result replaces
+  another between two frames, and the chart would then paint the old
+  points under the new model's key. `offset_secs` is in the key too,
+  and it is the APP clock's (`geode_shell::clock::AppClock`, `[time]
+  zone`, as-of dialog spec §6.1), never `chrono::Local` — `geode_core::
+  clock`'s sweep bans the machine clock workspace-wide — read through
+  `try_global` with the machine fallback a module fixture needs; the
+  tile observes the global, so a `[time] zone` reload rebuilds the
+  chart model and repaints its axis labels (a DST transition still
+  waits for the next rebuild — nothing polls the clock).
+- **An unfilled chip drops its text colour with its fill, to
+  `muted_foreground` (refines §9.3).** `Tone::Neutral`'s 3:1
+  guarantee is measured over its OWN fill, so `secondary_foreground`
+  painted straight onto the tile background is covered by no sweep at
+  all. Three pairings join `geode_shell::shell::control::shipped()`:
+  the `Tone::Warning` and `Tone::Danger` slot chips on a tile
+  background (a different ground from the title bar's as-of chip) and
+  the range popup's `Tone::Neutral` preset chips on a popover. The
+  unfilled chip needs no entry — `muted_foreground` on `background`
+  is the bare pairing `shipped()` already carries.
+- **A popup that holds the KEYBOARD keeps only its own four verbs
+  (`popup_survives` in `dispatch`).** §9.5's "any dispatched action
+  outside the popup's verbs closes it first" is stage-aware: the
+  series list, which holds no field, stays open through the verbs
+  that change what it shows (`v y Y c b d e`, `j`/`k`, and the doors
+  that replace it), while an insert popup keeps only `commit`,
+  `cancel`, `insert_up` and `insert_down`. The palette can dispatch
+  any action over an open field (`ctrl+k` is a chord), and a verb
+  that ran with the field still installed would leave `key_context`
+  reporting `insert` with nothing focused — a tile deaf to every bare
+  key until `escape`. A consequence worth stating: `L` or `r` over
+  another popup closes it and opens theirs, and a second `r` reopens
+  the range popup on a fresh seed rather than toggling it shut
+  (`escape` is its close; §9.8 gives `r` no toggle).
+- **The picker splits an option with `rsplit_once('@')` and a typed
+  pair with `split_once` (refines §9.6).** Its own options are built
+  here as `{identity}@{source}`, so the source is the LAST `@` piece
+  and a catalogued identity carrying an `@` of its own — a REST path
+  — still splits correctly. A text a trader TYPED is a pair only when
+  it has exactly one `@` with both sides non-empty and the right half
+  names a configured fetch source; anything else is an identity
+  awaiting a source, including a text whose right half names no
+  source, which a REST path may legitimately look like. The add row
+  is offered on the TRIMMED text, so whitespace alone offers nothing
+  to commit, and a source stage with no fetch source configured
+  closes with `no fetch source is configured` rather than opening a
+  dead end.
+- **A slot's popup state reads `failed: {reason}`, from the slot's
+  own fetch or the delivered load lane (refines §9.5).** A load
+  lane's `Health::Failed { reason }` was painted as a bare `failed`,
+  dropping the one sentence that says what went wrong; it now carries
+  the reason, exactly as a slot's own `SlotState::Failed` does.
+- **In the range popup a bare `1`..`7` is a preset only while
+  `!edited && !typing()` (refines §9.8).** `!typing()` is the obvious
+  half — a second digit belongs to the segment being typed. `!edited`
+  is what makes both halves of the popup reachable: every preset
+  digit but `8`, `9` and `0` is also a legal first digit of a year,
+  so a popup that read `1` as a preset after the trader had moved
+  onto the year segment could never be used to type `1990`. The rule
+  a trader learns is "a digit is a preset until you start editing a
+  date, and the date's from then on", and only a key that MOVED
+  something counts as editing (`edited |= moved`), so a `tab` or a
+  `right` on the last segment leaves the presets live. `typing()` is
+  a new reader on `geode_widgets::datefield::DateTimeField`. An
+  `Absolute` range seeds the popup from the dates it STORES and only
+  a `Relative` one resolves against now and the as-of, so reopening
+  `r` under a historical as-of is lossless. The popup's `tab` is
+  reclaimed from `Root`'s focus cycling by `geode_timeseries::init`
+  over its own `RANGE_CONTEXT` (`GeodeTimeseriesRange`), the same
+  door and mechanism as `geode_blotter::init`.
+- **`+` cannot be spelled in this keymap, so `=` and `-` are the zoom
+  keys (amends §9.4, whose row is corrected above).** `parse_keystroke`
+  splits a binding on `+`, so a literal `"+"` is an "empty segment"
+  error — found on a `--demo` boot, where the module's fragment was
+  dropped with a diagnostic. `shift+=` is no escape either: both
+  platforms deliver shift+punctuation as the shifted character with
+  the shift modifier CLEARED (`geode_shell::defaults`' module doc,
+  verified against the pinned platform sources), so that keystroke
+  arrives as `+`, `shift: false`, and would match nothing. What is
+  lost is one convenience spelling. `geode-app` now has a test that
+  builds the WHOLE production keymap — every builtin layer, the demo
+  layer, the full registry and every roster factory's fragment — and
+  asserts no diagnostic, so the next unspellable key fails in CI
+  rather than on a boot.
+- **The shell root carries an unconditional `GeodeShell` key context,
+  and `tab`/`shift-tab` are reclaimed on it (amends §9.4).**
+  gpui-component's `Root` binds both keys window-wide to its own
+  focus cycling in the `"Root"` context, and gpui dispatches a matched
+  BINDING before any `on_key_down` listener — so §9.4's `tab` chip
+  cursor was dead in the real app while every test that drove it
+  through the keymap passed. `ShellView::render` now carries
+  `"GeodeShell"` always (`"GeodeShell GeodeModalOpen"` while a modal
+  is open, so the existing conditional context is unchanged), and
+  `dialog::init_reclaimed_keybindings` binds `tab`/`shift-tab` to
+  `NoAction` there: the shell root sits BELOW `Root` on the dispatch
+  stack, so the deeper match wins and the keystroke falls through to
+  `handle_key_down`. The dialogs', command line's and palette's older
+  per-surface reclaims are redundant with it and are kept, each
+  naming the surface it belongs to. What is given up is `Root`'s
+  focus cycling inside the shell — an affordance Geode's keyboard
+  model does not use, since focus is moved by the shell's own verbs.
+- **`SeriesSettings` carries the fetch-source list as well as the
+  default source, and `ShellView` mirrors the names (refines
+  §9.12).** One derivation over `&Config` feeds the global, the
+  settings row's value list and the diagnostic, so the three cannot
+  disagree. The row's first value is `(none)`, which PERSISTS as the
+  absent key rather than an empty string — and creates no empty
+  `[timeseries]` table on the way — so stepping back to it leaves no
+  drift. The diagnostic is a WARNING that names what IS configured
+  (`'x' names no fetch source (have: demo_kdb, demo_rest)`), never an
+  error: a stale default costs a trader one explicit `@source`, and
+  rejecting a config reload over it would be out of proportion. It is
+  seeded identically at startup (`ShellView::new`) and on reload
+  (`apply_reload`), like `modules_default_diagnostic`. The mirror,
+  `ShellView.fetch_sources`, exists because `settings_view::rows_for`
+  reads `&ShellView` alone and has no `App` to ask the global from;
+  the three writers take it from the same value, so it cannot drift.
+  Folding it away by giving `rows_for` a context is a recorded
+  cleanup, not a defect.
+- **`holds_focus` answers THREE handles, not two (amends §9.1).** The
+  picker's and the expression field's `InputState`s, plus the range
+  popup's own `FocusHandle` — the segmented fields are pure state and
+  the CONTAINER is what is focused, the market-data date field's shape.
+  The series popup holds none: it keeps the tile's own keyboard, which
+  is what lets `j`/`k` reach the matcher.
+- **`Model::clear` resets the slot numbering to `s1` (amends §9.2's
+  "stable for the tile's life", which reads "for the life of its
+  slots").** No slot remains for `s1` to collide with, and a cleared
+  tile is a fresh tile; it is also what makes `take_number`'s
+  exhaustion message ("this tile has used every slot number; `:clear`
+  starts again") true.
+- **A restore reorders interleaved slots (`core::session`).** Sources
+  are added first and expressions second, because an expression is
+  resolved against the slots already present — so a session that
+  recorded source, expression, source restores the two sources in
+  order and the expression last. Slot NUMBERS survive untouched
+  (`set_next_number` before each add), so every `:` reference and the
+  chips' labels are unchanged; only the left-to-right order of the
+  header strip can differ from the one the tile was closed with.
+- **A header chip click does not stop propagation.** The shell's own
+  tile-level mouse-down — `leave_command_line`, `focus_main_tile` and
+  the `pending_focus_restore` re-arm — must still run, or a chip click
+  on an unfocused tile moves that tile's cursor while the keyboard
+  stays elsewhere. The market-data `⋯` button's identical finding is
+  the precedent. The popup ROWS keep theirs: they sit on a `deferred`,
+  occluding surface of their own.
+
+**What is pixel-unverified: everything this part paints.** The
+sandbox has no window, so §1.2 item 1's walk is the display check —
+the header strip's chips (swatch, label, axis letter, the dimmed and
+struck hidden slot, the three tones), the series popup and the
+picker's two stages, the expression strip and its inline error, the
+range popup's two segmented fields and its preset chips (including
+whether `RANGE_HINT` and the presets fit the 240 px popup), the
+footer's live chords, and the chart itself inside a real tile rather
+than the example window. §1.2 items 1 and 3 are built and their
+display checks are pending; item 2 was answered in Part 3.
+
 ## 10. Demo
 
 `--demo` registers `demo_kdb` and `demo_rest` (§5.6), declares the
@@ -1395,8 +1685,10 @@ test: the `received_at` dedupe, the as-of `received_at` filter, the
 `ts` clip, the inner join, the zero-denominator guard, the cap, the
 coverage subtraction, the unchanged-row skip, the superseded-only
 retention delete, the session-axis tick placement, decimation's
-min-max pair, the dependant removal. `--anchors-only` before every
-merge.
+min-max pair, and the dependant removal (`timeseries: dependant
+removal is transitive`, caught by
+`removing_an_operand_removes_its_dependants_transitively`).
+`--anchors-only` before every merge.
 
 ### 11.3 Benchmarks
 

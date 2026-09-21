@@ -184,6 +184,18 @@ impl DateTimeField {
         self.segment
     }
 
+    /// Whether digits are pending in the active segment — [`Self::typed`]
+    /// non-empty, which is exactly when [`Self::segments`] paints that
+    /// segment mid-entry rather than showing the committed value.
+    ///
+    /// The field itself never needs to ask; a HOST does, when it gives a
+    /// bare digit a second meaning of its own (the timeseries range
+    /// popup's preset shortcut, spec §9.8) and has to tell "this digit
+    /// starts a segment" from "this digit finishes the one being typed".
+    pub fn typing(&self) -> bool {
+        !self.typed.is_empty()
+    }
+
     /// Move to the segment on the left, clamped at the year. Leaving a
     /// segment drops its partial digits: the committed value shows again.
     pub fn left(&mut self) {
@@ -539,6 +551,24 @@ mod tests {
             .into_iter()
             .map(|s| s.text.to_string())
             .collect()
+    }
+
+    /// A host's own key table asks this to tell a digit that STARTS a
+    /// segment from one that finishes it (the range popup's presets).
+    #[test]
+    fn typing_reports_the_digits_pending_in_the_active_segment() {
+        let mut f = DateTimeField::open(
+            d(2026, 9, 14).and_hms_opt(0, 0, 0).unwrap(),
+            Precision::Date,
+            Segment::Day,
+        );
+        assert!(!f.typing(), "nothing typed on open");
+        // `1` cannot stand alone in the day — it waits for a second
+        // digit, which is exactly the pending state.
+        assert!(!f.digit(1), "the day waits");
+        assert!(f.typing());
+        f.backspace();
+        assert!(!f.typing(), "backspace drops the pending digits");
     }
 
     #[test]

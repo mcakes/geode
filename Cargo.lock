@@ -2513,6 +2513,7 @@ dependencies = [
  "geode-marketdata",
  "geode-pricing",
  "geode-shell",
+ "geode-timeseries",
  "gpui-base",
  "gpui-component",
  "gpui-component-macros",
@@ -2679,6 +2680,23 @@ dependencies = [
  "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "geode-timeseries"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "geode-chart",
+ "geode-core",
+ "geode-data",
+ "geode-shell",
+ "geode-widgets",
+ "gpui-component",
+ "gpui-pre",
+ "proptest",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

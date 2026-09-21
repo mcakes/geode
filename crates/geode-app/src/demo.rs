@@ -338,6 +338,31 @@ mod demo_config_integration {
         .unwrap();
     }
 
+    /// Task 5 (timeseries spec §10): the demo layer's own `[timeseries]
+    /// default_source = "demo_kdb"` must name a fetch source the demo
+    /// layer actually declares. `geode_shell::series::
+    /// default_source_diagnostic` is what `ShellView::new` folds into
+    /// its startup diagnostics, so anything else here would boot the
+    /// demo with a config warning about the demo's own config — and one
+    /// naming a source `:add` could not use, since a default that
+    /// resolves to nothing makes every `@source` explicit again.
+    ///
+    /// The one assertion that catches a renamed `[demo_kdb]` source, a
+    /// renamed key, or a `default_source` typed as anything but a
+    /// string; the sources themselves are pinned by
+    /// `the_demo_layer_declares_the_two_fetch_sources` next door.
+    #[test]
+    fn the_demo_layers_default_timeseries_source_names_one_of_its_own() {
+        let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");
+        let config = Config::load(&ConfigSources {
+            builtin: layer(src),
+            ..ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let diags = geode_shell::series::default_source_diagnostic(&config);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
     /// Task 1 (Phase 4 spec §3.3): `currency`, `model_code` and `expiry`
     /// are carried dimensions in the demo schema now, not lookup-only
     /// attributes — `categorical_columns` is what the picker and the

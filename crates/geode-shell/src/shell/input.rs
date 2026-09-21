@@ -639,6 +639,39 @@ impl ShellView {
             .detach();
     }
 
+    /// Set `[timeseries] default_source`, publish it through the
+    /// `series::SeriesSettings` global (the fetch-source list is
+    /// re-derived with it — sources are restart-gated, so it is
+    /// unchanged in practice), persist and repaint. The settings row's
+    /// one setter; a hot reload writes the field and the global itself,
+    /// since it must not persist what it just read.
+    pub(crate) fn set_default_source(&mut self, source: Option<String>, cx: &mut Context<Self>) {
+        self.default_source = source.clone();
+        let mut series = crate::series::SeriesSettings::from_config(&self.services.config);
+        series.default_source = source;
+        self.fetch_sources = series.names();
+        cx.set_global(series);
+        self.persist_default_source(cx);
+        cx.notify();
+    }
+
+    /// Persist `[timeseries] default_source`, off the UI thread — the
+    /// exact contract of [`Self::persist_find_style`] above; `(none)` is
+    /// `None`, which REMOVES the key.
+    pub(super) fn persist_default_source(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            return;
+        };
+        let source = self.default_source.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = crate::series::persist_to_user_config(&dir, source.as_deref()) {
+                    tracing::warn!(target: "geode::config", "default source not saved: {e}");
+                }
+            })
+            .detach();
+    }
+
     /// Persist `[tiles] add`, off the UI thread — the exact contract of
     /// [`Self::persist_find_style`] just above.
     pub(super) fn persist_add_direction(&self, cx: &mut Context<Self>) {

@@ -1152,17 +1152,36 @@ impl Render for ShellView {
             .size_full()
             .relative()
             .track_focus(&self.focus_handle)
-            // "A Geode modal is open", carried by the shell ROOT rather
-            // than the modal panel — the one context that is on the
-            // dispatch stack in normal mode, where focus is this very
-            // handle and the panel's own `"GeodeModal"` context is
-            // therefore absent. `init_reclaimed_keybindings`' bullet 5
-            // binds `tab`/`shift-tab` to `NoAction` here so `Root`'s
-            // window-wide focus cycling cannot walk focus off the shell
-            // while a modal is up. Conditional, not permanent: outside a
-            // modal that cycling is a live affordance nothing here has
-            // any business removing (bullet 1's own scoping argument).
-            .when(self.modal.is_some(), |el| el.key_context("GeodeModalOpen"))
+            // Two identifiers in one `KeyContext` (gpui's
+            // `KeyContext::parse` takes whitespace-separated ones):
+            //
+            // `GeodeShell` is carried ALWAYS — the shell root's own name
+            // on the dispatch stack, and `init_reclaimed_keybindings`'
+            // last bullet binds `tab`/`shift-tab` to `NoAction` on it.
+            // gpui-component's `Root` binds both keys window-wide to its
+            // own focus cycling and gpui dispatches a matched binding
+            // BEFORE any `on_key_down` listener, so without this reclaim a
+            // bare `tab` never reaches `handle_key_down` at all while a
+            // tile is focused — a module binding `tab` in its own context
+            // (the timeseries tile's `tab = timeseries::next`, timeseries
+            // spec §9.4) was dead in the real app. Permanent rather than
+            // conditional: inside the shell it is the shell's keymap that
+            // owns the key, in every context.
+            //
+            // `GeodeModalOpen` is added on top while a modal is up: "a
+            // Geode modal is open", carried by the shell ROOT rather than
+            // the modal panel — the one context that is on the dispatch
+            // stack in normal mode, where focus is this very handle and
+            // the panel's own `"GeodeModal"` context is therefore absent.
+            // Kept as its own identifier rather than folded into the
+            // unconditional one, since `init_reclaimed_keybindings` scopes
+            // more than `tab` by it and the two answers must stay
+            // separable.
+            .key_context(if self.modal.is_some() {
+                "GeodeShell GeodeModalOpen"
+            } else {
+                "GeodeShell"
+            })
             .on_key_down(cx.listener(Self::handle_key_down))
             // Root-level left-release fallback (post-merge review BUG 1,
             // extended to divider drags by the fix-round should-fix):

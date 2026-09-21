@@ -1705,3 +1705,73 @@ stops at `MAX_DENSITY_QUADS` = 2,000 per frame, in slot order
 (`geode_chart::density_quads()` is the counter;
 `a_frame_paints_at_most_the_density_bound` pins it). Unmeasured on a
 real window, like everything else painted here.
+
+## Timeseries module (spec §9, Part 4)
+
+What one **delivery** costs the UI thread in `geode-timeseries`:
+`core::chart::build` turning a `SeriesResult` into the `ChartModel` the
+element paints from. The shape is the series query's own point cap —
+500,000 buckets over four slots — and the work is copying: the bucket
+vector once, each slot's `values` once, plus each slot's percentiles,
+bins and prepared label. The tile then wraps the result in one
+`Arc::new` and swaps it in (`rebuild_chrome`), which the bench does not
+include and which costs an allocation, not a copy.
+
+**Bench** (`cargo bench -p geode-timeseries`, criterion median, the
+`bench` profile — `--release` plus debug symbols — on an Apple M5 Pro):
+
+| Benchmark | Result |
+|---|---|
+| `chart_model/500k_x_4` (one delivery's model build at the point cap) | 259 µs |
+
+That is five half-million-element vector clones — about 20 MB moved —
+in a quarter of a millisecond, comfortably inside §7.1's 8 ms for a
+pure-UI action and paid once per delivery, not per frame. (Task 3
+recorded ≈397 µs for the same row on a warmer, busier machine; the two
+readings bracket the cost rather than contradict each other.)
+
+**What does NOT pay it.** Since Task 6's review the model is rebuilt
+only when a field `chart::build` actually READS has moved, compared
+through `ChartKey` (`tile.rs`): the result's own sequence number, each
+slot's number/colour/axis/visibility/text, the frequency, the axis
+mode, the split, whether density is on, the default source, the 28-value
+theme signature and the named-colours `Arc` address. Everything else
+that reaches `rebuild_chrome` — a cursor move (`tab`), a chip click, a
+slot's state going `Fetching → Idle` when a fetch answers, a
+`set_visible` on the tile — re-prepares the header and the title (one
+`Chip` per slot, bounded by the slot count, never by the point count)
+and then stops at the key compare: no value vector is copied, and —
+just as importantly — `ChartModel::version` is not bumped, so every
+path `geode-chart` has cached survives the frame
+(`only_a_change_the_chart_model_reads_rebuilds_it` pins both halves).
+
+A **view move** — a pan, a zoom, a jump — rebuilds neither the header
+nor the chart model: the element takes `model.view()` beside the model,
+so nothing here is copied and `version` does not move (`view_moved` is
+a tail of its own, never `apply_changed`; the module doc calls it one
+of the three). The element does pay: both of `geode-chart`'s cache keys
+carry `view.key()`, so the frame after `h`/`l` re-decimates and
+re-derives its chrome — the cache MISS Part 3 measured at 1.51 ms for
+500,000 points into 1,600 columns, which is the budget §8.4 sets and
+the reason the tile must not add a model rebuild on top of it. A view
+move can also cost a REQUERY, and only while percentiles or density are
+on, since both are computed over the visible window (ruling 10).
+
+**Two per-notify costs are known and accepted.** First, while the add
+picker's identities stage is open, every `Diagnostics` notification —
+a source's health ticks about twice a second with a diagnostics tile
+open — rebuilds and sorts the catalogue's option strings before
+comparing them with the ones the list already holds; the comparison is
+what keeps a trader's highlight still, but the rebuild happens either
+way. It is bounded by the catalogue size and only while that stage is
+up. Second, showing a hidden tile sends two queries: the show requeries
+at once when it already has a result (hiding cleared `acted`, so
+`follows_changed` says yes), and the fetch it sends alongside
+answers `SeriesFetched Ok` a moment later, which requeries again. The
+query pool coalesces by key — one in flight, the newer tag supersedes —
+so the second question replaces the first rather than doubling the
+work.
+
+**Nothing painted here is measured.** The chips, the popups, the
+expression strip, the range popup and the chart inside a real tile are
+display-check items; the sandbox has no window.

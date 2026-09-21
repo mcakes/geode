@@ -5,3 +5,8 @@ config_version = 1
 # here would make Geode's own demo layer warn about itself on every boot.
 [blotter]
 stale_after = "15m"
+
+# The timeseries viewer's default fetch source (timeseries spec §10):
+# `:add SPX.close` reads `SPX.close@demo_kdb`.
+[timeseries]
+default_source = "demo_kdb"
