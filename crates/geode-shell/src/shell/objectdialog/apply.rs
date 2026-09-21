@@ -898,15 +898,9 @@ fn promote(
 /// success arm's own status line, never which branch of the `match` on
 /// `outcome` runs.
 ///
-/// `pub(crate)` for one reason, stated so it is not mistaken for a leak:
-/// the race the sequence check guards cannot be **scheduled** in a gpui
-/// test. The test executor polls a `background_executor().spawn` inline,
-/// so `run_writes` and this function run inside one `tick()` and no
-/// keystroke can be dispatched between them, however finely the ticks are
-/// driven (measured). The covering test therefore calls this directly
-/// with a stale sequence — real `ShellView`, real pending batch, real
-/// function, synthesized scheduling — and then asserts the batch still
-/// reaches disk.
+/// The test seam accepts explicit completion revisions so superseded successes
+/// and failures can be exercised deterministically against a real pending batch,
+/// independently of how the background executor schedules its completion tasks.
 pub(crate) fn finish_flush(
     shell: &mut ShellView,
     seq: u64,

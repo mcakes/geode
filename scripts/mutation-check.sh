@@ -1625,7 +1625,7 @@ run_mutation "keymap_edit: keys_table_for panics on an inline keys table" \
 run_mutation "keymap_edit: set_key always inserts instead of updating in place" \
   crates/geode-shell/src/keymap_edit.rs \
   '    if let Some(existing) = keys.get_mut(key) {' \
-  '    if false {' \
+  '    if let Some(existing) = keys.get_mut(key).filter(|_| false) {' \
   geode-shell \
   overwriting_an_existing_key_preserves_its_comment_and_quoting
 

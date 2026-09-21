@@ -1143,7 +1143,7 @@ fn a_failed_write_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::TestAp
 ///
 /// Every keystroke folds its change into one pending batch and bumps a
 /// sequence; the flush that wakes holding the current sequence owns the
-/// batch. The success arm has to respect that sequence too. Clearing the
+/// batch. Every completion has to respect that sequence too. Clearing the
 /// batch unconditionally loses any edit that arrived while the write was
 /// in flight: the older write completes, erases the batch, and the newer
 /// edit's own flush finds nothing to do — so it reaches neither memory
@@ -1151,16 +1151,9 @@ fn a_failed_write_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::TestAp
 /// reverts memory to the older on-disk state. The trader's change
 /// disappears with nothing on screen having said so.
 ///
-/// **The race cannot be scheduled in a gpui test**, and pretending
-/// otherwise would make this a test of the executor rather than of the
-/// guard: the test executor polls a `background_executor().spawn` inline,
-/// so `run_writes` and `finish_flush` run inside a single `tick()` with
-/// no gap for a keystroke however finely the ticks are driven (measured —
-/// an earlier version of this test ticked until the file appeared and
-/// still found the success arm had already run). So the stale completion
-/// is applied directly: a real `ShellView`, a real pending batch from a
-/// real keystroke, the real `finish_flush`, and only the *scheduling*
-/// synthesized. Then the batch is flushed for real and has to reach disk.
+/// Inject stale success and failure completions against the real pending batch,
+/// then let its current flush reach disk. This makes the interleaving explicit
+/// without depending on background executor timing.
 #[gpui::test]
 fn a_stale_write_completion_does_not_erase_a_newer_edit(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
