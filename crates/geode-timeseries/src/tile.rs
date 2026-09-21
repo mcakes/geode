@@ -82,9 +82,11 @@ use crate::popup::{
 /// **A field `chart::build` reads must appear here**, or a change to it
 /// paints stale — the same rule `shell::colours::theme_signature`
 /// carries, for the same reason. Note what is deliberately absent: a
-/// source slot's `source`/`identity` (its LABEL is read, but a slot
-/// number is never reused for the tile's life, so `number` pins the
-/// pair), its `rule` and the model's `percentiles` (neither reaches the
+/// source slot's `source`/`identity` (its LABEL is read, and a slot
+/// number is never reused while any slot lives — `:clear` restarts the
+/// numbering, but it also installs an empty key, so a re-added number
+/// can never match a pre-clear entry), its `rule` and the model's
+/// `percentiles` (neither reaches the
 /// chart model — they shape the REQUEST, and the answer arrives as a new
 /// `result`), and the view (the element takes it beside the model).
 #[derive(Clone, PartialEq)]
