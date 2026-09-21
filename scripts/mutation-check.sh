@@ -16525,16 +16525,9 @@ run_mutation "timeseries: a range change refetches an unanswered pair" \
   a_range_change_refetches_a_pair_whose_fetch_has_not_answered
 
 # An as-of change moves the span's LEFT edge too, and live fetching
-# never covered anything before `now − preset` (Task 7 ruling): the tile
-# refetches as well as requeries, gaps first. Requery alone paints a
-# truncated left edge with no sign that anything is missing.
-#
-# The `in_flight.clear()` on the line above is NOT separately pinned:
-# measured 2026-09-20, removing it survives the whole crate suite,
-# because it only bites when a pair's FIRST fetch is still unanswered as
-# the as-of moves (`fetch_pending` drops the set only when the RANGE
-# moved, and an as-of change leaves `Range` identical) and no fixture
-# reaches that window. A known gap, recorded rather than papered over.
+# never covered anything before `now − preset` (the Part 2 ruling): the
+# tile refetches as well as requeries, gaps first. Requery alone paints
+# a truncated left edge with no sign that anything is missing.
 run_mutation "timeseries: an as-of change refetches" \
   crates/geode-timeseries/src/tile.rs \
   '                    this.fetch_pending(cx);' \
@@ -16542,8 +16535,21 @@ run_mutation "timeseries: an as-of change refetches" \
   geode-timeseries \
   the_tile_follows_as_of_only_and_stages_under_an_open_barrier
 
+# …and the explicit `in_flight.clear()` beside it is what makes that
+# refetch reach a pair whose FIRST fetch is still unanswered:
+# `fetch_pending` drops the in-flight set only when the RANGE moved, and
+# an as-of change leaves `Range` identical, so a stale entry would
+# suppress the new span's ask entirely.
+run_mutation "timeseries: an as-of change drops the in-flight set" \
+  crates/geode-timeseries/src/tile.rs \
+  '                    this.in_flight.clear();
+                    this.model.mark_all_fetching();' \
+  '                    this.model.mark_all_fetching();' \
+  geode-timeseries \
+  an_as_of_change_refetches_a_pair_whose_fetch_has_not_answered
+
 # …and that refetch is gated on a REAL as-of move, never on
-# `follows_changed` (Task 8, folded review fix): that answers true while
+# `follows_changed`: that answers true while
 # `acted` is `None` — a tile that has never asked a query — so on a
 # freshly shown tile whose first fetch is still out, ANY frame notify (a
 # scope keystroke, say) asked for every pair's span a second time.

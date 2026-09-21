@@ -1200,7 +1200,7 @@ field and the picker's field).
 
 ```rust
 pub struct Model {
-    slots: Vec<Slot>,             // slot numbers are stable for the tile's life
+    slots: Vec<Slot>,             // slot numbers are stable for the life of its slots
     cursor: Option<usize>,        // index into slots
     range: Range,                 // Relative("1y") | Absolute(from, to)
     frequency: Frequency,
@@ -1595,6 +1595,33 @@ range change.
   the three writers take it from the same value, so it cannot drift.
   Folding it away by giving `rows_for` a context is a recorded
   cleanup, not a defect.
+- **`holds_focus` answers THREE handles, not two (amends §9.1).** The
+  picker's and the expression field's `InputState`s, plus the range
+  popup's own `FocusHandle` — the segmented fields are pure state and
+  the CONTAINER is what is focused, the market-data date field's shape.
+  The series popup holds none: it keeps the tile's own keyboard, which
+  is what lets `j`/`k` reach the matcher.
+- **`Model::clear` resets the slot numbering to `s1` (amends §9.2's
+  "stable for the tile's life", which reads "for the life of its
+  slots").** No slot remains for `s1` to collide with, and a cleared
+  tile is a fresh tile; it is also what makes `take_number`'s
+  exhaustion message ("this tile has used every slot number; `:clear`
+  starts again") true.
+- **A restore reorders interleaved slots (`core::session`).** Sources
+  are added first and expressions second, because an expression is
+  resolved against the slots already present — so a session that
+  recorded source, expression, source restores the two sources in
+  order and the expression last. Slot NUMBERS survive untouched
+  (`set_next_number` before each add), so every `:` reference and the
+  chips' labels are unchanged; only the left-to-right order of the
+  header strip can differ from the one the tile was closed with.
+- **A header chip click does not stop propagation.** The shell's own
+  tile-level mouse-down — `leave_command_line`, `focus_main_tile` and
+  the `pending_focus_restore` re-arm — must still run, or a chip click
+  on an unfocused tile moves that tile's cursor while the keyboard
+  stays elsewhere. The market-data `⋯` button's identical finding is
+  the precedent. The popup ROWS keep theirs: they sit on a `deferred`,
+  occluding surface of their own.
 
 **What is pixel-unverified: everything this part paints.** The
 sandbox has no window, so §1.2 item 1's walk is the display check —
