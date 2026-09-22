@@ -1780,3 +1780,10 @@ display-check items; the sandbox has no window.
 ### Publication request fan-out (2026-09-21)
 
 The deterministic `publication_bursts_query_only_base_and_join_consumers` test drives two visible blotters through 128 publication notifications: 32 each for one view's base, its joined dataset, the other view's base, and an unrelated dataset. Targeted watches produce **96 query submissions (64 + 32), versus 256 under global invalidation**, a 62.5% reduction. The document-panel test produces zero document queries for 128 unrelated dataset/key publications, then one for the selected document. These are request counts through production tile handlers with a test data handle, not SQL execution timings or end-to-end frame latency measurements. Global frame observer dispatch and diagnostic catalog refresh remain outside this optimization.
+
+
+### Diagnostics catalog request bound (2026-09-21)
+
+`catalog_bursts_keep_one_read_and_one_follow_up` drives the production bridge with a test data handle: one visibility request, then 128 publications, draining UI notifications after each publication while withholding the first catalog reply. The bridge emits **two catalog requests total** (initial plus one follow-up), versus **129 attempted submissions** under the former per-notification behavior. With the initial request removed from the wire and its reply withheld, the old path fills the 64-slot request queue with catalog reads and refuses the remaining 64 submissions. The new path leaves **zero additional catalog requests ahead of an ordinary control request**, which is accepted immediately; the already-running catalog read can still delay service-thread work. Subsequent portions of the test exercise another publication during the follow-up and an unchanged completion.
+
+These are deterministic submission/backlog counts, not SQL execution or elapsed query latency measurements. Catalog construction remains synchronous on the service thread, and sustained publications can keep one read active continuously. The change bounds amplification and outstanding work; it does not cap the cost of a single catalog read.

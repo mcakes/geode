@@ -260,7 +260,7 @@ impl DiagnosticsTile {
             // will show is a database round trip spent for nothing).
             if as_of_changed && this.visible {
                 this.diagnostics.update(cx, |d, cx| {
-                    d.request_catalog();
+                    d.request_catalog_refresh();
                     cx.notify();
                 });
             }

@@ -3317,14 +3317,16 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
   crates/geode-app/src/bridge.rs \
   '    cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
-        let catalog_tag = catalog_tag_for_drain;
+        let catalog_refresh = catalog_refresh_for_drain;
+        let catalog_window = window;
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);' \
   '    let shell_direct = shell.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
-        let catalog_tag = catalog_tag_for_drain;
+        let catalog_refresh = catalog_refresh_for_drain;
+        let catalog_window = window;
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
@@ -5486,14 +5488,8 @@ run_mutation "diagnostics: refresh_frame_hist copies the histogram while unwatch
 
 run_mutation "bridge: a stale Catalog outcome's tag check is disabled" \
   crates/geode-app/src/bridge.rs \
-  '                    DataEvent::Catalog(outcome) => {
-                        if outcome.tag != catalog_tag.get() {
-                            return;
-                        }' \
-  '                    DataEvent::Catalog(outcome) => {
-                        if false {
-                            return;
-                        }' \
+  'tag != outcome.tag' \
+  'false' \
   geode-app a_stale_catalog_outcome_is_dropped_and_the_latest_is_applied
 
 run_mutation "hot_reload: an [log] change on reload is never applied" \
@@ -5888,13 +5884,13 @@ run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never 
   crates/geode-diagnostics/src/tile.rs \
   '            if as_of_changed && this.visible {
                 this.diagnostics.update(cx, |d, cx| {
-                    d.request_catalog();
+                    d.request_catalog_refresh();
                     cx.notify();
                 });
             }' \
   '            if false {
                 this.diagnostics.update(cx, |d, cx| {
-                    d.request_catalog();
+                    d.request_catalog_refresh();
                     cx.notify();
                 });
             }' \
@@ -17010,6 +17006,100 @@ run_mutation 'consistency: diagnostics preserve earlier pending errors' \
   '                let mut merged = previous.clone();' \
   '                let mut merged = Vec::new();' \
   geode-app diagnostics_coalesce_in_history_order_with_the_shells_bound
+
+# Bounded diagnostics catalog refresh (2026-09-21).
+run_mutation "catalog refresh: one catalog read remains outstanding" \
+  crates/geode-app/src/bridge.rs \
+  'refresh.in_flight.get().is_some() || refresh.retry_pending.get()' \
+  'false || refresh.retry_pending.get()' \
+  geode-app catalog_bursts_keep_one_read_and_one_follow_up
+
+run_mutation "catalog refresh: retry delay cannot be bypassed by notifications" \
+  crates/geode-app/src/bridge.rs \
+  'refresh.in_flight.get().is_some() || refresh.retry_pending.get()' \
+  'refresh.in_flight.get().is_some() || false' \
+  geode-app catalog_refusal_and_failure_retry_without_new_events
+
+run_mutation "catalog refresh: a matching completion releases the slot" \
+  crates/geode-app/src/bridge.rs \
+  'catalog_refresh.in_flight.set(None);' \
+  '// Leave the completed request in flight.' \
+  geode-app catalog_bursts_keep_one_read_and_one_follow_up
+
+run_mutation "catalog refresh: a foreign recipient cannot release the slot" \
+  crates/geode-app/src/bridge.rs \
+  'outcome.key != DIAGNOSTICS_KEY' \
+  'false' \
+  geode-app catalog_bursts_keep_one_read_and_one_follow_up
+
+run_mutation "catalog refresh: unchanged results release pending refreshes" \
+  crates/geode-app/src/bridge.rs \
+  'if d.version() != before || d.pending_catalog_request() {' \
+  'if d.version() != before {' \
+  geode-app catalog_bursts_keep_one_read_and_one_follow_up
+
+run_mutation "catalog refresh: old as-of results are discarded" \
+  crates/geode-app/src/bridge.rs \
+  'snapshot.as_of == current_as_of' \
+  'true' \
+  geode-app an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of
+
+
+run_mutation "catalog refresh: refused submissions retry" \
+  crates/geode-app/src/bridge.rs \
+  'refresh.retry(&diagnostics, request, window, cx);' \
+  '// Refused demand is lost.' \
+  geode-app catalog_refusal_and_failure_retry_without_new_events
+
+run_mutation "catalog refresh: failed reads retry" \
+  crates/geode-app/src/bridge.rs \
+  'catalog_refresh.retry(&diagnostics, request, catalog_window, cx);' \
+  '// Failed read leaves no retry.' \
+  geode-app catalog_refusal_and_failure_retry_without_new_events
+
+run_mutation "catalog refresh: retry retains demand without another publication" \
+  crates/geode-app/src/bridge.rs \
+  '
+                CatalogRequest::Watched => d.request_catalog_refresh(),' \
+  '
+                CatalogRequest::Watched => {},' \
+  geode-app catalog_refusal_and_failure_retry_without_new_events
+
+run_mutation "catalog refresh: retry wakes the observer" \
+  crates/geode-app/src/bridge.rs \
+  '                    if d.pending_catalog_request() {
+                        cx.notify();
+                    }' \
+  '                    if d.pending_catalog_request() {
+                        // No wakeup.
+                    }' \
+  geode-app catalog_refusal_and_failure_retry_without_new_events
+
+run_mutation "catalog refresh: retry ends with its window" \
+  crates/geode-app/src/bridge.rs \
+  'let _ = window.update(cx, |_, _, cx| {' \
+  'let _ = cx.update(|cx| {' \
+  geode-app catalog_refusal_and_failure_retry_without_new_events
+
+run_mutation "catalog refresh: explicit demand survives the last watcher" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if explicit {
+            Some(CatalogRequest::Explicit)' \
+  '        if explicit {
+            Some(CatalogRequest::Watched)' \
+  geode-app catalog_explicit_requests_survive_without_diagnostics_watchers
+
+run_mutation "catalog refresh: explicit retries count as pending demand" \
+  crates/geode-shell/src/diagnostics.rs \
+  'self.pending_catalog_request || self.pending_explicit_catalog' \
+  'self.pending_catalog_request' \
+  geode-app catalog_explicit_requests_survive_without_diagnostics_watchers
+
+run_mutation "catalog refresh: explicit reads recover from as-of changes without a watcher" \
+  crates/geode-app/src/bridge.rs \
+  '                                            CatalogRequest::Explicit => d.request_catalog(),' \
+  '                                            CatalogRequest::Explicit => {},' \
+  geode-app catalog_explicit_requests_survive_without_diagnostics_watchers
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

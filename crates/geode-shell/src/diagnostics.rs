@@ -31,6 +31,14 @@ pub use geode_core::source_config::SourceShape;
 
 use crate::perf::FrameHistogram;
 
+/// Why the bridge should read the catalog. Explicit requests (for example an
+/// identity picker) remain valid without a visible diagnostics tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogRequest {
+    Watched,
+    Explicit,
+}
+
 /// One source's static description (Phase 4b §4.4's "sources" section),
 /// filled once by the app bridge at `attach` from its `SourceSpec` —
 /// plain strings, not `geode_data::source::{Priority, Readiness}`
@@ -244,6 +252,7 @@ pub struct Diagnostics {
     pending_level: Option<(String, Level)>,
     pending_overlay_toggle: bool,
     pending_catalog_request: bool,
+    pending_explicit_catalog: bool,
     /// [`Self::summary`]'s cache, keyed on `version` (same `RefCell`
     /// pattern as `Frame::bar_cache`) — `summary` is called from the
     /// status bar's render path every frame, and rebuilding the
@@ -278,6 +287,7 @@ impl Diagnostics {
             pending_level: None,
             pending_overlay_toggle: false,
             pending_catalog_request: false,
+            pending_explicit_catalog: false,
             summary_cache: RefCell::new((u64::MAX, Rc::from(""))),
         }
     }
@@ -593,7 +603,8 @@ impl Diagnostics {
     /// leaves (Phase 4b Task 4 fix round 1, MIN-4): a tile that becomes
     /// visible and immediately invisible again must not cost a database
     /// round trip whose outcome nothing will ever show. A request stays
-    /// queued while at least one other tile is still watching.
+    /// queued while at least one other tile is still watching. Explicit
+    /// requests from other consumers survive the last diagnostics tile hiding.
     pub fn unwatch(&mut self) {
         self.watchers = self.watchers.saturating_sub(1);
         if self.watchers == 0 {
@@ -605,26 +616,19 @@ impl Diagnostics {
         self.watchers
     }
 
-    /// Queue a fresh catalog request without changing any diagnostic data
-    /// (Phase 4b Task 5 fix round 1, MAJ-7): the resolved-generation
-    /// marker the data section paints (spec §4.5) is computed by the data
-    /// thread from the `CatalogParams::as_of` the request that produced
-    /// the held `CatalogSnapshot` carried — nothing re-requests one when
-    /// the frame's as-of changes, so a stale snapshot keeps marking a
-    /// generation the engine would no longer resolve to. The diagnostics
-    /// tile calls this when its own observed `as_of` version changed
-    /// while visible; the bridge's drain (already reading the frame's
-    /// *current* as-of at request time) does the rest.
-    ///
-    /// Never bumps `version` — same reasoning as [`Self::watch`]'s own
-    /// "does not itself bump" doc comment: nothing about the diagnostic
-    /// *data* changed, only what the bridge's drain is queued to do next.
-    /// Callers MUST `cx.notify()` themselves in the same update block —
-    /// the bridge's `cx.observe(&diagnostics, ..)` drain does not gate on
-    /// `version`, only on the pending flag, but it never runs at all
-    /// without a notify to wake it.
+    /// Queue an explicit catalog read, even without visible diagnostics (for
+    /// example, the timeseries identity picker). It survives diagnostics hiding.
+    /// The bridge reads the current frame as-of when it submits the request.
+    /// This does not bump `version`; callers must notify in the same update to
+    /// wake the bridge. Diagnostics itself uses `request_catalog_refresh`.
     pub fn request_catalog(&mut self) {
-        self.pending_catalog_request = true;
+        self.pending_explicit_catalog = true;
+    }
+
+    /// Queue a refresh for visible diagnostics, cancelled by the last unwatch.
+    /// As with `request_catalog`, the caller must notify to wake the bridge.
+    pub fn request_catalog_refresh(&mut self) {
+        self.pending_catalog_request |= self.watchers > 0;
     }
 
     /// Called by the palette's `Set log level…` two-step choice
@@ -690,20 +694,29 @@ impl Diagnostics {
         std::mem::take(&mut self.pending_overlay_toggle)
     }
 
-    pub fn take_pending_catalog_request(&mut self) -> bool {
-        std::mem::take(&mut self.pending_catalog_request)
+    /// Consume queued demand, preserving explicit consumers when diagnostics hides.
+    pub fn take_catalog_request(&mut self) -> Option<CatalogRequest> {
+        let watched = std::mem::take(&mut self.pending_catalog_request);
+        let explicit = std::mem::take(&mut self.pending_explicit_catalog);
+        if explicit {
+            Some(CatalogRequest::Explicit)
+        } else if watched {
+            Some(CatalogRequest::Watched)
+        } else {
+            None
+        }
     }
 
-    /// Whether a catalog request is queued, without consuming it — for
-    /// tests alone (market-data Part 3 Task 6): a module that asks for a
-    /// catalog ([`Self::request_catalog`]) has no other way to prove it
-    /// did, and [`Self::take_pending_catalog_request`] is the bridge
-    /// drain's own door — a test calling that would both answer its
-    /// question and cancel the request it was asking about, so the very
-    /// next assertion (or the real drain) would see nothing pending.
+    /// Consume queued demand without retaining its retry/visibility policy.
+    /// The bridge uses `take_catalog_request`; this is the test drain seam.
     #[cfg(any(test, feature = "test-support"))]
+    pub fn take_pending_catalog_request(&mut self) -> bool {
+        self.take_catalog_request().is_some()
+    }
+
+    /// Whether either a watched refresh or an explicit request remains queued.
     pub fn pending_catalog_request(&self) -> bool {
-        self.pending_catalog_request
+        self.pending_catalog_request || self.pending_explicit_catalog
     }
 
     /// `"sources 3 ok · 1 degraded · config 2 errors · data 1 error ·

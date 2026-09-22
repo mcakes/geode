@@ -19,11 +19,11 @@ use geode_data::{
 };
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
-use geode_shell::diagnostics::SourceSummary;
+use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
 use geode_shell::module::Delivery;
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
 use geode_shell::vimfind::FindStyle;
-use gpui::{App, AsyncApp, WindowHandle};
+use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -332,6 +332,54 @@ pub fn start(
     }
 }
 
+/// Window-local request lifecycle. The diagnostics entity owns the single
+/// pending refresh bit; only the bridge owns submissions and their replies.
+#[derive(Default)]
+struct CatalogRefresh {
+    tag: Cell<u64>,
+    in_flight: Cell<Option<(u64, CatalogRequest)>>,
+    retry_pending: Cell<bool>,
+}
+
+const CATALOG_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+impl CatalogRefresh {
+    /// Retain demand after refusal/error without spinning the observer. At most
+    /// one timer exists, and it neither retains the window nor the data handle.
+    fn retry(
+        self: &Rc<Self>,
+        diagnostics: &Entity<Diagnostics>,
+        request: CatalogRequest,
+        window: WindowHandle<Root>,
+        cx: &mut App,
+    ) {
+        let pending = diagnostics.update(cx, |d, _| {
+            match request {
+                CatalogRequest::Watched => d.request_catalog_refresh(),
+                CatalogRequest::Explicit => d.request_catalog(),
+            }
+            d.pending_catalog_request()
+        });
+        if !pending || self.retry_pending.replace(true) {
+            return;
+        }
+        let refresh = self.clone();
+        let diagnostics = diagnostics.downgrade();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            cx.background_executor().timer(CATALOG_RETRY_DELAY).await;
+            refresh.retry_pending.set(false);
+            let _ = window.update(cx, |_, _, cx| {
+                let _ = diagnostics.update(cx, |d, cx| {
+                    if d.pending_catalog_request() {
+                        cx.notify();
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+}
+
 /// Route events into the shell and forward reloads. Wakes on arrival:
 /// The mailbox receiver returns a future gpui's executor polls, so
 /// delivery latency is a frame, not a poll interval.
@@ -381,50 +429,36 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         cx.notify();
     });
 
-    // The diagnostics tile's `Request::Catalog` drain (Phase 4b §4.5):
-    // fires on every notify from the entity, regardless of what queued
-    // the request — `Diagnostics::note_published` (below, on a fresh
-    // publish while watched) and the diagnostics tile's own
-    // `set_visible(true)` (Task 5, `Diagnostics::watch`) both go through
-    // this one door, so a tile becoming visible gets its first catalog
-    // the same way a publish refreshes an already-visible one.
-    // `catalog_tag` is a plain `Rc<Cell<u64>>`, not `Arc<AtomicU64>`:
-    // both this observer and the drain loop below run on the UI thread's
-    // single-threaded async executor (the loop already captures a
-    // non-`Send` `Rc<BlotterFactory>`), so there is no real concurrency
-    // to guard against.
-    let catalog_tag = Rc::new(Cell::new(0u64));
+    // Leave demand in Diagnostics while a request or retry is outstanding.
+    // Publications, visibility and as-of changes share that one follow-up bit.
+    let catalog_refresh = Rc::new(CatalogRefresh::default());
     cx.observe(&diagnostics, {
         let handle = handle.clone();
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
-        let catalog_tag = catalog_tag.clone();
+        let refresh = catalog_refresh.clone();
         move |_entity, cx| {
-            let requested = diagnostics.update(cx, |d, _cx| d.take_pending_catalog_request());
-            if !requested {
+            if refresh.in_flight.get().is_some() || refresh.retry_pending.get() {
                 return;
             }
-            let tag = catalog_tag.get() + 1;
-            catalog_tag.set(tag);
+            let Some(request) = diagnostics.update(cx, |d, _| d.take_catalog_request()) else {
+                return;
+            };
+            let tag = refresh.tag.get() + 1;
+            refresh.tag.set(tag);
             let as_of = shell.read(cx).frame().read(cx).as_of().clone();
-            // MIN-7 (Phase 4b Task 4 fix round 1): a refused request
-            // (the service thread's queue is full or it's gone) used to
-            // vanish silently — unlike `ShellEvent::DistinctRequested`
-            // just above, which synthesises an error outcome so the
-            // picker never sits on `loading…` forever. There is no
-            // equivalent "loading" UI state for the catalog yet (Task 5
-            // hasn't built the tile), so this surfaces it the same way
-            // every other refusal in this file does: a `geode::query`
-            // warning, not a panic and not a swallow.
-            if !handle.catalog(CatalogParams {
+            if handle.catalog(CatalogParams {
                 key: DIAGNOSTICS_KEY,
                 tag,
                 as_of,
             }) {
+                refresh.in_flight.set(Some((tag, request)));
+            } else {
                 tracing::warn!(
                     target: "geode::query",
                     "catalog request refused — the data service is busy or gone"
                 );
+                refresh.retry(&diagnostics, request, window, cx);
             }
         }
     })
@@ -586,7 +620,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     .detach();
 
     let diagnostics_for_drain = diagnostics.clone();
-    let catalog_tag_for_drain = catalog_tag.clone();
+    let catalog_refresh_for_drain = catalog_refresh.clone();
     // Line-pricer spec §7.2: read once, up front, so the `Published` arm
     // below can decide without touching `bridge` — `attach` only borrows
     // it (`&Bridge`), and that borrow ends when `attach` returns, well
@@ -595,7 +629,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let local_datasets = Rc::clone(&bridge.local_datasets);
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
-        let catalog_tag = catalog_tag_for_drain;
+        let catalog_refresh = catalog_refresh_for_drain;
+        let catalog_window = window;
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
@@ -743,31 +778,41 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     DataEvent::Distinct(outcome) => {
                         shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
                     }
-                    // The diagnostics tile's "what does the database
-                    // hold" result (Phase 4b §4.5), requested by the
-                    // `cx.observe` registered in `attach`. Tag-checked
-                    // against `catalog_tag` — that observer is the only
-                    // submitter, so an outcome whose tag doesn't match
-                    // the latest one it handed out is answering a
-                    // request a newer one has already superseded, and is
-                    // dropped rather than applied (spec §7.3: a stale
-                    // result is never rendered).
                     DataEvent::Catalog(outcome) => {
-                        if outcome.tag != catalog_tag.get() {
+                        let Some((tag, request)) = catalog_refresh.in_flight.get() else {
+                            return;
+                        };
+                        if outcome.key != DIAGNOSTICS_KEY || tag != outcome.tag {
                             return;
                         }
+                        catalog_refresh.in_flight.set(None);
                         match outcome.snapshot {
                             Ok(snapshot) => {
+                                let current_as_of = shell.read(cx).frame().read(cx).as_of().clone();
                                 diagnostics.update(cx, |d, cx| {
                                     let before = d.version();
-                                    d.set_catalog(snapshot);
-                                    if d.version() != before {
+                                    // A publication while reading schedules another read, but
+                                    // does not starve presentation of consistent snapshots.
+                                    // An old as-of, however, must never replace the current one.
+                                    if snapshot.as_of == current_as_of {
+                                        d.set_catalog(snapshot);
+                                    } else {
+                                        // Explicit consumers need a current answer even when
+                                        // no diagnostics tile observes the frame's as-of.
+                                        match request {
+                                            CatalogRequest::Watched => d.request_catalog_refresh(),
+                                            CatalogRequest::Explicit => d.request_catalog(),
+                                        }
+                                    }
+                                    // Even an unchanged/discarded snapshot releases pending work.
+                                    if d.version() != before || d.pending_catalog_request() {
                                         cx.notify();
                                     }
                                 });
                             }
                             Err(e) => {
-                                tracing::warn!(target: "geode::query", "catalog request failed: {e}")
+                                tracing::warn!(target: "geode::query", "catalog request failed: {e}");
+                                catalog_refresh.retry(&diagnostics, request, catalog_window, cx);
                             }
                         }
                     }
@@ -2048,14 +2093,8 @@ role = "key"
         );
     }
 
-    /// Phase 4b §4.5: `attach`'s `cx.observe(&diagnostics, ..)` submits
-    /// one `Request::Catalog` per drained `pending_catalog_request`, each
-    /// with a fresh, higher tag. Two publishes while a diagnostics tile
-    /// is watching submit tags 1 then 2 — an outcome answering the
-    /// superseded tag 1 must be dropped (never applied to
-    /// `Diagnostics.catalog`), and one answering the latest tag 2 must
-    /// be applied. Exercises the real `attach`-installed observer and
-    /// drain loop end to end, not a unit of either in isolation.
+    /// The real observer and drain accept only the active request's tag.
+    /// A foreign response must neither update the catalog nor free its slot.
     #[gpui::test]
     fn a_stale_catalog_outcome_is_dropped_and_the_latest_is_applied(cx: &mut gpui::TestAppContext) {
         let window = open_test_window(cx, test_shell_services());
@@ -2110,17 +2149,17 @@ role = "key"
             cx.notify();
         });
         vcx.run_until_parked();
-        // Tag 2: a second publish supersedes it.
+        // A second publish queues a follow-up without replacing the active tag.
         diagnostics.update(&mut vcx, |d, cx| {
             d.note_published("risk");
             cx.notify();
         });
         vcx.run_until_parked();
 
-        // The stale tag-1 outcome must not be applied.
+        // An unsolicited tag must not release the active request.
         tx.try_send(DataEvent::Catalog(CatalogOutcome {
             key: DIAGNOSTICS_KEY,
-            tag: 1,
+            tag: 99,
             snapshot: Ok(CatalogSnapshot::default()),
         }))
         .unwrap();
@@ -2131,14 +2170,14 @@ role = "key"
             "a stale (superseded) tag must not be applied"
         );
 
-        // The fresh tag-2 outcome must be applied.
+        // The active tag-1 outcome must be applied, then the follow-up may run.
         let fresh = CatalogSnapshot {
             threads: 4,
             ..CatalogSnapshot::default()
         };
         tx.try_send(DataEvent::Catalog(CatalogOutcome {
             key: DIAGNOSTICS_KEY,
-            tag: 2,
+            tag: 1,
             snapshot: Ok(fresh.clone()),
         }))
         .unwrap();
@@ -2231,7 +2270,7 @@ role = "key"
     /// visible tile, and the real `attach()`-installed observer + drain:
     /// opening the tile watches (the first `Request::Catalog`, drained
     /// here), then changing the frame's as-of must produce a SECOND
-    /// `Request::Catalog` carrying the new as-of — not the entity/tile
+    /// `Request::Catalog` carrying the new as-of after the first completes — not the entity/tile
     /// unit tests' proxy of "the pending flag got set", but the real
     /// request landing on the wire with the right value.
     #[gpui::test]
@@ -2254,7 +2293,7 @@ role = "key"
             FindStyle::default(),
             Duration::from_secs(900),
         ));
-        let (_tx, rx) = crate::events::channel();
+        let (tx, rx) = crate::events::channel();
         let bridge = Bridge {
             marketdata: Rc::new(MarketDataFactory::new(
                 handle.clone(),
@@ -2312,11 +2351,26 @@ role = "key"
         }
 
         let at = chrono::Utc::now();
-        frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(AsOf::At(at));
-            cx.notify();
-        });
+        for offset in (0..8).rev() {
+            frame.update(&mut vcx, |f, cx| {
+                f.set_as_of(AsOf::At(at - chrono::Duration::days(offset)));
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        }
+
+        assert!(request_rx.try_recv().is_err(), "wait for the first read");
+        tx.try_send(DataEvent::Catalog(CatalogOutcome {
+            key: DIAGNOSTICS_KEY,
+            tag: 1,
+            snapshot: Ok(CatalogSnapshot::default()),
+        }))
+        .unwrap();
         vcx.run_until_parked();
+        assert!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.is_none()),
+            "an old as-of must not be installed"
+        );
 
         match request_rx.try_recv() {
             Ok(geode_data::Request::Catalog(params)) => {
@@ -2325,11 +2379,27 @@ role = "key"
                     AsOf::At(at),
                     "the second catalog request must carry the new as-of"
                 );
+                tx.try_send(DataEvent::Catalog(CatalogOutcome {
+                    key: params.key,
+                    tag: params.tag,
+                    snapshot: Ok(CatalogSnapshot {
+                        as_of: params.as_of,
+                        threads: 8,
+                        ..Default::default()
+                    }),
+                }))
+                .unwrap();
             }
             other => {
                 panic!("expected a second Request::Catalog carrying the new as-of, got {other:?}")
             }
         }
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().as_of.clone()),
+            AsOf::At(at)
+        );
+        assert!(request_rx.try_recv().is_err());
     }
 
     /// CRIT-1: a healthy desk — one configured source, no `Health`
@@ -2709,5 +2779,381 @@ role = "key"
             "the receiver is now closed"
         );
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+    struct CatalogFixture {
+        window: WindowHandle<Root>,
+        bridge: Bridge,
+        requests: std::sync::mpsc::Receiver<geode_data::Request>,
+        events: crate::events::Sender,
+    }
+
+    fn catalog_fixture(cx: &mut gpui::TestAppContext) -> CatalogFixture {
+        let window = open_test_window(cx, test_shell_services());
+        let (handle, requests) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = crate::events::channel();
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+            local_datasets: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        CatalogFixture {
+            window,
+            bridge,
+            requests,
+            events: tx,
+        }
+    }
+
+    fn next_catalog(f: &CatalogFixture) -> CatalogParams {
+        match f.requests.try_recv().expect("catalog request") {
+            geode_data::Request::Catalog(params) => params,
+            other => panic!("expected catalog, got {other:?}"),
+        }
+    }
+
+    fn answer_catalog(f: &CatalogFixture, params: &CatalogParams, threads: u64) {
+        f.events
+            .try_send(DataEvent::Catalog(CatalogOutcome {
+                key: params.key,
+                tag: params.tag,
+                snapshot: Ok(CatalogSnapshot {
+                    as_of: params.as_of.clone(),
+                    threads,
+                    ..Default::default()
+                }),
+            }))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn catalog_bursts_keep_one_read_and_one_follow_up(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let first = next_catalog(&f);
+        for i in 0..128 {
+            f.events
+                .try_send(DataEvent::Published {
+                    dataset: "risk".into(),
+                    batch: i.to_string(),
+                    gen_id: i,
+                    books: vec![None],
+                })
+                .unwrap();
+            vcx.run_until_parked();
+        }
+        assert!(
+            f.requests.try_recv().is_err(),
+            "a burst must not queue more reads"
+        );
+        // Ordinary requests have no catalog backlog to wait behind.
+        assert!(f.bridge.handle.cancel(QueryKey(42)));
+        assert!(matches!(
+            f.requests.try_recv(),
+            Ok(geode_data::Request::Cancel { key: QueryKey(42) })
+        ));
+        answer_catalog(&f, &first, 4);
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().threads),
+            4
+        );
+        let second = next_catalog(&f);
+        assert!(f.requests.try_recv().is_err());
+        // A duplicate/foreign completion cannot clear the active slot.
+        answer_catalog(&f, &first, 99);
+        vcx.run_until_parked();
+        f.events
+            .try_send(DataEvent::Catalog(CatalogOutcome {
+                key: QueryKey(123),
+                tag: second.tag,
+                snapshot: Ok(CatalogSnapshot {
+                    threads: 99,
+                    ..Default::default()
+                }),
+            }))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().threads),
+            4
+        );
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.note_published("risk");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(f.requests.try_recv().is_err());
+        // Identical results must still release the queued follow-up.
+        answer_catalog(&f, &second, 4);
+        vcx.run_until_parked();
+        let third = next_catalog(&f);
+        answer_catalog(&f, &third, 8);
+        vcx.run_until_parked();
+        assert!(f.requests.try_recv().is_err(), "no demand, no polling");
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().threads),
+            8
+        );
+    }
+
+    #[gpui::test]
+    fn catalog_visibility_keeps_the_in_flight_bound(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let first = next_catalog(&f);
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.note_published("risk");
+            d.unwatch();
+            cx.notify();
+        });
+        answer_catalog(&f, &first, 4);
+        vcx.run_until_parked();
+        assert!(
+            f.requests.try_recv().is_err(),
+            "hidden diagnostics needs no follow-up"
+        );
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().threads),
+            4
+        );
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let second = next_catalog(&f);
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.unwatch();
+            d.watch();
+            d.watch();
+            d.unwatch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            f.requests.try_recv().is_err(),
+            "showing again must not duplicate an in-flight read"
+        );
+        answer_catalog(&f, &second, 8);
+        vcx.run_until_parked();
+        let third = next_catalog(&f);
+        answer_catalog(&f, &third, 16);
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().threads),
+            16
+        );
+        assert!(f.requests.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn catalog_refusal_and_failure_retry_without_new_events(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        while f.bridge.handle.cancel(QueryKey(42)) {}
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        // Free the queue, but keep the delay: unrelated notifies cannot hot-loop retries.
+        while f.requests.try_recv().is_ok() {}
+        for _ in 0..32 {
+            diagnostics.update(&mut vcx, |d, cx| {
+                d.note_published("risk");
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        }
+        assert!(f.requests.try_recv().is_err());
+        vcx.executor().advance_clock(CATALOG_RETRY_DELAY);
+        vcx.run_until_parked();
+        let first = next_catalog(&f);
+        f.events
+            .try_send(DataEvent::Catalog(CatalogOutcome {
+                key: first.key,
+                tag: first.tag,
+                snapshot: Err("transient read error".into()),
+            }))
+            .unwrap();
+        vcx.run_until_parked();
+        assert!(f.requests.try_recv().is_err());
+        vcx.executor().advance_clock(CATALOG_RETRY_DELAY);
+        vcx.run_until_parked();
+        let second = next_catalog(&f);
+        answer_catalog(&f, &second, 8);
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().threads),
+            8
+        );
+        vcx.executor().advance_clock(CATALOG_RETRY_DELAY);
+        vcx.run_until_parked();
+        assert!(
+            f.requests.try_recv().is_err(),
+            "successful completion stops retries"
+        );
+        // Hide while waiting for an error retry: its old timer must not recreate demand.
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.request_catalog_refresh();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let third = next_catalog(&f);
+        f.events
+            .try_send(DataEvent::Catalog(CatalogOutcome {
+                key: third.key,
+                tag: third.tag,
+                snapshot: Err("retry then hide".into()),
+            }))
+            .unwrap();
+        vcx.run_until_parked();
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.unwatch();
+            cx.notify();
+        });
+        vcx.executor().advance_clock(CATALOG_RETRY_DELAY);
+        vcx.run_until_parked();
+        assert!(f.requests.try_recv().is_err());
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let fourth = next_catalog(&f);
+        f.events
+            .try_send(DataEvent::Catalog(CatalogOutcome {
+                key: fourth.key,
+                tag: fourth.tag,
+                snapshot: Err("retry then close".into()),
+            }))
+            .unwrap();
+        vcx.run_until_parked();
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        vcx.executor().advance_clock(CATALOG_RETRY_DELAY);
+        vcx.run_until_parked();
+        assert!(
+            f.requests.try_recv().is_err(),
+            "a retry must not submit after window closure"
+        );
+    }
+    #[gpui::test]
+    fn catalog_explicit_requests_survive_without_diagnostics_watchers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+        // This is the identity picker's request door: no diagnostics tile exists.
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.request_catalog();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let first = next_catalog(&f);
+        let at = chrono::Utc::now();
+        frame.update(&mut vcx, |frame, cx| {
+            frame.set_as_of(AsOf::At(at));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        answer_catalog(&f, &first, 4);
+        vcx.run_until_parked();
+        assert!(diagnostics.read_with(&vcx, |d, _| d.catalog.is_none()));
+        let second = next_catalog(&f);
+        assert_eq!(second.as_of, AsOf::At(at));
+        // Mixed demand must retain the explicit request when the last watcher hides.
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            d.request_catalog();
+            d.unwatch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(f.requests.try_recv().is_err());
+        answer_catalog(&f, &second, 8);
+        vcx.run_until_parked();
+        let third = next_catalog(&f);
+        f.events
+            .try_send(DataEvent::Catalog(CatalogOutcome {
+                key: third.key,
+                tag: third.tag,
+                snapshot: Err("picker retry".into()),
+            }))
+            .unwrap();
+        vcx.run_until_parked();
+        assert!(f.requests.try_recv().is_err());
+        vcx.executor().advance_clock(CATALOG_RETRY_DELAY);
+        vcx.run_until_parked();
+        let fourth = next_catalog(&f);
+        answer_catalog(&f, &fourth, 16);
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().threads),
+            16
+        );
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.note_published("risk");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            f.requests.try_recv().is_err(),
+            "an explicit read does not subscribe to publications"
+        );
     }
 }
