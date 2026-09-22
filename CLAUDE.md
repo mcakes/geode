@@ -184,7 +184,7 @@ cargo bench -p geode-blotter                           # run criterion benchmark
 cargo bench -p geode-documents                         # run criterion benchmarks (CVI parse/write — see docs/perf.md)
 cargo bench -p geode-marketdata                        # run criterion benchmarks (panel matrix model + draft — see docs/perf.md)
 cargo bench -p geode-timeseries                        # run criterion benchmarks (one delivery's chart model — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (1416 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (1417 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 zsh scripts/mutation-check.sh --anchors-only           # no cargo: stale or ambiguous anchors (<1 s, exits 1 on any) — run before every merge

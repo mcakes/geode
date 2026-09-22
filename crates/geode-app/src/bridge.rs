@@ -2400,6 +2400,19 @@ role = "key"
             AsOf::At(at)
         );
         assert!(request_rx.try_recv().is_err());
+
+        // With no read outstanding, only the tile's frame observer can ask.
+        // Recovery from a stale in-flight result must not mask that contract.
+        let later = at + chrono::Duration::days(1);
+        frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(AsOf::At(later));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        match request_rx.try_recv() {
+            Ok(geode_data::Request::Catalog(params)) => assert_eq!(params.as_of, AsOf::At(later)),
+            other => panic!("expected a refresh from an idle as-of change, got {other:?}"),
+        }
     }
 
     /// CRIT-1: a healthy desk — one configured source, no `Health`
@@ -3121,6 +3134,7 @@ role = "key"
             d.watch();
             d.request_catalog();
             d.unwatch();
+            d.watch(); // both demand kinds are present when the follow-up is submitted
             cx.notify();
         });
         vcx.run_until_parked();
@@ -3128,6 +3142,12 @@ role = "key"
         answer_catalog(&f, &second, 8);
         vcx.run_until_parked();
         let third = next_catalog(&f);
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.unwatch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        // The combined read must retain the explicit consumer's retry policy.
         f.events
             .try_send(DataEvent::Catalog(CatalogOutcome {
                 key: third.key,

@@ -17073,7 +17073,7 @@ run_mutation "catalog refresh: retry wakes the observer" \
   '                    if d.pending_catalog_request() {
                         // No wakeup.
                     }' \
-  geode-app catalog_refusal_and_failure_retry_without_new_events
+  geode-app catalog_explicit_requests_survive_without_diagnostics_watchers
 
 run_mutation "catalog refresh: retry ends with its window" \
   crates/geode-app/src/bridge.rs \
@@ -17099,6 +17099,12 @@ run_mutation "catalog refresh: explicit reads recover from as-of changes without
   crates/geode-app/src/bridge.rs \
   '                                            CatalogRequest::Explicit => d.request_catalog(),' \
   '                                            CatalogRequest::Explicit => {},' \
+  geode-app catalog_explicit_requests_survive_without_diagnostics_watchers
+
+run_mutation "catalog refresh: explicit demand takes priority over watched demand" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if explicit {' \
+  '        if explicit && !watched {' \
   geode-app catalog_explicit_requests_survive_without_diagnostics_watchers
 
 if [[ -n "$changed_ref" ]]; then
