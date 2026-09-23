@@ -25,9 +25,7 @@ use gpui::{App, Entity, SharedString, Window};
 
 pub use tile::DiagnosticsTile;
 
-/// Nothing to reclaim today (`DataTable` is not used here) — kept for
-/// symmetry with `geode_blotter::init`, which every other module-hosting
-/// call site (`geode-app::main`) calls unconditionally.
+/// Module initialization hook. Diagnostics has no component bindings to register.
 pub fn init(_cx: &mut App) {}
 
 pub const ACTIONS: &[(&str, &str)] = &[
@@ -45,17 +43,12 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diagnostics::collapse", "Collapse"),
 ];
 
-/// This module's default bindings (market-data documents §8.4), handed to
-/// the app through [`ModuleFactory::default_keymap`]. Until Part 3 this
-/// `[[bindings]]` section lived in the shell's own `BUILTIN_KEYMAP`,
-/// beside a mirrored copy of [`ACTIONS`] the shell had to carry because it
-/// cannot depend on this crate; both copies are gone, and the ids a
-/// binding names are now the same list `register_actions` registers, in
-/// the same crate.
+/// Default bindings supplied through [`ModuleFactory::default_keymap`].
+/// Binding IDs and their registrations in [`ACTIONS`] live together here,
+/// keeping the shell independent of this feature crate.
 ///
-/// One context, and no `mode` pair: this tile has no modes — `[`/`]`
-/// cycle its five sections and `/` (the shell's own `tile` binding)
-/// filters.
+/// The tile has one context and no modes: `[`/`]` cycle sections, and `/`
+/// uses the shell's shared tile find binding.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "diagnostics"
@@ -131,11 +124,9 @@ impl TileContent for DiagnosticsContent {
     }
 }
 
-/// Builds `diagnostics` tile occupants (§9.1). Holds the log ring and a
-/// refreshed copy of the loaded `Config` (for the config section's
-/// effective-config explainer) — `set_config` is called by the app bridge
-/// on every `ShellEvent::ConfigReloaded`, the same door `BlotterFactory::
-/// set_views` uses.
+/// Builds diagnostics tile occupants sharing the log ring and loaded config.
+/// The app refreshes the config through `set_config` before tile frame
+/// observers rebuild the effective-config rows.
 pub struct DiagnosticsFactory {
     ring: Arc<Ring>,
     config: Rc<RefCell<Config>>,
@@ -212,14 +203,8 @@ mod tests {
     use super::*;
     use geode_shell::keymap::fragments::{check_fragment, fragment_doc};
 
-    /// What the retired `the_shells_reserved_diagnostics_actions_match_ours`
-    /// and the shell's own `every_diagnostics_binding_target_is_reserved`
-    /// together used to guarantee, now provable inside this crate with no
-    /// mirrored copy of anything — the twin of
-    /// `geode_blotter::content`'s own fragment test, and the same two
-    /// directions: every id the fragment binds is registered here (a
-    /// `build_keymap` warning is exactly that failure), and every
-    /// registered action is reachable from some key.
+    /// Every default binding names a registered action, and every registered
+    /// action is reachable through the module's keymap fragment.
     #[test]
     fn the_default_keymap_binds_exactly_the_actions_this_module_registers() {
         let doc = fragment_doc("diagnostics", DEFAULT_KEYMAP).expect("the fragment parses");

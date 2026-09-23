@@ -1,10 +1,8 @@
 # geode-diagnostics
 
 The diagnostics module: one tile with five sections over the shell-owned
-`Diagnostics` entity and the log ring. It is opened from the status bar's
-diagnostics summary or the palette's `Diagnostics: Split` rows. There is
-no separate `diagnostics::open` action because tile creation is the one
-consistent way to open a module.
+`Diagnostics` entity and the log ring. Open it from the status bar's
+diagnostics summary or the palette's `Diagnostics: Split` rows.
 
 Current behavior and rationale:
 [`docs/current/features.md`](../../docs/current/features.md#diagnostics).
@@ -13,9 +11,25 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `sections` | Pure row builders for the five sections (`sources`, `data`, `config`, `log`, `perf`). Same inputs, same rows; the tile calls one only when an observed version changed. |
-| `commands` | The `:` line: `:section <name>`, `:level <target> <level>`, `:overlay`. Pure, no gpui, no I/O. |
-| `tile` | `DiagnosticsTile`: observes the `Diagnostics` entity and the frame, rebuilds one row list on a version change, paints it as a `uniform_list` in the mono face. `[`/`]` cycle sections. |
+| [`lib`](src/lib.rs) | Module factory, action registration, default keymap, and `TileContent` adapter. |
+| [`sections`](src/sections.rs) | Pure row builders for `sources`, `data`, `config`, `log`, and `perf`; time and clock values are explicit inputs. |
+| [`commands`](src/commands.rs) | Parser and word completions for `:section <name>`, plus refusals for application-wide commands. No GPUI or I/O. |
+| [`tile`](src/tile.rs) | Observers, selected section, filter, cursor, log tail, and prepared rows rendered through `uniform_list`. |
+
+## Interaction and persistence
+
+`[`/`]` cycle sections; `:section <name>` selects one directly. `j`/`k`,
+`gg`/`G`, and page bindings move the cursor, with count prefixes for row and
+page movement. `zo`/`zc` expand or collapse datasets in the data section.
+The log follows new records until the cursor moves; `G` resumes following.
+
+`/` supplies a substring filter used by the config and log sections. The
+header shows when a filter is set. Only the selected section and filter are
+saved in the session; cursor, collapsed datasets, and log records are not.
+
+`:level` and `:overlay` return messages directing users to `Set log level…`
+and `Toggle performance overlay` in the palette. They are not offered as
+completions because tile commands cannot change application state.
 
 ## Commands
 
@@ -25,15 +39,34 @@ cargo test -p geode-diagnostics
 
 ## Rules this crate pins
 
-- `Diagnostics::watch()` and `request_catalog()` queue a request but never
-  `cx.notify()`; the caller must, in the same update.
-- `DiagVersions` is one counter per section, so a perf tick never rebuilds
-  the config section.
-- The tile never requeries, so it must still self-arrive under the flip
-  barrier. Until 2026-09-14 it held every blotter to the 250 ms deadline.
+- Visibility changes call `Diagnostics::watch()`/`unwatch()` and notify in
+  the same update. A watch queues the initial catalog. Visible as-of changes
+  use `request_catalog_refresh()` and notify; hiding the last tile cancels
+  watched demand while explicit consumers retain their own requests.
+- Observers compare only the selected section's inputs: its `DiagVersions`
+  counter, plus frame as-of for data, frame config for config, or the ring
+  sequence for logs. Clock changes and local section/filter/collapse changes
+  also rebuild. A perf tick does not rebuild config rows.
+- The app refreshes the factory's shared config before tile frame observers
+  rebuild the config section. Preserve that observer registration order.
+- The tile submits no view query, so it signals its own arrival at the flip
+  barrier. Otherwise other tiles would wait for the 250 ms deadline.
+- Historical resolved-generation markers display only when the catalog and
+  frame as-of match; an outstanding refresh must not show a stale selection.
 - The sources section paints a source's two detail rows by
   `SourceSummary::shape`, resolved once in the app bridge: a fetch source
   is `adapter` plus `fetch`, never an empty `topics:`.
 - Warning and error rows take their colours through
   `geode_shell::shell::chip::chip_paint`, never a semantic foreground
   token over a tint by hand.
+- Paint shares prepared rows through `Rc` and cached header/title strings.
+  Log drains reuse their scratch allocation and retain at most 4,096 records
+  per tile. A loss warning reports the gap measured at the last drain, not
+  a lifetime total or records overwritten before the tile opened.
+
+## Limits
+
+Source ages are sampled at rebuild time; they do not tick while a source is
+quiet. The absolute timestamp remains available beside the age. The config
+explainer displays at most 2,000 leaves per document with an omitted-count
+row, but still traverses all leaves before applying that cap.

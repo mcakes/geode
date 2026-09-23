@@ -1,9 +1,7 @@
-//! Pure row builders for the five diagnostics sections (spec §4.6). No
-//! gpui rendering here beyond `SharedString` (a plain ref-counted string,
-//! not a paint) — `tile.rs` maps `Tone` to theme colours and paints the
-//! rows a builder returns. Every builder is a pure function of its
-//! arguments: same inputs, same rows, every time — the diagnostics tile
-//! calls one only when an observed version actually changed.
+//! Pure row builders for the five diagnostics sections. Each builder returns
+//! the same rows for the same inputs, including explicit time and clock values.
+//! `tile.rs` prepares these rows when inputs change and maps their `Tone` to
+//! theme colours during paint.
 
 use std::collections::BTreeSet;
 use std::time::SystemTime;
@@ -18,8 +16,8 @@ use geode_core::query::AsOf;
 use geode_shell::diagnostics::{Diagnostics, Health, SourceShape};
 use geode_shell::perf::{RequeryStats, format_ms};
 
-/// A row's visual weight — `tile.rs` maps each to a theme colour; `Marked`
-/// is the as-of-resolved-generation highlight (spec §4.6's "data" section).
+/// A row's visual weight, mapped to theme colours by `tile.rs`. `Marked`
+/// highlights the generation resolved under a historical as-of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Normal,
@@ -50,9 +48,8 @@ fn row(text: impl Into<SharedString>, depth: u8, tone: Tone) -> Row {
     }
 }
 
-/// `HH:MM:SS` on the trader's clock (`AppClock`, Phase 4a's ruling: local
-/// time throughout) — the diagnostics tile's own convention for every
-/// timestamp it shows, matching the frame's `short_time`-style readouts.
+/// Format `HH:MM:SS` using the supplied display clock, shared with the
+/// frame's time readouts. The tile supplies the configured `AppClock`.
 fn local_hms(t: SystemTime, clock: Clock) -> String {
     clock.hms(DateTime::<Utc>::from(t))
 }
@@ -61,14 +58,10 @@ fn local_hms_utc(t: DateTime<Utc>, clock: Clock) -> String {
     clock.hms(t)
 }
 
-/// The "sources" section (spec §4.6): name, path, priority, readiness
-/// rule, health with detail, since, last poll, next poll — sorted worst
-/// health first (`Health`'s `Ord` is severity order, so `Failed` sorts
-/// last there; the tile wants it first, hence `.rev()`), a source with no
-/// real health note yet (`SourceState::health` is `None`) shown as "no
-/// report yet" rather than counted as any particular health (matching
-/// `Diagnostics::summary`'s own CRIT-1 fix), and placed after every
-/// reported source.
+/// Source descriptions, health, and poll times, sorted worst health first.
+/// `Health::Ord` orders by severity ascending, so reported health is reversed.
+/// Sources with no health report appear last as "no report yet"; they are
+/// not assigned an assumed health status.
 pub fn sources_rows(d: &Diagnostics, now: SystemTime, clock: Clock) -> Vec<Row> {
     let mut reported: Vec<(&String, &geode_shell::diagnostics::SourceState)> = d
         .sources
@@ -118,15 +111,9 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime, clock: Clock) -> Vec<Row> 
         {
             text.push_str(&format!(" — {reason}"));
         }
-        // MIN-9 (fix round 1), accepted as-is: `now` is the instant this
-        // whole section rebuilt, and a rebuild only happens on an
-        // observed version change — a healthy, quiet source's "Ns ago"
-        // freezes at whatever it read on the last real change until
-        // something else bumps a version (the reload-poll tick's own
-        // ~500ms `refresh_frame_hist`, most commonly). Honest but
-        // occasionally stale; the absolute `since` timestamp right next
-        // to it is always correct, which is why this stays a decoration
-        // rather than the only clock reading on the row.
+        // Relative age uses the rebuild time and stays fixed until the next
+        // source-section rebuild. The absolute timestamp beside it remains
+        // valid while the source is quiet; perf-only ticks do not refresh it.
         let elapsed = now
             .duration_since(state.since)
             .map(|d| format!(" · {}s ago", d.as_secs()))
@@ -161,25 +148,11 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime, clock: Clock) -> Vec<Row> 
 
 fn push_spec_detail(out: &mut Vec<Row>, state: &geode_shell::diagnostics::SourceState) {
     let Some(spec) = &state.spec else { return };
-    // Two short rows, never one long one: the tile's rows are fixed-height
-    // `uniform_list` slots that clip rather than wrap, and a demo source's
-    // glob alone runs past a tile's width. Seen on a display 2026-09-08 —
-    // the wrapped tail of this row painted over the poll row beneath it.
-    //
-    // Which two is the source's SHAPE (timeseries spec §5.1), carried on
-    // the summary by the bridge — not `adapter` (Part 3's opening, which
-    // replaced a `topics.is_empty()` test with one on `adapter`) and not
-    // `topics.is_empty()` either, because neither can tell a fetch source
-    // from a subscribed one: both are "not a directory", the difference
-    // is the FAMILY of the dataset behind them, and `SourceSpec::shape`
-    // is the one place that answers it. Read off `adapter` alone, a fetch
-    // source painted as a market-data feed with an empty topic list.
-    //
-    // A subscribed source has no path to poll and no readiness rule, so
-    // printing either described a market-data feed as a directory source
-    // with an empty path and a sentinel convention it has never used. A
-    // fetch source has no topic either — nothing is pushed to it; it is
-    // asked for a span by the tile that wants one.
+    // Use two short rows because fixed-height list slots clip instead of wrap.
+    // The bridge resolves `SourceSpec::shape` using the dataset family: neither
+    // the adapter name nor an empty topic list can distinguish all three shapes.
+    // Directories show paths and readiness, subscriptions show adapter and
+    // topics, and fetch sources show adapter and on-demand span retrieval.
     match spec.shape {
         SourceShape::Directory => {
             let paths = spec.paths.join(", ");
@@ -208,26 +181,19 @@ fn push_spec_detail(out: &mut Vec<Row>, state: &geode_shell::diagnostics::Source
     }
 }
 
-/// The "data" section (spec §4.6): dataset › partition (batch/book), each
-/// generation with its id, published time, rows, live-or-archive, and the
-/// generation the current `as_of` resolves to marked `Tone::Marked`. A
-/// dataset in `collapsed` shows only its own header row.
+/// Dataset and partition generations with IDs, publication times, row counts,
+/// and live/archive state. For a historical as-of, mark the resolved generation
+/// only when the catalog and frame as-of agree. Collapsed datasets show only
+/// their header.
 pub fn data_rows(
     d: &Diagnostics,
     as_of: &AsOf,
     collapsed: &BTreeSet<String>,
     clock: Clock,
 ) -> Vec<Row> {
-    // MIN-5 (final review): the whole `CatalogSnapshot` carries the
-    // `AsOf` it was resolved under (each `DatasetState::catalog` here is
-    // only the per-dataset slice of that same snapshot, with no `as_of`
-    // of its own) — a resolved-generation marker is trustworthy only
-    // while the two agree. Between an `At(T1) -> At(T2)` frame change
-    // and the new catalog's arrival, the held snapshot is still T1's;
-    // `request_catalog` (Task 5 fix round 1, MAJ-7) makes the mismatch
-    // self-correcting within one round trip, but until then the marker
-    // must not paint at all rather than momentarily mark the wrong
-    // generation next to a scope bar already reading T2.
+    // Per-dataset catalog slices share the snapshot's as-of. After a frame
+    // as-of change, hide the resolved marker until a matching catalog arrives
+    // so the displayed generation cannot imply a different historical instant.
     let snapshot_matches_as_of = d.catalog.as_ref().is_some_and(|c| &c.as_of == as_of);
     let mut out = Vec::new();
     for (name, state) in &d.datasets {
@@ -283,14 +249,9 @@ pub fn data_rows(
     out
 }
 
-/// The "config" section (spec §4.6): the current config-load batch, then
-/// the data layer's own diagnostics, then the historical batches, then the
-/// effective-config explainer (each known doc as a flat leaf list,
-/// `path = value  [layer]` via `Config::explain`). `filter` is a plain
-/// substring match on the whole row's text, applied uniformly across
-/// every part of the section — so filtering to "theme" both narrows the
-/// explainer to matching leaves and drops diagnostics that don't mention
-/// it.
+/// Current config-load diagnostics, data-layer diagnostics, historical load
+/// batches, and effective-config leaves with provenance from `Config::explain`.
+/// Apply the same substring filter to every formatted row, including diagnostics.
 pub fn config_rows(d: &Diagnostics, config: &Config, filter: &str, clock: Clock) -> Vec<Row> {
     let mut out = Vec::new();
     out.push(row("current config diagnostics", 0, Tone::Muted));
@@ -324,8 +285,7 @@ pub fn config_rows(d: &Diagnostics, config: &Config, filter: &str, clock: Clock)
     }
 
     out.push(row("effective config", 0, Tone::Muted));
-    // MIN-3 (fix round 1): every doc `Config` actually holds, not a
-    // hand-maintained list that could fall behind it.
+    // Use the loaded document inventory so new documents appear automatically.
     for doc_name in config.doc_names() {
         let Some(doc) = config.doc(doc_name) else {
             continue;
@@ -363,23 +323,13 @@ pub fn config_rows(d: &Diagnostics, config: &Config, filter: &str, clock: Clock)
     }
 }
 
-/// A cap on how many leaf rows one doc contributes to the explainer
-/// (Phase 4b Task 5 fix round 1, MAJ-8), a final "… N more" row standing
-/// in for the rest — a pathological doc (or a future one nobody sized
-/// this for) must not turn one `:section config` render into thousands
-/// of rows.
+/// Maximum leaf rows displayed per document, followed by an omitted-count row.
+/// This bounds the prepared list size; leaf discovery still walks the document.
 const MAX_LEAVES_PER_DOC: usize = 2_000;
 
-/// Walk every leaf of a merged doc's table, recursing into both nested
-/// tables AND arrays (Phase 4b Task 5 fix round 1, MAJ-8) — the merged
-/// `keymap` doc's `bindings` is an array of tables (`[[bindings]]`), and
-/// before this fix `walk_value`'s `toml::Value::Array` case did not
-/// exist, so an array was stringified whole via `Value::to_string()`:
-/// one `Row` holding the entire keymap's bindings serialised onto a
-/// single unbroken line, several kilobytes long, that `uniform_list`
-/// cannot wrap and gpui reshapes on every paint while it's in the
-/// visible range. Indexed paths (`keymap.bindings.0.keys.j`) keep every
-/// leaf its own row instead.
+/// Walk nested tables and arrays, giving each leaf its own indexed path
+/// (e.g. `keymap.bindings.0.keys.j`). Stringifying an entire array of tables
+/// would create a long, clipped row with unnecessary text-shaping work.
 fn walk_leaves(table: &toml::Table, prefix: &str, out: &mut Vec<(String, String)>) {
     for (key, value) in table {
         let path = if prefix.is_empty() {
@@ -415,10 +365,8 @@ fn diagnostic_row_at_depth(diag: &Diagnostic, depth: u8) -> Row {
     row(diag.to_string(), depth, tone)
 }
 
-/// The "log" section (spec §4.6): the ring's tail, oldest first. `filter`
-/// is a plain substring match against the whole formatted row (so it
-/// catches both a target like `ingest` — matched inside `geode::ingest` —
-/// and a level like `WARN`).
+/// Log records, oldest first, filtered by substring against each formatted
+/// row. The filter can match a target such as `ingest` or a level such as `WARN`.
 pub fn log_rows(records: &[Record], filter: &str, clock: Clock) -> Vec<Row> {
     records
         .iter()
@@ -444,9 +392,8 @@ pub fn log_rows(records: &[Record], filter: &str, clock: Clock) -> Vec<Row> {
         .collect()
 }
 
-/// The "perf" section (spec §4.6): the frame-time histogram's
-/// percentiles, `RequeryStats`' two halves and its last reading, and the
-/// dropped-event count.
+/// Frame histogram percentiles, requery timing, dropped events, and catalog
+/// resource metrics. Inputs are snapshots; this builder performs no I/O.
 pub fn perf_rows(d: &Diagnostics, requery: &RequeryStats) -> Vec<Row> {
     let mut out = Vec::new();
     let h = &d.frame_hist;
@@ -518,12 +465,8 @@ pub fn perf_rows(d: &Diagnostics, requery: &RequeryStats) -> Vec<Row> {
         0,
         tone,
     ));
-    // MIN-4 (final review): these three cost real DuckDB round trips
-    // (`pragma_database_size()`, `duckdb_memory()`, `current_setting`)
-    // paid on every catalog request whether or not anything showed
-    // them — wired in here rather than computed and thrown away. `None`
-    // until the first `Request::Catalog` outcome arrives, same as the
-    // data section's own "(no catalog yet)" gate.
+    // Catalog resource metrics come from DuckDB queries on the data thread.
+    // They remain absent until the first catalog outcome arrives.
     if let Some(catalog) = &d.catalog {
         out.push(row(
             format!(
@@ -669,9 +612,8 @@ mod tests {
 
     #[test]
     fn a_sources_spec_detail_is_split_into_short_rows() {
-        // Seen on a display 2026-09-08: path, priority and readiness on one
-        // row wrapped inside the fixed-height list slot and painted over
-        // the poll row beneath. Each field group is its own row.
+        // Separate field groups keep long source paths from sharing a fixed-height
+        // row with priority and readiness.
         let mut d = Diagnostics::new(LogLevels::default());
         d.describe_source(
             "demo",
@@ -732,12 +674,8 @@ mod tests {
         );
     }
 
-    /// Part 2 residual: "subscribed" must be decided by `adapter`, not by
-    /// `topics.is_empty()` — a subscribed source with a topic list that
-    /// happens to be empty (rejected at load in the ordinary case, but a
-    /// diagnostics tile must not assume every caller went through that
-    /// validation) is still a subscribed source and must not fall back to
-    /// painting a path/readiness row shape it has no data for.
+    /// The declared shape determines subscribed-source rows even when the topic
+    /// list is empty. Diagnostics must handle callers that bypass config validation.
     #[test]
     fn a_subscribed_source_with_no_topics_still_shows_the_subscribed_shape() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -769,12 +707,8 @@ mod tests {
         );
     }
 
-    /// A fetch source (timeseries spec §5.4) is neither of the other two:
-    /// no path to poll and no readiness rule, like a subscribed source,
-    /// but nothing is pushed to it, so it has no topic either. Decided
-    /// off `adapter` alone it fell through to the subscribed arm and
-    /// painted `topics: ` — an empty list for a source that will never
-    /// have one.
+    /// Fetch sources display adapter and retrieval details without directory
+    /// paths, readiness rules, or subscription topics.
     #[test]
     fn a_fetch_source_shows_its_adapter_and_that_it_is_fetched() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -826,11 +760,8 @@ mod tests {
         assert_eq!(rows[0].tone, Tone::Muted);
     }
 
-    /// Fix round 1: `Started`/`Loading` can land before that source's
-    /// first-ever `Health` note — the cold-start moment the loading
-    /// sub-row exists for — so a source still reading "no report yet"
-    /// must show it too, directly under that row, not only a source
-    /// whose health is already known.
+    /// Loading can precede the first health report. Show the loading row even
+    /// when the source still reads "no report yet".
     #[test]
     fn a_loading_source_with_no_report_yet_still_shows_what_it_is_loading() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -897,10 +828,7 @@ mod tests {
     fn data_rows_mark_the_resolved_generation_under_an_as_of() {
         let mut d = Diagnostics::new(LogLevels::default());
         let as_of = AsOf::At(chrono::DateTime::UNIX_EPOCH);
-        // MIN-5 (final review): the snapshot's own `as_of` must match the
-        // frame's current `as_of` for the marker to show at all — a
-        // catalog fetched under the same as-of the frame is currently
-        // scoped to, the ordinary case.
+        // A matching catalog and frame as-of allow the resolved marker to show.
         d.set_catalog(CatalogSnapshot {
             as_of: as_of.clone(),
             datasets: vec![dataset_catalog()],
@@ -913,13 +841,9 @@ mod tests {
         assert_eq!(gen2.tone, Tone::Normal);
     }
 
-    /// MIN-5 (final review): between an `At(T1) -> At(T2)` frame change
-    /// and the new catalog's arrival, the tile rebuilds under T2 with a
-    /// `CatalogSnapshot` still resolved under T1 — `resolved_gen` names
-    /// the generation T1 resolves to, which T2 might not. The marker
-    /// must not paint at all until a snapshot resolved under the
-    /// frame's CURRENT as-of arrives, rather than momentarily marking
-    /// the wrong generation next to a scope bar reading T2.
+    /// After the frame changes as-of, suppress resolved-generation markers
+    /// until a matching catalog arrives. The held snapshot may resolve a
+    /// different generation.
     #[test]
     fn data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -987,9 +911,8 @@ mod tests {
         assert!(!filtered.is_empty());
     }
 
-    /// MAJ-8: an array of tables (`[[bindings]]`, the real shape the
-    /// merged `keymap` doc's `bindings` key takes) must be recursed into
-    /// with an indexed path per leaf, not stringified whole onto one row.
+    /// An array of tables such as keymap `[[bindings]]` must produce an indexed
+    /// path per leaf instead of one stringified array row.
     #[test]
     fn config_rows_recurses_into_arrays_with_indexed_paths() {
         let d = Diagnostics::new(LogLevels::default());
@@ -1025,8 +948,8 @@ mod tests {
         );
     }
 
-    /// MAJ-8: a doc with more than `MAX_LEAVES_PER_DOC` leaves is capped,
-    /// with a trailing "… N more" row rather than an unbounded list.
+    /// Documents exceeding `MAX_LEAVES_PER_DOC` display a trailing omitted-count
+    /// row instead of an unbounded list.
     #[test]
     fn config_rows_caps_leaves_per_doc_with_a_more_row() {
         let d = Diagnostics::new(LogLevels::default());
@@ -1054,21 +977,15 @@ mod tests {
         assert_eq!(leaf_rows, MAX_LEAVES_PER_DOC);
     }
 
-    /// MAJ-4's display-free measurement recipe (final review, ruling 4):
-    /// times `config_rows` on the largest shipped config — the `--demo`
-    /// layer's five docs (`app`, `datasets`, `dimensions`, `groupings`,
-    /// `views`) plus the compiled-in builtin keymap, the biggest single
-    /// doc in a real session (one leaf per binding key, after MAJ-8's
-    /// array recursion) — standing in for a display, since no display
-    /// was available to measure the tile's actual paint. Run with
-    /// `cargo test -p geode-diagnostics --lib sections::tests::
-    /// config_rows_on_the_demo_config_stays_under_budget -- --nocapture`
-    /// to see the printed number; `docs/perf.md`'s Phase 4b section
-    /// records what this measured. The assertion is a generous sanity
-    /// bound (10ms — well inside §7.1's 8ms *pure-UI* budget would be a
-    /// coincidence worth flagging, not the actual per-frame cost this
-    /// stands in for; twice a second, not every frame), not a tight
-    /// regression gate.
+    /// Measure `config_rows` with demo documents and the builtin keymap,
+    /// including indexed array leaves. This measures row construction only;
+    /// it excludes layout, text shaping, and painting. The 10 ms assertion is
+    /// a generous sanity bound, not proof of the 8 ms pure-UI budget.
+    ///
+    /// Run with `cargo test -p geode-diagnostics --lib
+    /// sections::tests::config_rows_on_the_demo_config_stays_under_budget
+    /// -- --nocapture` to print the measurement. See `docs/current/performance.md`
+    /// for budgets and measurement limits.
     #[test]
     fn config_rows_on_the_demo_config_stays_under_budget() {
         let d = Diagnostics::new(LogLevels::default());
@@ -1117,7 +1034,7 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(10),
             "config_rows took {elapsed:?} on the demo config — record the real number in \
-             docs/perf.md and reconsider MAJ-4's fix (b)/(c) if this budget ever tightens"
+             docs/perf.md and profile config leaf traversal and row formatting"
         );
     }
 
@@ -1192,11 +1109,8 @@ mod tests {
         assert!(joined.contains("dropped events: 3"));
     }
 
-    /// MIN-4 (final review): `database_bytes`, `memory_bytes` and
-    /// `threads` cost real DuckDB round trips (`pragma_database_size()`,
-    /// `duckdb_memory()`, `current_setting`) and were computed on every
-    /// catalog request but displayed by no section — wire them into the
-    /// perf section rather than paying for them and throwing them away.
+    /// The perf section displays database size, memory use, and thread count
+    /// from the catalog outcome.
     #[test]
     fn perf_rows_show_database_bytes_memory_bytes_and_threads_once_a_catalog_arrives() {
         let mut d = Diagnostics::new(LogLevels::default());

@@ -94,13 +94,43 @@ depending on each other.
 
 `geode-diagnostics` presents shell-owned operational state: sources, stored
 data, configuration, logs, and performance. The shell's `Diagnostics` entity
-is the source of truth; the tile builds only the selected section when that
-section's version changes.
+and shared log ring supply the state. `:section <name>` and `[`/`]` select a
+section; log-level and performance-overlay changes use application actions.
+The session saves the section and filter.
+
+| Section | Contents |
+|---|---|
+| Sources | Descriptions, health, loading activity, and poll times; worst reported health first, unreported sources last |
+| Data | Dataset and partition generations, with the resolved generation highlighted for a historical frame as-of |
+| Config | Current config-load diagnostics, data-layer diagnostics, prior load batches, and effective values with layer provenance |
+| Log | A bounded local tail of new records, with substring filtering and cursor following |
+| Perf | Frame and requery timing, dropped-event count, and database resource metrics from the catalog |
+
+The tile rebuilds only the selected section. Diagnostics counters, frame
+as-of/config versions, and the log ring sequence gate observer work according
+to the section's inputs. Clock changes and local section, filter, or collapse
+changes also rebuild. Rendering shares prepared rows and cached header text;
+an unrelated performance tick does not walk the config documents.
 
 The tile does not query ordinary view data, but it still participates in frame
 arrival so a global flip cannot wait on it indefinitely. Catalog requests are
 bounded and coalesced by the app bridge. Hiding the diagnostics surface removes
 watched demand while explicit catalog consumers can keep their own demand.
+An as-of change requests a fresh catalog while the tile is visible. Until the
+catalog's as-of matches the frame, resolved-generation markers are hidden.
+
+Each tile retains at most 4,096 log records and reuses its drain buffer. It
+starts at the ring's current sequence when opened. If the ring overwrites
+unread records, the next drain reports that gap; this is not a cumulative
+loss counter. Moving the cursor stops following, and `G` resumes it.
+
+Source ages reflect the last row rebuild rather than a ticking timer; the
+absolute timestamp remains visible. Config output is capped at 2,000 leaves
+per document with an omitted-count row, although traversal still visits all
+leaves. `/` filters the config and log sections by substring.
+
+See the [crate guide](../../crates/geode-diagnostics/README.md) for the module
+map and observer, notification, and allocation contracts.
 
 ## Pricing and the line pricer
 

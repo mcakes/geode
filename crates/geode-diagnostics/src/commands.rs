@@ -1,11 +1,8 @@
-//! The diagnostics tile's `:` line (Phase 4b Task 5, spec §4.6; command-line
-//! locality 2026-09-20): `:section <name>`. `:level` and `:overlay` were
-//! app-wide and are refusals now (`REFUSED_LEVEL`/`REFUSED_OVERLAY`); the
-//! palette's `Set log level…` and `Toggle performance overlay` are their
-//! doors. Pure — no gpui, no I/O — same discipline as
-//! `geode_blotter::core::commands`.
+//! Tile-local command parsing and completion, with no GPUI or I/O.
+//! `section <name>` selects a section. `level` and `overlay` return refusals
+//! that direct the user to the corresponding application actions.
 
-/// One of the five sections a diagnostics tile can show (spec §4.6),
+/// One of the five sections a diagnostics tile can show,
 /// switched by `:section <name>` or `[`/`]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -40,8 +37,7 @@ impl Section {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Section(Section),
-    /// A word this line no longer runs because it was app-wide
-    /// (command-line locality spec §5): the message names the door.
+    /// An application-wide command refused here, with a message naming its action.
     Refused(&'static str),
 }
 
@@ -78,32 +74,14 @@ pub fn parse(line: &str) -> Result<Command, String> {
     }
 }
 
-/// Completion candidates for the word under `cursor` on a `:` line — the
-/// shell ranks and shows them; this only knows the vocabulary. Each
-/// candidate is a bare WORD for that position (`ingest`, never `level
-/// ingest`): the shell splices the accepted candidate into the line in
-/// place of the word under the cursor (`commandline::accept`), and calls
-/// a typed word exact only when the vocabulary contains it, so a
-/// whole-line candidate turned `:level ` + accept into `level level
-/// ingest` and Enter on a fully typed `:level ingest debug` into `level
-/// ingest level ingest debug` (seen on a display 2026-09-08). The whole
-/// vocabulary for the position is returned, unfiltered, as the blotter's
-/// is: the shell's fuzzy (subsequence) ranking decides what a partial
-/// word matches — which also means Enter on a short prefix that several
-/// words contain (the blotter's `:so`, matched by more than one of its
-/// commands) is refused as ambiguous rather than run; the old prefix
-/// filter used to auto-run it. Words are split the way the
-/// shell's `commandline::word_at` splits them — any whitespace or a
-/// comma — so the position this computes is the word the shell will
-/// splice over. `cursor` truncates `line` to the text so far (the word
-/// under the cursor is the trailing token of that prefix, possibly
-/// empty). `cursor` is walked
-/// back to the nearest char boundary at or before it first (Phase 4b Task
-/// 5 fix round 1, MIN-1): the caller's cursor should always land on one,
-/// but this pure core must not depend on that and panic on the slice
-/// below otherwise — mirrors `geode_blotter::core::commands::completions`'
-/// own guard for the identical case, itself mirroring `commandline::
-/// word_at`'s.
+/// Return the complete vocabulary for the word under `cursor`. Each candidate
+/// is a bare word: the shell replaces only that word when accepting it and
+/// handles fuzzy ranking and ambiguous submissions. Filtering here would hide
+/// valid candidates from that check.
+///
+/// Word boundaries match the shell's `commandline::word_at`: whitespace or a
+/// comma. Clamp `cursor` to the nearest preceding UTF-8 boundary so arbitrary
+/// byte offsets cannot panic while slicing the line.
 pub fn completions(line: &str, cursor: usize) -> Vec<String> {
     let mut cursor = cursor.min(line.len());
     while !line.is_char_boundary(cursor) {
@@ -163,8 +141,8 @@ mod tests {
         assert!(parse("").is_err());
     }
 
-    /// Command-line locality (2026-09-20): `level` and `overlay` are
-    /// app-wide and left the line as refusals naming their door.
+    /// Application-wide commands return directions to their actions and are
+    /// excluded from the tile's completion vocabulary.
     #[test]
     fn level_and_overlay_are_refusals_and_not_completions() {
         assert_eq!(
@@ -177,10 +155,8 @@ mod tests {
         assert!(completions("level ", 6).is_empty());
     }
 
-    /// MIN-1: a cursor that does not land on a char boundary must not
-    /// panic — clamp back to the nearest one at or before it, same
-    /// guard `geode_blotter::core::commands::completions` and
-    /// `commandline::word_at` both already carry for this exact case.
+    /// A cursor inside a multibyte character must clamp to a character boundary
+    /// without panicking, as the shell's word parser does.
     #[test]
     fn completions_clamp_a_cursor_inside_a_multibyte_char() {
         let line = "section ✓og";
@@ -194,14 +170,9 @@ mod tests {
         assert!(result.is_ok(), "must not panic on a non-boundary cursor");
     }
 
-    /// Seen on a display 2026-09-08: `:level ` then accepting the
-    /// `ingest` candidate produced `level level ingest`, and Enter on a
-    /// fully typed `:level ingest debug` "accepted" its own last word
-    /// into `level ingest level ingest debug`. A candidate is the WORD
-    /// under the cursor: the shell splices it into the line in place of
-    /// that word (`commandline::accept`) and calls a word exact only
-    /// when the vocabulary contains it (`resolve_submit`). The blotter's
-    /// vocabulary is bare words for the same reason. Never the line.
+    /// Completion replaces only the word under the cursor. A whole-line
+    /// candidate would duplicate the command prefix; an exact typed word must
+    /// submit unchanged.
     #[test]
     fn a_candidate_is_the_word_under_the_cursor_not_the_line() {
         use geode_shell::commandline::{Submit, accept, rank_candidates, resolve_submit, word_at};
