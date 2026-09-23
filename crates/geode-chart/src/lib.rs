@@ -1,4 +1,4 @@
-//! `geode-chart`: the chart crate behind the timeseries viewer (spec §8).
+//! Reusable chart preparation and painting for the timeseries viewer.
 //!
 //! `core` is window-free geometry over slices; `model` is the immutable
 //! input a tile builds per delivery; `element` paints it through

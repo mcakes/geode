@@ -1,4 +1,8 @@
-# Performance measurement infrastructure
+# Performance measurement log
+
+> **Archive:** This file preserves chronological measurements, fixtures, and
+> investigations. See [`docs/current/performance.md`](current/performance.md)
+> for maintained budgets, current reference values, and known gaps.
 
 What exists today for spec §7.4 ("Enforcement"), and what is deliberately
 deferred. PHILOSOPHY.md §6 is the governing rule: performance is a

@@ -60,7 +60,7 @@ wide and module visible.
 
 ```sh
 cargo test -p geode-shell
-cargo bench -p geode-shell     # the pure shell cores (docs/perf.md)
+cargo bench -p geode-shell     # the pure shell cores
 ```
 
 Test fixtures live in `src/shell/tests/mod.rs`. They bind `ctrl+v` and

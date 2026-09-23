@@ -1,5 +1,5 @@
-//! Shared vocabulary for Geode: core types, config model, ids, errors,
-//! and performance utilities. See docs/superpowers/specs/ §2.
+//! Shared vocabulary and pure logic for Geode: configuration, schema,
+//! scopes, query values, snapshots, health, documents, series, and pricing.
 
 pub mod attribution;
 pub mod clock;

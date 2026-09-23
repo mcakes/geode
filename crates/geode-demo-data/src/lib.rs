@@ -1,6 +1,5 @@
-//! Deterministic synthetic risk data at the desk's real grain (spec §9.1).
-//! Seeded: same config always yields identical data. Struct-of-arrays per
-//! PHILOSOPHY §6 — no row objects.
+//! Deterministic synthetic risk data at the desk's real grain. The same seed
+//! and configuration produce identical struct-of-arrays data.
 
 pub mod documents;
 mod emit;

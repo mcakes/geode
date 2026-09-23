@@ -1,59 +1,10 @@
-//! The `Domain::Scopes` adapter (spec §8.4, reversed by
-//! `docs/superpowers/specs/2026-09-19-geode-scopes-dialog-editing-design.md`
-//! from a read-only summary to a real editor): the scopes a trader saves
-//! through this dialog (or the palette's/scope bar's `Scope: Save current
-//! as…`, `open_save_scope`) and recalls through the palette's `Scope:
-//! <name>` entries. `:scope save <name>`/`:scope load <name>` reached the
-//! same saved scopes until command-line locality closed both routes
-//! 2026-09-20.
+//! Object-dialog adapter for saved scopes.
 //!
-//! The adapter edits all three keys a saved [`Scope`] has: `dimensions`
-//! as a [`FieldKind::OrderedList`] (one item per non-empty selection,
-//! `crate::shell::pickable_columns` as what else may join it — `enter`
-//! opens the Values stage to tick a selection's own values, Task 3), and
-//! `text`/`expression` as `i`-editable [`FieldKind::Text`] rows
-//! ([`parse_text`] refuses a broken expression with `parse_expr`'s own
-//! message rather than writing it for the loader to warn about and
-//! drop). [`to_table`] still renders `draft.source` and nothing else —
-//! [`fold`] (every text or dimensions-list change) and `fold_values`
-//! (the Values stage's own fold, Task 3) are its only writers, so every
-//! keystroke reaches `source` before the validator or the writer ever
-//! sees it.
-//!
-//! **No `as-of` field.** A saved [`Scope`] carries no as-of at all —
-//! `Frame::save_scope` saves `self.scope.clone()` alone
-//! (`geode-shell/src/frame.rs`), and `scope_to_table`'s own three keys
-//! (`dimensions`, `text`, `expression`) have no fourth. As-of is frame
-//! state, not scope state; showing one here would be inventing a field
-//! nothing writes.
-//!
-//! ## `o`: the one door onto a `Frame`
-//!
-//! Everywhere else in this module is pure — `o` is the one verb that
-//! needs a `Frame`, and it is read in `render.rs`, never here.
-//! `render.rs`'s `Verb('o')` arm (`arm_overwrite`) only *arms* the
-//! confirm — it decides at that moment whether the write will also fork
-//! the object (whether the user layer already owns this name), so the
-//! prompt can disclose it, but it reads no `Frame`. The frame is read a
-//! keystroke later, in `run_confirmed`'s `Confirm::Overwrite` arm: `shell.
-//! frame.read(cx).scope().clone()` — the only place a `Frame` is read
-//! for *this dialog* at all (narrower than "the only entity": the shared
-//! filter field's `Entity<InputState>` is read elsewhere same as in every
-//! other dialog). [`overwrite_with`] takes the resulting `Scope` value,
-//! already read out, plus the live `Config` for the available block, so
-//! this module, like every other adapter, never touches a `Frame` or
-//! `gpui` itself.
-//!
-//! It replaces both `draft.source` (what [`to_table`] renders) and
-//! `draft.fields` (the read-only summary painted above it) with the
-//! frame's own scope. Only `source` is what `Draft::is_dirty` and
-//! `Draft::writes_by_destination` actually key the write decision on —
-//! comparing the two *painted* fields alone would make "did anything
-//! change" a question about whether `selects_summary` happens to render
-//! two different scopes identically, which is not a property it
-//! promises to keep as it grows (see `Draft::baseline_source`'s own doc
-//! in `mod.rs`). Rebuilding `fields` here is still necessary — nothing
-//! else repaints them — it just is not what decides whether `o` writes.
+//! A scope draft owns ordered dimension selections plus optional text and
+//! expression filters. The values stage edits one dimension's selected values.
+//! Expressions are parsed before persistence, so invalid text is refused with
+//! its parser diagnostic instead of being written and dropped on reload.
+//! Folding always updates the draft's source table before validation or write.
 
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;

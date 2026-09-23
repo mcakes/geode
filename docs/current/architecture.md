@@ -119,9 +119,9 @@ The architecture keeps expensive work outside render by construction:
 - hot paths avoid per-frame allocation and repeated formatting;
 - benchmarks keep debug symbols so measured regressions can be profiled.
 
-Measured results, hardware, datasets, and known gaps belong in
-[perf.md](../perf.md). A budget claim without its measurement conditions is
-not evidence.
+Maintained budgets and known gaps belong in [performance.md](performance.md).
+Raw results, hardware, and fixture conditions belong in the measurement log.
+A budget claim without its measurement conditions is not evidence.
 
 ## Verification
 

@@ -1,39 +1,9 @@
-//! Shared pure core for Geode's filtered list surfaces — the settings
-//! and keybinding dialogs and the command palette
-//! (`docs/superpowers/specs/2026-09-01-dialog-filter-input-design.md` §4,
-//! §6): fuzzy ranking of row text, and the keystroke vocabulary those
-//! surfaces still own once a focused text input has claimed every
-//! printable key.
+//! Pure fuzzy ranking and navigation for filtered list surfaces.
 //!
-//! [`rank`] serves the two dialogs; the palette does its own filtering
-//! inside `PaletteState` over a richer item type. [`nav_command`] serves
-//! all three.
-//!
-//! No `gpui` here, in the mould of [`crate::vimnav`] and
-//! [`crate::vimfind`] — feed it plain strings and shell-native
-//! [`Keystroke`]s, unit-test it without a window.
-//!
-//! ## Why the vocabulary is what it is
-//!
-//! With a single-line gpui-component `Input` focused, the dialogs can
-//! only claim keys that input does not consume first. Verified against
-//! the pinned rev (spec §2): `home`/`end` are swallowed unconditionally;
-//! `left`/`right` are swallowed except when a single empty selection
-//! sits at the very start or end of the text, where the pinned release
-//! propagates them (`gpui-base-0.6.2/src/input/base/movement.rs`,
-//! `left`/`right`; they were swallowed unconditionally at the old git
-//! rev) — `nav_command` claims neither, pinned by
-//! `nav_command_claims_nothing_else`, so the vocabulary is unaffected;
-//! `up`/`down`/`pageup`/`pagedown` and `tab`/`shift+tab` attach their
-//! listeners only for multi-line inputs, so they fall
-//! through; `ctrl+d`/`u`/`b`/`n`/`p` are unbound in the `"Input"` context
-//! on both platforms. `ctrl+f` is bound to the editor's Search on
-//! non-macOS and is reclaimed for us by a `NoAction` binding in
-//! `geode-app`'s init (spec §7).
-//!
-//! `pageup`/`pagedown` are deliberate aliases of `ctrl+b`/`ctrl+f`, not a
-//! third step size: they are free, and they are what a hand reaching for
-//! "a screenful" finds first on a keyboard that has them.
+//! Dialogs use `rank` over searchable row text. `nav_command` contains the
+//! keys that remain available while a single-line gpui-component input owns
+//! printable text. It deliberately avoids keys consumed by the input and can
+//! be tested without a window using shell-native `Keystroke` values.
 
 use crate::keymap::{Keystroke, Modifiers};
 use crate::palette::fuzzy_match;

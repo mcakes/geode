@@ -1,4 +1,4 @@
-//! The timeseries viewer module (timeseries spec §9): a tile that plots
+//! The timeseries viewer module: a tile that plots
 //! series fetched on demand, composed by arithmetic expression, managed
 //! through header chips and a popup, painted by `geode-chart`.
 
@@ -10,7 +10,7 @@ pub mod header;
 pub mod popup;
 pub mod tile;
 
-/// Reclaim `tab`/`shift+tab` inside the range popup (spec §9.8), the
+/// Reclaim `tab`/`shift+tab` inside the range popup, the
 /// same door and the same mechanism as `geode_blotter::init` and
 /// `geode_marketdata::init`: gpui-component's `Root` binds both keys
 /// window-wide to its own focus cycling (`root::Tab`), and gpui

@@ -1,5 +1,5 @@
-//! The blotter (foundation §9.2, Phase 3 spec §6): any view definition
-//! as a collapsible, keyboard-driven hierarchy with honest markers. The
+//! Any view definition as a collapsible, keyboard-driven hierarchy with
+//! honest markers. The
 //! pure core in `core` has no `gpui`; `delegate` adapts it to
 //! gpui-component's `DataTable`; `tile` is the entity per tile;
 //! `content` is what the shell hosts.
@@ -12,7 +12,7 @@ pub mod tile;
 
 pub use content::BlotterFactory;
 
-/// Reclaim `DataTable`'s own key bindings (Phase 3 §3.3): the blotter
+/// Reclaim `DataTable`'s own key bindings. The blotter
 /// never gives the table focus, but a row click moves gpui focus there
 /// for one frame, and these must not act during it. Same door and same
 /// reasoning as `geode_shell::shell::dialog::init_reclaimed_keybindings`.

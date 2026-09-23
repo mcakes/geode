@@ -56,8 +56,8 @@ zsh scripts/mutation-check.sh  # run after touching the compiler, scope lowering
                                # as-of routing, publish, retention or discovery
 ```
 
-The §7.1 budget (a requery under 50 ms at 1M rows) is measured in
-`docs/perf.md`.
+The requery budget and current reference measurements are in
+[`docs/current/performance.md`](../../docs/current/performance.md).
 
 ## Rules this crate pins
 
@@ -74,7 +74,6 @@ often tripped:
   database is not migrated; delete the database first.
 - Series timestamps are naive UTC, bound and read as epoch micros, so no
   session time zone can shift them.
-- A green suite proves less than you expect here. Five review rounds on
-  the query path each found a silent wrong-data defect a fixture could
-  not reach; `scripts/mutation-check.sh` is the answer, and every
-  behaviour you change gets an entry.
+- A green suite can miss wrong-data behavior when its fixture cannot reach
+  the branch. Add a targeted mutation entry for every changed correctness
+  contract.

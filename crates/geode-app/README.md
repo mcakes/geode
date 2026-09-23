@@ -7,6 +7,8 @@ window on `geode_shell::shell::ShellView`.
 
 Current crate boundaries and runtime ownership:
 [`docs/current/architecture.md`](../../docs/current/architecture.md).
+Feature composition and demo behavior are described in
+[`docs/current/features.md`](../../docs/current/features.md#demo-and-application-composition).
 
 ## Running
 

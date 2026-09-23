@@ -9,6 +9,8 @@ types all moved down for that reason).
 
 Its place in the dependency graph is described in
 [`docs/current/architecture.md`](../../docs/current/architecture.md).
+Layered document behavior is described in
+[`docs/current/configuration.md`](../../docs/current/configuration.md).
 
 ## What lives here
 

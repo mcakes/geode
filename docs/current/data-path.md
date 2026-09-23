@@ -130,8 +130,9 @@ rules prevent an accepted operation from leaving a tile waiting indefinitely.
 - The demo database is not automatically migrated after schema changes.
 - Historical as-of depends on retained generations; retention bounds how
   far back it can answer.
-- The exact performance measurements and their conditions are in
-  [perf.md](../perf.md), not inferred from the architecture diagram.
+- Maintained budgets and known gaps are in
+  [performance.md](performance.md); raw conditions and runs are in the
+  measurement log.
 - Ordinary tests verify outcomes. Targeted mutations in
   [`mutation-check.sh`](../../scripts/mutation-check.sh) check whether tests
   can detect particular wrong-data behaviors; `--anchors-only` validates

@@ -1,178 +1,15 @@
-//! The keybinding dialog: a list of every registered action with its
-//! currently-effective binding, **modal** — normal mode by default, `/`
-//! for the filter — and editable in place
-//! (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`,
-//! which supersedes the filter-first model of
-//! `2026-09-01-dialog-filter-input-design.md` for this dialog).
+//! The keybinding dialog: every registered action and its effective binding,
+//! editable in place.
 //!
-//! ## The two modes
+//! It opens in normal mode with the shared input blurred, so letters can invoke
+//! verbs such as unbind and reset. `/` enters fuzzy filter mode. Navigation is
+//! shared with other filtered lists; `enter` begins capture. Pure dialog state
+//! owns mode, query, selection, and capture. `dialog::sync_dialog_text` alone
+//! reconciles focus and the shared `InputState` after a transition.
 //!
-//! The dialog opens in [`DialogMode::Normal`] with `ShellView::
-//! dialog_input` **blurred**, so a bare letter is a verb rather than
-//! filter text — which is the whole reason this dialog can grow `d`
-//! (unbind) and `r` (reset) at all: while the filter owned every
-//! printable key, no letter could ever mean anything else. `/` enters
-//! [`DialogMode::Filter`], which is exactly the always-focused filter
-//! that shipped before: typing narrows, and the rows are ranked fresh by
-//! [`visible_rows`] over each row's [`searchable_text`] — the displayed
-//! title and category, never the invisible action id.
-//!
-//! Both modes share one navigation vocabulary
-//! ([`crate::listfilter::nav_command`], reached in normal mode through
-//! [`crate::dialogmode::normal_command`]): `up`/`down`/`ctrl+p`/`ctrl+n`
-//! ∓1, `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10,
-//! with `j`/`k`/`g`/`shift+g` added in normal mode where the letters are
-//! free. `enter` starts a rebind capture in either. `tab`/`shift+tab` are
-//! claimed in both, but only to be dropped — they are the settings
-//! dialog's stepping keys, reserved and inert here (see [`handle_key`]'s
-//! own doc comment for why claiming, not just ignoring, is what actually
-//! makes them inert).
-//!
-//! ## The three verbs (spec §8, §20.1; reset-all 2026-09-19)
-//!
-//! `d` **unbinds** the selected row's currently-effective binding, `r`
-//! **resets** the row's action to what the layers beneath say, and
-//! `shift+r` **resets every action** — the capability that could not exist
-//! while the filter owned every letter, and the reason this dialog went
-//! modal at all. All three write only the *user* layer
-//! (`crate::keymap_edit`), so they differ exactly where the layers do:
-//!
-//! - a binding from builtin or desk cannot be removed, so `d` silences
-//!   it with the documented `"none"` shadow in the user entry
-//!   ([`crate::keymap_edit::apply_unbind`]); a binding that IS the user's
-//!   own is removed outright. Which branch is decided by
-//!   [`BoundKey::layer`], carried onto the row by [`derive_rows`] from the
-//!   very [`Binding`] the row displays — never re-inferred at the call
-//!   site. See [`unbind_selected`] for why getting that backwards is
-//!   destructive in two different directions;
-//! - `r` removes **every** user-layer entry that overrides the row's
-//!   action ([`KeybindingRow::overrides`], from
-//!   [`crate::keymap::user_overrides_for`] over the whole keymap): a
-//!   rebind's new key AND the `"none"` shadow the rebind left over the
-//!   old one, or the bare shadow a `d` left. This is not the row's
-//!   displayed binding — that is `None` on a shadowed row and only the new
-//!   key on a rebound one, and a reset that read it (the rule before
-//!   2026-09-19) removed the new key alone and left the action *unbound*
-//!   rather than reset. One [`crate::keymap_edit::apply_reset`] write,
-//!   keyed by the file's own key spelling ([`Binding::key_source`]), so
-//!   `mod+h` is removed as `mod+h`, not as the `alt+h` it renders to;
-//! - `shift+r` drops every `[[bindings]]` entry from the user keymap
-//!   ([`crate::keymap_edit::apply_reset_all`]) — dialog-written and
-//!   hand-written alike, by user ruling, since nothing tells them apart —
-//!   and leaves the rest of the file (`config_version`, `mod`, comments
-//!   outside the entries) as it was. Desk and builtin are never touched.
-//!
-//! Every verb reports in [`KeybindingsState::notice`], a line painted in
-//! the footer and dropped at the next keystroke or click, and uses it to
-//! acknowledge the write *immediately*, naming the key(s) and, for `d`
-//! on a lower-layer binding, the way back ([`RECOVERY`]: `r`) — a disk
-//! write needs an acknowledgement
-//! that does not wait on the ~500ms reload before the row relabels.
-//! Those acknowledgements are in the present tense ("silencing …",
-//! "removing …") on purpose: the write is on the background executor and
-//! can still come back short, so a completed tense would assert an
-//! outcome the dialog has not confirmed. A verb that finds nothing to do
-//! writes nothing and says that instead — `r` on a row with no user
-//! override, `shift+r` with no user bindings. A key that visibly does
-//! nothing is the defect class this interaction model exists to remove,
-//! so "nothing happened" is stated in the footer rather than left to be
-//! inferred from an unchanged screen.
-//!
-//! Each verb asks first where it would write ([`KeybindingConfirm`],
-//! spec §20.1: `y`/`enter` or the yes button; `n`/`escape` withdraws),
-//! and is unarmed — notice only — where it would not. The question is
-//! [`confirm_prompt`]'s sentence, from the row and the live keymap, so
-//! `r` names the key it removes (or how many) and `shift+r` the count.
-//! The action bar paints each verb as a button only while it can act:
-//! `d` on a bound row, `r` on a row with overrides, `shift+r` while the
-//! user layer binds anything.
-//!
-//! `escape` walks the ladder of [`crate::dialogmode::escape_step`], one
-//! visible change per press: filter → normal (keeping the query
-//! applied), → clear the query, → close the modal. The close rung is the
-//! one this module does NOT handle — it returns `false` and lets
-//! `handle_key_down`'s modal branch close the dialog, the same door a
-//! backdrop click uses.
-//!
-//! ## Rebind capture
-//!
-//! `enter` on the selected row, or a single click on any row (§17.1 rule
-//! 2 — a click does what `enter` would, selecting and listening in one
-//! step rather than the superseded two-click rule where a first click
-//! only selected), starts "listening" for a new binding on the clicked
-//! or selected row; every keystroke while listening appends to a pending
-//! sequence (multi-keystroke bindings, e.g. `"g g"`, are supported);
-//! `enter` commits it, `escape` cancels. A click on a different row
-//! mid-capture retargets the capture to that row; a click on the row
-//! already being listened on restarts the capture, dropping whatever
-//! partial sequence had been typed.
-//! Capture is a third, *momentary* mode, deliberately checked before the
-//! mode routing and never passed through `normal_command`: while it is
-//! open every keystroke is the capture's, verbs included.
-//!
-//! Listening **blurs the filter input** and hands focus to the shell
-//! root, because a focused single-line `Input` consumes bare letters as
-//! text before any raw key listener sees them — without the blur, a
-//! capture could never read a plain `j`. That blur is the same switch
-//! normal mode holds open permanently; cancelling or committing hands
-//! focus back **to whichever surface the current mode owns** (the filter
-//! in `Filter`, the shell root in `Normal`). No site in this module
-//! performs either move: setting `listening` is the whole transition, and
-//! [`dialog::sync_dialog_text`] reconciles gpui to it (spec §16.1) from
-//! `dialogmode::focus_target`'s one decision, which reads `listening`
-//! ahead of the mode. That is why the surface a capture returns to can no
-//! longer be a hardcoded guess — a hardcoded filter would silently focus
-//! it under a dialog still claiming to be in normal mode, and the next
-//! `d` would type a `d` instead of unbinding. While
-//! listening — and, for the same reason, throughout normal mode — the
-//! filter row renders the query as static muted text rather than a live
-//! caret (see [`dialog::filter_row`]): a caret there would be a lie
-//! about where keystrokes are going.
-//!
-//! A committed capture is written to the user keymap document via
-//! [`crate::keymap_edit::apply_rebind`], same as every other config
-//! write in this crate, off the UI thread (spec PHILOSOPHY: "nothing may
-//! stall the render thread").
-//!
-//! ## What this dialog does NOT do
-//!
-//! It never updates its own rows optimistically after a commit. Instead,
-//! [`derive_rows`] re-resolves every row's effective binding, fresh, from
-//! `ShellView::services` on **every render** — so a just-written rebind
-//! becomes visible in the dialog only once the background reload watcher's
-//! ~500ms poll (`shell::ShellView::new`'s loop) has picked the file change
-//! back up and applied it to `services.keymap`. In practice this is a
-//! sub-second delay, not a user-visible bug, but it is real — a rebind does
-//! not *instantly* relabel its own row, and this module has no side channel
-//! back into `services.keymap` to make it do so; it goes through the one
-//! ordinary reload path every other config edit already goes through.
-//!
-//! ## Architecture: two-part state (mirrors `palette`/`PaletteState`)
-//!
-//! [`KeybindingsState`] — `selected`, the mode, the in-progress capture
-//! sequence, and the mirrored filter query — is pure (no `gpui`), stored on
-//! `ShellView` as `keybindings: Option<KeybindingsState>`, exactly like
-//! `palette: Option<PaletteState>`. Its two `gpui` siblings live directly
-//! on `ShellView` rather than inside this struct: `keybindings_scroll`
-//! (the row list's `gpui::ScrollHandle`) and `dialog_input` (the shared
-//! filter field, whose `InputEvent::Change` subscription feeds
-//! [`KeybindingsState::set_query`]). That is the same split
-//! `palette`/`palette_scroll`/`palette_input` already use, for the same
-//! reason: it keeps this module's own state fully unit-testable without a
-//! window (see the `tests` module at the bottom), while `build`'s render
-//! closure and this module's [`handle_key`] both still reach them
-//! (`shell.keybindings_scroll`, `shell.dialog_input`) exactly the way
-//! `ShellView`'s own methods reach `self.palette_scroll`.
-//!
-//! Opens through [`dialog::open_shell_dialog_with_key`] (the one
-//! mandatory modal door, alongside `dialog::open_shell_dialog`) — this
-//! dialog needs first refusal on the keystrokes it claims, and on *every*
-//! keystroke while listening, which is exactly what
-//! `dialog::ModalKeyHandler` exists for. `settings_view` has adopted the
-//! same door and the same interaction model wholesale (the
-//! settings-dialog rewrite), and this module's chip/highlight render
-//! helpers ([`key_chip`], [`highlighted_text`]) are `pub(crate)` for the
-//! same reason.
+//! Rebinding validates and persists the complete user keymap through the
+//! ordered configuration write path. Rows are always derived from the current
+//! registry and effective keymap rather than cached across a reload.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -396,8 +233,7 @@ pub struct KeybindingsState {
     /// of the `escape` ladder keeps the query applied, because leaving a
     /// search should leave you on the match, not undo the search.
     pub query: String,
-    /// Which mode this dialog is in
-    /// (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`).
+    /// Which mode this dialog is in.
     /// `Normal` on open: bare letters are verbs, and `dialog_input` is
     /// blurred in favour of the shell root so they reach [`handle_key`] —
     /// the same switch rebind capture has always performed, held open

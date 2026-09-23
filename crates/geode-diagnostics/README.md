@@ -6,6 +6,9 @@ diagnostics summary or the palette's `Diagnostics: Split` rows. There is
 no separate `diagnostics::open` action because tile creation is the one
 consistent way to open a module.
 
+Current behavior and rationale:
+[`docs/current/features.md`](../../docs/current/features.md#diagnostics).
+
 ## Layout
 
 | Module | Holds |

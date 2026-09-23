@@ -7,10 +7,13 @@ Start with the documents that describe Geode **as it works now**:
 | [Project README](../README.md) | Product overview, setup, and repository map |
 | [Philosophy](PHILOSOPHY.md) | Product and architecture principles |
 | [Architecture](current/architecture.md) | Crate boundaries, runtime ownership, configuration, and failure handling |
+| [Configuration](current/configuration.md) | Layers, documents, validation, writes, reload, keymaps, theme, time, and logging |
 | [Data path](current/data-path.md) | Current data flow, correctness rules, and reasons for them |
 | [Shell](current/shell.md) | Window ownership, tiles, input, focus, modules, and persistence |
-| [Crate READMEs](../crates/geode-data/README.md) | Local module maps and crate contracts |
-| [Performance](perf.md) | Measurements, conditions, and known gaps |
+| [Feature modules](current/features.md) | Blotter, documents, timeseries, diagnostics, pricing, and demo behavior |
+| [Crate READMEs](../crates/) | Local module maps and crate contracts |
+| [Performance](current/performance.md) | Budgets, instrumentation, reference values, and known gaps |
+| [Measurement log](perf.md) | Chronological benchmark results and investigations |
 
 `phase-history.md` and `superpowers/` are an archive of proposals,
 implementation steps, rulings, and review findings. They may describe
@@ -25,6 +28,6 @@ them. Put task sequences, commit instructions, review chronology, and
 superseded approaches in the dated record. When implementation changes a
 contract, update its current guide in the same change.
 
-This index will grow as each subsystem is migrated. Until then, start with its
-crate README and the code. Gaps in current documentation should be filled here
-rather than sending future readers into the implementation archive.
+Start with the relevant current guide, then its crate README and code. Fill
+gaps in the maintained guides rather than sending future readers into the
+implementation archive.

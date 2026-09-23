@@ -1,13 +1,11 @@
-//! The two-mode vocabulary Geode's *modal* dialogs share
-//! (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`).
+//! The two-mode vocabulary shared by Geode's modal dialogs.
 //!
 //! A modal surface opens in [`DialogMode::Normal`], where no `Input` is
 //! focused and bare letters are verbs; `/` enters [`DialogMode::Filter`],
 //! which is exactly the always-focused filter that ships today. A surface
 //! that has no verbs to reach outside its filter is *filter-only* and
 //! never uses this module at all — the palette, the dimension picker and
-//! the as-of selector are unchanged (spec §3; settings was filter-only
-//! too until §18 made it modal on 2026-09-12).
+//! the as-of selector use their own filter-only state.
 //!
 //! No `gpui` here, in the mould of [`crate::vimnav`] and
 //! [`crate::listfilter`]: feed it shell-native [`Keystroke`]s and

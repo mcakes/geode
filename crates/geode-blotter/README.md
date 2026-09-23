@@ -5,6 +5,9 @@ keyboard-driven hierarchy with honest markers for what a cell means
 (`pinned`, `unscoped`, `filtered`, `AS OF`, and a NULL for a measure the
 compiler declined to sum).
 
+Current behavior and rationale:
+[`docs/current/features.md`](../../docs/current/features.md#blotter).
+
 ## Layout
 
 | Module | Holds |
@@ -19,7 +22,7 @@ compiler declined to sum).
 
 ```sh
 cargo test -p geode-blotter
-cargo bench -p geode-blotter   # the pure core (docs/perf.md)
+cargo bench -p geode-blotter   # the pure core
 ```
 
 ## Rules this crate pins

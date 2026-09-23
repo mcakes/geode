@@ -5,6 +5,9 @@ Pure, with no I/O and no gpui. `geode-app` registers each kind into the
 data service at startup; `geode-data` itself never depends on this crate
 and sees only the `geode_core::document::DocumentKind` trait.
 
+Current behavior and rationale:
+[`docs/current/features.md`](../../docs/current/features.md#market-data-documents).
+
 ## What lives here
 
 | Module | Holds |
@@ -23,7 +26,7 @@ regenerated from the desk's XSD later, behind the same two functions
 
 ```sh
 cargo test -p geode-documents
-cargo bench -p geode-documents     # CVI parse and write (docs/perf.md)
+cargo bench -p geode-documents     # document parse and write
 ```
 
 ## Rules this crate pins

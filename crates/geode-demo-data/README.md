@@ -7,6 +7,9 @@ data. Struct-of-arrays throughout, no row objects.
 It depends on `geode-core` alone. It produces `DocumentRows` and never
 writes XML; turning rows into wire bytes is `geode-documents`' job.
 
+Current behavior and rationale:
+[`docs/current/features.md`](../../docs/current/features.md#demo-and-application-composition).
+
 ## What lives here
 
 | Module | Holds |

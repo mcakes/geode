@@ -30,10 +30,9 @@ geode-pricing = { path = "crates/geode-pricing" }
 geode-chart = { path = "crates/geode-chart" }
 geode-timeseries = { path = "crates/geode-timeseries" }
 
-# Phase 4b: the tracing foundation (`geode_core::log`). Versions pinned to
-# what gpui already resolves `tracing`/`tracing-subscriber` to in
-# Cargo.lock, so this adds no second copy of either. `tracing-appender` is
-# new to the lock — the daily rolling file layer in `geode-app::main`.
+# Logging versions match gpui's resolved `tracing` family, avoiding a second
+# copy. `tracing-appender` supplies the daily rolling file layer in
+# `geode-app::main`.
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
     "std",

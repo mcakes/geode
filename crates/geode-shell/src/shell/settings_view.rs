@@ -1,116 +1,19 @@
-//! The settings modal (`ctrl+,`, `settings::open`): a keyboard-driven flat
-//! row list in the exact mold of the keybinding dialog
-//! ([`super::keybindings_view`]) — the settings-dialog rewrite that
-//! REPLACED the gpui-component `Settings`/`SettingPage`/`SettingGroup`/
-//! `SettingItem`/`SettingField` composite this module used to wrap.
+//! The settings modal: a keyboard-driven flat list of typed settings.
 //!
-//! ## Why the composite went away
+//! Rows are derived from current `ShellView` state on every render and key
+//! event. A row owns an ordered set of values; stepping applies immediately
+//! through the setting's existing mutation and background persistence path.
+//! `i` or `enter` opens the shared typeahead for the selected row.
 //!
-//! The old dialog was the one surface in Geode that didn't speak the
-//! shell's own language: mouse-first controls (a dropdown popup, a switch,
-//! button groups), its own search input with its own focus, none of the
-//! vim vocabulary every other list surface here HAD AT THE TIME
-//! (`crate::vimnav` motions, `/` find via `crate::vimfind` — both since
-//! retired from every dialog by the filter-first rewrite, see
-//! `keybindings_view`'s module doc), and a stack of documented
-//! layout workarounds just to keep the composite from collapsing inside
-//! our own modal chrome (see `dialog::render_modal`'s height-contract doc
-//! comment for the scar tissue that remains). The keybinding dialog
-//! established the house pattern — pure unit-testable state + a
-//! [`dialog::ModalKeyHandler`] with first refusal on every keystroke + a
-//! `build` closure painting a flat scrollable row list — and this module
-//! now applies that pattern to settings wholesale.
+//! The dialog has normal and filter modes. In normal mode the shared input is
+//! blurred and letters are verbs; `/` enters filter mode. Pure `SettingsState`
+//! is the source of truth for mode and query. `dialog::sync_dialog_text` is the
+//! only code that reconciles that state with the shared `InputState` and focus.
+//! A transition here mutates pure state and leaves focus movement to that seam.
 //!
-//! ## The row model
-//!
-//! Five rows, derived FRESH from `ShellView` state on every render and
-//! every keystroke ([`derive_rows`] via [`rows_for`] — same no-caching
-//! contract as `keybindings_view::derive_rows`): Theme, Font size and
-//! Line numbers under **Appearance**, Find style under **Keyboard**, Add
-//! tile under **Tiling**. (A Dark mode row used to sit beside Theme; it
-//! was retired 2026-09-12 because every bundled theme name already
-//! carries its mode — `Molokai Dark`, `Gruvbox Light` — so the row only
-//! ever restated the Theme row's own value; the whole light/dark axis —
-//! `mod+shift+t`, `[theme] mode` — went with it the same day, see
-//! `theme.rs`'s "No light/dark mode".) Each row
-//! is one enumerated setting — an ordered list of value labels plus the
-//! index of the currently-active one — and editing is *stepping*:
-//! `space`/`shift+space` in normal mode and `tab`/`shift+tab` in either
-//! mode step the selected row's value forward/back (wrapping at both
-//! ends, [`step`]); the mouse form is the value chip (spec §20.3,
-//! [`dialog::value_chip`]) — click steps forward, shift+click steps
-//! back — and a click on the row's own label only selects it, never a
-//! step (the old second-click-steps rule is gone). A
-//! step applies IMMEDIATELY through the same apply-then-persist seams the
-//! old dialog's controls used
-//! ([`set_theme`]/[`set_font_size`]/[`set_find_style`]'s
-//! shared `*_on` cores) — theme stepping is a live preview, and
-//! persistence stays on the existing background paths
-//! (`ShellView::persist_theme` and friends; no I/O lands on the render
-//! thread here). In normal mode `i` or a bare `enter` opens the selected
-//! row's typeahead (spec 2026-09-19 §3.3) — while a field is open,
-//! [`route`] defers to `crate::choice::route`, the key table the object
-//! dialog's own field reads too; filter mode's `enter` — with no field
-//! open — stays claimed and dropped, there being nothing for it to
-//! confirm. See [`route`] for the whole vocabulary and
-//! [`handle_key`] for why `enter` and `tab` are *claimed* rather than
-//! left to the filter.
-//!
-//! The old dialog's read-only content — the "Mod key: …" line and the
-//! "saved to your app.toml" caption — survives as muted inert footer
-//! lines, not rows: there is nothing to step on either.
-//!
-//! ## What deliberately did NOT change
-//!
-//! The four setter helpers ([`set_theme`], [`set_font_size`],
-//! [`set_find_style`], [`set_add_direction`]) keep their exact
-//! `Entity<ShellView>`-taking signatures and semantics — they are the
-//! seam `shell::mod`'s tests drive directly, and nothing about *applying*
-//! a setting changed, only the control surface in front of it. Each now
-//! delegates to a `*_on(&mut ShellView, ...)` core so this module's own
-//! [`handle_key`] (which already holds `&mut ShellView` mid-key-dispatch
-//! and must not reenter the entity via `Entity::update`) can apply the
-//! identical path.
-//!
-//! ## Modes and the filter
-//!
-//! `docs/superpowers/specs/2026-09-01-dialog-filter-input-design.md`
-//! replaced this dialog's vim motions and `/` find (both styles) with a
-//! focused fuzzy filter over [`visible_rows`] / [`searchable_text`], and
-//! the dialog interaction model
-//! (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`,
-//! `crate::dialogmode`; §18 is this dialog's own amendment) then gave it
-//! the keybinding dialog's two modes. It opens in [`DialogMode::Normal`]
-//! with `ShellView::dialog_input` BLURRED (`open_shell_dialog_with_key`'s
-//! `focus_filter: false`; the door's own `dialog::sync_dialog_text` call
-//! parks the keys on the shell root), where `j`/`k` move, `space`/
-//! `shift+space` step, `/` enters [`DialogMode::Filter`] — exactly the
-//! always-focused filter the dialog had before, where printable keys
-//! type and the short vocabulary a focused `Input` leaves free
-//! ([`crate::listfilter::nav_command`]: `up`/`down`/`ctrl+p`/`ctrl+n` ∓1,
-//! `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10, plus
-//! `tab`/`shift+tab` for stepping) is what reaches the dialog — and
-//! `escape` walks [`dialogmode::escape_step`]'s ladder (filter → normal
-//! keeping the query → clear the query → close). [`route`] is the whole
-//! table, pure; [`handle_key`] applies it. Spec §3 originally listed this
-//! dialog as filter-only ("if settings ever grows a reset-to-default, it
-//! becomes modal by this same rule"); the user ruling of 2026-09-12 made
-//! it modal without waiting for a verb, so that a hand which learned the
-//! keybinding and config dialogs finds the same shape here rather than
-//! typing a `j` into the filter (the spec's own risk 2).
-//!
-//! The pure state (`mode`, `query`) is the truth about focus and the
-//! field's text, and [`dialog::sync_dialog_text`] is the only thing that
-//! moves either (spec §16.1) — it reads this dialog's state alongside the
-//! keybinding and object dialogs'. A transition site here is a pure
-//! mutation of [`SettingsState`] and must never call `focus` or
-//! `set_value` itself; the seams that reach the sync are the key-path
-//! tail in `ShellView::handle_key_down`, the open door, [`on_row_clicked`]
-//! and the frozen filter row's own click (`dialog::enter_filter_by_mouse`,
-//! §17.1 rule 1). The `[ui] find_style` setting and its row are untouched
-//! by any of this — `FindStyle` still exists, is still rendered and still
-//! steppable like any other row — this dialog (and the keybinding dialog)
-//! simply stop *reading* it to steer their own navigation.
+//! The visible settings are Theme, Font size, Line numbers, Find style, Add
+//! tile direction, and timeseries default source when available. A theme name
+//! already carries light or dark appearance, so there is no separate mode.
 
 use std::rc::Rc;
 

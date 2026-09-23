@@ -74,10 +74,15 @@ crates/
   geode-core         shared vocabulary: config, schema, scope, snapshot, colour, log
   geode-data         DataService: sources, ingest, DuckDB store, query path, health
   geode-shell        tiling WM, keymap engine, palette, frame, dialogs, module contract
+  geode-widgets      shared application controls below shell and feature crates
+  geode-chart        chart geometry, preparation and painting
   geode-blotter      any view as a collapsible keyboard-driven hierarchy
   geode-marketdata   market-data document panels with an edit draft (CVI)
+  geode-timeseries   fetchable series, expressions, statistics and chart tile
   geode-diagnostics  the diagnostics tile over health, generations, config and the log
-  geode-documents    typed parsers and writers per wire format (CVI)
+  geode-documents    typed parsers and writers per document wire format
+  geode-pricing      implementations of the pricing trait
+  geode-pricer       pure line-pricer sheet core (tile not built)
   geode-demo-data    deterministic synthetic risk data and documents
   geode-app          the `geode` binary: wires everything together
 docs/
@@ -105,9 +110,9 @@ ownership model.
 Threads are split the same way: the UI thread renders from immutable
 snapshots; a query pool owns the DuckDB read connections and delivers
 results over channels; one ingest thread owns the writer. The budgets in
-the foundation spec §7 are contracts: under 8 ms for a pure-UI action,
-under 50 ms for a requery at a million rows, and ingest never drops a
-foreground frame.
+the current architecture guide are contracts: under 8 ms for a pure-UI
+action, under 50 ms for a requery at a million rows, and ingest never drops
+a foreground frame.
 
 ## Developing
 
@@ -121,10 +126,9 @@ cargo check -p geode-shell --features test-support --all-targets
 
 CI runs those five on macOS and Windows; keep both building.
 
-A green suite proves less here than you would expect. The query path had
-five review rounds each find a silent wrong-data defect no fixture could
-reach, so `scripts/mutation-check.sh` breaks one load-bearing behaviour at
-a time and runs the suite. A `SURVIVED` line is a branch no test can see.
+A green suite can miss wrong-data behavior when its fixture cannot reach the
+relevant branch. `scripts/mutation-check.sh` breaks one load-bearing behavior
+at a time and runs the named test. A `SURVIVED` line is a branch no test sees.
 Run `--changed` after touching the data layer and add an entry for every
 behaviour you change; run `--anchors-only` before every merge. Commit
 before you mutate.
@@ -136,10 +140,10 @@ required reading.
 
 ## Status
 
-Shell, data layer, blotter, diagnostics, config dialogs, named colours,
-market-data documents through Part 3, tile stacks, choice lists and the
-timeseries data tier are merged. Market-data egress (Part 4) and the
-timeseries query and tile (Part 2) are next. Display checks on a real
-window are pending for much of the recent work. There are no real vendor
-adapters yet: every source shape is built against a simulator first. Current
-guides should state their own known limitations as they are migrated.
+The shell, data service, blotter, diagnostics, configuration dialogs,
+market-data editor, timeseries viewer, chart, shared date-time field, and
+line-pricer core are built. Market-data egress and the line-pricer tile and
+storage workflow are not built. There are no production vendor adapters; demo
+sources exercise each supported source shape. Some recent UI paths still need
+real-window display checks. The current subsystem guides record their specific
+limitations.

@@ -1,0 +1,147 @@
+# Feature modules
+
+Feature modules turn data and domain state into tiles. Each feature owns its
+model, commands, prepared presentation, module factory, and tests. Features do
+not depend on one another; they meet through shared vocabulary, the shell
+contract, and the data service.
+
+## Common lifecycle
+
+`geode-app` registers a `ModuleFactory` for each available tile kind. The shell
+creates an occupant for a `TileId`, sends its initial visibility and stack
+state, and later routes actions, find events, local commands, and asynchronous
+deliveries through `TileContent`.
+
+A module owns its domain state. It observes the shared `Frame`, requests data
+through `DataHandle`, and prepares the immutable or retained model used by its
+renderer. Hidden tiles may release subscriptions. On becoming visible they
+compare followed versions and request anything stale.
+
+Every module follows these interaction rules:
+
+- `:` changes only the focused tile; global changes use actions and palette
+  flows.
+- `/` searches within the tile.
+- Pointer commands have keyboard equivalents.
+- Insert-mode inputs own focus only while editing and blur before they close.
+- Stack state is visible through the shared marker in the module header.
+- Delivery matches are exhaustive so a new outcome cannot be ignored silently.
+
+## Blotter
+
+`geode-blotter` renders any configured view as a collapsible hierarchy. The
+data service returns every grouping depth in one `Snapshot`; the pure blotter
+core resolves columns, builds visible rows, retains expansion by path, formats
+the visible window, and handles cursor, find, and yank behavior.
+
+Attribution metadata decides whether a measure is meaningful at each depth. A
+non-attributable cell is shown as NULL rather than a plausible but incorrect
+sum. Pinned grouping, unscoped mode, local as-of, filtering, and named colours
+are tile state and survive through the module's session record.
+
+The `DataTable` delegate paints a prepared row model. Rendering does not
+recompile columns or format the whole dataset. Publication watches are scoped
+to the datasets the view reads, and global frame changes are staged through
+the flip barrier.
+
+## Market-data documents
+
+`geode-documents` owns typed wire-format parsers and writers. A parser produces
+`DocumentRows`, the shared struct-of-arrays representation, without opening a
+file or socket. `geode-data` knows only the `DocumentKind` trait; `geode-app`
+registers the concrete CVI and dividend kinds.
+
+`geode-marketdata` renders a document as either a matrix or a flat typed table.
+`PanelSpec` describes axes and value columns. `MatrixModel` is rebuilt on a
+delivery or structural edit and patched for an ordinary cell commit.
+
+Edits live in a `Draft` over a base generation. A newer delivery marks the
+draft behind rather than silently rebasing it. Rebase resolves edits by row and
+column labels, keeping stable intent across reordered documents. The module
+supports numeric, date, text, and closed-choice cells, row insertion/deletion,
+and kind-specific actions.
+
+Document egress is not built. `:upload` and related actions report that
+limitation rather than pretending to persist a draft upstream.
+
+## Timeseries
+
+`geode-timeseries` owns a chart tile composed from source series and arithmetic
+expressions. Its pure model tracks slots, range, frequency, axis mode,
+statistics, cursor, popups, and session state. Each mutation returns a
+`Changed` bitset so the tile can distinguish fetch, query, chart, chrome, and
+session work.
+
+Source identities resolve through the configured fetch sources. Fetch requests
+ask only for uncovered spans; completion is broadcast by `(identity, source)`
+so every interested tile requeries, including when zero new rows were needed.
+Series queries return aligned struct-of-arrays values, percentiles, bins, and
+coverage. Expression slots may narrow the result to buckets shared by their
+operands.
+
+`geode-chart` is independent of series and shell concepts. Its pure core owns
+scales, axes, layout, viewport, crosshair, decimation, and palette derivation.
+`ChartElement` paints an immutable `ChartModel` through gpui-component's plot
+surface. Paths and chrome are cached by the values that affect them; cursor
+movement does not rebuild the data model.
+
+`geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
+and key routing are separate from a painter that receives presentation values,
+allowing the market-data panel and as-of dialog to share behavior without
+depending on each other.
+
+## Diagnostics
+
+`geode-diagnostics` presents shell-owned operational state: sources, stored
+data, configuration, logs, and performance. The shell's `Diagnostics` entity
+is the source of truth; the tile builds only the selected section when that
+section's version changes.
+
+The tile does not query ordinary view data, but it still participates in frame
+arrival so a global flip cannot wait on it indefinitely. Catalog requests are
+bounded and coalesced by the app bridge. Hiding the diagnostics surface removes
+watched demand while explicit catalog consumers can keep their own demand.
+
+## Pricing and the line pricer
+
+`geode_core::pricing` defines the request, instrument, override, result, and
+`Pricer` vocabulary. `geode-pricing` contains implementations of that trait.
+The current `MockPricer` is deterministic test and demo behavior, not a
+financial model. The pricing worker applies one override set per batch,
+contains panics, supports cancellation between lines, and answers every line
+with either values or an error.
+
+`geode-pricer` currently contains the pure line-pricer core: a struct-of-arrays
+sheet, edits and undo, shorthand parsing/rendering, package folding, column
+planning, and document storage conversion. It has no tile and is not registered
+in the application roster. UI hosting and persistent workflow remain unbuilt.
+
+In-process pricing remains an upstream leaf. A feature submits definitions
+through the data-service request path and receives outcomes through shell
+delivery; it does not call a pricing implementation directly.
+
+## Demo and application composition
+
+`geode-demo-data` generates deterministic risk batches and market-data
+documents. `geode-app --demo` writes them under a seed-specific temporary
+directory and uses the same ingestion, adapter, parsing, query, and delivery
+paths as configured sources. Demo adapters provide subscribed documents and
+fetchable series without pretending to be production vendor integrations.
+
+`geode-app` is the composition root. It loads configuration, initializes GPUI
+and logging, builds registries, creates the data service and bridge, registers
+module factories, installs globals, and opens the window. Cross-layer policy
+that depends on the assembled binary belongs here; feature behavior does not.
+
+## Testing and performance
+
+Feature state machines are tested without a window. GPUI tests host the real
+tile for focus, key, pointer, popup, and delivery behavior. Render delegates
+are tested through prepared models rather than pixel claims unavailable to a
+headless context. Display checks remain necessary for exact color, geometry,
+and animation.
+
+Benchmarks cover blotter flattening and formatting, market-data model building,
+chart preparation, series querying, document parsing, and line-pricer core
+operations. Budgets and current gaps are recorded in
+[performance.md](performance.md).

@@ -1,5 +1,4 @@
-//! Implementations of `geode_core::pricing::Pricer` (line-pricer spec
-//! §4, §5.2).
+//! Implementations of `geode_core::pricing::Pricer`.
 //!
 //! This crate is a leaf under PHILOSOPHY §1's "In-process calculation":
 //! it depends on `geode-core` alone, nothing in the shell, a module or
@@ -20,8 +19,8 @@ use std::time::Duration;
 /// The name `[pricing] adapter` uses for the mock, and its default.
 pub const MOCK_PRICER: &str = "mock";
 
-/// An instrument on this underlying is refused, so the failed-line path
-/// is testable without a real library (spec §5.2).
+/// An instrument on this underlying is refused, making the failed-line path
+/// testable without a real library.
 pub const REFUSED_UNDERLYING: &str = "FAIL";
 
 /// Deterministic, cheap, and NOT a model. The numbers come from a hash

@@ -1,9 +1,9 @@
-//! The market-data panel module (market-data spec §8): one tile per
+//! The market-data panel module: one tile per
 //! `PanelSpec`, painting one document of a document dataset as a grid —
 //! pivoted on two axes, or a row per document row with the value columns
 //! laid flat — with a draft of unsent edits over the top.
 //!
-//! `core` is the pure half (spec §8.2/§8.4): the panel spec, the matrix
+//! `core` is the pure half: the panel spec, the matrix
 //! model a frame paints from, the draft, and the cell parser. It names no
 //! element, entity or window, so its tests run without one — the sole
 //! `gpui` type it borrows is `SharedString`, a refcounted string, so that
@@ -12,11 +12,10 @@
 //!
 //! [`tile`], [`delegate`] and [`content`] are the gpui half: the entity
 //! that requests its document through `DataHandle`, the `TableDelegate`
-//! its body is painted through (gpui-component's table, user ruling
-//! 2026-09-14), and the `TileContent`/`ModuleFactory` pair the shell hosts
-//! it through. Cell editing (insert mode, `:bump`, `:revert`) and the
-//! draft states (`Behind`, `:rebase`) are both here; `:upload`
-//! is Part 4, and the vocabulary already answers so.
+//! its body is painted through, and the `TileContent`/`ModuleFactory` pair
+//! the shell hosts it through. Cell editing (insert mode, `:bump`, `:revert`) and the
+//! draft states (`Behind`, `:rebase`) are both here. Egress is not built;
+//! `:upload` reports that limitation.
 
 pub mod commands;
 pub mod content;
@@ -31,9 +30,9 @@ pub use delegate::MatrixDelegate;
 pub use tile::MarketDataTile;
 
 /// Reclaim `DataTable`'s own key bindings, exactly as `geode_blotter::init`
-/// does and for the same reason (Phase 3 §3.3): this panel's body is a
-/// gpui-component table (user ruling 2026-09-14) which is never given
-/// focus, but a click inside it moves gpui focus there for one frame, and
+/// does and for the same reason: this panel's body is a gpui-component table
+/// which is never given focus, but a click inside it moves gpui focus there
+/// for one frame, and
 /// the component's own `escape`/arrows/`tab` actions must not act during
 /// it — they would fight the panel's `h j k l` and its cell editor.
 ///

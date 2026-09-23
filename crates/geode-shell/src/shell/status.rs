@@ -1,16 +1,12 @@
-//! The bottom status bar (Task 4, spec §3): pending keystroke display, the
+//! The bottom status bar: pending keystroke display, the
 //! config-reload indicator, and the active theme name. `status_bar` is a
 //! pure function of its arguments — no stored state, no I/O — so
 //! `ShellView` (or its tests) can call it with whatever matcher/theme
 //! snapshot they have on hand.
 //!
-//! Workspace indicators moved to the sidebar (Task 4 — `shell::sidebar`);
-//! this bar no longer knows the active workspace or which ones are
-//! non-empty. Per the phase-1c plan (`docs/superpowers/plans/
-//! 2026-08-29-phase-1c-shell-polish.md`, task 4 and its resize-binding
-//! section: "no `ShellMode`, ... no mode indicator"), there is no mode
-//! indicator either — Geode has never had a modal-editing concept for this
-//! bar to report.
+//! Workspace indicators belong to the sidebar; this bar does not know the
+//! active workspace or which ones are non-empty. It has no shell-wide mode to
+//! report.
 //!
 //! **Inventory decision:** migrated onto gpui-component's `StatusBar`
 //! (pinned release: `gpui-component-0.6.2/src/status_bar.rs`) rather

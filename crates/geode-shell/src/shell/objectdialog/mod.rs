@@ -1,86 +1,15 @@
-//! The config dialogs' shared scaffold: browse a config domain's named
-//! objects, and edit one
-//! (`docs/superpowers/specs/2026-09-08-geode-phase-4c-config-dialogs-design.md`).
+//! Shared scaffold for browsing and editing typed configuration objects.
 //!
-//! Phase 4c replaced an earlier design that would have put a TOML text
-//! editor in a tile. Instead every config domain — views, groupings,
-//! scopes, sources, the read-only schema — gets a purpose-built dialog
-//! on this one scaffold, so a trader edits *objects with fields* rather
-//! than text, and so the layer a change lands in is a property of the
-//! scaffold rather than a thing each dialog remembers to get right.
-//! Both stages were first built over one adapter, [`Domain::Views`] — the
-//! hardest shape first, deliberately (spec §14), so the vocabulary was
-//! settled before the thinner adapters depended on it. Views is the only
-//! domain whose fields split across two destinations, and
-//! [`Destination`] is what makes that split mechanical rather than a
-//! special case inside one adapter.
+//! Each domain supplies names, fields, validation, folding, and destinations;
+//! the scaffold owns selection, normal/filter modes, the field editor, confirm
+//! state, and user-layer persistence. Traders edit objects and fields rather
+//! than raw TOML. The writable layer and destination are explicit data, so an
+//! adapter cannot silently write inherited desk configuration.
 //!
-//! [`Domain::Groupings`] is the first of those thinner adapters, and it
-//! needed one more thing from the scaffold that Views alone never
-//! exercised: its object's own value is a bare array (`3 = ["book",
-//! "lhu"]`), not a table, so [`Domain::to_table`] renders a
-//! `toml_edit::Item` rather than a `toml_edit::Table` — see
-//! `groupings.rs`'s module doc for the full story.
-//!
-//! ## Layout
-//!
-//! Split the way `keybindings_view` and `picker` are, one directory
-//! further out because a domain adapter is a file of its own (spec §4):
-//!
-//! - this module — the pure core: [`Stage`], [`ObjectDialogState`],
-//!   [`Draft`] and its field vocabulary ([`Field`], [`FieldKind`],
-//!   [`ListItem`], [`Destination`]), [`ObjectRow`], [`Domain`], and the
-//!   one derivation of `layer` and `overridden` every domain shares;
-//! - [`views`] — the `Domain::Views` adapter: the doc it reads, the
-//!   one-line summary a view row shows, the fields a view has and which
-//!   file each one is written to, and nothing else;
-//! - [`groupings`] — the `Domain::Groupings` adapter: the nine grouping
-//!   slots, one dimension chain each;
-//! - [`render`] — the gpui shell: `open`, the [`dialog::ModalKeyHandler`]
-//!   both stages come through, and the painted list, fields and action
-//!   bar.
-//!
-//! No `gpui` type appears in this file, so every transition and every
-//! marker below is unit-testable without a window — the same split, for
-//! the same reason, that keeps `KeybindingsState` free of the scroll
-//! handle that sits beside it on `ShellView`.
-//!
-//! ## Browse rows are derived; the edit stage paints its draft
-//!
-//! [`Domain::objects`] runs fresh on every render and every keystroke.
-//! That is the contract `keybindings_view::derive_rows` and
-//! `settings_view::derive_rows` both hold, and the reason those dialogs
-//! cannot show a stale value: a config reload lands in
-//! `ShellView::services.config` with no notification to any dialog, so
-//! anything cached here would be wrong from the next 500 ms watcher tick
-//! onward.
-//!
-//! The **edit stage** is the deliberate exception: its rows come from the
-//! stored [`Draft`], not from `Config`. That is not a cache, and it is
-//! what makes a config edit instant. A keystroke records its change on a
-//! pending batch that is merged and applied 250 ms later ([`apply`]), so
-//! `services.config` is knowingly up to one debounce behind — a row
-//! derived from it would show the trader their own keystroke a quarter of
-//! a second late, which is the lag this whole design exists to remove.
-//! The draft is the same value the flush is about to merge, rendered
-//! through the same [`Domain::to_table`], and a failed write rebuilds it
-//! from the reverted config, so the two cannot drift apart.
-
-pub mod apply;
-mod colours;
-mod dataset_columns;
-mod groupings;
-pub mod render;
-mod schema;
-mod scopes;
-mod sources;
-mod views;
-
-/// `ShellView::deliver_distinct` routes a `SCOPES_KEY` outcome here — the
-/// one door onto the Values stage's own delivery, kept `pub(in crate::
-/// shell)` rather than fully `pub` like [`render::open`], since nothing
-/// outside this crate's shell needs it.
-pub(in crate::shell) use render::deliver_values;
+//! The browse stage lists objects. The edit stage holds a typed draft and may
+//! open nested choice, ordered-list, or values stages. Pure dialog state is the
+//! source of truth; the shared input is synchronized only through the dialog
+//! focus seam.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -7,6 +7,9 @@ edits over the top. CVI is the one panel spec built; the roster kind is
 the panel's own (`cvi`) while every panel shares the `marketdata` key
 context. Egress is not built; `:upload` reports that limitation.
 
+Current behavior and rationale:
+[`docs/current/features.md`](../../docs/current/features.md#market-data-documents).
+
 ## Layout
 
 | Module | Holds |
@@ -23,7 +26,7 @@ context. Egress is not built; `:upload` reports that limitation.
 
 ```sh
 cargo test -p geode-marketdata
-cargo bench -p geode-marketdata    # matrix model and draft (docs/perf.md)
+cargo bench -p geode-marketdata    # matrix model and draft
 ```
 
 ## Rules this crate pins

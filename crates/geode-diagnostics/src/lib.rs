@@ -1,10 +1,6 @@
-//! The diagnostics module (Phase 4b Task 5, spec §4.6): one tile, five
-//! sections over the shell-owned `Diagnostics` entity and the log ring —
-//! `:section` (`:level`/`:overlay` moved to the palette 2026-09-20),
-//! `[`/`]` to cycle. Opened via the status
-//! bar's diagnostics-summary click (`ShellView::open_module`) or the
-//! palette's `Diagnostics: Split` rows — `diagnostics::open` was retired
-//! by user ruling 2026-09-09.
+//! One diagnostics tile with five sections over the shell-owned
+//! `Diagnostics` entity and log ring. `:section` changes the visible section;
+//! `[` and `]` cycle. Log level and overlay changes use palette actions.
 
 pub mod commands;
 pub mod sections;

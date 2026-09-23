@@ -1,5 +1,9 @@
 # Phase history and standing rulings
 
+> **Archive:** This is the chronological implementation record and may contain
+> superseded behavior. See [`docs/README.md`](README.md) and
+> [`docs/current/`](current/) for maintained documentation.
+
 This is the verbatim, phase-by-phase record that used to be the "What Geode is" section of `CLAUDE.md`, moved here on 2026-09-19 because that file has a size cap. Nothing was edited in the move. Each paragraph is what a phase (or a fix wave, or a user ruling) built, in the order it landed, together with every review finding and every "a maintainer must not tidy this" trap it left behind, and it is long on purpose: `CLAUDE.md` now carries a status table and the distilled rules, and points here for the reasoning.
 
 **When a phase, fix wave or ruling merges, add its paragraph HERE** (newest at the bottom of the section it belongs to, or at the end), and update `CLAUDE.md` with a one-line status row and any new load-bearing rule — never another narrative paragraph there.
