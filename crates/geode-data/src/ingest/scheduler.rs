@@ -1,11 +1,9 @@
-//! Discovery on a schedule (Phase 3 spec §5.3, foundation §5.1). One
-//! thread walks every configured source on its own interval, builds a
-//! plan from what is ready, and hands it to the ingest runner. Polling,
-//! never watching: `notify` is unreliable over SMB (§11).
+//! One discovery thread polls directory sources at their own intervals and
+//! submits ready plans to ingest. Polling works on network shares where file
+//! watches can miss changes. Every source is initially due immediately.
 //!
-//! Every source is polled once immediately at start, so cold start is
-//! the same code path as the thirtieth poll, and discovery I/O happens
-//! here where nothing waits on it.
+//! Polls run sequentially: slow filesystem I/O delays other sources and
+//! shutdown. Panic containment does not provide an I/O timeout.
 
 use crate::health::{Health, severity_rank};
 use crate::ingest::IngestHandle;
@@ -19,12 +17,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchedulerEvent {
-    /// One poll finished; `ready` is how many files were handed to the
-    /// runner. Tests wait on this; the service maps it to
-    /// `DataEvent::Polled` (Phase 4b §4.4's last/next-poll diagnostic).
-    /// `next_in` is this source's `poll_interval` at the moment of this
-    /// poll — the service adds it to "now" to get the next poll's
-    /// estimated time.
+    /// Poll completion. `ready` counts planned files before runner deduplication,
+    /// not newly enqueued jobs. `next_in` is the configured interval used for the
+    /// service's next-poll estimate.
     Polled {
         source: String,
         ready: usize,
@@ -38,11 +33,8 @@ pub enum SchedulerEvent {
     },
 }
 
-/// Where discovery's events go. `false` means "this event was not
-/// delivered" — the caller's bounded channel was full, or its receiver is
-/// gone — and is never a shutdown signal: the scheduler re-arms and polls
-/// on regardless (Phase 4b follow-up, Task 1; its only stop is the `stop`
-/// condvar `Scheduler::shutdown` sets). A sink must not block.
+/// Nonblocking discovery event sink. False means delivery was refused, not
+/// that polling should stop. Shutdown signals the scheduler's stop condition.
 pub type SchedulerSink = Arc<dyn Fn(SchedulerEvent) -> bool + Send + Sync>;
 
 pub struct Scheduler {
@@ -106,9 +98,8 @@ fn wait_until(stop: &(Mutex<bool>, Condvar), until: Instant) -> bool {
     }
 }
 
-/// Which of one poll's two events the sink refused. Both are always
-/// attempted (fix round 1, MIN-4), so the warning can name what was
-/// actually dropped instead of saying "a discovery event" for either.
+/// Record health and poll-result refusals independently so the warning names
+/// every undelivered event.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Refused {
     health: bool,
@@ -147,11 +138,8 @@ fn run(
     if sources.is_empty() {
         return;
     }
-    // One line per scheduler, not one per poll (final review, MIN-3):
-    // before Task 1 a refusal ended this thread, so the warning could not
-    // repeat. Now the thread polls on every `poll_interval` for the rest
-    // of the session, and an unlatched line would fill the 4,096-entry
-    // log ring. `dropped` remains the authoritative count.
+    // Warn once per scheduler about refused delivery to preserve log capacity.
+    // Delivery counters retain the full refusal count.
     let refusal_logged = AtomicBool::new(false);
     // Everything is due now: the first sweep is the cold start.
     let mut due: Vec<(Instant, usize)> = (0..sources.len()).map(|i| (Instant::now(), i)).collect();
@@ -164,33 +152,17 @@ fn run(
         }
         let spec = &sources[i];
 
-        // The whole poll is the panic boundary (spec §5.7), not just
-        // `discover`: building the plan, submitting it, and the sink
-        // calls all run inside `catch_unwind` too. A panic anywhere in
-        // here — a bad glob, a share that hangs, a sink that panics —
-        // must degrade this source and let the thread carry on to the
-        // next one. Left partly outside, a panic in `build_plan` or
-        // `ingest.submit` would unwind straight out of this thread; the
-        // `JoinHandle` from `spawn` is never inspected for `Err`, so the
-        // thread would die silently and every other source would stop
-        // being polled with nothing on the sink to say so — exactly the
-        // silence spec §5.7 forbids.
+        // Contain the whole poll, including planning, submission, and normal sink
+        // calls. Report errors/panics as source failure, then rearm. This boundary
+        // does not interrupt a blocked filesystem call; failure reporting also
+        // requires the sink itself to return normally.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<Refused, crate::store::StoreError> {
                 geode_core::panic::contained(|| {
                     let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
                     let health = worst_health(&candidates);
-                    // NEW-1 (final review round 2): the scheduler ALWAYS
-                    // emits its poll result now — `Ok` on a clean poll,
-                    // `worst` otherwise — with no dedup of its own. The
-                    // transition guard moved to `DataService`'s shared
-                    // `HealthTracker`, which both this scheduler sink and
-                    // the ingest sink report through: a scheduler-local
-                    // tracker (the old `last_reported`) could not see a
-                    // publish's own health notes, so a degraded publish
-                    // stayed latched even after the scheduler's own next
-                    // clean poll — the scheduler thought it had already
-                    // said `Ok`.
+                    // Report every poll, including clean state. The service's shared tracker
+                    // combines discovery with load health and deduplicates transitions.
                     let health_delivered = match health {
                         Some((worst, detail)) => sink(SchedulerEvent::Health {
                             source: spec.name.clone(),
@@ -208,11 +180,7 @@ fn run(
                     if ready > 0 {
                         ingest.submit(plan);
                     }
-                    // Attempted unconditionally, never `health_delivered
-                    // && …` (fix round 1, MIN-4): a poll's two events are
-                    // independent, and short-circuiting meant one full
-                    // channel lost both while the caller's `dropped`
-                    // counter — and the warning below — knew about one.
+                    // Attempt Polled independently of the health delivery verdict.
                     let polled_delivered = sink(SchedulerEvent::Polled {
                         source: spec.name.clone(),
                         ready,
@@ -252,12 +220,9 @@ fn run(
     }
 }
 
-/// A refused event is one dropped diagnostic, not the end of discovery
-/// for every source (Phase 4b follow-up, Task 1). Nothing is retried: the
-/// health transition the tracker cares about is re-offered on the next
-/// report. Logged once per scheduler — `latched` (final review, MIN-3) —
-/// and a free function so a test can reach it without a scheduler thread,
-/// the same reason `runner::log_refused_event` is one.
+/// Warn once about refused diagnostics and continue polling. The scheduler
+/// does not retry individual events; the service can reoffer an unacknowledged
+/// health transition on the next report.
 fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
     if latched.swap(true, Ordering::Relaxed) {
         return;
@@ -269,24 +234,10 @@ fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
     );
 }
 
-/// The worst candidate state and a detail line naming EVERY file at that
-/// worst severity, ordered by [`severity_rank`] — never `Health`'s
-/// derived `Ord`. Two `Orphaned` candidates (both lower to
-/// `Degraded`) with different reasons are the same variant, so `Ord`
-/// falls through to comparing the `reason` STRING: the alphabet would
-/// decide which candidate's `*w == h` / `*w > h` comparison kept it, and
-/// the other file's name was dropped from the detail entirely — the
-/// same failure `severity_rank`'s own doc explains for `service.rs`'s
-/// `HealthTracker` rollup (NEW-5), here between two discovery
-/// candidates instead of two health lanes.
-///
-/// Equal rank keeps every candidate at that rank. The returned `Health`
-/// carries the FIRST such candidate's reason, in candidate order. When
-/// the kept candidates' reasons differ, the detail names each file with
-/// its own reason (`degraded: a.csv (expected value at line 1), b.csv
-/// (no header)`); when they agree — including `PendingTooLong`, which
-/// has none — the detail keeps today's plain shape (`pending_too_long:
-/// a.csv, b.csv`).
+/// Select by severity rank and include every file at the worst rank. Equal
+/// severity must not compare reason strings alphabetically. The returned
+/// Health carries the first candidate's reason; detail includes individual
+/// reasons when they differ and a shared label when they agree.
 fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, String)> {
     let mut worst: Vec<(Health, String)> = Vec::new();
     for c in candidates {
@@ -386,10 +337,8 @@ mod tests {
         (Arc::new(move |e| tx.send(e).is_ok()), rx)
     }
 
-    /// `events_sink`, but REFUSING the first event matching `refuse` —
-    /// returning `false` without sending it. `false` means "not
-    /// delivered", never "stop polling" (Phase 4b follow-up, Task 1).
-    /// The counter lets a test wait for the refusal instead of racing it.
+    /// Refuse the first matching event and count it. Tests wait for the refusal
+    /// before verifying discovery continues.
     fn refusing_events_sink(
         refuse: fn(&SchedulerEvent) -> bool,
     ) -> (
@@ -401,7 +350,7 @@ mod tests {
         let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&refusals);
         let sink: SchedulerSink = Arc::new(move |e: SchedulerEvent| {
-            // Claimed atomically (fix round 1, nit): load-then-add
+            // Claimed atomically: load-then-add
             // could refuse twice if two threads ever shared this sink.
             if refuse(&e)
                 && counter
@@ -521,9 +470,7 @@ mod tests {
 
     #[test]
     fn a_refused_event_does_not_stop_the_scheduler() {
-        // One full outbound channel used to end discovery for EVERY
-        // source for the rest of the session. The scheduler's only stop
-        // is its `stop` condvar (Phase 4b follow-up, Task 1).
+        // Refused event delivery must not stop subsequent discovery polls.
         let poll = Duration::from_millis(20);
         let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
             harness(poll, Duration::from_secs(3600));
@@ -579,9 +526,7 @@ mod tests {
 
     #[test]
     fn a_refusal_is_logged_once_per_scheduler_not_once_per_poll() {
-        // The default poll interval is 30 s and the thread no longer
-        // exits on a refusal, so an unlatched line repeats for the rest
-        // of the session (final review, MIN-3).
+        // Repeated delivery refusal must produce only one warning per scheduler.
         let latch = AtomicBool::new(false);
         let records = logged(|| {
             log_refused_discovery(&latch, "the health report", "risk");
@@ -624,12 +569,8 @@ mod tests {
 
     #[test]
     fn a_refused_health_does_not_swallow_that_polls_result() {
-        // The two events of one poll are independent (fix round 1,
-        // MIN-4): a refused `Health` used to short-circuit the `Polled`
-        // that follows it, so one full-channel moment lost two events
-        // while `dropped` counted one. The first event to actually
-        // arrive must therefore be THIS poll's `Polled`, not the next
-        // poll's `Health`.
+        // Refuse Health and verify the same poll still attempts Polled. The two
+        // delivery verdicts must not short-circuit each other.
         let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
             harness(Duration::from_millis(20), Duration::from_secs(3600));
         let (sink, sched_rx, refusals) =
@@ -652,16 +593,13 @@ mod tests {
 
     #[test]
     fn a_file_that_appears_after_start_is_discovered_and_published() {
-        // The whole point of the scheduler (Phase 3 §2.8): the probe
-        // discovered once and never again.
+        // A file arriving after startup must be found by a later poll.
         let (_db, dir, ingest, ingest_rx, conn, spec, _ds) =
             harness(Duration::from_millis(50), Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
         let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
 
-        // First poll: nothing there. A clean source's first poll is now
-        // also a Health::Ok transition (MAJ-2, final review) — skip past
-        // it rather than assuming Polled arrives first.
+        // Skip the first clean health report while waiting for poll completion.
         let mut first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         if matches!(
             first,
@@ -756,9 +694,7 @@ mod tests {
         sched.shutdown();
     }
 
-    /// MAJ-2 (final review): a source's health used to be latched for the
-    /// session — nothing ever emitted `Health::Ok`, so a source that
-    /// recovered from `PendingTooLong` kept reading as degraded forever.
+    /// A recovered source must report Ok after PendingTooLong.
     #[test]
     fn a_degraded_source_that_recovers_emits_an_ok_health_event() {
         let (_db, dir, ingest, _ingest_rx, conn, spec, _ds) =
@@ -808,18 +744,8 @@ mod tests {
         sched.shutdown();
     }
 
-    /// MAJ-2's original dedup guard lived here, at the scheduler; final
-    /// review round 2 (NEW-1) moved it to `DataService`'s shared
-    /// `HealthTracker`, because a scheduler-local tracker had no way to
-    /// see a PUBLISH's own health notes — a degraded publish stayed
-    /// latched even after the scheduler's next clean poll, since the
-    /// scheduler thought it had already said `Ok`. The scheduler now
-    /// emits its poll result unconditionally; the "exactly one Ok" case
-    /// this test used to pin now lives at the service level
-    /// (`service.rs`'s
-    /// `a_clean_scheduler_poll_and_a_clean_publish_together_send_exactly_one_ok`).
-    /// Pinned here instead: a steadily healthy source reports `Ok` on
-    /// EVERY poll, not just the first.
+    /// The scheduler reports Ok on every clean poll. Transition deduplication
+    /// belongs to the service, where discovery and load outcomes are combined.
     #[test]
     fn a_steadily_healthy_source_reports_ok_on_every_poll() {
         let poll = Duration::from_millis(20);
@@ -858,13 +784,9 @@ mod tests {
         sched.shutdown();
     }
 
-    /// The production symptom (2026-09-07 display): 3051 generations of 17
-    /// files that never changed, loaded over an hour of 2s polls. `submit`
-    /// never deduplicates, and `discover` only knows the catalog — not what
-    /// is already queued or being loaded right now — so every poll shorter
-    /// than a load re-adds a copy of every file not yet published. This
-    /// reproduces the ladder at a scale a unit test can afford: a 20ms
-    /// poll against files that each take longer than that to load.
+    /// Poll faster than files load so discovery repeatedly sees unpublished work.
+    /// Runner deduplication must prevent duplicate generations and allow the
+    /// queue to drain once each unchanged file is loaded.
     #[test]
     fn a_poll_shorter_than_a_load_does_not_reload_files_already_queued() {
         let (_db, dir, ingest, ingest_rx, conn, spec, _ds) =
@@ -902,16 +824,8 @@ mod tests {
         let (sink, _sched_rx) = events_sink();
         let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
 
-        // Bounded generously rather than tightly: this fixture has 15 real
-        // files to load (real DuckDB I/O, one publish transaction each),
-        // and under `cargo test --workspace`'s full parallel load that
-        // legitimately took longer than a tighter 10s bound allowed,
-        // failing a run that was simply still working, not stuck. A
-        // regression reproduces at a wholly different scale — the RED run
-        // against the unfixed code still hadn't gone idle after 10s with
-        // 45 *duplicate* publishes and climbing (the display's own case
-        // took an hour) — so this bound stays tight enough to fail fast on
-        // an actual defect while giving legitimate contention real room.
+        // Allow time for real CSV loads and publication transactions under parallel
+        // test load. Duplicate publication is checked separately before this timeout.
         let mut published = 0;
         let mut idle = false;
         let deadline = std::time::Instant::now() + Duration::from_secs(45);
@@ -919,16 +833,8 @@ mod tests {
             match ingest_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(IngestEvent::Published { .. }) => {
                     published += 1;
-                    // Fail on the defect itself, immediately, rather than
-                    // waiting out the full 45s bound: a regression means
-                    // published keeps climbing past the file count (the
-                    // RED run against `a18d0a9` reached 45 duplicate
-                    // publishes in the first 10s alone, still climbing),
-                    // and the two assertions below — the honest ones —
-                    // are otherwise unreachable in that case, since `idle`
-                    // never becomes true first. This makes the 45s bound
-                    // something only a genuinely slow-but-correct run
-                    // ever pays in full.
+                    // Fail immediately if publications exceed the number of files: duplicate
+                    // work may prevent the queue from ever becoming idle.
                     assert!(
                         published <= ready_files.len(),
                         "{published} publishes for {} files — duplicates",

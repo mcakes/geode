@@ -1,14 +1,7 @@
-//! The grain split (spec §3.2) and conflict detection (spec §3.5).
-//!
-//! The source file is flat at the atomic grain, so a measure belonging to a
-//! coarser grain is repeated across a row group and any `SUM` over it
-//! double-counts. Splitting by grain makes that impossible by construction
-//! rather than by discipline.
-//!
-//! Everything here is SQL executed inside DuckDB: no rows cross into Rust.
-//! Deduplicating a million rows through a Rust HashMap would violate both
-//! the allocation discipline (PHILOSOPHY §6) and the ingest-invisibility
-//! budget (spec §7.1).
+//! Split flat source rows by declared grain and detect conflicting repeated
+//! values. Coarse measures must contribute once per grain group rather than
+//! once per atomic row. All grouping and conflict checks run in DuckDB,
+//! avoiding per-row transfers and allocations in Rust.
 
 use crate::store::StoreError;
 use crate::store::catalog::FileId;
@@ -23,9 +16,8 @@ pub struct SplitRequest<'a> {
     pub file_id: FileId,
 }
 
-/// A column whose repeated values disagreed within one grain group. Either
-/// upstream is inconsistent or the column's declared grain is wrong — which
-/// is exactly the signal spec §3.5 wants surfaced rather than averaged away.
+/// A column whose repeated values disagree within a grain group. This can
+/// indicate inconsistent upstream data or an incorrect declared grain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
     pub grain: Grain,
@@ -53,7 +45,7 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
 }
 
 /// Key expressions for a grain. The pair grain canonicalizes its two
-/// underlyings so both source orderings collapse to one row (spec §3.3).
+/// underlyings so both source orderings collapse to one row.
 fn key_exprs(grain: Grain) -> Vec<(String, String)> {
     grain
         .key_columns()
@@ -73,7 +65,7 @@ fn key_exprs(grain: Grain) -> Vec<(String, String)> {
 }
 
 /// Measures and attributes declared at this grain, plus the carried
-/// dimensions it carries (spec §3.3). A carried dimension goes through
+/// dimensions it carries. A carried dimension goes through
 /// `any_value` like an attribute and — because the dependency on the
 /// key is a claim the schema makes — through the conflict check below
 /// like one too.
@@ -442,7 +434,7 @@ grain = "instrument"
     fn disagreeing_repeated_values_are_reported_as_conflicts() {
         let (_d, store) = fixture();
         // Same instrument, different NPV on one row: either upstream
-        // disagrees or the grain assignment is wrong (spec §3.5).
+        // disagrees or the grain assignment is wrong.
         store
             .writer()
             .execute_batch("update staging_raw set npv = 999 where underlying_ref = 'SPX'")

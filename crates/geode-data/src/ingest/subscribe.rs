@@ -1,53 +1,21 @@
-//! The receiver pipeline for a subscribed source (market-data spec §5.4):
-//! one thread per source, between the adapter tier and the ingest runner.
+//! One receiver thread per subscribed source parses, validates, stamps, and
+//! coalesces documents before submitting them to the ingest writer.
 //!
-//! Its whole shape follows from where it sits. Upstream is a bus whose
-//! producer must never be blocked ([`MessageSink::push`] is a `try_send`
-//! and a counter), downstream is a writer thread that publishes one
-//! generation at a time, and the two run at completely different speeds: a
-//! market-data feed republishes a key every few milliseconds, while a
-//! publish is a transaction. So this thread is where the rate is reconciled
-//! — parse, validate, stamp, then hand to [`Coalescer`], which keeps at
-//! most ONE pending document per key and releases it no more often than the
-//! source's `coalesce` window. Nothing is queued to be caught up on later:
-//! market data is a stream of latest-value snapshots, so the newest
-//! document for a key is the only one worth publishing.
+//! The adapter's MessageSink is bounded and refuses without waiting. The
+//! coalescer keeps one pending snapshot per key; it does not replace jobs
+//! already queued at ingest or cap the number of distinct keys. The receive
+//! loop waits until the next deadline or MAX_WAIT, whichever comes first.
+//! Releases depend on thread scheduling and message-processing time.
 //!
-//! **The timer is here and nowhere else.** `Coalescer` is pure — every
-//! method takes `now` — so this loop's `recv_timeout` is the only clock on
-//! the path, and its wait is `min(next release deadline, MAX_WAIT)`: a held
-//! document is released within a millisecond or two of its deadline even
-//! when the feed has gone quiet, and a thread with nothing pending still
-//! wakes four times a second to notice the stop flag.
+//! The service combines adapter connection reports in the discovery lane with
+//! receiver/publication reports in the load lane. Parse failures without a
+//! key use the raw topic. A later message that parses, validates, and stamps
+//! successfully clears that topic entry; publication reports separately under
+//! the document key. A clean connection report cannot clear either failure.
 //!
-//! **Failures split by lane, and this module takes no position on either.**
-//! Two closures are passed in: `report_load` for what this source's own
-//! documents did (the LOAD lane, keyed by batch — by the topic when the
-//! bytes never yielded a key), and the adapter's own `HealthSink` for
-//! connection state (the DISCOVERY lane). Both are built by
-//! `DataService::open`, because the health-lane rules are the service's
-//! (`docs/phase-history.md`, Phase 4b: a clean discovery report must never clear a
-//! load-lane problem) and a receiver thread that reported health itself
-//! would be a second place those rules live.
-//!
-//! **A topic-keyed failure is cleared HERE, because nothing else can.**
-//! The load lane is per-batch and worst-across-batches, and its only
-//! other `Ok` writer is the ingest sink's `Published` arm, keyed by the
-//! document's own batch (`SPX.Z`) — a different string from the topic a
-//! failed parse was filed under (`marketdata/cvi/SPX.Z`). So a source
-//! that recovered from one malformed message would have read `Failed`
-//! for the rest of the session. [`Receiving::failed_topics`] remembers
-//! the topics filed that way and reports `Health::Ok` under the topic on
-//! the first message from it that parses, validates and stamps; the
-//! tracker's own transition dedupe means only a real recovery emits, and
-//! a clean message on a never-failed topic costs one set lookup.
-//!
-//! Nothing here allocates per row: the parse allocates the columns and
-//! those exact columns are moved into the [`DocumentJob`] the runner
-//! publishes (PHILOSOPHY §6). What is allocated per message is one key
-//! `String` (the coalescer's map key, which is also the `batch` the publish
-//! records) and, first time only, one `String` per unrecognised element
-//! path.
+//! Parsed columns move into DocumentJob without per-row copies. Shutdown
+//! unsubscribes, sets the stop flag, and joins; pending coalesced documents are
+//! not flushed. Blocking adapter/parser code can delay shutdown.
 
 use crate::adapter::{AdapterError, HealthSink, MESSAGE_BOUND, Message, MessageSink, Subscription};
 use crate::health::Health;
@@ -64,17 +32,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// The longest one `recv_timeout` will wait when the coalescer has nothing
-/// due sooner.
-///
-/// It is a stop-flag granularity, not a data latency: a message wakes the
-/// thread immediately and a held document wakes it on its own deadline, so
-/// the only thing this bounds is how long `shutdown` could wait if the
-/// channel did not disconnect first (it does — `shutdown` unsubscribes
-/// before it joins, which drops the adapter's sink, and that sink is the
-/// only sender there is: this side keeps the refusal COUNTER rather than a
-/// sink clone, exactly so that holds). A quarter of a second was chosen to
-/// cost nothing per idle source while keeping that backstop short.
+/// Maximum idle receive wait when no coalesced document is due sooner.
+/// Messages and disconnection wake the receiver. This bounds stop-flag checks
+/// while idle, not total shutdown latency or parser execution time.
 const MAX_WAIT: Duration = Duration::from_millis(250);
 
 /// What a receiver thread reports about its own documents: the batch it
@@ -107,33 +67,13 @@ struct Pending {
     bytes: u64,
 }
 
-/// One subscribed source's live subscription and the thread draining it.
-///
-/// The subscription is held HERE rather than moved onto the receiver
-/// thread, so that `shutdown` can stop delivery before it stops reading:
-/// unsubscribing first means the dispatcher is no longer cloning messages
-/// into a queue nobody will drain, and it also disconnects the channel,
-/// which is what makes the join immediate instead of up to [`MAX_WAIT`].
-/// One thread ever touches it either way — `&mut self` on both methods is
-/// the whole of the discipline [`Subscription`] asks for.
+/// Owns a source's subscription and receiver thread. Keeping the subscription
+/// here lets shutdown unsubscribe before joining the receiver.
 pub struct SubscriptionWorker {
     subscription: Box<dyn Subscription>,
     stop: Arc<AtomicBool>,
-    /// The sink's refusal counter — the COUNTER, never a clone of the
-    /// sink itself.
-    ///
-    /// [`MessageSink::refused`] is the only record of a message this
-    /// source DROPPED (a receiver that fell behind its feed, which is
-    /// data silently missing from every query), so something here has to
-    /// be able to read it; fix round 1 kept a `MessageSink` clone for
-    /// that, and the clone kept the receiver's channel CONNECTED. With a
-    /// sender alive here, `unsubscribe` no longer disconnected anything,
-    /// the loop's `Disconnected` arm became unreachable on shutdown, and
-    /// every join waited out a [`MAX_WAIT`] tick instead — serially, once
-    /// per source, in `DataService::shutdown`. The counter carries the
-    /// number and no capability (`MessageSink::refused_counter`), so the
-    /// sole sender is the one the adapter holds and dropping it is what
-    /// ends the thread.
+    /// Keep only the refusal counter, not a MessageSink clone. Retaining a sender
+    /// here would prevent unsubscribe from disconnecting the receiver.
     refused: Arc<AtomicU64>,
     /// `None` once joined, so `shutdown` is idempotent and `Drop` can call
     /// it again with nothing to do.
@@ -221,18 +161,10 @@ impl SubscriptionWorker {
         self.refused.load(Ordering::Relaxed)
     }
 
-    /// Stops delivery, then the thread. Idempotent.
-    ///
-    /// Order matters: `unsubscribe` first so no further message is queued
-    /// and the channel disconnects — which it does, this side holding no
-    /// sender of its own (see [`SubscriptionWorker::refused`]), and which
-    /// the loop treats as a stop, so the join returns at once rather than
-    /// after a [`MAX_WAIT`] tick. Then the flag, the backstop for an
-    /// adapter whose `unsubscribe` leaves a sink alive somewhere; then
-    /// the join. A document the coalescer is still holding is
-    /// deliberately dropped rather than flushed — it is one superseded
-    /// snapshot per key, and the runner it would be submitted to is being
-    /// shut down in the same breath.
+    /// Unsubscribe, set the stop flag, and join. Idempotent. Pending coalesced
+    /// documents are not flushed. Disconnection wakes an idle receiver; the stop
+    /// flag also handles adapters that retain a sender after unsubscribe.
+    /// In-progress adapter/parser calls must return before shutdown can complete.
     pub fn shutdown(&mut self) {
         self.subscription.unsubscribe();
         self.stop.store(true, Ordering::Relaxed);
@@ -252,24 +184,11 @@ impl Drop for SubscriptionWorker {
     }
 }
 
-/// The largest number of distinct "unknown element" paths one source's
-/// receiver will remember having warned about.
-///
-/// A parser reports an unrecognised element by its own path in the
-/// document, and nothing here controls what a feed calls its elements —
-/// a hostile or merely buggy feed that indexes element names by content
-/// (a stray field per message, say) must not be able to grow this set,
-/// and so the receiver's own memory, without bound for the life of the
-/// session (PHILOSOPHY §6). Past the cap the set simply stops growing;
-/// see [`UnknownPaths::first_sighting`] for what a source reports once
-/// that happens.
+/// Maximum number of unknown-element paths retained per receiver. Feed-chosen
+/// names must not grow this warning-deduplication set without bound.
 const UNKNOWN_PATH_CAP: usize = 256;
 
-/// Dedupes "unknown element" warnings for one source's receiver thread —
-/// pulled out of [`Receiving`] as its own small piece of state so the
-/// cap-and-warn-once behaviour can be unit-tested directly, without
-/// constructing the dataset schema, ingest handle and report sinks the
-/// rest of the receiver needs.
+/// Per-source deduplication of unknown-element warnings, with a fixed cap.
 struct UnknownPaths {
     source: String,
     seen: HashSet<String>,
@@ -290,17 +209,9 @@ impl UnknownPaths {
         }
     }
 
-    /// True the first time `path` is seen, false on a repeat — the
-    /// dedupe the module doc promises: a feed sending one stray element
-    /// on every message logs one line, not one per message (spec §6.3).
-    ///
-    /// Below [`UNKNOWN_PATH_CAP`] this is a plain seen-before set. At the
-    /// cap the set stops growing (nothing new is allocated for it ever
-    /// again), a single `warn` says the cap was hit, and every later
-    /// distinct path reports `true` on every call — there is nowhere left
-    /// to remember having seen it, so the caller's own per-path warning
-    /// fires every time rather than once. Better a noisy log than
-    /// unbounded memory for a feed that will not stop sending new names.
+    /// Return false for remembered paths and true for a new path. At the cap,
+    /// warn once and stop remembering new paths; unremembered paths return true
+    /// on every call, so their per-path warnings can repeat.
     fn first_sighting(&mut self, path: &str) -> bool {
         if self.seen.contains(path) {
             return false;
@@ -337,14 +248,9 @@ struct Receiving {
     /// capped so an adversarial or buggy feed's own element names cannot
     /// grow it without bound — see [`UnknownPaths`].
     unknown: UnknownPaths,
-    /// Topics this source has filed a load-lane failure under — a parse
-    /// `Err` or a panicking parse, the two failures with no batch to key
-    /// on. Cleared by the first message from that topic that makes it all
-    /// the way through (see the module doc): no other writer of the load
-    /// lane keys by topic, so without this the entry would stand for the
-    /// life of the session. Bounded by the source's own topic set in
-    /// practice, and one entry is one `String` per topic that has ever
-    /// failed.
+    /// Raw topics with unresolved parse failures. Remove a topic after a message
+    /// parses, validates, and stamps successfully. This set has no fixed cap;
+    /// wildcard subscriptions can expose arbitrarily many distinct topics.
     failed_topics: HashSet<String>,
 }
 
@@ -375,40 +281,11 @@ impl Receiving {
         }
     }
 
-    /// One message, inside a panic boundary — the same one every other
-    /// background boundary in this crate uses (spec §5.7: an ingest load,
-    /// a pop-time catalog recheck, a discovery poll, a query worker, a
-    /// document publish).
-    ///
-    /// It is needed HERE more than at any of those, because the foreign
-    /// code is a parser over bytes a broker sent: an index into a
-    /// truncated body or an `unwrap` on an element the feed stopped
-    /// sending is a panic, not an `Err`, and there is no version of a
-    /// vendor parser this process can promise never panics. Without the
-    /// boundary one such message ends the receiver thread for the session
-    /// — the source then latches at whatever health it last reported,
-    /// nothing ever arrives again, and `contained` being false makes the
-    /// process-wide hook write a `crash-<ts>.log` for a failure that cost
-    /// one document.
-    ///
-    /// With it, the panic is reported exactly as an `Err` from the same
-    /// parse would be (the load lane, keyed by topic, with the payload as
-    /// the reason) and the thread takes the next message. `contained` is
-    /// what tells the panic hook this one is handled, so it logs at
-    /// `error` and writes no crash file.
-    ///
-    /// The whole of `on_message` is inside, not just the parse: a panic
-    /// anywhere on the path is the same failure of the same message, and a
-    /// boundary drawn around one step would leave the others uncovered
-    /// for no reason. `AssertUnwindSafe` is the same assertion the runner
-    /// makes and rests on the same fact — nothing here holds a lock, and
-    /// the two pieces of state a panic could leave mid-update (the
-    /// coalescer's map, the unknown-path set) are at worst a stale entry
-    /// that the next message for that key supersedes.
-    ///
-    /// `message` is borrowed rather than moved so the topic is still
-    /// readable after a panic unwound out of `on_message`, without
-    /// cloning one `String` per message to have it.
+    /// Handle one message under panic containment. Report a panic as a load
+    /// failure keyed by raw topic, including the payload, and continue receiving.
+    /// The boundary covers all of on_message, including parsing and validation.
+    /// Borrow the message so its topic remains available after unwinding without
+    /// cloning it for every message.
     fn handle_message(&mut self, message: &Message, coalescer: &mut Coalescer<Pending>) {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| self.on_message(message, coalescer))
@@ -514,8 +391,8 @@ impl Receiving {
         }
     }
 
-    /// Hands one released document to the runner. Never blocks on it:
-    /// `submit_document` takes the queue lock, pushes and notifies.
+    /// Queue a released document under the runner's mutex and notify it.
+    /// This does not wait for publication or refuse on queue capacity.
     fn submit(&self, pending: Pending) {
         self.ingest.submit_document(DocumentJob {
             source: self.source.clone(),
@@ -528,28 +405,12 @@ impl Receiving {
     }
 }
 
-/// The instant a publish of `rows` is stamped with, under this source's
-/// `source_time` policy (`geode_core::source_config::SourceTime`).
-///
-/// Pure, and the reason it is: as-of routing, the backfill guard and
-/// retention all order by this one value, so what it resolves to has to be
-/// testable for every policy without a feed, a thread or a clock.
-///
-/// `Receive` is the moment the message arrived. `Document(field)` reads a
-/// document-level attribute instead: a `Date` (a business date, which has
-/// no time of day) becomes that date's MIDNIGHT UTC, and a `Utf8` is read
-/// as RFC 3339 — which carries its own offset, so a feed stamping local
-/// time with an offset is honoured rather than silently read as UTC. Any
-/// other type is an error rather than a guess: a number could be epoch
-/// seconds, millis or days, and picking one would stamp a generation
-/// wrongly with nothing to notice it by.
-///
-/// A missing or wrongly-typed field is reported per document even though
-/// `SourceSpec::from_doc` already refused the configuration at load
-/// (Task 5: the field must be a `date`/`utf8` document-level attribute).
-/// That check is about the SCHEMA; this one is about the document actually
-/// sent, and a feed that omits an optional attribute is a feed problem,
-/// not a config one.
+/// Resolve the publication source timestamp used by backfill, as-of reads,
+/// and retention. Receive uses message arrival time. Document(field) reads
+/// a document attribute: Date becomes midnight UTC; Utf8 parses RFC 3339
+/// with its offset. Missing or other-typed values fail this document.
+/// Schema validation at source open cannot guarantee the actual message
+/// contains an optional attribute.
 pub fn source_time_of(
     policy: &SourceTime,
     rows: &DocumentRows,
@@ -693,10 +554,8 @@ mod tests {
 
     // ---- UnknownPaths::first_sighting (pure) ----------------------------
 
-    /// True once per distinct path, false on a repeat; past the cap the
-    /// set stops growing and every later distinct path reports `true`
-    /// forever (Part 2 residual: extracted so this needs no dataset,
-    /// ingest handle or report sink to test).
+    /// Remembered paths warn once; at the cap, the set stops growing and
+    /// unremembered paths continue returning true.
     #[test]
     fn first_sighting_dedupes_below_the_cap_then_warns_once_and_stops_growing() {
         let mut u = UnknownPaths::new("test-source".to_string());
@@ -824,9 +683,8 @@ mod tests {
         )
     }
 
-    /// The next publish, skipping the `PlanComplete` the runner emits
-    /// whenever its queue empties (one rides behind every document) and
-    /// the `Started` that now precedes every job it pops (Task 1).
+    /// Read the next publication, skipping Started and queue-idle announcements
+    /// that can occur before submission or between documents.
     fn published(rx: &Receiver<IngestEvent>) -> (String, usize) {
         loop {
             match rx.recv_timeout(Duration::from_secs(30)) {
@@ -1106,27 +964,10 @@ mod tests {
         );
     }
 
-    /// `shutdown` unsubscribes before it joins, and unsubscribing drops
-    /// the adapter's clone of the sender — so the loop returns on
-    /// `Disconnected` at once rather than sleeping out a [`MAX_WAIT`] tick
-    /// first. That rests on this side holding NO sender of its own: fix
-    /// round 1 kept a whole `MessageSink` here (for its refusal counter),
-    /// which kept the channel connected, made the `Disconnected` arm
-    /// unreachable on shutdown, and left every join waiting on the stop
-    /// flag — serially, once per source, in `DataService::shutdown`.
-    ///
-    /// Asserted as liveness, not timing (Part 2 residual: a wall-clock
-    /// bound could not tell a fast `Disconnected` exit from a merely
-    /// lucky short `MAX_WAIT` tick, and read differently depending on how
-    /// loaded the machine running it was). `unsubscribe` is called here
-    /// directly, WITHOUT the stop flag `shutdown` would also set, so the
-    /// loop's `Disconnected` arm is the only remaining way the thread can
-    /// end at all — `wait_until` blocking until `is_finished()` is
-    /// therefore direct evidence the channel actually disconnected, and a
-    /// regression that keeps the channel connected (a leaked sender
-    /// clone, the exact shape of the fix-round-1 defect this guards)
-    /// leaves the thread live forever, so the bounded wait times out and
-    /// fails the test rather than merely running slow.
+    /// Unsubscribe without setting the stop flag, then wait for the receiver to
+    /// exit. This proves no sender clone keeps the channel connected: only the
+    /// Disconnected arm can stop this loop. Handling a message first proves the
+    /// receiver has started; a bounded wait turns a leaked sender into a failure.
     #[test]
     fn shutting_down_an_idle_worker_does_not_wait_out_max_wait() {
         let mut h = plain_harness();
@@ -1193,18 +1034,9 @@ mod tests {
         gate: Arc<(Mutex<bool>, Condvar)>,
     }
 
-    /// How long [`GateKind`] will hold the receiver before parsing anyway.
-    ///
-    /// A CAP, not a delay: the test opens the gate within a millisecond or
-    /// two of the queue filling, and this exists so that a test whose own
-    /// assertion FAILS still ends. A panicking test never reaches its
-    /// `opened.notify_all()`, the `Harness` then drops its
-    /// `SubscriptionWorker`, and `shutdown` JOINS — a thread parked in
-    /// `parse` for ever turns "this test fails" into "the process hangs",
-    /// which in the mutation harness is a run that never finishes and
-    /// never reports. The first version of this fixture parked without a
-    /// cap and wedged a filtered run for twenty minutes; five seconds is
-    /// three orders of magnitude more than the queue needs to fill.
+    /// Maximum time the parser waits for the test gate. Normal execution opens
+    /// the gate after filling the queue. The timeout lets worker shutdown join
+    /// even if an earlier assertion panics before opening it.
     const GATE_CAP: Duration = Duration::from_secs(5);
 
     impl DocumentKind for GateKind {

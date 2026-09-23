@@ -1,20 +1,15 @@
-//! Per-key latest-wins coalescing with a minimum spacing between releases
-//! (spec §5.4 step 2). A source that republishes a key faster than a
-//! trader can reasonably see it (e.g. a market-data snapshot every few
-//! milliseconds) should not force a publish per message — this holds
-//! back all but the most recent item per key until `window` has elapsed
-//! since that key's last release, then lets the newest one through.
+//! Per-key latest-wins coalescing with a minimum spacing between releases.
+//! A new item replaces the pending item for its key without moving the release
+//! deadline. The receiver supplies `now` and owns the timer.
 //!
-//! Pure: every method takes `now: Instant` rather than reading a clock,
-//! so the receiver thread (Task 9) owns the only timer and this type's
-//! own tests need none.
+//! Only pending items are coalesced; jobs already handed to ingest remain
+//! queued. Distinct keys and retained release timestamps have no fixed cap.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-/// Per-key latest-wins with a minimum spacing between releases (spec §5.4
-/// step 2). Pure: every method takes `now`, so the receiver thread's timer
-/// is the only clock and the tests need none.
+/// Per-key latest-wins with minimum release spacing. Methods take `now`,
+/// so the receiver owns the timer and tests need no clock.
 pub struct Coalescer<T> {
     window: Duration,
     /// At most one pending item per key — a later `offer` for a key

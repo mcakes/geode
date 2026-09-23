@@ -1,8 +1,6 @@
-//! The fetch worker (timeseries spec §5.4): one thread per fetch source
-//! that owns the adapter's `Fetch` and runs its blocking calls off every
-//! other thread. It knows nothing about storage: an outcome goes to the
-//! sink the service built, which submits rows to the ingest runner,
-//! reports failures on the load lane, and stores identities.
+//! One fetch worker per source owns its adapter's blocking `Fetch` calls.
+//! Outcomes go to the service sink, which submits rows to ingest, reports
+//! load failures, and caches identities. The worker owns no storage.
 
 use crate::adapter::{AdapterError, Fetch, FetchRequest, SeriesRows};
 use crate::store::series::Span;
@@ -41,9 +39,8 @@ pub enum FetchOutcome {
     Identities(Option<Vec<String>>),
 }
 
-/// Where an outcome goes. Called on the worker's own thread, so it must
-/// not block — the service's sink submits into the ingest runner (a
-/// `push_back` under a lock) and sends one event, nothing more.
+/// Receives outcomes on the fetch thread. Keep callbacks short: processing
+/// and shutdown cannot advance until the callback returns.
 pub type FetchOutcomeSink = Arc<dyn Fn(FetchOutcome) + Send + Sync>;
 
 pub struct FetchWorker {

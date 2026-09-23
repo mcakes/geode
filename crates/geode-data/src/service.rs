@@ -1,9 +1,6 @@
-//! `DataService` — the application's door to stored data.
-//!
-//! Modules ask this and nothing else: no module opens a file, holds a
-//! connection, or names a table. Everything below is an implementation
-//! detail, which keeps a future sidecar-process split from changing the
-//! module contract. See `docs/current/data-path.md`.
+//! `DataService` is the application's door to stored data. Modules submit
+//! requests without owning connections, transports, or table names. See
+//! `docs/current/data-path.md` for ownership and delivery contracts.
 
 use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
 use crate::documents::DocumentRegistry;
@@ -49,65 +46,50 @@ pub struct DataServiceConfig {
     pub views: Vec<ViewSpec>,
     pub dimensions: DerivedDimensions,
     pub query_workers: usize,
-    /// Configured sources (spec §5.2). Empty means nothing is ever
-    /// ingested — a warm database is queried as it stands.
+    /// Configured sources. Empty disables source workers; stored-data queries
+    /// and local document writes remain available.
     pub sources: Vec<SourceSpec>,
-    /// The transports this build has (market-data spec §5.2). Filled by
-    /// `geode-app`, because it is the one crate that knows which adapters
-    /// were compiled in — this crate only ever looks a
-    /// `[sources.<name>] adapter = "…"` name up. Empty is legitimate: a
-    /// build with no adapter serves `csv_dir` sources and reports every
-    /// subscribed one as unservable.
+    /// Transports registered by `geode-app`, looked up by each source's adapter
+    /// name. An empty registry still permits directory sources; sources requiring
+    /// an unavailable adapter are reported as unservable.
     pub adapters: AdapterRegistry,
-    /// The document formats this build can parse (§6.4), filled by
-    /// `geode-app` for the same reason and consulted the same way — a
-    /// subscribed source's `document` key names one of these.
+    /// Document formats registered by `geode-app`. A subscribed source's
+    /// `document` key selects one of these kinds.
     pub documents: DocumentRegistry,
-    /// The pricer this build runs (line-pricer spec §5.3), filled by
-    /// `geode-app` for the same reason as `adapters`/`documents`.
+    /// Pricing implementation registered by `geode-app`.
     pub pricer: PricerConfig,
 }
 
-/// Everything the service produces, on one channel (spec §5.1).
+/// Outcomes and state changes delivered through the service's event sink.
 #[derive(Debug)]
 pub enum DataEvent {
     Query(QueryOutcome),
-    /// A series query's answer (timeseries spec §6.4), routed by the
-    /// tile's key like `Query`.
+    /// Series query result, addressed by the requesting tile's key.
     Series(SeriesOutcome),
-    /// The picker's distinct-values result (spec §3.4).
+    /// Picker distinct-values result.
     Distinct(DistinctOutcome),
-    /// The diagnostics tile's "what does the database hold" result
-    /// (spec §4.5).
+    /// Catalog metadata for diagnostics and source identities.
     Catalog(CatalogOutcome),
-    /// A pricing batch's answer (line-pricer spec §5.3), addressed to
-    /// the tile key that asked.
+    /// Pricing result, addressed by the requesting tile's key.
     Price(PriceOutcome),
-    /// A file was published: the frame bumps its data generation and every
-    /// visible tile requeries. A burst coalesces there.
+    /// File or document publication. Dataset, batch, and books identify the
+    /// partitions whose subscribers need invalidation; the app coalesces bursts.
     Published {
         dataset: String,
         batch: String,
         gen_id: i64,
         books: Vec<Option<String>>,
     },
-    /// A fetch finished (timeseries spec §5.4), keyed by the PAIR rather
-    /// than the asking tile: two tiles holding `SPX.close@kdb_hist` both
-    /// learn the outcome of the one fetch that answered them. `Ok(appended)`
-    /// may be `Ok(0)` — a covered span, or an overlapping refetch — and
-    /// the tile must requery on it all the same: the span is covered,
-    /// whether it was covered just now or already.
+    /// Fetch completion addressed by `(source, identity)` so every tile watching
+    /// the pair can requery. `Ok(0)` is still completion: the span may already
+    /// have been covered or the refetch may have appended no changed rows.
     SeriesFetched {
         source: String,
         identity: String,
         result: Result<u64, String>,
     },
-    /// The ingest runner popped a job (spec 2026-09-17 §5.3): the status
-    /// bar's progress strip starts here. Mirrors `IngestEvent::Started`
-    /// verbatim, so for a file it is likewise never sent for a re-queued
-    /// already-loaded file (finding 1, 2026-09-19 final review) — only
-    /// once the pop-time stale re-check passes, and so always followed by
-    /// a real load outcome. Ended by [`DataEvent::LoadEnded`].
+    /// Begins ingest progress after the file stale check, or before a document
+    /// or series write. Local documents omit this event. Ended by LoadEnded.
     Loading {
         source: String,
         path: String,
@@ -116,23 +98,22 @@ pub enum DataEvent {
     /// Ends the ingest progress state. Coalesces with `Loading` in the app's
     /// mailbox, so even a burst ending while the UI is busy clears the strip.
     LoadEnded,
-    /// The worst state discovery found for a source on its last poll.
+    /// Combined source health across discovery and per-batch load outcomes,
+    /// with the deciding state's explanation.
     Health {
         source: String,
         worst: Health,
         detail: String,
     },
-    /// One source's poll finished — Phase 4b §4.4's "last and next poll"
-    /// diagnostic. `next` is `at + spec.poll_interval` at the moment of
-    /// this poll, not a live countdown; a later poll's own `Polled`
-    /// supersedes it.
+    /// Poll completion. `next` estimates the next poll using the current
+    /// interval; it falls back to `at` if timestamp addition overflows.
     Polled {
         source: String,
         ready: usize,
         at: SystemTime,
         next: SystemTime,
     },
-    /// Config problems found at open or on a view reload (§10.1).
+    /// Configuration problems found at open or view reload.
     Diagnostics(Vec<Diagnostic>),
 }
 
@@ -154,7 +135,7 @@ pub struct QueryParams {
     pub submitted: Instant,
     pub view: String,
     /// Replaces the named view's own grouping for this query: the
-    /// frame's active slot or a tile's pin (spec §5.1). `None` keeps the
+    /// frame's active slot or a tile's pin. `None` keeps the
     /// view's.
     pub grouping: Option<Vec<String>>,
     pub scope: Scope,
@@ -162,11 +143,9 @@ pub struct QueryParams {
     pub max_depth: usize,
 }
 
-/// One on-demand history request as a module asks for it (timeseries
-/// spec §5.3). `key` is the asking tile's, carried for symmetry with
-/// every other request — the ANSWER is keyed by the pair, not by it, so
-/// a second tile watching the same pair is not left waiting on a fetch
-/// it did not ask for.
+/// On-demand history request. `key` identifies the requester; completion is
+/// addressed by source and identity so other tiles watching the pair also
+/// learn the outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchParams {
     pub key: QueryKey,
@@ -179,7 +158,7 @@ pub struct FetchParams {
 /// The `Snapshot` a `Query` or `Distinct` result must carry. A series
 /// payload under either kind is a routing defect, not data: reported as
 /// that key's failure rather than unwrapped, so it degrades one tile and
-/// leaves the pool running (spec §10.1).
+/// leaves the pool running.
 fn view_snapshot(payload: Payload) -> Result<geode_core::snapshot::Snapshot, String> {
     match payload {
         Payload::Snapshot(s) => Ok(s),
@@ -187,18 +166,9 @@ fn view_snapshot(payload: Payload) -> Result<geode_core::snapshot::Snapshot, Str
     }
 }
 
-/// `SchedulerEvent::Polled` -> `DataEvent::Polled` (Phase 4b §4.4's
-/// last/next-poll diagnostic), extracted as a pure free function
-/// (review round 1 MAJ-4) so the `next = at + next_in` arithmetic is
-/// unit-testable without spinning up a real scheduler thread — nothing
-/// in the suite otherwise ever observes `DataEvent::Polled` at all,
-/// since `service()`'s test fixture runs with `sources: Vec::new()`.
-///
-/// `checked_add` with a saturating fallback (MIN-7), not `at + next_in`
-/// directly: `poll_interval` is user-configured
-/// (`source::config::parse_duration`) and unbounded in magnitude, so a
-/// pathological config value must not panic the request loop over a
-/// diagnostic nobody asked to see fail.
+/// Convert a poll result to its diagnostic event. A user-configured interval
+/// can overflow SystemTime; fall back to `at` rather than panic. `next` is
+/// an estimate, not a scheduling deadline.
 fn polled_event(source: String, ready: usize, at: SystemTime, next_in: Duration) -> DataEvent {
     DataEvent::Polled {
         source,
@@ -208,22 +178,14 @@ fn polled_event(source: String, ready: usize, at: SystemTime, next_in: Duration)
     }
 }
 
-/// Logs one `IngestEvent::Failed` at `geode::ingest` `error` (MIN-4): a
-/// file that did not load, named by dataset and batch, with the reason.
-/// A free function for the same testability reason as
-/// [`log_health_event`] just below.
+/// Log an ingest failure with dataset, batch, and reason at error level.
 fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
     tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
 }
 
-/// Logs one `Health` outcome at `geode::ingest`, leveled by what actually
-/// happened (Phase 4b Task 2 fix round 1, MAJ-1): `Failed` lost data or a
-/// working source, so it's `error`; `Degraded`/`PendingTooLong` are
-/// notable but not a loss, so `warn`; `Ok`/`Pending` are routine, so
-/// `info`/`debug`. The one choke point every `SchedulerEvent::Health`
-/// passes through (`scheduler_sink` below) — kept as a free function so
-/// a test can drive it directly against a scoped ring subscriber without
-/// standing up a real `Scheduler`.
+/// Log source health: Failed at error, Degraded/PendingTooLong at warn,
+/// Ok at info, and Pending at debug. Callable independently so tests can
+/// verify levels through a scoped subscriber.
 fn log_health_event(source: &str, worst: &Health, detail: &str) {
     match worst {
         Health::Failed { .. } => {
@@ -241,23 +203,10 @@ fn log_health_event(source: &str, worst: &Health, detail: &str) {
     }
 }
 
-/// The LOAD lane's door for a source whose content arrives over an
-/// adapter rather than off disk — the subscribed receiver's document
-/// outcomes and the fetch worker's failures, which are the same event
-/// one hop apart: something that did arrive could not be stored.
-///
-/// One function rather than a closure built per arm of `open`'s
-/// resolution loop (Task 8 review, Important 1). The two were
-/// byte-identical, 175 lines apart, on the seam this crate has had to
-/// fix five times — see [`HealthTracker`]'s own doc for what each of
-/// those fixes was. A single door is what keeps a later correction from
-/// landing on one caller and not the other.
-///
-/// `batch` is whatever key that source's outcomes are filed under: the
-/// document's key (or its raw topic, unparsed) for a subscribed source,
-/// the `"{identity}@{source}"` pair for a fetch source. A failure is
-/// logged by `log_ingest_failure` and a recovery by `log_health_event`,
-/// never both — a failure already had its line.
+/// Report adapter content outcomes through the shared load lane. Batch keys
+/// are the parsed document key (or raw topic for parse failure) for subscribed
+/// sources, and `identity@source` for fetches. Failures receive one operation
+/// log; recovery logs through the combined health transition.
 fn load_report_sink(
     spec: &SourceSpec,
     sink: &EventSink,
@@ -293,64 +242,13 @@ fn load_report_sink(
     })
 }
 
-/// One source's health along two independent lanes (final review round
-/// 3, NEW-4) — round 2's fix (`HealthTracker` as a single shared
-/// last-value map, keyed only by source) closed MAJ-2's original latch
-/// but opened a worse one: a routine, CONTENT-BLIND discovery poll
-/// (`Health::Ok` whenever nothing is currently stuck or malformed on
-/// disk) could overwrite a real, unfixed `Degraded`/`Failed` a PUBLISH
-/// had set, within about one poll interval, with nothing actually
-/// corrected. `CandidateState::Unchanged` is assigned to an
-/// already-loaded file regardless of whether that load degraded
-/// (`source::discovery::is_unchanged`'s own doc comment says so), and
-/// `worst_health` skips `Unchanged`/`Ready`/`Pending` candidates
-/// entirely — so "nothing looks stuck on the file system" is not
-/// evidence "the last publish was clean", and a single shared map could
-/// not tell the two apart. A false-`Ok` on the one surface whose job is
-/// to be right about state — worse than round 2's own defect (a real
-/// problem that stayed visibly flagged, if permanently).
+/// Per-source discovery state and load state per batch. The worst severity
+/// wins; equal severities use the most recently changed value. Repeating an
+/// unchanged report preserves its stamp, so clean polls cannot displace a
+/// load failure or make the displayed reason alternate.
 ///
-/// Two lanes fix it: `discovery`, written only by the scheduler sink
-/// (content-blind — "is anything currently stuck or malformed on
-/// disk"), and `load`, written only by the ingest sink (content-aware —
-/// "did the last publish or load attempt succeed cleanly"). Neither
-/// lane can be written by the other producer. The value this module
-/// actually reports is always the WORSE of the two, by
-/// [`severity_rank`], so a clean discovery poll can never override a
-/// load-set `Degraded`/`Failed`: only writing the `load` lane back to
-/// `Ok` (a corrected republish of that batch) can, because that is the
-/// only way to bring the combined worst back down.
-///
-/// Round 4 (NEW-5, NEW-6) changed two more things about that combine,
-/// both of which were reported states that were simply wrong:
-///
-/// - Each slot carries its own `detail`, and `report_*` hands back the
-///   DECIDING slot's `(health, detail)` pair for its caller to forward
-///   verbatim. Before, each sink forwarded its OWN detail alongside
-///   whatever health the tracker returned — so an ingest sink handed
-///   back discovery's `PendingTooLong` attached a just-published
-///   batch's name to it and dropped the stuck file's, and a scheduler
-///   sink handed back a load's `Degraded` attached a clean poll's EMPTY
-///   detail, surfacing "degraded" with no reason at all.
-/// - Comparison is by [`severity_rank`], never `Health`'s derived
-///   `Ord`, and an equal rank is decided by which slot changed most
-///   recently (the ruling's `decided_by`, generalised — see
-///   [`LaneValue::changed`]). Two simultaneous `Degraded`s are ordinary
-///   (a malformed sentinel from discovery, a carried-dimension
-///   violation from a publish); derived `Ord` fell through to comparing
-///   their reason STRINGS, so which one a trader saw was decided by the
-///   alphabet and the other was never reported at all.
-///
-/// The `load` lane is keyed by BATCH, not by source (NEW-6). A
-/// `Degraded` generation stays LIVE AND QUERYABLE — that is the whole
-/// difference between `Degraded` and `Failed` — so batch `BK1`
-/// publishing cleanly says nothing whatever about the degraded rows
-/// batch `BK0` is still serving, and must not clear them. The source's
-/// load value is the worst across its batches, and only a batch's own
-/// next publish replaces its entry. The map grows one entry per batch
-/// name ever published for the source (books, or one per file for a
-/// source with no `batch_pattern`) and never shrinks: bounded by the
-/// source's own batch vocabulary, tens of entries, not a leak.
+/// Load entries are retained for every observed batch/key. There is no fixed
+/// capacity or eviction policy; memory grows with distinct names.
 #[derive(Debug, Clone, Default)]
 struct Lanes {
     /// What discovery alone currently believes. `None` until the first
@@ -386,13 +284,8 @@ struct LaneValue {
     /// that whoever forwards the combined value forwards the deciding
     /// slot's explanation rather than its own caller's.
     detail: String,
-    /// [`Lanes::seq`] at the moment this value last actually CHANGED.
-    ///
-    /// This is the ruling's `decided_by` in its general form: on an
-    /// equal rank, the slot that changed most recently decides. Because
-    /// the stamp is per SLOT rather than per lane, the same rule also
-    /// orders the `load` lane's batches against each other, which a
-    /// single "which lane wrote last" flag could not do.
+    /// Advance the stamp only when health or detail changes. Repeated polls
+    /// must not win a severity tie by arrival time alone.
     changed: u64,
 }
 
@@ -460,23 +353,9 @@ impl Lanes {
         })
     }
 
-    /// Offer the combined value to `emit` — `Some(pair)` when it
-    /// differs from the one last forwarded, `None` when it does not —
-    /// and record it as reported ONLY if `emit` says it was delivered.
-    ///
-    /// The conditional commit is round 5, re-review finding 2. Round 4
-    /// removed the `delivered &&` short-circuit that could skip the
-    /// send outright, on the reasoning that a transition recorded as
-    /// reported but never sent is lost for good: nothing re-reports it,
-    /// because an identical later report keeps its stamp and combines
-    /// to the same pair, so `combined == last_reported` from then on
-    /// and the entity keeps the PRE-transition value. A refused
-    /// `try_send` — the event channel momentarily full — loses it the
-    /// same way, so the commit waits on delivery too. `emit`'s verdict
-    /// must be the HEALTH send's alone: the ingest sink's own return
-    /// value also carries whether the paired `Published` event landed,
-    /// and conflating the two would withhold a health transition that
-    /// did arrive.
+    /// Offer a changed combined state and remember it only if delivery succeeds.
+    /// A refused transition is offered again on the next report for this source;
+    /// there is no independent retry timer.
     fn offer(&mut self, emit: impl FnOnce(Option<(Health, String)>) -> bool) -> bool {
         let combined = self.combined();
         if combined == self.last_reported {
@@ -529,36 +408,11 @@ impl HealthTracker {
         reported
     }
 
-    /// The scheduler sink's real door: decide, then emit inside `emit`,
-    /// as ONE step.
-    ///
-    /// Round 4's adversarial pass. Deciding and emitting must not be
-    /// separable: the scheduler thread and the ingest runner thread
-    /// report independently (the runner drains its queue while the
-    /// scheduler polls on, so a publish concurrent with a poll is
-    /// ordinary, not exotic), and if the lock were dropped between the
-    /// two, their two decisions could reach the entity in the OPPOSITE
-    /// order to the one they were made in. `Diagnostics::note_health` is
-    /// last-write-wins, so the entity would then latch the OLDER value
-    /// while this tracker believed the newer one had been reported —
-    /// and nothing re-reports, so it would stay wrong until the next
-    /// real transition, in either direction including false-clean.
-    ///
-    /// `emit` runs with the tracker's own lock held, and returns
-    /// whether its `DataEvent::Health` was DELIVERED — the commit waits
-    /// on that (see [`Lanes::offer`]).
-    ///
-    /// Holding the lock across `emit` is safe because an [`EventSink`]
-    /// may not call back into `DataService` (see that type's doc), so
-    /// nothing reachable from the callback can take this lock. Note
-    /// that this is a NON-REENTRANCY argument, not a non-blocking one
-    /// (round 5, re-review finding 5): the callback's `try_send` is
-    /// indeed non-blocking, but it also calls `log_health_event`, and
-    /// production installs a synchronous stderr writer, so a slow log
-    /// write can serialise the two reporter threads here. Accepted —
-    /// neither of them is the render thread, and the alternative
-    /// (releasing the lock to log) is the reordering this door exists
-    /// to prevent.
+    /// Update discovery, choose the combined state, and emit under one lock.
+    /// Serializing these steps prevents concurrent reporters from delivering an
+    /// older transition after a newer one. The sink must not reenter the service
+    /// or query pool: result delivery can already hold the pool lock.
+    /// Logging here can delay a reporter while the tracker lock is held.
     fn report_discovery_and_emit(
         &self,
         source: &str,
@@ -578,12 +432,7 @@ impl HealthTracker {
         lanes.offer(emit)
     }
 
-    /// The ingest sink's door: every publish's health (`Ok` included)
-    /// and every load failure, under the BATCH it belongs to (NEW-6 —
-    /// one batch's clean publish clears only that batch). Returns the
-    /// deciding slot's pair on a real transition, on the same terms as
-    /// [`HealthTracker::report_discovery`] — and test-only for the same
-    /// reason.
+    /// Test helper: report a load outcome with delivery assumed successful.
     #[cfg(test)]
     fn report_load(
         &self,
@@ -625,18 +474,9 @@ impl HealthTracker {
         lanes.offer(emit)
     }
 
-    /// The load lane's current word for one batch — what a series
-    /// outcome carries per slot (timeseries spec §6.4). `None` when
-    /// nothing was ever reported for it, which is the same as clean.
-    ///
-    /// A read, not a report: it neither stamps nor offers, so asking it
-    /// on every series result cannot disturb the transition bookkeeping
-    /// the two `report_*_and_emit` doors own.
-    ///
-    /// Called from the query pool's result sink UNDER the pool's queue
-    /// lock: the order is pool queue lock → tracker lock, never the
-    /// reverse, and nothing reachable from a `report_*_and_emit` emit
-    /// closure may touch the pool.
+    /// Read one source/batch load state without changing it. Series result
+    /// delivery may hold the query-pool lock, so tracker callbacks must never
+    /// acquire that lock in the opposite order.
     pub(crate) fn load_lane(&self, source: &str, batch: &str) -> Option<Health> {
         let sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
         sources
@@ -657,48 +497,16 @@ pub struct DataService {
     /// every early exit of a fetch is a `SeriesFetched`, and the ones
     /// decided here never reach a worker or the runner.
     sink: EventSink,
-    /// Config errors found at open (spec §10.1). Held rather than
+    /// Config errors found at open. Held rather than
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
-    /// Field order is drop order. The fetch workers stop first and the
-    /// subscriptions stop receiving next (each one's thread submits work
-    /// into the runner, so both have to stop before the runner does); the
-    /// pool joins its workers after them; `pricing` is an independent
-    /// worker on its own thread and queue, unrelated to the pool's DuckDB
-    /// connections, stopped in `shutdown` right after the pool — placed
-    /// here for that reason, not because anything below it depends on it;
-    /// the scheduler stops submitting after that; then the runner stops,
-    /// which it does by RETURNING on its stop flag at the top of its loop
-    /// — whatever is still queued is dropped unstarted, never drained,
-    /// which is the whole reason everything that submits into it is
-    /// stopped before it — and drops the `Store` on its way out. `conn`,
-    /// the field listed last, drops after everything else.
-    ///
-    /// `conn` dropping last is harmless, not accidental correctness:
-    /// duckdb-rs holds the database as `Arc<Mutex<DatabaseHandle>>`, and
-    /// `conn` is a `try_clone` of that same handle, so `duckdb_close`
-    /// only runs when the *last* reference goes, whichever field that
-    /// happens to be — dropping `conn` before the `Store` would just
-    /// issue one `duckdb_disconnect` and close nothing. An earlier
-    /// version of this comment wrongly called a different drop order a
-    /// live bug on the strength of this same detail.
-    ///
-    /// `fetchers` is one fetch worker per fetch source (timeseries spec
-    /// §5.4), behind a `Mutex` for the same reason `subscriptions` below
-    /// is. Declared
-    /// BEFORE `subscriptions`, so this declaration order — which is drop
-    /// order — is the order `shutdown` stops the two in as well: a
-    /// worker's outcome sink submits series jobs into `ingest`, so both
-    /// must precede the runner, and the fetchers come first of the two.
+    /// Workers precede their consumers in field drop order. Fetchers and
+    /// subscriptions can submit to ingest; they must stop before the writer.
+    /// Explicit shutdown follows the same producer-before-consumer order.
     fetchers: std::sync::Mutex<Vec<FetchWorker>>,
-    /// `subscriptions` is one receiver thread per subscribed source
-    /// (market-data spec §5.4), behind a `Mutex` only because
-    /// `DataService::shutdown` takes `&self` (as every other stop door
-    /// here does) while `SubscriptionWorker::shutdown` takes `&mut self`
-    /// — the same reason `IngestHandle` holds its `JoinHandle` behind
-    /// one. It is never contended: only `shutdown` and `Drop` take it,
-    /// and `shutdown` is idempotent.
+    /// Allows `shutdown(&self)` to stop and join workers whose shutdown needs
+    /// mutable access.
     subscriptions: std::sync::Mutex<Vec<SubscriptionWorker>>,
     /// What each fetch source last answered `Fetch::catalogue` with,
     /// written by the workers' outcome sinks and read by `catalog`.
@@ -728,28 +536,10 @@ impl DataService {
         }
         Catalog::new(store.writer()).ensure_tables()?;
 
-        // Migration: a database written before `generations` existed has
-        // real rows in its data tables and nothing in the summary. Rebuild
-        // it once, here, per dataset -- but only when the summary is
-        // actually empty for that dataset *and* at least one of its
-        // tables holds data, so a dataset that has simply never been
-        // published to is not given a spurious rebuild, and a database
-        // whose summary is already maintained is never rebuilt merely
-        // because it was opened (`rebuild_generations` is destructive: it
-        // deletes the dataset's rows before reinserting, so running it
-        // unconditionally would make the summary just a cache of the last
-        // open rather than a maintained record).
-        //
-        // This can only ever notice an *absent* summary, never a
-        // *wrong* one (review round 1, MIN-2) -- a database from a build
-        // that had the table and a maintenance bug, or a hand-edited row,
-        // looks "already populated" and is left alone, by design: a full
-        // comparison at open is exactly the scan this table exists to
-        // remove. There is no palette command or flag for this today; the
-        // manual repair is `delete from generations where dataset = ?`
-        // for the affected dataset, then reopen -- the next `open` call
-        // finds an empty summary and rebuilds it from the tables, same as
-        // the first-time migration below.
+        // Rebuild generation summaries only for datasets with payload but no
+        // summary entries. This does not validate or repair a partially populated
+        // summary; repairing one requires clearing that dataset's summary before
+        // reopening.
         for ds in &config.schema.datasets {
             let tables = crate::store::ddl::history_of(&ds.name, ds);
             let summarised: i64 = {
@@ -786,55 +576,17 @@ impl DataService {
             }
         }
 
-        // Every reader the service will ever need is cloned before the
-        // store moves onto the ingest thread (Phase 3 §2.5).
+        // Create independent readers before transferring the only writer to ingest.
         let conn = store.reader()?;
         let discovery_conn = store.reader()?;
-        // NEW-1 (final review round 2): one `HealthTracker`, shared by
-        // both sinks built below — see that type's own doc for why a
-        // tracker scoped to just one of the two producers cannot close
-        // the latch MAJ-3 reopened.
+        // All source workers share one health tracker.
         let health_tracker = Arc::new(HealthTracker::default());
 
-        // Phase 4b's deferred gap 2 (spec §4.4): seed the LOAD lane from
-        // what the catalog persisted, before anything else can speak for
-        // these sources. The lane is otherwise in-process only, so a
-        // restart forgot a still-live degraded generation completely —
-        // nothing republishes a file that has not changed, so the first
-        // content-blind discovery poll's `Ok` was the only word on the
-        // source, and it read `ok` while the blotter summed degraded
-        // rows.
-        //
-        // Placed HERE, before `Scheduler::spawn`, for that ordering: the
-        // seed must be in the tracker before the first poll reports, or
-        // the poll's `Ok` becomes the last-reported value and the seed
-        // that follows it is a spurious transition rather than the
-        // state.
-        //
-        // Ruling: keyed by SOURCE (as the whole tracker is) but read per
-        // DATASET, which is the only grain the catalog records. Two
-        // sources on one dataset therefore both get the same seed, and a
-        // dataset with no configured source gets none — there is no
-        // source key to file it under. That over-reports (a source is
-        // told about a sibling's degraded batch) and never false-cleans,
-        // which is the direction this whole seam has been fixed in five
-        // times.
-        //
-        // A `StoreError` here is propagated, not swallowed: the failure
-        // mode of a swallowed one is a service that opens quietly and
-        // reports clean.
-        //
-        // Each dataset is read ONCE and its result fanned out to every
-        // source configured for it, rather than re-running the query per
-        // source: the answer depends only on the dataset, and two sources
-        // on one dataset would otherwise run the identical two-window
-        // join twice at open.
-        //
-        // One `DataEvent::Health` per unhealthy batch reaches the sink
-        // here, not one per source: with several degraded batches the
-        // entity's final value is the worst of them (the tracker
-        // combines before it emits), but the startup log carries a line
-        // for each transition along the way.
+        // Seed load health from persisted live file generations before workers
+        // start. Unchanged files may never reload, so their degradation must survive
+        // restart. Query once per dataset and apply the result to each configured
+        // source for it: the catalog does not retain source ownership, so sources
+        // sharing a dataset can receive the same conservative degradation.
         let datasets: std::collections::BTreeSet<&str> =
             config.sources.iter().map(|s| s.dataset.as_str()).collect();
         for dataset in datasets {
@@ -845,15 +597,8 @@ impl DataService {
                     let detail = format!("{batch}: {}", reason.unwrap_or_default());
                     let source = spec.name.clone();
                     let sink = Arc::clone(&sink);
-                    // The ingest sink's `Published` arm's emit closure,
-                    // verbatim: the same door, the same log line, the same
-                    // verbatim forwarding of the DECIDING slot's pair.
-                    //
-                    // Its `bool` is discarded for the same reason the
-                    // sinks' own callers stopped acting on one (Task 1):
-                    // a refused send means only "not delivered", the
-                    // tracker did not commit the transition, and the next
-                    // report of this source offers it again.
+                    // Only acknowledge a seed if its health event was delivered. A refusal
+                    // leaves it eligible for emission on the source's next report.
                     health_tracker.report_load_and_emit(
                         &spec.name,
                         batch,
@@ -878,7 +623,7 @@ impl DataService {
         let result_sink: ResultSink = {
             let sink = Arc::clone(&sink);
             // The tracker rides into the sink so a series result can
-            // carry each pair's load-lane word (timeseries spec §6.4)
+            // carry each pair's load-lane word
             // without a second trip through the service thread.
             let health_tracker = Arc::clone(&health_tracker);
             Arc::new(move |r: QueryResult| match r.kind {
@@ -902,12 +647,8 @@ impl DataService {
                             .collect()
                     }),
                 })),
-                // Timeseries spec §6.4. The `pairs` the request carried
-                // are matched to the result's slots BY SLOT NUMBER, not
-                // by position: `SeriesResult::slots` holds every slot,
-                // expressions included, while `pairs` holds only the
-                // source ones, so the two lists differ in length the
-                // moment a request has an expression slot.
+                // Match health to source slots by slot number. Expression slots leave gaps,
+                // so positional zipping would attach health to the wrong result.
                 RequestKind::Series { pairs } => {
                     let result = match r.payload {
                         Ok(Payload::Series(mut res)) => {
@@ -919,10 +660,7 @@ impl DataService {
                             }
                             Ok(res)
                         }
-                        // A routing defect, not data — reported as this
-                        // key's failure rather than unwrapped, the same
-                        // rule `view_snapshot` applies the other way
-                        // round (spec §10.1).
+                        // Report a mismatched worker payload as an error rather than panicking.
                         Ok(Payload::Snapshot(_)) => {
                             Err("internal: a series request answered with a snapshot".to_string())
                         }
@@ -978,56 +716,20 @@ impl DataService {
                         gen_id,
                         books,
                     });
-                    // A local publish (line-pricer spec §5.3) has no
-                    // source a `[sources]` entry declares, so no health
-                    // lane: `Published` and `LoadEnded` only.
+                    // Local document writes have no configured source-health lane.
                     if source == LOCAL_SOURCE {
                         let _ = sink(DataEvent::LoadEnded);
                         return delivered;
                     }
-                    // MAJ-3 (final review): a degraded *publish* — the
-                    // exact carried-dimension violation Phase 4a's grain
-                    // rules exist to catch — used to reach nowhere but a
-                    // DuckDB column nothing reads. Paired `Health` event
-                    // under the source key (MAJ-1), same shape a load
-                    // failure reports, whenever the load itself wasn't
-                    // clean.
-                    //
-                    // NEW-1 (final review round 2): EVERY publish's
-                    // health is reported to the shared tracker now, `Ok`
-                    // included — not gated on `health != Health::Ok`
-                    // here. That old guard was the other half of the
-                    // latch: a clean republish's `Ok` never even reached
-                    // the entity, so nothing could ever clear a source a
-                    // degraded publish had marked. The tracker decides
-                    // whether this is a real transition; only then is it
-                    // forwarded.
-                    //
-                    // NEW-4 (final review round 3): the LOAD lane
-                    // specifically — see `HealthTracker`'s own doc for
-                    // why a publish's clean `Ok` and a discovery poll's
-                    // clean `Ok` are no longer interchangeable.
-                    //
-                    // NEW-5/NEW-6 (round 4): under this BATCH's key, and
-                    // the returned `(worst, detail)` pair is forwarded
-                    // VERBATIM — it is the deciding slot's, which may be
-                    // the discovery lane's (a stuck file this publish
-                    // knows nothing about), and attaching this publish's
-                    // own detail to it named the wrong file.
+                    // Report every publication, including a clean correction, against its own
+                    // batch. The tracker chooses the worst discovery/load state and its detail;
+                    // a clean batch cannot clear another batch's failure.
                     let reason = match &health {
                         Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
                         _ => String::new(),
                     };
-                    // The closure's verdict is the HEALTH send's alone,
-                    // never `delivered && …` (round 5, finding 2): the
-                    // tracker commits on it, and folding in whether the
-                    // paired `Published` event landed would withhold a
-                    // health transition that did arrive. `&&` here also
-                    // short-circuits, which would skip the send
-                    // outright. The two are combined afterwards, for
-                    // the runner's own "was this delivered" answer —
-                    // which, since Task 1, the runner logs rather than
-                    // exits on.
+                    // Attempt both events independently. Only the health event's own delivery
+                    // verdict acknowledges the health transition.
                     let health_delivered = health_tracker.report_load_and_emit(
                         &source,
                         &batch,
@@ -1060,16 +762,7 @@ impl DataService {
                     batch,
                     reason,
                 } => {
-                    // MIN-4: a file that did not load is exactly the
-                    // "lost data or a feature" case `log_health_event`
-                    // maps to `error` — logged directly (dataset, batch,
-                    // reason) rather than through that helper, since the
-                    // message shape a load failure wants (which file,
-                    // which batch) differs from a discovery-level
-                    // `Health` line's (which source, what's wrong with
-                    // it). Unconditional — a load failure is always worth
-                    // this line, whether or not the AGGREGATE health
-                    // (below) changed.
+                    // Log each failed operation even if aggregate source health is unchanged.
                     log_ingest_failure(&dataset, &batch, &reason);
                     if source == LOCAL_SOURCE {
                         let delivered = sink(DataEvent::Diagnostics(vec![Diagnostic {
@@ -1082,21 +775,7 @@ impl DataService {
                         let _ = sink(DataEvent::LoadEnded);
                         return delivered;
                     }
-                    // MAJ-1 (final review): keyed by the SOURCE name
-                    // (`WorkItem::source`, threaded onto `IngestEvent`),
-                    // never the dataset — a `[sources.<name>]` block's
-                    // `name` and `dataset` are two separate fields, and
-                    // keying by `dataset` created a phantom `sources`
-                    // entry while the real source kept reading "no
-                    // report yet".
-                    //
-                    // NEW-1 (final review round 2): routed through the
-                    // shared tracker like every other health report, so
-                    // a repeated identical failure (a permanently
-                    // unreachable share, polled forever) does not
-                    // re-send. NEW-4 (round 3): the LOAD lane — a load
-                    // failure is content-aware, the same as any other
-                    // publish outcome, never discovery's concern.
+                    // Key health by source name and record this failure in its load lane.
                     let health_delivered = health_tracker.report_load_and_emit(
                         &source,
                         &batch,
@@ -1118,15 +797,8 @@ impl DataService {
                     let _ = sink(DataEvent::LoadEnded);
                     health_delivered
                 }
-                // The series lane (timeseries spec §5.4). Both arms close
-                // out the `Started` this job's pop already sent (which
-                // reached `DataEvent::Loading` through the arm above) with
-                // a `LoadEnded`, exactly as the file and document arms do,
-                // and answer the asking tile with `SeriesFetched`.
-                //
-                // The load-lane key is `"{identity}@{source}"` on every
-                // path — here, and the fetch worker's own `Failed` — which
-                // is what lets a success clear a failure.
+                // Series completion is addressed by identity and source, including zero
+                // appends. End progress after either outcome.
                 IngestEvent::SeriesAppended {
                     source,
                     dataset,
@@ -1196,17 +868,8 @@ impl DataService {
                     let _ = sink(DataEvent::LoadEnded);
                     delivered && health_delivered
                 }
-                // Finding 2 (2026-09-19 final review): the queue draining
-                // is also an end signal — a refused `LoadEnded` on the
-                // last load of a burst (a momentarily full channel) would
-                // otherwise stick the strip forever, since nothing else
-                // ever follows it. The send's own result is returned, so
-                // a refusal here is logged exactly the way `run`'s own
-                // `if !sink(IngestEvent::PlanComplete) { … }` already
-                // treats a refusal — once, via `log_refused_event`'s
-                // latch, never retried (the runner does not re-announce
-                // an idle drain; the next real `Started`/`LoadEnded` pair
-                // is what a trader next sees).
+                // A drained runner also ends progress. The runner does not retry refused
+                // events; the app mailbox coalesces progress state.
                 IngestEvent::PlanComplete => sink(DataEvent::LoadEnded),
             })
         };
@@ -1216,34 +879,12 @@ impl DataService {
             ingest_sink,
         ));
 
-        // Subscribed sources (market-data spec §5.4): one receiver
-        // thread each. Resolved here because this is the only place that
-        // holds both registries, the schema and the health tracker at
-        // once — and a `csv_dir` source never touches either registry,
-        // since it is the reader's own directory path and goes to the
-        // `Scheduler` below exactly as it always has.
-        //
-        // Placed after the runner (a worker submits into it) and before
-        // `Scheduler::spawn`, for the same ordering reason the load-lane
-        // seed above is placed where it is: a source this build cannot
-        // serve must be reported before the first poll can speak, or the
-        // report reads as a transition away from a poll's `Ok` rather
-        // than as the state.
-        //
-        // Every resolution failure below is the same shape and the same
-        // lane: the source is configured, this build cannot serve it,
-        // and that is a DISCOVERY-lane `Failed` — the lane a connection
-        // state belongs to, an absent adapter being the extreme case of
-        // "not connected". Never the load lane, which is about documents
-        // that did arrive. Reported and skipped, never fatal: one
-        // unservable source must not stop the others or the queries.
+        // Resolve adapters after the ingest runner exists and before discovery
+        // starts. An unservable source reports Failed and is skipped; other sources
+        // and stored-data queries remain available.
         let mut subscriptions: Vec<SubscriptionWorker> = Vec::new();
         let mut directory_sources: Vec<SourceSpec> = Vec::new();
-        // The fetch tier (timeseries spec §5.4), resolved in the same
-        // loop and on the same lane: a fetch source is a subscribed
-        // source whose dataset is of the series family
-        // (`SourceSpec::shape`), so the two share every failure shape
-        // and `report_unservable` below is hoisted to serve both.
+        // Fetch sources resolve through the same source configuration loop.
         let mut fetchers: Vec<FetchWorker> = Vec::new();
         let mut fetch_datasets: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -1364,19 +1005,7 @@ impl DataService {
                     };
                     match FetchWorker::spawn(&spec.name, fetch, outcome_sink) {
                         Ok(worker) => {
-                            // Servable: the discovery lane's clean state,
-                            // so a later failure reads as a transition.
-                            //
-                            // Emitted through the same closure every other
-                            // report here uses, never a `|_| true` that
-                            // drops it (Task 8 review, Important 2): the
-                            // tracker commits a transition only when its
-                            // emit says DELIVERED, so discarding this one
-                            // would both hide the source's `ok` and mark
-                            // as reported a value nothing ever saw —
-                            // including, if the load-lane seed above was
-                            // refused, swallowing the re-offer of a
-                            // seeded `Failed`.
+                            // Use the actual delivery verdict when reporting a clean connection.
                             let source = spec.name.clone();
                             let sink = Arc::clone(&sink);
                             health_tracker.report_discovery_and_emit(
@@ -1428,11 +1057,7 @@ impl DataService {
                 report_unservable(format!("dataset '{}' is not declared", spec.dataset));
                 continue;
             };
-            // Spec §6.4's check, once per source at open rather than per
-            // document on the receiver thread: the kind and the dataset
-            // must agree on the column set, or every document this source
-            // sends would fail the same way with nothing naming the
-            // cause.
+            // Validate kind and schema compatibility once when opening the source.
             if let Err(e) = check_kind_against(kind.as_ref(), dataset) {
                 report_unservable(e);
                 continue;
@@ -1535,26 +1160,8 @@ impl DataService {
                     worst,
                     detail,
                 } => {
-                    // NEW-1 (final review round 2): the scheduler now
-                    // sends its poll result on every poll, unconditionally
-                    // (see `ingest::scheduler::run`'s own comment) — this
-                    // is the one place that decides whether it is a real
-                    // transition, through the SAME tracker the ingest
-                    // sink above reports through.
-                    //
-                    // NEW-4 (final review round 3): the DISCOVERY lane —
-                    // a clean poll here says only "nothing looks stuck or
-                    // malformed on disk right now", never "the last
-                    // publish was clean". Writing this lane can never by
-                    // itself clear a load-set `Degraded`/`Failed`; see
-                    // `HealthTracker`'s own doc comment.
-                    //
-                    // NEW-5 (round 4): the returned `(worst, detail)`
-                    // pair is forwarded VERBATIM. It is the deciding
-                    // slot's, which is often the LOAD lane's — a clean
-                    // poll's own detail is the empty string, so
-                    // attaching it to a load-set `Degraded` published
-                    // the word "degraded" with no reason at all.
+                    // Forward every poll to the shared discovery lane. Emit the deciding lane's
+                    // health and detail together, which may still describe a load failure.
                     health_tracker.report_discovery_and_emit(&source, worst, detail, |reported| {
                         match reported {
                             Some((worst, detail)) => {
@@ -1582,15 +1189,8 @@ impl DataService {
             scheduler_sink,
         );
 
-        // Validate here, not at first query: a misconfigured view otherwise
-        // surfaces as a DuckDB binder error from inside a pool worker,
-        // attributed to whichever tile happened to submit it, with the
-        // config that caused it nowhere in the message. §10.1 wants a
-        // diagnostic naming the view.
-        //
-        // Reported, never fatal — the same rule the shell follows for bad
-        // config. One broken view must not stop the service the other
-        // views need.
+        // Validate views at open so diagnostics name the configuration before any
+        // tile queries it. Report and skip broken views while serving valid ones.
         let diagnostics = config
             .views
             .iter()
@@ -1633,9 +1233,8 @@ impl DataService {
         &self.diagnostics
     }
 
-    /// Swap the view set (a safe hot reload, foundation §8). Returns what
-    /// validation found; a broken view is reported and skipped, the rest
-    /// take effect.
+    /// Replace views with the validated subset and return diagnostics for those
+    /// skipped. Valid views take effect even if another view is broken.
     pub fn replace_views(
         &mut self,
         views: Vec<ViewSpec>,
@@ -1655,9 +1254,8 @@ impl DataService {
         diagnostics
     }
 
-    /// Check a scope before it is compiled, so a bad column is reported
-    /// against the scope rather than as a binder error (§10.1). The
-    /// caller owns scope state, so this cannot be done at open.
+    /// Validate caller-owned scope before compilation so errors name its invalid
+    /// columns rather than surfacing later as SQL binder failures.
     pub fn validate_scope(&self, dataset: &str, scope: &Scope) -> Vec<Diagnostic> {
         match self.config.schema.dataset(dataset) {
             Some(ds) => scope.validate(ds, &self.config.dimensions),
@@ -1728,7 +1326,7 @@ impl DataService {
         }))
     }
 
-    /// The picker's distinct-values query (spec §3.4): compile and submit
+    /// The picker's distinct-values query: compile and submit
     /// under the caller's scope and era, unioned across every dataset
     /// that carries the column. The caller has already removed the
     /// column's own selection from `params.scope`.
@@ -1750,10 +1348,8 @@ impl DataService {
         }))
     }
 
-    /// The document request (market-data spec §7): compiled by
-    /// `compile_document` and submitted like a view query, so it shares
-    /// the pool's cancellation and per-key coalescing and comes back as
-    /// an ordinary `DataEvent::Query` — the tile route is unchanged.
+    /// Queue a document query through the shared pool, with the same per-key
+    /// supersession and cancellation behavior as view queries.
     pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
@@ -1774,11 +1370,8 @@ impl DataService {
         }))
     }
 
-    /// The line pricer's batch (spec §5.3). A batch the worker's own
-    /// bounded queue refuses is answered here, not dropped: every line
-    /// captured before `params` moves into `PricingWorker::request`
-    /// (which consumes it) so a refused batch still gets an outcome — a
-    /// tile must never sit waiting on a batch that will not come.
+    /// Queue pricing work without waiting. Refusal produces a terminal
+    /// `PriceOutcome` for each requested line so callers do not wait forever.
     pub fn price(&self, params: PriceParams) {
         let key = params.key;
         let tag = params.tag;
@@ -1810,7 +1403,7 @@ impl DataService {
         }));
     }
 
-    /// Publish an app-authored document (spec §5.3, §7.2). The dataset
+    /// Publish an app-authored document. The dataset
     /// must be declared `local = true`: anything else is refused with an
     /// error diagnostic and nothing is written. Accepted, the rows go
     /// through the ingest runner's document lane exactly as a
@@ -1851,13 +1444,9 @@ impl DataService {
         });
     }
 
-    /// The series query (timeseries spec §6): capped, compiled, and
-    /// submitted like a view query, so it shares the pool's cancellation
-    /// and per-key coalescing and comes back as `DataEvent::Series`.
-    ///
-    /// The cap is checked BEFORE `compile_series` (§6.3): a request no
-    /// chart could paint costs nothing but the arithmetic, and the
-    /// refusal names the frequency and the span rather than a SQL error.
+    /// Cap the series request before compilation, then submit it through the
+    /// shared pool for per-key supersession and cancellation. A cap refusal names
+    /// the frequency and span; results arrive as DataEvent::Series.
     pub fn series(&self, params: &SeriesParams) -> Result<QueryId, StoreError> {
         let points = params.frequency.buckets_in(params.range.0, params.range.1);
         if points > SERIES_POINT_CAP {
@@ -1888,9 +1477,7 @@ impl DataService {
             submitted: params.submitted,
             view: ViewId(format!("series:{}", params.dataset)),
             work: Work::Series(Box::new(plan)),
-            // A series has no tree and no grouping (spec §6.4), and its
-            // provenance is per SLOT rather than per dataset — carried
-            // on `SlotResult::provenance`, not here.
+            // Retain provenance for each source slot; series results have no tree.
             grouping: Vec::new(),
             provenance: Provenance::default(),
             kind: RequestKind::Series { pairs },
@@ -1902,7 +1489,7 @@ impl DataService {
         self.pricing.cancel(key);
     }
 
-    /// The on-demand fetch (timeseries spec §5.4): subtract what the
+    /// The on-demand fetch: subtract what the
     /// coverage table already holds and queue one job per gap on the
     /// source's fetch worker. Every early exit is a `SeriesFetched`, so
     /// the asking tile always hears back.
@@ -1926,21 +1513,11 @@ impl DataService {
             )));
             return;
         };
-        // Clipped to the dataset's `history` window BEFORE coverage is
-        // subtracted (timeseries spec §4.7 as built, the Task 6 ruling):
-        // `sweep_pair` runs inside the append's own transaction, so rows
-        // older than the window would be inserted and deleted again in
-        // one breath — and the coverage row with them, so the next fetch
-        // would ask for the same dead span forever. A request wholly
-        // outside the window is answered here, without asking the source.
-        //
-        // `checked_sub_signed`, and no clip at all when the window does
-        // not convert or the subtraction leaves the representable range:
-        // `history` is user-configured and unbounded in magnitude
-        // (`source::config::parse_duration`), and a pathological value
-        // must not panic the request loop. Not clipping is the safe
-        // direction — the fetch is asked for, and the append's own sweep
-        // still bounds what is kept.
+        // Clip to the dataset's history window before subtracting coverage. Otherwise
+        // append retention would immediately remove old rows and coverage, causing
+        // the same expired span to be fetched repeatedly. Wholly expired requests
+        // complete without adapter I/O. If conversion or subtraction overflows,
+        // skip clipping rather than panic; append still applies its retention policy.
         let mut from = params.from;
         if let Some(cutoff) = self
             .config
@@ -1997,10 +1574,8 @@ impl DataService {
         }
     }
 
-    /// Ask a fetch source for its identities again (timeseries spec
-    /// §5.5). `false` when the source is not a fetch source or its queue
-    /// refused; the answer, when it comes, lands in the next
-    /// `CatalogSnapshot::identities`.
+    /// Refresh a fetch source's identities. Return false for an unknown/non-fetch
+    /// source or refused queue submission. Results update the next catalog snapshot.
     pub fn identities(&self, source: &str) -> bool {
         let fetchers = self.fetchers.lock().unwrap_or_else(|e| e.into_inner());
         fetchers
@@ -2009,19 +1584,11 @@ impl DataService {
             .is_some_and(|w| w.request(FetchWork::Identities))
     }
 
-    /// The diagnostics tile's "what does the database hold" request
-    /// (spec §4.5), answered directly here on the service thread rather
-    /// than submitted to the query pool — the plan's ruling: every query
-    /// `build_catalog` runs is catalog-sized (`generations`,
-    /// `file_generations`, DuckDB's own introspection functions), none
-    /// of them touch a data table's rows, and the pool exists to bound
-    /// concurrent *data* scans, not to serialize a synchronous,
-    /// millisecond-scale read.
+    /// Read catalog metadata synchronously on the service's reader connection.
+    /// These queries inspect metadata rather than scanning payload tables.
     pub fn catalog(&self, params: &CatalogParams) -> CatalogOutcome {
         let mut snapshot = build_catalog(&self.conn, &self.config.schema, &params.as_of);
-        // Not in the database at all (timeseries spec §5.5): a source's
-        // catalogue is what its fetch worker last answered, so it is
-        // folded in here rather than read by `build_catalog`.
+        // Merge identities cached by fetch sources; these are not stored in DuckDB.
         if let Ok(snap) = &mut snapshot {
             snap.identities = self
                 .identities
@@ -2050,13 +1617,8 @@ impl DataService {
         }
     }
 
-    /// Per-book freshness for a dataset (spec §4.5).
-    ///
-    /// Takes the era rather than assuming live. Reporting today's
-    /// freshness beside a historical result inverts the rule §5.4 exists
-    /// for — the same defect class that was fixed at five other sites in
-    /// phase 2b, and this was the one place left holding it. The parameter
-    /// is what stops the next caller reintroducing it by omission.
+    /// Per-book freshness in the requested era. Historical results must use the
+    /// selected generations rather than today's live freshness.
     pub fn freshness(&self, dataset: &str, as_of: AsOf) -> Result<BookFreshness, StoreError> {
         let at = match as_of {
             AsOf::Live => return Catalog::new(&self.conn).book_freshness(dataset),
@@ -2067,7 +1629,7 @@ impl DataService {
         };
 
         // The oldest generation contributing to each book, which is the
-        // same stalest-input rule live freshness applies (§4.5) — a book
+        // same stalest-input rule live freshness applies — a book
         // is as fresh as the stalest file behind it, not the newest.
         let mut by_book: std::collections::BTreeMap<Option<String>, DateTime<Utc>> =
             std::collections::BTreeMap::new();
@@ -2085,19 +1647,10 @@ impl DataService {
         Ok(by_book.into_iter().collect())
     }
 
-    /// How far back time travel can go, or `None` when nothing has ever
-    /// been published — never a fabricated time (spec §4.6).
-    ///
-    /// Over the archive *and* live: a partition published once has its
-    /// only generation in live, and as-of to any instant since then reads
-    /// it (`Era::relation`), so the bound starts at the oldest generation
-    /// anywhere rather than at the oldest one that has been superseded.
-    ///
-    /// The table list is `ddl::history_of`, the one place a dataset's
-    /// tables are named, so both families are covered: built from
-    /// `ds.grains()` here instead, a document dataset (which declares no
-    /// grain) scanned nothing and reported `None` — no bound, so no time
-    /// travel — however much history it held.
+    /// Oldest source time across the dataset's live and archive table pairs, or
+    /// None when they contain no rows. This includes document history and a
+    /// partition's first generation still in live; it does not guarantee complete
+    /// history across every partition since that instant.
     pub fn as_of_bounds(&self, dataset: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
         let Some(ds) = self.config.schema.dataset(dataset) else {
             return Ok(None);
@@ -2232,12 +1785,8 @@ mod tests {
             },
         )
         .unwrap();
-        // A second key, published once at a time strictly between SPX.Z's
-        // two — so a live request for either document has a genuinely
-        // different own freshness to report, and a bug that collapsed
-        // every document's freshness into one dataset-wide MIN (Task 8
-        // review, Major) would answer both with NDX.Z's 14:03 rather than
-        // each document's own time.
+        // Publish another key between SPX.Z's two generations. The distinct live
+        // times detect a dataset-wide minimum incorrectly used for both documents.
         crate::store::document::publish_document(
             &store,
             &crate::store::document::DocumentPublishRequest {
@@ -2284,7 +1833,7 @@ mod tests {
     /// A service over a `local = true` document dataset (`sheets`) plus
     /// the CVI fixture dataset (not `local`), with a `FakePricer` behind
     /// the pricing worker — the fixture the publish and pricing tests
-    /// share (line-pricer spec §5.3, §7.2). `delay` is the fake's own
+    /// share. `delay` is the fake's own
     /// per-line delay: `Duration::ZERO` for most tests, non-zero where a
     /// test needs a batch to still be running when it submits the next
     /// one (the cancel and full-queue tests below).
@@ -2390,12 +1939,8 @@ mod tests {
                 DataEvent::Health { source, .. } => {
                     panic!("no health lane for a local publish, got {source}")
                 }
-                // final-review finding 3: a sheet autosave must never
-                // blink the ingest progress strip — the runner skips
-                // `Started` for `LOCAL_SOURCE`, so no `Loading` for
-                // "local" should ever reach here. A `Loading` for some
-                // other source (there is none in this fixture) is not
-                // the concern.
+                // Local autosave must not start ingest progress. Observe the raw Loading
+                // events so an unwanted start cannot be hidden by an outcome helper.
                 DataEvent::Loading { ref source, .. } if source == "local" => {
                     panic!("a local publish must not emit Loading, got {e:?}")
                 }
@@ -2575,7 +2120,7 @@ mod tests {
         assert!(saw_queue_full_error, "at least one batch was refused");
     }
 
-    /// A service with one SUBSCRIBED source (market-data spec §5.4) on an
+    /// A service with one SUBSCRIBED source on an
     /// in-process `ChannelAdapter` — the same code path a broker source
     /// takes, with only the wire faked (`ChannelAdapter`'s own doc).
     ///
@@ -2676,13 +2221,8 @@ mod tests {
         }
     }
 
-    /// Asserts nothing but the runner's own harmless idle-queue
-    /// `LoadEnded` (finding 2, 2026-09-19 final review: the queue drain
-    /// at startup announces itself even when no source ever had work to
-    /// give it, and `note_load_ended` is a no-op with nothing recorded)
-    /// arrives within `timeout` — used by the skipped-source tests below,
-    /// where a fixture with exactly one source, itself unservable, never
-    /// submits any other work for the drain to follow.
+    /// Allow only the runner's startup idle LoadEnded within the timeout. These
+    /// fixtures have one unservable source and submit no ingest work.
     fn assert_nothing_but_the_idle_drain_arrives(
         rx: &std::sync::mpsc::Receiver<DataEvent>,
         timeout: Duration,
@@ -2733,7 +2273,7 @@ mod tests {
         }
     }
 
-    /// A service with one FETCH source (timeseries spec §5.4) over the
+    /// A service with one FETCH source over the
     /// series dataset — the shape `SourceSpec::shape` answers `Fetch`
     /// for: a subscribed source whose dataset is of the series family.
     fn fetch_service(
@@ -2845,10 +2385,8 @@ mod tests {
         }
     }
 
-    /// Timeseries spec §6.4: the pool's `SeriesResult` reaches the sink
-    /// as `DataEvent::Series`, keyed and tagged as asked, with each
-    /// source slot's load-lane word attached by the `pairs` the request
-    /// carried.
+    /// Verify the pool result reaches the service sink with its request key/tag
+    /// and the load health for each source slot.
     #[test]
     fn a_series_request_answers_with_the_bucketed_values_and_the_pairs_health() {
         let (_d, _calls, service, rx) = fetch_service(None);
@@ -2905,14 +2443,9 @@ mod tests {
         );
     }
 
-    /// A request's `pairs` are matched to the result's slots BY SLOT
-    /// NUMBER, never by position (timeseries spec §6.4): `SeriesResult::
-    /// slots` holds EVERY slot in request order, expression slots
-    /// included, while `pairs` holds only the source ones. Here the
-    /// expression sits BETWEEN the two source slots, so a positional zip
-    /// would file `broken`'s failure on the expression slot and leave
-    /// the second source slot clean — the wrong pane marked, in both
-    /// directions, with every single-slot assertion still green.
+    /// Place an expression between two source slots. Matching source health by
+    /// position would mark the expression failed and leave the second source
+    /// clean; matching by slot number preserves both assignments.
     #[test]
     fn health_is_attached_by_slot_number_not_position() {
         use geode_core::series::expr::{Ast, Op};
@@ -2977,11 +2510,8 @@ mod tests {
         );
     }
 
-    /// Spec §6.3: the cap is checked BEFORE compilation, so a request no
-    /// one could paint never reaches the compiler or the pool. The
-    /// dataset is deliberately unknown: a cap moved BELOW `compile_
-    /// series` would answer `unknown dataset 'nope'` instead, which is
-    /// the only way the ordering is observable from out here.
+    /// Use an oversized request with an unknown dataset. The cap error must win
+    /// over compilation's unknown-dataset error, proving validation order.
     #[test]
     fn a_capped_request_is_refused_before_compilation() {
         let (_d, _calls, service, _rx) = fetch_service(None);
@@ -3003,7 +2533,7 @@ mod tests {
 
     /// Through `DataService::spawn` so the serve loop's error arm is what
     /// answers: a compile failure is this key's own outcome, never a lost
-    /// request (§10.1).
+    /// request.
     #[test]
     fn a_compile_error_is_the_requests_own_outcome_through_the_handle() {
         let dir = tempfile::tempdir().unwrap();
@@ -3110,10 +2640,8 @@ mod tests {
         );
     }
 
-    /// The Task 6 ruling as built (timeseries spec §4.7): a fetch is
-    /// clipped to the dataset's own `history` window before coverage is
-    /// subtracted, so a span entirely outside it never reaches the
-    /// source — nothing would survive the append's own sweep anyway.
+    /// A fetch wholly outside the dataset history window must complete without
+    /// calling the source; append retention would retain none of its rows.
     #[test]
     fn a_fetch_older_than_the_history_window_is_answered_without_asking_the_source() {
         let (_d, calls, service, rx) = fetch_service(None);
@@ -3127,11 +2655,8 @@ mod tests {
         assert_eq!(calls.lock().unwrap().len(), 0);
     }
 
-    /// A servable fetch source's clean discovery lane is DELIVERED at
-    /// open, not merely committed (Task 8 review, Important 2): the
-    /// tracker treats a report as made only once its emit says the event
-    /// landed, so an emit that drops it would both hide the source's
-    /// `ok` and mark as reported a value nothing ever saw.
+    /// Opening a servable fetch source must deliver its clean discovery state,
+    /// not merely mark it as reported inside the tracker.
     #[test]
     fn a_servable_fetch_source_reports_ok_on_the_discovery_lane_at_open() {
         let (_d, _calls, service, rx) = fetch_service(None);
@@ -3156,12 +2681,8 @@ mod tests {
             "2026-01-05T00:00:00Z",
             "2026-01-06T00:00:00Z",
         ));
-        // Both events are collected in ONE drain, in whichever order they
-        // arrive: a loop that scans for one of them discards the other,
-        // and a test written that way pins an accidental ordering rather
-        // than the two facts it means to check (Task 8 review, ruling on
-        // Important 3 — production order is health first, here and on the
-        // runner's own two series arms).
+        // Collect both outcomes in one drain regardless of arrival order. Waiting
+        // for one while discarding the other would impose an unnecessary ordering.
         let mut fetched = None;
         let mut health = None;
         while fetched.is_none() || health.is_none() {
@@ -3365,10 +2886,8 @@ mod tests {
 
     #[test]
     fn a_source_naming_an_adapter_this_build_lacks_is_reported_and_skipped() {
-        // The vendor adapter is not compiled into this repo at all
-        // (roadmap ruling 5), so a config naming it is the ordinary case,
-        // not an exotic one: it must read as one unservable source, with
-        // the service still serving everything else.
+        // An unavailable adapter must fail only its configured source while the
+        // service continues answering stored-data requests.
         let (_dir, _feed, svc, rx) = subscribed_service(Arc::new(FakeKind::new()), "solace");
         let (source, worst, detail) = next_health(&rx);
         assert_eq!(source, "cvi");
@@ -3391,10 +2910,8 @@ mod tests {
         svc.shutdown();
     }
 
-    /// Spec §11's other half of the missing-adapter case: the adapter is
-    /// there, the `document` key names a kind this build does not
-    /// register. Same lane, same shape — one unservable source, reported
-    /// with the kind named, and everything else still served.
+    /// A registered adapter with an unknown document kind is unservable. The
+    /// diagnostic must name the kind while other service operations remain usable.
     #[test]
     fn a_source_naming_a_document_kind_this_build_lacks_is_reported_and_skipped() {
         let (_dir, feed, svc, rx) =
@@ -3421,9 +2938,7 @@ mod tests {
 
     #[test]
     fn a_kind_that_disagrees_with_its_dataset_is_reported_and_skipped() {
-        // Spec §6.4's check, at source-open time: the kind produces a
-        // column the dataset does not declare. Caught once, here, rather
-        // than by every document this source would ever send.
+        // Reject kind/schema mismatch once at source open, before receiving messages.
         let (_dir, feed, svc, rx) =
             subscribed_service(Arc::new(FakeKind::with_extra_column()), "demo_bus");
         let (source, worst, _) = next_health(&rx);
@@ -3460,9 +2975,8 @@ mod tests {
             "a lost connection is the discovery lane's Failed, reason verbatim"
         );
 
-        // The two lanes are independent: a message that arrives anyway
-        // still publishes, and its clean LOAD-lane `Ok` does not clear the
-        // connection's `Failed` (`docs/phase-history.md`, Phase 4b's NEW-4).
+        // A clean document may publish while connection health remains Failed.
+        // Its load outcome must not clear the independent discovery lane.
         feed.publish(
             "cvi/SPX.Z",
             FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
@@ -3496,16 +3010,8 @@ mod tests {
         svc.shutdown();
     }
 
-    /// Spec §11's pair: a parse failure sets the load lane, and a later
-    /// clean document on the SAME topic clears it.
-    ///
-    /// The clearing half is the whole point. A parse failure has no batch
-    /// to key on, so it is filed under the raw topic; the load lane's only
-    /// other `Ok` writer is the ingest sink's `Published` arm, keyed by
-    /// the document's own batch (`SPX.Z`, a different string from
-    /// `cvi/SPX.Z`) — so without the receiver clearing its own topic
-    /// entry, this source would read `Failed` for the rest of the session
-    /// while publishing perfectly good documents.
+    /// A parse failure is keyed by raw topic, while publication uses the parsed
+    /// document key. Recovery must clear the raw-topic entry explicitly.
     #[test]
     fn a_parse_failure_sets_the_load_lane_and_a_later_clean_document_clears_it() {
         let (_dir, feed, svc, rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
@@ -3564,7 +3070,7 @@ mod tests {
 
     #[test]
     fn a_grouping_override_regroups_the_named_view() {
-        // The frame's active slot is applied per query (spec §5.1), not
+        // The frame's active slot is applied per query, not
         // by registering a view per slot. Grouped by book alone the tree
         // has 1 + books rows at depth ≤ 1; the view's own three-level
         // grouping has many more.
@@ -3630,11 +3136,8 @@ mod tests {
 
     #[test]
     fn a_catalog_request_echoes_the_tag_and_lists_the_one_dataset() {
-        // `DataService::catalog` answers directly (the plan's ruling:
-        // catalog-sized queries run on the service thread, not the
-        // pool), so this checks the return value straight — the request
-        // loop that puts it on the sink as `DataEvent::Catalog` is
-        // `handle.rs`'s job, exercised end to end there.
+        // Check the synchronous metadata return directly. The handle tests exercise
+        // request-loop delivery as DataEvent::Catalog.
         let (_db, _src, svc, _rx) = service();
         let params = CatalogParams {
             key: QueryKey(11),
@@ -3679,13 +3182,8 @@ mod tests {
         svc.shutdown();
     }
 
-    /// Task 8 review, Major: a live document request used to report
-    /// `dataset_as_of`/`book_freshness`, which groups by `book` — always
-    /// `None` for a document — so every document in the dataset collapsed
-    /// into one group and a request for a just-published document was
-    /// labelled with some *other* document's staler time. Two documents
-    /// of different freshness, each asked for live, must each get its
-    /// own back.
+    /// Query two live documents with different source times. Each must report
+    /// its own selected generation rather than the dataset's minimum time.
     #[test]
     fn a_live_document_request_reports_its_own_documents_freshness() {
         let (_dir, svc, rx) = document_service();
@@ -3726,10 +3224,7 @@ mod tests {
 
     #[test]
     fn polled_event_next_is_at_plus_next_in() {
-        // Review round 1 MAJ-4, restoring the brief's own Step 8 entry
-        // ("Polled.next = at"): the one line the plan's "Rulings taken
-        // while planning" section specifically called for, now unit-
-        // tested directly rather than only through a scheduler.
+        // Check poll-time arithmetic without depending on scheduler timing.
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let next_in = Duration::from_secs(30);
         match polled_event("risk".into(), 3, at, next_in) {
@@ -3750,9 +3245,7 @@ mod tests {
 
     #[test]
     fn polled_event_saturates_rather_than_panics_on_a_huge_poll_interval() {
-        // MIN-7: `poll_interval` is user-configured and unbounded in
-        // magnitude (`source::config::parse_duration`); `at + next_in`
-        // must not panic the request loop over a diagnostic value.
+        // An interval too large for timestamp addition must not panic.
         let at = SystemTime::now();
         match polled_event("risk".into(), 0, at, Duration::MAX) {
             DataEvent::Polled { next, .. } => assert!(next >= at),
@@ -3820,11 +3313,8 @@ mod tests {
 
     #[test]
     fn a_misconfigured_view_is_a_diagnostic_at_open_not_a_binder_error_later() {
-        // Unwired, this view compiled fine and failed inside a pool worker
-        // as `Binder Error: ... nosuchcolumn`, attributed to whichever tile
-        // submitted it, with nothing naming the view or the config that
-        // caused it (§10.1). And it failed at first query, not at load, so
-        // a view nobody opened looked healthy.
+        // Opening the service must diagnose the view by name before its first query,
+        // including views no tile opens.
         let (db, _src, _svc, _rx) = service();
         let ds = crate::ingest::load::tests_support::fixture().3;
         let mut schema = SchemaSpec::default();
@@ -3967,10 +3457,8 @@ mod tests {
 
     #[test]
     fn a_historical_result_is_labelled_with_the_data_it_actually_read() {
-        // Not the instant requested. Asking for today against data last
-        // published a month ago must report the month-old time, or every
-        // dataset carries the same value and `stalest()` — the whole
-        // point of §5.4 — can no longer tell one input from another.
+        // Freshness must name the actual selected generation. Reporting the requested
+        // instant would hide differences between stale inputs.
         let (_db, _src, svc, rx) = service();
         // A month-old generation of a partition nothing else covers,
         // written through a clone of the service's own connection. A
@@ -4108,8 +3596,7 @@ mod tests {
                     assert_eq!(dataset, "risk_snapshot");
                     published += 1;
                 }
-                // MAJ-2 (final review): a clean source's first poll is
-                // now itself an `Ok` transition — expected, not a failure.
+                // A first clean discovery report emits Ok.
                 Ok(DataEvent::Health { worst, detail, .. }) if worst != Health::Ok => {
                     panic!("{detail}")
                 }
@@ -4126,18 +3613,8 @@ mod tests {
 
     #[test]
     fn a_load_is_bracketed_by_loading_and_load_ended() {
-        // Task 1: the status bar's progress strip starts on `Loading` and
-        // ends on `LoadEnded`, unconditionally — one file, one source
-        // named "risk", so there is nothing queued behind it.
-        //
-        // Finding 2 (2026-09-19 final review): `LoadEnded` is now also
-        // sent when `IngestEvent::PlanComplete` announces the queue has
-        // drained, so a single file's own load produces TWO of them —
-        // one from the `Published` arm, one from the drain that follows
-        // it immediately after (one runner, one thread: nothing can land
-        // between the two). The exact four-deep sequence is what stays
-        // deterministic; asserting only "at least one" would let a
-        // regression silently drop the drain's own `LoadEnded` again.
+        // One file emits Loading and LoadEnded; draining the queue emits another
+        // LoadEnded. Assert both boundaries.
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let csv_path = src.path().join("risk_2026-08-24_BK0.csv");
@@ -4163,14 +3640,7 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                // Pinned (finding 3, 2026-09-19 final review): long
-                // enough that the cold-start poll is the only one to
-                // ever run within this test, the same reasoning
-                // `a_clean_publish_of_another_batch_does_not_clear_a_
-                // degraded_batch`'s fixture documents — an un-pinned
-                // default let a second poll re-submit the already-loaded
-                // file and blow the test's 30 s budget waiting out the
-                // extra events.
+                // Keep discovery to its initial poll while checking this event sequence.
                 poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
@@ -4230,31 +3700,9 @@ mod tests {
 
     #[test]
     fn a_failed_load_still_ends_the_strip() {
-        // Ingest progress (2026-09-19), harness entry "ingest: a failed
-        // load still ends the strip": the Failed arm's own `LoadEnded`
-        // send is a separate line from the Published arm's, and a failed
-        // load's `Health` is deduplicated by the tracker and may never
-        // reach the entity — `LoadEnded` is what actually ends the
-        // status bar's strip, so this must drive a real failure through
-        // a real `DataService` rather than a synthetic tracker call.
-        //
-        // Finding 2 (2026-09-19 final review) added a SECOND end signal
-        // — the queue drain's own `LoadEnded` — which, with only one
-        // file queued, would fire immediately after this file's failure
-        // and mask the Failed arm's own send going missing. A second,
-        // well-formed file (BK1, an OLDER `as_of` so BK0 — the malformed
-        // one — sorts first and loads first: `ingest::plan::build_plan`
-        // breaks a priority tie by newest `source_time` first) keeps the
-        // queue non-empty across BK0's failure, so the drain cannot fire
-        // until BK1 is done too — isolating the Failed arm's own
-        // `LoadEnded` as the only thing that can end the strip between
-        // the two loads.
-        //
-        // The first CSV's header omits `NPV`, a column the `.done`
-        // sentinel still declares present: `read_csv`'s projection asks
-        // for a column the file does not have and fails at the SQL step,
-        // before any row is staged — a malformed CSV, not a synthetic
-        // error.
+        // Queue a malformed newer file before a valid older one. The valid file
+        // keeps the queue nonempty after failure, isolating the failed operation's
+        // LoadEnded from the separate queue-drained announcement.
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -4290,10 +3738,7 @@ mod tests {
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
             sources: vec![crate::source::SourceSpec {
-                // Pinned (finding 3, 2026-09-19 final review) — same
-                // reasoning as the sibling fixture above: without it a
-                // second poll can re-submit a file and the test waits
-                // out its 30 s budget on events this test does not need.
+                // Keep discovery to its initial poll while checking failure progress.
                 poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
@@ -4351,12 +3796,8 @@ mod tests {
 
     #[test]
     fn a_load_failure_reports_health_under_the_source_name_not_the_dataset_name() {
-        // MAJ-1 (final review): `[sources.eod_risk] dataset = "risk_snapshot"`
-        // — the source's own name differs from the dataset it feeds, which
-        // is exactly the review's failure scenario. The schema is left
-        // without `risk_snapshot` declared on purpose, so the runner's
-        // "dataset is not declared" failure fires deterministically without
-        // depending on a real load succeeding or failing.
+        // Use different source and dataset names to detect health keyed incorrectly.
+        // Leave the dataset undeclared for a deterministic runner failure.
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
@@ -4393,11 +3834,8 @@ mod tests {
         let mut seen = None;
         while Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_secs(5)) {
-                // The discovery-level `Ok` transition (MAJ-2, final
-                // review) is expected on the first clean poll — the
-                // failure this test cares about is the *ingest* failure
-                // that follows once the runner tries to load the
-                // undeclared dataset.
+                // Skip initial clean discovery health while awaiting the ingest failure
+                // from the undeclared dataset.
                 Ok(DataEvent::Health {
                     worst: Health::Ok, ..
                 }) => {}
@@ -4422,7 +3860,7 @@ mod tests {
     }
 
     /// A minimal schema with `currency` a dimension carried by the
-    /// instrument grain (spec §3.3) — same shape as
+    /// instrument grain — same shape as
     /// `ingest::load::tests::carried_schema` (not reused directly: that
     /// one is private to its own test module), needed here to drive a
     /// `Degraded` publish end to end through a real source directory.
@@ -4470,13 +3908,8 @@ source_name = "NPV"
 
     #[test]
     fn a_degraded_publish_reaches_the_entity_as_degraded_health() {
-        // MAJ-3 (final review): `IngestEvent::Published.health` used to be
-        // swallowed by the service's `..` — a load with a carried-dimension
-        // violation (spec §3.3, the exact silent-wrong-data condition
-        // Phase 4a's grain rules exist to catch) went live with no
-        // `DataEvent::Health` at all. Through the real door: a source
-        // directory with one file whose `currency` disagrees within its
-        // instrument key.
+        // A real directory load with conflicting carried currency must publish its
+        // degradation through DataEvent::Health as well as publish the generation.
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let csv_path = src.path().join("risk_2026-08-24_BK0.csv");
@@ -4523,12 +3956,8 @@ source_name = "NPV"
         while Instant::now() < deadline && (!published || seen.is_none()) {
             match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(DataEvent::Published { .. }) => published = true,
-                // The discovery scheduler's own `Ok` transition (MAJ-2,
-                // final review) runs on a separate thread and can
-                // interleave with the ingest runner's `Published`/
-                // `Health{Degraded}` pair in either order — it must not
-                // be mistaken for the degraded-publish event this test is
-                // watching for.
+                // Discovery runs independently; its clean report must not be mistaken for
+                // the degraded publication this test awaits.
                 Ok(DataEvent::Health {
                     worst: Health::Ok, ..
                 }) => {}
@@ -4545,7 +3974,7 @@ source_name = "NPV"
         }
         assert!(published, "the file still publishes — Degraded, not Failed");
         let (source, worst, detail) = seen.expect("a Health event for the degraded publish");
-        assert_eq!(source, "eod_risk", "keyed by the source name (MAJ-1)");
+        assert_eq!(source, "eod_risk", "keyed by the source name");
         assert!(
             matches!(worst, Health::Degraded { .. }),
             "expected Degraded, got {worst:?}"
@@ -4554,17 +3983,8 @@ source_name = "NPV"
         svc.shutdown();
     }
 
-    /// NEW-4 (final review round 3) — the specific gap the round-2
-    /// re-review named: every round-2 integration test held
-    /// `poll_interval` at 3600s (so only the cold-start poll ever ran)
-    /// or used a stray file discovery alone could never clear, which
-    /// meant none of them ever let a SECOND, genuinely clean scheduler
-    /// poll fire after a degraded publish — exactly the path that let a
-    /// content-blind "nothing looks stuck" poll silently overwrite a
-    /// real, unfixed `Degraded` back to `Ok`. This test deliberately
-    /// lets several more polls fire (a short `poll_interval`) after the
-    /// degraded publish, with the bad file never replaced, and asserts
-    /// the entity never reads `Ok` again.
+    /// Let several clean polls run after a degraded publication without replacing
+    /// the bad file. Content-blind discovery must not clear its load degradation.
     #[test]
     fn a_degraded_publish_survives_several_more_clean_discovery_polls() {
         let db = tempfile::tempdir().unwrap();
@@ -4737,13 +4157,8 @@ source_name = "NPV"
 
     #[test]
     fn a_restart_seeds_the_load_lane_from_a_still_live_degraded_generation() {
-        // Phase 4b's deferred gap 2 (spec §4.4): the load lane was in
-        // process only. `file_generations.health` persisted the
-        // degradation, but nothing read it back, so after a restart the
-        // first poll found the CSV `Unchanged` (nothing republishes),
-        // the tracker was empty, and the scheduler's content-blind `Ok`
-        // was the only word on the source — reading `ok` while the
-        // blotter summed the still-live degraded rows.
+        // An unchanged unhealthy file is skipped on restart. Its persisted live
+        // generation must seed health without requiring another load.
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let db_path = db.path().join("geode.duckdb");
@@ -4809,9 +4224,7 @@ source_name = "NPV"
             "a restart must re-report the still-live degraded generation"
         );
 
-        // And the tracker HOLDS it: the polls that keep firing here are
-        // content-blind `Unchanged` polls, exactly the ones NEW-4 showed
-        // must never clear a load-set problem.
+        // Repeated Unchanged polls must preserve the seeded load degradation.
         let mut saw_ok = false;
         let deadline = Instant::now() + Duration::from_millis(600);
         while Instant::now() < deadline {
@@ -4835,13 +4248,8 @@ source_name = "NPV"
 
     #[test]
     fn a_seeded_batch_is_cleared_by_that_batchs_own_corrected_republish() {
-        // Fix round 1, MIN-2. The seed's key must be exactly the key a
-        // publish writes (`WorkItem::batch`), or the seeded `Degraded` is
-        // unclearable: the operator fixes the file, the republish clears
-        // its own key, and the seeded one sits beside it reporting a
-        // problem that no longer exists — for the rest of the session,
-        // and again on the next restart. That is MAJ-2's stuck-forever
-        // failure mode arriving through the seed.
+        // The seed must use the same batch key as publication. A corrected republish
+        // can then clear it instead of leaving an unreachable unhealthy entry.
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let db_path = db.path().join("geode.duckdb");
@@ -5015,25 +4423,12 @@ source_name = "NPV"
         );
     }
 
-    /// NEW-4 (final review round 3): the six consequences the ruling
-    /// asks to be pinned directly against `HealthTracker`'s two-lane
-    /// combine logic — fast and precise, ahead of the slower
-    /// integration-level coverage below (which still exists for the
-    /// scenario the review specifically flagged as untested at the
-    /// `DataService` level: a real second scheduler poll).
+    /// Unit tests for lane combination and delivery acknowledgement.
     mod health_tracker_lanes {
         use super::*;
 
-        /// The two same-rank reasons round 4's NEW-5 trace uses: an
-        /// `Orphaned` sentinel found by discovery and a
-        /// carried-dimension violation found by a publish, both
-        /// `Degraded`, both real, both needing different action. Their
-        /// lexicographic order matters to these tests: `"currency…"`
-        /// sorts BEFORE `"expected…"`, so `Health`'s derived `Ord` —
-        /// which falls through to the reason string once the variants
-        /// tie — picks the discovery one, the opposite of what the
-        /// severity-rank-plus-most-recently-changed rule picks when the
-        /// load lane moved last.
+        /// Choose reasons whose alphabetical order opposes change order, so the
+        /// test distinguishes last-changed tie breaking from string ordering.
         fn orphan() -> Health {
             Health::Degraded {
                 reason: "expected value at line 1".into(),
@@ -5095,9 +4490,7 @@ source_name = "NPV"
             );
         }
 
-        /// The mirror of the first test, worded as the ruling states it:
-        /// discovery clearing (a clean poll) while the load lane is
-        /// Degraded must leave the combined value at Degraded.
+        /// Clearing discovery must preserve an unresolved degraded load.
         #[test]
         fn discovery_clearing_does_not_override_a_degraded_load() {
             let t = HealthTracker::default();
@@ -5142,13 +4535,8 @@ source_name = "NPV"
             );
         }
 
-        /// NEW-5 (final review round 4): both lanes `Degraded` at once —
-        /// a malformed sentinel (discovery's `Orphaned`) AND a
-        /// carried-dimension violation from a publish. The second is a
-        /// real, distinct finding a trader must act on separately: it
-        /// must reach the surface, WITH ITS OWN REASON. Comparing whole
-        /// `Health` values instead of severity rank decides this by the
-        /// alphabet and drops one of the two findings entirely.
+        /// Two different degraded reasons have equal severity. The latest changed
+        /// lane must surface with its own reason, independent of alphabetical order.
         #[test]
         fn a_second_degradation_at_the_same_rank_is_reported() {
             let t = HealthTracker::default();
@@ -5186,9 +4574,7 @@ source_name = "NPV"
             );
         }
 
-        /// The ruling's flap check: a standing degraded LOAD and a
-        /// source polling cleanly forever reports nothing after the
-        /// first transition.
+        /// Repeated clean polls must not re-emit a standing load degradation.
         #[test]
         fn repeated_clean_polls_with_a_standing_degraded_load_report_nothing() {
             let t = HealthTracker::default();
@@ -5248,12 +4634,8 @@ source_name = "NPV"
             );
         }
 
-        /// NEW-5(b): the pair handed back belongs to the DECIDING slot,
-        /// which is routinely not the caller's. A stuck stray file
-        /// (discovery `PendingTooLong`) stands while a batch fails and
-        /// is then fixed: the ingest sink's clean publish gets back
-        /// discovery's `PendingTooLong` AND discovery's detail — naming
-        /// the stuck file, which is the one thing that can be acted on.
+        /// Forward the deciding lane's detail with its health, even when the caller
+        /// updated another lane. A clean publish can still leave a stuck-file warning.
         #[test]
         fn the_reported_pair_comes_from_the_deciding_lane_not_the_caller() {
             let t = HealthTracker::default();
@@ -5281,9 +4663,7 @@ source_name = "NPV"
             );
         }
 
-        /// NEW-6 (final review round 4): batch `BK0`'s degraded
-        /// generation is LIVE AND QUERYABLE, so batch `BK1` publishing
-        /// cleanly says nothing about it and must not clear it.
+        /// A clean second batch must not clear the first batch's degraded live data.
         #[test]
         fn a_clean_publish_of_one_batch_leaves_another_batchs_degraded_standing() {
             let t = HealthTracker::default();
@@ -5365,16 +4745,8 @@ source_name = "NPV"
             );
         }
 
-        /// Round 5, re-review finding 2: a transition is recorded as
-        /// reported only once the emit says it was DELIVERED. A refused
-        /// `DataEvent::Health` — a momentarily full 256-slot event
-        /// channel — must be offered again on the next report rather
-        /// than silently counted as shown, or the entity keeps the
-        /// pre-transition value for good (nothing re-reports; an
-        /// identical later poll keeps its stamp and combines to the
-        /// same pair). This is the other half of the reasoning that
-        /// removed the `delivered &&` short-circuit in round 4: that
-        /// closed one of the two ways the send can fail to happen.
+        /// Refusal must not acknowledge the transition: the next unchanged report
+        /// must offer the same health event again.
         #[test]
         fn a_refused_health_event_is_offered_again_not_recorded_as_reported() {
             let t = HealthTracker::default();
@@ -5417,29 +4789,8 @@ source_name = "NPV"
             );
         }
 
-        /// Round 4's adversarial pass, pinned deterministically (round
-        /// 5, on the re-review's recommendation). The scheduler thread
-        /// and the ingest runner thread report independently (the
-        /// runner drains its queue while the scheduler polls on), so if
-        /// a decision and its emission were separable the two could
-        /// reach the entity in the opposite order to the one they were
-        /// decided in — and `Diagnostics::note_health` is
-        /// last-write-wins, so the entity would latch the OLDER value
-        /// while this tracker believed the newer one had been reported,
-        /// with nothing to re-report it.
-        ///
-        /// What makes that impossible is the invariant asserted here
-        /// directly: `emit` runs with the tracker's lock HELD, so no
-        /// second reporter can decide (let alone emit) in between.
-        /// `try_lock` returns `Err(WouldBlock)` for a lock held by any
-        /// thread, this one included.
-        ///
-        /// This replaces round 4's two-thread, 50 ms-sleep version.
-        /// That one could only fail honestly, but it could pass
-        /// spuriously — on a loaded CI box the second thread simply not
-        /// having been scheduled looks exactly like it being correctly
-        /// blocked, which would hide the regression while the harness
-        /// reported the mutation caught.
+        /// Use try_lock inside the sink to prove emission holds the tracker lock.
+        /// This tests ordering directly without a timing race.
         #[test]
         fn emit_runs_with_the_tracker_lock_held() {
             let t = HealthTracker::default();
@@ -5509,30 +4860,9 @@ source_name = "NPV"
         }
     }
 
-    /// NEW-6 (final review round 4), superseding round 2's version of
-    /// this test (which asserted the OPPOSITE — that ANY clean publish
-    /// for the source clears an earlier degraded one, whichever batch
-    /// each belonged to): batch `BK0`'s degraded generation stays LIVE
-    /// AND QUERYABLE, that being the whole difference between `Degraded`
-    /// and `Failed`, so an unrelated batch `BK1` publishing cleanly says
-    /// nothing at all about `BK0`'s rows and must not clear them. Only
-    /// `BK0`'s own clean republish can
-    /// (`a_clean_republish_of_the_same_batch_clears_its_degraded_health`).
-    ///
-    /// **Isolation from the scheduler's own signal is deliberate.** Any
-    /// poll that *discovers* a `Ready` file also, in that same cycle,
-    /// computes `worst_health` as `None` over it (`Ready` candidates are
-    /// skipped, never counted unhealthy) — so a poll that notices a new
-    /// clean file tends to send its own `Ok` before that file has even
-    /// finished loading, which would let the SCHEDULER path mask a
-    /// broken ingest-sink path rather than this test catching it. Both
-    /// files are written and discovered together, in the ONE poll a
-    /// 3600s `poll_interval` allows within this test's run — after that,
-    /// the only thing that can still change the entity's health is a
-    /// PUBLISH. `source_time` (the sentinel's `as_of`) makes the load
-    /// order deterministic: the runner's queue sorts newest-first at the
-    /// same priority, so the degraded batch (newer `as_of`) loads before
-    /// the clean one.
+    /// One poll queues an unhealthy batch before a clean unrelated batch.
+    /// A long interval prevents another discovery report from masking whether
+    /// the clean publication incorrectly clears the first batch's failure.
     #[test]
     fn a_clean_publish_of_another_batch_does_not_clear_a_degraded_batch() {
         let db = tempfile::tempdir().unwrap();
@@ -5645,16 +4975,8 @@ source_name = "NPV"
         svc.shutdown();
     }
 
-    /// NEW-6's other half (final review round 4): the batch's OWN clean
-    /// republish — the corrected file dropped back into the source
-    /// directory — genuinely clears it, all the way through the real
-    /// door (discovery, load, publish, tracker, entity event). Without
-    /// this, "only that batch can clear it" would be satisfiable by
-    /// nothing ever clearing anything.
-    ///
-    /// A short `poll_interval` here on purpose: a SECOND poll is the
-    /// whole point, and — since round 3 — a routine poll can no longer
-    /// mask anything, so there is nothing left to isolate the test from.
+    /// Republish the same batch cleanly through the real pipeline. Repeated
+    /// polling is needed to discover the corrected file.
     #[test]
     fn a_clean_republish_of_the_same_batch_clears_its_degraded_health() {
         let db = tempfile::tempdir().unwrap();
@@ -5756,17 +5078,8 @@ source_name = "NPV"
         svc.shutdown();
     }
 
-    /// NEW-4 (final review round 3), superseding round 2's version of
-    /// this test (which asserted the OPPOSITE — that a clean publish
-    /// clears a scheduler-set `PendingTooLong` — an assertion round 3's
-    /// ruling explicitly overturns): a source the SCHEDULER reports
-    /// `PendingTooLong` for (a permanently stuck stray file, discovery
-    /// alone, no load involved) is NOT cleared by an unrelated CLEAN
-    /// PUBLISH for the same source. The stray file is still genuinely
-    /// stuck — nothing about it changed — so the combined (worse-of-two)
-    /// value must stay `PendingTooLong`; only discovery itself observing
-    /// the stray file resolve (or vanish) could clear discovery's own
-    /// lane.
+    /// A clean publish cannot clear discovery's PendingTooLong for a stuck file.
+    /// Only discovery observing that file resolve or disappear can clear its lane.
     #[test]
     fn discovery_pending_too_long_is_not_cleared_by_an_unrelated_clean_publish() {
         let db = tempfile::tempdir().unwrap();
@@ -5832,20 +5145,9 @@ source_name = "NPV"
         opts.leave_one_pending = false;
         geode_demo_data::emit_directory(&batch, &opts).unwrap();
 
-        // Collect everything for several poll intervals: the clean
-        // publish itself must still arrive (the load succeeds), but no
-        // Health::Ok for this source may ever follow it, since the stray
-        // file keeps discovery's own lane at PendingTooLong.
-        //
-        // Two phases rather than one 800 ms window (fix round 1): the
-        // setup half is a real discovery poll, CSV read and publish, and
-        // 800 ms of wall clock is not enough for it under a loaded
-        // machine — it flaked in a full-suite run, passing every time in
-        // isolation. Waiting for the publish on the suite's usual
-        // generous bound and only then watching for a spurious `Ok`
-        // makes the assertion timing-independent and strictly stronger:
-        // the whole publish is now inside the observation window instead
-        // of racing its end.
+        // Wait for publication before observing several further polls. Separate the
+        // I/O completion timeout from the observation window so slow setup cannot
+        // shorten the check for an incorrect Health::Ok.
         let mut saw_published = false;
         let mut saw_ok = false;
         let watch = |e, saw_published: &mut bool, saw_ok: &mut bool| match e {
@@ -5882,11 +5184,8 @@ source_name = "NPV"
         svc.shutdown();
     }
 
-    /// NEW-1's dedup half: the scheduler's own clean polls (now emitted
-    /// unconditionally, every poll — MAJ-2's dedup moved here, to the
-    /// shared tracker) and one clean publish for the same source must
-    /// still add up to exactly ONE `DataEvent::Health { worst: Ok, .. }`
-    /// reaching the outer channel, not one per producer.
+    /// Clean polls and a clean publication for one source must combine into one
+    /// Ok transition at the service boundary.
     #[test]
     fn a_clean_scheduler_poll_and_a_clean_publish_together_send_exactly_one_ok() {
         let db = tempfile::tempdir().unwrap();
@@ -6078,9 +5377,7 @@ source_name = "NPV"
         svc.shutdown();
     }
 
-    // ---- Phase 4b Task 2 fix round 1 (MAJ-1): log_health_event's level
-    // split, proved against a scoped ring subscriber rather than by
-    // reading the match arms. ------------------------------------------
+    // Verify health log levels through a scoped ring subscriber.
 
     use tracing_subscriber::layer::SubscriberExt;
 

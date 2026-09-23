@@ -1,13 +1,11 @@
-//! The per-file load pipeline (spec §5.5):
+//! Per-file load pipeline:
 //!
-//!   sentinel -> validate columns -> read_csv into raw staging ->
-//!   column map -> split by grain -> publish -> record the generation
+//! sentinel -> validate columns -> read_csv staging -> column map ->
+//! split by grain -> publish -> record generation
 //!
-//! Schema tolerance lives in the projection. The sentinel declares the
-//! CSV's columns, so the projection is decided *before* the file is opened:
-//! a declared column is projected under its canonical name, an absent one
-//! becomes NULL of the declared type. Drift costs milliseconds instead of a
-//! multi-hundred-megabyte parse (spec §5.2).
+//! The sentinel determines the projection before the CSV is opened. Declared
+//! columns use canonical names; absent columns become typed NULLs. Staging
+//! precedes the transaction that publishes all grains and catalog metadata.
 
 use crate::health::Health;
 use crate::ingest::split::{Conflict, SplitRequest, split_by_grain};
@@ -86,7 +84,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     let conn = store.writer();
     let declared: Vec<&str> = req.sentinel.columns.iter().map(String::as_str).collect();
 
-    // 1. Decide the projection from the sentinel, before opening the CSV.
+    // Decide the projection from the sentinel, before opening the CSV.
     let mut projection: Vec<String> = Vec::new();
     let mut missing_optional = Vec::new();
     let mut missing_required = Vec::new();
@@ -121,7 +119,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         .cloned()
         .collect();
 
-    // 2. read_csv into raw staging. DuckDB's reader is multi-threaded and
+    // read_csv into raw staging. DuckDB's reader is multi-threaded and
     // keeps this loop small.
     let sql = format!(
         "create or replace table {RAW_TABLE} as
@@ -143,7 +141,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             })?
     };
 
-    // 3. Split by grain, deduplicating coarse measures and canonicalizing
+    // Split by grain, deduplicating coarse measures and canonicalizing
     // pairs; collect any disagreements.
     let catalog = Catalog::new(conn);
     // Reserved, not peeked: this id is stamped onto the published rows
@@ -171,7 +169,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     let conn = &tx;
     let catalog = Catalog::new(conn);
 
-    // 4. Publish each grain, guarded against backfill.
+    // Publish each grain, guarded against backfill.
     //
     // The books come from the staged rows, not the sentinel: the sentinel's
     // list is advisory, and a row whose book is absent from it would enter
@@ -207,19 +205,10 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         })
         .collect();
 
-    // A failed lookup must not collapse into "nothing is live yet" — that
-    // would silently disable the backfill guard and let an old file
-    // overwrite current risk, the exact outcome the guard exists to prevent.
-    // Over every partition this file writes, the bookless one included.
-    //
-    // Folding over the named books alone missed it, and the gap is
-    // reachable whenever a batch's books change between generations:
-    // version 1 writes books [A] plus unattributed rows, version 2 writes
-    // books [B] plus unattributed rows. The guard asked only about B,
-    // which was never live, got `None`, and published — overwriting the
-    // bookless partition that version 1 left live at a *newer* source
-    // time. That is the one thing the guard exists to prevent, and the
-    // bookless partition was outside it.
+    // Check every written partition, including NULL book, before choosing live
+    // or archive. A lookup error must propagate: treating it as no live data
+    // would allow an older file to overwrite current data. A changed named-book
+    // set does not remove the existing bookless partition from this guard.
     let mut live_source_time = None;
     for partition in &partitions {
         if let Some(t) =
@@ -245,11 +234,9 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         )?);
     }
 
-    // 5. Rebuild the dimension ENUM types from what is now live and
-    // archived, so the query path can cast to them and get
-    // dictionary-encoded columns (spec §3.6), and the scope compiler's
-    // text-filter rewrite (spec §3.5) can apply under an as-of era too.
-    // Storage stays VARCHAR — see `refresh_enum` for why.
+    // Refresh dimension ENUM types from live and archived values for dictionary
+    // encoding and historical text filters. Storage stays VARCHAR; see
+    // `refresh_enum` for the type-rebuild contract.
     for col in crate::store::ddl::categorical_columns(req.dataset) {
         // Refresh from the coarsest staged table carrying the column,
         // which is the smallest scan that sees every value. The third
@@ -280,7 +267,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         )?;
     }
 
-    // 6. Record the generation.
+    // Record the generation.
     let mut degradations: Vec<String> = Vec::new();
     if !missing_required.is_empty() {
         degradations.push(format!(
@@ -297,7 +284,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             undeclared.join(", ")
         ));
     }
-    // A carried dimension that varied inside its key (spec §3.3): the
+    // A carried dimension that varied inside its key: the
     // file disagrees with the schema's dependency claim. The row was
     // written with one of the values; say so rather than hide it.
     for c in &split.conflicts {
@@ -325,7 +312,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         source,
     })?;
     // A generation every grain filed straight to the archive was never
-    // live, so it must not count toward freshness (§4.5). Recorded all the
+    // live, so it must not count toward freshness. Recorded all the
     // same: the load happened, and provenance should say so.
     let archived_only = !published.is_empty()
         && published
@@ -353,8 +340,8 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         health: health.clone(),
     })?;
 
-    // 7. Cross-file disagreement, recorded per load so diagnostics can
-    // show a trend (spec §3.5). Read after publishing, because it is the
+    // Cross-file disagreement, recorded per load so diagnostics can
+    // show a trend. Read after publishing, because it is the
     // whole live table that has to agree, not this file.
     let mut cross_file = Vec::new();
     for grain in req.dataset.grains() {
@@ -379,10 +366,8 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     })
 }
 
-/// Books present in the staged rows, plus a count of rows whose `book` is
-/// NULL. Those are reported rather than dropped: a NULL book produces a
-/// partition no publish can ever match, so its rows would sit in live
-/// forever, invisible to replacement.
+/// Books present in staged rows and the number of NULL-book rows. NULL books
+/// are retained as a replaceable partition and reported as degradation.
 fn distinct_books(conn: &duckdb::Connection) -> Result<(Vec<String>, usize), StoreError> {
     let sql = format!("select book, count(*) from {RAW_TABLE} group by book order by book");
     let err = |source| StoreError::Sql {
@@ -406,7 +391,7 @@ fn distinct_books(conn: &duckdb::Connection) -> Result<(Vec<String>, usize), Sto
 pub(crate) mod tests_support {
     use geode_demo_data::{EmitOptions, GeneratorConfig, emit_directory, generate};
 
-    /// The spec §6.3 tree view over the fixture dataset: lhu >
+    /// The tree view over the fixture dataset: lhu >
     /// underlying > position, one measure at underlying grain and one at
     /// position grain.
     pub(crate) fn tree_view() -> geode_core::view::ViewSpec {
@@ -458,7 +443,7 @@ kind = "measure"
     }
 
     /// `risk_2026-08-24_BK000_part1` -> `BK000_part1`: the filename with its
-    /// date component stripped (spec §4.3).
+    /// date component stripped.
     pub(crate) fn batch_of(csv: &std::path::Path) -> String {
         let stem = csv.file_stem().unwrap().to_string_lossy().to_string();
         let parts: Vec<&str> = stem.split('_').collect();
@@ -682,9 +667,8 @@ source_name = "ModelCode"
 
     #[test]
     fn the_planted_attribute_disagreement_is_detected() {
-        // The fixture plants a wrong model_code on alternate rows of one
-        // instrument, so its instrument-grain group disagrees with itself.
-        // §3.5 wants that surfaced, not averaged away.
+        // Conflicting model codes within one instrument must surface as degradation,
+        // not disappear into the selected representative value.
         let f = fixture();
         let mut found = Vec::new();
         for file in f.emitted.files.iter().filter(|x| x.sentinel_path.is_some()) {
@@ -704,7 +688,7 @@ source_name = "ModelCode"
     }
 
     /// A minimal schema with `currency` a dimension carried by the
-    /// instrument grain (spec §3.3) — deliberately not the shared
+    /// instrument grain — deliberately not the shared
     /// `schema()`/`fixture()` above, which the generator populates and
     /// has no way to plant a carried-dimension disagreement in.
     fn carried_schema() -> geode_core::schema::DatasetSpec {
@@ -751,10 +735,8 @@ source_name = "NPV"
 
     #[test]
     fn a_carried_dimension_dependency_violation_degrades_health() {
-        // Two rows sharing one instrument's key but disagreeing on the
-        // currency it declares itself to carry: the schema's dependency
-        // claim is wrong for this file, and §3.3 wants that surfaced as
-        // degraded health rather than silently picking one value.
+        // Two rows share an instrument key but disagree on its carried currency.
+        // Publishing one representative value must also report degraded health.
         let ds = carried_schema();
         let db_dir = tempfile::tempdir().unwrap();
         let store = Store::open(db_dir.path().join("geode.duckdb")).unwrap();
@@ -872,13 +854,9 @@ source_name = "NPV"
 
     #[test]
     fn an_older_file_cannot_overwrite_the_bookless_partition() {
-        // The backfill guard folded over the file's *named* books only, so
-        // the bookless partition sat outside it. Reachable whenever a
-        // batch's book set changes between generations: v1 writes [BK…]
-        // plus unattributed rows, v2 writes [BKZZZ] plus unattributed
-        // rows. The guard asked only about BKZZZ, which was never live,
-        // got `None`, and published — overwriting bookless rows that v1
-        // had left live at a *newer* source time.
+        // Change the named books while retaining NULL-book rows in an older file.
+        // The bookless partition must still be protected from backfill overwriting
+        // its newer live generation.
         let f = fixture();
         let file = ready_file(&f);
         let text = std::fs::read_to_string(&file.csv_path).unwrap();
@@ -945,7 +923,7 @@ source_name = "NPV"
 
     #[test]
     fn republishing_a_file_with_bookless_rows_does_not_accumulate_them() {
-        // Rows with no book are kept and reported (§4.4), which makes them
+        // Rows with no book are kept and reported, which makes them
         // live data in a partition of their own. That partition has to be
         // replaced on republish like any other, or every republish of the
         // batch appends another copy and the desk total drifts upward.
@@ -1008,9 +986,8 @@ source_name = "NPV"
 
     #[test]
     fn the_same_instrument_disagreeing_across_files_is_recorded() {
-        // 2a detects disagreement within a file. Instruments are reused
-        // across books, and those books' files are written at different
-        // times, so cross-file disagreement is the common case (spec §3.5).
+        // Reuse instruments across batches with different attributes to exercise
+        // cross-file disagreement separately from within-file conflicts.
         let f = fixture();
         let file = ready_file(&f);
         load(&f, file);
@@ -1057,7 +1034,7 @@ source_name = "NPV"
     #[test]
     fn conflict_counts_are_recorded_so_diagnostics_can_show_a_trend() {
         // A single reading says little; a column that conflicts on every
-        // load is evidence its declared grain is wrong (spec §3.4).
+        // load is evidence its declared grain is wrong.
         let f = fixture();
         load(&f, ready_file(&f));
         let cat = crate::store::Catalog::new(f.store.writer());
@@ -1077,9 +1054,8 @@ source_name = "NPV"
 
     #[test]
     fn dimension_columns_come_back_dictionary_encoded() {
-        // This is what §7.2's "interned at ingest" actually requires: a
-        // plain VARCHAR returns StringArray, and the renderer would have
-        // to compare strings per cell.
+        // A dictionary-encoded result avoids per-cell string comparisons. A plain
+        // VARCHAR would return StringArray instead.
         let f = fixture();
         load(&f, ready_file(&f));
         let conn = f.store.writer();
@@ -1166,20 +1142,10 @@ source_name = "NPV"
 
     #[test]
     fn a_value_dropped_from_a_republished_partition_still_shows_in_the_enum() {
-        // `book` is baked into the partition key (batch + book, spec
-        // §4.3), so a value there cannot leave live through a normal
-        // republish — a file that no longer carries a book simply never
-        // touches that book's partition, and the partition stays live at
-        // its old generation. A *non-key* categorical column, like
-        // `lhu`, genuinely can leave live: republishing the same
-        // partition (same batch, same books, so every one of its
-        // partitions is touched) with every row's `lhu` rewritten
-        // archives the old rows and replaces them, and live no longer
-        // carries the old value at all. That is exactly the case
-        // `refresh_enum`'s live-and-archive union exists for (spec
-        // §3.5): the old value must still be in the dictionary so an
-        // as-of text filter over it still takes the rewrite instead of
-        // falling back to a row scan.
+        // Use a non-key categorical column: replacing the same partitions can remove
+        // its old value from live while preserving it in archive. The dictionary
+        // must retain that value for historical text filters. Changing `book` would
+        // leave the old partition live and would not exercise this condition.
         let f = fixture();
         let file = ready_file(&f);
         load(&f, file);
@@ -1272,7 +1238,7 @@ source_name = "NPV"
         );
         assert!(err.is_err());
         let after = count(&f, "risk_snapshot_underlying_live");
-        assert_eq!(before, after, "spec §5.7: a failed load never clobbers");
+        assert_eq!(before, after, "a failed load never clobbers");
     }
 
     #[test]

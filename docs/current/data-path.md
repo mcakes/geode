@@ -41,6 +41,45 @@ some producers call it while holding a queue lock. See
 [`handle.rs`](../../crates/geode-data/src/handle.rs) and
 [`service.rs`](../../crates/geode-data/src/service.rs).
 
+## Queues and shutdown
+
+The ingestion boundaries have different capacity and replacement rules:
+
+| Boundary | Accepted work and refusal |
+|---|---|
+| `DataHandle` request channel | Bounded; `try_send` refuses without waiting when full or disconnected. |
+| Adapter message sink | Bounded; refused messages are counted and dropped. |
+| Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
+| Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
+| Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. |
+
+For queued files, resubmission can promote priority without adding another
+job. A catalog check immediately before loading skips work that has already
+been published, without starting progress. Within a file priority, newer
+source times run first. The runner finishes each operation before selecting
+another; sustained document traffic can starve series and files, and sustained
+series traffic can starve files. Coalescing reduces repeated documents but
+does not bound the writer backlog or the number of distinct document keys.
+Fixed staging-table names also require serialized file loads on a store.
+
+Subscription release deadlines drive the receiver's wait, capped at 250 ms
+while idle. They are not a hard latency guarantee: parsing and thread
+scheduling can delay release. The coalescer retains release timestamps for
+observed keys without eviction. Unknown-element warning deduplication stops
+growing at 256 paths per source; further unremembered paths can warn repeatedly.
+
+Shutdown stops producers before the ingest writer. Fetch workers drain their
+accepted requests and join. Subscription workers unsubscribe, set a stop flag,
+and join without flushing documents still held by their coalescers. Discovery
+stops polling; the ingest runner finishes its current operation and exits
+without draining queued jobs. Submission to the runner itself has no shutdown
+refusal, so producer ordering is required. Shutdown is not a flush guarantee.
+Blocking adapter, parser, or filesystem calls can delay joins; panic
+containment does not cancel them. See
+[`runner.rs`](../../crates/geode-data/src/ingest/runner.rs),
+[`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
+[`fetch.rs`](../../crates/geode-data/src/ingest/fetch.rs).
+
 ## Ingestion and publication
 
 Directory sources are polled, not watched, because file watches can fail
@@ -165,6 +204,24 @@ load health is tracked per batch so a clean batch cannot clear another
 batch's degradation. Only a corrected outcome for that batch can do so.
 See [`service.rs`](../../crates/geode-data/src/service.rs).
 
+Equal severities choose the most recently changed health/detail pair.
+Repeating the same report preserves its change stamp, preventing steady
+polling from alternating the displayed reason. Combining and emitting state
+happen under the tracker lock; callbacks must not reenter the service or
+query pool. A transition is acknowledged only if its health event was
+delivered. Refusal leaves it eligible for the next source report, with no
+independent retry timer. Publication and health delivery are attempted
+independently. The scheduler reports every poll, leaving transition
+deduplication to this shared tracker.
+
+Adapter connection state uses the discovery lane. Content failures use the
+load lane: document keys for parsed documents, raw topics for parse failures,
+and `identity@source` for fetches. A message that parses, validates, and stamps
+successfully clears an earlier failure under its raw topic; publication then
+reports under the document key. Local document writes have no configured
+source-health lane. Load entries have no eviction policy, and unresolved
+raw-topic failures have no fixed cap; memory can grow with distinct names.
+
 At startup, persisted unhealthy file generations seed the load lane. An
 unchanged file need not reload, so its retained degradation must survive a
 restart. Live-health resolution excludes archive-only arrivals, uses the
@@ -173,11 +230,25 @@ book. It has no host-clock cutoff because live queries also serve
 future-stamped source data. Unknown health labels and generations without a
 file-catalog record do not establish a health report.
 
+The catalog does not record which configured source owns a file generation.
+Sources sharing a dataset therefore receive the same persisted degradation
+at startup, which can conservatively over-report a source's load health.
+Seeds use publication's batch key so a corrected load can clear them.
+
 Publication events invalidate affected views. Query results are addressed to
 the requesting key. Series fetch completion is addressed by `(identity,
 source)` so every tile watching the same pair can requery, including when a
 fetch appended zero rows because the span was already covered. These routing
 rules prevent an accepted operation from leaving a tile waiting indefinitely.
+
+Ingest and discovery workers continue after event refusal and do not retry
+individual events. The app mailbox retains terminal outcomes and publication
+invalidations until drained; an alternate sink must provide its own delivery
+policy. Ingest progress starts only for work that will run and ends after an
+operation or queue drain. Local document writes omit the start event, so
+autosave does not activate progress. A poll's `ready` count is the plan size
+before runner deduplication; its next-poll time is an estimate, falling back
+to the report time if adding the interval overflows.
 
 ## Limits and verification
 

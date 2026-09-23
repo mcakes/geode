@@ -16,17 +16,23 @@ Current behavior and rationale:
 
 ## Threading
 
-`DataService` owns the writer connection and is not `Sync`, so it lives
-on its own thread. `DataHandle` is the `Clone + Send + Sync` door: every
-method is a `try_send`, and a request that cannot be queued is refused
-and counted rather than waited on. Results and health come back as
+The ingest runner owns the only writer connection. `DataService` runs the
+request loop with its own reader for catalog and coverage lookups; the
+query pool has independent readers. `DataHandle` is the `Clone + Send + Sync`
+door: request submission uses `try_send`, and a request that cannot be queued
+is refused and counted rather than waited on. Results and health come back as
 `DataEvent`s through an `EventSink`; a sink returning `false` means "not
 delivered" and no producer stops on it.
 
-Every background boundary (an ingest load, a catalog recheck, a discovery
-poll, a query worker, a document publish, a message receive) runs under
-`geode_core::panic::contained`. A contained panic logs and keeps the app
-running; an ingest load panic marks the source `Failed`.
+Background operations contain panics and report failures without stopping
+unrelated work; an ingest load panic reports that operation as `Failed`.
+Containment does not interrupt blocked adapter or filesystem calls.
+
+The bounded request and adapter channels do not bound the ingest queues.
+Documents precede series, which precede files, with no preemption of running
+work. Sustained higher-priority traffic can starve lower-priority jobs.
+See [queues and shutdown](../../docs/current/data-path.md#queues-and-shutdown)
+for capacity, coalescing, and worker shutdown behavior.
 
 ## What lives here
 

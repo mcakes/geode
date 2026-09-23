@@ -1,7 +1,6 @@
-//! The cold-start priority ladder (spec §5.4). Ingest is a priority queue,
-//! not a sweep: the desk has strong priors about what it wants to see
-//! first, and a sentinel-only scan is cheap enough to plan the whole run
-//! before opening a single CSV.
+//! File-ingestion priorities, planned from sentinel metadata before CSV reads.
+//! Current risk precedes history; within each priority, newer source times
+//! come first.
 
 use crate::source::{Candidate, CandidateState, Priority, SourceSpec};
 use chrono::{DateTime, Utc};

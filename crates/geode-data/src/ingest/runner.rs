@@ -1,46 +1,17 @@
-//! The ingest runner (spec §5.4–§5.7, Phase 3 §2.5). One thread owning
-//! the writer connection for **every** dataset, working three queues —
-//! parsed documents, fetched series rows, and a priority-ordered queue
-//! of files — never taking the app down.
+//! One ingest thread owns the writer and serializes all publication.
 //!
-//! A queued document is taken **ahead of** any file, whatever the file's
-//! priority (market-data spec §5.4, amended in Task 11: the rung wording
-//! there predates this ruling), and a queued series job is taken
-//! **after** documents but **ahead of** any file (timeseries spec §5.4,
-//! Task 7): an append was asked for by a trader watching a chart, a file
-//! was found by a poll nobody is waiting on. Two reasons documents lead.
-//! A document publish is milliseconds — the rows are already parsed and
-//! already coalesced to the latest per key upstream (`ingest::coalesce`),
-//! so there is nothing to read, split or scan — and so it cannot starve a
-//! file load however many arrive: the file it jumps is delayed by the
-//! length of one appender pass. And a single rule spares the runner a
-//! second priority vocabulary: documents carry no `Priority`, and
-//! interleaving them with files by one would mean inventing and
-//! maintaining a comparison between two things that are never actually
-//! competing for the same time.
+//! Each dequeue prefers documents, then fetched series, then files. Documents
+//! and series are FIFO; files follow planned priority and descending source
+//! time. Running work finishes before priorities are reconsidered. Sustained
+//! higher-priority traffic can starve lower-priority work.
 //!
-//! `Queue::in_flight` belongs to the file arm alone — it is the dedupe
-//! key discovery's own polls are checked against, and neither a document
-//! nor a series job has a file, a `stat` or a poll, so nothing on either
-//! path reads or writes it.
+//! File submissions deduplicate queued/in-flight path, size, and source time;
+//! a queued file can be promoted. Document and series queues have no dedupe,
+//! refusal, or fixed capacity. Upstream coalescing does not bound these queues.
 //!
-//! One thread, not a pool, and one for all datasets rather than one per
-//! dataset: DuckDB is single-writer, so every publish serializes anyway
-//! (spec §5.3), and a runner per dataset would make that discipline a
-//! convention held by whoever spawned them. The `Store` — and with it the
-//! writer — lives here; the service keeps only reader connections cloned
-//! before the store moved (Phase 3 §5.3).
-//!
-//! **Moving staging onto a pool is planned but on hold** — read
-//! `docs/ingest-cold-start-handoff.md` first. The 1.87× in `docs/perf.md`
-//! measures `read_csv` alone, not staging, and `staging_raw` /
-//! `staging_{grain}` are fixed global names that concurrent staging would
-//! overwrite. This paragraph becomes wrong the day that lands; rewrite it
-//! rather than leaving it to mislead.
-//!
-//! Preemption granularity is one file: the queue is re-sorted on every
-//! submit, so a newly landed current file jumps ahead of remaining backfill
-//! without interrupting a load in flight (spec §5.4).
+//! Loads use fixed staging-table names, so concurrent file loads on the same
+//! store are unsafe. Shutdown joins running work but does not drain queued
+//! jobs. See `docs/current/data-path.md` for delivery and health contracts.
 
 use crate::adapter::SeriesRows;
 use crate::health::Health;
@@ -66,27 +37,17 @@ use std::thread::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub enum IngestEvent {
-    /// The runner popped a job and is about to load it (spec 2026-09-17
-    /// §5.3): `path` is the file's own path, or `document://{source}/
-    /// {dataset}` for a document (its batch is not known until the rows
-    /// are read, and the strip never needs it); `queued` is how many
-    /// items — files and documents — still waited behind it at the
-    /// instant it was popped. For a file, emitted only after the pop-time
-    /// stale re-check passes (2026-09-19 final review, finding 1) — a
-    /// re-queued already-loaded file produces no `Started` at all, rather
-    /// than one with nothing to end it. Always followed by exactly one
-    /// `Published` or `Failed` for the same job: one runner, one FIFO
-    /// queue.
+    /// One job is about to run; `queued` counts waiting jobs across all three
+    /// queues. Files/documents finish with Published or Failed; series finish
+    /// with SeriesAppended or SeriesFailed. Local documents omit this event.
     Started {
         source: String,
         path: String,
         queued: usize,
     },
     Published {
-        /// The `[sources.<name>]` this item came from (Phase 4b final
-        /// review, MAJ-1) — distinct from `dataset`: `SourceSpec` names
-        /// and datasets are two separate fields, and the service must key
-        /// `DataEvent::Health` by this, never by `dataset`.
+        /// Configured source name, distinct from dataset. Source health must use
+        /// this name even when several sources feed the same dataset.
         source: String,
         dataset: String,
         batch: String,
@@ -103,9 +64,8 @@ pub enum IngestEvent {
         batch: String,
         reason: String,
     },
-    /// A series job appended (timeseries spec §5.4 step 3). `appended`
-    /// may be 0 — an overlapping refetch — and the event is still sent,
-    /// because coverage was recorded and the asking tile must requery.
+    /// Series append completion, emitted even when `appended` is zero because
+    /// coverage has been recorded and watchers must requery.
     SeriesAppended {
         source: String,
         dataset: String,
@@ -126,28 +86,15 @@ pub enum IngestEvent {
     PlanComplete,
 }
 
-/// Where events go. `false` means "this event was not delivered" —
-/// the caller's bounded channel was full, or its receiver is gone. It is
-/// never a shutdown signal: the runner keeps working through one and the
-/// event is simply dropped (Phase 4b follow-up, Task 1; the runner's only
-/// stop is `IngestHandle::shutdown`). Called from the runner's own thread,
-/// so a sink must not block indefinitely — a channel send is fine.
+/// Nonblocking event delivery. `false` means refused; the runner continues
+/// without retrying the event. The callback can run under the queue lock and
+/// must not reenter the runner.
 pub type IngestSink = Arc<dyn Fn(IngestEvent) -> bool + Send + Sync>;
 
-/// A parsed document waiting to publish (market-data spec §5.4 step 3).
-/// The rows are **owned**: the receiver thread parses into
-/// struct-of-arrays and hands the columns over, keeping nothing, so the
-/// publish reads no buffer another thread could still be writing and
-/// nothing here is cloned per row (PHILOSOPHY §6).
-///
-/// `source` is the `[sources.<name>]` name and `dataset` the dataset it
-/// feeds — two separate fields for the reason `IngestEvent::Published`
-/// records (Phase 4b's MAJ-1), not one name used twice.
-///
-/// `bytes` and `received_at` are what a document has instead of a file's
-/// length and mtime: a message carries no `stat`, but provenance still
-/// wants both, and `source_time` — the time *the feed* stamped, not the
-/// time we saw it — is what the backfill guard and as-of order by.
+/// Owned parsed columns waiting for publication. The receiver transfers them
+/// without per-row copies or shared mutable buffers. `source` names the
+/// health owner; `dataset` names storage. `bytes` and `received_at` record
+/// message provenance; `source_time` orders generations and historical reads.
 #[derive(Debug)]
 pub struct DocumentJob {
     pub source: String,
@@ -158,8 +105,7 @@ pub struct DocumentJob {
     pub bytes: u64,
 }
 
-/// Fetched rows waiting to append (timeseries spec §5.4). Owned, like
-/// `DocumentJob`'s rows, for the same reason.
+/// Owned fetched rows waiting for the serialized append operation.
 #[derive(Debug)]
 pub struct SeriesJob {
     pub source: String,
@@ -203,20 +149,12 @@ pub struct IngestHandle {
 
 pub struct IngestRunner;
 
-/// The work a file load does. A function pointer rather than a direct
-/// call to [`load_file`] so a test can inject one that panics — the
-/// same shape as `geode_data::query::pool::RunFn`, and for the same
-/// reason: there is no CSV that makes `load_file` itself panic, and
-/// panic-safety (Phase 4b Task 6: the file and the panic payload land
-/// in the reported `Failed.reason`) is the property worth testing here.
+/// File-load operation, injectable to exercise panic containment independently
+/// of ordinary malformed-input errors.
 type LoadFn = fn(&Store, &LoadRequest) -> Result<LoadOutcome, LoadError>;
 
-/// The work a document publish does, injectable for exactly the reason
-/// [`LoadFn`] is: no document makes [`publish_document`] itself panic
-/// (`DocumentRows::validate` turns every malformed one into an `Err`
-/// before a byte is written), so containment — the property spec §5.7
-/// actually asks for on this path — is only testable through an injected
-/// publish that does.
+/// Document-publish operation, injectable to verify panic containment.
+/// Malformed document validation normally returns an error before writing.
 type PublishFn = fn(&Store, &DocumentPublishRequest) -> Result<DocumentPublished, StoreError>;
 
 impl IngestRunner {
@@ -256,26 +194,9 @@ impl IngestRunner {
 }
 
 impl IngestHandle {
-    /// Add work. Items are merged into the queue and the whole queue is
-    /// re-sorted, so a current file preempts pending backfill. Returns how
-    /// many of `plan`'s items were newly queued (see `enqueue`), for
-    /// tests: the runner's own pop-time re-check (below) independently
-    /// guarantees a duplicate is never *loaded* twice regardless of what
-    /// this dedupe does, so a test that only observes `IngestEvent`s
-    /// cannot isolate this method's own contribution from that backstop.
-    ///
-    /// See `enqueue` for the dedupe and promotion rule this applies.
-    /// Discovery polls on its own clock and re-reports every file the
-    /// catalog does not yet reflect — including one this queue already
-    /// holds, or one the runner is in the middle of loading, whose catalog
-    /// record is written only at the end of the load. Without dedupe, a
-    /// poll shorter than a load re-adds a copy of every not-yet-published
-    /// file every time it runs: the production symptom was 3051
-    /// generations of 17 files that never changed, even though (as the doc
-    /// above notes) the pop-time re-check alone would already have kept
-    /// every one of those copies from actually reloading — what the
-    /// dedupe adds on top is bounding how large the queue, and how many
-    /// wasted pop-time catalog lookups, a quiet poll interval can pile up.
+    /// Merge file work, deduplicating queued and in-flight identities and
+    /// promoting already queued work when its priority improves. The pop-time
+    /// catalog check separately skips files that have already been loaded.
     pub fn submit(&self, plan: WorkPlan) -> usize {
         let (lock, cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -289,17 +210,9 @@ impl IngestHandle {
         enqueued
     }
 
-    /// Hand a parsed document to the runner. Returns nothing, and refuses
-    /// nothing: unlike `submit`, there is no dedupe to report on — the
-    /// coalescer upstream already keeps at most one pending document per
-    /// key, so the deduplication this queue would otherwise need has
-    /// already happened where it can also *replace* a pending document
-    /// rather than merely drop a duplicate.
-    ///
-    /// Cheap enough to call from a receiver thread on every message
-    /// (spec's "nothing blocks a producer"): it moves the already-parsed
-    /// columns into a `VecDeque` under the queue lock and wakes the
-    /// runner. It never blocks on the runner itself.
+    /// Append a document under a short queue lock. No capacity limit, refusal,
+    /// or deduplication applies here; upstream coalescing only replaces documents
+    /// that have not yet been submitted to this runner.
     pub fn submit_document(&self, job: DocumentJob) {
         let (lock, cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -336,34 +249,9 @@ impl Drop for IngestHandle {
     }
 }
 
-/// The queue mutation `submit` performs under its lock, pulled out as a
-/// free function so a test can drive it synchronously against a bare
-/// `Queue` — no runner thread, no timing at all — which is the only way
-/// to exercise the `in_flight` half of the dedupe condition directly
-/// rather than incidentally through `submit`'s return value.
-///
-/// An incoming item naming the same `(csv_path, size, source_time)` as
-/// one already queued or in flight is not queued again — `size` is part
-/// of the key, not just `source_time`, because that is exactly the pair
-/// `is_unchanged` compares (`source/discovery.rs`); a key coarser than
-/// the change-detection rule it defends would let two different sizes at
-/// one source time collapse into "the same file".
-///
-/// If the match is against an item still sitting in the queue (not one
-/// already in flight — that copy is past the point of reprioritising),
-/// its priority is promoted to the better of the two
-/// (`existing.priority.min(item.priority)`) rather than the new offer
-/// being dropped with no effect. `build_plan` decides an item's priority
-/// fresh on every poll from whichever candidate is currently the newest
-/// *Ready* one for its batch (spec §5.4): once today's file loads and
-/// reads `Unchanged`, yesterday's still-queued file can become that
-/// newest-Ready candidate and get offered at the source's own priority
-/// instead of `Backfill`. Without promotion, a file already queued would
-/// stay stuck at whatever priority it first queued under, sitting behind
-/// another source's current work it should now jump ahead of.
-///
-/// Returns how many items were newly queued; a promotion does not count,
-/// since nothing new entered the queue.
+/// Deduplicate by path, size, and source time. A matching queued entry can
+/// move to a higher priority. Return only the number of new entries, excluding
+/// promotions and duplicates.
 fn enqueue(q: &mut Queue, items: Vec<WorkItem>) -> usize {
     let mut enqueued = 0;
     for item in items {
@@ -436,18 +324,8 @@ fn take_work(q: &mut Queue) -> Option<Work> {
     Some(Work::File(it))
 }
 
-/// Publishes one queued document, reporting the outcome as the same
-/// `IngestEvent`s a file load reports — a document *is* a file to
-/// everything downstream (generations, as-of, retention, the freshness
-/// catalog), so a second event vocabulary would only make the service
-/// and the diagnostics tile handle the same publish twice.
-///
-/// A free function rather than an arm of `run`'s `match`, so the file
-/// body below keeps the one indentation level it has always had: the
-/// alternative re-indents every line of it, which is both a diff nobody
-/// can review and — concretely — a break of the six mutation anchors
-/// sitting inside it. It takes `job` by value because the rows die with
-/// the publish.
+/// Publish one owned document and report its outcome through the same
+/// generation events as files. The rows are consumed by this operation.
 fn publish_one_document(
     store: &Store,
     schema: &SchemaSpec,
@@ -485,10 +363,8 @@ fn publish_one_document(
         return;
     };
 
-    // The same boundary the file arm uses (spec §5.7): a panicking publish
-    // degrades its own document and the runner keeps working. `contained`
-    // is what tells the process-wide panic hook this one is handled, so it
-    // logs at `error` instead of writing a crash file.
+    // Contain publication panics as this document's failure and continue. The
+    // contained marker tells the process panic hook to log without a crash file.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         geode_core::panic::contained(|| {
             publish(
@@ -552,9 +428,8 @@ fn publish_one_document(
     }
 }
 
-/// The series arm of the runner (timeseries spec §5.4 step 3), the
-/// document arm's shape exactly: resolve the dataset by name, append
-/// under `contained`, announce the outcome, count a refused announcement.
+/// Resolve the series dataset, append under panic containment, and report
+/// completion or failure. Refused delivery does not stop the runner.
 fn append_one_series(
     store: &Store,
     schema: &SchemaSpec,
@@ -631,17 +506,11 @@ fn run(
     load: LoadFn,
     publish: PublishFn,
 ) {
-    // PlanComplete is announced once per drain, on the transition from
-    // working to idle — not on every wakeup. An idle runner would otherwise
-    // push an event every poll interval, forever, into an unbounded channel.
+    // Announce PlanComplete once at startup and on each transition to idle.
+    // Repeated idle wakeups must not produce redundant progress events.
     let mut announced_idle = false;
-    // One line per runner, not one per refused event (final review,
-    // MIN-3): before Task 1 a gone receiver ended this thread after a
-    // single refusal, so it could never repeat. Now the thread lives
-    // on, and an unlatched warning would fill the 4,096-entry log ring
-    // — the one in-process log a diagnostics tile reads — with copies
-    // of itself. The caller's `dropped` counter stays the
-    // authoritative count.
+    // Warn once per runner about refused delivery so a disconnected receiver
+    // cannot fill the log ring. Delivery counters remain the full count.
     let refusal_logged = AtomicBool::new(false);
 
     loop {
@@ -662,13 +531,8 @@ fn run(
                 if !announced_idle {
                     announced_idle = true;
                     if !sink(IngestEvent::PlanComplete) {
-                        // Logged with the lock released, the same rule
-                        // `query::pool`'s delivery site follows (fix
-                        // round 1, MIN-5): formatting a warning under
-                        // the queue mutex blocks `submit`. Re-acquired
-                        // and re-checked from the top, so a shutdown or
-                        // an item that landed meanwhile is seen at once
-                        // rather than after the 50 ms wait.
+                        // Release the queue lock before logging so formatting cannot block submit.
+                        // Reacquire and recheck shutdown/work before waiting again.
                         drop(q);
                         log_refused_event(&refusal_logged, "the queue-drained announcement");
                         q = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -684,17 +548,9 @@ fn run(
 
         let (work, queued) = work;
 
-        // A document is published here and the loop starts over: none of
-        // the file machinery below applies to it — no pop-time change
-        // detection (there is no file to re-`stat`), no `in_flight` to
-        // clear (it was never set), no sentinel. Its `Started` is emitted
-        // right here, before the publish, since a document has no stale
-        // check to emit it after — except for a local publish
-        // (`LOCAL_SOURCE`, line-pricer §5.5, final-review finding 3): a
-        // sheet autosave must never blink the ingest progress strip, so
-        // its `Started`/`Loading` is skipped entirely. The unconditional
-        // `LoadEnded` the service sends after every publish is untouched
-        // — the strip tolerates a `LoadEnded` with no matching `Started`.
+        // Documents bypass file readiness and stale checks. Local writes omit
+        // Started so autosave does not activate ingest progress; publication still
+        // produces an outcome and the service's LoadEnded.
         let item = match work {
             Work::Document(job) => {
                 if job.source == LOCAL_SOURCE {
@@ -724,31 +580,9 @@ fn run(
             Work::File(item) => item,
         };
 
-        // Pop-time re-check, the other half of the dedupe: the queue can
-        // still hold a copy of a file that finished loading — under a
-        // different, no-longer-in-flight copy — while this one waited.
-        // `submit`'s dedupe (above) catches the common case; this catches
-        // what slips past it (spec §5.7: not a failure, so no event).
-        //
-        // Wrapped in its own panic boundary, same reasoning as the load's
-        // below: `lookup_by_path` unwraps every column it reads
-        // (`store/catalog.rs`), so a `file_generations` row an older build
-        // wrote in a shape this build does not expect can panic here
-        // rather than return `Err`. A panic and a `StoreError` both fail
-        // open — "not stale", so the load proceeds rather than an item
-        // being silently dropped by a check that itself broke — but the
-        // two are matched as distinct arms so a future diagnostic can
-        // tell "the read broke" from "nothing was found" apart, even
-        // though both currently do the same thing.
-        //
-        // Fix round 1, MIN-10: unlike the load boundary twenty lines
-        // down, a panic caught here produces no `IngestEvent` — it is
-        // swallowed into "not stale" by `.unwrap_or(false)` below. It is
-        // not silent: the boundary runs under `geode_core::panic::
-        // contained`, so the process-wide hook logs it at `error` as a
-        // contained panic (message and location) without a crash file.
-        // What it lacks is the load arm's *named* event with the file
-        // path; recorded as a known asymmetry rather than fixed here.
+        // Recheck the catalog before loading: work may have become redundant while
+        // queued. A stale skip emits no event. Lookup errors and contained panics
+        // fail open so the load is attempted rather than silently discarded.
         let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| {
                 Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path)
@@ -765,11 +599,8 @@ fn run(
             continue;
         }
 
-        // Emitted only now — after the stale check passed — so a
-        // re-queued already-loaded file (finding 1, 2026-09-19 final
-        // review) never starts the strip: a `Started` with no
-        // `Published`/`Failed` to follow it would leave the status bar
-        // stuck.
+        // Announce Started only after the stale check, so every announcement has a
+        // terminal operation outcome.
         if !sink(IngestEvent::Started {
             source: item.source.clone(),
             path: item.candidate.csv_path.to_string_lossy().into_owned(),
@@ -778,8 +609,7 @@ fn run(
             log_refused_event(&refusal_logged, "a load-started announcement");
         }
 
-        // The dataset is resolved per item (Phase 3 §2.5). An undeclared
-        // one is this item's failure, named, and the runner carries on.
+        // Resolve the dataset per item. An undeclared dataset fails only this job.
         let Some(dataset) = schema.dataset(&item.dataset) else {
             let failed = sink(IngestEvent::Failed {
                 source: item.source.clone(),
@@ -800,9 +630,8 @@ fn run(
             continue;
         };
 
-        // Panic boundary (spec §5.7): a panicking load degrades its file and
-        // the runner keeps working. Only a render-thread panic takes the app
-        // down.
+        // Contain load panics, report the file as Failed, and continue with the next
+        // job. Ordinary load errors use the same failure event.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| {
                 let CandidateState::Ready(sentinel) = &item.candidate.state else {
@@ -845,12 +674,8 @@ fn run(
                 reason,
             },
             Err(payload) => {
-                // The panic's payload (Phase 4b Task 6, spec §4.7's
-                // as-built deviation: a panicking load is `Failed`, not
-                // `Degraded` — the plan's ruling): `&str`/`String` cover
-                // every `panic!`/`unwrap`/`expect` in practice; anything
-                // else (a custom payload type) falls back to a named
-                // placeholder rather than losing the event.
+                // Preserve string panic payloads in Failed.reason; custom payloads receive
+                // a named placeholder so the failure event is still delivered.
                 let message = panic_payload_message(payload.as_ref());
                 let path = item.candidate.csv_path.display();
                 log_ingest_panic(&item.candidate.csv_path, &message);
@@ -875,17 +700,7 @@ fn run(
     }
 }
 
-/// A refused event was not delivered — the caller's bounded channel was
-/// momentarily full, or its receiver is gone. Either way the runner keeps
-/// going (Phase 4b follow-up, Task 1: exit-on-false was never the shutdown
-/// path — `IngestHandle::shutdown` + `Drop` is, and one cold-start burst
-/// filling a 256-slot channel used to end ingest for the session). Logged
-/// once per RUNNER, never retried: the health transitions that matter are
-/// re-offered by `HealthTracker` on the next report, and `latched` keeps a
-/// permanently gone receiver from filling the log ring with copies of this
-/// line (final review, MIN-3). A free function for the same reason
-/// `log_ingest_panic` is one: it fires on the runner's own thread, so a
-/// test can only reach it directly.
+/// Log refused delivery once; the runner does not retry individual events.
 fn log_refused_event(latched: &AtomicBool, what: &str) {
     if latched.swap(true, Ordering::Relaxed) {
         return;
@@ -904,17 +719,9 @@ pub fn is_preemptible(item: &WorkItem) -> bool {
     item.priority == Priority::Backfill
 }
 
-/// A `catch_unwind` payload as text, for the `Failed.reason` a panicking
-/// load produces (Phase 4b Task 6). `panic!`/`unwrap`/`expect` payloads
-/// are always `&'static str` or `String`; anything else (a custom
-/// `panic_any` payload) falls back to a named placeholder rather than
-/// losing the event.
-///
-/// `pub(crate)` for the receiver thread's own boundary
-/// (`ingest::subscribe`), which reports a panicking parse the same way
-/// this one reports a panicking load: one spelling of a payload, so two
-/// `Failed.reason`s a trader reads side by side in the diagnostics tile
-/// cannot describe the same panic differently.
+/// Render a panic payload for Failed.reason. Strings are preserved and custom
+/// payloads receive a placeholder. Shared by the runner and receiver so their
+/// diagnostics describe the same payload consistently.
 pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -925,24 +732,8 @@ pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Str
     }
 }
 
-/// Logs a panicking load at `geode::ingest` `error`, with the file and
-/// payload (Phase 4b Task 6 fix round 1, MAJ-2). Pulled out as a free
-/// function — the crate's established pattern for a log line a test
-/// needs to drive directly, `service.rs`'s `log_health_event`/
-/// `log_ingest_failure` — for the same reason those exist: this event
-/// fires on the spawned `geode-ingest` thread, and
-/// `tracing::subscriber::with_default`'s scope is thread-local, so a
-/// test running on the *test* thread could never observe it if it
-/// stayed inline in `run`.
-///
-/// Fix round 1, MIN-9: a panicking load is logged at `error` twice —
-/// this line (which has the file) and `service.rs`'s own
-/// `log_ingest_failure` a moment later on the same thread (which has
-/// the dataset/batch, reading `Failed.reason` — the string this event's
-/// `message` also feeds). Both are correct per their own task's brief;
-/// recorded here so two `geode::ingest` errors for one failure reads as
-/// a decision, not a surprise, to whoever next looks at the ring or the
-/// diagnostics tile for this source.
+/// Log a contained ingest panic with its file and payload. Kept callable
+/// independently so tests can capture it with a thread-local subscriber.
 fn log_ingest_panic(path: &std::path::Path, message: &str) {
     tracing::error!(target: "geode::ingest", file = %path.display(), "ingest task panicked: {message}");
 }
@@ -1069,13 +860,8 @@ mod tests {
         handle.shutdown();
     }
 
-    /// A sink that forwards into a channel but REFUSES the first event
-    /// matching `refuse` — returning `false` without sending it. `false`
-    /// means "this event was not delivered", never "stop producing"
-    /// (Phase 4b follow-up, Task 1): every test below asserts the runner
-    /// kept working through one. The returned counter is how many
-    /// refusals actually happened, so a test can wait for the refusal
-    /// rather than racing it.
+    /// Forward events except the first matching refusal. Count refusals so tests
+    /// can observe the boundary before asserting the runner remains usable.
     fn refusing_sink(
         refuse: fn(&IngestEvent) -> bool,
     ) -> (
@@ -1123,8 +909,7 @@ mod tests {
 
     #[test]
     fn a_refused_load_outcome_does_not_stop_the_runner() {
-        // A momentarily full event channel is not a shutdown signal: the
-        // runner's own `shutdown` is (Phase 4b follow-up, Task 1).
+        // Refused event delivery must not stop the runner.
         let (_db, _src, store, ds, plan) = harness();
         assert!(plan.items.len() >= 2, "need at least two files");
         let first = plan.items[0].clone();
@@ -1182,10 +967,8 @@ mod tests {
         assert!(plan.items.len() >= 2, "need at least two files");
         let mut undeclared = plan.items[0].clone();
         undeclared.dataset = "not_declared_anywhere".into();
-        // A DIFFERENT file: sharing `plan.items[0]`'s `(csv_path, size,
-        // source_time)` races `clear_in_flight`, which runs after the
-        // sink call this test waits on, so the resubmission could be
-        // dropped as an in-flight duplicate (fix round 1, MIN-1).
+        // Use a different file identity: the previous event can arrive before
+        // clear_in_flight, so immediate resubmission could be deduplicated.
         let good = plan.items[1].clone();
 
         let (sink, rx, refusals) = refusing_sink(|e| matches!(e, IngestEvent::Failed { .. }));
@@ -1394,16 +1177,8 @@ mod tests {
         let (_db, _src, store, ds, mut plan) = harness();
         assert!(plan.items.len() >= 3, "need several items to observe order");
 
-        // Force everything to Backfill, then pull one item *out* to
-        // resubmit separately at LatestRisk priority — a poll finding this
-        // file newly current. It must be removed from `plan` first: this
-        // test used to clone it in place instead, submitting the same
-        // (csv_path, source_time) twice at different priorities and
-        // expecting *two* Published events for it. That is the ladder
-        // defect A fixed (submit's own dedupe now drops the second copy),
-        // so `expected` would then wait forever on a publish that no
-        // longer comes. Removing it first keeps this test about
-        // preemption, not a second covert case of the dedupe.
+        // Remove one backfill item and resubmit it at LatestRisk to isolate priority
+        // preemption. Leaving its original copy would also exercise deduplication.
         for item in &mut plan.items {
             item.priority = Priority::Backfill;
         }
@@ -1443,14 +1218,8 @@ mod tests {
 
     #[test]
     fn a_dedupe_hit_promotes_the_queued_items_priority_to_the_better_of_the_two() {
-        // Unlike the test above (a brand-new file jumping the queue), this
-        // is the *same* file resubmitted at a better priority — a poll
-        // finding that yesterday's still-queued file is now the newest
-        // Ready candidate for its batch, once whatever used to eclipse it
-        // has already loaded (spec §5.4, `build_plan`). The resubmission
-        // must promote the queued entry rather than being dropped with no
-        // effect, or the file would be stuck behind other Backfill work it
-        // should now jump ahead of.
+        // Resubmitting the same queued file at a better priority must promote it.
+        // This exercises promotion rather than insertion of a new current file.
         let (_db, _src, store, ds, mut plan) = harness();
         assert!(plan.items.len() >= 2, "need at least two files");
         for item in &mut plan.items {
@@ -1519,10 +1288,7 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, IngestEvent::Published { .. }))
             .count();
-        assert_eq!(
-            published, good,
-            "one bad file must not stop the run (spec §5.7)"
-        );
+        assert_eq!(published, good, "one bad file must not stop the run");
     }
 
     /// A runner delivering into a channel, built on an injected `load` —
@@ -1574,14 +1340,8 @@ mod tests {
         );
     }
 
-    /// `service.rs`'s own `logged(...)` pattern (Phase 4b Task 2 fix
-    /// round 1, MAJ-1), reproduced here rather than shared: `log_ingest_
-    /// panic` fires on the spawned `geode-ingest` thread, so — unlike
-    /// `a_panicking_load_names_the_file_and_the_panic_payload` above,
-    /// which only sees the `Failed.reason` string that crosses the
-    /// channel — this drives the free function directly, on the test
-    /// thread, against a scoped ring subscriber (fix round 1, MAJ-2:
-    /// exactly why it was pulled out of `run` as a free function).
+    /// Capture a direct log call with a scoped subscriber. The subscriber is
+    /// thread-local, so it cannot observe calls on the spawned ingest thread.
     fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
         use tracing_subscriber::layer::SubscriberExt;
         let ring = Arc::new(geode_core::log::Ring::new(8));
@@ -1595,9 +1355,8 @@ mod tests {
 
     #[test]
     fn a_refusal_is_logged_once_per_runner_not_once_per_event() {
-        // A gone receiver refuses every event for the rest of the
-        // session; unlatched, this line alone would evict the 4,096-entry
-        // ring a diagnostician came to read (final review, MIN-3).
+        // Repeated refusal from a gone receiver must produce one warning, preserving
+        // space in the diagnostics ring for other events.
         let latch = AtomicBool::new(false);
         let records = logged(|| {
             log_refused_event(&latch, "the first thing");
@@ -1657,10 +1416,8 @@ mod tests {
 
     #[test]
     fn an_item_naming_an_undeclared_dataset_fails_by_name_and_the_runner_continues() {
-        // One runner serves every dataset (spec §2.5), so an item can name
-        // a dataset the schema does not declare — a sources.toml pointing
-        // at a dataset that a later datasets.toml edit removed. It must be
-        // reported as that item's failure, not a panic and not silence.
+        // An item can name a removed dataset. Report its failure and keep the runner
+        // available for other datasets.
         let (_db, _src, store, ds, plan) = harness();
         let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
         let mut wrong = plan.items[0].clone();
@@ -1689,18 +1446,9 @@ mod tests {
 
     #[test]
     fn submit_drops_an_item_already_queued_for_the_same_file_and_source_time() {
-        // `submit` used to `extend` the queue unconditionally: two plans
-        // naming the same (path, source_time) queued the file twice. This
-        // is the common case the production ladder came from — a poll
-        // re-adding a file that is already waiting to load.
-        //
-        // The assertion has to be on `submit`'s own return value, not on
-        // the eventual `IngestEvent` stream: the runner's pop-time
-        // re-check (a separate defence) independently guarantees a
-        // duplicate is never *loaded* twice regardless of what `submit`
-        // does, so "exactly one Published" is true even with this
-        // dedupe disabled — it would not isolate this method's own
-        // contribution from that backstop.
+        // Assert submit's queued count directly. Counting publications alone cannot
+        // prove submission deduplication because the pop-time stale guard also
+        // prevents duplicate loads.
         let (_db, _src, store, ds, plan) = harness();
         let item = plan.items[0].clone();
 
@@ -1737,21 +1485,9 @@ mod tests {
 
     #[test]
     fn a_queued_item_whose_file_was_loaded_meanwhile_is_skipped_at_pop_time() {
-        // The other half of the fix: even a duplicate that slips past
-        // `submit`'s dedupe (e.g. it was already popped and in flight when
-        // the duplicate arrived) must be harmless once the file it names
-        // has actually finished loading. Load one file directly, bypassing
-        // the runner, then submit it alongside a second, genuinely unloaded
-        // file — the runner must publish nothing for the first and still
-        // load the second.
-        //
-        // The second file is what makes this deterministic rather than
-        // racing `PlanComplete` (which fires once before the stale item is
-        // even popped, and gives no event at all for a silent stale skip):
-        // giving the stale item strictly higher priority guarantees the
-        // single-threaded runner pops and dispenses with it *before* the
-        // fresh one, so waiting for the fresh item's own Published event
-        // is proof enough that the stale item was already handled.
+        // Load one file outside the runner, then queue it ahead of a fresh file.
+        // The fresh file's publication proves the stale file has already been
+        // processed; a queue-drained announcement could race submission.
         let (_db, _src, store, ds, plan) = harness();
         assert!(plan.items.len() >= 2, "need two distinct files");
         let mut stale = plan.items[0].clone();
@@ -1809,10 +1545,8 @@ mod tests {
             "the fresh file must still load: {events:?}"
         );
 
-        // Finding 1 (2026-09-19 final review): a stale-skipped file must
-        // never even announce a `Started` — one with no `Published`/
-        // `Failed` to follow it would start the status bar's strip and
-        // leave it stuck.
+        // A stale skip must emit no Started: without a matching operation outcome,
+        // the progress strip could remain active.
         let stale_path = stale.candidate.csv_path.to_string_lossy().into_owned();
         let started_paths: Vec<&str> = events
             .iter()
@@ -1829,15 +1563,9 @@ mod tests {
 
     #[test]
     fn a_malformed_catalog_row_panics_the_pop_time_lookup_without_killing_the_runner() {
-        // The pop-time re-check calls `lookup_by_path`, which unwraps
-        // every column it reads (`store/catalog.rs`). A `file_generations`
-        // row this build cannot read the shape of — here, `mtime` is
-        // NULL, which the read side never expects — panics there instead
-        // of returning an `Err`. That panic must degrade only the item
-        // being popped (fail open: "not stale", so its own load proceeds
-        // normally) and must not take the ingest thread down with it
-        // (spec §5.7): a second, distinct item queued behind it must
-        // still publish.
+        // A NULL mtime in the catalog triggers the lookup's unwrap panic. The stale
+        // check must fail open, allow the file load, and leave the runner able to
+        // publish a second distinct file.
         let (_db, _src, store, ds, plan) = harness();
         assert!(plan.items.len() >= 2, "need two distinct files");
         let poisoned = plan.items[0].clone();
@@ -1889,13 +1617,10 @@ mod tests {
         );
     }
 
-    // ---- documents (market-data spec §5.4 step 3) ----------------------
+    // Document publication.
 
-    /// A store that can hold the spec's own document dataset: the schema
-    /// applied and the catalog tables created, exactly as
-    /// `store::document`'s own fixture builds one. Separate from
-    /// `harness()` because a document needs no source directory and no
-    /// generated CSV at all.
+    /// Create a document store with schema and catalog tables. Documents need
+    /// neither a source directory nor generated CSV fixtures.
     fn document_store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
@@ -1904,12 +1629,8 @@ mod tests {
         (dir, store)
     }
 
-    /// The next outcome event, skipping the idle announcements a runner
-    /// legitimately emits before and between work — `PlanComplete` fires
-    /// once when the runner starts on an empty queue, which races any
-    /// submit, so no test may treat it as positional — and `Started`,
-    /// which now always precedes the outcome these tests are watching
-    /// for (Task 1).
+    /// Read the next outcome, skipping Started and idle announcements.
+    /// PlanComplete may occur before submission and between jobs.
     fn next_event(rx: &Receiver<IngestEvent>) -> IngestEvent {
         loop {
             match rx.recv_timeout(Duration::from_secs(60)) {
@@ -1967,11 +1688,8 @@ mod tests {
         let _ = dir;
     }
 
-    /// line-pricer §5.5, final-review finding 3: a local publish
-    /// (`LOCAL_SOURCE`) must never blink the ingest progress strip — no
-    /// `IngestEvent::Started` for it, though `Published` still fires.
-    /// Reads the raw stream (not `next_event`, which skips `Started` on
-    /// purpose) so an unwanted `Started` cannot hide from the assertion.
+    /// Local publication must omit Started while still emitting Published.
+    /// Read the raw stream so the outcome helper cannot hide an unwanted start.
     #[test]
     fn a_local_publish_emits_no_started() {
         let (dir, store) = document_store();
@@ -2182,11 +1900,9 @@ mod tests {
         let _ = dir;
     }
 
-    // ---- series (timeseries spec §5.4 step 3) ---------------------------
+    // Series append.
 
-    /// A store that can hold the timeseries spec's own series dataset —
-    /// schema applied, catalog tables created — the way `document_store`
-    /// builds one for the document family.
+    /// Create a series store with schema and catalog tables.
     fn series_store() -> (tempfile::TempDir, Store, geode_core::schema::SchemaSpec) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
@@ -2309,11 +2025,8 @@ mod tests {
 
     #[test]
     fn take_work_pops_documents_then_series_then_files() {
-        // Every lane populated at once, in the reverse of pop order, so a
-        // swap of any two `pop_front`s in `take_work` (documents/series or
-        // series/files) is caught here rather than passing every other
-        // test in the crate — the earlier version of this test queued no
-        // document at all and so could not see that first ordering break.
+        // Populate all three queues in reverse priority order. This detects either
+        // a document/series or a series/file ordering swap.
         let mut q = Queue::default();
         q.documents.push_back(job("cvi_params", spx()));
         q.series
