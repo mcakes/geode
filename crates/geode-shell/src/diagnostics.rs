@@ -1,22 +1,15 @@
-//! The shell-owned `Diagnostics` entity (Phase 4b Task 4, spec §4.4):
-//! source health, dataset generations, config diagnostics and dropped
-//! events gathered in one place beside [`crate::frame::Frame`], fed by
-//! the app bridge (`geode-app`, the only crate allowed to touch
-//! `geode-data`) and by config load/reload. The status bar reads a
-//! cached [`Diagnostics::summary`]; the diagnostics module (Task 5)
-//! observes the whole entity and rebuilds only on a version change.
+//! Operational state shared by the status bar and diagnostics tiles. The app
+//! bridge supplies source and catalog events; config load/reload supplies its
+//! own diagnostic batches. [`Diagnostics::summary`] caches the status text.
 //!
-//! Pure: no gpui, no I/O, no clock reads — every method that needs "now"
-//! takes it as a parameter, same discipline as `Frame`. `ShellView` owns
-//! this in a gpui entity and notifies on write; a module reads it
-//! through that entity.
+//! This model performs no I/O or clock reads. Callers supply timestamps and
+//! notify the GPUI entity after mutations; these methods have no `Context`.
 //!
-//! **Version discipline (load-bearing):** every `note_*`/`set_*` method
-//! that actually changes state bumps `version`; one that changes nothing
-//! (the same health reported again, the same catalog snapshot, an empty
-//! config diagnostic batch) does not. A diagnostics tile compares
-//! versions to decide whether to rebuild — a method that bumps
-//! unconditionally would rebuild it on every no-op poll.
+//! Diagnostic data changes advance the combined version and the affected
+//! [`DiagVersions`] counters. Repeated equal snapshots are no-ops; loading and
+//! publication events always advance their counters. Catalog demand and watcher
+//! counts do not change diagnostic data versions, but still require caller
+//! notification so the bridge can submit queued work.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -39,34 +32,25 @@ pub enum CatalogRequest {
     Explicit,
 }
 
-/// One source's static description (Phase 4b §4.4's "sources" section),
-/// filled once by the app bridge at `attach` from its `SourceSpec` —
-/// plain strings, not `geode_data::source::{Priority, Readiness}`
-/// themselves, so this module never names `geode-data` (CLAUDE.md: shell
-/// and data never depend on each other). The bridge renders `priority`/
-/// `readiness` with their own `Debug`/label forms.
+/// A source description prepared by the app bridge from its `SourceSpec`.
+/// Priority and readiness are display strings so the shell can describe data
+/// sources without depending on `geode-data` types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSummary {
     pub paths: Vec<String>,
     pub priority: String,
     pub readiness: String,
-    /// Which channel implementation feeds this source
-    /// (`geode_core::source_config::CSV_DIR_ADAPTER` for a directory of
-    /// CSVs, a broker adapter's name otherwise). Without it the tile
-    /// described every source as a directory one — it had only `paths`
-    /// and `readiness` to go on, and a subscribed source has neither.
+    /// Adapter name, such as `CSV_DIR_ADAPTER` or a broker implementation.
+    /// Use `shape` to choose source-specific presentation.
     pub adapter: String,
     /// The topic patterns a subscribed source subscribes to; empty for a
     /// directory or a fetch source. Never how a reader tells the shapes
     /// apart — `shape` below is (a subscribed source is refused at load
     /// without at least one topic, but a fetch source has none by design).
     pub topics: Vec<String>,
-    /// Which of the three pipelines this source rides. `SourceSpec::
-    /// shape` is the one answer, but it needs the `SchemaSpec` (a fetch
-    /// source is a non-directory source whose DATASET is of the series
-    /// family) and no tile has one: the bridge, which does, computes it
-    /// once here (timeseries spec §5.1). Without it a fetch source read
-    /// as a subscribed one and painted an empty topic list.
+    /// Directory, subscribed, or fetch pipeline. The app bridge resolves this
+    /// from `SourceSpec` and the dataset family; adapter names and empty topic
+    /// lists alone cannot distinguish all three shapes.
     pub shape: SourceShape,
 }
 
@@ -79,15 +63,9 @@ pub const SOURCE_HISTORY_CAP: usize = 16;
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceState {
     pub spec: Option<SourceSummary>,
-    /// `None` until the first real `note_health` call — a source that is
-    /// merely *configured* (`describe_source`) or has only been *polled*
-    /// (`note_polled`) has not yet reported anything, and must not be
-    /// counted in [`Diagnostics::summary`] or read as any particular
-    /// health (Phase 4b Task 4 fix round 1, CRIT-1: a healthy desk with
-    /// no `Health` event ever emitted for a cleanly loading source used
-    /// to show a permanent, warning-toned `sources N pending`). Task 5's
-    /// sources section reads `None` as "no report yet", not as
-    /// `Health::Pending`.
+    /// Absent until `note_health` supplies a report. Describing or polling a
+    /// source does not establish its health. The summary excludes unreported
+    /// sources, while the sources section displays "no report yet".
     pub health: Option<Health>,
     pub detail: String,
     pub since: SystemTime,
@@ -115,14 +93,10 @@ impl Default for SourceState {
     }
 }
 
-/// What the ingest runner is loading right now (spec 2026-09-17 §5.3),
-/// set by `DataEvent::Loading` and cleared by `DataEvent::LoadEnded` —
-/// which, for a file, is always preceded by a `Loading` for the same
-/// job: a re-queued already-loaded file produces neither event at all
-/// (finding 1, 2026-09-19 final review), rather than a `Loading` with
-/// nothing to clear it. `label` is prepared here, once per event, so the
-/// status bar clones a `SharedString` per paint and formats nothing per
-/// frame.
+/// Current ingest activity, set by `DataEvent::Loading` and cleared by
+/// `DataEvent::LoadEnded`. The label is formatted once per event so the status
+/// bar can share it on each paint. Files skipped as already loaded emit no
+/// start/end pair.
 #[derive(Debug, Clone)]
 pub struct IngestActivity {
     pub source: String,
@@ -132,8 +106,8 @@ pub struct IngestActivity {
     pub label: gpui::SharedString,
 }
 
-/// One dataset's catalog state (Phase 4b §4.5) — `None` until the first
-/// `Request::Catalog` outcome names it.
+/// A dataset's catalog snapshot, absent until a catalog outcome includes it
+/// or when a newer outcome omits it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DatasetState {
     pub catalog: Option<DatasetCatalog>,
@@ -146,33 +120,21 @@ pub const CONFIG_HISTORY_CAP: usize = 16;
 /// first (a plain append cap, not "batches" — see that field's doc).
 pub const DATA_DIAGNOSTICS_CAP: usize = 256;
 
-/// Per-population versions (Phase 4b final review, MAJ-4): one counter
-/// per diagnostics *section*, bumped only by the mutators that section's
-/// row builder actually reads — so a tile only ever rebuilds the section
-/// it is currently showing, never all five just because *something*
-/// changed. [`Diagnostics::version`] is unrelated and unchanged by this:
-/// it keeps bumping on every mutation, exactly as before, for
-/// [`Diagnostics::summary`]'s cache and anything else that wants "did
-/// anything at all change" — these are a second, finer-grained signal
-/// alongside it, not a replacement.
+/// Section-specific change counters alongside [`Diagnostics::version`], which
+/// invalidates the shared status summary. A tile compares only the counter for
+/// its selected section:
 ///
-/// The mapping to `sections.rs`'s five builders:
-/// - `sources` -> `sources_rows` (reads `Diagnostics::sources`)
-/// - `data` -> `data_rows` (reads `Diagnostics::datasets`; the frame's
-///   own `as_of` is the other half `DiagnosticsTile` already compares
-///   separately, via `Frame::versions`)
-/// - `config` -> `config_rows` (reads `Diagnostics::config`,
-///   `config_history`, **and** `data_diagnostics` — despite that field's
-///   name, it is the config section that renders it, not the data
-///   section; the frame's own `config` version is the other half
-///   `DiagnosticsTile` already compares separately)
-/// - `log_levels` -> `log_rows`'s target/level filtering reads
-///   `Diagnostics::levels`; the ring's own `latest_seq` is the other
-///   half, read directly off the `Ring` rather than mirrored here (the
-///   ring is not part of this entity)
-/// - `perf` -> `perf_rows` (reads `Diagnostics::frame_hist` and
-///   `dropped_events`; `RequeryStats` comes from the frame, compared the
-///   same way as `data`/`config`'s frame half)
+/// - `sources`: source descriptions, health, polls, and ingest activity.
+/// - `data`: publications and catalog snapshots.
+/// - `config`: current config diagnostics, their history, and data diagnostics.
+/// - `log_levels`: target-level settings.
+/// - `perf`: the copied frame histogram and dropped-event count.
+///
+/// Frame as-of/config versions and the log ring sequence are separate inputs
+/// observed by the tile. Performance rows also read frame requery statistics
+/// and catalog resource metrics, but those inputs have no dedicated perf
+/// invalidation here; they appear on the next perf-section rebuild. Log-level
+/// changes trigger a rebuild, but row substring filtering is tile-local.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DiagVersions {
     pub sources: u64,
@@ -182,8 +144,8 @@ pub struct DiagVersions {
     pub perf: u64,
 }
 
-/// The shell-owned diagnostics gatherer (spec §4.4). See the module doc
-/// for the version-bump discipline every mutator here follows.
+/// Shared operational state. Mutators maintain the combined and section
+/// versions described in the module documentation.
 pub struct Diagnostics {
     pub sources: BTreeMap<String, SourceState>,
     pub datasets: BTreeMap<String, DatasetState>,
@@ -192,44 +154,19 @@ pub struct Diagnostics {
     /// [`Self::note_load_ended`]. The status bar and the sources
     /// section both read this.
     pub ingest: Option<IngestActivity>,
-    /// The current CONFIG-LOAD diagnostics — the latest load or reload's
-    /// batch, whole (Phase 4b Task 4 fix round 1, MAJ-5: was a capped,
-    /// ever-appending log; a reload that changed nothing used to
-    /// re-append its own unchanged batch, inflating
-    /// [`Self::summary`]'s error count every time a log-level change's
-    /// own persist (the palette's `Set log level…`; `:level` on a
-    /// tile's command line until command-line locality closed that
-    /// route 2026-09-20) triggered a reload). [`Self::note_config`]
-    /// *replaces* this wholesale; [`Self::config_history`] is the
-    /// append-only log now.
-    ///
-    /// Fed *only* by config load/reload (`ShellView::new`'s startup call
-    /// and `hot_reload::apply_reload`, every reload unconditionally) —
-    /// **not** by the data layer's own diagnostics, which is
-    /// [`Self::data_diagnostics`] (Phase 4b Task 4 fix round 2, NEW-1:
-    /// round 1 fed both populations through this one field via
-    /// `note_config`'s replace semantics, so a data-layer error and a
-    /// later config reload — including the one a log-level change's own
-    /// persist write triggers — silently erased each other from the
-    /// summary, the same false-signal class CRIT-1 was raised under, just the
-    /// opposite direction: a false *negative* instead of a false
-    /// positive). [`Self::summary`] counts errors from both fields.
+    /// The latest config-load diagnostic batch. `note_config` replaces it,
+    /// including clearing it after a clean reload. This population is separate
+    /// from `data_diagnostics` so a reload cannot erase a data-layer condition.
+    /// The status summary counts errors from both populations independently.
     pub config: Vec<Diagnostic>,
-    /// Every batch [`Self::note_config`] has ever installed into
-    /// [`Self::config`], latest first, capped at [`CONFIG_HISTORY_CAP`]
-    /// — an audit trail for Task 5's config section, distinct from the
-    /// "what's true right now" [`Self::config`] the summary counts.
+    /// Changed config-load batches, newest first, capped at
+    /// [`CONFIG_HISTORY_CAP`]. Includes the current batch; identical reloads
+    /// add nothing. History is excluded from the status summary error count.
     pub config_history: VecDeque<(SystemTime, Vec<Diagnostic>)>,
-    /// The data layer's own diagnostics (Phase 4b Task 4 fix round 2,
-    /// NEW-1) — fed by [`Self::note_data_diagnostics`] from the app
-    /// bridge's `DataEvent::Diagnostics` arm (schema/dataset/view
-    /// validation errors at service open, a failed open, or after a
-    /// `Request::ReplaceViews`). A plain append log, oldest first,
-    /// capped at [`DATA_DIAGNOSTICS_CAP`] — unlike [`Self::config`],
-    /// there is no single "current batch" here: `geode-data` reports
-    /// once per condition, not a full snapshot on every event, so
-    /// nothing here would be safe to *replace*. A `Diagnostic` already
-    /// present (by equality) is not re-appended.
+    /// Data-layer conditions from the app bridge, oldest first, capped at
+    /// [`DATA_DIAGNOSTICS_CAP`]. Data events report individual conditions, not
+    /// complete snapshots, so new entries append and equal retained entries
+    /// are skipped. A config reload cannot clear these conditions.
     pub data_diagnostics: VecDeque<(SystemTime, Diagnostic)>,
     pub dropped_events: u64,
     pub restart_required: Option<String>,
@@ -237,33 +174,22 @@ pub struct Diagnostics {
     /// on the reload-poll tick — see that method's own doc comment for
     /// why this is a copy rather than the histogram itself.
     pub frame_hist: FrameHistogram,
-    /// The last `Request::Catalog` outcome, whole (Phase 4b §4.5).
+    /// The latest catalog outcome, including its as-of and resource metrics.
     pub catalog: Option<CatalogSnapshot>,
     pub levels: LogLevels,
-    /// How many diagnostics tiles currently have this entity visible
-    /// (Phase 4b open question 2's ruling) — [`Self::watch`]/
-    /// [`Self::unwatch`] bracket a tile's `set_visible`, so
-    /// `refresh_frame_hist`/`note_published`'s catalog request only do
-    /// real work while at least one tile could show it.
+    /// Visible diagnostics tile count, maintained by `watch`/`unwatch`.
+    /// Watched catalog refreshes and histogram copies require at least one
+    /// watcher; explicit catalog consumers are independent.
     watchers: u32,
     version: u64,
-    /// Per-population versions (MAJ-4) — see [`DiagVersions`]'s own doc.
+    /// Section counters; see [`DiagVersions`].
     versions: DiagVersions,
     pending_level: Option<(String, Level)>,
     pending_overlay_toggle: bool,
     pending_catalog_request: bool,
     pending_explicit_catalog: bool,
-    /// [`Self::summary`]'s cache, keyed on `version` (same `RefCell`
-    /// pattern as `Frame::bar_cache`) — `summary` is called from the
-    /// status bar's render path every frame, and rebuilding the
-    /// formatted string (iterating both maps) on every one of those
-    /// calls when nothing changed would be exactly the per-frame heap
-    /// churn PHILOSOPHY.md forbids. `Rc<str>` (Phase 4b Task 4 fix
-    /// round 1, MAJ-1 — was `String`): a cache hit used to hand back a
-    /// freshly allocated `String` on every single paint (`.clone()` on
-    /// a `String` allocates); a hit here clones a refcount instead, the
-    /// same shape `Frame::bar_cache` already uses for its `Rc<
-    /// ScopeBarModel>`.
+    /// Status summary cached by combined version. A cache hit shares the
+    /// `Rc<str>` allocation, avoiding formatting and buffer copies during paint.
     summary_cache: RefCell<(u64, Rc<str>)>,
 }
 
@@ -296,17 +222,13 @@ impl Diagnostics {
         self.version
     }
 
-    /// Per-population versions (MAJ-4) — see [`DiagVersions`]'s own doc.
-    /// `Copy`, so a caller snapshots it cheaply on every observer tick.
+    /// Copy the section counters for comparison in an observer.
     pub fn versions(&self) -> DiagVersions {
         self.versions
     }
 
-    /// A source's static description (once, at bridge `attach`). A
-    /// no-op for an identical, already-recorded summary (Phase 4b Task
-    /// 4 fix round 1, MIN-2) — brief-sanctioned to bump unconditionally
-    /// since `attach` runs once per window, but a second `attach` (or a
-    /// future re-describe) must not bump for nothing.
+    /// Record a source description. An identical description leaves versions
+    /// unchanged, including when the bridge describes a source again.
     pub fn describe_source(&mut self, source: &str, summary: SourceSummary) {
         let state = self.sources.entry(source.to_string()).or_default();
         if state.spec.as_ref() == Some(&summary) {
@@ -317,16 +239,10 @@ impl Diagnostics {
         self.versions.sources += 1;
     }
 
-    /// Record a source's worst health as of `at`. The *first* real note
-    /// for a source is always a transition — guarded on `state.health`
-    /// being `None`, not on whether the map entry already exists (Phase
-    /// 4b Task 4 fix round 1, MAJ-2: `describe_source`/`note_polled`
-    /// both create the entry via `or_default()` before any health ever
-    /// arrives, so guarding on entry-existence swallowed the first real
-    /// note whenever either had already run — `since` stayed at the
-    /// epoch and `history` stayed empty for a perfectly healthy source
-    /// for the whole session). After the first real note, reporting the
-    /// same `(worst, detail)` again is a no-op.
+    /// Record the source's current worst health and detail. Its first health
+    /// report starts the transition history even if description or poll events
+    /// already created the map entry. Repeating the same health and detail is
+    /// a no-op; a changed detail or recovery records a new transition.
     pub fn note_health(&mut self, source: &str, worst: Health, detail: String, at: SystemTime) {
         let state = self.sources.entry(source.to_string()).or_default();
         if let Some(current) = &state.health
@@ -380,13 +296,9 @@ impl Diagnostics {
         self.versions.sources += 1;
     }
 
-    /// The load ended (`DataEvent::LoadEnded`) — sent after every
-    /// `Published`, every `Failed`, and again at every queue drain
-    /// (finding 2, 2026-09-19 final review), so a dropped end event is
-    /// repaired at the latest when the queue empties. A no-op when
-    /// nothing was recorded — an end with no start bumps nothing, which
-    /// is what makes the drain's own copy, and the runner's startup
-    /// drain before any load ever ran, free.
+    /// Clear the active load. The runner sends an end event after load outcomes
+    /// and at queue drain, allowing a missed end event to be repaired. Repeated
+    /// end events while idle leave versions unchanged.
     pub fn note_load_ended(&mut self) {
         if self.ingest.take().is_some() {
             self.version += 1;
@@ -394,14 +306,9 @@ impl Diagnostics {
         }
     }
 
-    /// A file was published for `dataset` (§3.12-style feed, mirrored
-    /// here for the diagnostics view): always bumps, and — while at
-    /// least one diagnostics tile is watching — sets
-    /// [`Self::pending_catalog_request`] so the bridge's drain requests
-    /// a fresh `Request::Catalog` (spec §4.5). Unwatched, a publish is
-    /// still worth recording (the dataset now exists in `self.datasets`
-    /// even before its first real catalog outcome), it just doesn't
-    /// spend a database round trip nobody would see.
+    /// Record a publication: retain the dataset name and always advance the data
+    /// version. Queue a catalog refresh only while diagnostics is watched; a
+    /// hidden surface does not need a database read for each publication.
     pub fn note_published(&mut self, dataset: &str) {
         self.datasets.entry(dataset.to_string()).or_default();
         if self.watchers > 0 {
@@ -411,22 +318,9 @@ impl Diagnostics {
         self.versions.data += 1;
     }
 
-    /// The current config diagnostics batch, from a load or reload —
-    /// *replaces* [`Self::config`] wholesale (Phase 4b Task 4 fix round
-    /// 1, MAJ-5: used to append into a capped log unconditionally
-    /// except on an empty batch, so an unchanged reload — e.g. the one
-    /// a log-level change's own persist write triggers (the palette's
-    /// `Set log level…`; `:level` on a tile's command line until
-    /// command-line locality closed that route 2026-09-20) —
-    /// re-appended the exact same diagnostics and inflated `summary`'s
-    /// error count every
-    /// time). A no-op when `diags` is byte-identical to the current
-    /// batch (this also covers the old "empty batch" guard: an empty
-    /// batch equal to an already-empty `self.config` is a no-op, but an
-    /// empty batch replacing a *non-empty* one now correctly clears it
-    /// — a clean reload after a run of config errors must be able to
-    /// zero the count). Every real change is also appended to
-    /// [`Self::config_history`], capped at [`CONFIG_HISTORY_CAP`].
+    /// Replace the current config-load batch and retain the changed batch in
+    /// `config_history`. An equal batch leaves versions and history unchanged.
+    /// An empty batch clears standing config errors after a clean reload.
     pub fn note_config(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
         if self.config == diags {
             return;
@@ -440,15 +334,10 @@ impl Diagnostics {
         self.versions.config += 1;
     }
 
-    /// The data layer's own diagnostics (Phase 4b Task 4 fix round 2,
-    /// NEW-1) — appended, not replaced: unlike a config load, `geode-data`
-    /// reports once per condition rather than a full snapshot each time,
-    /// so there is no "current batch" to replace here. A `Diagnostic`
-    /// already present (by equality, anywhere in the list) is not
-    /// re-appended and does not bump — the bridge's own `DataEvent::
-    /// Diagnostics` arm can otherwise re-report the same condition (e.g.
-    /// a `Request::ReplaceViews` after an unrelated reload). Capped at
-    /// [`DATA_DIAGNOSTICS_CAP`], oldest dropped first.
+    /// Append data-layer conditions, deduplicating against retained entries.
+    /// Each event reports individual conditions rather than a replacement batch.
+    /// Drop the oldest entries above `DATA_DIAGNOSTICS_CAP`; bump versions only
+    /// when a new condition is appended.
     pub fn note_data_diagnostics(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
         let mut changed = false;
         for d in diags {
@@ -497,14 +386,10 @@ impl Diagnostics {
         self.version += 1;
     }
 
-    /// A fresh `Request::Catalog` outcome (spec §4.5): stored whole and
-    /// folded per-dataset into `self.datasets`. A no-op (byte-identical
-    /// snapshot) does not bump. Every dataset's `catalog` is cleared
-    /// before the new snapshot's datasets are folded back in (Phase 4b
-    /// Task 4 fix round 1, MIN-5): `self.datasets`' *keys* stay
-    /// monotonic (a dataset `note_published` has ever named keeps
-    /// existing as a map entry), but a dataset absent from a newer
-    /// snapshot must not keep showing a stale `DatasetCatalog` forever.
+    /// Store a changed catalog snapshot and refresh the per-dataset slices.
+    /// Dataset names remain in the map, but a dataset omitted from the new
+    /// snapshot has its catalog cleared so stale generations cannot linger.
+    /// An equal snapshot leaves versions unchanged.
     pub fn set_catalog(&mut self, snapshot: CatalogSnapshot) {
         if self.catalog.as_ref() == Some(&snapshot) {
             return;
@@ -520,34 +405,13 @@ impl Diagnostics {
         self.versions.data += 1;
     }
 
-    /// Copy `hist` into [`Self::frame_hist`] — only while at least one
-    /// diagnostics tile is watching (open question 2's ruling: this is
-    /// the one place a `FrameHistogram` is cloned, and it must cost
-    /// nothing when no tile could show it) AND only when it actually
-    /// changed (Phase 4b Task 4 fix round 1, MAJ-3: the watchers gate
-    /// alone still bumped on every ~500ms tick even when nothing was
-    /// recorded in between, which — through `ShellView::
-    /// on_diagnostics_changed`'s unconditional `cx.notify()` — repainted
-    /// the whole shell twice a second forever while a diagnostics tile
-    /// sat open and idle, exactly the "bumps unconditionally" failure
-    /// this module's own doc warns against). `FrameHistogram` has no
-    /// `PartialEq`; `count()` plus `max_micros()` is a cheap, sufficient
-    /// proxy — both are monotonically non-decreasing, so equal on both
-    /// means nothing new was recorded. `true` (and a bump) exactly when
-    /// the copy happened.
+    /// Copy the frame histogram only while watched and when its count or maximum
+    /// changes. Return `true` and advance the perf version only after copying;
+    /// an idle poll must not notify merely because it checked the histogram.
     ///
-    /// **Known gap (Phase 4b Task 4 fix round 2, NEW-4), accepted as-is:**
-    /// a tick whose only change is a fresh `note_discarded_idle` (an
-    /// idle gap counted, no frame recorded — `perf.rs`) does not copy,
-    /// since that field bumps neither `count()` nor `max_micros()`.
-    /// `discarded_idle` is part of the copied `FrameHistogram` and is
-    /// surfaced by the profiling-gated `perf::dump`, not the default
-    /// overlay, so the practical cost is that Task 5's tile could show a
-    /// stale `discarded_idle` value between two ticks that were
-    /// otherwise identical. The proxy is sound for everything else: both
-    /// fields it does check are monotonic between resets, and a
-    /// `reset()` that leaves both at 0 also leaves nothing worth
-    /// showing.
+    /// This is a change proxy, not a full histogram comparison. Changes solely
+    /// to discarded-idle counts are not copied, and a reset followed by new
+    /// samples with the same count and maximum can also go undetected.
     pub fn refresh_frame_hist(&mut self, hist: &FrameHistogram) -> bool {
         if self.watchers == 0 {
             return false;
@@ -563,48 +427,20 @@ impl Diagnostics {
         true
     }
 
-    /// A diagnostics tile became visible: also queues a catalog request
-    /// (Task 5's `set_visible(true)` is the one caller — "visibility
-    /// triggers the first request through the same drain" the plan's
-    /// Step 6 describes, so a freshly opened tile does not sit on
-    /// whatever `self.catalog` happened to hold, or nothing, until the
-    /// next publish happens to arrive). Does not itself bump `version` —
-    /// it changes nothing about the diagnostic *data*, only what future
-    /// mutators are allowed to do (spend a catalog request, copy the
-    /// frame histogram) and what the bridge's drain will act on once the
-    /// caller's own `cx.notify()` runs (same two-step contract every
-    /// other entity mutation in this codebase follows: mutate, then
-    /// notify at the call site).
-    ///
-    /// **Returns `true`, always today** (Phase 4b Task 4 fix round 2,
-    /// MIN-6): every call queues a request, so the return value carries
-    /// no information beyond "a request was queued" — its purpose is to
-    /// make that fact visible at the *type* level, not just in this
-    /// comment, so a caller reading the signature is reminded a
-    /// `cx.notify()` is now owed. **This method does not notify by
-    /// itself and cannot** — it has no `Context`. Task 5's `set_visible`
-    /// MUST call `cx.notify()` in the same `diagnostics.update(cx, |d,
-    /// cx| { d.watch(); cx.notify(); })` block, or the queued request
-    /// sits unseen by the bridge's `cx.observe(&diagnostics, ..)` drain
-    /// (registered in `geode-app::bridge::attach`) until some *other*
-    /// mutation happens to notify later. See
-    /// `watch_reaching_the_bridge_drain_requires_the_callers_own_notify`
-    /// (`shell/tests/diagnostics.rs`) for the contract exercised end to
-    /// end through a real bridge.
+    /// Register a visible tile and queue its initial catalog refresh, returning
+    /// `true`. This changes demand, not diagnostic data, so versions stay put.
+    /// The caller must `cx.notify()` in the same entity update; otherwise the
+    /// bridge cannot observe the queued request until another mutation notifies.
+    /// Each visibility transition must have a matching `unwatch`.
     pub fn watch(&mut self) -> bool {
         self.watchers += 1;
         self.pending_catalog_request = true;
         true
     }
 
-    /// The counterpart of [`Self::watch`] — a diagnostics tile went
-    /// invisible or was torn down. Saturating: never underflows past 0.
-    /// Clears a still-pending catalog request once the *last* watcher
-    /// leaves (Phase 4b Task 4 fix round 1, MIN-4): a tile that becomes
-    /// visible and immediately invisible again must not cost a database
-    /// round trip whose outcome nothing will ever show. A request stays
-    /// queued while at least one other tile is still watching. Explicit
-    /// requests from other consumers survive the last diagnostics tile hiding.
+    /// Remove a visible tile's watch, saturating at zero. The last watcher
+    /// clears pending watched demand, while explicit consumers retain their
+    /// requests. The caller must notify observers after the visibility change.
     pub fn unwatch(&mut self) {
         self.watchers = self.watchers.saturating_sub(1);
         if self.watchers == 0 {
@@ -631,18 +467,10 @@ impl Diagnostics {
         self.pending_catalog_request |= self.watchers > 0;
     }
 
-    /// Called by the palette's `Set log level…` two-step choice
-    /// (`log::level`, `shell::choicedialog`'s `Target::LogLevel`) — the
-    /// door that replaced `:level <target> <level>` when command-line
-    /// locality closed it 2026-09-20 — or by the reload-driven `[log]`
-    /// pickup: updates `self.levels` (via
-    /// `LogLevels::with`, the same retain-then-push `[log]` parsing
-    /// already uses) and queues one persist for
-    /// [`Self::take_pending_level`] to drain. A no-op when `target`
-    /// already carries `level` (Phase 4b Task 4 fix round 1, MIN-3):
-    /// otherwise `:level ingest debug` typed twice queued (and wrote)
-    /// two identical persists, and — per the MAJ-5 fix above — could
-    /// have tripped a reload each time.
+    /// Apply one target-level setting and queue its persistence for
+    /// [`Self::take_pending_level`]. Repeating the same target and level is a
+    /// no-op. The palette uses this path; disk reload uses `set_levels` instead
+    /// so reading a saved setting does not write it again.
     pub fn request_level(&mut self, target: &str, level: Level) {
         if self
             .levels
@@ -677,14 +505,9 @@ impl Diagnostics {
         true
     }
 
-    /// Until command-line locality closed it 2026-09-20, `:overlay` (a
-    /// module command) reached here to queue a toggle for
-    /// [`Self::take_pending_overlay_toggle`] to drain, since modules
-    /// never reach `ShellView` directly (spec ruling). The live door,
-    /// the palette's `Toggle performance overlay` (`perf::toggle_overlay`),
-    /// flips `ShellView::perf_overlay` directly instead; this method is
-    /// kept as the seam the locality sweep tests watch and has no
-    /// production caller any more.
+    /// Queue a toggle for the shell to drain. Command-locality tests observe
+    /// this seam to detect forbidden tile-wide effects. Production overlay
+    /// actions toggle `ShellView::perf_overlay` directly.
     pub fn request_overlay_toggle(&mut self) {
         self.pending_overlay_toggle = true;
         self.version += 1;
@@ -719,29 +542,14 @@ impl Diagnostics {
         self.pending_catalog_request || self.pending_explicit_catalog
     }
 
-    /// `"sources 3 ok · 1 degraded · config 2 errors · data 1 error ·
-    /// 5 dropped"` — every segment optional, omitted when its count is
-    /// zero; `""` (never shown by the status bar — `(!s.is_empty())
-    /// .then_some(..)`'s job at the call site) when there is nothing to
-    /// report at all. Cached (see [`Self::summary_cache`]'s own doc
-    /// comment) keyed on `version`; a hit clones an `Rc<str>` refcount,
-    /// never a buffer.
+    /// Status summary, with optional source-health, current config-error,
+    /// retained data-error, and dropped-event segments. Zero counts are omitted;
+    /// an empty string means there is nothing to show. A cache hit shares the
+    /// existing `Rc<str>` buffer.
     ///
-    /// The `sources` segment counts only sources with a *real* health
-    /// note (`SourceState.health.is_some()`) — a configured-but-not-yet-
-    /// reported source is not counted at all (Phase 4b Task 4 fix round
-    /// 1, CRIT-1; Task 5's sources section shows it as "no report yet"
-    /// instead). `config N error(s)` counts `self.config`'s
-    /// [`Severity::Error`] entries — the *current* batch only (MAJ-5),
-    /// not the history — and `data N error(s)` counts
-    /// [`Self::data_diagnostics`]' [`Severity::Error`] entries
-    /// separately (Phase 4b Task 4 fix round 2, NEW-1: the two
-    /// populations must never share one count, or a config reload and a
-    /// data-layer error silently erase each other). No
-    /// `restart required: …` segment any more (Phase 4b Task 4 fix
-    /// round 1, MAJ-4): the status bar's own `restart_required` segment
-    /// (`shell/render.rs`) already shows that message; embedding it here
-    /// too duplicated it on screen.
+    /// Only sources with a health report are counted. Config history contributes
+    /// no errors; data conditions are counted separately so config reloads
+    /// cannot hide them. Restart-required text has its own status-bar segment.
     pub fn summary(&self) -> Rc<str> {
         {
             let cache = self.summary_cache.borrow();
@@ -759,7 +567,7 @@ impl Diagnostics {
         let mut counts = [0usize; LABELS.len()];
         for s in self.sources.values() {
             let Some(health) = &s.health else {
-                continue; // no report yet — not counted (CRIT-1)
+                continue; // Unreported sources have no health to count.
             };
             if let Some(idx) = LABELS.iter().position(|&l| l == health.label()) {
                 counts[idx] += 1;
@@ -790,10 +598,7 @@ impl Diagnostics {
             ));
         }
 
-        // NEW-1 (Phase 4b Task 4 fix round 2): counted separately from
-        // `config_errors` above — the two populations are unrelated
-        // (config load vs. the data layer) and must not clobber each
-        // other's count, the exact bug this split fixes.
+        // Count retained data errors independently of the current config-load batch.
         let data_errors = self
             .data_diagnostics
             .iter()
@@ -811,12 +616,8 @@ impl Diagnostics {
     }
 }
 
-/// A fixed-capacity ring of the last 32 dispatched actions' FNV-1a
-/// hashes (Phase 4b Task 6 fills its consumer, the crash file — this
-/// type lives here since it's shell-owned state, recorded on every
-/// dispatch). Hashes, not `ActionId`s: cloning a `String` per dispatch
-/// would be the exact per-frame heap churn PHILOSOPHY.md forbids: see
-/// the plan's ruling ("the action tail stores FNV-1a hashes, not ids").
+/// The last 32 dispatched action IDs as FNV-1a hashes, for crash reporting.
+/// Fixed storage and hashing avoid allocating an action string per dispatch.
 #[derive(Debug, Clone)]
 pub struct ActionTail {
     hashes: [u64; 32],
@@ -907,12 +708,8 @@ mod tests {
         assert_eq!(d.sources["risk"].since, t + Duration::from_secs(2));
     }
 
-    /// MAJ-2 (final review, 2026-09-08): the entity's own transition
-    /// bookkeeping already supported a `Degraded -> Ok` note before this
-    /// fix — what was missing was the scheduler ever *sending* one
-    /// (`ingest::scheduler`'s `last_reported` guard, tested there). This
-    /// pins the entity half of the contract: a recovered source's health
-    /// reads `Ok`, not latched at its worst-ever state.
+    /// A recovery report replaces degraded health with `Ok`. This model stores
+    /// current health, not the worst state ever seen.
     #[test]
     fn a_degraded_source_that_recovers_shows_ok_in_the_entity() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -928,11 +725,8 @@ mod tests {
         assert_eq!(d.summary().as_ref(), "sources 1 ok");
     }
 
-    /// MAJ-2: `describe_source`/`note_polled` both create the entry
-    /// before any real health arrives; the first `note_health` call must
-    /// still be treated as a transition (`since` set, one history row)
-    /// rather than swallowed by comparing against the freshly created
-    /// default.
+    /// A source described or polled before its first health event still needs
+    /// that event to set `since` and begin the transition history.
     #[test]
     fn the_first_real_health_note_transitions_even_after_describe_source_and_note_polled() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1019,9 +813,7 @@ mod tests {
         );
     }
 
-    /// CRIT-1: a source that is configured (`describe_source`) but has
-    /// never reported a real health note must not appear in the
-    /// summary at all — not as "pending", not as anything.
+    /// A configured source without a health report is excluded from the summary.
     #[test]
     fn a_described_but_unreported_source_is_not_counted_in_the_summary() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1051,10 +843,7 @@ mod tests {
         assert!(!d.take_pending_catalog_request(), "drained");
     }
 
-    /// `watch()` itself queues a catalog request (Phase 4b §4.5, plan
-    /// Step 6: "visibility triggers the first request through the same
-    /// drain") — a freshly visible tile gets its first catalog without
-    /// waiting for the next publish.
+    /// Becoming visible requests a catalog without waiting for a publication.
     #[test]
     fn watching_itself_also_requests_the_first_catalog() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1067,11 +856,8 @@ mod tests {
         assert!(!d.take_pending_catalog_request(), "drained");
     }
 
-    /// Phase 4b Task 5 fix round 1, MAJ-7: `request_catalog` queues a
-    /// request without touching `version` — a caller (the diagnostics
-    /// tile, on an as-of change) must still notify itself for the bridge
-    /// to see it, but nothing about this call is itself a diagnostic-data
-    /// change.
+    /// An explicit catalog request changes demand without changing diagnostic
+    /// data versions. Its caller still must notify the bridge.
     #[test]
     fn request_catalog_queues_without_bumping_the_version() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1082,8 +868,7 @@ mod tests {
         assert!(!d.take_pending_catalog_request(), "drained");
     }
 
-    /// MIN-4: the *last* watcher leaving clears a still-pending request
-    /// nobody will see the outcome of.
+    /// The last watcher leaving clears pending watched demand.
     #[test]
     fn unwatch_to_zero_clears_a_pending_catalog_request() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1092,8 +877,7 @@ mod tests {
         assert!(!d.take_pending_catalog_request());
     }
 
-    /// MIN-4's other half: a request stays queued while at least one
-    /// other tile is still watching.
+    /// Watched demand stays queued while another tile is still watching.
     #[test]
     fn unwatch_above_zero_keeps_a_pending_catalog_request() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1114,9 +898,7 @@ mod tests {
         assert_eq!(d.frame_hist.count(), 1);
     }
 
-    /// MAJ-3: while watched, an *unchanged* histogram must not copy or
-    /// bump — the reload-poll tick calls this every ~500ms regardless
-    /// of whether any new frame was recorded in between.
+    /// An unchanged histogram must not copy or bump during the periodic poll.
     #[test]
     fn refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1144,7 +926,7 @@ mod tests {
         assert_eq!(d.take_pending_level(), None);
     }
 
-    /// MIN-3: the same target+level again must not re-queue a persist.
+    /// An identical target-level request must not queue another write.
     #[test]
     fn request_level_is_a_no_op_when_the_target_already_has_that_level() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1192,8 +974,7 @@ mod tests {
         );
     }
 
-    /// MIN-2: re-describing a source with an identical summary must not
-    /// bump — only safe by luck today (`attach` runs once); made real.
+    /// An identical source description must not advance versions.
     #[test]
     fn describe_source_is_a_no_op_for_an_identical_summary() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1243,8 +1024,7 @@ mod tests {
         assert_eq!(d.version(), v, "identical snapshot, no rebuild");
     }
 
-    /// MIN-5: a dataset absent from a newer snapshot must not keep a
-    /// stale `DatasetCatalog` forever.
+    /// A dataset omitted from a newer snapshot must lose its stale catalog.
     #[test]
     fn set_catalog_drops_a_dataset_missing_from_a_newer_snapshot() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1299,9 +1079,8 @@ mod tests {
         assert_eq!(d.watchers(), 0);
     }
 
-    /// MAJ-4: `restart_required` is the status bar's own segment now
-    /// (`render.rs`'s `self.restart_required.as_deref()`); the summary
-    /// must not embed it too, or the message paints twice.
+    /// Restart-required text belongs to its own status segment and must not
+    /// also appear in the diagnostics summary.
     #[test]
     fn set_restart_required_does_not_appear_in_the_summary() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1313,9 +1092,8 @@ mod tests {
         );
     }
 
-    /// MAJ-1: a cache hit must clone the `Rc<str>` refcount, never
-    /// rebuild the string — pinned by pointer identity across two calls
-    /// with no mutation between them.
+    /// A summary cache hit preserves allocation identity across calls without
+    /// a mutation; equal text alone would not prove that no copy was made.
     #[test]
     fn summary_reuses_the_same_allocation_when_the_version_is_unchanged() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1328,7 +1106,7 @@ mod tests {
         );
     }
 
-    // --- MAJ-5: note_config replaces rather than appends ---------------
+    // Config batch replacement and history.
 
     #[test]
     fn note_config_is_a_no_op_for_an_identical_batch() {
@@ -1357,9 +1135,7 @@ mod tests {
         assert_eq!(d.config_history.len(), 2, "history keeps both batches");
     }
 
-    /// A clean reload (empty batch) after standing errors must actually
-    /// clear the count — the old "empty batch is always a no-op" guard
-    /// used to make this impossible.
+    /// An empty config batch clears errors from the preceding load.
     #[test]
     fn note_config_with_an_empty_batch_clears_a_previously_nonempty_one() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -1394,9 +1170,7 @@ mod tests {
         );
     }
 
-    // --- NEW-1 (fix round 2): note_config and note_data_diagnostics ---
-    // ---                       are two producers, neither clobbers the
-    // ---                       other.
+    // Config-load snapshots and data-layer conditions remain independent.
 
     #[test]
     fn a_config_reload_does_not_clobber_a_standing_data_diagnostic() {
@@ -1445,9 +1219,7 @@ mod tests {
         assert_eq!(d.data_diagnostics.len(), 1);
     }
 
-    /// The exact NEW-1 scenario: a data-layer error is present, then an
-    /// unrelated config reload runs (e.g. the one `:level`'s own persist
-    /// triggers) — the data error must survive it.
+    /// An unrelated config reload must preserve a retained data-layer error.
     #[test]
     fn a_config_reload_after_a_data_layer_error_keeps_the_error_count() {
         let mut d = Diagnostics::new(LogLevels::default());

@@ -108,9 +108,13 @@ changes still rebuild.
   expensive.
 - Series append deduplication reads every stored version for the pair. Large
   historical pairs may need a narrower live-value index.
-- Document generations are not yet connected to the directory-source
-  retention sweep, so a long-running subscribed document source can grow its
-  archive without that bound.
+- Measure and document live/archive retention has no production scheduler;
+  the sweep API is exercised by tests. Their archives can grow without that
+  automatic bound. Series retention runs during append.
+- Diagnostics perf rows sample requery and catalog resource metrics on their
+  next rebuild; those inputs have no dedicated perf invalidation. Histogram
+  copying compares sample count and maximum, so idle-only changes and a
+  reset/refill with the same count and maximum can be missed.
 - The measured parallel CSV result covers `read_csv`, not the complete staging
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.

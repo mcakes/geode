@@ -1,26 +1,20 @@
-//! The per-file publish transaction (spec §4.3) and the backfill guard
-//! (spec §4.4).
-//!
-//! Live holds exactly one generation per partition after any sequence of
-//! publishes in any order. That invariant is what makes live's size
-//! independent of retention, which is what keeps the §7.1 requery budget
-//! reachable by construction rather than by tuning.
+//! Transactional publication and backfill routing for live/archive table pairs.
+//! Live holds one generation per partition regardless of publication order,
+//! keeping live query size independent of retained history. File and document
+//! loaders can publish multiple pairs in their shared transaction.
 
 use crate::store::StoreError;
 use crate::store::ddl::TablePair;
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 
-/// The unit of replacement: a batch within a book (spec §4.3). Not the file
-/// — filenames carry dates, so file identity is not partition identity.
+/// The replacement key within a dataset: batch and optional book. File names
+/// include dates, so file identity alone cannot identify the partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
     pub batch: String,
-    /// `None` is the partition of rows with no book. Ingest keeps such
-    /// rows and reports them (spec §4.4), so they are live data and must
-    /// be replaced on republish like any other partition — otherwise every
-    /// republish appends another copy and live no longer holds one
-    /// generation per partition.
+    /// Rows without a book form a real partition. NULL-safe replacement must
+    /// remove their outgoing generation too, or each republish duplicates it.
     pub book: Option<String>,
 }
 
@@ -29,11 +23,9 @@ pub struct PublishRequest {
     /// The dataset the published rows belong to. It names the summary
     /// row (`generations`), not a table: table names live in `tables`.
     pub dataset: String,
-    /// The pair the rows move between — a grain's pair for the measure
-    /// family, the one document pair for the document family. Two
-    /// datasets can share a grain (spec §4.2), so a pair is never derived
-    /// from a grain alone; the caller that knows the family builds it
-    /// (`ddl::table_pairs`, `TablePair::for_grain`).
+    /// Dataset-owned live/archive tables: a grain pair for measures or the
+    /// single document pair. Resolve names with the dataset as well as the
+    /// grain, because different datasets can share a grain.
     pub tables: TablePair,
     pub staging_table: String,
     pub partitions: Vec<Partition>,
@@ -64,14 +56,10 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
     }
 }
 
-/// A `(batch, book) IN (…)` predicate with the values inlined as quoted
-/// literals. Safe because both come from the catalog and the sentinel, not
-/// from user input; scope predicates, which do take user input, bind
-/// instead (spec §6.2).
-///
-/// `book is null` for the bookless partition: `book = '…'` matches no
-/// NULL, so that partition would never be deleted and would accumulate a
-/// copy per republish.
+/// Select partitions using escaped catalog/sentinel literals. User-supplied
+/// scope values use bound parameters elsewhere. Match bookless partitions
+/// with `book is null`; ordinary equality would leave their outgoing rows
+/// in live and duplicate them on republish.
 fn partition_predicate(partitions: &[Partition]) -> String {
     let terms: Vec<String> = partitions
         .iter()
@@ -154,13 +142,9 @@ pub(crate) fn publish_in_transaction(
 ) -> Result<PublishOutcome, StoreError> {
     let live = &req.tables.live;
     let archive = &req.tables.archive;
-    // The tables used to be *derived* from `req.dataset`, so the rows and
-    // the summary row this publish records could not name different
-    // datasets. Now they are two fields, and disagreeing would write rows
-    // into one dataset's tables while recording the generation under
-    // another's name -- as-of would then resolve a generation with no data
-    // and skip one with data, silently. Every pair's names begin with the
-    // dataset's, whichever family built it, so this catches it in debug.
+    // Payload tables and generation summary must name the same dataset.
+    // A mismatch makes stored rows unreachable through the summary. Both
+    // table families prefix names with the dataset, checked here in debug.
     debug_assert!(
         live.starts_with(&format!("{}_", req.dataset))
             && archive.starts_with(&format!("{}_", req.dataset)),
@@ -228,16 +212,12 @@ pub(crate) fn publish_in_transaction(
         });
     }
 
-    // One transaction: archive the outgoing rows, drop them from live,
-    // insert the new ones, and record the generation in the summary. Any
-    // failure rolls the whole thing back, so a failed load leaves live
-    // untouched (spec §5.7) *and* the summary unrecorded -- it must never
-    // claim a generation that did not actually land.
+    // Archive outgoing rows, replace live, and record the summary in the
+    // caller's transaction. Any failure must roll back all three so the
+    // summary cannot claim a generation whose payload did not land.
     //
-    // The outgoing rows move with `select *` — keeping the `gen_id` and
-    // `source_time` they carried while live. Stamping them with the
-    // incoming generation instead would make as-of to any moment when the
-    // older generation was live return nothing (spec §4.4).
+    // Moving outgoing rows with `select *` preserves their generation ID
+    // and source time, keeping their historical identity intact.
     let sql = format!(
         "insert into {archive} select * from {live} where {predicate};
          delete from {live} where {predicate};
@@ -441,9 +421,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(archived, 10.0, "the superseded rows moved to archive");
-        // The archived rows must keep the generation they had while live.
-        // Stamping them with the incoming generation would make as-of to a
-        // time when they *were* live return nothing (spec §4.4).
+        // Archived rows retain their original generation ID and source time
+        // so queries for the period when they were live can still find them.
         assert_eq!(gen_id, 1, "archived rows keep their own gen_id");
         assert_eq!(
             stamp,
@@ -618,12 +597,9 @@ mod tests {
 
     #[test]
     fn a_failed_publish_leaves_live_untouched() {
-        // Review round 1 (MAJ-1): `staging_table = "no_such_table"` fails
-        // at the row-count query that runs *before* `begin`, so this used
-        // to prove nothing about the transaction at all -- the publish
-        // never even reached it. A column-count mismatch fails at the
-        // `insert into {live} select *, …` statement itself, the one
-        // inside `begin; … commit;`.
+        // A staging column-count mismatch fails during the live insert, after
+        // outgoing rows have moved. This exercises rollback of partial work;
+        // a missing staging table would fail earlier at the row-count query.
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
         publish_file(
@@ -641,7 +617,7 @@ mod tests {
         assert_eq!(
             live_rows(&store),
             vec![("BK000".to_string(), 10.0)],
-            "a failed load never clobbers the last good generation (spec §5.7)"
+            "a failed load never clobbers the last good generation"
         );
     }
 
@@ -726,12 +702,9 @@ mod tests {
 
     #[test]
     fn a_failed_publish_leaves_no_summary_row() {
-        // Review round 1 (MAJ-1): the mutation must fail *inside* the
-        // transaction (the `insert into {live} select *, …` statement),
-        // not before `begin` at the staging-table row-count query --
-        // `staging_table = "no_such_table"` proved nothing about the
-        // rollback covering the summary insert, since the publish never
-        // reached the transaction at all.
+        // Fail at the live insert with a staging column-count mismatch.
+        // The transaction has already moved outgoing rows, so this verifies
+        // rollback keeps payload and summary consistent.
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
         publish_file(
@@ -756,11 +729,8 @@ mod tests {
 
     #[test]
     fn a_failed_archived_only_publish_leaves_no_summary_row() {
-        // The archived-only branch has its own `begin; … commit;` now
-        // (review round 1, MAJ-1) and had no failure test at all: a
-        // column-count mismatch on the `insert into {archive} select *,
-        // …` statement must roll back the archive insert and never reach
-        // the summary insert that follows it in the same `execute_batch`.
+        // A column-count mismatch in the archive insert must leave neither
+        // partial archive rows nor a summary entry for the failed backfill.
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
         publish_file(

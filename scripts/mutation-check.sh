@@ -5503,7 +5503,7 @@ run_mutation "hot_reload: an [log] change on reload is never applied" \
 run_mutation "diagnostics: CRIT-1 — an unreported source counts as pending in the summary" \
   crates/geode-shell/src/diagnostics.rs \
   '            let Some(health) = &s.health else {
-                continue; // no report yet — not counted (CRIT-1)
+                continue; // Unreported sources have no health to count.
             };' \
   '            let health = s.health.clone().unwrap_or(Health::Pending);' \
   geode-shell a_described_but_unreported_source_is_not_counted_in_the_summary

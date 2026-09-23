@@ -77,3 +77,9 @@ often tripped:
 - A green suite can miss wrong-data behavior when its fixture cannot reach
   the branch. Add a targeted mutation entry for every changed correctness
   contract.
+- Generation summaries cover all live/archive pairs, including NULL-book
+  partitions. As-of selection and retention break source-time ties by the
+  greatest generation ID so corrected republishes win consistently.
+- Live/archive retention has a transactional storage API but no production
+  scheduler. Series retention runs inside append transactions. See the
+  [maintenance contract](../../docs/current/data-path.md#retention-and-maintenance).

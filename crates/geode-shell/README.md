@@ -27,8 +27,8 @@ surfaces that consume them.
 | `frame` | The shared frame: scope with undo/redo, the active grouping slot, as-of, recent publishes, saved scopes, and the data and config generations, as one value every tile observes. |
 | `scopebar`, `commandline`, `palette_usage`, `listfilter`, `choice`, `vimnav`, `vimfind`, `dialogmode`, `footer` | The models behind the scope bar, the per-tile `:` line, palette ranking (frecency), filtered lists, choice-with-typeahead, vim-style list motion and `/` find, the two-mode dialog vocabulary, and dialog footer hints. |
 | `theme`, `fonts`, `fontsize`, `linenumbers`, `tileadd`, `tips` | Settings and their pure resolution rules: the bundled gpui-component themes, the bundled Inter and JetBrains Mono faces, the rem scale knob, `[ui] line_numbers`, the add-tile direction, tooltip text from the live keymap. |
-| `config_write`, `keymap_edit`, `log_persist`, `session`, `reload` | The one door every config write goes through, comment-preserving keymap edits, `:level` persistence, `session.toml`, and the hot-reload poll with its keep-last-good decision. |
-| `diagnostics` | The shell-owned `Diagnostics` entity's state: source health, generations, config diagnostics, dropped events. |
+| `config_write`, `keymap_edit`, `log_persist`, `session`, `reload` | Ordered config writes, comment-preserving keymap edits, log-level action persistence, `session.toml`, and hot reload that retains the last valid config. |
+| `diagnostics` | Source health, generations, independent config/data diagnostics, section versions, cached status summary, and watched/explicit catalog demand. See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
 | `perf` | The always-compiled frame-time histogram. |
 | `defaults` | The builtin action set and keymap, the Builtin config layer. |
 
@@ -92,3 +92,9 @@ change most often hits:
 - Every gpui-kit and gpui-pre crate is `=`-pinned in the root `Cargo.toml`.
   "The pinned rev" in a comment means those versions, read from the
   registry source.
+- Diagnostics request methods cannot notify observers themselves. Visibility
+  and catalog-demand changes require a caller notification even though they
+  leave diagnostic data versions unchanged. Explicit catalog demand survives
+  the last diagnostics tile hiding.
+- Config-load diagnostics replace a batch; data conditions append separately.
+  Keep their lifetimes distinct so a reload cannot hide a data-layer error.

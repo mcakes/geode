@@ -125,6 +125,62 @@ and series outcomes route by tile key. A series fetch completion has no tile
 key and is broadcast to visible occupants because several tiles may watch the
 same `(identity, source)` pair.
 
+## Diagnostics state and demand
+
+[`Diagnostics`](../../crates/geode-shell/src/diagnostics.rs) holds operational
+state beside the frame. The app bridge supplies data events; the shell
+supplies config-load diagnostics. The model does no I/O or clock reads and
+has no GPUI context. Callers supply timestamps and notify after mutation.
+The [diagnostics tile](features.md#diagnostics) prepares its own visible rows
+from this state.
+
+The combined `version` invalidates the cached status summary. `DiagVersions`
+provides narrower counters so each tile can ignore unrelated updates:
+
+| Counter | Changes |
+|---|---|
+| `sources` | Source description, health/detail, poll times, ingest activity |
+| `data` | Publication events and catalog snapshots |
+| `config` | Current config-load batch, batch history, retained data conditions |
+| `log_levels` | Target-level settings |
+| `perf` | Copied frame histogram and dropped-event count |
+
+Equal snapshots leave their counters unchanged; loading and publication events
+always advance theirs. Frame as-of/config versions and log ring sequences are
+separate inputs observed by the tile. Catalog resource metrics and frame
+requery statistics have no dedicated perf invalidation, so they appear on the
+next perf-section rebuild.
+
+Source health remains absent until the first report, even if description or
+poll events created the source entry. Unreported sources do not contribute to
+the status summary. A changed health or detail records a transition, including
+recovery, with the most recent 16 retained per source.
+
+Config loads replace the current diagnostic batch; a clean load clears it and
+an identical load adds no history. The model retains the latest 16 changed
+batches, including the current one. Data-layer conditions append separately,
+deduplicate against retained entries, and keep at most 256. Config reloads do
+not clear them, and they have no per-condition resolution operation. The
+summary counts current config errors and retained data errors independently;
+history is excluded. Cache hits share an `Rc<str>` without copying text.
+
+Catalog demand has two lifetimes. `watch` registers a visible tile and queues
+its initial refresh; publications and visible as-of changes queue watched
+refreshes. The last `unwatch` clears that pending demand. `request_catalog`
+records an explicit consumer's request, which survives diagnostics hiding.
+When both are pending, `take_catalog_request` consumes them together as
+explicit demand, preserving its retry policy.
+
+Demand changes do not advance data versions. Callers must still notify in the
+same entity update so the bridge observes them. The bridge allows one catalog
+request in flight, coalesces follow-up demand, and retries refused or failed
+requests with a delay. It reads the current frame as-of when submitting.
+
+Histogram copying is limited to watched diagnostics and changes in sample
+count or maximum. This keeps idle polling from causing needless repaints,
+but misses changes solely to discarded-idle counts or a reset/refill that
+reproduces the same count and maximum.
+
 ## Persistence and configuration
 
 The session file records workspace trees, docks, stacks, focused regions,

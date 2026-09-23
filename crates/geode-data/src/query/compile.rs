@@ -1,10 +1,9 @@
-//! The view compiler (spec §6.3). One statement per view, covering every
-//! level of the rollup tree, with each measure aggregated at its own grain
-//! and joined at group cardinality.
+//! Compile one statement for every level of a view's rollup tree. Aggregate
+//! each measure at its own grain, then join at group cardinality to prevent
+//! coarser measures from multiplying across finer rows.
 //!
-//! Emitting one query per level would put tree navigation on the 50ms
-//! requery budget; emitting one puts expand and collapse on the 8ms frame
-//! budget instead, because every level is already in the snapshot.
+//! Every level arrives in one snapshot, keeping expand/collapse on the 8 ms
+//! pure-UI budget instead of requiring a new query under the 50 ms budget.
 
 use crate::query::scope_sql::{DictionaryCache, Era, compile_scope_cached};
 use crate::store::StoreError;
@@ -33,17 +32,11 @@ pub struct CompiledQuery {
     pub params: Vec<Value>,
     pub grouping: Vec<String>,
     pub columns: Vec<CompiledColumn>,
-    /// Every dataset the query reads. A joined view is as stale as its
-    /// stalest input (spec §5.4), and the caller cannot compute that
-    /// without knowing which datasets were touched.
+    /// Datasets actually read, used to report the joined view's stalest input.
     pub stalest_input: Vec<String>,
-    /// For an as-of query, the *oldest* generation actually resolved per
-    /// dataset — the same stalest-input rule live freshness uses (§4.5: a
-    /// dataset's headline as-of is its oldest book). The *requested*
-    /// instant is not the answer: asking for today against data last
-    /// published a month ago must report the month-old time, or §5.4's
-    /// stalest-input rule reports nothing at all because every dataset
-    /// carries the same requested value.
+    /// Oldest selected source time per dataset for a historical query. Report
+    /// the data's age, not the requested instant: equal requested timestamps
+    /// can conceal inputs whose actual generations differ by weeks.
     pub resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
@@ -51,11 +44,9 @@ fn quoted(cols: &[String]) -> Vec<String> {
     cols.iter().map(|c| format!("\"{c}\"")).collect()
 }
 
-/// Whether `grain` carries every one of `columns` as a dimension —
-/// derived dimensions resolved to their source first. A carried
-/// dimension counts here exactly as a key dimension does (spec §3.3):
-/// `DatasetSpec::carries` is the one place that decides "carried by this
-/// grain and every finer one".
+/// Whether `grain` carries every requested dimension. Resolve derived names
+/// to their source columns and use `DatasetSpec::carries` for both key and
+/// carried dimensions, including inheritance to finer grains.
 fn carries_all(
     ds: &DatasetSpec,
     grain: Grain,
@@ -193,22 +184,16 @@ fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// A derived dimension as a scalar expression over its source column
-/// (spec §6.8): `case "book" when 'BK000' then 'IDX_EXO_EU' ... end`.
-///
-/// A scalar projection rather than a joined lookup table on purpose. A
-/// join can duplicate rows when the key repeats and can match NULL keys
-/// against rolled-up levels — both defects this compiler has had — while
-/// a `case` is a pure function of the row: it cannot change cardinality,
-/// and an unmapped value falls through to NULL, which is the honest
-/// answer for a book the desk map does not cover.
+/// Project a derived dimension as a scalar `CASE` over its source column.
+/// This preserves row cardinality even if mapping keys repeat, and unmapped
+/// values become NULL. A lookup join could multiply rows or match rolled-up
+/// NULL keys.
 fn derived_expr(d: &geode_core::dimensions::DerivedDimension) -> String {
     format!("{} as \"{}\"", derived_case(d), d.name)
 }
 
-/// A derived dimension's `case` expression alone, unaliased — the form
-/// `compile_distinct` (Phase 4 §3.4) needs so it can alias the whole
-/// select to `value` rather than the dimension's own name.
+/// Unaliased derived-dimension `CASE`, shared with distinct-value queries
+/// that name the output `value` instead of the dimension's name.
 pub(crate) fn derived_case(d: &geode_core::dimensions::DerivedDimension) -> String {
     if d.values.is_empty() {
         return "NULL::varchar".to_string();
@@ -261,11 +246,8 @@ fn derived_for<'a>(
         .collect()
 }
 
-/// One dataset's resolved era (spec §6.5): which table kind to read and,
-/// for an as-of query, the generation predicate and the oldest generation
-/// actually resolved. Lifted out of `compile_view` so `compile_distinct`
-/// (Phase 4 §3.4) can resolve the same era per dataset without pulling in
-/// the whole view compiler.
+/// The table kind, optional generation predicate, and oldest selected source
+/// time for one dataset. Shared by view and distinct-value compilation.
 pub(crate) struct ResolvedEra {
     pub kind: TableKind,
     pub generations: Option<String>,
@@ -281,13 +263,9 @@ impl ResolvedEra {
     }
 }
 
-/// Resolve which era `dataset` should be read under for `as_of` (spec
-/// §6.5). Live carries no generation predicate at all; only the as-of
-/// path pays for history, resolved from the `generations` summary (spec
-/// §6.5 as amended) -- which is itself maintained across every table the
-/// dataset's history lives in, not one grain's, since a partition can be
-/// missing from one grain while present at another (see
-/// `resolve_generations`).
+/// Resolve a dataset's read era. Live uses its table without a generation
+/// predicate. Historical reads resolve the summary covering all live/archive
+/// pairs, including partitions represented at only one grain.
 pub(crate) fn era_for(
     conn: &Connection,
     dataset: &str,
@@ -378,12 +356,10 @@ pub(crate) fn compile_view_with_cache(
     let mut joins: Vec<String> = Vec::new();
     let mut columns: Vec<CompiledColumn> = Vec::new();
 
-    // Same statement shape, different relations (spec §6.5). Only the
-    // as-of path pays for history; live carries no generation predicate
-    // at all. Resolved across every table the dataset's history lives in,
-    // not one grain's: a partition can be missing from one grain while
-    // present at another, and resolving from one would drop it from every
-    // grain's answer (see `resolve_generations`).
+    // Live and historical reads share the statement shape. Historical
+    // relations filter both archive and live by generations resolved across
+    // all grains, so a partition absent from one grain remains visible
+    // at the grains that contain it.
     let resolved = era_for(conn, &view.dataset, as_of)?;
     let mut resolved_as_of = resolved.resolved_as_of.clone();
     // One era for the whole statement: every aggregate, the spine's
@@ -665,13 +641,9 @@ pub(crate) fn compile_view_with_cache(
             .collect()
     };
     for (i, g) in view.grouping.iter().enumerate() {
-        // Dimension columns are cast to their derived ENUM so the result
-        // comes back dictionary-encoded rather than as strings (spec
-        // §6.6, §7.2) — the renderer then compares on integer codes.
-        //
-        // Below the materialized bound the column is not in the spine at
-        // all. It is still selected, as the NULL a rolled-up level would
-        // carry, so the snapshot's shape does not depend on the bound.
+        // Cast dimensions to their derived ENUMs for dictionary-encoded output
+        // and integer-code comparisons. Below the materialized depth, select
+        // NULL for absent spine columns so snapshot shape stays unchanged.
         let ty = if interned.contains(&g.as_str()) {
             crate::store::ddl::enum_type_name(&view.dataset, g)
         } else {
@@ -682,17 +654,10 @@ pub(crate) fn compile_view_with_cache(
         } else if ty == "varchar" {
             selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));
         } else {
-            // `try_cast`, not `::`. The ENUM is rebuilt at ingest (§3.6),
-            // so a value it does not carry means something already went
-            // wrong upstream — but a plain cast turns that anomaly into
-            // `Conversion Error: Could not convert string 'X' to UINT8`,
-            // which fails the whole statement. One unknown book then costs
-            // the trader every row of the tile rather than one cell.
-            //
-            // The cost is that such a value reads back blank, and a blank
-            // dimension cell already means "rolled up". That is a real
-            // ambiguity and it is the lesser one: the alternative is not a
-            // louder error about that value, it is no data at all.
+            // Use `try_cast` so an incomplete ENUM dictionary blanks an unknown
+            // dimension value instead of failing the whole query. That NULL is
+            // visually ambiguous with a rolled-up cell, but all other rows remain
+            // available. Ingest normally refreshes the dictionary.
             selects.push(format!("try_cast(s.\"{g}\" as {ty}) as \"{g}\""));
         }
         columns.push(CompiledColumn {
@@ -713,13 +678,9 @@ pub(crate) fn compile_view_with_cache(
     selects.extend(agg_selects);
     columns.extend(agg_columns);
 
-    // Cross-dataset joins (spec §6.4). Join keys are declared in schema
-    // config and joined onto the spine.
-    //
-    // A join is only meaningful when the grouping reaches the joined
-    // dataset's key: above that level several instruments share the row,
-    // and ROLLUP has already NULLed the key, so the join naturally yields
-    // NULL — which is the honest answer rather than an arbitrary pick.
+    // Join schema-declared keys onto the spine only at grouping depths that
+    // reach the joined dataset's key. Coarser rolled-up rows have NULL keys
+    // and yield NULL attributes instead of an arbitrary entity's values.
     let mut stalest_input = vec![view.dataset.clone()];
     for (i, join) in view.joins.iter().enumerate() {
         let Some(joined_ds) = schema.dataset(&join.dataset) else {
@@ -739,9 +700,7 @@ pub(crate) fn compile_view_with_cache(
         else {
             continue;
         };
-        // Only once the join is known to actually happen: a skipped join
-        // must not make the view report itself as stale as a dataset it
-        // never read (spec §5.4).
+        // Only datasets actually read contribute to provenance and freshness.
         stalest_input.push(join.dataset.clone());
 
         // Which of the joined dataset's columns this view actually wants.
@@ -755,14 +714,10 @@ pub(crate) fn compile_view_with_cache(
             .filter(|name| joined_ds.column(name).is_some() && !view.grouping.contains(*name))
             .collect();
 
-        // A joined dataset's table is keyed finer than the join key — an
-        // instrument's reference row exists per position that holds it —
-        // so joining the table directly multiplies every spine row by how
-        // many rows share the key. Aggregating to the join key first is
-        // what makes this a lookup rather than a fan-out. `any_value` is
-        // the right reducer because these are attributes that should
-        // agree; where they do not, that is what the cross-file conflict
-        // detector reports (spec §3.5), not something to average.
+        // Reduce the joined table to one row per join key before joining the
+        // spine. Multiple positions can carry the same instrument reference; a
+        // direct join would multiply the result. `any_value` selects attributes
+        // that should agree; cross-file conflict diagnostics report disagreement.
         let joined_gen = match as_of {
             crate::query::as_of::AsOf::Live => None,
             crate::query::as_of::AsOf::At(t) => {
@@ -805,11 +760,8 @@ pub(crate) fn compile_view_with_cache(
         joins.push(format!(
             "left join (select {projection} from {relation} group by {keys}) {alias} on {on}",
             projection = projection.join(", "),
-            // `joined_era.relation` already applies `joined_gen` to both
-            // the archive and live tables it reads (Phase 4a's as-of
-            // baseline fix) — a `where` clause here would reapply it and
-            // run the tuple semi-join twice per relation use, so there is
-            // none.
+            // The relation filters archive and live by generation already. Adding
+            // a WHERE here would run the same tuple semi-join twice.
             relation = joined_era.relation(&join.dataset, joined_grain),
             keys = join
                 .on
@@ -839,12 +791,8 @@ pub(crate) fn compile_view_with_cache(
     // Derived columns are expressions over the columns already selected.
     for c in &view.columns {
         if let ViewColumn::Derived { name, sql } = c {
-            // A derived column is only as attributable as what it is
-            // computed from. Marked Additive/Direct unconditionally, an
-            // expression over a NonAttributable measure claimed to be
-            // summable at a level where its own input is blanked (§6.3) —
-            // and the marker is the only thing a renderer has to go on, so
-            // a wrong one is worse than a missing column.
+            // A derived expression inherits its inputs' attribution. It cannot
+            // claim additive values at a depth where an input is non-attributable.
             let referenced = referenced_columns(sql, &columns);
             let (attribution_by_depth, scope_semantics) = if referenced.is_empty() {
                 // A constant, or an expression over nothing this view
@@ -864,19 +812,11 @@ pub(crate) fn compile_view_with_cache(
                     }),
                 )
             };
-            // Blank the *value* wherever the meet says NonAttributable,
-            // not just the marker.
-            //
-            // A measure is emitted as `case when s.row_depth in (…) then
-            // null else agg."x" end as "x"`, but a bare `x` inside a
-            // derived expression is resolved against the joined
-            // aggregate's column, not against the alias beside it — SQL
-            // only falls back to a lateral alias when no table column
-            // matches, and here one does. So the expression read straight
-            // past the blanking and printed a pair-grain number on a
-            // position-grain row: the double-count §6.3 exists to prevent.
-            // Asserting on markers alone cannot see it, which is why the
-            // test for this reads values.
+            // Blank derived values wherever the attribution meet is
+            // NonAttributable. A bare input name in this SELECT resolves to the
+            // joined aggregate's column before its neighboring masked alias, so
+            // input masking alone cannot prevent a derived expression from
+            // exposing a coarser measure at an invalid depth.
             let blank: Vec<String> = (0..=n)
                 .filter(|d| attribution_by_depth[*d] == Attribution::NonAttributable)
                 .map(|d| d.to_string())
@@ -1007,7 +947,7 @@ grain = "position"
         SchemaSpec::from_doc(&doc).0
     }
 
-    /// The spec §6.3 view: lhu > underlying > position, one measure at
+    /// Fixture grouped by LHU, underlying, and position, with one measure at
     /// underlying grain and one at position grain.
     fn view() -> ViewSpec {
         let text = r#"
@@ -1049,11 +989,8 @@ kind = "measure"
         (dir, store)
     }
 
-    /// Rebuild the `generations` summary for every dataset in `schema`
-    /// from its own tables (`store::ddl::history_of`). `resolve_generations`
-    /// now reads the summary rather than scanning tables directly, so any
-    /// fixture built with raw SQL (bypassing `publish_file`'s own
-    /// maintenance) and then queried under `AsOf::At` needs this first.
+    /// Rebuild each dataset's summary from its own payload tables. Raw SQL
+    /// fixtures bypass publication maintenance and need this before as-of queries.
     fn rebuild_all_generations(store: &crate::store::Store, schema: &SchemaSpec) {
         for ds in &schema.datasets {
             crate::store::ddl::rebuild_generations(
@@ -1260,16 +1197,9 @@ kind = "dimension"
 
     #[test]
     fn an_as_of_join_labels_each_side_with_the_instant_it_actually_read() {
-        // The fixture gap the phase-2b handoff named: an as-of query over
-        // a *joined* dataset whose two sides resolve to different
-        // instants. Every other as-of join test has both sides landing on
-        // one generation, so `resolved_as_of` could hold a single value
-        // for both and look correct.
-        //
-        // §5.4 is the point: a joined view is as stale as its stalest
-        // input, and `Provenance::stalest` can only say so if each dataset
-        // carries the instant it actually read. One timestamp for the pair
-        // makes them equal and hides that one side is weeks behind.
+        // Resolve the joined datasets to different instants. Each must retain
+        // its selected timestamp so `Provenance::stalest` exposes the lagging
+        // input; one shared timestamp would conceal the difference.
         let (_d, store) = fixture();
         let schema = joined_schema();
         store
@@ -1317,7 +1247,7 @@ kind = "dimension"
         );
         assert_ne!(
             risk, reference,
-            "the two sides must not collapse to one instant, or §5.4's \
+            "the two sides must not collapse to one instant, or the \
              stalest-input rule has nothing to compare"
         );
 
@@ -1536,10 +1466,8 @@ kind = "dimension"
         rows.map(|r| r.unwrap()).collect()
     }
 
-    /// The Phase 4 §3.3 fixture: `currency` carried by the instrument
-    /// grain. `npv` (position) and `delta01` (underlying) are the two
-    /// measures that disagree on whether a currency grouping attributes
-    /// them.
+    /// A currency dimension carried at instrument grain. Position NPV and
+    /// underlying delta differ in whether currency grouping can attribute them.
     fn carried_schema() -> SchemaSpec {
         let text = r#"
 [risk_carried.columns.book]
@@ -1872,7 +1800,7 @@ grain = "instrument"
         assert_eq!(grand[0][1], "Some(12.0)", "7 + 5, not doubled: {totals:?}");
     }
 
-    /// `desk` derived from `book` — the standing §6.8 case.
+    /// Derived dimension fixture: `desk` maps values from `book`.
     fn desks() -> DerivedDimensions {
         let doc = geode_core::config::merge_docs(
             "dimensions",
@@ -1900,20 +1828,10 @@ kind = "measure"
 
     #[test]
     fn a_derived_dimension_finer_than_a_measures_grain_blanks_that_measure() {
-        // The last of the phase-2b handoff's predicted fixture gaps: a
-        // view grouped by a derived dimension whose `from` column is
-        // absent at one of the view's measure grains.
-        //
-        // `region` derives from `underlying_ref`, which the underlying and
-        // pair grains carry and the position grain does not. So at the
-        // region level `delta01` (underlying grain) is attributable and
-        // `daily_trading_pnl` (position grain) is not: a position's PnL
-        // belongs to the position, and splitting it across the regions its
-        // underlyings happen to sit in would invent a number (§6.3).
-        //
-        // The attribution rule compares *base* columns, so this only works
-        // if the derived name is resolved before the grain comparison —
-        // which is the thing no fixture exercised.
+        // Resolve `region` to its source `underlying_ref` before checking grain
+        // attribution. Underlying delta can be grouped by region; position PnL
+        // cannot be divided among its underlyings' regions without inventing
+        // an allocation. The fixture must exercise both measures together.
         let (_d, store) = fixture();
         let dims = {
             let doc = merge_docs(
@@ -2069,14 +1987,9 @@ kind = "measure"
         assert_eq!(total[1], "None", "an unmapped desk selects nothing");
     }
 
-    /// A deliberately hostile store: a NULL book, a NULL LHU, two
-    /// archived generations, a dimension value that exists only in
-    /// history, and derived ENUMs actually built from live.
-    ///
-    /// Every one of those is ordinary in the real feed and none of them
-    /// were in the original fixture, which is why three rounds of review
-    /// each found defects the suite could not see. Reviews find what the
-    /// fixture makes reachable.
+    /// Fixture covering NULL book and LHU values, multiple archived generations,
+    /// a dimension value found only in history, and an incomplete ENUM dictionary.
+    /// These cases exercise historical reads beyond the ordinary live-data path.
     fn hostile_fixture() -> (tempfile::TempDir, crate::store::Store) {
         let (dir, store) = fixture();
         let conn = store.writer();
@@ -2111,14 +2024,10 @@ kind = "measure"
                 TIMESTAMPTZ '2026-08-01 00:00:00Z');",
         )
         .unwrap();
-        // Build the ENUMs deliberately incomplete — from live only, both
-        // arguments naming the live table — even though ingest itself no
-        // longer does this (`refresh_enum` now unions in the archive,
-        // spec §3.5): this fixture tests that the general read path does
-        // not *depend* on the dictionary being complete, a property
-        // that must hold independent of that fix. Only for columns this
-        // grain's table actually has; `underlying2_ref` lives at the pair
-        // grain.
+        // Build ENUMs from live only to verify that historical reads tolerate
+        // a dictionary missing archived values. Production refresh unions
+        // archive values too, but query correctness must not depend on a
+        // complete dictionary. Only create enums for columns this grain carries.
         for col in
             crate::store::ddl::categorical_columns(schema().dataset("risk_snapshot").unwrap())
                 .into_iter()
@@ -2270,11 +2179,9 @@ kind = "measure"
 
     #[test]
     fn a_measure_predicate_is_direct_not_semi_joined() {
-        // "Not a key column at this grain" is not "finer". A measure
-        // declared at this grain is on this very table, so filtering on
-        // it is direct — badging it SemiJoined tells the trader
-        // "positions that have…" about a filter that is nothing of the
-        // kind, which inverts §6.3's attribution contract on screen.
+        // A measure declared at this grain is directly filterable even when
+        // it is not a key dimension. Marking it SemiJoined would describe
+        // an existence filter that the query does not perform.
         let (_d, store) = fixture();
         let ds = schema();
         let sql = crate::query::scope_sql::compile_scope(
@@ -2402,10 +2309,8 @@ kind = "measure"
 
     #[test]
     fn an_as_of_query_reads_only_the_archive_even_through_a_semi_join() {
-        // The whole as-of compile path had no test, which is how two
-        // silent defects survived: the semi-join probe read `_live` with
-        // no generation predicate, so a historical answer quietly mixed in
-        // today's numbers (spec §6.5).
+        // Historical semi-join probes must use the selected era too. Reading
+        // unfiltered live rows here would mix current values into history.
         let (_d, store) = fixture();
         let conn = store.writer();
         // Two generations in the archive, and a *different* value live —
@@ -2460,10 +2365,8 @@ kind = "measure"
 
     #[test]
     fn as_of_after_the_current_generation_reads_the_current_generation() {
-        // The generation a partition holds now is in live and nowhere
-        // else. Resolving from the archive alone answered "as of an hour
-        // ago" with this morning's *previous* file (100, not 7), and found
-        // nothing at all for BK1, which has only ever been published once.
+        // The newest generation lives only in live. Historical resolution
+        // must include it, including for a partition published only once.
         let (_d, store) = fixture();
         store
             .writer()
@@ -2510,8 +2413,7 @@ kind = "measure"
             delta, "Some(15.0)",
             "10 + 5, the generations current at 08-15"
         );
-        // The label is the *oldest* partition read — §4.5's stalest-book
-        // rule, the same one live freshness applies — not the newest.
+        // Freshness reports the oldest selected partition, matching live rollups.
         assert_eq!(
             resolved.get("risk_snapshot"),
             Some(&at("2026-08-01T00:00:00Z")),
@@ -2664,8 +2566,8 @@ kind = "measure"
 
     #[test]
     fn cross_gamma_is_blank_below_instrument_level_and_present_above_it() {
-        // spec §6.3: the pair is canonical, so an underlying-level row has
-        // no honest share of it; an instrument-level or coarser row does.
+        // A canonical pair has no attributable share at underlying level;
+        // instrument-level and coarser rows can aggregate it.
         let (_d, store) = pair_fixture();
         let mut v = view();
         v.columns.push(ViewColumn::Measure {
@@ -2703,14 +2605,9 @@ kind = "measure"
 
     #[test]
     fn a_blanked_cross_gamma_is_still_blank_after_the_snapshot_boundary() {
-        // The companion to the test above, and the gap between them was
-        // the defect. That one proves the *compiler* emits NULL, reading
-        // through DuckDB's own row API. This one proves a module can still
-        // tell, reading through `Snapshot` — which is the only way a
-        // module ever sees a result. `f64_column` returns the raw Arrow
-        // value buffer, so the cell §6.3 deliberately blanked arrived as a
-        // confident 0.0: the rule was implemented in the compiler and
-        // discarded one layer up, with every compiler test still green.
+        // Verify NULLs through `Snapshot`, the module-facing result, as well
+        // as through DuckDB's row API. Raw Arrow value buffers can contain
+        // zero behind a NULL; consumers must respect the validity bitmap.
         use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
 
         let (_d, store) = pair_fixture();
@@ -2776,7 +2673,7 @@ kind = "measure"
                 Some(v) => {
                     assert!(
                         depth < 2,
-                        "row {row} at depth {depth} reads {v} where §6.3 blanked it"
+                        "row {row} at depth {depth} reads {v} where attribution requires NULL"
                     );
                     assert_eq!(v, 3.0, "row {row}");
                 }
@@ -2790,12 +2687,8 @@ kind = "measure"
 
     #[test]
     fn a_derived_column_inherits_the_attribution_of_what_it_references() {
-        // A derived column was marked Additive/Direct unconditionally. An
-        // expression over cross gamma therefore claimed to be summable at
-        // a level where cross gamma itself is blanked (§6.3) — the marker
-        // says "add this up" about a number built from one that must not
-        // be. The marker is the only thing a renderer has to go on, so a
-        // wrong one is worse than a missing column.
+        // An expression over cross gamma inherits its non-attributable depths.
+        // The renderer uses that marker to decide where values can be summed.
         let (_d, store) = pair_fixture();
         let mut v = view();
         v.columns.push(ViewColumn::Measure {
@@ -2844,15 +2737,9 @@ kind = "measure"
 
     #[test]
     fn a_derived_column_is_blanked_where_its_inputs_are() {
-        // The marker is not enough. A measure blanked as NonAttributable
-        // is emitted as `case when s.row_depth in (…) then null else
-        // agg."x" end as "x"`, but a derived expression naming `x` is a
-        // bare identifier in the same SELECT list — SQL resolves that
-        // against the joined aggregate's *column*, not the alias beside
-        // it, so the expression reads the unblanked value and prints a
-        // pair-grain number on a position-grain row. Exactly the
-        // double-count §6.3 exists to prevent, and asserting on markers
-        // alone cannot see it.
+        // Read derived values as well as markers. SQL resolves a bare input
+        // name to the aggregate column before the adjacent masked alias, so
+        // the expression itself must be masked at non-attributable depths.
         let (_d, store) = pair_fixture();
         let mut v = view();
         v.columns.push(ViewColumn::Measure {
@@ -2894,10 +2781,9 @@ kind = "measure"
 
     #[test]
     fn an_apostrophe_in_a_comment_does_not_hide_the_columns_referenced() {
-        // One apostrophe in prose used to open a string that never closed,
-        // swallowing every identifier after it — and the empty result took
-        // the branch that hands out `Additive` at every level. The unsafe
-        // direction is under-matching, so this is the case that matters.
+        // An apostrophe in a SQL comment must not start a string token and
+        // hide subsequent identifiers. Missing a referenced input could grant
+        // additive attribution at depths where it is invalid.
         let (_d, store) = pair_fixture();
         for sql in [
             "-- don't sum this across pairs\n cross_gamma02 * 2",
@@ -2938,14 +2824,10 @@ kind = "measure"
 
     #[test]
     fn a_comment_does_not_drag_in_columns_the_expression_never_names() {
-        // The discriminating case for stripping comments, as opposed to
-        // merely surviving them. Over an *additive* measure, an apostrophe
-        // in a comment used to leave the scan mid-string, and the
-        // unbalanced-quote guard then conservatively returned every
-        // column — including the pair-grain one — so the expression was
-        // blanked at depths where its actual input is perfectly additive.
-        // Safe, but wrong, and only visible when the expression's own
-        // inputs are stronger than the columns it accidentally pulls in.
+        // Use an additive input to distinguish correct comment stripping from
+        // a conservative unbalanced-quote fallback. Pulling in every column
+        // would also include the pair-grain measure and wrongly blank this
+        // expression at depths where its actual input remains additive.
         let (_d, store) = pair_fixture();
         let mut v = view();
         v.columns.push(ViewColumn::Measure {
@@ -3108,10 +2990,8 @@ kind = "measure"
 
     #[test]
     fn a_stale_enum_degrades_that_column_instead_of_failing_the_query() {
-        // The ENUM is refreshed at ingest (§3.6), so a value it does not
-        // carry means something already went wrong upstream. A plain cast
-        // makes that anomaly fail the *whole* statement, so one unknown
-        // book costs the trader every row of the tile.
+        // An unknown ENUM value must not make the entire query fail. Ingest
+        // refreshes dictionaries, but reads must tolerate an incomplete one.
         let (_d, store) = fixture();
         store
             .writer()
@@ -3299,9 +3179,9 @@ kind = "measure"
 
     #[test]
     fn a_text_filter_reaches_coarse_measures_by_membership() {
-        // `underlying_ref` is textual and finer than position grain. The
-        // filter applied to the greeks and silently not to the PnL beside
-        // them — and marked nothing (spec §6.3).
+        // A text filter on `underlying_ref` narrows greeks but cannot be applied
+        // at position grain. Mark the PnL attribution rather than silently
+        // presenting filtered greeks beside apparently filtered position PnL.
         let (_d, store) = fixture();
         let mut s = schema();
         s.datasets[0]
@@ -3398,9 +3278,8 @@ kind = "measure"
 
     #[test]
     fn a_derived_dimension_works_in_the_expression_grammar_too() {
-        // `desk = 'EU'` is a natural thing to type. Before this it either
-        // named a column no table has, or bound a derived value against
-        // the source column and matched nothing.
+        // A predicate on `desk` must evaluate the derived mapping; no payload
+        // table contains that column or stores `EU` as its source book value.
         let (_d, store) = fixture();
         let scoped = |text: &str| {
             let q = compile_view(
@@ -3701,29 +3580,13 @@ kind = "measure"
 
     #[test]
     fn compile_view_over_two_grains_resolves_the_dictionary_once_per_statement() {
-        // `view()` has two measure grains (`delta01` at Underlying,
-        // `daily_trading_pnl` at Position); this dataset's grouping
-        // ["lhu", "underlying_ref", "position_ref"] happens to be fully
-        // covered by those two grains' own carried columns, so `missing`
-        // is empty and the spine fallback scan's own `compile_scope_
-        // cached` call does not run at all for this fixture. The *other*
-        // catalog consumer this test actually exercises is the
-        // `interned` block, which still calls `cache.enum_types` after
-        // the grain loop.
+        // Both measure grains cover this grouping, so the spine fallback does
+        // not run. The first grain warms the dataset-wide dictionary cache;
+        // the second grain and interned-column check can reuse it.
         //
-        // Review round 1, Minor 3: a post-hoc `cache.lookups` count like
-        // this one defends only the *first* site to touch the cache in
-        // a given run, whichever that happens to be -- not "every site".
-        // Because the dictionary resolution is dataset-wide, not
-        // grain-specific, the first measure grain here (Underlying)
-        // always pre-warms whatever the second grain (Position) or the
-        // interned block would otherwise need, so a bypass introduced at
-        // either of *those* two sites would leave `cache.lookups`
-        // unchanged and this test would still pass. See
-        // `compile_view_with_no_measures_resolves_the_dictionary_once_
-        // via_the_spine` below for the shape that actually isolates a
-        // single call site (there, the spine, because it is forced to be
-        // the *only* one).
+        // A final lookup count proves reuse but cannot detect a bypass at a
+        // later site already warmed by the first. The no-measures and no-text
+        // fixtures below isolate the spine and interned-column consumers.
         let (_d, store) = fixture();
         let s = schema_with_a_textual_dictionary(&store);
 
@@ -3794,18 +3657,9 @@ kind = "measure"
 
     #[test]
     fn compile_view_with_no_text_scope_resolves_the_dictionary_once_via_the_interned_check() {
-        // Review round 1, Minor 2: with no text scope at all, the text
-        // block inside `compile_scope_cached` never runs for either
-        // measure grain -- `scope.text` is `None`, so neither
-        // `cache.enum_types` nor `cache.matches` is reached there. The
-        // `interned` block (`compile.rs`, gated on `era.kind ==
-        // TableKind::Live`) is then the *only* consumer of the cache in
-        // the whole statement, so this is the one shape that isolates
-        // and protects that specific call site: reverting it to the
-        // free `existing_enum_types` function would leave `cache.
-        // lookups` at 0 instead of 1, since nothing else in this
-        // statement would ever touch the shared cache to make up the
-        // difference.
+        // With no text scope, neither grain consults the dictionary cache.
+        // The live interned-column check is its only consumer; a lookup count
+        // of one therefore proves that this site uses the shared cache.
         let (_d, store) = fixture();
         let s = schema_with_a_textual_dictionary(&store);
 

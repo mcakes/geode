@@ -1,10 +1,8 @@
-//! Freshness bookkeeping (spec §4.5). Records what was loaded from where
-//! and when, in *source* time — never mtime, which any copy or restore
-//! corrupts (spec §4.4).
+//! Publication catalog and freshness in source time. Filesystem modification
+//! time cannot establish freshness because copies and restores can change it.
 //!
-//! Freshness rolls up: a book is as fresh as its stalest contributing file,
-//! and a dataset's headline as-of is the oldest book in the effective
-//! scope. That is the same stalest-input rule joins use (spec §5.4).
+//! A book is as fresh as its stalest contributing file; a dataset headline uses
+//! the oldest book in scope. Joined views likewise report their stalest input.
 
 use crate::health::Health;
 use crate::store::StoreError;
@@ -24,8 +22,8 @@ pub type BookFreshness = Vec<(Option<String>, DateTime<Utc>)>;
 pub struct FileGeneration {
     pub file_id: FileId,
     pub dataset: String,
-    /// Filename with its date component removed: the partition's identity
-    /// across business dates (spec §4.3).
+    /// Filename with its date component removed, identifying the batch across
+    /// business dates. Dataset and book complete the partition key.
     pub batch: String,
     pub path: PathBuf,
     pub size: u64,
@@ -35,19 +33,13 @@ pub struct FileGeneration {
     pub gen_id: i64,
     pub loaded_at: DateTime<Utc>,
     pub row_count: usize,
-    /// The partitions this file wrote, as `(dataset, batch, book)` names
-    /// them. `None` is the bookless partition — rows whose book is NULL,
-    /// which 2a reports rather than drops, and which publishes under
-    /// `book is null`. Modelled the same way `Partition.book` is, because
-    /// a `Vec<String>` cannot represent it and everything that joined on
-    /// it silently lost those rows.
+    /// Books written by this file within its dataset and batch. `None` names
+    /// the bookless partition, retained by ingest and matched with `IS NULL`
+    /// during publication and freshness lookup.
     pub books: Vec<Option<String>>,
-    /// The publish filed this generation straight to the archive without
-    /// it ever being live — the backfill guard's outcome for a file older
-    /// than what is already current (§4.3). Recorded because the load did
-    /// happen and provenance should say so, but excluded from freshness:
-    /// a generation that never went live cannot be what a book's
-    /// staleness is measured from.
+    /// True when backfill routing sent the generation directly to archive.
+    /// It remains part of provenance and history, but cannot establish live
+    /// freshness because it never replaced live data.
     pub archived_only: bool,
     pub health: Health,
 }
@@ -99,13 +91,9 @@ CREATE TABLE IF NOT EXISTS attribute_conflicts (
   column_name VARCHAR,
   entities BIGINT
 );
--- The generation summary (spec §6.5 as amended): which generations exist,
--- per dataset and partition, maintained inside the publish and sweep
--- transactions rather than scanned fresh from the archive per as-of
--- requery (`query::as_of::resolve_generations`, `store::ddl::
--- rebuild_generations`). No primary key -- DuckDB will not key a nullable
--- column (`book` is NULL for the bookless partition) -- so uniqueness is
--- by the maintaining code's own guards, not the schema.
+-- Generation identities per dataset and partition, maintained with payload
+-- publication and retention so as-of queries need not scan archive rows.
+-- A primary key would exclude NULL books; maintenance code enforces uniqueness.
 CREATE TABLE IF NOT EXISTS generations (
   dataset VARCHAR,
   batch VARCHAR,
@@ -134,37 +122,14 @@ impl<'a> Catalog<'a> {
         self.ensure_gen_id_sequence()
     }
 
-    /// Create the generation sequence starting above whatever the catalog
-    /// already holds.
-    ///
-    /// It cannot live in [`DDL`] with a literal `START 1`: on a database
-    /// written before the sequence existed, that would hand out ids that
-    /// are already stamped onto live rows — the same collision this
-    /// sequence exists to prevent, but hitting every existing partition
-    /// rather than one crashed load. `IF NOT EXISTS` makes this a no-op
-    /// once created, so the start value is only ever read from a catalog
-    /// the sequence has not yet been responsible for.
+    /// Create the generation sequence above recorded history if it does not
+    /// already exist. A fresh store starts at 1; a populated catalog starts at
+    /// `latest + 2` to avoid an unrecorded legacy allocation at `latest + 1`.
     fn ensure_gen_id_sequence(&self) -> Result<(), StoreError> {
-        // `+ 2`, not `+ 1`, and the extra one is the whole point.
-        //
-        // The old allocator was `max(gen_id) + 1` over the catalog, peeked
-        // before the catalog row was written. So a load that published its
-        // rows and then failed to record leaves rows stamped
-        // `max_recorded + 1` while the catalog still reads `max_recorded`
-        // — and that orphaned id is exactly what `latest_gen_id() + 1`
-        // computes. Starting there would hand the first sequence-allocated
-        // id straight to the generation a crashed pre-sequence load
-        // already wrote: this migration would reproduce, once, the precise
-        // collision it exists to eliminate.
-        //
-        // Skipping one costs nothing (ids are opaque and need only be
-        // unique and increasing) and closes it, because a crashed old
-        // build could leak only that one id — allocation was always
-        // `max + 1`, so it could never get further ahead than that.
-        //
-        // Only where there is history to migrate. A catalog with no
-        // generations has no crashed load behind it and nothing to skip,
-        // so a fresh database still starts at 1.
+        // A legacy load could write rows with `max_recorded + 1` before
+        // recording its catalog entry. Skip that possible orphaned ID when
+        // initializing the sequence. IDs need only be unique and increasing,
+        // so the gap is harmless. An existing sequence is left unchanged.
         let latest = self.latest_gen_id()?;
         let start = if latest == 0 { 1 } else { latest + 2 };
         self.sql(&format!(
@@ -186,15 +151,9 @@ impl<'a> Catalog<'a> {
             })
     }
 
-    /// Take the next generation id, consuming it.
-    ///
-    /// A sequence rather than `max(gen_id) + 1`, because that was peeked
-    /// *before* the catalog row was written: a load that published its
-    /// rows and then failed to record left the id free, and the next load
-    /// stamped a different generation of the same partition with it. The
-    /// generation predicate then could not tell the two apart. A sequence
-    /// hands out an id once whether or not anything is ever recorded
-    /// against it, so a crashed load costs an id and nothing else.
+    /// Reserve and consume the next generation ID. A failed or rolled-back
+    /// load must not make its allocation available to another generation.
+    /// Sequence gaps are harmless; ID reuse makes history ambiguous.
     pub fn reserve_gen_id(&self) -> Result<i64, StoreError> {
         let sql = "select nextval('file_generations_gen_id')";
         self.conn
@@ -331,26 +290,18 @@ impl<'a> Catalog<'a> {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// The newest source time published for a partition (spec §4.3). This is
-    /// what the backfill guard compares against: an older file shares the
-    /// batch, so it must not overwrite what is already live.
-    /// `book` is `None` for the bookless partition, matching
-    /// `Partition.book`. `fb.book = ?` cannot match a NULL, so asking with
-    /// `&str` could never see it — and a load of purely unattributed rows
-    /// therefore computed "nothing is live yet" and published with the
-    /// guard disabled.
+    /// Newest source time of a generation that went live for this partition.
+    /// The backfill guard compares against it so older arrivals cannot replace
+    /// current data. `None` names the bookless partition and requires `IS NULL`
+    /// rather than ordinary equality.
     pub fn live_source_time(
         &self,
         dataset: &str,
         batch: &str,
         book: Option<&str>,
     ) -> Result<Option<DateTime<Utc>>, StoreError> {
-        // Scoped by dataset. `batch` is the filename with its date
-        // component removed, so two datasets whose source files share a
-        // stem produce the same batch — and the backfill guard for one
-        // then read the other's source times, filing a legitimately new
-        // file as history with no error and no degradation.
-        // `book_freshness` filters on dataset; this did not.
+        // Scope by dataset as well as batch and book. File stems can match
+        // across datasets; another dataset's time must not reject this load.
         let (sql, params): (&str, Vec<duckdb::types::Value>) = match book {
             Some(b) => (
                 "select max(fg.source_time) from file_generations fg
@@ -379,13 +330,9 @@ impl<'a> Catalog<'a> {
             })
     }
 
-    /// Per-book freshness: a book is as fresh as its *stalest* file.
-    ///
-    /// `None` is the bookless partition, which has freshness of its own.
-    /// It used to have none: `file_books` held no row for it, so the join
-    /// dropped it — invisibly on a file that also carried real books,
-    /// where its staleness was reported as theirs, and entirely on a file
-    /// of only unattributed rows.
+    /// For each book, take the newest live-published source time per batch,
+    /// then the oldest of those contributing batches. Bookless rows contribute
+    /// their own `None` entry. Archive-only arrivals do not affect freshness.
     pub fn book_freshness(&self, dataset: &str) -> Result<BookFreshness, StoreError> {
         let sql = "select book, min(t) from (
                        select fg.batch as batch, fb.book as book, max(fg.source_time) as t
@@ -411,73 +358,25 @@ impl<'a> Catalog<'a> {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// The persisted health of the generations a `AsOf::Live` query
-    /// reads right now, one entry per batch whose live generation is not
-    /// `ok`.
+    /// Read persisted unhealthy conditions for the generations served by live
+    /// queries, one worst condition per batch. `DataService::open` uses this to
+    /// seed load health: an unchanged file after restart will not republish,
+    /// but any degradation in its retained live data must remain visible.
     ///
-    /// Phase 4b's health tracker keeps its load lane in process only, so
-    /// a restart used to forget a still-live degraded generation
-    /// entirely: the first poll finds the CSV `Unchanged`, nothing
-    /// republishes, and the source reads `ok` while the blotter sums its
-    /// degraded rows. This is the read-back that seeds it
-    /// (`DataService::open`) — `file_generations.health` has been
-    /// written on every publish since 2a and was never read back.
+    /// Resolve the newest non-archive-only generation per `(batch, book)` by
+    /// source time, breaking ties by greatest generation ID. Do not bound by
+    /// the host clock: live queries also include future-stamped source data.
+    /// A same-time corrected republish must supersede its predecessor's health.
     ///
-    /// **No time bound, deliberately (fix round 1, MIN-3).** This must
-    /// agree with what the query path actually serves, and the live path
-    /// carries no generation predicate at all: `Era::live()` leaves
-    /// `generations: None` and `Era::relation` reads the live table
-    /// whole. So a generation whose `source_time` is *ahead* of the host
-    /// clock — an upstream stamping a business close in advance, or plain
-    /// clock skew; publish applies no such bound either — is live, is
-    /// summed by the blotter, and must be what this reports. Bounding
-    /// this by `Utc::now()` would have reported the *previous*
-    /// generation's health instead: a false clean, the one direction this
-    /// seam must never fail in. What is live is therefore the newest
-    /// non-archived generation per `(batch, book)` with no bound at all,
-    /// which is exactly what `live_source_time` and `book_freshness`
-    /// already read. Historical health is a different question, for a
-    /// caller that has one; nothing asks it today.
+    /// Exclude archive-only records in the join before ranking so a backfill
+    /// cannot hide the live generation. Collapse books to their batch's worst
+    /// severity, ordered `failed`, `degraded`, `pending_too_long`, `pending`,
+    /// matching the data service's load-health lane.
     ///
-    /// Resolution is otherwise `query::as_of::resolve_generations`', off
-    /// the same summary table: newest `source_time` per `(batch, book)`,
-    /// ties broken by `gen_id` descending. The tie is not exotic — a
-    /// *corrected republish* keeps the sentinel's `as_of` and so ties the
-    /// generation it replaces (`store::publish`'s backfill guard is
-    /// strictly-older for exactly that reason), which is the ordinary way
-    /// a degradation is fixed. Taking the lower `gen_id` there would seed
-    /// the superseded degraded generation of a batch that was corrected
-    /// while the app was down, with a stale reason, on every restart.
-    ///
-    /// Three further differences from `resolve_generations`, all
-    /// deliberate:
-    ///
-    /// - `coalesce(fg.archived_only, false) = false` sits in the JOIN,
-    ///   not in an outer filter, so a generation that never went live
-    ///   (§4.5) can neither be picked as the live one nor hide the
-    ///   generation that actually is — the same guard `book_freshness`
-    ///   and `live_source_time` apply, for the same reason.
-    /// - The result is one row per BATCH, because the health tracker's
-    ///   load lane is keyed by batch (Phase 4b, NEW-6). A batch whose
-    ///   books resolve to different generations with different health is
-    ///   reported once, at its worst, by the label order `failed` >
-    ///   `degraded` > `pending_too_long` > `pending` — the SQL spelling
-    ///   of `service::severity_rank`, which is the one ordering this
-    ///   codebase rolls health up by (never `Health`'s derived `Ord`,
-    ///   which falls through to comparing reason strings).
-    /// - The filter names the four unhealthy labels rather than excluding
-    ///   `'ok'` (fix round 1, MIN-4). `Health::from_parts` maps anything
-    ///   it does not recognise to `Health::Ok`, so a label written by a
-    ///   future build, or a hand-edited row, used to arrive here as a
-    ///   spurious `Ok` — seeded before any producer had spoken, taking
-    ///   `last_reported` with it and swallowing the first genuine
-    ///   discovery `Ok`. Naming the vocabulary keeps this function's
-    ///   filter and `from_parts`' match arms the same set: a label this
-    ///   admits is a label that round-trips.
-    ///
-    /// A generation with no `file_generations` row — a summary rebuilt
-    /// from the data tables of a database whose catalog was lost — is
-    /// dropped by the join: no health was recorded, so none is claimed.
+    /// Only these known unhealthy labels are admitted. Unknown labels decode
+    /// as `Ok` and must not seed a false health report. A summary generation
+    /// without a file-catalog record has no recorded health and is omitted.
+    /// Row decoding errors propagate instead of silently hiding a condition.
     pub fn live_health(&self, dataset: &str) -> Result<Vec<(String, Health)>, StoreError> {
         let sql = "select batch, health, health_reason from (
                        select batch, health, health_reason,
@@ -553,19 +452,13 @@ impl<'a> Catalog<'a> {
             .min())
     }
 
-    /// Attribute columns whose value for one entity disagrees across the
-    /// whole live table (spec §3.5).
+    /// Find attribute columns that disagree for one entity across the live
+    /// table. Group by grain identity rather than its full key: an instrument
+    /// held in two books has two keys but one identity. This catches cross-file
+    /// conflicts that a staging-table check cannot see.
     ///
-    /// The same shape as the within-file detector in `ingest::split`, run
-    /// over everything rather than one file's staging table — and grouped
-    /// by the grain's *identity* columns rather than its key, because an
-    /// instrument reused in two books has two keys and one identity. That
-    /// grouping is what makes this cross-file rather than a re-run of the
-    /// check ingest already did.
-    ///
-    /// Diagnostic, not corrective: newest source time still wins. The
-    /// value is the signal — a column that conflicts on every load is
-    /// evidence it does not live at this grain at all (spec §3.4).
+    /// The result is diagnostic; it does not rewrite data. Repeated conflicts
+    /// can indicate that the attribute is declared at the wrong grain.
     pub fn attribute_conflicts(
         &self,
         dataset: &str,
@@ -775,11 +668,8 @@ mod tests {
 
     #[test]
     fn a_reserved_gen_id_is_never_handed_out_twice() {
-        // The id used to be `max(gen_id) + 1` over the catalog, peeked
-        // before the row was written. A load that published its rows and
-        // then failed to record left the id free, so the next load stamped
-        // a *different* generation of the same partition with it — and the
-        // generation predicate could no longer tell them apart.
+        // Consume an ID without recording a catalog row, as a failed load can
+        // do. The next reservation must still return a different ID.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
 
@@ -1312,10 +1202,8 @@ mod tests {
 
     #[test]
     fn live_health_reports_only_the_batches_whose_live_generation_is_unhealthy() {
-        // Phase 4b follow-up (spec §4.4 "Known gaps, deferred" item 2):
-        // the ingest health lane is in-process, so after a restart the
-        // only record of a still-live degraded generation is the one
-        // `file_generations.health` kept. This is the read-back.
+        // Recover the persisted health of still-live data after restart, when
+        // no new load is needed to produce another health event.
         let (_d, store) = store();
         // BK000: degraded and still live — the whole point.
         published(
@@ -1382,13 +1270,9 @@ mod tests {
 
     #[test]
     fn live_health_reports_a_generation_whose_source_time_is_in_the_future() {
-        // Fix round 1, MIN-3. Publish applies no upper bound on source
-        // time, and `Era::live()` carries no generation predicate at all
-        // — a sentinel stamped ahead of the host clock (a business close
-        // dated in advance, or clock skew) publishes into the live table
-        // and IS what a live query sums. An `at <= now` bound here would
-        // have answered with the previous, clean generation instead:
-        // false-clean, the one direction this seam must never fail in.
+        // A future-stamped generation can be live because publication applies
+        // no host-time upper bound. Read its health too; a clock cutoff would
+        // incorrectly report the preceding clean generation.
         let (_d, store) = store();
         published(
             &store,
@@ -1426,14 +1310,8 @@ mod tests {
 
     #[test]
     fn live_health_breaks_a_tied_source_time_on_the_newer_generation() {
-        // Fix round 1, MIN-1. The backfill guard is strictly-older
-        // (`store::publish`) precisely so that a file re-dropped with the
-        // same sentinel `as_of` REPLACES rather than becoming history —
-        // which is the ordinary way an operator corrects a degraded file.
-        // Both generations therefore carry one source time and only
-        // `gen_id` separates them. Taking the lower one seeds the
-        // superseded degraded generation, with a stale reason, on every
-        // restart until something republishes in-session.
+        // A same-time corrected republish replaces live data. Its greater
+        // generation ID must also replace the predecessor's health on restart.
         let (_d, store) = store();
         let tied = ts("2026-08-30T07:00:00Z");
         published(
@@ -1459,13 +1337,9 @@ mod tests {
 
     #[test]
     fn live_health_ignores_a_health_label_it_does_not_recognise() {
-        // Fix round 1, MIN-4. `Health::from_parts` maps anything it does
-        // not know to `Health::Ok`, so a label written by a future build
-        // (or a hand-edited row) used to be seeded as a spurious `Ok`
-        // before any producer had spoken — taking `last_reported` with it
-        // and swallowing the first genuine discovery `Ok`. The filter
-        // names the vocabulary rather than excluding `'ok'`, so this
-        // function's filter and `from_parts`' arms stay the same set.
+        // Unknown stored health labels must not seed `Ok` before a producer
+        // has reported. Admit only the unhealthy labels that round-trip
+        // through `Health::from_parts`.
         let (_d, store) = store();
         published(
             &store,
@@ -1494,12 +1368,9 @@ mod tests {
 
     #[test]
     fn live_health_never_reads_an_archived_only_generation_as_live() {
-        // A generation filed straight to the archive was never live
-        // (§4.5), so its health is not what the source is currently
-        // serving. The source times here are arranged so that source
-        // order alone would pick the archived one — the
-        // `archived_only` guard, not the ordering, is what excludes it,
-        // and only a fixture built this way can tell the two apart.
+        // A generation filed directly to archive must not supply live health.
+        // Give it the newest source time so only the `archived_only` guard,
+        // rather than ordering alone, can exclude it.
         let (_d, store) = store();
         published(
             &store,

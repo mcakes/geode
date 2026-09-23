@@ -1,69 +1,40 @@
-//! Time travel (spec §4.5, §6.5). The same compiled SQL, aimed at the
-//! archive tables, with the generation resolved per partition.
-//!
-//! Datasets and books refresh on independent cadences, so the resolved
-//! state is "each partition as it stood at T" — the question a trader is
-//! actually asking. The live path carries no generation predicate at all;
-//! only this path pays for history.
+//! Resolve historical generations per partition and select them from live
+//! and archive tables. Datasets and books refresh independently, so each
+//! partition contributes its state at the requested instant. Live queries
+//! read live tables directly and carry no generation predicate.
 
 use crate::store::StoreError;
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 
-/// Re-exported from `geode-core` (spec §2.7): the shell holds the frame's
-/// as-of and cannot name this crate.
+/// Shared with the shell through `geode-core`, keeping the shell independent
+/// of this data crate.
 pub use geode_core::query::AsOf;
 
 /// One partition's state at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedGeneration {
     pub batch: String,
-    /// `Option` because ingest permits rows with no book: it reports them
-    /// as a degradation rather than dropping them (spec §4.4), so a
-    /// NULL-book partition is a real partition and time travel has to be
-    /// able to name it. `retention.rs` handles the same hazard the same way.
+    /// The bookless partition is represented by `None`. Ingest retains and
+    /// reports these rows, so historical queries must match NULL books too.
     pub book: Option<String>,
     pub gen_id: i64,
-    /// When this generation was published. The honest label for a
-    /// historical result: the requested instant is what the user asked
-    /// for, not what the data actually is.
+    /// Source timestamp of the selected generation. Historical freshness uses
+    /// this value, which can precede the requested instant.
     pub source_time: DateTime<Utc>,
 }
 
-/// The newest generation at or before `at`, for every partition of
-/// `dataset` that existed by then.
+/// Resolve the newest generation at or before `at` for each partition in the
+/// dataset. Source-time ties select the greatest generation ID, matching the
+/// retention ordering and choosing the corrected republish.
 ///
-/// Reads the `generations` summary table (`store::ddl`), not the data
-/// tables: `publish_file` and `retention::sweep` maintain it inside their
-/// own transactions (spec §6.5 as amended), so it cannot lag what the
-/// tables hold, and this resolve no longer scans the archive at all — it
-/// was 543 ms of compile at ~3000 generations before this table existed
-/// (docs/perf.md, "Phase 4a: the as-of baseline"). `store::ddl::
-/// rebuild_generations` is the migration path for a database written
-/// before the summary existed (`DataService::open`), and doubles as the
-/// tests' oracle — the summary is defined to equal what it produces.
+/// Read the `generations` summary to avoid scanning payload history during
+/// query compilation. Publication and retention maintain it transactionally;
+/// `store::ddl::rebuild_generations` reconstructs it from stored rows.
 ///
-/// The summary itself is built the same way this function used to read:
-/// unioned across **all** of a dataset's tables — every grain's archive
-/// *and* live. It must be all of them, in both directions. A generation
-/// is a *file*, and one file publishes every grain under a single
-/// `gen_id` — but a partition can be absent from one grain's archive
-/// while present at another (a cash-only book has no underlying rows; a
-/// grain added later has no history at all while coarser grains have
-/// years). And the generation a partition holds *now* is in live and
-/// nowhere else: the publish transaction moves the outgoing generation to
-/// the archive, it does not copy the incoming one there (§4.3). Resolving
-/// from the archive alone answers "as of an hour ago" with this morning's
-/// *previous* file, and finds nothing at all for a partition published
-/// only once. Either omission narrows the answer silently, the same class
-/// of defect as matching a NULL book with `=`.
-///
-/// Ties on `source_time` break on `gen_id`, newest first. They are
-/// ordinary: a corrected republish keeps its source time (§4.4) and the
-/// generation it replaced goes to the archive with the same stamp, so the
-/// summary holds two generations of one partition at one instant. Without
-/// the tiebreak the window function's choice is whatever order the rows
-/// came back in, and `retention.rs` can keep the one this drops.
+/// The summary must cover every grain's live and archive tables. A partition
+/// can exist at only one grain, and its newest generation lives only in the
+/// live table. Omitting either would silently narrow historical results.
 pub fn resolve_generations(
     conn: &Connection,
     dataset: &str,
@@ -98,12 +69,9 @@ pub fn resolve_generations(
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
 }
 
-/// Test-only oracle: `resolve_generations`, before the summary table
-/// existed -- a full scan of `tables` rather than a read of `generations`.
-/// Kept so a scenario test can assert the two agree, and so the
-/// resolve's own doc-commented reasoning (every table, both directions;
-/// the tie-break) stays checked against an independent implementation,
-/// not just against itself.
+/// Test oracle that resolves generations by scanning payload tables. Compare
+/// this independent path with summary-based resolution to check table coverage,
+/// source-time ties, and summary maintenance.
 #[cfg(test)]
 pub(crate) fn resolve_from_tables(
     conn: &Connection,
@@ -146,52 +114,19 @@ pub(crate) fn resolve_from_tables(
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
 }
 
-/// A predicate selecting exactly those generations. Values come from the
-/// catalog, not from user input, so they are inlined as quoted literals;
-/// scope predicates, which do take user input, bind (spec §6.2).
+/// Select resolved generations with an ID prefilter and an exact tuple match
+/// on `(batch, book, gen_id, source_time)`. Catalog strings are escaped as SQL
+/// literals; user-supplied scope values use bound parameters elsewhere.
 ///
-/// A generation is named by `(batch, book, gen_id, source_time)`, not by
-/// `gen_id` alone. The relation this filters is archive-plus-live, and a
-/// `gen_id` collision would otherwise select two generations at once.
+/// The source-time term remains necessary for stored history containing reused
+/// generation IDs. Sequence allocation prevents new reuse after failed loads,
+/// but cannot disambiguate rows already written with the same ID.
 ///
-/// `gen_id` now comes from a sequence (`Catalog::reserve_gen_id`), so a
-/// load that publishes and then fails to record can no longer leave its id
-/// for the next load to reuse. **The source-time term stays anyway**, and
-/// the prerequisites doc's suggestion that it could go once the sequence
-/// landed is wrong on one point: the sequence fixes allocation from here
-/// on, and does nothing about ids already written. A database loaded by an
-/// older build can hold two generations of one partition sharing an id
-/// right now, and dropping this term would make those ambiguous again —
-/// silently, and only for the history that predates the fix.
-///
-/// The shape is a `gen_id` IN-list plus a tuple semi-join, not the OR-chain
-/// this used to emit (docs/perf.md, "Phase 4a: the as-of baseline"), and not
-/// the `gen_id` range that briefly replaced the OR-chain and was itself
-/// replaced here (docs/perf.md, "the range prefilter degenerates on a real
-/// archive"). The facts that make the IN-list a straight win:
-///
-/// - `gen_id in (…)` is a plain scan filter DuckDB pushes to the table
-///   scan as an *optional* filter; zonemaps then skip whole row groups
-///   holding none of the listed ids — per id, not per range — and skip an
-///   entire *side* of the union when it holds none of them at all (a
-///   pure-archive era's live side, or a pure-live era's archive side). A
-///   range (`between lo and hi`) pruned the same way only when the
-///   resolved ids happened to sit close together; on a real desk, books
-///   refresh on independent schedules (§4.5) — one last published
-///   Tuesday, another an hour ago — so `[lo, hi]` widens toward the whole
-///   archive and the range prunes nothing at all. Measured on a 20.8 GiB
-///   demo database that had drifted to 3051 generations: a range spanning
-///   `1..3051` scanned all 116M archived rows of one grain; the IN-list of
-///   the same 17 resolved ids, on the same table, took 1.5 ms (docs/perf.md,
-///   "the range prefilter degenerates on a real archive").
-/// - The `in (select … from (values …))` tuple test is a hash lookup
-///   evaluated once per row, replacing a per-row disjunction over up to
-///   one term per resolved generation.
-/// - DuckDB's row-value (struct) comparison treats NULL fields as equal
-///   (`select (1, NULL::varchar) in (select (1, NULL::varchar))` is
-///   `true`), so a NULL book needs no `coalesce` sentinel: `NULL::varchar`
-///   in the `values` row matches a NULL `book` column exactly, which is
-///   the bookless partition's whole correctness requirement.
+/// The ID list allows DuckDB scan filtering and row-group pruning even when
+/// independently refreshed books have widely separated generation IDs. The
+/// tuple semi-join enforces exact partition identity without a per-row chain
+/// of alternatives. Its struct comparison matches NULL fields, so a typed
+/// `NULL::varchar` represents a bookless partition without a sentinel string.
 pub fn generation_predicate(generations: &[ResolvedGeneration]) -> String {
     if generations.is_empty() {
         // Selecting nothing, not everything: a time before all history is
@@ -240,12 +175,8 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
-    /// `resolve_generations` now reads the `generations` summary, not
-    /// `tables` directly -- so every test here rebuilds the summary from
-    /// its raw fixture tables first (exercising `rebuild_generations` on
-    /// every call) and then resolves by dataset name. The dataset name is
-    /// arbitrary for these fixtures; only the two-dataset filter test
-    /// below cares that it is one of two.
+    /// Raw SQL fixtures bypass publication's summary maintenance. Rebuild the
+    /// summary from fixture tables before resolving it by dataset name.
     fn resolve_after_rebuild(
         store: &crate::store::Store,
         dataset: &str,
@@ -302,8 +233,7 @@ mod tests {
 
     #[test]
     fn each_partition_resolves_on_its_own_clock() {
-        // Books refresh independently, so 'as it stood at T' is per
-        // partition, not one dataset-wide generation (spec §4.5).
+        // Books refresh independently, so historical resolution is per partition.
         let (_d, store) = fixture();
         let gens = resolve_after_rebuild(
             &store,
@@ -354,14 +284,9 @@ mod tests {
 
     #[test]
     fn a_summary_row_that_cannot_be_read_is_an_error_not_a_smaller_answer() {
-        // The summary itself is well-typed (`batch` is a non-nullable
-        // `String` in `ResolvedGeneration`), so this needs a row the
-        // maintenance code never writes -- a NULL `batch`, which the
-        // `generations` table's own schema still permits (spec: no
-        // primary key, no NOT NULL). Discarding it here is the same
-        // silent-narrowing defect as above, now anchored on
-        // `resolve_generations`'s own row decode rather than the
-        // rebuild's insert.
+        // A NULL batch is permitted by the summary table but cannot decode
+        // into `ResolvedGeneration::batch`. Propagate that error rather than
+        // dropping the row and silently narrowing the historical answer.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())
@@ -379,19 +304,10 @@ mod tests {
 
     #[test]
     fn a_tie_that_straddles_archive_and_live_resolves_to_the_live_one() {
-        // The fixture gap the phase-2b handoff named: every other tie test
-        // puts both generations in the archive, so the tie-break was only
-        // ever exercised *within* one relation.
-        //
-        // The real shape is different. A corrected republish keeps its
-        // source time (§4.4), and the publish transaction moves the
-        // outgoing generation to the archive while the incoming one stays
-        // in live — so the two tied generations sit in *different*
-        // relations, and `Era::relation` reads them as `archive union all
-        // live`. Losing the tie-break across that union answers with the
-        // superseded copy of a corrected file: the wrong numbers,
-        // silently, for exactly the file someone corrected because it was
-        // wrong. Verified to fail without the `gen_id desc` term.
+        // A corrected republish has the same source time as its predecessor,
+        // with the predecessor in archive and the correction in live. Resolve
+        // the tie across both relations by greatest generation ID; otherwise
+        // a historical query can return the superseded numbers.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())
@@ -430,20 +346,10 @@ mod tests {
 
     #[test]
     fn a_tie_on_source_time_resolves_to_the_newest_gen_id_every_time() {
-        // A corrected republish keeps its source time (§4.4), so two
-        // generations of one partition share an instant. Without a
-        // tiebreak the window function's pick is whichever row came back
-        // first.
-        //
-        // Eight tied generations, not two, and the winner is the one
-        // inserted *first*. The loop below is nearly free as a detector on
-        // its own: the plan is deterministic within a process, so twenty
-        // iterations sample the same answer twenty times rather than
-        // twenty times independently. What makes this catch the missing
-        // tiebreak is the fixture — an unordered pick takes the scan's
-        // first row, which here is the lowest `gen_id`, so the wrong
-        // answer is wrong every time instead of half the time. Measured:
-        // with two rows the mutation survived two runs in three.
+        // Same-time corrections require the greatest generation ID to win.
+        // Insert eight tied generations in ascending ID order so taking the
+        // first row disagrees with that rule. Repeating a deterministic query
+        // is not independent sampling; the fixture must expose the tie-break.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())
@@ -589,25 +495,11 @@ mod tests {
 
     #[test]
     fn the_predicate_selects_a_null_book_partition_from_either_side() {
-        // A NULL-book generation in the archive, and a *later* generation
-        // of the same bookless partition in live sharing the **same**
-        // `gen_id`. Resolving at an instant before the live generation's
-        // source time must pick the archived one — and the predicate,
-        // applied to exactly the relation `Era::relation` builds (archive
-        // union all live, each side filtered), must select the archived
-        // row's value and not live's.
-        //
-        // The shared `gen_id` is load-bearing, not incidental: with only
-        // one resolved generation, the IN-list term `gen_id in (1)`
-        // cannot tell the two rows apart — both carry `gen_id = 1`. Only
-        // the tuple's `source_time` column can, so this fixture makes the
-        // tuple do real work rather than merely riding along behind an
-        // IN-list that already excludes live on its own (a distinct
-        // `gen_id` for live would let the IN-list alone pass this test).
-        // `book = '…'` cannot match a NULL book;
-        // DuckDB's row-value (struct) comparison treats NULL fields as
-        // equal, so the tuple form needs no `coalesce` sentinel (spec
-        // §4.4, §6.5).
+        // Give archive and live rows the same generation ID and NULL book,
+        // but different source times. The historical predicate must select
+        // only the earlier archived value. The ID prefilter cannot separate
+        // these rows: this fixture requires both the source-time tuple field
+        // and NULL-safe struct matching to do real work.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())
@@ -704,13 +596,10 @@ mod tests {
 
     #[test]
     fn resolve_generations_agrees_with_a_full_table_scan_across_four_instants() {
-        // The oracle: three generations across two batches -- a corrected
-        // republish (tied source time, straddling archive and live), one
-        // bookless partition, and (review round 1, MIN-3) one generation
-        // present at only one grain -- resolving from the summary must
-        // equal a full scan of the tables at every instant that matters:
-        // before all history, at the tie, in between, and after
-        // everything.
+        // Compare summary resolution with a payload scan before, at, between,
+        // and after the fixture's source times. Include a corrected republish
+        // across live/archive, a bookless partition, and a generation present
+        // at only one grain.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())

@@ -1,14 +1,9 @@
-//! Retention (spec §4.6). Bounded by disk rather than RAM now that storage
-//! is persistent, so defaults are generous — but unbounded history would
-//! still grow the database file without limit.
+//! Archive retention by partition. Each `(batch, book)` retains its own
+//! generations, so a busy book cannot evict a quiet book's history.
 //!
-//! Retention is per partition: "keep 50 generations" means each (batch, book)
-//! keeps its own 50, so a busy book cannot evict a quiet one's history.
-//!
-//! What a sweep is handed is a [`TablePair`], not a grain: the measure
-//! family's pairs are its grains', the document family's is its one
-//! document pair (market-data spec §4.1), and neither family needs a
-//! sweep of its own.
+//! Sweeps accept [`TablePair`] values: one per grain for measure datasets,
+//! or the single document pair. The storage API supports both families, but
+//! the application does not schedule these sweeps automatically.
 
 use crate::store::StoreError;
 use crate::store::ddl::{TableKind, TablePair, table_pairs};
@@ -33,7 +28,9 @@ impl RetentionPolicy {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
     pub evicted_rows: usize,
-    /// How far back time travel can go (spec §4.6).
+    /// Oldest source time remaining in the archive tables swept by this call.
+    /// This excludes live tables and is not a completeness guarantee across
+    /// partitions or unswept grains.
     pub oldest_remaining: Option<DateTime<Utc>>,
 }
 
@@ -44,35 +41,15 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
     }
 }
 
-/// The `generations` reconciliation delete: a row survives only if at
-/// least one of `pairs`' archive **or** live tables still holds it.
+/// Delete summary entries only when no live or archive table in `pairs`
+/// retains the generation. `reconcile_generations` supplies every pair owned by
+/// the dataset, including pairs this sweep did not evict from. Otherwise a
+/// generation surviving at one grain could become unreachable through as-of.
 ///
-/// `pairs` here is deliberately whatever `reconcile_generations` passes
-/// -- **always** `ddl::table_pairs(ds)`, never the subset `sweep`'s
-/// caller chose to evict (review round 1, MAJ-2). A generation this sweep
-/// evicted from one pair's archive can still be present in another (a
-/// cash-only book has no underlying rows, so its position-grain history
-/// outlives anything recorded at the underlying grain, and the reverse is
-/// just as real: a grain published less often can hold a generation long
-/// after a busier grain has aged it out). Reconciling against the swept
-/// subset instead of the whole dataset would delete a summary row for a
-/// generation that a table outside that subset still has, and time
-/// travel to it would find data with no summary entry to resolve
-/// through -- exactly the corruption the harness's own `generations:
-/// reconciliation covers only the first grain` entry demonstrates.
-///
-/// All four join columns use `is not distinct from`, matching the
-/// eviction query above: `gen_id` and `source_time` used plain `=`
-/// before round 1 (MIN-4), which is UNKNOWN against a NULL and makes
-/// `not exists` true -- silently deleting a row with a NULL `gen_id` or
-/// `source_time`. Neither column is ever NULL through `publish_file`,
-/// but a legacy or hand-written row could hold one, the same class as
-/// the NULL `book` `a_null_book_does_not_disable_the_whole_sweep` exists
-/// for.
-///
-/// This scans every named table, same as the eviction above already
-/// does -- background work on the sweeper's own cadence, never paid by a
-/// requery (`query::as_of::resolve_generations` reads only the summary).
+/// Compare all four identity fields with `is not distinct from`. Ordinary
+/// equality cannot match NULL books or legacy NULL metadata and would delete
+/// summary rows while their payload still exists. These table scans belong to
+/// maintenance; requery resolution reads the resulting summary.
 fn generations_reconcile_sql(dataset: &str, pairs: &[TablePair]) -> String {
     let escaped = dataset.replace('\'', "''");
     let checks: Vec<String> = pairs
@@ -97,20 +74,9 @@ fn generations_reconcile_sql(dataset: &str, pairs: &[TablePair]) -> String {
     )
 }
 
-/// Reconcile the `generations` summary against **every** table `ds` has
-/// (`ddl::table_pairs`: each grain's pair for the measure family, the one
-/// document pair for the document family) -- never the subset a
-/// particular `sweep` call happened to evict. Review round 1 (MAJ-2): the
-/// reconciliation used to trust `sweep`'s own table list, which a caller
-/// bounding a large sweep's transaction to one pair at a time (an obvious
-/// thing to do) would silently narrow, deleting summary rows for
-/// generations that a table outside the call's own list still holds. The
-/// property now belongs to this function, not to what any caller
-/// remembers to pass.
-///
-/// A no-op for a dataset that owns no table at all -- a measure dataset
-/// declaring no grain (nothing to check against, so nothing to delete).
-/// A document dataset always owns its one pair.
+/// Reconcile against all table pairs declared by the dataset, independently
+/// of the caller's eviction subset. A generation retained at any grain must
+/// remain resolvable. Datasets with no table pairs require no reconciliation.
 fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
     let pairs = table_pairs(ds);
     if pairs.is_empty() {
@@ -120,42 +86,18 @@ fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), Stor
     conn.execute_batch(&sql).map_err(sql_err(&sql))
 }
 
-/// Evict old generations, per `RetentionPolicy`, from each of `pairs`'
-/// archive tables -- bounded to what the caller is sweeping in this call
-/// (bounding a large sweep's transaction pair by pair is a legitimate
-/// reason to call this once per pair) -- then reconcile the `generations`
-/// summary against **every** pair `ds` owns, regardless of `pairs`
-/// (`reconcile_generations`; review round 1, MAJ-2 -- the reconciliation
-/// is not the caller's to narrow).
+/// Evict archive generations from the supplied pairs, then reconcile the
+/// summary against every pair the dataset owns. Measure and document datasets
+/// use the same table-pair API.
 ///
-/// A pair rather than a `Grain`, so one sweep serves both families: the
-/// measure family's caller passes a grain's pair (or `ddl::table_pairs`
-/// for all of them), the document family's the one document pair. A
-/// document dataset has no grain to name at all.
+/// Eviction, summary reconciliation, and report reads share one transaction.
+/// Errors during the sweep roll back all earlier pair deletions. The connection
+/// must not already have a transaction, and every declared live/archive pair
+/// must exist even when only a subset is swept.
 ///
-/// One transaction: `begin`, the per-pair eviction, the reconciliation,
-/// `commit` on success, `rollback` on any error -- the counts and
-/// `min(source_time)` reads inside see the transaction's own deletes.
-/// Three consequences worth knowing before this is wired into a
-/// scheduler (review round 1, MIN-5):
-///
-/// 1. Calling `sweep` on a connection already inside a transaction now
-///    fails with a nested `begin` where it used to work. No caller does
-///    this today.
-/// 2. Every pair `ds` owns needs its **live** table to exist, not just
-///    its archive -- the reconciliation names both, for every pair,
-///    regardless of which pairs this call actually swept. That is why
-///    this file's own `fixture()` grew a live table and an
-///    `ensure_tables()` call.
-/// 3. The whole call is one transaction on the single writer connection
-///    ingest publishes through (`store::mod`). A large sweep now blocks
-///    every publish for its duration, where the old per-pair
-///    auto-commits let a publish interleave between pairs. Spec §7's
-///    "ingest never drops a foreground frame" makes this worth a
-///    decision when the sweeper is wired -- and the reconciliation does
-///    not actually need the evictions in its own transaction, only their
-///    committed effect, so splitting it into its own shorter transaction
-///    is available if that decision goes the other way.
+/// A caller using the ingest writer must serialize the whole sweep with
+/// publication. Large sweeps delay writes for their duration; this function
+/// does not schedule, split, or yield the work.
 pub fn sweep(
     conn: &Connection,
     ds: &DatasetSpec,
@@ -210,15 +152,10 @@ fn sweep_in_transaction(
                 ));
             }
 
-            // NOT EXISTS, not NOT IN: a single NULL in the subquery makes
-            // `NOT IN` evaluate to UNKNOWN for every row, so one archived
-            // row with a NULL book would silently disable retention
-            // forever. `is not distinct from` keeps NULL keys matchable.
-            //
-            // Ties on `source_time` break on `gen_id`, newest first — the
-            // same order `as_of.rs` resolves by, so the generation time
-            // travel would pick is never the one retention evicts. A
-            // corrected republish makes such ties ordinary (§4.4).
+            // Use NULL-safe `NOT EXISTS`: a NULL book in a `NOT IN` subquery would
+            // make comparisons unknown and prevent eviction. Rank each partition
+            // by source time and then generation ID descending, matching as-of
+            // resolution so a corrected republish wins a source-time tie.
             let sql = format!(
                 "delete from {archive} a where not exists (
                      select 1 from (
@@ -261,8 +198,8 @@ fn sweep_in_transaction(
     Ok(report)
 }
 
-/// Force a checkpoint. Owned by the sweeper because a checkpoint can stall
-/// the writer and must not land mid-refresh (spec §4.6).
+/// Force a checkpoint. The caller must schedule it away from publication
+/// because checkpointing can stall the writer; `sweep` does not call it.
 pub fn checkpoint(conn: &Connection) -> Result<(), StoreError> {
     let sql = "checkpoint";
     conn.execute_batch(sql).map_err(sql_err(sql))
@@ -606,9 +543,8 @@ grain = "position"
 
     #[test]
     fn a_tie_on_source_time_keeps_the_generation_as_of_would_pick() {
-        // Two generations at one instant (a corrected republish, §4.4):
-        // keep-one must keep the newer gen_id, the one `as_of.rs`
-        // resolves to, or time travel points at an evicted generation.
+        // For same-time corrections, keep-one retains the greatest generation
+        // ID, matching the generation selected by as-of resolution.
         let (_d, store) = fixture();
         for _ in 0..10 {
             store
@@ -751,18 +687,10 @@ grain = "position"
 
     #[test]
     fn reconciliation_covers_every_grain_the_dataset_has_not_just_the_swept_subset() {
-        // Review round 1 (MAJ-2): `ds` declares both Position and
-        // Underlying, but this call sweeps *only* Position -- the way a
-        // caller bounding a large sweep's transaction one grain at a time
-        // naturally would. Reconciliation must still protect BK000's
-        // first generation, which survives only in Underlying, a grain
-        // this call never even evicted from. Before the fix,
-        // `generations_reconcile_sql` was built from the *swept* `grains`
-        // parameter (`&[Position]` here), so it would have checked only
-        // the Position tables and deleted this row -- exactly the
-        // corruption `generations: reconciliation covers only the first
-        // grain` demonstrates, reached through a caller that looks
-        // entirely reasonable rather than through a mutation.
+        // Sweep only Position while the dataset also declares Underlying.
+        // Reconciliation must preserve a generation that survives solely in
+        // the unswept Underlying pair; checking only Position would lose its
+        // as-of summary entry.
         let (_d, store) = fixture();
         store
             .writer()
@@ -853,13 +781,9 @@ grain = "position"
 
     #[test]
     fn a_failed_sweep_rolls_back_both_the_archive_and_the_summary() {
-        // Review round 1 (MIN-5): a failure must roll back everything
-        // this call already did, not just leave the failing grain
-        // untouched. Position's own eviction runs first and modifies its
-        // archive inside the transaction; Underlying's archive table was
-        // never created, so its `select count(*)` fails right after --
-        // proving the whole sweep rolls back rather than committing
-        // Position's partial work.
+        // Position eviction succeeds before the missing Underlying archive
+        // causes a query error. Verify that rollback restores Position too,
+        // so a failed sweep cannot commit only its earlier pairs.
         let (_d, store) = fixture();
         fill(&store, 3);
         let tables = POSITION_TABLES.map(String::from);
@@ -896,9 +820,8 @@ grain = "position"
 
     #[test]
     fn sweep_then_checkpoint_both_succeed() {
-        // Review round 1 (MIN-5): `sweep` always committed before this
-        // change and still does -- a `checkpoint` immediately afterward
-        // on the same connection must not see a transaction left open.
+        // A checkpoint immediately after a successful sweep must find no
+        // transaction left open on the connection.
         let (_d, store) = fixture();
         fill(&store, 3);
         sweep(

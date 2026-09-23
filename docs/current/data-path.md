@@ -27,7 +27,7 @@ tile ─► DataHandle ─► DataService ─► read pool
   └────────── DataEvent ◄─────────────┘
 ```
 
-The writer is serialized because DuckDB admits one writer. Independent read
+Geode serializes publication on one writer connection. Independent read
 connections serve queries. The ingest runner gives parsed documents priority
 over fetched series, and both priority over queued files; it finishes a file
 already in flight before taking another job. This puts trader-requested work
@@ -56,7 +56,16 @@ newer generation moves the outgoing rows to archive and installs the incoming
 rows in one transaction. An older arrival goes to archive without replacing
 live data. This keeps live queries bounded by current data while preserving
 history for time travel. The source timestamp from the sentinel orders
-generations; filesystem modification time does not.
+generations; filesystem modification time does not. Equal source times allow
+a corrected republish to replace live data, with the greater generation ID
+winning historical ties. Outgoing rows retain their original ID and source
+time when archived.
+
+The file loader publishes all grains, dictionary updates, and catalog metadata
+in one transaction after staging. A failed publication rolls back the complete
+generation. The lower-level table-pair publisher requires its owner's
+transaction when participating in a file or document load. IDs are reserved
+from sequences before use; a failed load can consume an ID without reusing it.
 
 Measures are split by declared grain during ingest. The query compiler
 aggregates each measure at its own grain before joining grouped results. This
@@ -100,10 +109,47 @@ the generation actually selected, not merely the time requested. See
 [`as_of.rs`](../../crates/geode-data/src/query/as_of.rs) and
 [`catalog.rs`](../../crates/geode-data/src/store/catalog.rs).
 
-Retention is per partition, so a frequently updated book cannot evict a
-quiet book's history merely by publishing more often. A sweep reconciles the
-generation summary against every table pair in the dataset. See
-[`retention.rs`](../../crates/geode-data/src/store/retention.rs).
+The summary covers every live and archive table owned by the dataset. A
+partition may appear at only one grain, and its newest generation may exist
+only in live. Historical reads filter both sides by the resolved identities.
+The predicate combines a generation-ID list for scan pruning with an exact
+`(batch, book, gen_id, source_time)` tuple match. NULL books remain matchable;
+source time disambiguates stored history containing reused legacy IDs.
+Resolution errors propagate instead of silently dropping partitions.
+
+Each joined dataset resolves independently and records its oldest selected
+source time. Reporting the requested instant for both sides would conceal a
+stale input. Grain attribution likewise follows actual inputs: derived
+dimensions resolve to their source columns, and derived measures inherit
+their inputs' attribution. Non-attributable results must return NULL, with
+validity preserved through `Snapshot`, as well as carry the attribution marker.
+
+## Retention and maintenance
+
+The live/archive retention API works per table pair and partition, so a busy
+book cannot evict a quiet book's history. If both count and source-age limits
+are supplied, a generation must satisfy both to survive. Source-time ties
+use the same descending generation-ID order as historical resolution.
+
+Each sweep owns one transaction covering archive eviction and summary
+reconciliation. Reconciliation checks every declared live/archive pair even
+when the caller evicts from only one pair: a generation surviving at another
+grain must remain resolvable. NULL-safe comparisons prevent bookless rows from
+disabling eviction or losing their summary entries. A sweep failure rolls
+back earlier pair deletions.
+
+The connection must be outside a transaction and all declared pairs must
+exist. Sweeping on the ingest writer delays publication for the duration of
+the call. Checkpointing is a separate operation that can also stall writes.
+`SweepReport::oldest_remaining` covers only the swept archive tables; it does
+not promise complete history across all grains and partitions.
+
+The application does not schedule live/archive sweeps automatically; the API
+is currently called by tests. This applies to measure and document archives.
+Series retention is separate and runs for the affected `(source, identity)`
+pair inside each append transaction. See
+[`retention.rs`](../../crates/geode-data/src/store/retention.rs) and
+[`series.rs`](../../crates/geode-data/src/store/series.rs).
 
 ## Freshness, health, and delivery
 
@@ -119,6 +165,14 @@ load health is tracked per batch so a clean batch cannot clear another
 batch's degradation. Only a corrected outcome for that batch can do so.
 See [`service.rs`](../../crates/geode-data/src/service.rs).
 
+At startup, persisted unhealthy file generations seed the load lane. An
+unchanged file need not reload, so its retained degradation must survive a
+restart. Live-health resolution excludes archive-only arrivals, uses the
+greatest generation ID for source-time ties, and reports each batch's worst
+book. It has no host-clock cutoff because live queries also serve
+future-stamped source data. Unknown health labels and generations without a
+file-catalog record do not establish a health report.
+
 Publication events invalidate affected views. Query results are addressed to
 the requesting key. Series fetch completion is addressed by `(identity,
 source)` so every tile watching the same pair can requery, including when a
@@ -128,8 +182,8 @@ rules prevent an accepted operation from leaving a tile waiting indefinitely.
 ## Limits and verification
 
 - The demo database is not automatically migrated after schema changes.
-- Historical as-of depends on retained generations; retention bounds how
-  far back it can answer.
+- Historical as-of depends on retained generations. Measure and document
+  archives currently have no automatic retention sweep.
 - Maintained budgets and known gaps are in
   [performance.md](performance.md); raw conditions and runs are in the
   measurement log.
