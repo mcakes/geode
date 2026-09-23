@@ -85,8 +85,8 @@ containment does not cancel them. See
 Directory sources are polled, not watched, because file watches can fail
 silently on network shares. Discovery checks readiness through the configured
 strategy, including the `.done` sentinel, and skips unchanged generations.
-A file that is pending, malformed, or too old to become current is reported
-according to its state; the system does not silently present it as fresh.
+Readiness and discovery gaps are described under
+[source discovery and adapters](#source-discovery-and-adapters).
 
 The unit of replacement is a **partition** identified by dataset, batch, and
 book, including a possible NULL book. A file can publish several partitions
@@ -122,6 +122,63 @@ misfile values silently. Rebuild an affected demo database after changing its
 schema; production migration needs an explicit procedure. See
 [`store/mod.rs`](../../crates/geode-data/src/store/mod.rs) and
 [`geode-data README`](../../crates/geode-data/README.md).
+
+## Source discovery and adapters
+
+Directory discovery reads metadata and the JSON sentinel at
+`<csv filename>.done`. The sentinel requires `as_of` (RFC 3339, normalized to
+UTC) and `columns` (a string array); unknown fields are ignored, while known
+fields must have the expected JSON types. The parser does not verify CSV
+content or reconcile optional metadata with it. Sentinel books are advisory;
+publication derives partitions from staged rows.
+
+| Condition | Discovery result |
+|---|---|
+| Sentinel metadata unavailable | `Pending`, or `PendingTooLong` when CSV age strictly exceeds the timeout. Metadata errors use the same path as a missing sentinel. |
+| Sentinel older than CSV | `Pending` regardless of age; this branch does not apply the timeout. |
+| Sentinel metadata available, but text read or parsing fails | `Orphaned`, with the reason. |
+| Stable-mtime readiness configured | `Orphaned` for each matched candidate: poll history is not implemented. |
+| Latest catalog entry for the path has equal size and source time | `Unchanged`. |
+| Otherwise, with a valid current sentinel | `Ready`; the CSV has not yet been parsed or validated. |
+
+CSV modification time affects readiness and pending age; it does not order
+generations or participate in unchanged-file detection. Neither does a content
+hash. A same-size correction with the same source time is therefore skipped,
+even if its bytes changed. Discovery and the runner's pre-load check share
+this rule. A committed degraded generation counts as loaded; a rolled-back
+load has no new catalog entry.
+
+Invalid glob syntax, glob traversal errors, and CSV metadata errors are
+currently skipped. Catalog lookup errors propagate to the scheduler. An
+empty discovery result therefore cannot establish that every path was
+accessible. See [`discovery.rs`](../../crates/geode-data/src/source/discovery.rs)
+and [`sentinel.rs`](../../crates/geode-data/src/source/sentinel.rs).
+
+Adapters expose independent subscription, upload, and fetch capabilities.
+The app registers them by name; a duplicate registration warns and replaces
+the earlier adapter. A message sink's successful push acknowledges queue
+admission only. Full or disconnected queues refuse, drop, and count the
+message. Connection health is separate from message delivery and stored-data
+health. Fetch implementations must supply their own timeouts for both history
+and identity enumeration; the worker provides no cancellation or deadline.
+
+`ChannelAdapter` is the in-process bus used by demos and integration tests.
+Its bounded inbound queue and each bounded subscription queue can refuse
+independently. The dispatcher starts on the first subscription and delivers
+once per matching registration. Message and health fan-out copy their target
+handles under the registration lock, then release it before delivery.
+Unsubscribe removes future interest but cannot retract a delivery snapshot
+already taken.
+
+Feeds and outstanding upload handles keep the channel open. Dropping the last
+sender lets the dispatcher drain and exit; its thread is not joined. The bus
+cannot reopen, and closing it does not emit `Lost` or remove subscriptions.
+`ChannelFeed::set_state` synchronously notifies current subscribers without
+retaining state or changing message flow; new subscriptions report `Connected`.
+Concurrent state notifications have no ordering guarantee, and health
+callbacks must return promptly without panicking. See
+[`adapter/mod.rs`](../../crates/geode-data/src/adapter/mod.rs) and
+[`channel.rs`](../../crates/geode-data/src/adapter/channel.rs).
 
 ## Queries and time travel
 

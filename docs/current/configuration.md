@@ -19,6 +19,11 @@ source layer so the UI can explain whether it is inherited or overridden.
 TOML order is preserved throughout the workspace because column and row order
 are part of several document contracts.
 
+Named objects such as sources, datasets, and views are exceptions to recursive
+merging: a higher layer replaces the entire table for that name. Overriding
+one source therefore requires its complete configuration, including required
+fields; omitted fields do not inherit from the lower-layer source.
+
 Each document carries `config_version`. A missing version is diagnosed and
 read as current where compatibility permits; an unsupported version is
 rejected. Parse and validation failures become `Diagnostic` values instead of
@@ -66,6 +71,63 @@ creates missing tables and columns needed by its own metadata, while payload
 publication remains positional. Rebuild a demo database after changing column
 membership, roles, grains, or order. A production schema migration must be an
 explicit operation.
+
+## Source configuration
+
+`sources.toml` has one top-level table per source, such as `[risk_files]`.
+Every source needs a declared, non-local dataset. The `adapter` setting and
+dataset family select its runtime path:
+
+| Shape | Selection and required settings |
+|---|---|
+| Directory | `adapter = "csv_dir"` (the default), with `paths` globs. A series dataset is rejected. |
+| Subscription | Another adapter over a document dataset, with a `document` kind and nonempty `topics`. |
+| Fetch | Another adapter over a series dataset. No document kind or topic list is needed. |
+
+The shared reader returns usable sources plus diagnostics addressed to
+`sources.<name>.<field>`. Missing/unknown datasets, local datasets, incompatible
+adapter/dataset shapes, and invalid required subscription settings skip the
+source with an error. A directory source with no usable paths is skipped with
+an idle warning, allowing an incomplete definition to be saved. Runtime
+adapter capability and document-kind compatibility are checked when the
+service opens the source; an unservable source does not stop the others.
+
+Directory defaults are sentinel readiness, a 30-second poll interval, a
+10-minute pending timeout, and `latest_risk` priority. Other priorities are
+`latest_other` and `backfill`. `batch_pattern` is a regex with a named `batch`
+capture applied to the CSV filename stem; it should exclude the date when
+successive business dates belong to the same partition. An invalid pattern
+warns and is ignored; an absent or nonmatching pattern uses the whole stem.
+`readiness = { stable_mtime = 3 }` parses, but discovery does not implement
+that strategy and reports matched candidates as unusable.
+
+Subscription defaults are `coalesce = "500ms"` and `source_time = "receive"`.
+The coalescing interval spaces releases to ingest for each document key;
+`"0"` disables coalescing, without guaranteeing message delivery or immediate
+publication. `source_time = "document:<field>"` requires a document-level
+`date` or `utf8` attribute. At receipt, a date becomes midnight UTC and a
+string must parse as RFC 3339 with its offset. Schema validation cannot ensure
+that a particular message supplies a valid value.
+
+Topic patterns use `/`-separated levels. A whole `*` matches one level; a
+final `>` matches one or more trailing levels. Empty patterns, empty pattern
+levels, and a non-final `>` level reject the source. Other text is literal.
+Directory-only settings warn and are ignored on adapter-backed sources;
+subscription-only settings warn and are ignored on directory and fetch
+sources. Parsed directory paths are cleared on adapter-backed sources.
+
+Duration strings accept nonnegative integers with `ms`, `s`, `m`, `h`, `d`,
+or `y`, plus bare `"0"`; a day is 24 hours and a year is 365 days. Invalid
+duration values warn and use the setting's default. Unrecognized readiness,
+priority, and source-time strings also warn and fall back to their defaults;
+a recognized `document:<field>` with an invalid field instead rejects the
+source. The duration warning currently lists only `s`, `m`, `h`, and `ms`,
+although the parser also accepts `d` and `y`.
+
+Source and dataset edits require restart to rebuild runtime workers. See
+[`source_config.rs`](../../crates/geode-core/src/source_config.rs) for parsing
+and [source discovery and adapters](data-path.md#source-discovery-and-adapters)
+for runtime readiness, delivery, and failure behavior.
 
 ## Runtime edits
 

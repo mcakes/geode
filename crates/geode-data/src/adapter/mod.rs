@@ -1,24 +1,11 @@
-//! The adapter tier: how a market-data feed reaches this crate (market-
-//! data spec §5.2).
+//! Transport capabilities for subscription, upload, and on-demand history.
+//! The application registers adapters by name; the data service resolves the
+//! capability each source requires. ChannelAdapter provides an in-process bus.
 //!
-//! Everything a vendor adapter has to provide is a trait here, and the
-//! only implementation in the workspace is [`channel::ChannelAdapter`],
-//! which is in-process. That is deliberate (roadmap ruling 5): the real
-//! Solace adapter is built on the desk's own machine against a crate this
-//! repo cannot compile, so what lives here is its CONTRACT — three small
-//! object-safe traits, a registry the app fills at startup exactly as it
-//! fills [`crate::documents::DocumentRegistry`], and a bounded sink. No
-//! file and no socket is opened anywhere in this module.
-//!
-//! The one rule the whole tier is shaped around: **nothing blocks a
-//! producer.** A broker's callback thread is not ours to stall — it feeds
-//! every other subscriber in that process too — so [`MessageSink::push`]
-//! is a `try_send` on a bounded channel plus a counter, never a `send`,
-//! in exactly the mould of [`crate::service::EventSink`] and
-//! [`crate::ingest::IngestSink`]. A message that cannot be delivered is
-//! DROPPED and counted: market data is a stream of latest-value snapshots
-//! (the coalescer downstream keeps at most one pending document per key),
-//! so a queue that grows until it is authoritative is worse than a gap.
+//! MessageSink uses bounded try_send: refusal drops and counts the message
+//! without waiting for queue space. Acceptance means queued, not parsed or
+//! stored. Connection callbacks and blocking fetch calls have separate
+//! contracts below. See `docs/current/data-path.md`.
 
 pub mod channel;
 pub mod topic;
@@ -47,35 +34,19 @@ pub struct Message {
     pub bytes: Vec<u8>,
 }
 
-/// The depth of one subscription's message queue — and, in
-/// [`ChannelAdapter`], of the bus's own inbound queue as well, since a
-/// producer outrunning the dispatcher and a dispatcher outrunning a
-/// receiver are the same problem one hop apart and there is no reason for
-/// the two to disagree.
-///
-/// Sized for a burst, not a backlog: a receiver thread that has fallen 256
-/// messages behind is not going to catch up by being given 4,096 — the
-/// coalescer would collapse them to one document per key anyway. What the
-/// depth buys is tolerance of a momentary stall (a publish transaction, a
-/// slow parse) without dropping anything.
+/// Capacity of each subscription queue and the ChannelAdapter inbound queue.
+/// Each hop can refuse independently. This absorbs bursts but neither bounds
+/// the downstream ingest backlog nor guarantees delivery under sustained load.
 pub const MESSAGE_BOUND: usize = 256;
 
-/// Where an adapter puts the messages it received: bounded, and never
-/// blocking.
+/// Bounded message admission. A successful push queues the message; it does
+/// not acknowledge parsing or storage. Full and disconnected queues both
+/// return false and increment the shared refusal counter. Producers must
+/// handle refusal without blocking their callback thread or stopping unrelated
+/// subscriptions.
 ///
-/// `push` answers whether the message was DELIVERED. `false` means the
-/// consumer's queue was full or its receiver is gone, and the two are the
-/// same answer on purpose, for the same reason [`crate::service::EventSink`]
-/// gives: the rule for both is identical — the message is dropped, the
-/// refusal is counted, and **the producer carries on**. An adapter must
-/// never treat `false` as "stop publishing": the thread it is running on
-/// belongs to the vendor library, and stalling it or unwinding out of it
-/// is a far worse failure than a missed snapshot.
-///
-/// Clone is by design and shares the counter: the dispatcher (or the
-/// vendor's callback) holds one clone per registration while the test or
-/// the service that created it reads [`MessageSink::refused`] from another
-/// thread.
+/// Clones share both the sender and counter. A retained clone keeps the
+/// receiver connected; use refused_counter for monitoring without a sender.
 #[derive(Clone)]
 pub struct MessageSink {
     tx: SyncSender<Message>,
@@ -119,29 +90,17 @@ impl MessageSink {
         self.refused.load(Ordering::Relaxed)
     }
 
-    /// The shared refusal counter on its own, for a reader that wants the
-    /// count WITHOUT holding a sender.
-    ///
-    /// That distinction is the whole reason this exists
-    /// (`SubscriptionWorker`'s own `refused` field): keeping a
-    /// `MessageSink` clone alive to read [`MessageSink::refused`] also
-    /// keeps the receiver's channel connected, so unsubscribing no longer
-    /// disconnects it and every join has to wait out the receiver's
-    /// timeout instead of returning at once. An `Arc<AtomicU64>` carries
-    /// the number and nothing else.
+    /// Read refusals without retaining a sender. Keeping a MessageSink clone
+    /// solely for metrics would prevent unsubscribe from disconnecting an idle
+    /// receiver; this counter does not affect channel liveness.
     pub fn refused_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.refused)
     }
 }
 
-/// What an adapter says about its connection to the feed.
-///
-/// Three states rather than a bool because the middle one is the whole
-/// point: a vendor client that is reconnecting has not lost anything yet,
-/// and a trader should see "waiting", not "broken". `Lost` carries the
-/// reason because that string is what reaches the diagnostics tile;
-/// `DataService` maps the three onto the discovery health lane
-/// (`Connected -> Ok`, `Reconnecting -> Pending`, `Lost -> Failed`).
+/// Adapter connection status. DataService maps Connected to Ok, Reconnecting
+/// to Pending, and Lost to Failed in the discovery lane. These reports do not
+/// establish that every message was delivered or that stored content is clean.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionState {
     Connected,
@@ -149,11 +108,10 @@ pub enum ConnectionState {
     Lost { reason: String },
 }
 
-/// Where connection state goes. Called on whatever thread noticed the
-/// transition — the vendor's, or [`ChannelFeed::set_state`]'s caller — so
-/// it must not block and must not call back into the adapter. It returns
-/// nothing: unlike a message, a state is idempotent and the newest one
-/// wins, so there is nothing useful to say about "delivered".
+/// Connection callback on the reporting thread. It must return promptly,
+/// avoid reentering the adapter, and not panic. There is no delivery verdict;
+/// the service combines reports with load health. Implementations must define
+/// their notification ordering rather than relying on a queue here.
 pub type HealthSink = Arc<dyn Fn(ConnectionState) + Send + Sync>;
 
 /// Why an adapter refused. A plain message rather than an enum: every
@@ -173,10 +131,9 @@ impl std::fmt::Display for AdapterError {
 
 impl std::error::Error for AdapterError {}
 
-/// One source's live subscription. `Send` and not `Sync`: each is owned by
-/// exactly one receiver thread, which is also the only thread allowed to
-/// unsubscribe it — hence `&mut self` on both methods, so no lock is
-/// needed at this level.
+/// One source's subscription handle. Send permits transferring ownership;
+/// methods require exclusive access, without requiring Sync. The service owns
+/// this handle beside the receiver thread so it can unsubscribe before joining.
 pub trait Subscription: Send {
     /// Starts delivering messages on any of `topics` to `sink`, and
     /// connection transitions to `health`. An adapter reports its current
@@ -189,21 +146,20 @@ pub trait Subscription: Send {
         health: HealthSink,
     ) -> Result<(), AdapterError>;
 
-    /// Stops delivery. Idempotent, and infallible on purpose: it is what a
-    /// shutting-down worker calls, and a failure there has nowhere to go.
+    /// Stop the subscription. Idempotent and infallible; release retained message
+    /// sinks so receivers can observe disconnection. ChannelAdapter can still
+    /// finish delivery from a snapshot taken before unsubscribe.
     fn unsubscribe(&mut self);
 }
 
-/// The write side: publishing a document back onto the bus (spec §5.5).
-/// Separate from [`Subscription`] because the two capabilities are
-/// independent — a read-only feed has no egress, and an adapter that can
-/// only upload has no subscription.
+/// Optional upload capability, independent of subscription and fetch.
+/// Transport implementations define what successful upload acknowledges.
 pub trait Egress: Send {
     fn upload(&mut self, target: &str, bytes: Vec<u8>) -> Result<(), AdapterError>;
 }
 
-/// One on-demand history request (timeseries spec §5.2): an identity the
-/// source interprets, over a half-open span `from <= ts < to`.
+/// History request for one adapter-defined identity over the half-open span
+/// `from <= ts < to`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchRequest {
     pub identity: String,
@@ -211,9 +167,9 @@ pub struct FetchRequest {
     pub to: DateTime<Utc>,
 }
 
-/// What a fetch returns: struct-of-arrays, equal lengths, strictly
-/// ascending `ts`. Never a row struct (PHILOSOPHY §6): the append path
-/// reads both columns at index `i`.
+/// Columnar fetch response with equal lengths and strictly ascending times.
+/// The worker validates alignment/order before dropping non-finite values;
+/// the append path reads matching timestamp/value indexes.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SeriesRows {
     pub ts: Vec<DateTime<Utc>>,
@@ -265,23 +221,13 @@ impl SeriesRows {
     }
 }
 
-/// The on-demand side (timeseries spec §5.2): history for one identity
-/// over a span, at the source's native grain. `Send` and not `Sync` for
-/// the reason [`Subscription`] is — one fetch worker thread owns it, and
-/// `&mut self` is what lets a vendor client keep a connection inside it
-/// with no lock. Called on that thread, so blocking is fine there.
+/// Blocking history capability owned by one fetch worker. Methods require
+/// exclusive access; Send allows ownership transfer without requiring Sync.
 ///
-/// **A shim must bound its own `fetch` — and `catalogue`, which rides the
-/// same worker thread and the same join — with a deadline** — the vendor
-/// client's own timeout where it has one, otherwise a deadline the shim
-/// enforces itself. There is no deadline on this side of the door and no
-/// cancellation: `ingest::fetch::FetchWorker::shutdown` drops its sender
-/// and JOINS the worker thread, so the call in flight (and every span
-/// still queued behind it) runs to completion before the app can exit. A
-/// vendor call that hangs for two minutes holds the window shut for two
-/// minutes, and one that never returns never lets the app close at all.
-/// The demo adapter needs none: it is pure CPU over a seeded walk and
-/// returns in microseconds.
+/// Implementations must bound both fetch and catalogue calls with their own
+/// timeouts. The worker provides no deadline or cancellation and drains its
+/// accepted queue before joining at shutdown. A call that never returns can
+/// therefore prevent application shutdown.
 pub trait Fetch: Send {
     fn fetch(&mut self, req: &FetchRequest) -> Result<SeriesRows, AdapterError>;
 
@@ -291,27 +237,12 @@ pub trait Fetch: Send {
     fn catalogue(&mut self) -> Option<Vec<String>>;
 }
 
-/// A named feed transport. `Send + Sync` because one adapter is shared
-/// (behind an `Arc`) by the service thread that hands out subscriptions
-/// and by whatever thread the transport itself runs on.
-///
-/// All three capability doors return `Option` rather than `Result` because
-/// `None` is not the failure of a call: it says this adapter cannot do
-/// that, and the caller's response is to report a source it cannot serve
-/// rather than to treat it as an error to surface verbatim.
-///
-/// `None` is usually a static fact — a read-only feed has no egress side in
-/// any build. It need not be: an adapter may also LOSE a capability at
-/// runtime, as [`ChannelAdapter`] does once every producer of its bus is
-/// gone. So a caller must not cache the answer as a property of the
-/// adapter; asking again on a later request is legitimate, and the same
-/// goes for a capability that is present but refuses — `subscribe` on a
-/// closed [`ChannelAdapter`] answers `Err` rather than a silent
-/// `Connected`.
+/// Named transport shared through Arc. Optional capabilities are independent:
+/// None means unavailable, while a returned capability may still refuse an
+/// operation. Availability can change; for example, a closed ChannelAdapter
+/// cannot create new egress handles, and its subscriptions reject subscribe.
 pub trait Adapter: Send + Sync {
-    /// The name a `[sources.<name>] adapter = "…"` key refers to. A
-    /// `&'static str` because an adapter is compiled in, never named at
-    /// runtime.
+    /// Name selected by a source's `adapter` setting in sources.toml.
     fn name(&self) -> &'static str;
 
     /// A FRESH subscription each call — one per subscribed source, with
@@ -322,34 +253,24 @@ pub trait Adapter: Send + Sync {
     /// The upload side, or `None` if this adapter has none.
     fn egress(&self) -> Option<Box<dyn Egress>>;
 
-    /// The on-demand side, or `None` if this adapter has none. Defaulted,
-    /// so the vendor adapters built outside this repository against the
-    /// two-door contract keep compiling.
+    /// On-demand history capability. The default returns None for adapters that
+    /// provide no fetch implementation.
     fn fetch(&self) -> Option<Box<dyn Fetch>> {
         None
     }
 }
 
-/// The adapters this build has, keyed by [`Adapter::name`].
-///
-/// Shaped exactly like [`crate::documents::DocumentRegistry`] and for the
-/// same reason: `geode-app` is the one crate that knows which transports
-/// were compiled in (the vendor adapter is not in this repo), so it fills
-/// the registry at startup and `DataService` only ever looks a name up. A
-/// source naming an adapter that is not here is a configured source this
-/// build cannot serve — reported as unhealthy, never a panic.
+/// Adapters keyed by name, registered by geode-app at startup. A configured
+/// source naming an absent adapter is reported as unservable by the service;
+/// other sources remain usable.
 #[derive(Default, Clone)]
 pub struct AdapterRegistry {
     adapters: HashMap<String, Arc<dyn Adapter>>,
 }
 
 impl AdapterRegistry {
-    /// Registers an adapter, keyed by `adapter.name()`. A second
-    /// registration under the same name replaces the first and warns — the
-    /// same ruling `DocumentRegistry::register` records: there is no
-    /// ordering guarantee across the app's startup wiring that would make
-    /// "first wins" safer, but which transport answers a name from then on
-    /// must not be silent.
+    /// Register by name. A duplicate replaces the previous adapter and warns so
+    /// transport selection cannot change silently.
     pub fn register(&mut self, adapter: Arc<dyn Adapter>) {
         let name = adapter.name().to_string();
         if self.adapters.insert(name.clone(), adapter).is_some() {

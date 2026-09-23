@@ -1,46 +1,21 @@
-//! `ChannelAdapter`: an [`Adapter`](super::Adapter) that is a channel and
-//! nothing else — no socket, no file, no vendor library.
+//! In-process message bus for demos and adapter integration tests. It uses the
+//! same subscription pipeline as external transports without network I/O.
 //!
-//! It exists twice over. It is the fixture every subscribed-source path in
-//! this crate is tested against (a real thread, a real bounded queue, real
-//! topic matching — the only thing that is not real is the wire), and it
-//! is the demo bus: `--demo` has no broker to talk to, so the generator
-//! publishes onto one of these and the service subscribes to it through
-//! exactly the code path a Solace source would take (spec §9.4).
+//! The bounded inbound channel feeds one dispatcher, started by the first
+//! subscription. Each matching registration receives one message, even if
+//! several of its patterns match. Full subscriber queues refuse independently.
+//! Message and health fan-out snapshot registrations, release the mutex, then
+//! deliver. Unsubscribe removes future interest but cannot retract a snapshot
+//! already taken. No callback runs under a bus lock; locks are not nested.
 //!
-//! Shape:
+//! Feeds and egress handles own strong senders; the bus keeps only a weak one.
+//! Dropping the last sender lets the dispatcher drain and exit. Its handle is
+//! not joined. The channel cannot reopen: egress returns None and subscribe
+//! returns an error once no strong sender remains.
 //!
-//! * [`ChannelAdapter::new`] makes a bounded inbound channel and hands
-//!   back the adapter and one [`ChannelFeed`] — the producer side.
-//! * One dispatcher thread drains that channel and fans each message out
-//!   to every registration whose topic list matches. It starts on the
-//!   FIRST `subscribe` rather than at construction, so an adapter that is
-//!   registered but never used by any source costs no thread.
-//! * `ChannelFeed::set_state` fans a [`ConnectionState`] out synchronously
-//!   on the CALLER's thread. That is the point: a test asserts on what the
-//!   health sinks saw on the line after the call, with nothing to wait
-//!   for, and the state a trader sees never queues behind a backlog of
-//!   messages.
-//!
-//! **Lock discipline.** The registrations live behind a `Mutex` because
-//! subscribing, unsubscribing and dispatching happen on different threads.
-//! No sink — message or health — is ever called with that lock held: both
-//! fan-out paths clone the handles they need into a small `Vec`, drop the
-//! guard, and then call out. A sink is foreign code (Task 9's receiver
-//! thread, a test's closure, later the app's), so calling it under the
-//! lock would make a `subscribe` from inside a sink a deadlock rather than
-//! a merely surprising thing to write. No two of this module's locks are
-//! ever held at once, in any order.
-//!
-//! **Lifetime.** The adapter holds the inbound sender only WEAKLY, so
-//! dropping the last strong holder — every `ChannelFeed` and every
-//! outstanding egress — closes the channel, ends the dispatcher, and frees
-//! the adapter even if the registry still holds its `Arc`. A closed bus
-//! never reopens: no new strong sender can be made once the last one is
-//! gone. Both capability doors therefore refuse rather than pretend —
-//! [`ChannelAdapter::egress`] answers `None`, and `subscribe` answers
-//! `Err` — because a subscription on a closed bus would report `Connected`
-//! and deliver nothing, which reads as a healthy source with no data.
+//! Connection reports are synchronous notifications via ChannelFeed::set_state,
+//! not retained state or delivery gates. New subscriptions report Connected.
+//! Closing the inbound channel does not emit Lost or remove registrations.
 
 use super::{
     Adapter, AdapterError, ConnectionState, Egress, HealthSink, MESSAGE_BOUND, Message,
@@ -64,19 +39,12 @@ struct Registration {
     health: HealthSink,
 }
 
-/// Everything a feed, a subscription and the dispatcher share.
-///
-/// Split out of [`ChannelAdapter`] because `Adapter::subscription` and
-/// `Adapter::egress` take `&self`: there is no `Arc<Self>` to clone from
-/// inside a trait method, and both the subscription and the egress side
-/// have to outlive the borrow. An `Arc<Bus>` the adapter merely wraps is
-/// the plainest way to say that, and it keeps the strong/weak story in one
-/// struct.
+/// Shared bus state owned by adapter, feed, subscription, and dispatcher
+/// handles. Capabilities retain an Arc independently of their adapter borrow.
 struct Bus {
     name: &'static str,
-    /// The inbound sender, held weakly — see the module doc's *Lifetime*.
-    /// `Mutex` only because `Weak` is not `Sync` on its own; it is taken
-    /// for the length of an upgrade and nothing else.
+    /// Weak inbound sender. Upgrade under this mutex without retaining a lock
+    /// while delivering callbacks; the bus itself must not keep producers alive.
     feed: Mutex<Weak<SyncSender<Message>>>,
     /// The receiving end, waiting for the dispatcher to take it. Left here
     /// rather than moved into the thread closure so a failed `spawn` loses
@@ -91,18 +59,9 @@ struct Bus {
     /// [`MessageSink::refused`] exists: a dropped message must be countable
     /// somewhere, or a producer outrunning the dispatcher is invisible.
     refused: AtomicU64,
-    /// `Some` once the dispatcher is running. Never joined: nothing in the
-    /// app has a thread it may block on, and the dispatcher ends by itself
-    /// when the channel closes. Holding the handle is what makes "started"
-    /// a single check-and-set under one lock, so two concurrent
-    /// `subscribe`s cannot start two dispatchers.
-    ///
-    /// Deliberately NOT cleared when the dispatcher exits, and it does not
-    /// need to be: the thread only ends when the channel closes, and a
-    /// closed channel can never reopen (no new strong sender can be made
-    /// from a `Weak` with no strong holders left). `subscribe` therefore
-    /// asks whether the BUS is alive rather than whether this slot is
-    /// filled — see its own closed-bus check.
+    /// Dispatcher handle, set once under a lock and never joined or cleared.
+    /// The lock serializes concurrent startup attempts. Bus liveness is checked
+    /// through the weak sender, not by whether this handle remains present.
     dispatcher: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -200,15 +159,9 @@ pub struct ChannelAdapter {
 }
 
 impl ChannelAdapter {
-    /// The adapter and its producer side.
-    ///
-    /// `name` is what a `[sources.<name>] adapter = "…"` key must say, so
-    /// it is `&'static str` like every other adapter's name — `"channel"`
-    /// for a plain one, `"demo_bus"` for the demo's. The inbound channel is
-    /// bounded at [`MESSAGE_BOUND`]: a publisher that outruns the
-    /// dispatcher is refused (`publish` answers `false`) rather than
-    /// allowed to grow the queue, the same rule every sink in this tier
-    /// follows.
+    /// Create an adapter and producer feed. A source selects the adapter by
+    /// `name`. The inbound queue holds up to MESSAGE_BOUND messages; publish
+    /// returns false and counts refusal if the queue cannot accept another.
     pub fn new(name: &'static str) -> (Arc<ChannelAdapter>, ChannelFeed) {
         let (tx, inbound) = mpsc::sync_channel(MESSAGE_BOUND);
         let tx = Arc::new(tx);
@@ -242,9 +195,8 @@ impl Adapter for ChannelAdapter {
     }
 
     fn egress(&self) -> Option<Box<dyn Egress>> {
-        // `None` once every feed is gone: the bus is closed and publishing
-        // on it could only fail. Holding this strong sender is also what
-        // keeps the bus open for as long as the egress lives.
+        // No new egress can be created after the last strong sender is dropped.
+        // A returned egress itself keeps the inbound channel open.
         let tx = self.bus.feed.lock().unwrap().upgrade()?;
         Some(Box::new(ChannelEgress {
             feed: ChannelFeed {
@@ -255,9 +207,8 @@ impl Adapter for ChannelAdapter {
     }
 }
 
-/// The producer side of a [`ChannelAdapter`]: what a test or the demo bus
-/// holds to put messages on it. `Clone` so several producers can share one
-/// bus; the bus lives until the last of them is dropped.
+/// Cloneable producer handle. Feeds and egress handles keep the inbound
+/// channel open until the last strong sender is dropped.
 #[derive(Clone)]
 pub struct ChannelFeed {
     bus: Arc<Bus>,
@@ -267,10 +218,9 @@ pub struct ChannelFeed {
 }
 
 impl ChannelFeed {
-    /// Puts one message on the bus. `false`, with the refusal counted, if
-    /// the inbound queue is full (the dispatcher is behind) — never blocks,
-    /// so a demo generator or a test cannot be stalled by a slow
-    /// subscriber.
+    /// Try to enqueue a message stamped with the current UTC arrival time.
+    /// False counts a full or disconnected inbound queue. True acknowledges
+    /// only bus admission, not receipt by any subscriber or publication to storage.
     pub fn publish(&self, topic: &str, bytes: Vec<u8>) -> bool {
         let queued = self
             .tx
@@ -296,10 +246,10 @@ impl ChannelFeed {
         self.bus.refused.load(Ordering::Relaxed)
     }
 
-    /// Reports a connection state to every registered subscription,
-    /// synchronously on this thread. Not queued behind the messages on
-    /// purpose: a "lost" a trader sees only after the backlog drains is a
-    /// "lost" reported at the wrong time.
+    /// Notify current health subscribers synchronously on the caller's thread,
+    /// outside the registration lock. State is not retained for new subscribers
+    /// and does not pause or reject messages. Concurrent calls have no ordering
+    /// guarantee; callbacks must return promptly and must not panic.
     pub fn set_state(&self, state: ConnectionState) {
         self.bus.fan_state(state);
     }
@@ -328,19 +278,10 @@ impl ChannelSubscription {
 }
 
 impl Subscription for ChannelSubscription {
-    /// Registers this subscription's interest and reports `Connected`.
-    ///
-    /// The local `_open` below holds a strong inbound sender for the whole
-    /// call, so the bus cannot close between the liveness check, the
-    /// registration and the `Connected` report — without it, a feed dropped
-    /// in that window would still have yielded a `Connected` on a bus that
-    /// was already closed.
-    ///
-    /// A close immediately AFTER the report is inherent rather than a gap:
-    /// that is the ordinary "connection lost after connect" every adapter
-    /// has, and it is what `ConnectionState` and
-    /// [`ChannelFeed::set_state`] exist to model. What must not happen is
-    /// reporting a connection that was never there.
+    /// Register interest and synchronously report Connected. Hold a strong sender
+    /// until the call returns so the bus remains open through registration and
+    /// notification. This does not guarantee future messages or a Lost notification
+    /// when the last producer disappears.
     fn subscribe(
         &mut self,
         topics: &[String],
@@ -355,23 +296,9 @@ impl Subscription for ChannelSubscription {
                 ),
             });
         }
-        // Mirrors `ChannelAdapter::egress`'s door, and for a sharper
-        // reason: once every feed is dropped the channel is closed for
-        // good, and `ensure_dispatcher` would happily answer `Ok` because
-        // the dispatcher slot is still filled by the thread that has since
-        // exited. Subscribing then would report `Connected` and deliver
-        // nothing for the rest of the session — a source reading healthy in
-        // the discovery lane with zero rows behind it, which is the one
-        // failure shape this tier must never produce. A refusal instead,
-        // and nothing registered and no state reported.
-        //
-        // `_open` is HELD for the whole function rather than tested and
-        // dropped (round 2 of the review): a strong sender is what keeps the
-        // channel open, so holding one makes "the bus is alive" true across
-        // the check, the registration AND the `Connected` report instead of
-        // only at the instant of the check. It is an `Arc`, not a lock
-        // guard, so the no-nested-locks rule still holds — the `feed` mutex
-        // is released at the end of this statement.
+        // Retain a strong sender across registration and Connected delivery. Merely
+        // checking the weak sender would allow the last producer to disappear
+        // between those steps. The feed mutex is released after this upgrade.
         let _open = self
             .bus
             .feed
@@ -384,8 +311,8 @@ impl Subscription for ChannelSubscription {
                     self.bus.name
                 ),
             })?;
-        // Before the registration, so a message can never be dispatched to
-        // a half-built one, and so a failure leaves nothing registered.
+        // Start the dispatcher before registering. A spawn failure then leaves no
+        // new registration. Messages can be drained before registration takes effect.
         self.bus.ensure_dispatcher()?;
         {
             let mut registrations = self.bus.registrations.lock().unwrap();
@@ -401,11 +328,8 @@ impl Subscription for ChannelSubscription {
                 health: Arc::clone(&health),
             });
         }
-        // Outside the lock, and synchronous: the caller knows it is
-        // connected by the time `subscribe` returns, with nothing to poll.
-        // An in-process channel is connected as soon as it exists, so this
-        // is the whole of this adapter's connection lifecycle unless a feed
-        // says otherwise through `set_state`.
+        // Notify outside the registration lock. New subscriptions report Connected
+        // regardless of any earlier set_state notification.
         health(ConnectionState::Connected);
         Ok(())
     }
@@ -416,10 +340,8 @@ impl Subscription for ChannelSubscription {
 }
 
 impl Drop for ChannelSubscription {
-    /// A dropped subscription is an unsubscribed one. Without this, a
-    /// receiver thread that ended without calling `unsubscribe` (a panic,
-    /// an early return) would leave the dispatcher cloning messages into a
-    /// sink nobody reads for the life of the process.
+    /// Remove this subscription on drop as well as explicit unsubscribe. Delivery
+    /// snapshots already taken by a fan-out can still hold its sink briefly.
     fn drop(&mut self) {
         self.remove();
     }
@@ -433,10 +355,9 @@ struct ChannelEgress {
 }
 
 impl Egress for ChannelEgress {
-    /// Publishes `bytes` on `target` — the echo of spec §5.5: an uploaded
-    /// document comes straight back to whichever subscriptions cover the
-    /// topic it was written to, which is what makes the write path
-    /// exercisable with no broker at all.
+    /// Enqueue bytes on the target topic through the normal feed path. Success
+    /// acknowledges inbound admission; matching subscriptions can still refuse
+    /// the message independently.
     fn upload(&mut self, target: &str, bytes: Vec<u8>) -> Result<(), AdapterError> {
         if self.feed.publish(target, bytes) {
             Ok(())

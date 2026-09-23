@@ -28,7 +28,7 @@ Layered document behavior is described in
 | `snapshot` | The immutable, `Arc`-shared columnar result the UI reads. Arrow is an implementation detail; nothing outside this file names an Arrow type. |
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |
 | `document` | The struct-of-arrays rows a parsed market-data document becomes, and the `DocumentKind` trait a parser implements. |
-| `source_config` | `sources.toml`: one named table per source. |
+| `source_config` | I/O-free source parsing: defaults, dataset-family routing, topic and timestamp-field validation, and field-addressed diagnostics. Source tables replace whole objects across layers. |
 | `format` | Number formatting (scale, precision, grouping, negative style) shared by the blotter and the market-data panel. |
 | `colour` | Named colours: a hue on a canonical wheel interpolated in OKLCH between theme anchors, with a 3:1 readability floor. Pure; callers hand in `Anchors`/`Tokens`. |
 | `health` | The degradation vocabulary (`Ok`, `Pending`, `PendingTooLong`, `Degraded`, `Failed`). Roll up by `severity_rank`, never by the derived `Ord`. |
@@ -51,6 +51,11 @@ cargo bench -p geode-core          # config merge and tree-index benches
 ```
 
 ## Rules this crate pins
+
+Source settings and validation outcomes are described in the
+[configuration guide](../../docs/current/configuration.md#source-configuration).
+Parsing a source does not establish transport availability or runtime support
+for its readiness strategy; the data service checks those boundaries.
 
 - Nothing here opens a file, a socket or a window. A type that needs to
   know a gpui or DuckDB type does not belong in this crate.

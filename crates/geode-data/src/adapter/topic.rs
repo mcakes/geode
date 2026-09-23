@@ -1,32 +1,11 @@
-//! Topic pattern matching — Solace's syntax, in the one place the whole
-//! crate (and, later, the real vendor adapter) shares it.
-//!
-//! `geode-data` never opens a socket, so nothing here talks to a broker:
-//! this is the *grammar* a `[sources.<name>] topics` entry is written in,
-//! matched locally against the topic a `Message` arrived on. It is
-//! Solace's because the adapter this contract is designed for is
-//! Solace's, and a pattern a trader writes in `sources.toml` has to mean
-//! the same thing whether the messages came from the broker or from
-//! `ChannelAdapter` in a test or the demo (global constraint: one place,
-//! tested).
+//! Allocation-free slash-separated topic matching for the local adapter.
+//! Configuration validation lives in geode-core; this matcher interprets
+//! patterns without returning diagnostics.
 
-/// Whether `topic` matches `pattern`.
-///
-/// Levels are separated by `/`. A `*` level matches exactly one level. A
-/// `>` level, and only as the FINAL level, matches one or more trailing
-/// levels — never zero, which is why `marketdata/cvi/>` does not match
-/// the parent topic `marketdata/cvi`. Every other level is a literal.
-///
-/// A `>` anywhere but the last level is not wildcard syntax at all, so it
-/// is treated as the literal level `>` — which no ordinary topic carries,
-/// so such a pattern matches nothing rather than silently behaving like
-/// some other wildcard. Refusing it at config-load time would be the
-/// alternative; it is not done here because this function is the pure
-/// matcher and has nowhere to put a diagnostic.
-///
-/// Allocation-free: both sides are walked as `split` iterators, so a
-/// per-message match over a handful of patterns costs no heap at all
-/// (PHILOSOPHY §6 — this runs on the dispatcher for every message).
+/// Match slash-separated levels. A whole `*` level matches one level; a final
+/// `>` consumes one or more levels. Other text, including a non-final `>`, is
+/// literal. No normalization or validation is performed here: split preserves
+/// empty levels, while configuration rejects empty pattern levels.
 pub fn topic_matches(pattern: &str, topic: &str) -> bool {
     let mut patterns = pattern.split('/').peekable();
     let mut levels = topic.split('/');

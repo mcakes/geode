@@ -1,18 +1,19 @@
-//! The `.done` sentinel (spec §5.3). Permissive by contract: only source
-//! time and the expected column list are required, every unrecognised field
-//! is ignored, and a missing required field is a health error naming the
-//! file rather than a failure to ingest anything at all.
+//! JSON `.done` sentinel parser. `as_of` and `columns` are required; unknown
+//! fields are ignored. Known fields must have their declared JSON types.
+//! Timestamps accept RFC 3339 offsets and normalize to UTC. Parsing errors
+//! are returned for discovery to report against the affected candidate.
 //!
-//! The production shape is an open question (spec §10.1); this parser is
-//! written so that only those two fields need to survive being wrong.
+//! This parser does not read the CSV or verify its row count, dataset, or
+//! columns. Books and other optional metadata do not establish readiness by
+//! themselves; discovery checks sentinel modification time separately.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sentinel {
-    /// Authoritative source time: orders generations, drives as-of, and
-    /// decides what is "most recent" (spec §4.4). Never file mtime.
+    /// Authoritative source time for generation order and as-of reads. CSV and
+    /// sentinel modification times are used for readiness, not this timestamp.
     pub as_of: DateTime<Utc>,
     /// Column spelling as it appears in the CSV header.
     pub columns: Vec<String>,

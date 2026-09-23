@@ -1,17 +1,11 @@
-//! `sources.toml` (Phase 3 spec §5.2): one named table per source, atomic
-//! by name like every other named config object (foundation §8). Every
-//! problem is a diagnostic; a source that cannot be used is skipped and
-//! the rest load.
+//! Typed `sources.toml` configuration, with one top-level table per source.
+//! Layer merging replaces a source's whole table by name. Parsing returns
+//! usable sources and field-addressed diagnostics; invalid sources are skipped.
 //!
-//! Lives in `geode-core`, not `geode-data`, because `geode-shell` may
-//! never depend on `geode-data` (workspace layering rule) but still needs
-//! to validate a `sources` doc for its own Sources config dialog (Phase 4c
-//! §2.2) — this reader has no dependency beyond `MergedDoc`, `SchemaSpec`
-//! and `Diagnostic`, all of which already live here, so the whole type
-//! (including the `Readiness`/`Priority` field types it carries) moves
-//! rather than being duplicated. `geode-data`'s ingest and discovery code
-//! keeps using `SourceSpec` unchanged, by re-export
-//! (`geode_data::source::SourceSpec`).
+//! This reader performs no I/O and depends only on shared configuration and
+//! schema types. Both the shell and data service use it without depending on
+//! each other. Transport and document-kind availability are checked by the
+//! assembled application and service. See `docs/current/configuration.md`.
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::schema::{ColumnRole, ColumnType, SchemaSpec};
@@ -19,38 +13,34 @@ use std::path::Path;
 use std::time::Duration;
 use toml::Table;
 
-/// `pub` (4c §19.3): the Sources dialog's `fields` spells these back as
-/// text (`sources::spell_duration`) when a source omits the key, so the
-/// row shows the value that will actually apply rather than a blank.
+/// Directory polling defaults, also used by configuration editors to display
+/// the effective values of omitted settings.
 pub const DEFAULT_POLL: Duration = Duration::from_secs(30);
 pub const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(600);
-/// A subscribed source's default `coalesce`: at most one publish per key
-/// every 500ms rather than one per message — "0" opts a source back into
-/// publishing every message.
+/// Default minimum spacing between coalescer releases for each document key.
+/// This limits submission rate, not publication timing on the ingest writer.
+/// A zero window releases every accepted, valid message without coalescing.
 pub const DEFAULT_COALESCE: Duration = Duration::from_millis(500);
 
-/// §19.3 (ruling 2026-09-12): a source with nothing to poll is idle, not
-/// broken — a warning, and skipped, so the dialog's `n` can create one
-/// and let the trader type the globs in afterwards. One line, so the
-/// mutation harness can flip its severity by anchoring on it.
+/// A directory source without usable paths is idle: warn and skip it while
+/// allowing its configuration to be saved and completed later.
 pub const IDLE_PATHS: &str = "no 'paths' — the source is idle until one is set";
 
-/// The reader's own default `adapter` (market-data-documents plan, Task
-/// 5): a bare `[sources.<name>]` table with no `adapter` key is a
-/// directory-of-CSVs source exactly as it always was — every subscribed
-/// field below is meaningless for one and warned away if present.
+/// Default adapter name. `csv_dir` selects directory discovery; other names
+/// select a subscription or fetch worker according to the dataset family.
 pub const CSV_DIR_ADAPTER: &str = "csv_dir";
 
 /// How a source decides a file is complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Readiness {
-    /// `<name>.done` exists and is at least as new as the CSV.
+    /// `<csv filename>.done` exists and is at least as new as the CSV.
     Sentinel,
-    /// No sentinel convention: require a stable (size, mtime) across N polls.
+    /// Requested stability across N polls. Configuration accepts this setting,
+    /// but discovery has no poll history and reports it as unsupported.
     StableMtime { polls: u32 },
 }
 
-/// Where a source sits in the cold-start ladder (spec §5.4).
+/// File-ingestion priority. Current candidates precede historical backfill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Priority {
     /// Current risk on screen first.
@@ -61,29 +51,20 @@ pub enum Priority {
     Backfill,
 }
 
-/// Which timestamp a subscribed source's publish is stamped with — the
-/// same "as-of routing needs one honest clock" question a directory
-/// source answers with the CSV's own mtime/sentinel, a subscribed one
-/// has no file for. `"receive"` is the default: the moment this process
-/// received the message. `"document:<field>"` names an attribute column
-/// on the document itself (an `anchor_date`, say) whose value is used
-/// instead — validated right here in `from_doc`, against the schema this
-/// reader already has in hand: the field must be a document-level
-/// attribute (`ColumnRole::Attribute { grain: None }`) of type `Date` or
-/// `Utf8`, or the source is skipped with an Error at `.source_time`
-/// naming the field and, when it exists but is the wrong shape, its type.
+/// Timestamp policy for subscribed documents. Receive uses message arrival;
+/// Document names a document-level Date or Utf8 attribute. The reader rejects
+/// an absent or incompatible schema field with a source_time error. The
+/// receiver separately validates the value in each message. Directory sources
+/// use sentinel source time instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceTime {
     Receive,
     Document(String),
 }
 
-/// Which of the three pipelines a source rides (timeseries spec §5.1):
-/// the directory poller, a subscription receiver, or a fetch worker. The
-/// dataset's family decides between the last two — a non-directory
-/// adapter over a series dataset is fetched, over a document dataset
-/// subscribed — so this takes the schema rather than storing a fourth
-/// copy of the answer on the spec.
+/// Runtime pipeline selected by adapter and dataset family. `csv_dir` uses
+/// discovery; another adapter uses fetching for series and subscription for
+/// documents. Derive this from the schema rather than storing a second answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceShape {
     Directory,
@@ -95,35 +76,28 @@ pub enum SourceShape {
 pub struct SourceSpec {
     pub name: String,
     pub dataset: String,
-    /// One or more directory globs (spec §5.1).
+    /// Directory globs. Parsed adapter-backed sources have an empty list.
     pub paths: Vec<String>,
     pub readiness: Readiness,
     pub priority: Priority,
     pub poll_interval: Duration,
     pub pending_timeout: Duration,
-    /// Regex with a named `batch` capture, applied to the file stem, that
-    /// strips the date component so business dates share a partition
-    /// (spec §4.3). Without one the whole stem is the batch.
+    /// Regex applied to the file stem, with a named `batch` capture. Capturing
+    /// the date-independent part keeps successive dates in the same partition.
+    /// Absent, invalid, or nonmatching patterns fall back to the whole stem.
     pub batch_pattern: Option<String>,
-    /// Which channel implementation feeds this source. `CSV_DIR_ADAPTER`
-    /// (the default) is the reader's own directory-of-CSVs path above;
-    /// anything else is a subscribed source (`is_subscribed`) and the
-    /// fields below govern it instead of `paths`/`readiness`/
-    /// `poll_interval`/`pending_timeout`/`batch_pattern`, which a
-    /// subscribed source's table may still carry (a hand-edit, a
-    /// half-migrated source) but which are warned and ignored.
+    /// Transport name. `csv_dir` selects directory discovery; other adapters
+    /// use subscription or fetching according to [`SourceSpec::shape`].
     pub adapter: String,
-    /// The document kind this source publishes (`DocumentRegistry`'s own
-    /// key) — required when `adapter != CSV_DIR_ADAPTER`, since a
-    /// subscribed source has no CSV header to infer a shape from.
+    /// Document registry key, required for subscriptions. Fetch sources have no
+    /// document kind and ignore this setting.
     pub document: Option<String>,
-    /// Topic patterns (this plan's one grammar: `>` trailing-levels,
-    /// `*` one level, else literal, `/`-separated) this source
-    /// subscribes to. Required non-empty when subscribed.
+    /// Subscription topic patterns: `/` separates levels, `*` matches one level,
+    /// and a final `>` matches one or more trailing levels. Required for
+    /// subscriptions; unused by directory and fetch sources.
     pub topics: Vec<String>,
-    /// At most one publish per key within this window — `DEFAULT_COALESCE`
-    /// (500ms) unless overridden; `Duration::ZERO` ("0") opts back into
-    /// publishing every message.
+    /// Minimum interval between coalescer releases for a document key. Defaults
+    /// to 500 ms; zero disables coalescing. Already queued ingest jobs are unaffected.
     pub coalesce: Duration,
     /// Which timestamp a publish is stamped with. See [`SourceTime`].
     pub source_time: SourceTime,
@@ -147,11 +121,9 @@ impl SourceSpec {
             .unwrap_or(stem)
     }
 
-    /// Is this a subscribed source (a channel adapter) rather than the
-    /// directory-of-CSVs path? The one door every other crate uses to
-    /// tell the two apart — never a direct `adapter != "csv_dir"` string
-    /// compare, so `CSV_DIR_ADAPTER` stays the one spelling of the
-    /// default.
+    /// Whether the source uses an adapter other than `csv_dir`. This includes
+    /// fetch sources despite the method name; use [`SourceSpec::shape`] to choose
+    /// between a subscription receiver and a fetch worker.
     pub fn is_subscribed(&self) -> bool {
         self.adapter != CSV_DIR_ADAPTER
     }
@@ -166,13 +138,9 @@ impl SourceSpec {
         }
     }
 
-    /// A directory-of-CSVs source with every optional field at its
-    /// default. The shape most call sites want; override with
-    /// struct-update syntax (`..SourceSpec::directory(..)`) where a site
-    /// needs a non-default `priority`, `poll_interval` or similar —
-    /// fifteen sites across seven files build one of these by hand, so a
-    /// shared constructor is the one place that fills the five
-    /// subscribed-source fields with their defaults.
+    /// Construct a directory source with default optional settings. Callers can
+    /// override individual fields with struct-update syntax. This constructor
+    /// does not perform the validation in [`SourceSpec::from_doc`].
     pub fn directory(
         name: impl Into<String>,
         dataset: impl Into<String>,
@@ -196,10 +164,10 @@ impl SourceSpec {
     }
 }
 
-/// `30s`, `10m`, `2h`, `500ms` — integers with one of four units. Nothing
-/// else: a bare number has no unit and a fraction has no convention,
-/// except a bare `"0"` alone, which needs no unit to be unambiguous (a
-/// subscribed source's `coalesce = "0"` — publish every message).
+/// Parse a nonnegative integer with unit `ms`, `s`, `m`, `h`, `d`, or `y`.
+/// Days are 24 hours and years are 365 days. A bare `0` is also accepted;
+/// other bare numbers, fractions, signs, and overflowing values are rejected.
+/// Surrounding whitespace is ignored.
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
     if s == "0" {
@@ -257,11 +225,9 @@ fn type_name(t: ColumnType) -> &'static str {
     }
 }
 
-/// Is `pattern` a `batch_pattern` the reader would accept — a regex that
-/// compiles and names a `batch` capture? The one spelling of that rule,
-/// shared by the reader below and the Sources dialog's inline refusal
-/// (§19.3), so a pattern the dialog accepts is never one the reader would
-/// go on to drop with a warning.
+/// Check that a regex compiles and declares a named `batch` capture. Shared
+/// by config parsing and the source editor. This does not require a match
+/// against any particular filename.
 pub fn check_batch_pattern(pattern: &str) -> Result<(), String> {
     match regex::Regex::new(pattern) {
         Err(e) => Err(format!("batch_pattern does not compile: {e}")),
@@ -274,9 +240,8 @@ pub fn check_batch_pattern(pattern: &str) -> Result<(), String> {
     }
 }
 
-/// `sources.<name>[.<key>]` (§19.5): `key` is the deepest field the call
-/// site honestly knows — `None` only for "not a table", where there is no
-/// field to point into at all.
+/// Address diagnostics as `sources.<name>[.<key>]`. Use the deepest known
+/// field, or only the source name when the entry is not a table.
 fn diag(
     severity: Severity,
     name: &str,
@@ -295,18 +260,10 @@ fn diag(
     }
 }
 
-/// Validates one `topics` entry against the Solace grammar the matcher in
-/// `geode_data::adapter::topic::topic_matches` runs at message time (that
-/// matcher stays in `geode-data` — it is the hot per-message path and has
-/// nowhere to put a diagnostic; this is the load-time check ahead of it,
-/// in `geode-core`, run once per source at config load). Three shapes are
-/// refused: an empty pattern, an empty level (two consecutive `/`s,
-/// including a leading or trailing one), and a `>` anywhere but the final
-/// level — each is all but certainly a typo, since the matcher treats a
-/// non-final `>` as the literal level `>`, which no real topic carries,
-/// so such a pattern would silently match nothing forever rather than
-/// fail loudly now. `*` anywhere, and `>` as the last level, are the two
-/// real wildcards and always accepted.
+/// Validate subscription patterns before delivery. Reject an empty pattern,
+/// empty slash-separated levels, and a `>` level outside the final position.
+/// Only whole levels `*` and final `>` are wildcards; other text is literal.
+/// The runtime matcher remains in geode-data and performs no validation.
 fn validate_topic_pattern(pattern: &str) -> Result<(), String> {
     if pattern.is_empty() {
         return Err("empty topic pattern".to_string());
@@ -417,8 +374,7 @@ impl SourceSpec {
             let family = schema.dataset(&dataset).map(|d| d.family);
             let fetch = subscribed && family == Some(crate::schema::Family::Series);
 
-            // A directory source reads CSV rows into grain tables; it can
-            // never fill a series table (timeseries spec §5.1).
+            // Directory loading writes grain tables, so it cannot fill a series dataset.
             if !subscribed && family == Some(crate::schema::Family::Series) {
                 diags.push(diag(
                     Severity::Error,
@@ -431,9 +387,7 @@ impl SourceSpec {
                 ));
                 continue;
             }
-            // A subscribed source has no CSV row to infer a shape from —
-            // it publishes `DocumentRows` straight into a document-family
-            // table, never a measures one (market-data-documents plan).
+            // A non-fetch adapter publishes DocumentRows and requires a document dataset.
             if subscribed && !fetch && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {
                 diags.push(diag(
                     Severity::Error,
@@ -447,11 +401,8 @@ impl SourceSpec {
                 continue;
             }
 
-            // Directory-only keys, meaningful for `csv_dir` alone: warned
-            // (and never read for their value below) on a subscribed
-            // source rather than silently half-applied. A fetch source
-            // wears its own wording for the same reason, on both lists —
-            // it is neither a directory nor a subscription.
+            // Warn about directory settings on adapter-backed sources. Use defaults in
+            // the typed value rather than retaining settings the runtime will ignore.
             let ignored = |key: &str, diags: &mut Vec<Diagnostic>| {
                 if !table.contains_key(key) {
                     return;
@@ -481,9 +432,7 @@ impl SourceSpec {
                     ignored(key, &mut diags);
                 }
             }
-            // The subscribed-only keys, the same rule the other way — and
-            // a fetch source ignores these too (a fetch worker has no
-            // topic or document kind of its own).
+            // Only subscriptions use document kind, topics, coalescing, and source time.
             for key in ["document", "topics", "coalesce", "source_time"] {
                 if !subscribed || fetch {
                     ignored(key, &mut diags);
@@ -511,21 +460,13 @@ impl SourceSpec {
                         )
                     };
                     diags.push(diag(Severity::Warning, name, Some("paths"), m));
-                    // Dropped, not merely left unread: a reader must not
-                    // STORE what it has just said it ignores. A surface
-                    // reading `paths` back — the diagnostics tile's
-                    // sources section does — has no other way to know
-                    // this source was never going to be polled, and
-                    // painted a leftover glob as if it were live.
+                    // Clear ignored paths so consumers of the typed configuration cannot
+                    // mistake them for active directory globs.
                     paths.clear();
                 }
             } else if paths.is_empty() {
-                // §19.3 (ruling 2026-09-12): a source with nothing to poll
-                // is idle, not broken — a warning, and skipped, so the
-                // dialog's `n` can create one and let the trader type the
-                // globs in afterwards. One line, so the harness can flip
-                // its severity by anchoring on it. Directory sources only
-                // — a subscribed source has nothing to be idle about.
+                // An incomplete directory source is idle, not invalid. Warn and skip it;
+                // adapter-backed sources do not need directory paths.
                 diags.push(diag(Severity::Warning, name, Some("paths"), IDLE_PATHS));
                 continue;
             }
@@ -647,15 +588,8 @@ impl SourceSpec {
                     None | Some("receive") => SourceTime::Receive,
                     Some(s) => match s.strip_prefix("document:") {
                         Some(field) => {
-                            // Validated right here, against the schema
-                            // this reader already has in hand — no need
-                            // to defer it to whatever later reads
-                            // `SourceTime::Document` (controller ruling,
-                            // market-data-documents plan Task 5 review).
-                            // `schema.dataset(&dataset)` is `Some` and
-                            // document-family: checked above, before
-                            // this source could reach `subscribed` code
-                            // at all.
+                            // Validate against the already resolved document schema. The selected
+                            // attribute must have a type the receiver can convert to source time.
                             let column = schema.dataset(&dataset).and_then(|d| d.column(field));
                             match column {
                                 Some(c)
@@ -749,10 +683,8 @@ mod tests {
     use crate::schema::SchemaSpec;
 
     fn schema() -> SchemaSpec {
-        // `cvi_params` (copied from `examples/demo-config/datasets.toml`)
-        // sits beside the measure-family `risk_snapshot` so the
-        // "a subscribed source needs a document family dataset" rule has
-        // both a dataset that satisfies it and one that doesn't.
+        // Include a document dataset and a measure dataset to exercise both sides
+        // of the subscription-family validation rule.
         let text = r#"
 [risk_snapshot.columns.book]
 type = "utf8"
@@ -911,9 +843,8 @@ paths = ["/x/*.csv"]
         assert!(errors[1].contains("'b'") && errors[1].contains("nonesuch"));
     }
 
-    /// §19.3 (ruling 2026-09-12, superseding this test's old name): a
-    /// missing `paths` key and an explicit `paths = []` reach the same
-    /// branch — both are idle, both are warnings, neither is an error.
+    /// Missing paths and an empty list both produce an idle warning and no
+    /// runtime source, allowing incomplete configurations to be saved.
     #[test]
     fn missing_or_empty_paths_is_idle_not_an_error() {
         let (specs, diags) = from(
@@ -1019,8 +950,8 @@ batch_pattern = "(?P<batch>unclosed"
 
     #[test]
     fn a_pattern_without_a_batch_capture_is_dropped_with_a_warning() {
-        // A pattern that compiles but never captures `batch` would make
-        // every file's batch its whole stem — silently defeating §4.3.
+        // A regex without a named batch capture would silently use the whole stem,
+        // separating business dates that should share a partition.
         let (specs, diags) = from(
             r#"
 [a]
@@ -1116,11 +1047,8 @@ priority = "latest_other"
         assert!(s.paths.is_empty());
     }
 
-    /// A subscribed source's `paths` is warned about AND dropped. Storing
-    /// what the reader has just said it ignores is how a surface comes to
-    /// paint a subscribed source as a directory one — the diagnostics
-    /// tile's sources section reads `SourceSpec::paths` and has no other
-    /// way to know it was never going to be polled.
+    /// Ignored subscription paths must be removed from the typed configuration,
+    /// so downstream diagnostics do not present them as active directory globs.
     #[test]
     fn a_subscribed_sources_paths_are_warned_about_and_cleared() {
         let (sources, diags) = from(
@@ -1228,15 +1156,8 @@ paths = ["/x/*.csv"]
         assert!(d.message.contains("local"), "{}", d.message);
     }
 
-    /// Part 2 residual: each `topics` entry is validated at load against
-    /// the Solace grammar `geode_data::adapter::topic::topic_matches`
-    /// runs (the matcher itself has nowhere to put a diagnostic and stays
-    /// in `geode-data`; this is the load-time validator, in `geode-core`,
-    /// checking the same three rules ahead of time). An empty pattern, an
-    /// empty level (two consecutive `/`s), or a `>` anywhere but the
-    /// final level is refused — the config author almost certainly meant
-    /// something else, and letting it through would silently match
-    /// nothing or the literal level `>` forever.
+    /// Reject malformed topic patterns at config load: empty patterns, empty
+    /// levels, and a non-final `>` must produce a diagnostic and skip the source.
     #[test]
     fn a_topic_pattern_with_an_empty_string_is_refused() {
         let (sources, diags) = from(
@@ -1344,10 +1265,8 @@ paths = ["/x/*.csv"]
         );
     }
 
-    /// Task 5 review (2026-09-13): `document:<field>` is validated at
-    /// load, against the schema this reader already has — a typo names
-    /// no column at all, an f64 attribute is the wrong type, and a real
-    /// document-level date/utf8 attribute is accepted.
+    /// Validate document timestamp fields against the schema: reject unknown
+    /// columns and incompatible types; accept document-level Date/Utf8 attributes.
     #[test]
     fn source_time_document_field_is_validated_against_the_schema() {
         let (sources, diags) = from(

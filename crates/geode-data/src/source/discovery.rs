@@ -1,8 +1,10 @@
-//! Source discovery (spec §5.1, §5.2). Polls configured directory globs,
-//! decides readiness, and skips what has not changed.
+//! Poll directory globs, classify readiness, and compare files with the catalog.
+//! Polling avoids dependence on filesystem watches on network shares.
 //!
-//! Polling rather than filesystem watches: `notify` is unreliable over SMB
-//! (spec §11), and polling degrades honestly where a watch fails silently.
+//! Discovery reads metadata and sentinels, not CSV content. Glob traversal and
+//! CSV metadata errors are skipped; catalog errors propagate. An empty result
+//! therefore does not prove every configured path was accessible. See
+//! `docs/current/data-path.md` for readiness and change-detection limits.
 
 use crate::source::sentinel::{Sentinel, parse_sentinel};
 use crate::store::Catalog;
@@ -12,23 +14,22 @@ use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-// `SourceSpec` (and the `Readiness`/`Priority` types it carries) now lives
-// in geode-core so geode-shell can validate a sources doc without
-// depending on this crate (Phase 4c §2.2). Discovery and ingest keep using
-// it unchanged through this re-export.
+// Shared configuration types let the shell validate sources without depending
+// on geode-data; discovery and ingest use the same values through this export.
 pub use geode_core::source_config::{Priority, Readiness, SourceSpec};
 
 #[derive(Debug, Clone)]
 pub enum CandidateState {
-    /// Complete and not yet loaded.
+    /// Sentinel is ready and catalog identity differs; CSV content is not validated.
     Ready(Sentinel),
-    /// Waiting on its sentinel. Expected, not broken.
+    /// Sentinel metadata is unavailable or older than the CSV.
     Pending,
-    /// Waiting past the source's timeout.
+    /// Sentinel metadata is unavailable and CSV age exceeds the timeout.
     PendingTooLong,
     /// Already loaded at this size and source time.
     Unchanged,
-    /// Present but unusable — a malformed or unreadable sentinel.
+    /// Unsupported readiness, or an unreadable/malformed sentinel after metadata
+    /// was obtained.
     Orphaned { reason: String },
 }
 
@@ -94,10 +95,9 @@ fn classify(
     now: SystemTime,
 ) -> Result<CandidateState, StoreError> {
     if let Readiness::StableMtime { polls } = spec.readiness {
-        // Not implemented: the fallback needs poll history nothing keeps
-        // yet. Reporting `Pending` would make such a source ingest nothing,
-        // forever, with no diagnostic — silence is the one failure mode
-        // spec §5.7 forbids. Surface it instead.
+        // Stable-mtime needs history across polls, which discovery does not retain.
+        // Report the unsupported strategy for this candidate instead of leaving it
+        // pending indefinitely.
         return Ok(CandidateState::Orphaned {
             reason: format!(
                 "source '{}' uses the stable-mtime readiness strategy \
@@ -117,7 +117,8 @@ fn classify(
         });
     };
 
-    // A sentinel older than its CSV means the file is being rewritten.
+    // An older sentinel does not establish completion of the current CSV.
+    // This branch remains Pending regardless of pending_timeout.
     let sentinel_mtime = sentinel_meta.modified().unwrap_or(now);
     if sentinel_mtime < mtime {
         return Ok(CandidateState::Pending);
@@ -149,19 +150,13 @@ fn classify(
     Ok(CandidateState::Ready(sentinel))
 }
 
-/// True when `prev` — the catalog's latest recorded generation for a path —
-/// already reflects this file's current (size, source time): the same
-/// file, not reloaded since. Shared between `classify`'s own change
-/// detection and the ingest runner's pop-time re-check
-/// (`ingest::runner::run`), so a duplicate queued item is harmless even if
-/// one slips past `IngestHandle::submit`'s dedupe — both call sites apply
-/// exactly the same rule.
+/// Compare size and source time with the latest catalog generation for this
+/// path. Shared by discovery and the runner's pre-load stale check.
 ///
-/// `Health` is not part of the rule: a generation recorded for a load that
-/// then failed (e.g. in `attribute_conflicts`, after the catalog write)
-/// still counts as "loaded" here, at both call sites, exactly as it always
-/// has for `classify` — this extraction does not change that, only
-/// applies it a second place.
+/// CSV mtime, health, and content are not part of the comparison. A same-size
+/// rewrite with unchanged source time is invisible to both checks. A failed
+/// transaction rolls back its catalog row and cannot establish a new identity;
+/// a committed degraded generation is still considered loaded.
 pub(crate) fn is_unchanged(prev: &FileGeneration, size: u64, source_time: DateTime<Utc>) -> bool {
     prev.size == size && prev.source_time == source_time
 }
@@ -218,7 +213,7 @@ mod tests {
         assert_eq!(
             s.batch_of(std::path::Path::new("/x/risk_2026-08-29_BK000_part1.csv")),
             "BK000_part1",
-            "two business dates must land in the same partition (spec §4.3)"
+            "two business dates must land in the same partition"
         );
     }
 
@@ -285,12 +280,8 @@ mod tests {
 
     #[test]
     fn an_unimplemented_readiness_strategy_says_so_instead_of_going_quiet() {
-        // The stable-mtime strategy needs poll history nothing keeps yet.
-        // Reporting `Pending` would make such a source ingest nothing,
-        // forever, with no diagnostic — and a source that silently loads
-        // no files is the one failure mode §5.7 forbids, because there is
-        // nothing on screen to notice. The branch existed and nothing
-        // tested it.
+        // A stable-mtime candidate must report its unsupported strategy and source
+        // name rather than remain pending without a diagnostic.
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
         write(d.path(), "risk_2026-08-30_BK000.csv.done", SENTINEL);
