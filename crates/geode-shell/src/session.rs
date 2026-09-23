@@ -1,15 +1,9 @@
-//! Session layout persistence (Task 3): saves/restores the workspace
-//! tiling layout across app restarts. Pure layout state — theme choices
-//! persist separately, into the user config layer (see `theme::
-//! persist_to_user_config`); this file no longer carries a `theme_mode`
-//! (removed: theme changes now persist via `toml_edit` into `app.toml`
-//! instead of the session file, so they survive the ordinary desk/user
-//! config merge like any other config value, not a side channel).
+//! Session persistence for workspace layout and transient user state.
 //!
-//! State-as-config (brief): the session file lives alongside desk/user
-//! config, at `user_config_dir()/session.toml` (wired in `geode-app`'s
-//! `main.rs`), and is declarative, hand-editable TOML — same shape as
-//! every other config document in this codebase, not a binary blob.
+//! `session.toml` lives in the user configuration directory and remains
+//! declarative, hand-editable TOML. It stores workspaces, docks, stacks,
+//! occupants, frame state, and palette usage. Durable preferences such as the
+//! theme live in their ordinary layered configuration documents instead.
 //!
 //! Format choice: manual `toml::Table`/`toml::Value` construction, matching
 //! how `geode-core::config` already hand-builds and reads TOML elsewhere in

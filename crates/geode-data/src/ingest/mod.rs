@@ -1,5 +1,5 @@
 //! Ingestion: discovery, readiness, the load pipeline, and the priority
-//! ladder (spec §5).
+//! ladder. See `docs/current/data-path.md` for the current flow.
 
 pub mod coalesce;
 pub mod fetch;

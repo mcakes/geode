@@ -1,11 +1,11 @@
-//! The module-hosting contract (foundation §9.1, Phase 3 §3). A tile is
+//! The module-hosting contract. A tile is
 //! still a `TileId`; what lives in it is a [`TileOccupant`] the shell
 //! created through a [`ModuleFactory`] from the app's [`ModuleRoster`].
 //!
 //! Nothing here names `geode-data`. The factory gets shell-side handles
 //! only — the tile id and the frame entity — and a module that needs
 //! data carries its own handle as a field of its factory, built in
-//! `geode-app` where both sides meet (§2.1). The one data type that
+//! `geode-app` where both sides meet. The one data type that
 //! crosses is [`Delivery`], which the shell routes to the tile whose id
 //! is `Delivery::key()` — or, where that answers `None`, to every tile
 //! on screen.
@@ -32,25 +32,17 @@ pub enum FindEvent {
     Cancelled,
 }
 
-/// What the shell routes to a tile (market-data spec §8.6, line-pricer
-/// spec §5.4) — by its id where the delivery names one, to every visible
-/// tile where it does not. Part 4 adds `Upload(UploadOutcome)` for a
-/// document upload's own outcome, carried through this same door. An
-/// enum rather than a second `TileContent` method: every existing
-/// `match` on `Delivery` then refuses to compile the instant a new
-/// variant lands, until the occupant it belongs to grows an arm for it
-/// — an occupant cannot silently ignore a delivery kind it was never
-/// taught about, the way an unmatched second method could be forgotten
-/// and no compiler would say a word. One variant per outcome kind, no
-/// wildcard arms anywhere.
+/// An asynchronous outcome routed by the shell. A keyed delivery goes to
+/// its tile; a keyless delivery goes to every visible tile. This is an enum
+/// so a new outcome forces every occupant to make an explicit compile-time
+/// decision. Matches must remain exhaustive and avoid wildcard arms.
 #[derive(Debug)]
 pub enum Delivery {
     Query(QueryOutcome),
     Price(PriceOutcome),
-    /// A series query's answer (timeseries spec §6.4), routed by the
-    /// tile's key like a `Query`.
+    /// A series query's answer, routed by tile key like a `Query`.
     Series(SeriesOutcome),
-    /// A fetch finished (timeseries spec §5.4). Keyed by the
+    /// A fetch finished. Keyed by the
     /// `(identity, source)` pair, not a tile: `ShellView::deliver` hands
     /// one to EVERY visible occupant, each its own copy, and a tile
     /// holding the pair requeries on `Ok` (an `Ok(0)` too — the span is
@@ -85,7 +77,7 @@ impl Delivery {
 /// complexity`.
 type OpenStackList = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// What the shell hands a stack member (tile-stacks spec §5.1): its
+/// What the shell hands a stack member: its
 /// one-based `index` and the stack's `len`, `text` prepared once
 /// (`"2/4"`) so no module formats it per frame, and `open_list`, a
 /// closure over the shell's own weak entity, so a module opens the
@@ -112,13 +104,13 @@ impl StackHandle {
         }
     }
 
-    /// Open the shell's transient member list on this tile (spec §5.2).
+    /// Open the shell's transient member list on this tile.
     pub fn open_list(&self, window: &mut Window, cx: &mut App) {
         (self.open)(window, cx)
     }
 
-    /// The marker chip every module paints FIRST in its header strip
-    /// (spec §5.1) — `2/4` in the mono face, `Tone::Neutral` through
+    /// The marker chip every module paints first in its header strip:
+    /// `2/4` in the mono face, `Tone::Neutral` through
     /// `chip_paint` (a state the trader chose, like `pinned`), the
     /// theme's small radius, id `("stack-marker", tile)`, selector
     /// `stack-marker-{tile}`, and a mouse-down that stops propagation and
@@ -185,9 +177,8 @@ pub trait TileContent {
     ) -> bool;
     /// A `:` line, without the colon. `Err` is shown inline on the line.
     ///
-    /// **The rule (command-line locality spec §2, 2026-09-20): a `:` line
-    /// changes only THIS tile** — what it queries for, how it paints,
-    /// its cursor, its draft. It never writes the frame (scope, grouping,
+    /// A `:` line changes only this tile: what it queries for, how it paints,
+    /// its cursor, or its draft. It never writes the frame (scope, grouping,
     /// as-of, slots), the shell, the config or the log levels, and never
     /// changes what another tile shows. A frame- or app-wide effect is a
     /// palette action instead (the palette is global or local per

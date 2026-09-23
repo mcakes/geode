@@ -1,10 +1,9 @@
-//! Tile occupant lifecycle (spec section 3.2, module hosting contract):
+//! Tile occupant lifecycle:
 //! which tiles need a module occupant right now, creating them on demand
 //! through the module roster, delivering async query results to the tile
 //! that asked for them, and the pure `session::TileRecords` snapshot the
-//! session writer serializes. Split out of `shell/mod.rs` (Phase 3c
-//! Task 0) as the seam `render.rs`'s per-frame reconciliation and
-//! `session_io.rs`'s writer both call into.
+//! session writer serializes. This is the seam shared by `render.rs`'s
+//! per-frame reconciliation and `session_io.rs`'s writer.
 
 use std::collections::HashSet;
 

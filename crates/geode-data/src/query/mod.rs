@@ -1,5 +1,5 @@
-//! The query path (spec §6): scope compilation, the grain-aware view
-//! compiler, the read pool, and as-of routing.
+//! The query path: scope compilation, the grain-aware view compiler,
+//! the read pool, and as-of routing. See `docs/current/data-path.md`.
 
 pub mod scope_sql;
 

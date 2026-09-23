@@ -1,6 +1,7 @@
 //! DataService: sources, ingestion, DuckDB storage, archive, and the
-//! query API. See docs/superpowers/specs/ §5. The only door to data —
-//! no other crate opens files or sockets.
+//! query API. The current contracts are in `docs/current/data-path.md`.
+//! This crate is the application's door to stored data; modules ask through
+//! `DataHandle` instead of owning a connection or source transport.
 
 pub mod adapter;
 pub mod documents;

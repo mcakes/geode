@@ -1,57 +1,16 @@
-//! The one door every config write in this crate goes through
-//! (`docs/superpowers/specs/2026-09-08-geode-phase-4c-config-dialogs-design.md` §6).
+//! The one door for runtime configuration writes.
 //!
-//! Before this module there were three `write_atomic` implementations
-//! and six persist paths spread across `theme`, `fontsize`, `vimfind`,
-//! `frame` (twice) and `keymap_edit`. Phase 4c's dialogs would have made
-//! it ten. One door means one set of guarantees to get right: a write is
-//! atomic, only the user layer is writable, and a file this process
-//! cannot parse is refused untouched rather than replaced.
+//! Only the user layer is writable. Each edit parses the current document,
+//! changes it with `toml_edit`, writes a uniquely named temporary file beside
+//! the target, syncs it, and renames it over the target. A document this
+//! process cannot parse is left untouched. Temporary names deliberately do
+//! not end in `.toml`, so the reload poll cannot observe a partial write.
 //!
-//! No `ShellServices` parameter: `user_dir` is what a caller actually
-//! has, and threading a whole services struct through the background
-//! executor for a path would be worse.
-//!
-//! ## What the three copies each guaranteed, and what survived here
-//!
-//! The three implementations this replaces (`theme::write_atomic`,
-//! `keymap_edit::write_atomic`, `session::write_atomic`) agreed on the
-//! core — `create_dir_all`, a pid+counter-suffixed temp file in the
-//! *same* directory as the target, `write_all`, `sync_all`, then a
-//! `rename` over the target — and differed in three ways, each of which
-//! is kept here rather than dropped:
-//!
-//! * **Temp filename derived from the target, not hardcoded.**
-//!   `theme.rs` derived `.{file_name}.{pid}-{counter}.tmp` from the
-//!   target path (finding M9: it had been hardcoded to `.app.toml.*`
-//!   back when it only ever wrote `app.toml`, and lied once `frame.rs`
-//!   started writing `groupings.toml` through it). The other two
-//!   hardcoded `.keymap.toml.*` and `.session.toml.*` — correct only
-//!   because each had exactly one target. The derived form is the union:
-//!   it reproduces both hardcoded names byte-for-byte for their own
-//!   targets and stays honest for every future doc. See [`tmp_file_name`].
-//! * **A parent directory that must exist.** `session::write_atomic`
-//!   takes a full file path and derives the directory from
-//!   `Path::parent`, erroring when there is none; the other two were
-//!   handed the directory. [`write_file`] keeps the `parent` derivation
-//!   and its error, since it is the primitive both shapes now use.
-//! * **The error type.** `theme`/`keymap_edit` returned
-//!   `Result<(), String>` with messages naming the path and the failing
-//!   step; `session` returned `std::io::Result`. The `String` form is
-//!   kept (it is what every persist signature at the seam already
-//!   returns) and `session::write_atomic` maps back to `io::Error` at
-//!   its own boundary, so its callers are unchanged.
-//!
-//! None of the three fsync'd the *directory* after the rename, so
-//! neither does this: the rename is atomic within a filesystem, and a
-//! post-crash-missing-but-not-torn config file is the failure mode this
-//! codebase already accepts (see `session::write_atomic`'s own
-//! "best-effort, never load-bearing" note). Nothing here is a regression
-//! of a guarantee that existed; adding a directory fsync would be a new
-//! one, and belongs to whoever wants it, deliberately.
-//!
-//! The temp name deliberately does not end in `.toml`: `reload::scan`'s
-//! `*.toml` glob must never observe a partial write mid-flight.
+//! Submissions targeting the same directory run in acceptance order on the
+//! background executor. Parsing and filesystem work happen outside queue
+//! locks. Atomic rename prevents a torn file; the directory itself is not
+//! fsynced, so persistence across an abrupt system failure remains
+//! best-effort.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write as _;

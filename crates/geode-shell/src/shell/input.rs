@@ -1,11 +1,10 @@
-//! Keyboard input path (spec section 3, 4): the active key-context stack,
+//! Keyboard input path: the active key-context stack,
 //! keystroke dispatch through the compiled keymap, the palette-toggle
 //! keystroke special-case, `handle_key_down`'s per-action routing, and the
 //! small `persist_*` helpers a few dispatched actions call to write a
-//! runtime change back to the user config layer. Split out of
-//! `shell/mod.rs` (Phase 3c Task 0) as the seam every keystroke passes
-//! through before landing in `palette_ctl`, `commandline_ctl`, `drag`, or
-//! a dispatched action.
+//! runtime change back to the user config layer. Every keystroke passes
+//! through this seam before landing in a transient surface or a dispatched
+//! action.
 
 use gpui::{App, Context, Focusable as _, KeyDownEvent, Window};
 use gpui_component::WindowExt as _;
@@ -26,9 +25,7 @@ use super::{
     scope_expr_view, settings_view,
 };
 
-/// A stack verb's refusal on a tile that is not a stack member
-/// (tile-stacks spec §4) — `ShellView::notice`'s value for the rest of
-/// that one dispatch.
+/// The notice produced when a stack verb targets a tile outside a stack.
 pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
 
 impl ShellView {

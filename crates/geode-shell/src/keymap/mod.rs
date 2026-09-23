@@ -1,5 +1,5 @@
-//! Keymap engine (spec §3.4): keystroke parsing, context predicates,
-//! layered binding resolution, and the sequence-aware matcher.
+//! Keymap engine: keystroke parsing, context predicates, layered binding
+//! resolution, and the sequence-aware matcher.
 //! Pure logic — no gpui.
 
 mod build;

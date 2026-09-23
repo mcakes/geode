@@ -6,16 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Geode is the everything-tool for an index exotic equity derivatives desk: risk, pricing, execution, and data visualization in one permanent, keyboard-driven shell, built in Rust on gpui (Zed's UI framework) + gpui-component.
 
-**Where the detail lives.** `docs/phase-history.md` is the verbatim, phase-by-phase record: what each phase built, every user ruling, every review finding and every "a maintainer must not tidy this" trap, in the order they landed. It is the file this section used to be, and it is long on purpose. **This file has a size cap, so when a phase or ruling merges, add its paragraph to `docs/phase-history.md`, a row to the status table and any new load-bearing rule to the list below — never a narrative paragraph here.** The rules below are the ones most likely to be tripped over without reading that record; the history has the reasoning, the harness entries and the test names behind each.
+**Where the detail lives.** `docs/README.md` indexes current guides. `docs/current/data-path.md` describes the data path's present behavior and rationale. `docs/phase-history.md` and `docs/superpowers/` are implementation archives, not required reading for ordinary maintenance. **This file has a size cap: when a change merges, update the relevant current guide and add only a load-bearing workspace rule here. Keep task chronology in the archive.**
 
-Two documents govern all work and are worth reading before non-trivial changes:
+The current design documents govern non-trivial changes:
 
 - `docs/PHILOSOPHY.md` — the charter. Key rules: Geode is a lens, not a brain (no financial computation in-app, only view-shaping); every action must be keyboard-reachable; nothing may stall the render thread; data-oriented design throughout (struct-of-arrays, allocation-free hot paths, per-frame heap churn is a defect).
-- `docs/superpowers/specs/2026-08-28-geode-foundation-design.md` — the full architecture spec (section references like "spec §7.4" in code comments point here). Implementation plans live in `docs/superpowers/plans/`.
+- `docs/current/architecture.md` — current crate boundaries, runtime ownership, configuration, failure handling, and verification strategy.
+- `docs/README.md` — the index of maintained subsystem guides. Where a guide exists, it is the source for current behavior and rationale. Old `spec §…` references in code point into the implementation archive and should be replaced with a direct explanation as each subsystem is migrated.
 
 ### Status (2026-09-19)
 
-Everything below is merged unless the row says otherwise. Specs live in `docs/superpowers/specs/`.
+Everything below is merged unless the row says otherwise. The final column currently identifies the historical design record; it will be retired as each area gains a current guide.
 
 | Area | What it built | Spec |
 |---|---|---|
@@ -53,7 +54,7 @@ Everything below is merged unless the row says otherwise. Specs live in `docs/su
 | Publication/read consistency and delivery (worktree, 2026-09-20) | Atomic file/document publication; planning and reads on one snapshot; coalesced outcome/invalidation delivery and reliable reloads. | history |
 | **On hold** | Cold start: read `docs/ingest-cold-start-handoff.md` first — the 1.87× figure measures `read_csv` alone, and `staging_*` are fixed global table names. | — |
 
-Display checks on a real window are pending for most of the above (the implementation sandbox cannot paint one); each spec's "as built" section says which claims are pixel-unverified.
+Display checks on a real window are pending for most of the above (the implementation sandbox cannot paint one). Record such limitations in the relevant current guide as each area is migrated.
 
 ### Load-bearing rules
 
@@ -217,7 +218,7 @@ geode-demo-data    deterministic seeded synthetic risk data (SoA) + the criterio
 
 ## Workspace invariants and gotchas
 
-- **Every gpui-kit and gpui-pre crate is `=`-pinned in the root `Cargo.toml`** — `gpui-component`, `gpui-kit-assets`, `gpui-base`, `gpui-component-macros`, `gpui-pre` (aliased `gpui`) and `gpui-pre-platform` (aliased `gpui_platform`), all from crates.io since 2026-09-18 (0.6.2 / 0.3.5; spec `docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md` §2). gpui-kit depends on `gpui-pre` with a caret and gpui-component names its own siblings `gpui-base`/`gpui-component-macros` with a caret too, so an unpinned entry would let `cargo update` move gpui — or split the gpui-kit family — under us (it did, on the first build of this upgrade). Bump both families together, deliberately, on a branch; read the gpui-pre crate's description on crates.io for the zed rev it snapshots. There is no git dependency on zed or gpui-kit any more, so the old two-copies hazard the previous form of this rule guarded against cannot recur. The full explanation is in the comment in the root `Cargo.toml`. **Glossary:** wherever this file or a code comment says "the pinned rev", "the pinned release" or "the pinned gpui-component", it means these exact versions; the source a maintainer reads is the registry copy at `~/.cargo/registry/src/*/gpui-component-0.6.2/src/` (styled components), `gpui-base-0.6.2/src/` (unstyled behaviour) and `gpui-pre-0.3.5/src/` (gpui itself), and the sibling `gpui-pre-*-0.3.5` crates beside them for anything gpui itself re-exports, never a git checkout.
+- **Every gpui-kit and gpui-pre crate is `=`-pinned in the root `Cargo.toml`** — `gpui-component`, `gpui-kit-assets`, `gpui-base`, `gpui-component-macros`, `gpui-pre` (aliased `gpui`) and `gpui-pre-platform` (aliased `gpui_platform`), all from crates.io at 0.6.2 / 0.3.5. gpui-kit depends on `gpui-pre` with a caret and gpui-component names its own siblings `gpui-base`/`gpui-component-macros` with a caret too, so an unpinned entry would let `cargo update` move gpui — or split the gpui-kit family — under us. Bump both families together, deliberately, on a branch; read the gpui-pre crate's description on crates.io for the zed rev it snapshots. There is no git dependency on zed or gpui-kit. The full explanation is in the comment in the root `Cargo.toml`. **Glossary:** wherever this file or a code comment says "the pinned rev", "the pinned release" or "the pinned gpui-component", it means these exact versions; the source a maintainer reads is the registry copy at `~/.cargo/registry/src/*/gpui-component-0.6.2/src/` (styled components), `gpui-base-0.6.2/src/` (unstyled behaviour) and `gpui-pre-0.3.5/src/` (gpui itself), and the sibling `gpui-pre-*-0.3.5` crates beside them for anything gpui itself re-exports.
 - **Every new lib/bin target needs `bench = false`** (and `[[bench]]` targets need `harness = false`) so `cargo bench` runs criterion cleanly instead of the built-in libtest harness. This is a workspace-wide invariant — copy the pattern from any existing crate.
 - `gpui_platform` uses the `runtime_shaders` feature so Metal shaders compile at runtime without a full Xcode install (no-op off macOS).
 - In `main`, `gpui_component::init(cx)` must run before any component use, and the root view is wrapped in `gpui_component::Root` (which also renders the dialog/notification layers).

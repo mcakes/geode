@@ -1,9 +1,9 @@
-//! `DataService` — the only door to data (spec §5).
+//! `DataService` — the application's door to stored data.
 //!
 //! Modules ask this and nothing else: no module opens a file, holds a
 //! connection, or names a table. Everything below is an implementation
-//! detail, which is what makes the future sidecar-process split an
-//! evolution rather than a rewrite (§2).
+//! detail, which keeps a future sidecar-process split from changing the
+//! module contract. See `docs/current/data-path.md`.
 
 use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
 use crate::documents::DocumentRegistry;

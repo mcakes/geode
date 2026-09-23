@@ -42,8 +42,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ] }
 tracing-appender = "0.2"
 
-# GPUI and gpui-kit come from crates.io and every one of them is `=`-pinned
-# (spec: docs/superpowers/specs/2026-09-17-geode-gpui-kit-upgrade-and-adoption-design.md §2).
+# GPUI and gpui-kit come from crates.io and every one of them is `=`-pinned.
 #
 # gpui-kit publishes weekly snapshots of zed's gpui crates as `gpui-pre`,
 # `gpui-pre-platform` and `gpui-pre-macros` (each crate's description on
@@ -79,7 +78,8 @@ gpui-kit-assets = "=0.6.2"
 gpui-base = "=0.6.2"
 gpui-component-macros = "=0.6.2"
 
-# Release builds keep debug symbols: profiling support from day one (spec §7.4).
+# Release builds keep debug symbols so production-shaped benchmarks and
+# regressions can be profiled.
 [profile.release]
 debug = true
 lto = "thin"

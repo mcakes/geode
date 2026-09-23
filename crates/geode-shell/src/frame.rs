@@ -1,5 +1,4 @@
-//! The shared frame (foundation §4, Phase 3 §4, Phase 4 §3.1/§3.6/§3.8/
-//! §3.9/§3.12): global scope, undo/redo history, the active grouping slot,
+//! The shared frame: global scope, undo/redo history, the active grouping slot,
 //! as-of (with one remembered previous value), recent publishes, saved
 //! scopes, and the data and config generations, as one value every tile
 //! observes. Pure: `ShellView` holds it in a gpui entity and notifies; a

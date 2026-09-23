@@ -1,8 +1,8 @@
-//! The store: one persistent DuckDB database that is the system of record
-//! (spec §4.1). History survives relaunch and CSV ingest is paid once.
+//! The store: one persistent DuckDB database that is the system of record.
+//! History survives relaunch and CSV ingest is paid once.
 //!
 //! One dedicated writer connection serves ingest; readers are independent
-//! connections on the same database (spec §5.3). No in-memory mirror: a
+//! connections on the same database. No in-memory mirror: a
 //! dual store doubles the coherency surface for a win nothing has measured.
 
 pub mod catalog;

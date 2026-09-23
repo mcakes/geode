@@ -1,9 +1,8 @@
-//! The door modules get (Phase 3 spec §5.1). `DataService` owns a DuckDB
-//! connection and is not `Sync`, so it lives on one thread; this is the
-//! `Clone + Send + Sync` handle to it. Nothing here blocks: every method
+//! The module-facing handle. `DataService` owns a DuckDB connection and is
+//! not `Sync`, so it lives on one thread; this is the `Clone + Send + Sync`
+//! handle to it. Nothing here blocks: every method
 //! is a `try_send`, and a request that cannot be queued is refused and
-//! counted rather than waited on (§7.3 — backpressure never stalls the
-//! UI).
+//! counted rather than waited on — backpressure never stalls the UI.
 
 use crate::service::{
     DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams,

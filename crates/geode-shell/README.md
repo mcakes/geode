@@ -1,0 +1,94 @@
+# geode-shell
+
+The Geode shell: the tiling window manager, workspaces and docks, the
+keymap engine, the command palette, the shared frame (scope, grouping,
+as-of), theming, the modal dialogs, and the contract a module implements
+to live in a tile. Built on gpui and gpui-component.
+
+This crate never depends on `geode-data` or on any module crate. A module
+gets shell-side handles only (a `TileId`, the frame entity, the action
+registry); anything it needs from data it asks `geode-data` for itself,
+and the two meet only in `geode-app`.
+
+Current behavior and rationale: [`docs/current/shell.md`](../../docs/current/shell.md).
+
+## Layout
+
+The crate is split into pure cores, tested without a window, and the gpui
+surfaces that consume them.
+
+**Pure cores (no gpui)**
+
+| Module | Holds |
+|---|---|
+| `tiling` | The tiling tree (`Node::Split`, `Node::Leaf`, `Node::Stack`), workspaces, the three fixed docks per workspace, divider and drop-zone geometry. `Tree::layout` is the single source of truth for where a tile is; hjkl navigation uses the same geometry. |
+| `keymap` | Keystroke parsing, context predicates, layered binding resolution, chords, sequences and counts, the sequence-aware matcher, and module keymap fragments (`fragments::check_fragment`). |
+| `actions` | The shared action registry; the keymap maps keys to action ids and the palette lists them. |
+| `frame` | The shared frame: scope with undo/redo, the active grouping slot, as-of, recent publishes, saved scopes, and the data and config generations, as one value every tile observes. |
+| `scopebar`, `commandline`, `palette_usage`, `listfilter`, `choice`, `vimnav`, `vimfind`, `dialogmode`, `footer` | The models behind the scope bar, the per-tile `:` line, palette ranking (frecency), filtered lists, choice-with-typeahead, vim-style list motion and `/` find, the two-mode dialog vocabulary, and dialog footer hints. |
+| `theme`, `fonts`, `fontsize`, `linenumbers`, `tileadd`, `tips` | Settings and their pure resolution rules: the bundled gpui-component themes, the bundled Inter and JetBrains Mono faces, the rem scale knob, `[ui] line_numbers`, the add-tile direction, tooltip text from the live keymap. |
+| `config_write`, `keymap_edit`, `log_persist`, `session`, `reload` | The one door every config write goes through, comment-preserving keymap edits, `:level` persistence, `session.toml`, and the hot-reload poll with its keep-last-good decision. |
+| `diagnostics` | The shell-owned `Diagnostics` entity's state: source health, generations, config diagnostics, dropped events. |
+| `perf` | The always-compiled frame-time histogram. |
+| `defaults` | The builtin action set and keymap, the Builtin config layer. |
+
+**gpui surfaces**
+
+| Module | Holds |
+|---|---|
+| `shell` | `ShellView`, the one view that owns the window: key dispatch (`input.rs`), tile occupants and focus restore (`occupants.rs`), rendering, drag and drop, the toolbar, sidebar and status bar, the palette, the settings, keybindings and object dialogs (`objectdialog/`), the dimension picker, the as-of dialog, the choice dialog, the stack member list, which-key, hot reload, session I/O, and the colour doors (`chip`, `listrow`, `control`, `colours`, `scale`). Its tests live in `shell/tests/`. |
+| `module` | The module-hosting contract: `TileContent`, `ModuleFactory`, `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
+
+## Globals
+
+The workspace has four module-visible GPUI globals, written by the shell:
+`linenumbers::UiSettings`, `tips::Chords`, `clock::AppClock`, and
+`series::SeriesSettings`. Add another only for state that is genuinely app
+wide and module visible.
+
+## Features
+
+- `test-support` exposes `module::recording` and a few accessors outside
+  `#[cfg(test)]`, so the module crates' tests can host a recorded
+  neighbour. CI checks `cargo check -p geode-shell --features test-support
+  --all-targets` because nothing else keeps that configuration building.
+- `profiling` turns on gpui's own profiler (frame and input-latency
+  histograms, the debug overlay, hang detection) and the two shell actions
+  that surface it. Enabled through `geode-app`'s same-named feature.
+
+## Commands
+
+```sh
+cargo test -p geode-shell
+cargo bench -p geode-shell     # the pure shell cores (docs/perf.md)
+```
+
+Test fixtures live in `src/shell/tests/mod.rs`. They bind `ctrl+v` and
+`ctrl+h` in a test layer to create tiles (the shipped keymap has no such
+chord) and carry a `rec` recording factory in the roster.
+
+## Rules this crate pins
+
+The current contracts and their reasons are in
+[`docs/current/shell.md`](../../docs/current/shell.md). The ones a first
+change most often hits:
+
+- Every action must be keyboard-reachable, and nothing may stall the
+  render thread. Per-frame heap churn is a defect.
+- Dialogs open through `shell::dialog::open_shell_dialog`, never
+  `window.open_dialog`. A mouse-opened dialog relies on the
+  `prevent_default` inside that door.
+- The pure state of a dialog is the truth; `dialog::sync_dialog_text` is
+  the only thing that moves focus or writes the shared `Input`.
+- Every tile mouse-down path and every keyboard verb that moves tile focus
+  re-arms `pending_focus_restore`. A module that drops a focused
+  `InputState` must `window.blur(cx)` first, or every chord dies for the
+  rest of the session.
+- Colours go through the doors: `chip_paint` for semantic chips,
+  `row_paint` for list rows, `control::paint` for hover and pressed
+  states. Each has a sweep over every bundled theme with no exception list.
+- Chrome geometry is authored at the `Medium` rem through `scale::design`;
+  radii come from the theme.
+- Every gpui-kit and gpui-pre crate is `=`-pinned in the root `Cargo.toml`.
+  "The pinned rev" in a comment means those versions, read from the
+  registry source.
