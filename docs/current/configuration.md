@@ -168,6 +168,20 @@ View and derived-dimension replacements use a latest-value mailbox into the
 data service, so a full request queue cannot permanently lose a configuration
 reload.
 
+The bridge's `ConfigReloaded` handler runs for changes to views, view/dataset
+presentation, dimensions, or colours. It uses the same presentation-aware
+view loader as startup, updates module factories, and offers views/dimensions
+to the service. This is not an atomic update across factories and workers;
+the handle acknowledges retention, not application. See
+[view replacement](request-delivery.md#view-replacement-and-shutdown).
+
+That handler also rereads the stale threshold and factory validation schema.
+A stale-threshold-only edit does not trigger it, and dataset edits require
+restart. A later eligible reload can therefore update factory settings or
+schema before the running service is rebuilt. Presentation and colour-reader
+diagnostics append to the retained data-diagnostics lane; the shell remains
+responsible for replacing the current config-diagnostics batch.
+
 ## Keymaps and actions
 
 Action IDs are the stable vocabulary shared by configuration, the command

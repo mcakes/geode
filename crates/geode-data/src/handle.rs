@@ -1,8 +1,11 @@
-//! The module-facing handle. `DataService` owns a DuckDB connection and is
-//! not `Sync`, so it lives on one thread; this is the `Clone + Send + Sync`
-//! handle to it. Nothing here blocks: every method
-//! is a `try_send`, and a request that cannot be queued is refused and
-//! counted rather than waited on — backpressure never stalls the UI.
+//! Cloneable request handle for the service thread. Ordinary submissions use
+//! try_send under a short mutex: full or disconnected channels refuse and count
+//! the request without waiting for queue space. Acceptance is queue admission,
+//! not completion. Cancellation and supersession can suppress query outcomes.
+//!
+//! View replacements use a latest-value mailbox with a best-effort wakeup.
+//! Shutdown and final-handle drop join the service and can block; run those off
+//! the UI thread. See `docs/current/request-delivery.md`.
 
 use crate::service::{
     DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams,
@@ -20,36 +23,30 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-/// Requests queued before the handle refuses. One in-flight query per
-/// tile bounds the steady state at tile count; the headroom is for a
-/// burst of frame changes landing before the service thread wakes.
+/// Maximum waiting requests on the service channel. This bound includes
+/// queries, cancellation, and other ordinary requests; it does not bound work
+/// already handed to downstream workers.
 pub const REQUEST_BOUND: usize = 64;
 
 #[derive(Debug)]
 pub enum Request {
     Query(QueryParams),
-    /// The picker's distinct-values query (spec §3.4).
+    /// Picker distinct-values request, answered with DataEvent::Distinct.
     Distinct(DistinctParams),
-    /// The document request (market-data spec §7): one document by key,
-    /// live or as-of — see `DataService::document`.
+    /// One document by key, live or as-of, answered with DataEvent::Query.
     Document(DocumentParams),
-    /// The timeseries viewer's series query (timeseries spec §6): one
-    /// round trip per tile, answered as `DataEvent::Series`.
+    /// Series query, answered with DataEvent::Series.
     Series(SeriesParams),
-    /// The diagnostics tile's "what does the database hold" request
-    /// (Phase 4b §4.5). Answered synchronously on the service thread,
-    /// not through the query pool — see `DataService::catalog`.
+    /// Catalog metadata request, answered synchronously on the service reader
+    /// rather than through the query pool.
     Catalog(CatalogParams),
-    /// The line pricer's batch (line-pricer spec §5.3), answered by the
-    /// pricing worker as `DataEvent::Price`.
+    /// Pricing batch, answered by the pricing worker with DataEvent::Price.
     Price(PriceParams),
-    /// A document the app authored, published as a generation of a
-    /// `local = true` dataset (spec §5.3, §7.2).
+    /// App-authored document for a dataset declared local.
     Publish(LocalPublish),
-    /// The timeseries viewer's on-demand fetch (timeseries spec §5.3):
-    /// coverage is subtracted on the service thread and only the gaps
-    /// reach the source's fetch worker; the outcome is
-    /// `DataEvent::SeriesFetched`, keyed by the pair, never by `key`.
+    /// History fetch. The service subtracts committed coverage and submits gaps
+    /// to the source's fetch worker. Completion uses the identity/source pair,
+    /// not the requester's key.
     Fetch(FetchParams),
     /// Ask a fetch source for its identities again; they land in the
     /// next `CatalogSnapshot::identities`.
@@ -97,18 +94,9 @@ impl Inner {
         }
     }
 
-    /// Stop accepting requests and end the service thread. A queued
-    /// `Shutdown` sentinel is not enough on its own: if the channel is
-    /// full the sentinel is refused, and `serve`'s blocking `rx.recv()`
-    /// would then wait forever for a request that never lands. What
-    /// actually guarantees the thread ends is dropping the sender —
-    /// `recv()` returns `Err` once the channel is empty and
-    /// disconnected, regardless of how full it was a moment before —
-    /// so the sender is taken out of the `Option` first (every later
-    /// `send` sees `None` and refuses), a `Shutdown` is offered
-    /// best-effort so a healthy loop can exit its `match` promptly
-    /// rather than via a wasted `recv` error path, and only then is the
-    /// sender dropped and the thread joined.
+    /// Close admission before joining. Offer Shutdown best-effort, then drop the
+    /// sender so even a full queue eventually disconnects after queued requests
+    /// are dispatched. Downstream shutdown can still wait on running I/O.
     fn stop(&self) {
         let taken = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(tx) = taken {
@@ -142,13 +130,15 @@ impl DataHandle {
         self.inner.send(req)
     }
 
-    /// Queue a query. `false` means it was not queued — retry on the next
-    /// trigger; the result, when it comes, arrives on the sink keyed and
-    /// tagged as asked.
+    /// Queue a query. False means no request was admitted and no reply is owed.
+    /// Outcomes preserve key/tag; supersession or cancellation can suppress them.
     pub fn query(&self, params: QueryParams) -> bool {
         self.send(Request::Query(params))
     }
 
+    /// Queue cancellation for query-pool and pricing work under this key.
+    /// False means cancellation was not queued. There is no acknowledgement;
+    /// this does not cancel fetches or ingest jobs, or retract emitted results.
     pub fn cancel(&self, key: QueryKey) -> bool {
         self.send(Request::Cancel { key })
     }
@@ -160,64 +150,59 @@ impl DataHandle {
         self.send(Request::Distinct(params))
     }
 
-    /// Queue the document request (market-data spec §7). `false` means it
-    /// was not queued; the result, when it comes, arrives on the sink as
-    /// an ordinary `DataEvent::Query`, keyed and tagged as asked.
+    /// Queue a document request. False means not queued. Outcomes share the
+    /// DataEvent::Query shape and preserve the request key/tag.
     pub fn document(&self, params: DocumentParams) -> bool {
         self.send(Request::Document(params))
     }
 
-    /// Queue the timeseries viewer's series query (timeseries spec §6).
-    /// `false` means it was not queued; the result, when it comes,
-    /// arrives on the sink as `DataEvent::Series`, keyed and tagged as
-    /// asked — a cap or compile refusal included, so the asking tile
-    /// always hears back.
+    /// Queue a series query. False means not queued. Cap and compile failures
+    /// for admitted requests are returned as keyed/tagged DataEvent::Series errors;
+    /// superseded or cancelled work can produce no outcome.
     pub fn series(&self, params: SeriesParams) -> bool {
         self.send(Request::Series(params))
     }
 
-    /// Queue the diagnostics tile's catalog request (spec §4.5). `false`
-    /// means it was not queued; the result, when it comes, arrives on
-    /// the sink as `DataEvent::Catalog`, keyed and tagged as asked.
+    /// Queue catalog metadata work. False means not queued; outcomes preserve
+    /// key/tag in DataEvent::Catalog.
     pub fn catalog(&self, params: CatalogParams) -> bool {
         self.send(Request::Catalog(params))
     }
 
-    /// Queue a pricing batch. `false` means the request channel refused
-    /// it; a batch the worker's own queue refuses is answered with an
-    /// error per line, so a tile never waits on a batch that will not
-    /// come.
+    /// Queue a pricing batch. False means the service channel refused it. A
+    /// subsequent pricing-worker refusal instead produces an error for each line.
     pub fn price(&self, params: PriceParams) -> bool {
         self.send(Request::Price(params))
     }
 
-    /// Queue a local publish. Refused (an error `Diagnostics` event,
-    /// nothing written) unless the dataset is declared `local`.
+    /// Queue local publication. False means no admission. After admission the
+    /// service validates local-dataset permission and reports rejection through
+    /// Diagnostics; true does not mean the document has been stored.
     pub fn publish(&self, publish: LocalPublish) -> bool {
         self.send(Request::Publish(publish))
     }
 
-    /// Queue an on-demand fetch (timeseries spec §5.3). `false` means it
-    /// was not queued; the outcome, when it comes, arrives on the sink as
-    /// `DataEvent::SeriesFetched` — keyed by the `(identity, source)`
-    /// pair, not by `params.key`, so every tile watching that pair hears
-    /// the one answer.
+    /// Queue a fetch. False means not queued. SeriesFetched identifies the
+    /// identity/source pair so all visible tiles watching it can react, including
+    /// when completion appended zero rows.
     pub fn fetch(&self, params: FetchParams) -> bool {
         self.send(Request::Fetch(params))
     }
 
-    /// Ask a fetch source for its identities again (timeseries spec
-    /// §5.5). `false` means the request was not queued; the answer lands
-    /// in the next `CatalogSnapshot::identities`.
+    /// Queue an identity refresh. False means no admission to the service queue.
+    /// Worker refusal is logged; there is no dedicated completion event. Successful
+    /// enumeration updates the identities returned by a later catalog request.
     pub fn identities(&self, source: impl Into<String>) -> bool {
         self.send(Request::Identities {
             source: source.into(),
         })
     }
 
-    /// The safe hot-reload path for views (foundation §8). Diagnostics
-    /// come back on the sink. Latest configuration wins even when the request
-    /// queue is full; false means the service is gone, never temporary pressure.
+    /// Store the latest views and dimensions, replacing any pending replacement.
+    /// A full wakeup queue still returns true: the service checks the mailbox
+    /// before every dequeued request. False means closed admission or a disconnected
+    /// service. True acknowledges retained state, not validation or application;
+    /// validation diagnostics return through the event sink.
     pub fn replace_views(&self, views: Vec<ViewSpec>, dimensions: DerivedDimensions) -> bool {
         let guard = self.inner.tx.lock().unwrap_or_else(|e| e.into_inner());
         let Some(tx) = guard.as_ref() else {
@@ -245,19 +230,14 @@ impl DataHandle {
         self.inner.dropped.load(Ordering::Relaxed)
     }
 
-    /// Stop the service thread and wait for it. Idempotent; also runs
-    /// when the last handle drops. Disconnecting the channel — not the
-    /// queued `Shutdown` sentinel — is what guarantees the thread ends:
-    /// see `Inner::stop`.
+    /// Close request admission and join the service. Idempotent; final-handle
+    /// drop does the same. Already admitted requests precede Shutdown, or drain
+    /// until sender disconnection if that sentinel could not be queued.
     ///
-    /// **This blocks the calling thread until the service thread has
-    /// actually stopped.** Once `serve`'s loop sees `Request::Shutdown`
-    /// it calls `DataService::shutdown`, which joins the scheduler and
-    /// ingest threads in turn — so this call waits out whatever either
-    /// of them is doing right now: an in-flight `load_file` (seconds,
-    /// for a large CSV) or an in-flight `discover` (unbounded, if the
-    /// share it is scanning is hung). Call this — and let the last
-    /// `DataHandle` drop — off the UI thread.
+    /// Joining waits for service open, request dispatch, and downstream worker
+    /// shutdown. Fetch calls, discovery, and publication can delay it indefinitely
+    /// if their I/O does not return. This is not a storage flush guarantee; ingest
+    /// shutdown does not drain its queued jobs. Call off the UI thread.
     pub fn shutdown(&self) {
         self.inner.stop();
     }
@@ -282,10 +262,10 @@ impl DataHandle {
 }
 
 impl DataService {
-    /// Open the service on its own thread and return the handle at once.
-    /// Opening — DuckDB, schema, catalog — happens on that thread, so the
-    /// caller (the UI) never waits on it; a failure to open arrives on
-    /// the sink as a diagnostic and the handle then refuses everything.
+    /// Spawn the service without waiting for database open/schema setup. An open
+    /// error is reported through Diagnostics, then the request receiver closes.
+    /// Requests admitted before that failure have no individual outcomes. Failure
+    /// to spawn the thread itself panics at the expect below.
     pub fn spawn(config: DataServiceConfig, sink: EventSink) -> DataHandle {
         let (tx, rx) = sync_channel(REQUEST_BOUND);
         let pending_views = PendingViews::default();
@@ -344,8 +324,7 @@ fn serve(
         match req {
             Request::Query(params) => {
                 if let Err(e) = service.query(&params) {
-                    // A compile-time failure — unknown view, bad scope —
-                    // is this key's outcome, not a lost request (§10.1).
+                    // Return compile/validation failure with the original request key and tag.
                     sink(DataEvent::Query(QueryOutcome {
                         key: params.key,
                         tag: params.tag,
@@ -356,8 +335,7 @@ fn serve(
             }
             Request::Distinct(params) => {
                 if let Err(e) = service.distinct(&params) {
-                    // Same rule as `Query`: a compile-time failure is
-                    // this key's outcome, not a lost request (§10.1).
+                    // Return distinct-query compilation failure to the original requester.
                     sink(DataEvent::Distinct(DistinctOutcome {
                         key: params.key,
                         tag: params.tag,
@@ -368,12 +346,8 @@ fn serve(
             }
             Request::Document(params) => {
                 if let Err(e) = service.document(&params) {
-                    // Same rule as `Query`: a compile-time failure is
-                    // this key's outcome, not a lost request (§10.1).
-                    // `Document` shares `Query`'s outcome shape (there is
-                    // no `DataEvent::Document`), so a failed compile goes
-                    // out as `DataEvent::Query` exactly as `Request::
-                    // Query`'s own error arm does.
+                    // Document failures use DataEvent::Query, just like successful document
+                    // results, with the original request key/tag.
                     sink(DataEvent::Query(QueryOutcome {
                         key: params.key,
                         tag: params.tag,
@@ -556,8 +530,7 @@ mod tests {
         assert!(matches!(rx.recv().unwrap(), Request::Identities { source } if source == "k"));
     }
 
-    /// Timeseries spec §6: the series query rides the same queue as
-    /// every other request, carrying its params untouched.
+    /// Series parameters must pass unchanged through the common request queue.
     #[test]
     fn a_series_request_is_queued_as_a_request() {
         use geode_core::series::{BucketRule, Frequency, SeriesParams, SeriesSpec, SlotKind};
@@ -611,8 +584,8 @@ mod tests {
 
     #[test]
     fn a_full_channel_refuses_and_counts_rather_than_blocking() {
-        // §7.3: backpressure never stalls the UI. The bound is small on
-        // purpose (REQUEST_BOUND); the test fills it without draining.
+        // Fill the bounded channel without draining it to verify refusal and its
+        // counter without relying on service-thread timing.
         let (h, _rx) = DataHandle::for_tests();
         let mut accepted = 0;
         for i in 0..(REQUEST_BOUND as u64 + 5) {
@@ -890,9 +863,8 @@ mod tests {
 
     #[test]
     fn shutdown_completes_even_when_the_request_queue_is_full() {
-        // Reproduces: shutdown must disconnect the channel, not merely
-        // enqueue a Shutdown sentinel — a full queue drops that sentinel
-        // and `serve`'s `rx.recv()` then blocks forever, hanging `join`.
+        // Shutdown must drop the sender even when the queue refuses its sentinel.
+        // Otherwise the service can drain the queue and then wait forever in recv.
         let (db, _src, store, ds, emitted) = crate::ingest::load::tests_support::fixture();
         for file in emitted.files.iter().filter(|f| f.sentinel_path.is_some()) {
             let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
@@ -930,9 +902,8 @@ mod tests {
             sink,
         );
 
-        // Fill the queue immediately, before the service can have
-        // finished opening — some of these will be refused, which is
-        // fine; the point is the queue is full.
+        // Submit a burst during startup to exercise shutdown under request
+        // pressure. How many offers are refused depends on thread scheduling.
         for _ in 0..(REQUEST_BOUND + 8) {
             h.cancel(QueryKey(1));
         }

@@ -24,6 +24,11 @@ is refused and counted rather than waited on. Results and health come back as
 `DataEvent`s through an `EventSink`; a sink returning `false` means "not
 delivered" and no producer stops on it.
 
+View replacements retain the latest configuration even under request-channel
+pressure. Shutdown and final-handle drop join workers and must run off the UI
+thread. Admission, cancellation, and completion have distinct guarantees; see
+[requests and UI delivery](../../docs/current/request-delivery.md).
+
 Background operations contain panics and report failures without stopping
 unrelated work; an ingest load panic reports that operation as `Failed`.
 Containment does not interrupt blocked adapter or filesystem calls.

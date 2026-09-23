@@ -1,6 +1,12 @@
-//! Latest-state delivery to the UI. A slow frame retains one outcome per
-//! recipient and one invalidation per partition, not one allocation per update.
-//! The bounded channel carries only a wakeup; a full wakeup channel loses no data.
+//! Coalesced state for UI delivery. Pending entries are keyed by event kind and
+//! recipient, source, or dataset/batch. Tagged outcomes retain the highest tag;
+//! publications union affected books and keep the greatest generation ID.
+//! Replacing an entry preserves its position among other pending keys, so this
+//! is not a chronological event log. See `docs/current/request-delivery.md`.
+//!
+//! A one-slot channel carries only wakeups. Full wakeup capacity does not refuse
+//! state, but pending entries have no fixed key-count cap. Sender acceptance
+//! does not acknowledge that the window has applied the event.
 
 use geode_core::query::QueryKey;
 use geode_data::service::DataEvent;

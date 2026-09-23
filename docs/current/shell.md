@@ -125,6 +125,10 @@ and series outcomes route by tile key. A series fetch completion has no tile
 key and is broadcast to visible occupants because several tiles may watch the
 same `(identity, source)` pair.
 
+The app bridge supplies these deliveries from a coalescing mailbox. See
+[requests and UI delivery](request-delivery.md) for admission/refusal,
+stale-result handling, publication routing, and window lifetime.
+
 ## Diagnostics state and demand
 
 [`Diagnostics`](../../crates/geode-shell/src/diagnostics.rs) holds operational

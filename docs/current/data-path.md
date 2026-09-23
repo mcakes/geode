@@ -33,13 +33,14 @@ over fetched series, and both priority over queued files; it finishes a file
 already in flight before taking another job. This puts trader-requested work
 ahead of background discovery without attempting concurrent writes.
 
-The request channel is bounded. `DataHandle` uses `try_send`: `false` means
-the request was **not queued**, so a caller must handle refusal rather than
-wait for an answer that cannot arrive. Accepted requests return outcomes
-through `DataEvent`. The app's event sink must remain nonblocking because
-some producers call it while holding a queue lock. See
-[`handle.rs`](../../crates/geode-data/src/handle.rs) and
-[`service.rs`](../../crates/geode-data/src/service.rs).
+Ordinary requests use a bounded channel. `DataHandle` returns `false` when
+submission was refused; callers must handle that rather than wait for a reply.
+Acceptance is not completion: startup failure, cancellation, and supersession
+can leave an admitted request without an individual outcome. View replacements
+use a separate latest-value mailbox. The app's event sink must not wait for
+the UI or reenter the service because some producers hold a queue lock. See
+[requests and UI delivery](request-delivery.md) for admission, cancellation,
+reload, shutdown, and event-coalescing contracts.
 
 ## Queues and shutdown
 
@@ -292,11 +293,13 @@ Sources sharing a dataset therefore receive the same persisted degradation
 at startup, which can conservatively over-report a source's load health.
 Seeds use publication's batch key so a corrected load can clear them.
 
-Publication events invalidate affected views. Query results are addressed to
-the requesting key. Series fetch completion is addressed by `(identity,
-source)` so every tile watching the same pair can requery, including when a
-fetch appended zero rows because the span was already covered. These routing
-rules prevent an accepted operation from leaving a tile waiting indefinitely.
+Non-local publication events advance matching dataset/document watches; local
+publications update diagnostics without advancing frame revisions. Query
+results are addressed to the requesting key. Series fetch completion is
+broadcast to visible occupants by `(identity, source)` so modules watching
+that pair can react, including when a fetch appended zero rows. See
+[window routing](request-delivery.md#routing-into-the-window) for delivery
+filters and catalog refresh behavior.
 
 Ingest and discovery workers continue after event refusal and do not retry
 individual events. The app mailbox retains terminal outcomes and publication

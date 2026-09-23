@@ -37,7 +37,8 @@ demo series walk; nothing migrates an existing database.
 | Module | Holds |
 |---|---|
 | `main` | Startup order: logging, config, registry and keymap, roster, service, window. `parse_args` and `config_dirs` are pure and tested. |
-| `bridge` | Where the shell and the data layer meet: builds the service config from the layered docs, spawns the service behind a `DataHandle`, drains its event channel into the shell on a task that wakes on arrival, forwards config reloads back to the data thread, and resolves `SourceSummary::shape` for the diagnostics tile. |
+| `bridge` | Service setup and module factories, window event routing, catalog refresh/retry, and forwarding view reloads to the data service. |
+| `events` | Coalesced pending outcomes and state with a one-slot wakeup channel. Retains publication book unions and highest-tagged results. |
 | `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer. |
 | `demo_bus` | Demo mode's producer for the market-data path: a thread generating CVI documents and publishing them onto a `ChannelAdapter` through the same wire format a real subscribed source's receiver parses. Registered only under `--demo`. |
 | `demo_series` | Demo mode's fetch adapter: seeded, span-independent one-minute bars for two dozen identities, behind two sources (`demo_kdb` with a catalogue, `demo_rest` without). |
@@ -71,8 +72,10 @@ cargo check -p geode-app --features profiling
 - `ShellServices.keymap_diagnostics` and `keymap_fragment_diagnostics`
   ride from here into the diagnostics config section because they cannot
   be recomputed from the config alone.
-- The bridge's event channel is bounded and `try_send`-only; the drain
-  task is awaited on the foreground executor, never polled.
+- The bridge awaits a state mailbox on the foreground executor. Only its
+  wakeup channel has a fixed capacity; pending state coalesces by recipient
+  or source without an overall key-count cap. See
+  [requests and UI delivery](../../docs/current/request-delivery.md).
 - The daily log file and crash file names roll on the UTC date; every
   displayed time is the trader's local clock.
 - `NamedColours::from_doc` diagnostics are reported only by the bridge's
