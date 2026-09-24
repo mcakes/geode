@@ -1,18 +1,12 @@
-//! The as-of selector (as-of dialog spec 2026-09-20 §5): a filter-first
-//! modal over [`AsOfState`]'s ranked rows — `Current`/`Live` while pinned,
-//! the business-day presets, the `Custom` row holding the segmented
-//! date-time field, the recent publishes — each painted with the instant
-//! it resolves to on the configured clock. The pure model is
-//! `asof_rows`; this file is the gpui half: `open`, the modal key
-//! handler and `build`.
+//! The as-of selector: a filter-only modal over [`AsOfState`]'s rows.
+//! Timestamps use the clock captured when the dialog opens.
 //!
-//! Keys (§5.2): `listfilter::nav_command` moves; `1`–`5` on an EMPTY
-//! field jump to a preset; `enter` commits the highlighted row; `tab`
-//! opens the Custom field (and leaves it); while the field is open every
-//! bare key goes through `geode_widgets::datefield::route` — `enter`
-//! commits the field's value, `escape` closes the field, a chord is not
-//! the field's (a modal owns the keyboard). A second `escape` closes
-//! the dialog through `handle_key_down`'s own modal branch.
+//! List navigation moves the highlight; `1`–`5` with an empty query commits
+//! a preset; Enter commits the highlighted row. Tab opens Custom, clears
+//! the query, and seeds its segmented field. While Custom is open, Enter
+//! commits, Escape or Tab closes the field, and other non-chord keys belong
+//! to the field. Closing Custom leaves the cleared query in place. Escape
+//! with no field open closes the modal through the shell input handler.
 
 use std::rc::Rc;
 
@@ -32,19 +26,12 @@ use super::asof_rows::{self, AsOfState, Commit, Row, Section};
 use super::colours::{over, to_hsla, to_rgb};
 use super::{ShellView, dialog, scale};
 
-/// Dialog content width at the design rem (the picker's 480 was too
-/// narrow for a label and a dated right column side by side).
+/// Content width for a label and a dated timestamp side by side.
 const WIDTH: f32 = 640.0;
 
-/// A row's height at the design rem — the same 28 the picker's
-/// `choice_rows` and the palette's own row list use — and how many the
-/// `as-of-rows` viewport shows before it scrolls (review round 2,
-/// finding 3): without an explicit bound here `overflow_y_scroll` has
-/// nothing to overflow against (the list just grows to fit every row),
-/// so `ScrollHandle::scroll_to_item` would have nothing to do — the cap
-/// is what makes the list an actual independently-scrollable viewport,
-/// distinct from the dialog's header/footer, the same shape
-/// `dialog::choice_rows` already gives the choice dialogs.
+/// Row height and viewport cap. The explicit height bound gives the list
+/// scrollable overflow, allowing scroll-follow to keep the highlight visible
+/// without moving the dialog header or footer.
 const ROW_HEIGHT: f32 = 28.0;
 const VISIBLE_ROWS: usize = crate::choice::DEFAULT_CAP;
 
@@ -59,11 +46,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     let clock = view.clock(cx);
     let frame = view.frame.read(cx);
     let publishes: Vec<_> = frame.recent_publishes().iter().cloned().collect();
-    // Review round 2 (re-review), finding 3: `AsOfState::build` always
-    // highlights row 0, and `as_of_scroll` lives on `ShellView` — it
-    // keeps whatever offset a PREVIOUS open scrolled it to, so a fresh
-    // open must reset it back to the top rather than opening mid-scroll
-    // (the `choicedialog::open`/`choice_dialog_scroll` precedent).
+    // The retained scroll handle must follow the fresh state's first row.
     view.as_of_scroll.scroll_to_item(0);
     view.as_of_dialog = Some(AsOfState::build(
         frame.as_of(),
@@ -71,9 +54,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         clock,
         chrono::Utc::now(),
     ));
-    // Review round 2, finding 5: the `data` version `on_frame_changed`
-    // compares against to decide whether a later notify is a publish
-    // landing while this dialog is open.
+    // Track the global data revision so later publications refresh these rows.
     view.as_of_data_version = frame.versions().data;
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
@@ -111,22 +92,10 @@ fn apply_commit(
     shell.close_modal(window, cx);
 }
 
-/// The [`dialog::ModalKeyHandler`] for this modal. Every arm is a pure
-/// mutation of [`AsOfState`] plus, on a commit, `apply_commit`; the
-/// shared field's text is reconciled by the as-of arm `sync_dialog_text`
-/// grew for it (review round 2, finding 1 — this dialog is filter-only
-/// and had none before) on every return from this handler, through the
-/// key-path seam `handle_key_down` already runs unconditionally after
-/// the modal's own key handler (`input.rs`), so a query the field's own
-/// mutations clear (`open_field`) or set (`set_query`) always reaches
-/// the shared `Input` back. Final whole-branch review, finding M-8: the
-/// `enter` arm USED to re-feed that same live text into `set_query`
-/// before trusting the highlight, which is what made this guarantee true
-/// in the first place — now that the guarantee holds on every return
-/// from this handler (not just this one arm), the re-feed is gone and a
-/// `debug_assert_eq!` stands in its place instead, since re-feeding on
-/// divergence would be actively wrong (`set_query` re-ranks and resets
-/// the highlight to 0).
+/// Route modal keys into [`AsOfState`] and apply successful commits.
+/// The shell's key path calls `sync_dialog_text` afterward, keeping the
+/// shared Input aligned with model changes such as Custom clearing the query.
+/// Enter relies on that equality to preserve the current highlight.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -136,16 +105,9 @@ fn handle_key(
     let Some(state) = shell.as_of_dialog.as_mut() else {
         return false;
     };
-    // The field owns every key while it is open (§5.2) but a chord,
-    // which is never the field's own — `route` answers `None` for one
-    // too, but the check here comes FIRST so a chord is not the
-    // field's even while it is open (review round 2, finding 2); a
-    // modal owns the keyboard, so it goes where every modal chord
-    // goes — never to the matcher. Anything else non-chord is claimed
-    // regardless of whether `route` recognizes it: an unclaimed key
-    // would otherwise reach the shared `Input` as typing (`input.rs`'s
-    // key-path seam), re-filtering the list and hiding the Custom row
-    // out from under its own open field.
+    // Custom claims every non-chord key, including keys the segmented field
+    // cannot use. Letting one reach the shared Input could filter away Custom.
+    // Chords remain with the outer modal handler.
     if state.field().is_some() {
         if ks.mods.is_chord() {
             return false;
@@ -186,18 +148,8 @@ fn handle_key(
                 let Some(state) = shell.as_of_dialog.as_mut() else {
                     return false;
                 };
-                // The re-feed this used to do here (`state.set_query(
-                // &live)`) is now redundant: `sync_dialog_text`'s as-of
-                // arm (this function's own doc comment) keeps the shared
-                // `Input` and `AsOfState::query` equal on every return
-                // from this handler, so by the time a later keystroke
-                // reaches here the two can never have diverged. Final
-                // whole-branch review, finding M-8: re-feeding anyway
-                // would be worse than redundant if they ever DID diverge
-                // — `set_query` re-ranks and resets the highlight to 0
-                // (review round 2's Critical all over again), silently
-                // committing row 0 instead of whatever the trader is
-                // actually looking at. The assert is the tripwire.
+                // Input changes and `sync_dialog_text` must keep these equal. Re-ranking
+                // here on divergence could reset the highlight and commit another row.
                 debug_assert_eq!(
                     state.query(),
                     live.as_str(),
@@ -256,15 +208,9 @@ pub fn segment_paint(theme: &Theme) -> SegmentPaint {
         g: 1.0,
         b: 1.0,
     };
-    // Moved toward pure black or pure white, whichever contrasts more
-    // with the fill itself — not toward `theme.foreground`, which on
-    // several bundled light themes (a light `foreground` sitting close
-    // in lightness to a light `primary`) is itself under 3:1 against the
-    // fill, leaving `readable_on` no `t` that clears. Every colour
-    // clears 3:1 against one of black and white, so this floor always
-    // lands — the same fix `geode-marketdata`'s `FlooredTones::
-    // primary_text` already made for the identical `primary_foreground`
-    // over `primary` pairing.
+    // Use the black or white endpoint with greater contrast against the fill.
+    // The theme foreground can itself be below the required ratio, leaving
+    // `readable_on` unable to reach the floor.
     let floored = |text: Hsla, fill: Hsla| -> Hsla {
         let ground = over(fill, popover);
         let toward = if contrast_ratio(black, ground) >= contrast_ratio(white, ground) {
@@ -380,25 +326,7 @@ fn build(
                                 {
                                     f.select(segment);
                                 }
-                                // Final whole-branch review, finding I-1:
-                                // every OTHER seam that mutates `AsOfState`
-                                // reconciles the shared `Input` through
-                                // this same call (this function's own doc
-                                // comment names the key-path seam; the
-                                // row-click arm below already did it on
-                                // its own opening click) — a segment
-                                // select had no seam of its own. Belt and
-                                // braces today (`render_modal`'s panel
-                                // already stops this mouse-down's
-                                // propagation before it could reach the
-                                // shell root's own default focus grab —
-                                // verified empirically, not assumed — so
-                                // nothing observable currently regresses
-                                // without this call), but the one thing
-                                // every mutation of the field is supposed
-                                // to do unconditionally, and cheap enough
-                                // that skipping it here was the outlier,
-                                // not a deliberate exception.
+                                // Reconcile the shared Input after selecting a field segment.
                                 dialog::sync_dialog_text(shell, window, cx);
                                 cx.notify();
                             });
@@ -440,22 +368,8 @@ fn build(
                     return;
                 };
                 if is_custom {
-                    // A click on the Custom row's body (not a segment —
-                    // the painter stops propagation there) opens the
-                    // field, like `tab`. `sync_dialog_text` is hoisted
-                    // OUT of the `field().is_none()` arm (final
-                    // whole-branch review, finding I-1): every arm that
-                    // mutates `AsOfState` reconciles the shared `Input`
-                    // through this call, and a body click on an
-                    // ALREADY-open Custom row is exactly such a mutation
-                    // (it still runs `set_highlighted`-equivalent work
-                    // via the highlight move to the Custom row on open,
-                    // and is symmetric with the segment click beside it),
-                    // so it belongs here whether or not THIS particular
-                    // click is the one that opened the field, the same
-                    // "every seam, not just the ones that happened to
-                    // need it" reasoning the segment click's own call
-                    // just above follows.
+                    // A Custom body click opens the field if needed. Segment clicks stop
+                    // propagation; both paths reconcile the shared Input.
                     if state.field().is_none() {
                         state.open_field();
                     }

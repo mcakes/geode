@@ -14,6 +14,7 @@ Start with the documents that describe Geode **as it works now**:
 | [Data path](current/data-path.md) | Current data flow, correctness rules, and reasons for them |
 | [Requests and UI delivery](current/request-delivery.md) | Request admission, cancellation, reload, shutdown, mailbox coalescing, and window routing |
 | [Shell](current/shell.md) | Window ownership, tiles, input, focus, modules, and persistence |
+| [Input and dialogs](current/input-and-dialogs.md) | Keyboard ownership, modal lifetime, palette, completion, choices, and frame pickers |
 | [Tiling and workspaces](current/tiling.md) | Layout geometry, region focus, stacks, transfers, resizing, and restoration limits |
 | [Feature modules](current/features.md) | Blotter, documents, timeseries, diagnostics, pricing, and demo behavior |
 | [Crate READMEs](../crates/) | Local module maps and crate contracts |

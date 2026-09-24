@@ -1,18 +1,7 @@
-//! The which-key hint (Task 8, spec §3): while a keystroke sequence is
-//! pending (`Matcher::pending()` non-empty — e.g. mid-way through a
-//! desk/user-layer sequence like `g g`; the builtin keymap has no
-//! sequences of its own anymore), show a small overlay listing every
-//! keystroke that would continue
-//! some binding from here, next to the title of what it would do.
-//!
-//! Split the same way `palette.rs` is: `continuations` is the pure core
-//! (TDD'd without gpui, below) computing which keys continue the pending
-//! sequence; `render`, at the bottom, is the only part that touches
-//! `gpui`/`gpui_component`. Display-only: the overlay never steals focus or
-//! changes key routing — `ShellView` keeps feeding keystrokes to
-//! `self.matcher` exactly as it does today, this module only reads the
-//! result. No delay timer (YAGNI until it annoys someone): the overlay
-//! appears the same frame the matcher goes pending.
+//! Display-only hints for a pending keymap sequence. The shell shows this
+//! panel while the matcher has pending keystrokes; it neither takes focus nor
+//! changes routing. Continuations are computed from active predicates and the
+//! compiled keymap. No delay timer is used.
 
 use super::scale;
 use crate::actions::{ActionId, ActionRegistry};
@@ -20,44 +9,17 @@ use crate::keymap::{KeyContext, Keymap, Keystroke, UNBOUND_ACTION};
 use crate::palette::render_keystroke;
 use std::collections::HashMap;
 
-/// For every binding whose keystroke sequence strictly extends `pending`
-/// and whose predicate passes against `stack`, the keystroke immediately
-/// following `pending` paired with the action that binding resolves to.
+/// Return one representative action per next key after `pending`, restricted
+/// to bindings whose predicates match the supplied context stack.
 ///
-/// Bindings are deduped by that next keystroke, keeping the *shortest*
-/// binding when more than one shares it. That "shortest wins" outcome
-/// rests on two different justifications depending on how short the
-/// survivor is — this is not one rule mirroring `Matcher` throughout:
-/// - **Exactly one keystroke past `pending`:** this genuinely mirrors
-///   `Matcher` itself (its own "exact match beats longer candidate",
-///   `matcher.rs` `exact_match_beats_longer_candidate`) — pressing that key
-///   would fire this binding's action immediately rather than extend the
-///   sequence further, so it's the *only* action `Matcher` could ever
-///   resolve to for that key. No ambiguity, nothing conventional about it.
-/// - **Two (or more) candidates all longer than one keystroke** — e.g.
-///   `"ctrl+w h x"` (len 3) and `"ctrl+w h y z"` (len 4) both sharing next
-///   keystroke `h` from `pending = ["ctrl+w"]`: here `Matcher` has *no*
-///   analogous precedent — every one of them would leave `Matcher` merely
-///   `Pending` at that key, with no opinion between them until further
-///   keys arrive. Preferring the shortest here is a **deliberate display
-///   convention** of this hint alone (shorter sequences are likelier to be
-///   what the user is about to complete), pinned by
-///   `both_longer_collision_keeps_the_shorter_sequence_as_a_convention`
-///   below so a future change to it is a conscious one, not an accident of
-///   `HashMap` iteration order.
+/// Prefer the shortest extension, then the last equal-length binding in compiled
+/// order. A one-key extension mirrors the matcher's immediate exact resolution.
+/// Longer alternatives share a display convention: the shown action may require
+/// additional keys, and other tails sharing that next key are not listed.
 ///
-/// Independently of shortest-wins: among bindings tied for the very same
-/// length at this next keystroke, last-wins by layer-then-declaration
-/// order — so a user-layer rebind (or unbind, via the `none` action) of
-/// the same extended sequence shadows whatever a lower layer bound there.
-///
-/// Only after that resolution are entries whose *final* action is `none`
-/// dropped: an unbound continuation must not be advertised as one, but an
-/// unbind must still be able to shadow a real lower-layer binding on its
-/// way to being dropped.
-///
-/// Sorted by rendered keystroke text (`render_keystroke`, shared with the
-/// palette's own binding-text rendering rather than a third copy of it).
+/// Resolve ties before dropping `none`, so an unbind can hide a lower-layer hint.
+/// Sort results by rendered key spelling. An empty prefix is accepted by this
+/// helper; the shell controls when the hint is visible.
 pub fn continuations(
     keymap: &Keymap,
     pending: &[Keystroke],
@@ -92,11 +54,7 @@ pub fn continuations(
     result
 }
 
-/// The row title for one continuation: the registry's own title for the
-/// action, falling back to the bare action id when it isn't registered.
-/// `build_keymap` already drops bindings to unknown actions (spec §10.1),
-/// so this fallback shouldn't fire for a real keymap — but this is display
-/// code, not a place to unwrap and panic on the rare stale-registry case.
+/// Use a registered action title, falling back to its ID when registration is absent.
 fn title_for(registry: &ActionRegistry, action: &ActionId) -> String {
     registry
         .get(action)
@@ -117,12 +75,9 @@ const WIDTH: f32 = 220.0;
 /// Gap kept from the right/bottom edges of the viewport / status bar.
 const MARGIN: f32 = 8.0;
 
-/// Render the which-key overlay: a small `popover`-toned panel anchored to
-/// the bottom-right, sitting just above the status bar, listing each
-/// continuation as `key → title`. When `count` is `Some`, the panel's
-/// first row shows the count in flight (§3.3) ahead of the continuations.
-/// Caller (`ShellView::render`) only calls this when `matcher.pending()`
-/// is non-empty.
+/// Render continuation keys and action titles above the status bar, with an
+/// optional pending count. The caller shows this only for a nonempty sequence;
+/// a count alone does not make it visible.
 pub fn render(
     continuations: &[(Keystroke, ActionId)],
     count: Option<u32>,
@@ -162,12 +117,8 @@ pub fn render(
         );
     }
 
-    // The panel div still paints (with test-hook debug_selector below) even
-    // for an empty `continuations` — a matcher.pending()-non-empty state
-    // should always carry at least one continuation in practice (a
-    // `Matcher` only goes `Pending` when it already found a longer
-    // candidate), so this stays a thin, honest wrapper rather than adding
-    // a branch this crate's tests can't exercise for real.
+    // Keep an empty panel measurable in tests. Overlay visibility depends on
+    // pending matcher input, not the number of displayable continuations.
     div()
         .absolute()
         .right(px(margin))
@@ -263,13 +214,8 @@ mod tests {
 
     #[test]
     fn empty_pending_still_matches_length_one_bindings() {
-        // Pure-core contract: `continuations` doesn't special-case an empty
-        // `pending` — every binding "strictly extends" it. The caller
-        // (`ShellView::render`) is what only invokes this while
-        // `matcher.pending()` is non-empty. "g" and "g g" share the same
-        // next keystroke ("g") from an empty pending; the exact one-key
-        // binding wins (see `exact_binding_beats_a_longer_one_sharing_the_
-        // same_next_key`) since pressing "g" alone fires it immediately.
+        // An empty prefix includes all bindings. When they share a next key,
+        // a one-key binding takes precedence over a longer sequence.
         let km = keymap(
             &[(
                 Layer::Builtin,
@@ -302,16 +248,8 @@ mod tests {
 
     #[test]
     fn both_longer_collision_keeps_the_shorter_sequence_as_a_convention() {
-        // Unlike `exact_binding_beats_a_longer_one_sharing_the_same_next_
-        // key`, *neither* binding here resolves at the next keystroke:
-        // "ctrl+w h x" (len 3) and "ctrl+w h y z" (len 4) both extend past
-        // it. `Matcher` has no precedent to mirror for this case — every
-        // candidate would leave it merely `Pending` at "h", with no
-        // opinion between them until further keys arrive. Preferring the
-        // shorter one is this hint's own display convention (see
-        // `continuations`'s doc comment); this test pins that choice so a
-        // future change to it is deliberate, not an accident of `HashMap`
-        // iteration order.
+        // Neither candidate resolves at the next key. The shorter sequence is
+        // a representative display choice; dispatch still waits for further input.
         let km = keymap(
             &[(
                 Layer::Builtin,

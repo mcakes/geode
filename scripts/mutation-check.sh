@@ -1944,15 +1944,13 @@ run_mutation "keybindings: a click leaves the previous row's notice standing" \
   '    if state.notice.take().is_some() {
         cx.notify();
     }
-    // Spec §20.1: a click is claimed and dropped while a question stands —
-    // the object dialog'"'"'s tick-click rule (§18.9.2) on this surface.
+    // An armed question owns input until answered; ignore list clicks.
     if state.confirm.is_some() {
         return;
     }
     let visible = visible_rows(state, &rows);
     let Some(ix)' \
-  '    // Spec §20.1: a click is claimed and dropped while a question stands —
-    // the object dialog'"'"'s tick-click rule (§18.9.2) on this surface.
+  '    // An armed question owns input until answered; ignore list clicks.
     if state.confirm.is_some() {
         return;
     }
@@ -11447,10 +11445,10 @@ run_mutation "insert: a non-binding keystroke falls through to the matcher" \
   '            return;
         }
 
-        // Deliberately no analogous "if palette_input is focused, return' \
+        // The palette handles its own navigation and text below. Convert once for' \
   '        }
 
-        // Deliberately no analogous "if palette_input is focused, return' \
+        // The palette handles its own navigation and text below. Convert once for' \
   geode-shell a_count_prefix_typed_in_insert_mode_is_text_not_a_count
 
 # Controller ruling: a bare key resolves only against the contexts that
@@ -12129,11 +12127,9 @@ run_mutation "final: a restored draft's dropped edits are named" \
 # into the abandoned cell, count prefix and all.
 run_mutation "final: a keyboard focus move hands the keyboard back to the shell" \
   crates/geode-shell/src/shell/input.rs \
-  '            // own, which is exactly the kind of drift the mechanism rule
-            // is against.
+  '            // would have to track the workspace router exactly.
             self.note_keyboard_focus_move(window, cx);' \
-  '            // own, which is exactly the kind of drift the mechanism rule
-            // is against.' \
+  '            // would have to track the workspace router exactly.' \
   geode-shell \
   a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell
 
@@ -14169,12 +14165,12 @@ run_mutation "objectdialog: the chip door refuses a read-only domain (spec §20.
 run_mutation "dialog: the keybindings frozen-row click is dropped while a confirm is armed (spec §20.1)" \
   crates/geode-shell/src/shell/dialog.rs \
   '    if let Some(state) = shell.keybindings.as_mut() {
-        // Spec §20.1: not over an open question.
+        // Keep the confirmation'"'"'s exclusive input route until it is answered.
         if state.confirm.is_some() {
             return;
         }' \
   '    if let Some(state) = shell.keybindings.as_mut() {
-        // Spec §20.1: not over an open question.
+        // Keep the confirmation'"'"'s exclusive input route until it is answered.
         if false {
             return;
         }' \
@@ -15357,8 +15353,8 @@ run_mutation "grouping: the readout click opens the picker" \
 run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
   crates/geode-shell/src/shell/dialog.rs \
   '    window.prevent_default();
-    // The open-door seam' \
-  '    // The open-door seam' \
+    // Dialog state is installed before this call so synchronization can choose its' \
+  '    // Dialog state is installed before this call so synchronization can choose its' \
   geode-shell \
   the_pick_chip_is_always_present_and_opens_the_picker
 

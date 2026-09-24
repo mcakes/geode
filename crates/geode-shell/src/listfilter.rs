@@ -51,21 +51,10 @@ pub fn rank(texts: &[String], query: &str) -> Vec<Ranked> {
     scored.into_iter().map(|(_, ranked)| ranked).collect()
 }
 
-/// Map one keystroke onto a list-navigation command, or `None` if no
-/// list surface claims it (see the module doc for what they *can*
-/// claim). The caller feeds the result to [`crate::vimnav::apply`],
-/// which wraps a bare ±1 and clamps every larger or counted step (spec
-/// §20.5) against the current — filtered — row count.
-///
-/// Every palette motion goes through this and `vimnav::apply` — the
-/// palette has no motion arms of its own any more (`PaletteState::
-/// move_selection` was deleted in spec §20's final fix wave), so a bare
-/// ±1 (`up`/`down`/`ctrl+p`/`ctrl+n`) wraps and every larger step
-/// (`ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`/page up/down) clamps, by
-/// `apply`'s one rule. The dialogs — keybindings, settings, the object
-/// dialog — and the picker and as-of selector route the same way, so
-/// nothing here has to inspect the returned delta to decide which rule
-/// applies (spec §3, "The command palette"; §20.5).
+/// Recognize filtered-list navigation while Input owns printable text:
+/// Up/Down and Control-P/N move ±1, Control-U/D move ±5, and Control-B/F or
+/// PageUp/PageDown move ±10. Exact modifier sets are required. Callers apply
+/// these commands to the filtered row count through [`crate::vimnav::apply`].
 pub fn nav_command(ks: &Keystroke) -> Option<NavCommand> {
     let delta = match (ks.mods, ks.key.as_str()) {
         (Modifiers::NONE, "up") | (Modifiers::CTRL, "p") => -1,

@@ -1,7 +1,6 @@
-//! The per-tile command line's pure state (Phase 3 §3.4): the word under
-//! the cursor, ranked completions through the palette's fuzzy matcher,
-//! accepting one, and the key vocabulary. `shell::commandline_view`
-//! paints it; `ShellView` routes keys to it. No `gpui` here.
+//! Per-tile prompt state and pure completion helpers: word boundaries, fuzzy
+//! ranking, replacement, selection cycling, and submit resolution. The shell
+//! controller owns Input, focus, and routing to the prompt's captured tile.
 
 use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter::{Ranked, rank};
@@ -50,7 +49,7 @@ impl CommandLine {
         }
     }
 
-    /// Re-rank for a new line and vocabulary.
+    /// Refresh token range and ranked vocabulary, resetting selection and error state.
     pub fn refresh(&mut self, line: &str, cursor: usize, words: Vec<String>) {
         self.word = word_at(line, cursor);
         self.words = words;
@@ -88,9 +87,7 @@ fn is_delimiter(c: char) -> bool {
 /// returned, extending forward past it to the word's real end.
 pub fn word_at(line: &str, cursor: usize) -> Range<usize> {
     let mut cursor = cursor.min(line.len());
-    // M4: `InputState::cursor` should always be on a char boundary, but
-    // this pure core must not depend on that — clamp down to the nearest
-    // boundary at or before it rather than panicking on the slices below.
+    // Clamp external byte offsets backward to a UTF-8 boundary before slicing.
     while !line.is_char_boundary(cursor) {
         cursor -= 1;
     }
@@ -115,7 +112,8 @@ pub fn rank_candidates(words: &[String], word: &str) -> Vec<Ranked> {
     rank(words, word)
 }
 
-/// Replace `word` in `line` with `candidate`; the new cursor sits after it.
+/// Replace a valid UTF-8 byte range with the candidate and return the byte
+/// cursor immediately after it. Callers must supply an in-bounds boundary range.
 pub fn accept(line: &str, word: Range<usize>, candidate: &str) -> (String, usize) {
     let mut out = String::with_capacity(line.len() + candidate.len());
     out.push_str(&line[..word.start]);
@@ -156,9 +154,10 @@ pub enum Submit {
     Ambiguous(Vec<String>),
 }
 
-/// Enter's decision (§3.4): an exact word or no candidates runs as typed;
-/// exactly one candidate is accepted and run; more is refused. The line
-/// never guesses.
+/// Resolve submission independently of the highlighted candidate. An empty
+/// current word, no matches, or an exact case-sensitive vocabulary match runs the
+/// line unchanged. A unique candidate replaces the word and runs; multiple
+/// nonexact matches return ambiguity. Callers provide candidates for this token.
 pub fn resolve_submit(
     line: &str,
     cursor: usize,
@@ -218,11 +217,7 @@ mod tests {
 
     #[test]
     fn a_cursor_on_a_non_char_boundary_clamps_down_instead_of_panicking() {
-        // M4: "café" — 'é' is a 2-byte UTF-8 char occupying bytes 8..10 of
-        // this line, so byte 9 sits inside it. `InputState::cursor` should
-        // always land on a boundary, but the pure core must not depend on
-        // that: it clamps down to the nearest boundary at or before the
-        // given cursor rather than panicking on the slice.
+        // A byte cursor inside the two-byte é must snap backward before slicing.
         let line = "sort café";
         assert_eq!(
             word_at(line, 9),

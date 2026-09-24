@@ -1,19 +1,10 @@
-//! The scope expression dialog (command-line locality spec §4.1): the
-//! typed door onto the frame's expression layer now that `:scope <expr>`
-//! is a refusal. In [`asof_view`](super::asof_view)'s mould: the shared
-//! `dialog_input` IS the value being edited, `enter` commits, a parse
-//! error paints inline and keeps the dialog open, an empty field clears
-//! the expression. Opened by `frame::scope_expression` (the palette's
-//! "Set scope expression…") and by a click on the scope bar's expression
-//! chip (`toolbar::toolbar`'s `on_expr`).
+//! Edit the frame's expression layer in the shared dialog Input.
+//! Enter parses and applies the draft; an empty field clears the expression.
+//! A parse error stays inline, and editing clears the error. Escape closes
+//! without applying. Each open seeds a fresh draft from the current frame.
 //!
-//! No dataset validation here (spec §4.1): `:scope <expr>` validated
-//! against the typing tile's dataset, arbitrary for a frame-wide value;
-//! the compiler drops a conjunct naming a column a dataset has no
-//! storage for, and a saved scope's expression arrives unvalidated too.
-//!
-//! [`open`] is the only entry point and the only place a
-//! [`ScopeExprState`] is constructed — nothing survives a close/reopen.
+//! Validation here is syntax-only: there is no dataset, column, or operator
+//! compatibility check. A parsed expression can still fail a later query.
 
 use std::rc::Rc;
 
@@ -41,9 +32,8 @@ pub struct ScopeExprState {
     pub error: Option<String>,
 }
 
-/// What `enter` does with the field's text: empty clears the expression
-/// (`Ok(None)`), anything else must parse. The message is the one the
-/// `:` line used to show (`"{message} at column {caret}"`).
+/// Trim and parse the draft, treating an empty value as clearing the layer.
+/// Errors label the parser's one-based byte offset as a column.
 pub fn commit_text(text: &str) -> Result<Option<Expr>, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -145,10 +135,7 @@ fn build(shell: &ShellView, _window: &mut Window, cx: &mut App) -> AnyElement {
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx));
     if let Some(err) = &state.error {
-        // Through the chip door (`shell::chip`), not a raw `theme.danger`:
-        // that token bypasses the readability floor, and the parse error
-        // is the single thing in this dialog a trader must be able to
-        // read (review finding, Task 6 fix round 1).
+        // Use the chip paint helper so error text meets its readability floor.
         column = column.child(
             div()
                 .text_sm()

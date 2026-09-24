@@ -1,10 +1,7 @@
-//! The as-of dialog's pure row model (as-of dialog spec 2026-09-20 §5.1):
-//! one ranked list in five fixed sections — `Current` and `Live` (only
-//! while the frame is pinned), the business-day presets, the `Custom`
-//! row holding the segmented field, the recent publishes — ranked by
-//! `listfilter::rank` over each row's LABEL (the right column is paint,
-//! never matched), section order kept and rank order inside a section.
-//! No `gpui`: every transition is unit-tested here; `asof_view` paints.
+//! The as-of dialog's pure row model. Sections stay in this order: Current
+//! and Live while pinned, business-day presets, Custom, then recent publishes.
+//! Each section ranks labels independently; the right-hand timestamps are
+//! not searchable. `asof_view` owns rendering and modal input.
 
 use chrono::{DateTime, Timelike, Utc};
 
@@ -72,10 +69,7 @@ struct Entry {
     section: Section,
 }
 
-/// [`AsOfState::rebuild`]'s return shape — entries, presets, publish
-/// instants, the pinned instant — named so clippy's `type_complexity`
-/// lint doesn't fire on the private helper both `build` and `refresh`
-/// share.
+/// Rows, preset instants, publish instants, and the pin rebuilt together.
 type RebuiltRows = (
     Vec<Entry>,
     Vec<Preset>,
@@ -118,10 +112,7 @@ impl AsOfState {
         state
     }
 
-    /// The entries/presets/publish-instants/pinned quadruple `build` and
-    /// [`refresh`](Self::refresh) both need — pulled out so a refresh
-    /// rebuilds the ROWS exactly the way an open builds them, never a
-    /// second, drifting copy of the same shape.
+    /// Build the same row and instant mappings for opening and refreshing.
     fn rebuild(
         as_of: &AsOf,
         publishes: &[Publish],
@@ -181,19 +172,11 @@ impl AsOfState {
         (entries, presets, instants, pinned)
     }
 
-    /// A publish landed (or the pin changed) while the dialog is open
-    /// (spec §5.1, parity with the old `cached_presets`): rebuild the
-    /// rows with the SAME query, keep the highlighted row by identity —
-    /// `(section, label, right)`, since a row's own index can shift when
-    /// a new publish is prepended — falling back to `0` when it no
-    /// longer exists, and leave an open Custom field's own edit state
-    /// untouched (`self.field` is never read or written here; the
-    /// Custom row itself is always present, so its identity survives a
-    /// refresh the same way any other row's does). `right` (the
-    /// formatted timestamp) joins `label` in the identity because two
-    /// publishes can share a label (`"risk / EOD · 12 books"` twice, at
-    /// different instants) — `label` alone would let the highlight hop
-    /// to whichever one now sorts first (review round 2 re-review).
+    /// Refresh rows using the clock captured at open, retaining the query and
+    /// Custom field edit state. Restore the highlight by displayed
+    /// `(section, label, right)`, falling back to row 0 if it disappears.
+    /// Including the formatted timestamp distinguishes many repeated publish
+    /// labels, but instants with identical display text still share an identity.
     pub fn refresh(&mut self, as_of: &AsOf, publishes: &[Publish], now: DateTime<Utc>) {
         let previous = self
             .ranked
@@ -216,8 +199,7 @@ impl AsOfState {
         }
     }
 
-    /// Rank every section's labels against the query, sections in fixed
-    /// order, rank order inside each; an empty query keeps file order.
+    /// Rank labels within each fixed section; an empty query keeps input order.
     fn rerank(&mut self) {
         const ORDER: [Section; 5] = [
             Section::Current,
@@ -283,9 +265,8 @@ impl AsOfState {
         true
     }
 
-    /// `1`-`5` on an EMPTY query: that preset's commit (the grouping
-    /// picker's digit-jump precedent). `None` for a typed query, `0`, a
-    /// non-digit, or a digit past the painted presets.
+    /// `1`–`5` with an empty query commits that preset. Return `None` for a
+    /// nonempty query, `0`, a non-digit, or a digit beyond the preset list.
     pub fn jump_digit(&self, key: &str) -> Option<Commit> {
         if !self.query.is_empty() {
             return None;
@@ -317,12 +298,8 @@ impl AsOfState {
             .and_then(|p| self.instant_of(&p.row))
             .or(self.pinned)
             .unwrap_or(self.now)
-            // Final whole-branch review, finding M-3: the field has no
-            // sub-second segment (`Segment::ALL` stops at `Second`), so a
-            // seed carrying nanoseconds (typically `now`) kept them dead
-            // in `self.value` where nothing ever showed or cleared
-            // them — a bare `tab` then `enter` with no segment touched
-            // would silently commit `HH:MM:SS.<whatever now's ns were>`.
+            // The field exposes seconds but no fractional segment. Truncate the seed
+            // so committing an untouched field cannot retain invisible nanoseconds.
             .with_nanosecond(0)
             .expect("0 is always a valid nanosecond value");
         let local = self.clock.local(seed).naive_local();
@@ -350,11 +327,7 @@ impl AsOfState {
         self.field.as_ref()
     }
 
-    /// The field for editing. Clears a standing DST-gap refusal on every
-    /// call — any further key routed to the field is a fresh attempt, and
-    /// the stale refusal must not keep painting on the Custom row through
-    /// it (`field_refusal` is only ever set again by a `commit` that
-    /// refuses).
+    /// Get the field for editing and clear any previous commit refusal.
     pub fn field_mut(&mut self) -> Option<&mut DateTimeField> {
         self.refusal = None;
         self.field.as_mut()
@@ -376,9 +349,10 @@ impl AsOfState {
         self.now
     }
 
-    /// What `enter` does: with the field open, its value resolved on the
-    /// clock (a DST gap is the one refusal, kept on `refusal` for the row
-    /// to paint); otherwise the highlighted row's own instant.
+    /// Commit the open field after completing its pending segment and resolving
+    /// local time on the captured clock. Incomplete segments and DST gaps leave
+    /// a refusal for the row to paint. Without a field, commit the highlighted
+    /// instant or Live; no selection and an unopened Custom row are errors.
     pub fn commit(&mut self) -> Result<Commit, String> {
         if let Some(field) = self.field.as_mut() {
             if let Err(segment) = field.complete_pending() {
@@ -592,13 +566,8 @@ mod tests {
         );
         assert_eq!(s.field().unwrap().segment(), Segment::Day);
 
-        // Final whole-branch review, finding M-3: the field has no
-        // sub-second segment (`Segment::ALL` stops at `Second`), so a
-        // nanosecond-bearing seed — `now` itself, most likely, since
-        // nothing else in this state carries one — must be truncated to
-        // the second before it ever reaches the field's value, or a
-        // bare `tab` then `enter` with no segment touched would silently
-        // commit `HH:MM:SS.<whatever now's nanoseconds were>`.
+        // A field with no fractional segment must discard hidden nanoseconds,
+        // even when committed without any segment edit.
         let now_with_ns = now()
             .with_nanosecond(123_456_789)
             .expect("a valid nanosecond value");
@@ -778,13 +747,7 @@ mod tests {
         assert_eq!(s.painted()[0].label, "EOD T-1");
     }
 
-    /// Task 1 coverage minor: the `Live` row has no instant of its own
-    /// (`instant_of` answers `None` for it, same as `Custom`) — `tab`
-    /// from it must fall through to the PIN (`.or(self.pinned)`), not
-    /// `now`. `tab_seeds_the_field_from_the_highlighted_row_or_the_pin_
-    /// or_now` only exercises the pin fallback from `Current` (row 0);
-    /// this is the sibling row that shares the same fallback for a
-    /// different reason.
+    /// Live has no instant, so opening Custom from it uses the pin before now.
     #[test]
     fn tab_from_the_live_row_while_pinned_seeds_the_pin() {
         let pinned = Utc.with_ymd_and_hms(2026, 9, 18, 16, 0, 0).unwrap();
@@ -799,9 +762,7 @@ mod tests {
         );
     }
 
-    /// Task 1 coverage minor: committing a highlighted `Publish` row
-    /// answers that publish's OWN `at`, via `instant_of`'s `Row::
-    /// Publish(i) => self.publishes.get(*i)` arm.
+    /// A highlighted publish commits its own instant.
     #[test]
     fn commit_on_a_highlighted_publish_row_equals_that_publishs_at() {
         let at = now() - chrono::Duration::hours(3);
@@ -816,10 +777,7 @@ mod tests {
         assert_eq!(s.commit().unwrap(), Commit::At(at));
     }
 
-    /// Task 1 coverage minor: `Custom` has no instant of its own, and
-    /// `commit` with no field open refuses it explicitly rather than
-    /// falling through to `instant_of` (which would answer `None` too,
-    /// but the `Row::Custom` arm is its own, more specific refusal).
+    /// Custom requires an open field before it can commit.
     #[test]
     fn commit_on_custom_with_no_field_open_is_an_error() {
         let mut s = state(AsOf::Live, &[]);
@@ -832,8 +790,7 @@ mod tests {
         assert!(s.commit().is_err());
     }
 
-    /// Task 1 coverage minor: `set_highlighted` past the end of the
-    /// painted list is refused and leaves the highlight untouched.
+    /// An out-of-range selection leaves the highlight unchanged.
     #[test]
     fn set_highlighted_out_of_range_is_refused() {
         let mut s = state(AsOf::Live, &[]);

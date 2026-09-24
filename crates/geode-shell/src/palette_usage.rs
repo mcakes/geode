@@ -1,40 +1,20 @@
-//! Palette usage: how often and how recently each palette row was chosen,
-//! and the bounded ranking bonus that turns those two numbers into the
-//! "brain-reading" order a trader expects — the command they reach for
-//! every morning at the top of an empty palette, and a habitual command
-//! leapfrogging a marginally better textual match on a typed query — within
-//! the bound [`MAX_BONUS`] states.
+//! Bounded usage history for palette ranking, with caller-supplied Unix time.
+//! Each row records a count and last-use time. The palette snapshots bonuses at
+//! open, keeping ranking work per query independent of clock reads and map lookup.
 //!
-//! Pure, in the mould of `listfilter` and `vimnav`: no gpui, no clock, no
-//! I/O. Every method takes `now` as unix seconds so tests fix time
-//! outright; `ShellView` reads the wall clock once per record and once per
-//! palette open (`PaletteState::with_usage` bakes one bonus per item at
-//! open, so a keystroke's filter pass adds an integer per item and looks
-//! nothing up). The map persists as `session.toml`'s `[palette.usage]`
-//! table (`session::to_toml`/`from_toml`) — per-machine state riding the
-//! session file's own coalesced flush, not a config document of its own,
-//! because the user config dir is mtime-watched for every `*.toml` but
-//! `session.toml` and a separate usage file would trigger a config reload
-//! on every palette dispatch.
+//! History persists in session.toml, which the config reload scanner excludes.
+//! Recording palette choices therefore participates in session saving without
+//! triggering configuration reloads.
 
 use std::collections::BTreeMap;
 
-/// The most entries the map keeps. Recording past it drops the entry
-/// whose bonus is lowest as of that moment (the least recent, then the
-/// least used), so the file stays bounded no matter how many themes or
-/// saved scopes a trader cycles through.
+/// Maximum retained records. Recording prunes by lowest current bonus,
+/// then oldest last-use time, then lexicographically first key.
 pub const MAX_ENTRIES: usize = 256;
 
-/// The largest bonus any entry can earn: [`RECENCY_BONUS`]'s first bucket
-/// plus [`FREQUENCY_CAP`], i.e. two of the matcher's run bonuses. What
-/// that buys, against the palette's own scores (title prefix `10k + 1`
-/// for a `k`-char run, discounted category word start `6k − 1`): a bare
-/// scattered match never beats a contiguous run whatever its usage; a
-/// maxed-out row whose only hit is in its category leads an unused title
-/// prefix at `k ≤ 3`, ties it at `k = 4` and loses from `k = 5` on. That
-/// is the ruling (review 2026-09-12), pinned by `palette::tests::
-/// a_used_category_hit_leads_a_short_title_prefix_and_loses_to_a_long_one`
-/// — read it before moving this, [`RECENCY_BONUS`] or [`FREQUENCY_CAP`].
+/// Largest row bonus: 18 points from recency plus capped frequency.
+/// Only textual matches receive it; it can change ordering among close matches.
+/// The scoring relationship is checked against two RUN_BONUS values below.
 pub const MAX_BONUS: u32 = RECENCY_BONUS[0] + FREQUENCY_CAP;
 const _: () = assert!(MAX_BONUS == 2 * crate::palette::RUN_BONUS);
 
@@ -45,9 +25,8 @@ const _: () = assert!(MAX_BONUS == 2 * crate::palette::RUN_BONUS);
 const RECENCY_BONUS: [u32; 4] = [12, 8, 4, 1];
 const RECENCY_EDGES: [u64; 3] = [60 * 60, 24 * 60 * 60, 7 * 24 * 60 * 60];
 
-/// What frequency adds at most: `count - 1`, capped here, so the second
-/// use of a command adds one point and the eighth and every later one add
-/// the same six.
+/// Frequency contribution: count minus one, saturated at six.
+/// The seventh and later uses therefore receive the maximum frequency bonus.
 const FREQUENCY_CAP: u32 = 6;
 
 /// One row's record: how many times it was chosen and when it was last
@@ -132,8 +111,7 @@ impl PaletteUsage {
         self.entries.get(key).map_or(0, |record| record.bonus(now))
     }
 
-    /// The `[palette.usage]` table: one `{ count, last_used }` inline
-    /// table per key.
+    /// Serialize count and last-used fields per key; timestamps saturate at i64::MAX.
     pub fn to_toml(&self) -> toml::Table {
         let mut table = toml::Table::new();
         for (key, record) in &self.entries {
@@ -151,14 +129,10 @@ impl PaletteUsage {
         table
     }
 
-    /// Read a `[palette.usage]` table back, tolerantly: an entry that is
-    /// not a table, or whose `count`/`last_used` is missing, not an
-    /// integer, or negative, is dropped with a warning — never a reason
-    /// to fail the session file. A file holding more than [`MAX_ENTRIES`]
-    /// entries (hand-edited, or written by a build with a larger cap) is
-    /// cut down to the cap here, once, keeping the most recent and then
-    /// the most used — rather than one entry per `record` on the UI
-    /// thread, an `O(n)` pass each, for as many dispatches as it was over.
+    /// Read usage entries independently, warning and skipping malformed tables
+    /// or missing/non-integer/negative fields. Counts saturate at u32::MAX. Oversized
+    /// maps retain the most recent records, then highest counts, then smallest keys;
+    /// this load-time ordering does not use the time-dependent ranking bonus.
     pub fn from_toml(table: &toml::Table, warnings: &mut Vec<String>) -> Self {
         let mut entries = BTreeMap::new();
         for (key, value) in table {
@@ -338,9 +312,7 @@ mod tests {
         assert_eq!(warnings.len(), 3, "{warnings:?}");
     }
 
-    /// An oversize file (hand-edited, or written by a build with a larger
-    /// cap) is cut down once on load — by the least recent, then least
-    /// used — rather than one entry per `record` on the UI thread.
+    /// Load-time trimming keeps the most recent records, breaking ties by frequency.
     #[test]
     fn an_oversize_file_is_pruned_once_on_load_keeping_the_most_recent() {
         let mut usage = PaletteUsage::new();

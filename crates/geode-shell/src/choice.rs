@@ -1,28 +1,16 @@
-//! Shared pure core for "choose one value from a list, with typeahead"
-//! (spec 2026-09-19 §3.1): the object dialog's `Choice` rows, every
-//! settings-dialog row, and the market-data panel's underlying picker
-//! all rank, highlight, complete and pick through this one type. No
-//! `gpui` here, in the mould of [`crate::listfilter`] and
-//! [`crate::vimnav`] — feed it plain strings and shell-native
-//! [`Keystroke`]s, unit-test it without a window.
+//! Pure typeahead choice state: options, fuzzy ranking, selection, and a
+//! sliding display window. Callers retain window focus and apply the picked value.
 //!
-//! Identity is the OPTION TEXT, never a positional index: every re-rank
-//! (`set_query`, `replace_options`) captures the highlighted text first
-//! and re-finds it afterwards (the underlying picker's own rule, review
-//! fix round 2 of the header work), so typing can narrow the list
-//! without the highlight silently landing on a different option.
+//! Reranking preserves the selected option by its text, falling back to the first
+//! ranked row when that text no longer matches. Duplicate option texts resolve to
+//! the first declared occurrence. The cap limits the painted window, not the
+//! ranked list; callers must supply a positive cap for a visible selection.
 
 use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter::{self, Ranked};
 use crate::vimnav::{self, NavCommand};
 
-/// How many ranked rows a choice surface PAINTS at once: the underlying
-/// picker's `PICKER_ROWS`, now the one number every choice list shares.
-/// This is the size of the painted WINDOW, not a truncation of the
-/// ranked list — the window slides to follow the highlight (`follow`),
-/// so the highlight is always inside it and `enter` can never pick a
-/// row the trader cannot see, even when the current value ranks past
-/// row `cap`.
+/// Default number of visible choice rows. Ranking and navigation retain all matches.
 pub const DEFAULT_CAP: usize = 12;
 
 /// One list of options, the query it is ranked against, and which
@@ -84,11 +72,8 @@ impl ChoiceList {
         self.highlighted - self.window
     }
 
-    /// The highlighted row as an index into the FULL ranked list — what
-    /// a painter of every ranked row inside a scroll container (the two
-    /// dialogs' `dialog::choice_rows`) compares against and hands to
-    /// `scroll_to_item`, so the keys keep the lit row in the viewport
-    /// while the wheel is free to scroll it (user report 2026-09-19).
+    /// Selected index in the full ranked list, for callers rendering every row
+    /// inside a scroll container. Window-relative painters use [`Self::highlighted`].
     pub fn ranked_highlighted(&self) -> usize {
         self.highlighted
     }
@@ -114,12 +99,9 @@ impl ChoiceList {
         self.highlighted_option().map(|i| self.options[i].as_str())
     }
 
-    /// Re-rank against `query`, keeping the highlight by text. `false`
-    /// when `query` is what the list was last ranked against — nothing
-    /// re-ranks and the highlight stays put, so a defensive re-read of a
-    /// field's live text at commit time costs a compare and moves
-    /// nothing (`InputState::set_value` emits no `Change` event, so the
-    /// commit path cannot trust that every keystroke reached here).
+    /// Rerank a changed query, preserving selection by option text. Return false
+    /// without reranking when the text is unchanged, so rereading Input at commit
+    /// does not disturb the current selection.
     pub fn set_query(&mut self, query: &str) -> bool {
         if query == self.query {
             return false;
@@ -139,13 +121,8 @@ impl ChoiceList {
         self.place(keep.as_deref());
     }
 
-    /// Rebuild `ranked` against the current options and query, then put
-    /// the highlight on `value`'s row — row 0 when `value` is `None` or
-    /// not an option — and bring it into view. Unlike the old truncating
-    /// cap, a value that ranks past row `cap` is still found and lit;
-    /// `window` resets to 0 first so `follow` always slides forward from
-    /// the top rather than keeping some earlier scroll position that has
-    /// nothing to do with the newly placed value.
+    /// Rerank and select the first occurrence of `value` when it survives the
+    /// filter, otherwise row zero. Reset the window and bring selection into view.
     pub fn place(&mut self, value: Option<&str>) {
         self.ranked = listfilter::rank(&self.options, &self.query);
         self.highlighted = value
@@ -156,14 +133,8 @@ impl ChoiceList {
         self.follow();
     }
 
-    /// Keep the window around the highlight after a move that can land
-    /// anywhere in `ranked` (a nav past the old cap, or `place` finding a
-    /// value far down the list): slide forward or back just far enough
-    /// that `window <= highlighted < window + cap`, then clamp so the
-    /// window never starts past `ranked.len().saturating_sub(cap)` — the
-    /// last point at which a full `cap`-wide slice still fits, which is
-    /// what keeps a short or just-narrowed list painting a FULL window
-    /// instead of stopping short with blank rows below the highlight.
+    /// Slide the window to contain selection, then clamp its start so the
+    /// last visible window remains full when enough results exist. Requires cap > 0.
     fn follow(&mut self) {
         if self.highlighted < self.window {
             self.window = self.highlighted;
@@ -173,25 +144,22 @@ impl ChoiceList {
         self.window = self.window.min(self.ranked.len().saturating_sub(self.cap));
     }
 
-    /// Move the highlight over the WHOLE ranked list by [`vimnav::apply`]'s
-    /// rule — a bare ±1 wraps, anything larger clamps (§20.5) — then bring
-    /// it back into view.
+    /// Navigate the full ranked list: deltas ±1 wrap and other moves clamp.
+    /// Then bring the selected row into the painted window.
     pub fn nav(&mut self, cmd: NavCommand) {
         self.highlighted = vimnav::apply(self.highlighted, self.ranked.len(), cmd);
         self.follow();
     }
 
-    /// [`Self::nav`] with every step clamped — the underlying picker's
-    /// own rule (header spec §7), kept for it.
+    /// Navigate with every move clamped, then bring selection into view.
     pub fn nav_clamped(&mut self, cmd: NavCommand) {
         self.highlighted = vimnav::apply_clamped(self.highlighted, self.ranked.len(), cmd);
         self.follow();
     }
 
-    /// A click on painted row `row` — WINDOW-relative, matching
-    /// [`Self::highlighted`] and `dialog::choice_rows`'s own row
-    /// positions. Refused (`false`) past the painted range, which a
-    /// click cannot reach anyway.
+    /// Select a window-relative painted row, matching [`Self::highlighted`].
+    /// Return false outside the painted slice. Full-list painters instead use
+    /// [`Self::set_ranked_highlighted`].
     pub fn set_highlighted(&mut self, row: usize) -> bool {
         if row >= self.painted_len() {
             return false;
@@ -233,9 +201,9 @@ pub enum ChoiceKey {
     Nav(NavCommand),
 }
 
-/// The one key table every choice field reads (spec §3.1): the object
-/// dialog's, the settings dialog's, and — through its own `up`/`down`
-/// arms — the underlying picker's. `None` is "the field's to type".
+/// Map Escape and Tab with any modifiers, bare Enter, and shared list
+/// navigation to choice commands. Return `None` for the caller to route as text
+/// or another operation. This helper does not change focus or apply a value.
 pub fn route(ks: &Keystroke) -> Option<ChoiceKey> {
     if ks.key == "escape" {
         return Some(ChoiceKey::Cancel);
@@ -298,17 +266,8 @@ mod tests {
             "an unchanged query moves nothing"
         );
 
-        // The case above never actually distinguishes "kept by text"
-        // from "kept by index" — every re-rank there leaves exactly one
-        // surviving candidate, so falling back to row 0 lands on the
-        // same option either way. Here "Bamboo" is placed at row 0 (its
-        // DECLARED index), and the re-rank leaves TWO candidates: "am"
-        // scores "Ambrose" higher (it matches at the very start of the
-        // word) than "Bamboo" (a mid-word match), so after the re-rank
-        // "Ambrose" is ranked row 0 and "Bamboo" row 1 — a kept-by-INDEX
-        // identity (or a dropped one, which falls back to row 0) would
-        // both land the highlight on "Ambrose"; only kept-by-TEXT still
-        // finds "Bamboo".
+        // Reordering options changes the selected index. Retaining the same
+        // text proves selection follows option identity, not the old index.
         let mut rivals = ChoiceList::new(opts(&["Bamboo", "Ambrose"]), 12);
         rivals.place(Some("Bamboo"));
         assert_eq!(
@@ -398,11 +357,8 @@ mod tests {
 
     #[test]
     fn place_brings_a_value_past_the_cap_into_view() {
-        // 44 options, cap 12: placing a value that ranks well past the
-        // cap must still land the highlight ON it, with the window
-        // dragged along so it is actually visible — not silently
-        // dropped back to row 0 the way a truncating cap once did (the
-        // Theme row trap this fix round closes).
+        // A selected value beyond the first window must remain both visible
+        // and pickable after reranking.
         let options: Vec<String> = (0..44).map(|i| format!("t{i:02}")).collect();
         let mut list = ChoiceList::new(options, 12);
         list.place(Some("t30"));

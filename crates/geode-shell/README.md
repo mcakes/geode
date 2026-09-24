@@ -11,6 +11,8 @@ registry); anything it needs from data it asks `geode-data` for itself,
 and the two meet only in `geode-app`.
 
 Current behavior and rationale: [`docs/current/shell.md`](../../docs/current/shell.md).
+Keyboard ownership, palette, completion, choices, and frame-picker contracts:
+[input and dialogs](../../docs/current/input-and-dialogs.md).
 
 ## Layout
 

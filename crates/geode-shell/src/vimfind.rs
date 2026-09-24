@@ -1,52 +1,20 @@
-//! Reusable vim-style `/` find for list dialogs.
+//! Substring-find state, selection helpers, and the find-style setting.
 //!
-//! A pure state machine in the exact mold of [`crate::vimnav`]: no gpui,
-//! feed it [`Keystroke`]s, get back a [`FindResult`] describing what the
-//! query session did, plus a pure wrapping search function
-//! ([`find_match`]) the caller applies to its own rows' searchable text.
-//! Built for the keybinding dialog first, but deliberately generic — any
-//! list dialog (settings-style or otherwise) can hold a [`VimFind`] next
-//! to its `VimListNav` and get the same `/` interaction.
+//! [`VimFind`] keeps an editable query and the last nonempty committed query.
+//! Bare Escape, Enter on an empty query, and Backspace on an empty query cancel.
+//! Bare Enter on nonempty text commits; Backspace removes one character; bare
+//! Space and single-character bare/Shift-only keys append text. Other keys return
+//! [`FindResult::Ignored`]; callers decide event consumption.
 //!
-//! The module also owns [`FindStyle`], the `[ui] find_style` user setting
-//! choosing between this vim jump model and an fzf-style *filter* — the
-//! session/query mechanics below are shared by both; only what the caller
-//! does with the query differs (see [`FindStyle`]'s doc comment).
+//! The vim driver searches forward from a saved selection anchor after each edit;
+//! cancelling restores the anchor. The fzf driver narrows by the same substring
+//! match and returns a pick outcome. These helpers do not own window focus and
+//! are separate from the dialogs' Input-backed filters. [`FindStyle`] also serves
+//! modules with their own find implementation.
 //!
-//! ## Semantics (vim's jump model, not a filter)
-//!
-//! `/` starts a find session; typed characters build a query shown in the
-//! caller's status line; the list itself never filters or reorders — the
-//! caller moves its *selection* to matches instead (vim `incsearch`
-//! style, live on every edit, from the anchor where `/` was pressed):
-//!
-//! - printable keys append to the query (`shift`+letter appends the
-//!   uppercase letter; matching is case-insensitive either way);
-//! - `backspace` removes the last character — on an already-empty query it
-//!   exits the session (vim: backspacing past the start of the pattern
-//!   abandons the search);
-//! - `enter` commits: the session ends, the query is remembered for
-//!   `n`/`N` repeats ([`VimFind::last_query`]), selection stays where the
-//!   incremental jump put it. Enter on an empty query cancels instead;
-//! - `escape` cancels: the session ends, the caller restores the anchor
-//!   selection, and the previous committed query (if any) survives for
-//!   `n`/`N`;
-//! - anything else (modified keys, non-printable) is swallowed
-//!   ([`FindResult::Ignored`]) so stray chords can't fall through to list
-//!   navigation mid-session.
-//!
-//! `n`/`N` themselves are the *caller's* keys (pressed outside a session,
-//! they're plain keystrokes this module never sees) — the caller checks
-//! [`VimFind::last_query`] and applies [`find_match`] with the direction.
-//!
-//! ## Known keystroke-vs-character limitation
-//!
-//! This crate's [`Keystroke`] carries a key *name*, not the typed
-//! character ([`crate::shell::keys::convert_keystroke`] deliberately drops
-//! `key_char`), so a shifted symbol appends the key's base character (e.g.
-//! typing `:` on a US layout arrives as `shift+;` and appends `;`).
-//! Letters, digits, and unshifted symbols — the realistic query alphabet
-//! for matching displayed titles and categories — are unaffected.
+//! Keystroke editing uses key names, not a platform text-input stream. It has no
+//! IME composition or paste handling; shifted characters depend on the spelling
+//! the event source supplies. Input-backed surfaces handle text independently.
 
 use std::path::Path;
 
@@ -56,21 +24,10 @@ use geode_core::config::{Config, Layer};
 
 use crate::keymap::{Keystroke, Modifiers};
 
-/// Which behavior `/` gets in list dialogs (`[ui] find_style`): vim's
-/// jump model above (the default), or an fzf-style filter. The [`VimFind`]
-/// state machine serves both — `/` starts the session and query editing is
-/// byte-for-byte identical either way; what differs is what the *caller*
-/// does with the query (jump the selection vs. narrow the rendered rows —
-/// [`press_while_finding`] vs. [`press_while_finding_fzf`]). Neither driver
-/// has a caller today — the filter-first dialog rewrite (spec
-/// `2026-09-01-dialog-filter-input-design.md` §8-9) retired the settings
-/// dialog's `/` session, their last one — but both stay in the crate,
-/// intact and tested, for Phase 3's blotter, which is expected to want
-/// this whole vim-jump-vs-filter choice again. Mirrors
-/// [`crate::fontsize::FontSize`]'s shape exactly: `config_value`/`label`/
-/// `from_value`/`from_config` plus a [`persist_to_user_config`] sibling, so
-/// the settings control, startup resolution, and hot reload all ride the
-/// same paths font size does.
+/// Find behavior selected by `app.toml`'s `[ui] find_style`: vim-style
+/// selection movement or fzf-style filtering. Default is Vim. This setting is
+/// shared with module-owned find implementations; the helper drivers below do
+/// not define the current shell dialogs' filtering behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FindStyle {
     #[default]
@@ -117,13 +74,13 @@ impl FindStyle {
     }
 }
 
-/// Write `[ui] find_style` into `<user_dir>/app.toml`, preserving every
-/// other table, key, and comment — the same toml_edit + atomic-write
-/// contract as [`crate::fontsize::persist_to_user_config`] (see
-/// [`crate::theme::persist_to_user_config`]'s doc comment for the full
-/// failure-mode reasoning: missing file created with `config_version = 1`,
-/// unparseable file left untouched and reported as `Err`, reload-watcher
-/// interplay identical).
+/// Write `[ui] find_style` in the user app document through
+/// [`crate::config_write`]. Unparseable files return an error before writing;
+/// a missing or non-table `ui` value is replaced with an ordinary table.
+///
+/// # Panics
+/// An existing inline `ui = { ... }` table passes the table-like guard but cannot
+/// be borrowed as an ordinary table by this writer.
 pub fn persist_to_user_config(user_dir: &Path, style: FindStyle) -> Result<(), String> {
     crate::config_write::edit(user_dir, Layer::User, "app", |doc| {
         if !doc.get("ui").is_some_and(Item::is_table_like) {
@@ -155,8 +112,8 @@ pub enum FindResult {
     /// The session ended with nothing committed (`escape`, `enter` on an
     /// empty query, or `backspace` past the start) — restore the anchor.
     Cancel,
-    /// Swallowed without changing the query (a modified/non-printable
-    /// keystroke mid-session, or a press while no session is active).
+    /// No state change. The caller decides whether to consume this key;
+    /// an inactive session also returns this result.
     Ignored,
 }
 
@@ -208,14 +165,8 @@ impl VimFind {
         self.editing.as_ref().map(|q| format!("/{q}"))
     }
 
-    /// The query whose matches a caller's rows should highlight: the live
-    /// one while a session is editing (updating with every keystroke), else
-    /// the last committed one — vim `hlsearch`: matches stay lit for
-    /// `n`/`N` until the dialog closes (dialog state is fresh per open;
-    /// there is no `:noh`). `None` when neither exists or the live query is
-    /// still empty. Promoted from `keybindings_view::highlight_query`
-    /// (settings-dialog rewrite) — it only ever read this struct's own two
-    /// fields, so it was always this type's method in disguise.
+    /// Nonempty active query, otherwise the last committed query when no
+    /// session is active. An active empty query suppresses the old highlight.
     pub fn highlight_query(&self) -> Option<&str> {
         self.query().or(self.last_query()).filter(|q| !q.is_empty())
     }
@@ -308,24 +259,8 @@ pub fn find_match(
     None
 }
 
-// ---------------------------------------------------------------------
-// Shared session drivers (extracted from `keybindings_view` by the
-// settings-dialog rewrite): the press-by-press semantics of an ACTIVE
-// find session, over a caller's `(selection, anchor)` pair. When both
-// dialogs still had a `/` session, keybindings and settings each held a
-// `VimFind` + `selected: usize` + `find_anchor: Option<usize>` and
-// delegated every mid-session keystroke here; only what *picking* a row
-// meant differed (keybindings started rebind listening, settings just
-// kept the selection), which is why [`press_while_finding_fzf`] reports
-// an [`FzfOutcome`] for the caller to interpret instead of taking a
-// callback. Neither dialog holds that state any more (the filter-first
-// rewrite retired both `/` sessions — see the module doc), but the
-// contract is unchanged for whichever caller picks these drivers back up
-// (Phase 3's blotter — §9 of the design doc): three `&mut` parameters
-// rather than a trait or a shared struct, so a caller can keep its own
-// state type (with dialog-specific extras alongside) and hand over a
-// borrow of exactly the three fields involved.
-// ---------------------------------------------------------------------
+// Shared selection drivers. Callers own the active-session precondition,
+// selection anchor, row text, event consumption, and interpretation of picks.
 
 /// Feed one keystroke to an ACTIVE find session in **vim** style and move
 /// `selected` per the outcome: an incremental jump from the anchor on
@@ -362,12 +297,9 @@ pub fn press_while_finding(
     }
 }
 
-/// Repeat the last committed find in `dir` (`n`/`N`), excluding the
-/// current row so every press advances (wrapping). Returns false — the
-/// keystroke was not a find repeat — when nothing was ever committed;
-/// with a committed query but no match anywhere, the selection just stays
-/// (still handled: `n` after a stale query must not fall through to
-/// anything else).
+/// Repeat from the next/previous row and wrap through the full list,
+/// including the original row last. Return false only without a committed query;
+/// a handled repeat with no matches or no rows leaves selection unchanged.
 pub fn repeat_find(
     find: &VimFind,
     selected: &mut usize,
@@ -407,10 +339,7 @@ pub fn filter_matches(texts: &[String], query: &str) -> Vec<usize> {
         .collect()
 }
 
-/// What one keystroke did to an active **fzf**-style session — the pick
-/// seam a future caller of [`press_while_finding_fzf`] interprets for
-/// itself (see the section comment above): the driver itself has no idea
-/// what a dialog does with a picked row, only that one was picked.
+/// Result of the filtering driver; the caller decides what picking a row does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FzfOutcome {
     /// The session continues: a query edit (selection re-anchored to the
@@ -427,32 +356,12 @@ pub enum FzfOutcome {
     Cancelled,
 }
 
-/// Feed one keystroke to an ACTIVE find session in **fzf** style
-/// (`[ui] find_style = "fzf"`) — the sibling of [`press_while_finding`],
-/// kept separate so the vim path stays byte-for-byte untouched. Query
-/// editing is still [`VimFind::press`] exactly as in vim mode
-/// (backspace-past-start cancels, stray chords are swallowed, ...); what
-/// differs is everything around it:
-///
-/// - every query edit resets the selection to the FIRST match (fzf's
-///   idiom — the filtered list re-anchors at its top), parking on the
-///   anchor when nothing matches (moot while no rows render, but
-///   deterministic);
-/// - bare `up`/`down` step the selection through the matches, clamped at
-///   the ends (no wrap) — intercepted here, *before* [`VimFind::press`]
-///   would swallow them as non-printable (vim mode leaves them to it);
-/// - bare `enter` picks: with at least one match the session ends
-///   ([`VimFind::press`] sees the enter, so an empty query's Cancel and a
-///   non-empty one's Commit both close it), the anchor is dropped,
-///   selection stays on the picked row, and [`FzfOutcome::Picked`] tells
-///   the caller to do whatever picking means in its dialog. With ZERO
-///   matches the enter never reaches [`VimFind::press`] at all: nothing
-///   happens and the session stays active;
-/// - `escape`/backspace-past-start cancel and restore the anchor, exactly
-///   as vim mode does.
-///
-/// The caller guarantees `find.is_active()` and swallows the keystroke
-/// regardless of outcome, same contract as [`press_while_finding`].
+/// Drive an active substring-filter session. Edits select the first match
+/// or restore the anchor when none match. Bare Up/Down clamp within matching rows.
+/// Bare Enter picks when matches exist, including with an empty query; otherwise
+/// it leaves the session open. Cancellation restores the anchor. The caller must
+/// supply an active session and consume its keys; this helper does neither focus
+/// routing nor the operation represented by a pick.
 pub fn press_while_finding_fzf(
     find: &mut VimFind,
     selected: &mut usize,
@@ -466,9 +375,8 @@ pub fn press_while_finding_fzf(
         let query = find.query().unwrap_or("");
         let matches = filter_matches(texts, query);
         let Some(pos) = matches.iter().position(|&ix| ix == *selected) else {
-            // Selection off the match list only happens with zero matches
-            // (edits and arrows both keep it on one otherwise) — nothing
-            // to step through.
+            // No matching row contains the current selection; leave it unchanged.
+            // The caller normally keeps selection synchronized with edits.
             return FzfOutcome::Continue;
         };
         let new_pos = match ks.key.as_str() {
@@ -514,16 +422,11 @@ pub fn press_while_finding_fzf(
     }
 }
 
-/// The byte range of the first case-insensitive occurrence of `query` in
-/// `text`, for span highlighting (`StyledText::with_highlights` takes byte
-/// ranges) — the *display* counterpart of [`find_match`]'s yes/no. `None`
-/// for an empty query or no occurrence.
-///
-/// Char-wise scan rather than `to_lowercase().find(..)` on the whole
-/// string: lowercasing can change byte lengths (ß → ss), which would skew
-/// a byte offset found in the lowered copy when mapped back onto `text`.
-/// Comparing per-char keeps every returned offset a real boundary in
-/// `text` itself.
+/// Return a byte range in the original text for a case-insensitive match.
+/// Compare lowercase expansions character by character so returned endpoints are
+/// original UTF-8 boundaries, even when lowercasing expands a character (İ).
+/// An empty query or absent match returns `None`. A partial match within a
+/// single character's lowercase expansion is not a highlightable range.
 pub fn match_range(text: &str, query: &str) -> Option<std::ops::Range<usize>> {
     if query.is_empty() {
         return None;
@@ -723,17 +626,7 @@ mod tests {
         assert_eq!(range, 0..text.len());
     }
 
-    // -- the shared session drivers (extracted from keybindings_view) ------
-    //
-    // These tests moved here with the code they pin (the settings-dialog
-    // rewrite promoted the session-press semantics out of
-    // `keybindings_view` so both dialogs could share one driver). They
-    // are now the only tests of these drivers: both dialogs have since
-    // moved to an always-focused fuzzy filter (the settings dialog was
-    // the drivers' last caller), so `press_while_finding` and
-    // `press_while_finding_fzf` have no caller outside this module today
-    // — retained whole, and tested here, for Phase 3's blotter (see the
-    // module doc and `FindStyle`'s).
+    // Shared selection-driver tests: exercise query edits, commit, cancel, and repeat.
 
     /// A session mid-flight: `find` started, anchor saved at `selected` —
     /// the exact state a caller is in right after handling `/`.

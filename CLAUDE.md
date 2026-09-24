@@ -22,6 +22,8 @@ Current documentation is authoritative:
   health.
 - `docs/current/shell.md` — tiles, input, focus, frame state, dialogs, and
   persistence.
+- `docs/current/input-and-dialogs.md` — keyboard ownership, modal lifetime,
+  palette, completion, choices, and frame pickers.
 - `docs/current/features.md` — feature modules and their current limitations.
 - Each crate README — local module map, commands, and narrow invariants.
 - `docs/current/performance.md` — budgets, instrumentation, current reference

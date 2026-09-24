@@ -1,10 +1,7 @@
-//! The per-tile command line controller (spec section 3.4): opening it
-//! for `/` (find) or `:` (command) prompts, closing/cancelling it,
-//! reacting to its text changing (live find-as-you-type), and its key
-//! handler — the Accept branch that runs a submitted command or completion
-//! against the focused occupant lives here. Split out of `shell/mod.rs`
-//! (Phase 3c Task 0): the 3b final review found this accept branch sitting
-//! 1,400 lines from the pure `commandline` core it depends on.
+//! Lifecycle and routing for the per-tile `/` and `:` prompts.
+//! Each prompt captures its tile ID when opened. Find changes and commit/cancel
+//! events go to that occupant; command completion and execution use its vocabulary.
+//! Errors remain inline until a text edit or successful close.
 
 use gpui::{Context, Focusable as _, KeyDownEvent, Window};
 
@@ -15,13 +12,8 @@ use super::ShellView;
 use super::keys::convert_keystroke;
 
 impl ShellView {
-    /// Open the per-tile command line (§3.4) with the given prompt: builds
-    /// a fresh [`CommandLine`] over the focused tile, cancels any pending
-    /// keymap sequence (mirrors `toggle_palette`'s own cancel — same
-    /// reasoning: the line has its own key handling that never touches
-    /// `self.matcher`), resets the shared input's value, and focuses it.
-    /// A no-op when there is no focused tile, or the focused tile has no
-    /// occupant — nothing to run a command against.
+    /// Open a fresh prompt for the focused occupied tile, cancel pending key
+    /// sequences, clear Input, and focus it. Without an occupied tile, do nothing.
     pub(super) fn open_command_line(
         &mut self,
         prompt: Prompt,
@@ -45,20 +37,12 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Close the command line (if open) and hand focus back to the shell
-    /// root — the command-line twin of [`close_palette`](Self::close_palette).
+    /// Close the prompt, returning focus to the shell root only when the
+    /// command Input still owns keyboard focus.
     fn close_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_line = None;
-        // Only reclaim keyboard focus for the shell root if `command_
-        // input` still holds it (I1, final review). Every established
-        // close path — Enter, Escape, `ctrl+k`, a dialog opening — runs
-        // while that is true, so this was always a no-op guard for them.
-        // It matters for the render-time backstop above (`render`'s own
-        // doc comment, beside `ensure_occupants`'s drag-cancel
-        // neighbours): that path also closes the line when some OTHER
-        // surface — the toolbar's `filter_input` — has already taken
-        // focus for itself, and reclaiming it here would steal it right
-        // back the instant the user clicked it.
+        // Restore shell focus only if this Input still owns it. A blur-driven
+        // close must not steal focus back from the surface the user just selected.
         if self
             .command_input
             .read(cx)
@@ -70,29 +54,9 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Close the command line exactly as pressing Escape on it would
-    /// (§3.4): a `Find` prompt tells the occupant it was cancelled first
-    /// (`FindEvent::Cancelled`); either prompt then just closes. A no-op
-    /// when none is open.
-    ///
-    /// This is the one door every OTHER exclusive-focus surface uses to
-    /// take the command line's input away from under it unconditionally
-    /// — mirroring `close_palette`'s own call sites: `handle_command_
-    /// line_key`'s own escape arm, `toggle_palette` (opening OR closing
-    /// the palette while the line is open), and `dialog::open_shell_
-    /// dialog_with_key` (a modal opening over an open line). A chord
-    /// that opens an overlay is not a click away, so none of those three
-    /// routes through this door's mouse-facing sibling instead. Without
-    /// this, the line stayed `Some` and painted but stopped receiving
-    /// any of its own keys the moment a newer surface's branch in
-    /// `handle_key_down` started winning ahead of it. A mouse click away
-    /// from the line — both tile mouse-down handlers in `render`, and
-    /// `render`'s own generic backstop for every other focus-stealing
-    /// surface (I1, final review — same doc comment location as the
-    /// `pending_focus_restore`/drag-cancel block above it) — goes
-    /// through [`leave_command_line`](Self::leave_command_line) instead,
-    /// which commits a non-empty `Find` prompt's text before falling
-    /// back to this door for everything else (spec §20.4).
+    /// Cancel an open prompt. A find sends Cancelled to its captured occupant;
+    /// either prompt then closes. Escape and overlay-opening routes use this operation,
+    /// while pointer-driven blur uses [`Self::leave_command_line`].
     pub(super) fn cancel_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(line) = self.command_line.as_ref() else {
             return;
@@ -105,14 +69,9 @@ impl ShellView {
         self.close_command_line(window, cx);
     }
 
-    /// The mouse's way out of the command line (spec §20.4): a click
-    /// away from a `/` line whose text has already moved the cursor
-    /// COMMITS it — `FindEvent::Committed` with the field's text, so the
-    /// cursor stays on the match and `n`/`N` have a target — exactly as
-    /// the scope bar keeps its text on blur. An empty `/` line, and any
-    /// `:` line (nothing typed there has applied, and a stray click must
-    /// not run a command), cancel through [`cancel_command_line`].
-    /// `escape` is still `cancel_command_line` for both prompts.
+    /// Leave on blur: commit nonempty find text to the captured occupant,
+    /// retaining its match, but cancel empty finds and all command prompts.
+    /// A stray focus change must not execute an unsubmitted command.
     pub(super) fn leave_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(line) = self.command_line.as_ref() else {
             return;
@@ -128,12 +87,9 @@ impl ShellView {
         }
     }
 
-    /// Re-rank (`:`) or forward (`/`) every change to the command line's
-    /// text — the `InputEvent::Change` subscription wired up in `new`.
-    /// `/` forwards the raw text to the occupant's own `find` on every
-    /// keystroke (§3.4: `FindEvent::Changed`); `:` asks the occupant for
-    /// completions over the word under the cursor and re-ranks them
-    /// through the pure core (`CommandLine::refresh`).
+    /// On Input text change, forward FindEvent::Changed or refresh command
+    /// completions from the captured occupant using the current text and byte cursor.
+    /// Without that occupant, retain prompt state unchanged.
     pub(super) fn on_command_line_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(line) = self.command_line.as_ref() else {
             return;
@@ -156,21 +112,12 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Keys while the command line's input has focus (routed from
-    /// `handle_key_down`'s own command-line branch, ahead of the modal/
-    /// filter-input guards). `true` if the key was consumed here and must
-    /// not also reach the window's text-input phase; everything not
-    /// claimed here (printable characters, caret movement, ...) falls
-    /// through to the focused `Input`, exactly as the filter field and the
-    /// dialogs' shared filter input already do.
-    ///
-    /// `escape` cancels (a `/` cancel is forwarded to the occupant first);
-    /// `enter` commits — `/` forwards the committed text, `:` resolves the
-    /// line through the pure core (`commandline::resolve_submit`) and
-    /// either runs it on the occupant, accepts a unique match and runs
-    /// that, or shows an ambiguous-match error inline without closing.
-    /// `tab`/`ctrl+n`/`ctrl+p` (command-line only) step or accept the
-    /// completion popup.
+    /// Handle keys for an open prompt. Escape cancels and Enter submits regardless
+    /// of modifiers. Find Enter commits even empty text; command Enter resolves exact,
+    /// unique, or ambiguous completions, then runs on the captured occupant. Execution
+    /// and ambiguity errors keep the prompt open. Bare Tab accepts a candidate; bare
+    /// arrows and Control-N/P cycle candidates. Return true for handled keys so the
+    /// caller consumes them; other keys remain available to Input.
     pub(super) fn handle_command_line_key(
         &mut self,
         event: &KeyDownEvent,
@@ -247,22 +194,9 @@ impl ShellView {
                     if let Some(word) = c.highlighted_word().map(str::to_string) {
                         let text = self.command_input.read(cx).value().to_string();
                         let (line, cursor) = commandline::accept(&text, c.word.clone(), &word);
-                        // C1 (final review): `c.word` is the range the
-                        // NEXT accept splices into — it must move to
-                        // cover exactly the candidate just written
-                        // (`word.start..cursor`), or a second `tab` uses
-                        // the stale pre-accept range against the
-                        // already-accepted line and corrupts it. Nothing
-                        // else can refresh `word` here: `set_value`
-                        // below emits no `InputEvent::Change` at the
-                        // pinned gpui-component rev (`on_command_line_
-                        // changed`, this struct's only other writer of
-                        // `word`, never runs), which is also why the
-                        // `candidates`/`words`/`highlighted` save-and-
-                        // restore this replaced was provably inert: the
-                        // `refresh` those three fields were being
-                        // defended against never fires from `set_value`
-                        // either.
+                        // The next Tab replaces the candidate just written, not the original
+                        // short token. Update its cached byte range explicitly because set_value
+                        // does not emit the Input change event that normally refreshes completions.
                         c.word = c.word.start..cursor;
                         // Cycle on repeat: the next tab highlights the next
                         // candidate over the same typed word.
