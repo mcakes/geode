@@ -563,6 +563,10 @@ mod tests {
             &adapters,
             sink,
         );
+        // Rebound after `workers` so it drops first: a failing assert then
+        // opens the gate before `workers`' drop joins the held worker,
+        // instead of hanging on it.
+        let release = release;
         let documents = documents();
 
         // One in flight, held at the gate...
