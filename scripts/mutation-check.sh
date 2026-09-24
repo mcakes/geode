@@ -1389,6 +1389,22 @@ run_mutation "sources: a pattern without a batch capture is dropped" \
   geode-core \
   a_pattern_without_a_batch_capture_is_dropped_with_a_warning
 
+# ---- egress config (market-data egress, Task 6)
+
+run_mutation "egress config: an unknown document is dropped" \
+  crates/geode-core/src/egress_config.rs \
+  '        if !schema.dataset(doc_name).is_some_and(|d| d.is_document()) {' \
+  '        if !schema.dataset(doc_name).is_some() {' \
+  geode-core \
+  a_documents_key_naming_no_document_dataset_is_an_error_and_the_target_is_dropped
+
+run_mutation "egress config: {key} is substituted" \
+  crates/geode-core/src/egress_config.rs \
+  '            .map(|(_, template)| template.replace("{key}", &key.join("/")))' \
+  '            .map(|(_, template)| template.clone())' \
+  geode-core \
+  address_substitutes_key_when_present_and_is_unchanged_without_it
+
 # ---- discovery scheduler (Phase 3 §5.3)
 
 run_mutation "scheduler: every source is polled immediately at start" \
