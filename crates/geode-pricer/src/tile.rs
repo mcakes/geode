@@ -63,6 +63,10 @@ pub struct PricerTile {
     pub(crate) cursor: Cursor,
     pub(crate) visible: bool,
     pub(crate) loading: bool,
+    /// The record's `expanded` while a load is pending: applied by
+    /// `loaded`, and what `serialize` writes meanwhile, so a session save
+    /// mid-load never overwrites a good record.
+    held_expanded: Option<Vec<LineId>>,
     /// Transient header notice (a load failure, a refused request).
     pub(crate) notice: Option<SharedString>,
     /// The view fallback's standing notice (`resolve_plan`).
@@ -152,8 +156,17 @@ impl PricerTile {
                 (fallback(&name, &record), true)
             }
         };
-        let mut expansion = Expansion::from_ids(record.expanded.iter().copied());
-        expansion.retain_packages(&sheet);
+        // A pending load's expansion waits for the rows: pruned against
+        // the empty fallback it would lose every package (`loaded` applies
+        // it). The record's cursor waits in `cursor.line`, which
+        // `reconcile_cursor` leaves alone while loading.
+        let (expansion, held_expanded) = if loading {
+            (Expansion::default(), Some(record.expanded.clone()))
+        } else {
+            let mut e = Expansion::from_ids(record.expanded.iter().copied());
+            e.retain_packages(&sheet);
+            (e, None)
+        };
 
         let delegate = SheetDelegate::new(cx.theme());
         let table = cx.new(|cx| {
@@ -229,6 +242,7 @@ impl PricerTile {
             cursor,
             visible: false,
             loading,
+            held_expanded,
             notice: (!notices.is_empty()).then(|| notices.join("; ").into()),
             view_notice: None,
             footer: None,
@@ -271,7 +285,10 @@ impl PricerTile {
             view: Some(self.sheet.view.clone()),
             refresh: Some(self.sheet.refresh),
             cursor: self.cursor.line,
-            expanded: self.expansion.ids().collect(),
+            expanded: match &self.held_expanded {
+                Some(held) => held.clone(),
+                None => self.expansion.ids().collect(),
+            },
         }
         .to_table()
     }
@@ -318,6 +335,9 @@ impl PricerTile {
                 self.notice = Some(format!("sheet '{name}' was not found; opened empty").into())
             }
             Err(e) => self.notice = Some(format!("sheet '{name}' did not load: {e}").into()),
+        }
+        if let Some(held) = self.held_expanded.take() {
+            self.expansion = Expansion::from_ids(held);
         }
         self.expansion.retain_packages(&self.sheet);
         self.resolve_plan();
@@ -516,7 +536,12 @@ impl PricerTile {
 
     /// A cursor whose line went away falls back to the row at its old
     /// index (planning decision 10).
+    /// While a load is pending the model is the empty fallback, so the
+    /// record's cursor line is kept as is for `loaded` to resolve.
     fn reconcile_cursor(&mut self) {
+        if self.loading {
+            return;
+        }
         match self.cursor_row() {
             Some(r) => self.cursor.last_row = r,
             None => self.set_cursor_row(self.cursor.last_row),
@@ -970,6 +995,45 @@ pub(crate) mod tests {
             .update(&mut vcx, |t, cx| t.loaded(Ok(Some(rows)), cx));
         assert_eq!(h.sheet_len(&vcx), 1);
         assert!(h.notice(&vcx).is_none());
+    }
+
+    /// The pending path is Part 4's production restore (planning decision
+    /// 7): the record's cursor and expansion wait for the rows, and a
+    /// session save while loading writes them back unchanged.
+    #[gpui::test]
+    fn a_pending_load_keeps_the_records_cursor_and_expansion(cx: &mut gpui::TestAppContext) {
+        let (store, mut record) = seeded(&[
+            "SPX Z26 5000 C",
+            "-5 SPX Z26 4800/5200 CS",
+            "SPX Z26 4000 P",
+        ]);
+        // Ids are 1 (A), 2 (the package), 3–4 (legs), 5 (B).
+        record.insert("cursor".into(), toml::Value::Integer(5));
+        record.insert(
+            "expanded".into(),
+            toml::Value::Array(vec![toml::Value::Integer(2)]),
+        );
+        let rows = store.get("book").unwrap();
+        store.set_pending(true);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let saved = crate::session::Record::from_table(&h.serialize(&mut vcx));
+        assert_eq!(saved.cursor, Some(crate::core::LineId(5)));
+        assert_eq!(saved.expanded, vec![crate::core::LineId(2)]);
+        h.tile
+            .update(&mut vcx, |t, cx| t.loaded(Ok(Some(rows)), cx));
+        assert_eq!(
+            h.tree(&vcx).len(),
+            5,
+            "the package is open, so its legs show"
+        );
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(4),
+            "the cursor is on line 5"
+        );
+        let saved = crate::session::Record::from_table(&h.serialize(&mut vcx));
+        assert_eq!(saved.cursor, Some(crate::core::LineId(5)));
+        assert_eq!(saved.expanded, vec![crate::core::LineId(2)]);
     }
 
     #[gpui::test]
