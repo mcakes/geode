@@ -718,9 +718,13 @@ pub struct FrozenFilter<'a> {
 
 /// §17.1 rule 1: a mouse-down on the frozen filter row is the mouse form
 /// of `/`. A pure mutation — [`sync_dialog_text`] on the handler's return
-/// is what focuses the `Input`. On the keybinding dialog a capture in
-/// progress is cancelled first: a click on a text field is never a
-/// keystroke to bind, and `listening` wins over the mode in
+/// is what focuses the `Input`. Through the same `dialogmode::
+/// enter_filter` door the key takes, so a filter opened with the mouse
+/// records the query `escape` puts back just as a typed `/` does.
+///
+/// On the keybinding dialog a capture in progress is cancelled first: a
+/// click on a text field is never a keystroke to bind, and `listening`
+/// wins over the mode in
 /// `dialogmode::focus_target`, so leaving it set would keep the keys on
 /// the shell root under a pill reading `filter`. On both modal dialogs
 /// that can arm a confirm (keybindings, object dialog) the click is
@@ -733,16 +737,16 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
             return;
         }
         state.listening = None;
-        state.mode = DialogMode::Filter;
+        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
     } else if let Some(state) = shell.object_dialog.as_mut() {
         // Spec §20.1: not over an open question. `build_edit` still paints
         // the frozen row while a confirm is armed, so the guard lives here.
         if state.confirm.is_some() {
             return;
         }
-        state.mode = DialogMode::Filter;
+        state.enter_filter();
     } else if let Some(state) = shell.settings.as_mut() {
-        state.mode = DialogMode::Filter;
+        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
     }
 }
 

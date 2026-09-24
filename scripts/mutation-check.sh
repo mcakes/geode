@@ -1643,18 +1643,31 @@ run_mutation "keybindings: the dialog opens in filter mode" \
   geode-shell \
   the_dialog_opens_in_normal_mode_and_letters_do_not_type
 
-# `EscapeStep::LeaveFilter`'s contract is that the query stays APPLIED —
-# leaving a search leaves you on the match rather than undoing it. A
-# dialog that cleared the query on the way out would still walk the same
-# number of rungs and still close on the third press, so only an
-# assertion on the query between rungs catches it.
-run_mutation "keybindings: leaving filter mode clears the query" \
+# The 2026-09-23 ruling's two halves, one entry each, both anchored on
+# the `exit` this handler passes through. `enter` keeps what was typed:
+# a dialog that reverted on the way out would still walk the same number
+# of rungs and still close on the last press, so only an assertion on
+# the query between rungs catches it.
+run_mutation "keybindings: enter out of filter mode reverts the query" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        state.mode = DialogMode::Normal;' \
-  '        state.mode = DialogMode::Normal;
-        state.query.clear();' \
+  '            &mut state.query,
+            exit,' \
+  '            &mut state.query,
+            dialogmode::FilterExit::Revert,' \
   geode-shell \
   escape_walks_the_ladder_one_rung_at_a_time
+
+# And its twin: `escape` puts the entry query back. Breaking it to
+# `Keep` leaves the abandoned search standing — the pre-ruling behaviour,
+# which every other test in this file is happy with.
+run_mutation "keybindings: escape out of filter mode keeps the abandoned query" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            &mut state.query,
+            exit,' \
+  '            &mut state.query,
+            dialogmode::FilterExit::Keep,' \
+  geode-shell \
+  escape_puts_back_the_query_filter_mode_was_entered_with
 
 # Review round 1, Important: the ClearQuery rung reset `selected` to 0
 # without moving the viewport, which is parked wherever the *filtered*
@@ -7922,8 +7935,8 @@ run_mutation "dialog: a click on the frozen filter row enters filter mode" \
 run_mutation "dialog: the frozen-row click cancels a capture in progress" \
   crates/geode-shell/src/shell/dialog.rs \
   '        state.listening = None;
-        state.mode = DialogMode::Filter;' \
-  '        state.mode = DialogMode::Filter;' \
+        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
+  '        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
   geode-shell clicking_the_frozen_filter_row_while_listening_cancels_the_capture
 
 # ---- Task 8: the object dialog to the mock (§18.1) ---------------------
@@ -8679,27 +8692,27 @@ run_mutation "settings: the dialog opens in filter mode" \
   geode-shell \
   the_settings_dialog_opens_in_normal_mode_and_letters_do_not_type
 
-# `EscapeStep::LeaveFilter` keeps the query APPLIED. A dialog that
-# cleared it on the way out still walks the same number of rungs.
-# Anchored on the whole `LeaveFilter` arm (2026-09-19: the choice
-# field's own `Cancel`/`Pick` arms below it now write
-# `state.mode = DialogMode::Normal;` too, at different indentation, so
-# the bare line alone stopped being a unique anchor).
-run_mutation "settings: leaving filter mode clears the query" \
+# Which exit each key carries (user ruling 2026-09-23), anchored on
+# `route`'s two arms rather than on `handle_key`'s application of them:
+# the arms are where the two keys' meanings are decided, and swapping
+# one for the other still leaves the dialog walking the same number of
+# rungs — only an assertion on the query between them catches it.
+run_mutation "settings: enter out of filter mode reverts the query" \
   crates/geode-shell/src/shell/settings_view.rs \
-  '        KeyAction::LeaveFilter => {
-            // The query stays applied — leaving a search leaves you on
-            // the match rather than undoing it (`EscapeStep::LeaveFilter`).
-            state.mode = DialogMode::Normal;
-        }' \
-  '        KeyAction::LeaveFilter => {
-            // The query stays applied — leaving a search leaves you on
-            // the match rather than undoing it (`EscapeStep::LeaveFilter`).
-            state.mode = DialogMode::Normal;
-            state.query.clear();
-        }' \
+  '        return KeyAction::LeaveFilter(exit);' \
+  '        return KeyAction::LeaveFilter(FilterExit::Revert);' \
   geode-shell \
   settings_escape_walks_the_ladder_one_rung_at_a_time
+
+# The other half of the 2026-09-23 ruling on this surface: `escape` puts
+# the entry query back. Breaking the delegation to `Keep` leaves the
+# abandoned search standing — what this dialog did before the ruling.
+run_mutation "settings: escape out of filter mode keeps the abandoned query" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '        return KeyAction::LeaveFilter(exit);' \
+  '        return KeyAction::LeaveFilter(FilterExit::Keep);' \
+  geode-shell \
+  settings_escape_puts_back_the_query_filter_mode_was_entered_with
 
 # The ladder's second rung skipped: escape with a query applied closes
 # the dialog and loses the filter with it.
@@ -10686,13 +10699,15 @@ run_mutation "objectdialog: revalidate folds the column stage first" \
   geode-shell \
   the_column_stage_writes_a_differing_key_to_the_overlay
 
-# 2c §5.2: `enter` means one thing in both modes — the browse stage's own
-# rule for the same key. Filtering to a column and pressing enter is how a
-# trader reaches one column of a thirty-column view.
-run_mutation "objectdialog: enter opens the column stage from filter mode too" \
+# 2c §5.2: `enter` opens the row under the cursor, filtered list
+# included — how a trader reaches one column of a thirty-column view.
+# Since 2026-09-23 that is normal mode's `enter` one keystroke after the
+# one that leaves the filter, so this entry anchors on the normal-mode
+# arm and the test presses the key twice.
+run_mutation "objectdialog: enter opens the column stage of the selected row" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            commit_selected_row(shell, cx);' \
-  '            edit_commit_notice(shell);' \
+  '        NormalCommand::Commit => commit_selected_row(shell, cx),' \
+  '        NormalCommand::Commit => edit_commit_notice(shell),' \
   geode-shell \
   the_column_stage_writes_a_differing_key_to_the_overlay
 
@@ -17106,6 +17121,92 @@ run_mutation "catalog refresh: explicit demand takes priority over watched deman
   '        if explicit {' \
   '        if explicit && !watched {' \
   geode-app catalog_explicit_requests_survive_without_diagnostics_watchers
+
+# ---- Filter mode's two exits (user ruling 2026-09-23) -----------------
+
+# The snapshot itself. Recording the query filter mode was entered with
+# is what `escape` reverts TO; taking the snapshot from an empty string
+# instead would revert every search to nothing, which is exactly what
+# the old `escape` did and what nothing else here would notice.
+run_mutation "dialogmode: entering filter mode records no query to revert to" \
+  crates/geode-shell/src/dialogmode.rs \
+  'pub fn enter_filter(mode: &mut DialogMode, entry: &mut String, query: &str) {
+    entry.clear();
+    entry.push_str(query);' \
+  'pub fn enter_filter(mode: &mut DialogMode, entry: &mut String, query: &str) {
+    entry.clear();
+    let _ = query;' \
+  geode-shell \
+  each_entry_into_filter_mode_takes_its_own_snapshot
+
+# An `escape` that restores the SAME text moved no row, so it must not
+# report a change: a cursor parked 40 rows down an unchanged list would
+# otherwise jump to the top for a `/` the trader thought better of.
+run_mutation "dialogmode: an unchanged revert claims the query changed" \
+  crates/geode-shell/src/dialogmode.rs \
+  '        FilterExit::Revert if query == entry => false,' \
+  '        FilterExit::Revert if false => false,' \
+  geode-shell \
+  an_escape_with_nothing_typed_reports_no_change
+
+# The object dialog's two query slots (§18.3): the edit, column and
+# values stages filter by the DRAFT's query, browse by the state's own.
+# Reverting the wrong slot puts a query back where nobody was looking
+# and leaves the visible one standing.
+run_mutation "objectdialog: leaving filter mode reverts the browse slot in every stage" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    fn effective_query_mut(&mut self) -> &mut String {
+        match (&self.stage, self.draft.as_mut()) {
+            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
+                &mut draft.query
+            }' \
+  '    fn effective_query_mut(&mut self) -> &mut String {
+        match (&self.stage, self.draft.as_mut()) {
+            (Stage::Values { .. }, Some(draft)) => {
+                &mut draft.query
+            }' \
+  geode-shell \
+  escape_reverts_the_edit_stages_own_query
+
+# The cursor half of a revert: the restored list is a different list, so
+# the row under the cursor is a different row. Leaving `selected` where
+# the narrowed list left it is the stale-index defect the `ClearQuery`
+# rung already fixed once.
+run_mutation "objectdialog: a revert leaves the cursor in the narrowed list" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            *self.effective_selected_mut() = 0;' \
+  '            let _ = self.effective_selected_mut();' \
+  geode-shell \
+  escape_puts_back_the_query_filter_mode_was_entered_with
+
+# The edit stage's own copy of the exit branch (the browse entry above
+# guards browse's): the same mechanism at its second site, since a
+# dialog whose two stages disagree about `enter` is exactly the drift
+# `filter_exit` exists to prevent.
+run_mutation "objectdialog: enter in the edit stage's filter mode is not an exit" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        if let Some(exit) = dialogmode::filter_exit(ks) {
+            // `LeaveFilter` and its twin, the browse stage'"'"'s own rule' \
+  '        if let Some(exit) = dialogmode::filter_exit(ks).filter(|_| ks.key == "escape") {
+            // `LeaveFilter` and its twin, the browse stage'"'"'s own rule' \
+  geode-shell \
+  slash_filters_the_edit_stage_and_escape_walks_the_full_ladder
+
+# `enter` in the object dialog's browse filter is claimed by the exit
+# table, not left to the `Input`. Narrowing the table to `escape` is the
+# pre-ruling shape — an `enter` the field eats, which changes no text and
+# so leaves the dialog sitting in filter mode with nothing to show for
+# the keystroke. (The anchor carries the comment line beneath it: the
+# edit stage's own copy of this branch is the same line at a deeper
+# indent, and a shorter-indent anchor is a substring of the longer one.)
+run_mutation "objectdialog: enter in browse filter mode is not an exit" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if let Some(exit) = dialogmode::filter_exit(ks) {
+        // The ladder'"'"'s first rung and its twin, both claimed (`true`):' \
+  '    if let Some(exit) = dialogmode::filter_exit(ks).filter(|_| ks.key == "escape") {
+        // The ladder'"'"'s first rung and its twin, both claimed (`true`):' \
+  geode-shell \
+  slash_filters_and_escape_walks_the_ladder
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

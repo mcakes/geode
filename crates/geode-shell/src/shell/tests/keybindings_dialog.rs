@@ -176,9 +176,21 @@ fn tab_is_reserved_and_leaves_the_keybindings_dialog_untouched(cx: &mut gpui::Te
 #[gpui::test]
 fn enter_starts_listening_and_a_letter_is_captured_not_typed(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
-    // From filter mode, where the blur is a real transition rather than
-    // the state the dialog already sits in.
+    // Out of filter mode first, where the blur is a real transition
+    // rather than the state the dialog already sits in: since
+    // 2026-09-23 the first `enter` only leaves the filter, and the
+    // second is the one that binds.
     cx.simulate_keystrokes("/");
+    cx.simulate_keystrokes("enter");
+    assert!(
+        shell.read_with(&cx, |shell, _| shell
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .listening
+            .is_none()),
+        "the enter that leaves filter mode must not also start a capture"
+    );
     cx.simulate_keystrokes("enter");
     assert!(
         shell.read_with(&cx, |shell, _| shell
@@ -215,12 +227,33 @@ fn enter_starts_listening_and_a_letter_is_captured_not_typed(cx: &mut gpui::Test
 /// to — see `cancelling_a_capture_restores_focus_to_the_mode_that_
 /// started_it` for the normal-mode half), and leaves both the query and
 /// the dialog itself alone.
+///
+/// The capture is started by a row CLICK because that is the only door
+/// into one from filter mode since 2026-09-23: `enter` there now leaves
+/// the filter instead of binding (§17.1 rule 2 is unchanged — a click is
+/// still "select and listen" whatever mode the dialog is in).
 #[gpui::test]
 fn escape_cancels_a_capture_without_closing_the_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
     cx.simulate_keystrokes("/");
     cx.simulate_input("f");
-    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let row = top_match_bounds(&shell, &mut cx);
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(10.0), row.origin.y + gpui::px(10.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .listening
+            .is_some()),
+        "sanity: the click started a capture from filter mode"
+    );
     cx.simulate_input("j");
     cx.simulate_keystrokes("escape");
 
@@ -685,25 +718,35 @@ fn slash_enters_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The ladder, one visible step at a time: filter → normal keeping the
-/// query, → clear the query, → close. A dialog that skipped a rung would
-/// close on the first escape and lose the user's filter with it.
+/// The ladder, one visible step at a time: filter → normal (by `enter`,
+/// which keeps the query — user ruling 2026-09-23), → clear the query, →
+/// close. A dialog that skipped a rung would close on the first escape
+/// and lose the user's filter with it.
 #[gpui::test]
 fn escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
     cx.simulate_keystrokes("/ t h e m e");
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("enter");
     let (mode, q) = shell.read_with(&cx, |s, _| {
         let k = s.keybindings.as_ref().unwrap();
         (k.mode, k.query.clone())
     });
     assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
-    assert_eq!(q, "theme", "leaving filter must keep the query applied");
+    assert_eq!(q, "theme", "enter must keep the query applied");
     assert!(
         !dialog_filter_is_focused(&shell, &mut cx),
         "and must blur the filter, or normal mode's letters would still type"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .listening
+            .is_none()),
+        "and must not start a capture on its way out of filter mode"
     );
 
     cx.simulate_keystrokes("escape");
@@ -724,6 +767,52 @@ fn escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The other way out (user ruling 2026-09-23): `escape` puts back the
+/// query filter mode was entered with — here a kept `theme`, so a second
+/// search typed over it and abandoned leaves the first one standing,
+/// rather than the text the user backed out of. The `Input` is written
+/// from the restored query too: a revert visible only in the mirrored
+/// copy would reappear as stale text the moment `/` refocused the field.
+#[gpui::test]
+fn escape_puts_back_the_query_filter_mode_was_entered_with(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/ t h e m e");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+
+    // A second search over the first, then a change of mind.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().query.clone()),
+        "themex",
+        "sanity: the second session typed onto the kept query"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let (mode, query) = shell.read_with(&cx, |s, _| {
+        let k = s.keybindings.as_ref().unwrap();
+        (k.mode, k.query.clone())
+    });
+    assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
+    assert_eq!(query, "theme", "escape must put back the entry query");
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "and must not close the dialog"
+    );
+
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "theme",
+        "the field the next filter session sees is the restored query, \
+         not the abandoned one"
+    );
+}
+
 /// A cleared query must clear the *input* too, not just the mirrored
 /// copy: the `Input` owns the text, so a query cleared only in
 /// `KeybindingsState` would reappear the moment `/` refocused the field
@@ -733,7 +822,10 @@ fn clearing_the_query_clears_the_field_the_next_filter_session_sees(cx: &mut gpu
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
     cx.simulate_keystrokes("/ t h e m e");
     cx.run_until_parked();
-    cx.simulate_keystrokes("escape escape");
+    // `enter` keeps the query, `escape` then takes the ClearQuery rung
+    // (2026-09-23: an `escape` straight out of filter mode would revert
+    // instead, which is a different rung and a different test).
+    cx.simulate_keystrokes("enter escape");
     cx.run_until_parked();
 
     cx.simulate_keystrokes("/");
@@ -868,9 +960,9 @@ fn clearing_the_query_scrolls_back_to_the_top(cx: &mut gpui::TestAppContext) {
         "sanity: the selection walked 20 rows down the filtered list"
     );
 
-    // Escape twice: out of filter mode (query kept), then the
-    // `ClearQuery` rung.
-    cx.simulate_keystrokes("escape escape");
+    // Out of filter mode with the query kept (`enter`), then the
+    // `ClearQuery` rung (`escape`).
+    cx.simulate_keystrokes("enter escape");
     cx.run_until_parked();
     assert_eq!(
         shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().selected),
@@ -913,6 +1005,7 @@ fn a_modified_escape_walks_the_same_ladder_as_a_bare_one(cx: &mut gpui::TestAppC
     cx.run_until_parked();
 
     cx.simulate_keystrokes("shift-escape");
+    cx.run_until_parked();
     let (mode, query) = shell.read_with(&cx, |s, _| {
         let k = s.keybindings.as_ref().unwrap();
         (k.mode, k.query.clone())
@@ -922,7 +1015,17 @@ fn a_modified_escape_walks_the_same_ladder_as_a_bare_one(cx: &mut gpui::TestAppC
         crate::dialogmode::DialogMode::Normal,
         "shift+escape must leave filter mode, exactly as escape does"
     );
-    assert_eq!(query, "theme", "and keep the query applied");
+    assert_eq!(
+        query, "",
+        "and revert the query it was entered with, exactly as escape does"
+    );
+
+    // Back in with a query this time kept by `enter`, so there is
+    // something for the `ClearQuery` rung to clear.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("theme");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
 
     cx.simulate_keystrokes("ctrl-escape");
     cx.run_until_parked();
@@ -1013,13 +1116,38 @@ fn services_with_a_user_binding_for_the_palette() -> ShellServices {
     services
 }
 
-/// Filter down to the palette row and leave filter mode, so the tests
-/// below act on a row with a known, non-empty binding rather than
-/// whatever happens to sort first.
+/// The painted bounds of the top row of the *filtered* list. A row's
+/// debug selector is keyed by its index in the FULL row list, so under a
+/// filter `keybindings-row-0` may not be on screen at all — the visible
+/// list's first entry names its own row index.
+fn top_match_bounds(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+) -> gpui::Bounds<gpui::Pixels> {
+    let ix = shell.read_with(cx, |shell, _| {
+        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+        let state = shell.keybindings.as_ref().expect("dialog open");
+        keybindings_view::visible_rows(state, &rows)
+            .first()
+            .expect("the filter must match at least one row")
+            .row
+    });
+    // `debug_bounds` wants a `'static` selector; the row index is only
+    // known at run time, so this one test helper leaks its formatted
+    // name rather than every caller spelling out a match over indices.
+    let selector: &'static str = Box::leak(format!("keybindings-row-{ix}").into_boxed_str());
+    cx.debug_bounds(selector)
+        .expect("the filtered list's top row should have painted")
+}
+
+/// Filter down to the palette row and leave filter mode KEEPING the
+/// query — `enter`, since the 2026-09-23 ruling gave `escape` the other
+/// meaning — so the tests below act on a row with a known, non-empty
+/// binding rather than whatever happens to sort first.
 fn select_the_palette_row(cx: &mut gpui::VisualTestContext) {
     cx.simulate_keystrokes("/ p a l e t t e");
     cx.run_until_parked();
-    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("enter");
 }
 
 /// The gap this model exists to close: before it, clearing a binding
@@ -1652,7 +1780,9 @@ fn d_on_a_contexted_binding_names_r_as_the_way_back(cx: &mut gpui::TestAppContex
 
     vcx.simulate_keystrokes("/ f o c u s l e f t");
     vcx.run_until_parked();
-    vcx.simulate_keystrokes("escape");
+    // `enter` keeps the filter (2026-09-23); `escape` would put the empty
+    // query back and land the cursor on whatever sorts first.
+    vcx.simulate_keystrokes("enter");
     let (action, bound) = selected_row(&shell, &vcx);
     assert_eq!(
         action.0, "workspace::focus_left",
@@ -1956,7 +2086,7 @@ fn focus_and_text_follow_the_pure_state_through_every_transition(cx: &mut gpui::
     assert!(dialog_filter_is_focused(&shell, &mut cx));
     cx.simulate_input("pal");
     cx.run_until_parked();
-    cx.simulate_keystrokes("escape"); // leave filter, keep the query
+    cx.simulate_keystrokes("enter"); // leave filter, keep the query
     cx.run_until_parked();
     assert!(!dialog_filter_is_focused(&shell, &mut cx));
     let text = shell.read_with(&cx, |shell, cx| {
@@ -1964,7 +2094,7 @@ fn focus_and_text_follow_the_pure_state_through_every_transition(cx: &mut gpui::
     });
     assert_eq!(
         text, "pal",
-        "leaving filter mode keeps the query in the field"
+        "leaving filter mode by enter keeps the query in the field"
     );
     cx.simulate_keystrokes("escape"); // clear the query
     cx.run_until_parked();
@@ -1977,7 +2107,16 @@ fn focus_and_text_follow_the_pure_state_through_every_transition(cx: &mut gpui::
     );
     cx.simulate_keystrokes("/");
     cx.simulate_input("pal");
-    cx.simulate_keystrokes("enter"); // begin a capture from filter mode
+    cx.run_until_parked();
+    // A capture from filter mode is the mouse's door now (§17.1 rule 2):
+    // `enter` leaves the filter instead (user ruling 2026-09-23), so a
+    // click is what leaves `Filter` as the mode underneath the capture.
+    let row = top_match_bounds(&shell, &mut cx);
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(10.0), row.origin.y + gpui::px(10.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
     cx.run_until_parked();
     assert!(
         !dialog_filter_is_focused(&shell, &mut cx),
@@ -2073,7 +2212,9 @@ fn select_the_module_row(cx: &mut gpui::VisualTestContext) {
     // a `p`).
     cx.simulate_keystrokes("/ n o o p");
     cx.run_until_parked();
-    cx.simulate_keystrokes("escape");
+    // `enter`, the key that keeps a filter since 2026-09-23 — see
+    // [`select_the_palette_row`].
+    cx.simulate_keystrokes("enter");
 }
 
 /// A module's fragment binding (market-data documents §8.4) is a builtin

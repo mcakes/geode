@@ -317,10 +317,16 @@ fn handle_key(
 ///    fall through would hand it to whatever the shell does with that key
 ///    next;
 /// 2. in [`DialogMode::Filter`] the behaviour is the filter-first one
-///    every other dialog has, with `escape` leaving filter mode (keeping
-///    the query) instead of closing the dialog;
-/// 3. bare `enter` is claimed in both modes and opens the edit stage on
-///    the selected row, so the two modes route it identically;
+///    every other dialog has, with `escape` and bare `enter` both
+///    leaving filter mode through [`dialogmode::filter_exit`] rather
+///    than closing the dialog: `escape` puts back the query filter mode
+///    was entered with, `enter` keeps what was typed (user ruling
+///    2026-09-23);
+/// 3. bare `enter` opens the edit stage on the selected row in
+///    [`DialogMode::Normal`] only. From filter mode it is rung 2's
+///    "keep", so opening an object out of a search is two keystrokes:
+///    one to leave the filter, one to open the row it left the cursor
+///    on;
 /// 4. bare `tab`/`shift+tab` are claimed and dropped. Claiming them is
 ///    what makes them inert: with the filter focused, an unclaimed key
 ///    continues to the window's own text-input phase, and
@@ -443,8 +449,9 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                 // The one switch, thrown the other way — a pure mutation:
                 // `dialog::sync_dialog_text` gives the filter focus on
                 // this handler's return, and printable keys become text
-                // again.
-                state.mode = DialogMode::Filter;
+                // again. Through `enter_filter` so the query is recorded
+                // for the `escape` that backs out of the search.
+                state.enter_filter();
             }
             NormalCommand::Commit => {
                 open_selected(shell, cx);
@@ -507,25 +514,23 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
 
     // ---- Filter mode -------------------------------------------------
 
-    if ks.key == "escape" {
-        // The ladder's first rung, which must be claimed (`true`):
-        // falling through would close the whole dialog on the escape that
-        // was only meant to leave the search. The query stays applied;
-        // the blur `dialog::sync_dialog_text` performs on this handler's
-        // return is what makes the letters motions again.
-        state.mode = DialogMode::Normal;
+    if let Some(exit) = dialogmode::filter_exit(ks) {
+        // The ladder's first rung and its twin, both claimed (`true`):
+        // falling through on `escape` would close the whole dialog on the
+        // keystroke that was only meant to leave the search. `escape`
+        // puts the entry query back, `enter` keeps what was typed, and
+        // neither opens the row under the cursor — that is normal mode's
+        // own `enter`, one keystroke later (user ruling 2026-09-23). The
+        // blur `dialog::sync_dialog_text` performs on this handler's
+        // return is what makes the letters motions again, and it writes
+        // whichever query survives back into the `Input`.
+        if state.exit_filter(exit) {
+            // The list re-expands under a scroll offset still parked
+            // where the narrowed list left it; `exit_filter` has already
+            // put the cursor on the top match.
+            shell.object_dialog_scroll.scroll_to_item(0);
+        }
         cx.notify();
-        return true;
-    }
-
-    if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        // `enter` is `NormalCommand::Commit`, and normal mode routes it
-        // to exactly the same place (the `Commit` arm above). Claimed
-        // here so the two modes open an object the same way — the
-        // keybinding dialog's own `enter` branch is what this mirrors,
-        // and a routing difference between the two dialogs is a
-        // difference somebody eventually has to debug.
-        open_selected(shell, cx);
         return true;
     }
 
@@ -1379,13 +1384,16 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
 ///    (`enter`/`y`) or cancelled (`escape`/`n`). It replaces the action
 ///    bar rather than adding a row, so nothing above it moves;
 /// 2. in [`DialogMode::Filter`] (§18.3, entered by `/` the same as
-///    browse) `escape` leaves filter mode keeping the query, `enter` goes
-///    through [`commit_selected_row`] exactly as normal mode's `Commit`
-///    does — one meaning for one key, and the way a trader reaches one
-///    column of a thirty-column view — navigation goes through
-///    [`listfilter::nav_command`] against [`Draft::visible_rows`], and
-///    `tab`/`shift+tab` are claimed and dropped — everything else is
-///    unclaimed (`false`), reaching the focused `Input`;
+///    browse) `escape` and bare `enter` both leave filter mode through
+///    [`dialogmode::filter_exit`] and open nothing: `escape` puts back
+///    the query filter mode was entered with, `enter` keeps what was
+///    typed (user ruling 2026-09-23), and [`commit_selected_row`] is
+///    then normal mode's `Commit` one keystroke later — which is how a
+///    trader reaches one column of a thirty-column view. Navigation goes
+///    through [`listfilter::nav_command`] against [`Draft::visible_rows`],
+///    `tab`/`shift+tab` STEP the selected row here (the settings
+///    dialog's rule, 2026-09-13) — everything else is unclaimed
+///    (`false`), reaching the focused `Input`;
 /// 3. in [`DialogMode::Normal`], `escape` walks the ladder, whose
 ///    `PreviousStage` rung this stage exists to reach — going back a
 ///    stage, with nothing to discard because every edit already applied,
@@ -1511,27 +1519,25 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         .as_ref()
         .is_some_and(|state| state.mode == DialogMode::Filter);
     if filtering {
-        if ks.key == "escape" {
-            // `LeaveFilter`: back to normal, keeping the query applied —
-            // leaving a search leaves you on the match. The blur that
-            // makes the letters verbs again is
-            // `dialog::sync_dialog_text`'s, on this handler's return.
-            if let Some(state) = shell.object_dialog.as_mut() {
-                state.mode = DialogMode::Normal;
+        if let Some(exit) = dialogmode::filter_exit(ks) {
+            // `LeaveFilter` and its twin, the browse stage's own rule
+            // arriving at this stage: `escape` puts back the query filter
+            // mode was entered with, `enter` keeps what was typed, and
+            // neither opens the row under the cursor — a member row's
+            // column stage is normal mode's `enter`, one keystroke later
+            // (user ruling 2026-09-23). The blur that makes the letters
+            // verbs again is `dialog::sync_dialog_text`'s, on this
+            // handler's return.
+            let changed = shell
+                .object_dialog
+                .as_mut()
+                .is_some_and(|state| state.exit_filter(exit));
+            if changed {
+                // `exit_filter` has already put the draft's cursor on the
+                // top match; the viewport follows it for the reason every
+                // other query change does.
+                shell.object_dialog_scroll.scroll_to_item(0);
             }
-            cx.notify();
-            return true;
-        }
-        if ks.mods == Modifiers::NONE && ks.key == "enter" {
-            // Exactly what normal mode's `Commit` does, so `enter` means
-            // one thing in either mode — the browse stage's own rule
-            // ("bare `enter` is claimed in both modes and opens the edit
-            // stage on the selected row"). Until Part 2c there was
-            // nothing here to open and both modes could only give the
-            // notice; now a member row opens its column stage, and it
-            // opens from the filtered list too — which is how a trader
-            // reaches one column of a thirty-column view.
-            commit_selected_row(shell, cx);
             cx.notify();
             return true;
         }
@@ -1605,9 +1611,12 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         match step {
             Some(EscapeStep::ClearQuery) => {
                 // Reachable now (§18.3): a filter typed into the edit
-                // stage's own query, then `escape` twice — the first
-                // rung (handled above, in the `filtering` branch) leaves
-                // filter mode keeping the query; this one drops it.
+                // stage's own query, KEPT on the way out — `enter`, the
+                // filter branch's "keep" (user ruling 2026-09-23) —
+                // and then `escape` here, which drops it. An `escape`
+                // straight out of filter mode reverts instead, usually
+                // to an empty query, and this rung then has nothing to
+                // clear.
                 if let Some(draft) = draft_mut(shell) {
                     draft.query.clear();
                     draft.selected = 0;
@@ -1820,9 +1829,11 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         NormalCommand::EnterFilter => {
             // §18.3: the same switch browse's own `/` throws, and the
             // same pure mutation — `dialog::sync_dialog_text` gives the
-            // filter focus on this handler's return.
+            // filter focus on this handler's return. `enter_filter`
+            // records the draft's query for the `escape` that backs out
+            // of the search.
             if let Some(state) = shell.object_dialog.as_mut() {
-                state.mode = DialogMode::Filter;
+                state.enter_filter();
             }
         }
         // `enter` says whether `space` would do anything here
@@ -2030,7 +2041,15 @@ fn open_field(shell: &mut ShellView) {
         && let Some(draft) = state.draft.as_mut()
     {
         draft.begin_chain_entry();
-        state.mode = DialogMode::Filter;
+        // Gated on a field having actually opened, the way
+        // `open_text_field`'s own `Step::Changed` check is:
+        // `begin_chain_entry` returns without setting `text_entry` on a
+        // draft with no `dimensions` field, and filter mode with no
+        // field open means the next `escape` reverts the draft's query
+        // to a filter snapshot instead of cancelling a field.
+        if draft.text_entry.is_some() {
+            state.mode = DialogMode::Filter;
+        }
     }
     // The row list just became the (shorter) completion list with the
     // cursor on row 0; the viewport follows.
@@ -3728,8 +3747,13 @@ fn build(
                 Hint::new(HintRow::Move, &["up", "down"], "move"),
                 Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
                 Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
-                Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),
-                Hint::new(HintRow::Go, &["escape"], "back to normal"),
+                // The two ways out, named as the choice they are: `enter`
+                // no longer opens from here (user ruling 2026-09-23), so
+                // the selector rides the `escape` hint's twin rather
+                // than an "open" the key no longer does.
+                Hint::new(HintRow::Go, &["enter"], "keep the filter")
+                    .selector("objectdialog-hint-enter"),
+                Hint::new(HintRow::Go, &["escape"], "discard the filter"),
             ],
         }
     };
@@ -4687,8 +4711,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         hints
     } else if state.mode == DialogMode::Filter {
         // §18.3: the same filter-mode hints browse paints, since the
-        // vocabulary — type to narrow, the shared nav keys, `escape` back
-        // to normal — is identical in both stages. Plus, since
+        // vocabulary — type to narrow, the shared nav keys, `enter` and
+        // `escape` out — is identical in both stages. Plus, since
         // 2026-09-13, the one stepping pair that survives a focused
         // `Input` (`tab`/`shift+tab`), on a writable domain and a row
         // that has something to step; browse has no such row, which is
@@ -4697,7 +4721,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         if state.domain.writable(&state.stage) {
             hints.extend(change_hint(true));
         }
-        hints.push(Hint::new(HintRow::Go, &["escape"], "back to normal"));
+        // The two ways out, in browse's own words (user ruling
+        // 2026-09-23).
+        hints.push(Hint::new(HintRow::Go, &["enter"], "keep the filter"));
+        hints.push(Hint::new(HintRow::Go, &["escape"], "discard the filter"));
         hints
     } else if !state.domain.writable(&state.stage) {
         // §19.4: a read-only domain's normal-mode vocabulary is reading

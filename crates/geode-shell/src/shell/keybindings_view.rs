@@ -88,8 +88,11 @@
 //! user layer binds anything.
 //!
 //! `escape` walks the ladder of [`crate::dialogmode::escape_step`], one
-//! visible change per press: filter → normal (keeping the query
-//! applied), → clear the query, → close the modal. The close rung is the
+//! visible change per press: filter → normal (putting back the query
+//! filter mode was entered with — bare `enter` is the way out that KEEPS
+//! what was typed, user ruling 2026-09-23), → clear the query, → close
+//! the modal. A revert usually empties the query, so the clear rung is
+//! reached by `enter` then `escape` in practice. The close rung is the
 //! one this module does NOT handle — it returns `false` and lets
 //! `handle_key_down`'s modal branch close the dialog, the same door a
 //! backdrop click uses.
@@ -392,10 +395,15 @@ pub struct KeybindingsState {
     /// The filter query, mirrored here from `ShellView::dialog_input` by
     /// the `InputEvent::Change` subscription in `ShellView::new`. The
     /// `Input` owns the text; this is the pure copy the row list is
-    /// ranked against. It survives leaving filter mode — the first rung
-    /// of the `escape` ladder keeps the query applied, because leaving a
-    /// search should leave you on the match, not undo the search.
+    /// ranked against. It survives leaving filter mode by `enter`, which
+    /// applies the search and leaves you on the match; `escape` puts
+    /// [`Self::filter_entry_query`] back instead.
     pub query: String,
+    /// What [`Self::query`] stood at when filter mode was last entered —
+    /// written only by `dialogmode::enter_filter` and read only by
+    /// `dialogmode::exit_filter`, so the `escape` that backs out of a
+    /// search cannot revert to some earlier visit's text.
+    pub filter_entry_query: String,
     /// Which mode this dialog is in
     /// (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`).
     /// `Normal` on open: bare letters are verbs, and `dialog_input` is
@@ -440,6 +448,7 @@ impl Default for KeybindingsState {
             selected: 0,
             listening: None,
             query: String::new(),
+            filter_entry_query: String::new(),
             mode: DialogMode::Normal,
             notice: None,
             confirm: None,
@@ -738,15 +747,17 @@ fn arm_verb(
 ///    mode's contract is that a stray letter does nothing, and letting it
 ///    fall through would hand it to whatever the shell does with that key
 ///    next;
-/// 3. in [`DialogMode::Filter`] the pre-modal behaviour is unchanged,
-///    with one addition: `escape` leaves filter mode (keeping the query)
-///    instead of closing the dialog;
-/// 4. bare `enter` starts listening on the selected row, which blurs the
-///    filter input — through [`dialog::sync_dialog_text`] on this
-///    handler's return, not here — so the capture sees raw keystrokes
-///    (see the module doc's "Rebind capture"). Reached as
-///    [`NormalCommand::Commit`] in normal mode and directly in filter
-///    mode;
+/// 3. in [`DialogMode::Filter`], `escape` and bare `enter` both leave
+///    filter mode and nothing else ([`dialogmode::filter_exit`], user
+///    ruling 2026-09-23): `escape` puts back the query filter mode was
+///    entered with, `enter` keeps what was typed. Neither closes the
+///    dialog and neither starts a capture;
+/// 4. bare `enter` in [`DialogMode::Normal`] starts listening on the
+///    selected row ([`NormalCommand::Commit`]), which blurs the filter
+///    input — through [`dialog::sync_dialog_text`] on this handler's
+///    return, not here — so the capture sees raw keystrokes (see the
+///    module doc's "Rebind capture"). From filter mode that is one
+///    keystroke later, after rung 3 has handed the keys back;
 /// 5. [`listfilter::nav_command`] motions move the selection within the
 ///    *filtered* list, in both modes;
 /// 6. bare `tab`/`shift+tab` are claimed and dropped — returns `true`
@@ -915,8 +926,13 @@ fn handle_key(
                 // The one switch, thrown the other way — a pure mutation:
                 // `dialog::sync_dialog_text` gives the filter focus on
                 // this handler's return, and printable keys become text
-                // again.
-                state.mode = DialogMode::Filter;
+                // again. Through `enter_filter` so the query is recorded
+                // for the `escape` that backs out of the search.
+                dialogmode::enter_filter(
+                    &mut state.mode,
+                    &mut state.filter_entry_query,
+                    &state.query,
+                );
             }
             NormalCommand::Commit => {
                 begin_capture(state, visible.len());
@@ -938,25 +954,32 @@ fn handle_key(
         return true;
     }
 
-    // ---- Filter mode: the pre-modal behaviour, unchanged -------------
+    // ---- Filter mode -------------------------------------------------
 
-    if ks.key == "escape" {
-        // The ladder's first rung ([`EscapeStep::LeaveFilter`]), which
-        // must be claimed (`true`) — falling through would close the
-        // whole dialog on the escape that was only meant to leave the
-        // search. The query stays applied; the blur
-        // `dialog::sync_dialog_text` performs on this handler's return is
-        // what makes the letters verbs again. Modifier-agnostic for the
-        // reason given at the normal-mode guard above: a `shift+escape`
-        // that skipped straight to the close rung would lose the user's
-        // filter.
-        state.mode = DialogMode::Normal;
-        cx.notify();
-        return true;
-    }
-
-    if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        begin_capture(state, visible.len());
+    if let Some(exit) = dialogmode::filter_exit(ks) {
+        // The ladder's first rung ([`EscapeStep::LeaveFilter`]) and its
+        // twin, both claimed (`true`) — falling through on `escape` would
+        // close the whole dialog on the keystroke that was only meant to
+        // leave the search. `escape` puts the entry query back, `enter`
+        // keeps what was typed, and neither starts a capture: the row
+        // under the cursor is opened by normal mode's own `enter`, one
+        // keystroke later. The blur `dialog::sync_dialog_text` performs
+        // on this handler's return is what makes the letters verbs again,
+        // and it writes the restored query back into the `Input` too.
+        let changed = dialogmode::exit_filter(
+            &mut state.mode,
+            &state.filter_entry_query,
+            &mut state.query,
+            exit,
+        );
+        if changed {
+            // The list re-expands under a scroll offset still parked
+            // where the narrowed list left it, so the cursor goes to the
+            // top match and the viewport follows — exactly what the
+            // `ClearQuery` rung does for the same reason.
+            state.selected = 0;
+            shell.keybindings_scroll.scroll_to_item(0);
+        }
         cx.notify();
         return true;
     }
@@ -1710,8 +1733,11 @@ fn build(
                 Hint::new(HintRow::Move, &["up", "down"], "move"),
                 Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
                 Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
-                Hint::new(HintRow::Edit, &["enter"], "rebind the selected row"),
-                Hint::new(HintRow::Go, &["escape"], "back to normal"),
+                // The two ways out, named as the choice they are: the
+                // filter is kept or it is discarded, and `enter` no
+                // longer rebinds from here (user ruling 2026-09-23).
+                Hint::new(HintRow::Go, &["enter"], "keep the filter"),
+                Hint::new(HintRow::Go, &["escape"], "discard the filter"),
             ],
         }
     };

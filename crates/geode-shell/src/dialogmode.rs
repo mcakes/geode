@@ -40,8 +40,10 @@ pub enum DialogMode {
 /// the user can see, so `escape` is never a keystroke that appears inert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscapeStep {
-    /// Filter → normal, **keeping the query applied**: leaving a search
-    /// leaves you on the match, it does not undo the search.
+    /// Filter → normal, **discarding what filter mode typed**: the query
+    /// goes back to what it stood at when filter mode was entered
+    /// ([`FilterExit::Revert`]). `escape` is the way out that undoes the
+    /// search; `enter` is the way out that keeps it ([`FilterExit::Keep`]).
     LeaveFilter,
     ClearQuery,
     PreviousStage,
@@ -57,6 +59,72 @@ pub fn escape_step(mode: DialogMode, query_is_empty: bool, has_previous_stage: b
         DialogMode::Normal if !query_is_empty => EscapeStep::ClearQuery,
         DialogMode::Normal if has_previous_stage => EscapeStep::PreviousStage,
         DialogMode::Normal => EscapeStep::Close,
+    }
+}
+
+/// What leaving filter mode does with the query typed inside it (user
+/// ruling 2026-09-23). The two keys are symmetric and neither acts on the
+/// row under the cursor: a filter is how a row is *found*, so leaving one
+/// is a decision about the search text and nothing else. Opening what the
+/// cursor is on is normal mode's `enter`, one keystroke later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterExit {
+    /// `escape`: put back the query filter mode was entered with. A
+    /// search backed out of leaves the list as it found it, which is what
+    /// makes `/` safe to press on a list already narrowed by a filter
+    /// worth keeping.
+    Revert,
+    /// `enter`: the query stays as typed. The list stays narrowed and the
+    /// letters become verbs again — this is how a filter is *applied*.
+    Keep,
+}
+
+/// The two keys that leave filter mode, and nothing else. `escape` is
+/// modifier-agnostic for the reason every surface's own escape guard
+/// records — a bare-only guard would turn `shift+escape` into a key that
+/// visibly does nothing — while `enter` is bare only, leaving the
+/// modified spellings to whatever is underneath.
+pub fn filter_exit(ks: &Keystroke) -> Option<FilterExit> {
+    if ks.key == "escape" {
+        return Some(FilterExit::Revert);
+    }
+    if ks.mods == Modifiers::NONE && ks.key == "enter" {
+        return Some(FilterExit::Keep);
+    }
+    None
+}
+
+/// Enter filter mode, remembering the query to revert to. Every `/` and
+/// the mouse's own door go through this rather than assigning
+/// [`DialogMode::Filter`] directly, because a snapshot one call site
+/// forgets to take is an `escape` that reverts to whatever some *earlier*
+/// visit to filter mode left behind.
+pub fn enter_filter(mode: &mut DialogMode, entry: &mut String, query: &str) {
+    entry.clear();
+    entry.push_str(query);
+    *mode = DialogMode::Filter;
+}
+
+/// Leave filter mode, applying `exit` to the query. Returns whether the
+/// query changed — the caller's cue to put the cursor on the top match
+/// and scroll there, since a restored query re-expands the list under a
+/// scroll offset still parked where the narrowed one left it. An
+/// `escape` with nothing typed changes no text, and so moves no cursor.
+pub fn exit_filter(
+    mode: &mut DialogMode,
+    entry: &str,
+    query: &mut String,
+    exit: FilterExit,
+) -> bool {
+    *mode = DialogMode::Normal;
+    match exit {
+        FilterExit::Keep => false,
+        FilterExit::Revert if query == entry => false,
+        FilterExit::Revert => {
+            query.clear();
+            query.push_str(entry);
+            true
+        }
     }
 }
 
@@ -212,6 +280,95 @@ mod tests {
         assert_eq!(escape_step(DialogMode::Normal, true, true), PreviousStage);
         // Then, and only then, the modal closes.
         assert_eq!(escape_step(DialogMode::Normal, true, false), Close);
+    }
+
+    /// The two ways out of filter mode (user ruling 2026-09-23).
+    /// `escape` is modifier-agnostic like every surface's own escape
+    /// guard; `enter` is bare only, so a modified `enter` still belongs
+    /// to whatever is underneath.
+    #[test]
+    fn escape_reverts_the_filter_and_enter_keeps_it() {
+        assert_eq!(filter_exit(&bare("escape")), Some(FilterExit::Revert));
+        assert_eq!(filter_exit(&ks("escape", SHIFT)), Some(FilterExit::Revert));
+        assert_eq!(filter_exit(&bare("enter")), Some(FilterExit::Keep));
+        assert_eq!(filter_exit(&ks("enter", Modifiers::CTRL)), None);
+        // Everything else is the filter `Input`'s, not this table's.
+        assert_eq!(filter_exit(&bare("j")), None);
+        assert_eq!(filter_exit(&bare("/")), None);
+    }
+
+    /// `escape` puts back the query filter mode was entered with, and
+    /// says so (`true`) — the caller's cue to move the cursor to the top
+    /// of the re-expanded list.
+    #[test]
+    fn leaving_by_escape_restores_the_query_entry_recorded() {
+        let mut mode = DialogMode::Normal;
+        let mut entry = String::new();
+        let mut query = "vol".to_string();
+        enter_filter(&mut mode, &mut entry, &query);
+        assert_eq!(mode, DialogMode::Filter);
+        query.push_str("atility");
+        assert!(exit_filter(
+            &mut mode,
+            &entry,
+            &mut query,
+            FilterExit::Revert
+        ));
+        assert_eq!(mode, DialogMode::Normal);
+        assert_eq!(query, "vol");
+    }
+
+    /// `enter` leaves the query exactly as typed — the old `escape`'s
+    /// behaviour, now the key that means "apply this".
+    #[test]
+    fn leaving_by_enter_keeps_what_filter_mode_typed() {
+        let mut mode = DialogMode::Normal;
+        let mut entry = String::new();
+        let mut query = String::new();
+        enter_filter(&mut mode, &mut entry, &query);
+        query.push_str("delta");
+        assert!(!exit_filter(
+            &mut mode,
+            &entry,
+            &mut query,
+            FilterExit::Keep
+        ));
+        assert_eq!(mode, DialogMode::Normal);
+        assert_eq!(query, "delta");
+    }
+
+    /// An `escape` that restores the same text changed nothing, and must
+    /// say so: a cursor parked on row 40 of an unchanged list would
+    /// otherwise jump to the top for pressing `/` and changing its mind.
+    #[test]
+    fn an_escape_with_nothing_typed_reports_no_change() {
+        let mut mode = DialogMode::Normal;
+        let mut entry = String::new();
+        let mut query = "gamma".to_string();
+        enter_filter(&mut mode, &mut entry, &query);
+        assert!(!exit_filter(
+            &mut mode,
+            &entry,
+            &mut query,
+            FilterExit::Revert
+        ));
+        assert_eq!(query, "gamma");
+    }
+
+    /// The snapshot is taken at every entry, not once: a second visit
+    /// reverts to what the first one left, never to the query before it.
+    #[test]
+    fn each_entry_into_filter_mode_takes_its_own_snapshot() {
+        let mut mode = DialogMode::Normal;
+        let mut entry = String::new();
+        let mut query = String::new();
+        enter_filter(&mut mode, &mut entry, &query);
+        query.push_str("vega");
+        exit_filter(&mut mode, &entry, &mut query, FilterExit::Keep);
+        enter_filter(&mut mode, &mut entry, &query);
+        query.push_str("-hedge");
+        exit_filter(&mut mode, &entry, &mut query, FilterExit::Revert);
+        assert_eq!(query, "vega");
     }
 
     #[test]

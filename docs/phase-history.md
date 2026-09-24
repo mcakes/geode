@@ -169,3 +169,47 @@ The app bridge now permits one catalog request at a time. Diagnostics retains pe
 Queue refusals and read errors retain demand and use one one-second retry timer. Notifications cannot bypass the delay. Retries use a weak diagnostics handle, do not retain the data handle, and stop submitting watched refreshes when diagnostics hides, or any request when the window closes. Explicit catalog reads from identity and underlying pickers survive without diagnostics watchers and take priority over watched demand when coalesced. An explicit read whose as-of changed retries with the current as-of even when no diagnostics tile observes the frame. A successful completion with no pending demand does not poll. The service still builds the catalog on its existing connection/thread; no ingest queue or daemon protocol changes are involved.
 
 Bridge regression tests exercise a 128-publication burst, unchanged completions, duplicate/foreign replies, several as-of changes through a real diagnostics tile (both idle and in flight), mixed-demand priority, multiple watchers, hide/show during a read, a full request queue, read errors, and timer expiry after hiding or closing the window. The older as-of test now delivers the first reply before expecting the second request, as required by the new bound.
+
+
+### Filter mode's two exits (2026-09-23, worktree)
+
+User ruling: in a modal dialog's filter mode `escape` reverts the query
+to what it stood at when filter mode was entered, and a bare `enter`
+keeps it as typed. Both leave filter mode and neither acts on the row
+under the cursor. `enter` therefore no longer opens an object, its
+column stage, a rebind capture or a settings typeahead from filter mode
+— that is normal mode's `enter`, one keystroke later, so reaching a row
+out of a search costs two presses.
+
+`dialogmode` owns the vocabulary: `FilterExit::{Revert, Keep}`,
+`filter_exit` (the key table — `escape` modifier-agnostic, `enter` bare
+only), `enter_filter` (records the snapshot) and `exit_filter` (applies
+the exit and reports whether the query changed). Each dialog state
+carries a `filter_entry_query` beside its `query`; the object dialog
+wraps the pair in `ObjectDialogState::enter_filter`/`exit_filter`, which
+pick the open stage's query slot (`state.query` in browse, `draft.query`
+in the edit, column and values stages) and move that slot's cursor to
+the top match when the query changed. `dialog::enter_filter_by_mouse`
+takes the same door, so a filter opened by click reverts like a typed
+one, and `settings_view::route` reads `filter_exit` rather than pairing
+the two keys up again in its own table.
+
+The FIELD uses of `DialogMode::Filter` deliberately take neither door —
+`open_text_field`/`open_field`, `begin_naming`, settings'
+`open_choice_on_selected` — because a field is text being typed, not a
+search. Each is protected by a handler that claims its keys ahead of the
+filter branch (`render`'s `text_entry` branch, the `Stage::Naming`
+dispatch arm, `route`'s `choosing` rung), and closing one goes back to
+normal mode without consulting the snapshot, so a filter that was
+standing when the field opened is kept. One `filter_entry_query` serves
+the object dialog's two query slots because every stage transition sets
+normal mode explicitly, so a filter session can never span one.
+
+Two consequences worth remembering. After a revert the query is usually
+empty, so the next `escape` closes the dialog rather than taking the
+`ClearQuery` rung; the tests that walk the whole ladder now apply the
+filter with `enter` first. And a stage or a capture entered FROM filter
+mode is a mouse-only route now (§17.1 rule 2, §18.9.1) — the tests that
+covered `escape`-cancels-a-capture and open-from-a-filtered-list were
+moved onto the click door rather than deleted, since both hazards
+survive there.
