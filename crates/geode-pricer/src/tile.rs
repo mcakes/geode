@@ -9,18 +9,21 @@
 
 use crate::content::{PricerSettings, Shared};
 use crate::core::commands::{self, Command};
-use crate::core::sheet::{LineId, Sheet};
+use crate::core::edit::{Edit, EditError, Undo};
+use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::storage::from_rows;
 use crate::core::tree::Expansion;
+use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::delegate::{ChevronClicked, SheetDelegate};
 use crate::grid::{GridModel, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::session::Record;
 use crate::store::Loaded;
+use chrono::Utc;
 use geode_core::clock::Clock;
 use geode_core::document::DocumentRows;
-use geode_core::pricing::PriceOutcome;
+use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::QueryKey;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
@@ -30,12 +33,21 @@ use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, SharedString, Window, div};
+use gpui::{App, Context, Entity, SharedString, Task, Window, div};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 pub(crate) const LOADING: &str = "loading…";
+
+/// The one-shot wait before a refused submission asks again (planning
+/// decision 5): nothing else would ever resubmit with the refresh timer
+/// off.
+pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(1);
+pub(crate) const REFUSED: &str =
+    "pricing request refused: the data service is busy or gone; retrying";
 
 /// `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b` steps — `vimnav`'s fixed ±5
 /// and ±10, the market-data panel's own constants, times the count.
@@ -68,7 +80,6 @@ pub struct PricerTile {
     // Read from Task 8 on (the request door and the frame's as-of).
     #[allow(dead_code)]
     frame: Entity<Frame>,
-    #[allow(dead_code)]
     pub(crate) data: DataHandle,
     pub(crate) shared: Rc<Shared>,
     pub(crate) sheet: Sheet,
@@ -98,6 +109,19 @@ pub struct PricerTile {
     /// What `p`/`shift+p` put (Task 11): the last `y y` or `d d`.
     pub(crate) register: Option<crate::core::RowSpec>,
     find: Option<FindState>,
+    /// The latest submission's tag: an outcome with any other is dropped
+    /// whole (spec §9.2).
+    pub(crate) tag: u64,
+    /// `id → revision` of the latest batch (planning decision 4): decides
+    /// WHETHER to submit, never what — a batch always carries every stale
+    /// line.
+    in_flight: HashMap<LineId, u64>,
+    /// Read only through `apply_edit`/`apply_edits` (Task 9's entry field
+    /// and cell editor, Task 11's `:spot clear` and `u`/`ctrl+r` dispatch).
+    #[allow(dead_code)]
+    pub(crate) undo: UndoStack,
+    refresh_task: Option<Task<()>>,
+    retry_task: Option<Task<()>>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -239,6 +263,7 @@ impl PricerTile {
         // A closed tile gives its name back (spec §7.4's open set). Tasks
         // 8 and 12 add the cancel and the final save here.
         cx.on_release(|this: &mut PricerTile, _cx| {
+            this.data.cancel(QueryKey(this.id.0));
             this.shared.open.borrow_mut().remove(&this.sheet.name);
         })
         .detach();
@@ -272,6 +297,11 @@ impl PricerTile {
             clock: app_clock(cx),
             register: None,
             find: None,
+            tag: 0,
+            in_flight: HashMap::new(),
+            undo: UndoStack::default(),
+            refresh_task: None,
+            retry_task: None,
         };
         this.resolve_plan();
         this.rebuild(cx);
@@ -319,9 +349,23 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// Task 8 adds the reprice on show and the cancel on hide.
+    /// A show reprices what is stale and starts the timer; a hide cancels
+    /// in flight by key and stops it, keeping the stale marks (spec §9.5).
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
+            return;
+        }
         self.visible = visible;
+        if visible {
+            self.submit(cx);
+            self.restart_timer(cx);
+        } else {
+            self.data.cancel(QueryKey(self.id.0));
+            self.in_flight.clear();
+            self.refresh_task = None;
+            self.retry_task = None;
+        }
+        self.rebuild_chrome();
         cx.notify();
     }
 
@@ -375,9 +419,218 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// Task 8 fills this in.
+    /// The one edit door (global constraints): apply, record the undo,
+    /// then everything an edit implies. Task 9's entry field and cell
+    /// editor are its first production callers.
+    #[allow(dead_code)]
+    pub(crate) fn apply_edit(
+        &mut self,
+        edit: Edit,
+        cx: &mut Context<Self>,
+    ) -> Result<(), EditError> {
+        let undo = self.sheet.apply(edit)?;
+        self.undo.record(undo);
+        self.after_edit(cx);
+        Ok(())
+    }
+
+    /// Several edits as ONE undo entry (`:spot clear`, Task 11). On a
+    /// refusal the ones already applied are taken back and nothing is
+    /// recorded.
+    #[allow(dead_code)]
+    pub(crate) fn apply_edits(
+        &mut self,
+        edits: Vec<Edit>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), EditError> {
+        let mut undos: Vec<Undo> = Vec::new();
+        for e in edits {
+            match self.sheet.apply(e) {
+                Ok(u) => undos.push(u),
+                Err(err) => {
+                    for u in undos.iter().rev() {
+                        let _ = self.sheet.undo(u);
+                    }
+                    self.after_edit(cx);
+                    return Err(err);
+                }
+            }
+        }
+        if undos.is_empty() {
+            return Ok(());
+        }
+        // Take back the LAST edit first.
+        self.undo.record(Undo {
+            inverse: undos.into_iter().rev().flat_map(|u| u.inverse).collect(),
+        });
+        self.after_edit(cx);
+        Ok(())
+    }
+
+    /// What every edit, undo and redo implies: forget dead package ids,
+    /// rebuild, reprice what changed, and make sure the timer runs once
+    /// the sheet has a line. Task 12 adds the write-behind save. Reached
+    /// only through `apply_edit`/`apply_edits` until Task 9 wires a
+    /// production caller.
+    #[allow(dead_code)]
+    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.expansion.retain_packages(&self.sheet);
+        self.rebuild(cx);
+        self.submit(cx);
+        if self.refresh_task.is_none() {
+            self.restart_timer(cx);
+        }
+    }
+
+    /// One `PriceParams` of every stale line, when some stale line is not
+    /// already in flight at its current revision (spec §9.1, planning
+    /// decision 4). A hidden or loading tile submits nothing.
+    pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
+        if !self.visible || self.loading {
+            return;
+        }
+        let stale: Vec<usize> = self.sheet.stale_lines().collect();
+        let needed = stale
+            .iter()
+            .any(|r| self.in_flight.get(&self.sheet.id(*r)) != Some(&self.sheet.revision(*r)));
+        if !needed {
+            return;
+        }
+        let lines: Vec<PriceLine> = stale
+            .iter()
+            .filter_map(|r| {
+                self.sheet.request(*r).map(|request| PriceLine {
+                    id: self.sheet.id(*r).0,
+                    revision: self.sheet.revision(*r),
+                    request,
+                })
+            })
+            .collect();
+        let flight: HashMap<LineId, u64> =
+            lines.iter().map(|l| (LineId(l.id), l.revision)).collect();
+        self.tag += 1;
+        let queued = self.data.price(PriceParams {
+            key: QueryKey(self.id.0),
+            tag: self.tag,
+            submitted: Instant::now(),
+            overrides: self.sheet.overrides().clone(),
+            lines,
+        });
+        if queued {
+            self.in_flight = flight;
+            self.retry_task = None;
+            if self.notice.as_ref().is_some_and(|n| n.as_ref() == REFUSED) {
+                self.notice = None;
+            }
+        } else {
+            // Planning decision 5: nothing else would ever resubmit.
+            self.in_flight.clear();
+            self.notice = Some(REFUSED.into());
+            self.arm_retry(cx);
+        }
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
+    fn arm_retry(&mut self, cx: &mut Context<Self>) {
+        if self.retry_task.is_some() {
+            return;
+        }
+        self.retry_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RETRY_AFTER).await;
+            let _ = this.update(cx, |t, cx| {
+                t.retry_task = None;
+                t.submit(cx);
+            });
+        }));
+    }
+
+    /// `Delivery::Price` for this tile (spec §9.2).
     pub fn deliver(&mut self, outcome: PriceOutcome, cx: &mut Context<Self>) {
-        let _ = (outcome, cx);
+        if outcome.key != QueryKey(self.id.0) || outcome.tag != self.tag {
+            return;
+        }
+        let ids: Vec<(u64, u64)> = outcome
+            .results
+            .iter()
+            .map(|(id, rev, _)| (*id, *rev))
+            .collect();
+        let answers = self.sheet.deliver_all(
+            outcome
+                .results
+                .into_iter()
+                .map(|(id, rev, r)| (LineId(id), rev, r)),
+            Utc::now(),
+        );
+        for ((id, rev), answer) in ids.into_iter().zip(answers) {
+            match answer {
+                Delivered::Installed | Delivered::OldRevision { .. } => {}
+                // Deleted mid-round-trip: ordinary (planning decision 19).
+                Delivered::UnknownLine => tracing::debug!(
+                    target: "geode::pricing",
+                    tile = self.id.0, id, rev,
+                    "price result for a line no longer on the sheet"
+                ),
+                // Bugs (spec §10.1): dropped and logged with the ids.
+                Delivered::NotALine | Delivered::FutureRevision { .. } => tracing::warn!(
+                    target: "geode::pricing",
+                    tile = self.id.0, id, rev, answer = ?answer,
+                    "price result dropped"
+                ),
+            }
+        }
+        // The latest batch is answered (a cancelled one partly): whatever
+        // is still stale — an edit landed mid-flight, or a line the cancel
+        // cut off — is resubmitted.
+        self.in_flight.clear();
+        self.rebuild(cx);
+        self.submit(cx);
+    }
+
+    fn interval(&self) -> Option<Duration> {
+        match self.sheet.refresh {
+            Refresh::Every(d) => Some(d),
+            Refresh::Off => None,
+            Refresh::Default => self.shared.settings.borrow().refresh,
+        }
+    }
+
+    /// The periodic reprice (spec §9.4): running only while visible;
+    /// every tick marks every line stale and submits. Dropping the task
+    /// stops it.
+    pub(crate) fn restart_timer(&mut self, cx: &mut Context<Self>) {
+        self.refresh_task = None;
+        if !self.visible {
+            return;
+        }
+        let Some(every) = self.interval() else {
+            return;
+        };
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(every).await;
+                if this.update(cx, |t, cx| t.tick(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// A tick on an empty or loading sheet does nothing ("only while the
+    /// sheet has a line"); the timer stays armed and costs one wake.
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.sheet.is_empty() || self.loading {
+            return;
+        }
+        self.sheet.mark_all_stale();
+        self.rebuild(cx);
+        self.submit(cx);
+    }
+
+    fn reprice_all(&mut self, cx: &mut Context<Self>) {
+        self.sheet.mark_all_stale();
+        self.rebuild(cx);
+        self.submit(cx);
     }
 
     /// A `Pending` load's answer (planning decision 7): Part 4's
@@ -408,12 +661,14 @@ impl PricerTile {
         self.expansion.retain_packages(&self.sheet);
         self.resolve_plan();
         self.rebuild(cx);
+        self.submit(cx);
     }
 
     /// A reload reached this tile (planning decision 20).
     pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
         self.resolve_plan();
         self.rebuild(cx);
+        self.restart_timer(cx);
     }
 
     // ---- verbs ----------------------------------------------------------
@@ -497,6 +752,10 @@ impl PricerTile {
             "escape" => {
                 self.find = None;
                 self.notice = None;
+            }
+            "price" => {
+                self.reprice_all(cx);
+                return true;
             }
             _ => return false,
         }
@@ -603,8 +862,21 @@ impl PricerTile {
         let _ = window;
         match commands::parse(line)? {
             Command::View(name) => self.set_view(&name, cx),
-            // Tasks 8 and 11 replace this arm verb by verb.
-            _ => Err("not built yet".into()),
+            Command::Price => {
+                self.reprice_all(cx);
+                Ok(())
+            }
+            Command::Refresh(r) => {
+                self.sheet.refresh = r;
+                self.restart_timer(cx);
+                self.rebuild_chrome();
+                cx.notify();
+                Ok(())
+            }
+            // Task 11 replaces this arm.
+            Command::Shift { .. } | Command::Spot { .. } | Command::Group(_) | Command::Ungroup => {
+                Err("not built yet".into())
+            }
         }
     }
 
@@ -1556,5 +1828,317 @@ pub(crate) mod tests {
             Some(0),
             "escape returns to where `/` opened"
         );
+    }
+
+    // ---- Task 8 ----
+
+    fn edit(h: &Harness, vcx: &mut VisualTestContext, e: Edit) {
+        h.tile.update(vcx, |t, cx| t.apply_edit(e, cx)).unwrap();
+    }
+
+    fn new_strike(h: &Harness, vcx: &VisualTestContext, row: usize, strike: f64) -> Edit {
+        let i = h
+            .tile
+            .read_with(vcx, |t, _| t.sheet.instrument(row).unwrap().clone());
+        let geode_core::pricing::Instrument::Vanilla(mut v) = i else {
+            panic!("vanilla")
+        };
+        v.strike = geode_core::pricing::Strike::Absolute(strike);
+        Edit::SetInstrument {
+            row,
+            instrument: geode_core::pricing::Instrument::Vanilla(v),
+        }
+    }
+
+    #[gpui::test]
+    fn a_shown_tile_prices_every_stale_line_in_one_batch_and_the_answer_paints(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let batches = h.prices();
+        assert_eq!(batches.len(), 1, "one PriceParams for the frame");
+        let b = &batches[0];
+        assert_eq!(b.key, QueryKey(TILE));
+        assert_eq!(
+            b.lines.iter().map(|l| l.id).collect::<Vec<_>>(),
+            vec![1, 3, 4, 5],
+            "lines only, never the package"
+        );
+        assert_eq!(
+            h.header(&vcx)
+                .iter()
+                .filter(|t| t.ends_with("pricing…"))
+                .count(),
+            1
+        );
+        h.answer(&mut vcx, b, 12.5);
+        assert_eq!(h.cell(&vcx, 0, "price"), "12.50");
+        assert_eq!(
+            h.cell(&vcx, 1, "price"),
+            "0.00",
+            "−5 × 12.5 + 5 × 12.5: the package sums signed legs"
+        );
+        assert!(!h.header(&vcx).iter().any(|t| t.ends_with("pricing…")));
+        assert!(
+            h.prices().is_empty(),
+            "nothing left stale, nothing resubmitted"
+        );
+    }
+
+    #[gpui::test]
+    fn a_request_changing_edit_resubmits_and_a_qty_edit_does_not(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let b = h.prices().remove(0);
+        h.answer(&mut vcx, &b, 12.5);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        assert!(h.prices().is_empty(), "qty changes no request (spec §9.3)");
+        let e = new_strike(&h, &vcx, 0, 5100.0);
+        edit(&h, &mut vcx, e);
+        let again = h.prices();
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            again[0].lines.iter().map(|l| l.id).collect::<Vec<_>>(),
+            vec![1],
+            "only the edited line is stale"
+        );
+        assert!(again[0].tag > b.tag);
+    }
+
+    /// Planning decision 4: a newer batch carries every stale line, so
+    /// dropping the older batch's outcome whole loses nothing.
+    #[gpui::test]
+    fn an_older_submissions_outcome_is_dropped_whole(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let first = h.prices().remove(0);
+        let e = new_strike(&h, &vcx, 0, 5100.0);
+        edit(&h, &mut vcx, e);
+        let second = h.prices().remove(0);
+        assert_eq!(
+            second.lines.len(),
+            4,
+            "the new batch carries the old one's lines too"
+        );
+        h.answer(&mut vcx, &first, 99.0);
+        assert_eq!(
+            h.cell(&vcx, 2, "price"),
+            "",
+            "the older tag installs nothing"
+        );
+        h.answer(&mut vcx, &second, 12.5);
+        assert_eq!(h.cell(&vcx, 2, "price"), "12.50");
+    }
+
+    #[gpui::test]
+    fn an_answer_for_an_old_revision_leaves_the_line_stale_and_resubmits_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let first = h.prices().remove(0);
+        let e = new_strike(&h, &vcx, 0, 5100.0);
+        edit(&h, &mut vcx, e);
+        let second = h.prices().remove(0);
+        // The CURRENT tag, but line 1 answered at the revision before the
+        // edit (an edit landed during the round trip, spec §9.2).
+        h.deliver(
+            &mut vcx,
+            PriceOutcome {
+                key: second.key,
+                tag: second.tag,
+                submitted: std::time::Instant::now(),
+                results: first
+                    .lines
+                    .iter()
+                    .map(|l| (l.id, l.revision, Ok(result(12.5))))
+                    .collect(),
+            },
+        );
+        assert_eq!(
+            h.cell(&vcx, 0, "price"),
+            "",
+            "line 1's answer is for an older request"
+        );
+        assert_eq!(h.cell(&vcx, 2, "price"), "12.50", "the rest install");
+        let again = h.prices();
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            again[0].lines.iter().map(|l| l.id).collect::<Vec<_>>(),
+            vec![1],
+            "only line 1 goes again"
+        );
+    }
+
+    #[gpui::test]
+    fn a_delivery_for_another_key_is_ignored(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let b = h.prices().remove(0);
+        let mut other = b.clone();
+        other.key = QueryKey(99);
+        h.answer(&mut vcx, &other, 12.5);
+        assert_eq!(h.cell(&vcx, 0, "price"), "");
+    }
+
+    #[gpui::test]
+    fn a_failed_line_paints_a_dash_names_itself_in_the_footer_and_fails_its_package(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let b = h.prices().remove(0);
+        h.deliver(
+            &mut vcx,
+            PriceOutcome {
+                key: b.key,
+                tag: b.tag,
+                submitted: std::time::Instant::now(),
+                results: b
+                    .lines
+                    .iter()
+                    .map(|l| {
+                        (
+                            l.id,
+                            l.revision,
+                            if l.id == 3 {
+                                Err("refused by the mock".into())
+                            } else {
+                                Ok(result(1.0))
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        );
+        assert_eq!(
+            h.cell(&vcx, 1, "price"),
+            "—",
+            "a failed leg fails its package"
+        );
+        h.dispatch(&mut vcx, "down", None);
+        assert!(
+            h.footer(&vcx).unwrap().ends_with("refused by the mock"),
+            "the cursor row's failure in the footer"
+        );
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(h.footer(&vcx), None);
+    }
+
+    #[gpui::test]
+    fn hide_cancels_by_key_and_prices_nothing_until_shown(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let _ = h.prices();
+        h.visible(&mut vcx, false);
+        assert!(
+            h.requests()
+                .iter()
+                .any(|r| matches!(r, Request::Cancel { key } if *key == QueryKey(TILE)))
+        );
+        let e = new_strike(&h, &vcx, 0, 5100.0);
+        edit(&h, &mut vcx, e);
+        assert!(
+            h.prices().is_empty(),
+            "a hidden tile keeps its stale marks and submits nothing"
+        );
+        h.visible(&mut vcx, true);
+        assert_eq!(h.prices().len(), 1, "and resubmits on show");
+    }
+
+    #[gpui::test]
+    fn a_refused_submission_notices_and_retries_after_a_second(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&BOOK);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.close_channel();
+        h.visible(&mut vcx, true);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        vcx.executor().advance_clock(RETRY_AFTER);
+        vcx.run_until_parked();
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.tag) > tag,
+            "the retry fired and asked again"
+        );
+    }
+
+    #[gpui::test]
+    fn the_refresh_tick_marks_every_line_stale_and_submits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let b = h.prices().remove(0);
+        h.answer(&mut vcx, &b, 12.5);
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_secs(30));
+        vcx.run_until_parked();
+        let tick = h.prices();
+        assert_eq!(tick.len(), 1);
+        assert_eq!(tick[0].lines.len(), 4, "every line, at unchanged revisions");
+        assert_eq!(
+            tick[0].lines.iter().map(|l| l.revision).collect::<Vec<_>>(),
+            b.lines.iter().map(|l| l.revision).collect::<Vec<_>>()
+        );
+    }
+
+    #[gpui::test]
+    fn colon_refresh_sets_this_sheets_interval_and_off_stops_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let b = h.prices().remove(0);
+        h.answer(&mut vcx, &b, 12.5);
+        h.command(&mut vcx, "refresh off").unwrap();
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_secs(120));
+        vcx.run_until_parked();
+        assert!(h.prices().is_empty());
+        h.command(&mut vcx, "refresh 5s").unwrap();
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_secs(5));
+        vcx.run_until_parked();
+        assert_eq!(h.prices().len(), 1);
+        let r = crate::session::Record::from_table(&h.serialize(&mut vcx));
+        assert_eq!(
+            r.refresh,
+            Some(crate::core::Refresh::Every(std::time::Duration::from_secs(
+                5
+            )))
+        );
+    }
+
+    #[gpui::test]
+    fn colon_price_reprices_everything_now(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let b = h.prices().remove(0);
+        h.answer(&mut vcx, &b, 12.5);
+        h.command(&mut vcx, "price").unwrap();
+        assert_eq!(h.prices()[0].lines.len(), 4);
+        assert!(
+            h.dispatch(&mut vcx, "price", None),
+            "the palette's action is the same verb"
+        );
+    }
+
+    #[gpui::test]
+    fn a_missing_pricer_names_itself_in_the_header(cx: &mut gpui::TestAppContext) {
+        let settings = PricerSettings {
+            pricer: "vendor".into(),
+            pricer_missing: true,
+            ..PricerSettings::default()
+        };
+        let (h, vcx) = open_full(cx, None, MemorySheetStore::default(), settings);
+        assert_eq!(
+            h.notice(&vcx).as_deref(),
+            Some("pricer \"vendor\" is not built into this binary")
+        );
+    }
+
+    #[gpui::test]
+    fn the_header_time_reads_the_app_clock(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let b = h.prices().remove(0);
+        h.answer(&mut vcx, &b, 12.5);
+        vcx.update(|_, cx| {
+            cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc()))
+        });
+        let utc = h.tile.read_with(&vcx, |t, _| t.header.time.clone());
+        vcx.update(|_, cx| {
+            cx.set_global(geode_shell::clock::AppClock(
+                geode_core::clock::Clock::in_zone_named("Asia/Tokyo"),
+            ))
+        });
+        let tokyo = h.tile.read_with(&vcx, |t, _| t.header.time.clone());
+        assert_ne!(utc, tokyo, "a zone change re-prepares the header");
     }
 }
