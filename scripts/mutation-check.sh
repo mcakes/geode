@@ -11618,17 +11618,15 @@ run_mutation "mdtile: a panel with no catalog requests one" \
 # next launch — work lost silently, with the restored panel looking
 # perfectly healthy.
 #
-# Two lines, not one: `revert`'s own guard is the same
-# `if self.draft.is_empty() {` shape, and an ambiguous anchor mutates
-# whichever site comes first. Re-anchored 2026-09-19 (per-underlying
-# drafts): the current draft is now filed under `drafts.<key>` through a
-# `match` on the key, so the guard's second line changed.
+# Re-anchored 2026-09-24 (Task 4's rebase guard, amendment 4): the guard
+# is now followed by a group-capture block before the `match` on the key,
+# so the two-line anchor that used to reach `match &self.key {` no longer
+# does; the guard line alone is unique against `revert`'s own (the
+# opposite condition, `if self.draft.is_empty() {`).
 run_mutation "mdtile: serialize writes the draft" \
   crates/geode-marketdata/src/tile.rs \
-  '        if !self.draft.is_empty() {
-            match &self.key {' \
-  '        if false {
-            match &self.key {' \
+  '        if !self.draft.is_empty() {' \
+  '        if false {' \
   geode-marketdata \
   serialize_round_trips_key_and_draft
 
@@ -14846,6 +14844,21 @@ run_mutation "draft: bump lands the declared integer type" \
   '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
   '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::F64(current + delta)),' \
   geode-marketdata bump_lands_the_declared_type
+
+# A same-day group whose size changed has shifted ordinals. Mutated to
+# skip the check, an edit keyed `<date>#2` lands on a different row.
+# (The bare `if size_now != 0 && was != size_now {` line alone matches
+# both this site and the `Deleted`-mark site below it, indentation
+# included, since one is a tail substring of the other — the preceding
+# `size_now` line, which names `row_label` here and `&label` there, is
+# what makes this anchor unique.)
+run_mutation "draft: rebase refuses a changed same-day group" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                let size_now = now.get(group_of(row_label)).copied().unwrap_or(0);
+                if size_now != 0 && was != size_now {' \
+  '                let size_now = now.get(group_of(row_label)).copied().unwrap_or(0);
+                if false {' \
+  geode-marketdata rebase_refuses_edits_in_a_same_day_group_that_changed_size
 
 # `MarketDataTile::bump` checks every INSERTED-row cell's `bumped()`
 # result before either write door opens (task 3 review, fix round 1).

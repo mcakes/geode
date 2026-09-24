@@ -55,8 +55,9 @@ use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, FieldKey, MatrixModel, PanelSpec,
-    Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell, route,
+    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, DraftState, FieldKey, MatrixModel,
+    PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell,
+    route,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -1173,6 +1174,25 @@ impl MarketDataTile {
             match self.policy {
                 UpdatePolicy::Hold => unreachable!("guarded above"),
                 UpdatePolicy::Rebase => {
+                    // The rebase guard (spec §2, amendment 4) needs the
+                    // OUTGOING document's own group sizes before this
+                    // rebase moves `draft` onto the incoming one —
+                    // `painted_snapshot` is exactly what is on screen
+                    // right now, which is this draft's base by
+                    // construction (still `self.base_snapshot`/
+                    // `self.snapshot`, neither overwritten yet). A build
+                    // failure here is silently skipped, the same "leave
+                    // groups as they were" the restore path below takes:
+                    // it cannot happen against a document that painted a
+                    // moment ago, and if it somehow did, the worst case
+                    // is the guard comparing against a stale count rather
+                    // than losing the rebase itself.
+                    if let Some(base) = self.painted_snapshot()
+                        && let Ok(base_model) =
+                            MatrixModel::build(&base, self.spec, &Draft::default())
+                    {
+                        draft.capture_groups(&base_model);
+                    }
                     // Two builds, on purpose: `Draft::rebase` re-places
                     // the edits by the NEW document's row and column
                     // labels, which only a model of that document
@@ -3619,6 +3639,17 @@ impl MarketDataTile {
         if !self.draft.is_behind() {
             return Err(NOT_BEHIND.to_string());
         }
+        // The rebase guard (spec §2, amendment 4) needs the group sizes
+        // of the document currently on screen — `painted_snapshot` while
+        // `Behind` — before `rebase` below moves the draft onto the newer
+        // one. Skipped, not refused, on a build failure: the guard is a
+        // refinement of `rebase`'s own report, never a gate on running it
+        // at all.
+        if let Some(base) = self.painted_snapshot()
+            && let Ok(base_model) = MatrixModel::build(&base, self.spec, &Draft::default())
+        {
+            self.draft.capture_groups(&base_model);
+        }
         // Not `.expect(..)`: `Behind` implies a newer generation was
         // delivered, but this is a render-thread module, and an invariant
         // break here must read as a `:`-line refusal, never a crash.
@@ -4169,12 +4200,29 @@ impl MarketDataTile {
         // shape that has no key to file it under.
         let mut drafts = toml::Table::new();
         if !self.draft.is_empty() {
+            // The rebase guard (spec §2, amendment 4) needs group sizes
+            // captured against the document currently painted — true here
+            // exactly while `Editing` (the snapshot on screen) or `Behind`
+            // (`painted_snapshot` names the base, not the newer arrival).
+            // Computed on a CLONE, not `self.draft` itself: `serialize`
+            // takes `&self`, and this is the one capture site with no
+            // `&mut` to write it back onto the live draft, so a same-day
+            // group that changed size while nobody ran `:rebase` this
+            // session is still caught on the NEXT restart rather than
+            // only on the next explicit rebase.
+            let mut draft = self.draft.clone();
+            if matches!(draft.state, DraftState::Editing | DraftState::Behind { .. })
+                && let Some(base) = self.painted_snapshot()
+                && let Ok(base_model) = MatrixModel::build(&base, self.spec, &Draft::default())
+            {
+                draft.capture_groups(&base_model);
+            }
             match &self.key {
                 Some(key) => {
-                    drafts.insert(display_key(key), toml::Value::Table(self.draft.to_toml()));
+                    drafts.insert(display_key(key), toml::Value::Table(draft.to_toml()));
                 }
                 None => {
-                    t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));
+                    t.insert("draft".into(), toml::Value::Table(draft.to_toml()));
                 }
             }
         }
@@ -8756,6 +8804,102 @@ deleted = true
             chips.iter().any(|c| c
                 == "dropped 2 edits whose rows or columns the new document lacks: \
 2026-10-16/fwd, 2026-10-16/atm"),
+            "{chips:?}"
+        );
+    }
+
+    /// The rebase guard (spec §2, amendment 4), through `:rebase` on a
+    /// real dividend panel: an edit keyed by a same-date ORDINAL
+    /// (`2026-09-18#2`) is refused when the newer document's group grew
+    /// from two rows to three, and the notice names the row and the size
+    /// change; the edit is gone rather than landing on whichever row
+    /// `2026-09-18#2` now happens to be.
+    #[gpui::test]
+    fn rebase_refuses_a_same_day_group_edit_through_the_command_line(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_spec(cx, &DIVIDEND, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot(&[
+                (
+                    "2026-09-18",
+                    "2026-09-18",
+                    "2026-08-01",
+                    "2026-10-01",
+                    1.0,
+                    "declared",
+                ),
+                (
+                    "2026-09-18#2",
+                    "2026-09-18",
+                    "2026-08-01",
+                    "2026-10-01",
+                    2.0,
+                    "declared",
+                ),
+            ])),
+        );
+
+        // Row 1 ("2026-09-18#2"), the "amount" column (index 3).
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.0");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 1);
+
+        // A newer generation: the same date now carries a THIRD row, so
+        // the group's ordinals have shifted.
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot_at(
+                &[
+                    (
+                        "2026-09-18",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        1.0,
+                        "declared",
+                    ),
+                    (
+                        "2026-09-18#2",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        2.0,
+                        "declared",
+                    ),
+                    (
+                        "2026-09-18#3",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        3.0,
+                        "declared",
+                    ),
+                ],
+                NEWER,
+            )),
+        );
+
+        h.command(&mut vcx, "rebase")
+            .expect("behind: rebase applies");
+
+        let (len, chips) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().len(), t.header_texts()));
+        assert_eq!(len, 0, "the same-day group edit did not survive the rebase");
+        assert!(
+            chips
+                .iter()
+                .any(|c| c.contains("2026-09-18#2") && c.contains("2 → 3")),
             "{chips:?}"
         );
     }

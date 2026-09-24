@@ -9,7 +9,11 @@
 
 #![cfg(test)]
 
-use crate::core::spec::{Columns, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn};
+use crate::core::draft::Draft;
+use crate::core::matrix::MatrixModel;
+use crate::core::spec::{
+    Columns, DIVIDEND, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn,
+};
 use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
@@ -336,6 +340,17 @@ pub(crate) fn ladder_snapshot(rows: &[(i64, f64)]) -> Snapshot {
 /// `Columns::Values` branch correctly, not `SCHEDULE`'s three-column
 /// stand-in (task 3 review, fix round 1).
 pub(crate) fn dividend_snapshot(rows: &[(&str, &str, &str, &str, f64, &str)]) -> Snapshot {
+    dividend_snapshot_at(rows, BASE)
+}
+
+/// [`dividend_snapshot`] stamped as a generation of the caller's choosing
+/// (Task 4) — a second delivery at a later `as_of` is what moves a
+/// dividend panel's draft to `Behind`, the tile-level rebase-guard test's
+/// own door onto `:rebase`.
+pub(crate) fn dividend_snapshot_at(
+    rows: &[(&str, &str, &str, &str, f64, &str)],
+    as_of: &str,
+) -> Snapshot {
     let n = rows.len();
     let dt =
         |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").expect("a valid fixture date");
@@ -371,8 +386,33 @@ pub(crate) fn dividend_snapshot(rows: &[(&str, &str, &str, &str, f64, &str)]) ->
             ),
         ],
         0,
-        provenance(BASE),
+        provenance(as_of),
     )
+}
+
+/// A [`DIVIDEND`] model whose rows carry exactly the given `dividend_id`
+/// labels — Task 4's rebase-guard tests, which key a cell edit by a
+/// same-date ordinal (`2026-09-18#2`) and need only the row IDENTITY, not
+/// any particular dates or amount. Built with `MatrixModel::build`, not by
+/// hand, so this exercises the same `RowState::Document` labelling a real
+/// delivery would; every row shares one ex date so a caller who wants a
+/// same-day GROUP need only vary the labels' `#n` suffixes.
+pub(crate) fn flat_model(labels: &[&str]) -> MatrixModel {
+    let rows: Vec<(&str, &str, &str, &str, f64, &str)> = labels
+        .iter()
+        .map(|&label| {
+            (
+                label,
+                "2026-09-18",
+                "2026-08-01",
+                "2026-10-01",
+                1.0,
+                "declared",
+            )
+        })
+        .collect();
+    let snapshot = dividend_snapshot(&rows);
+    MatrixModel::build(&snapshot, &DIVIDEND, &Draft::default()).expect("a valid dividend fixture")
 }
 
 /// A flat panel with one `F64` and one `I64` value column (task 3 review,

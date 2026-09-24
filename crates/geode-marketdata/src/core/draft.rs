@@ -11,7 +11,7 @@
 //! delivery whose `as_of` differs from `base` is a newer generation and
 //! the draft goes `Behind` rather than being clobbered (roadmap ruling 9).
 
-use crate::core::matrix::MatrixModel;
+use crate::core::matrix::{MatrixModel, RowState};
 use crate::core::spec::{Columns, PanelSpec};
 use geode_core::document::Value;
 use geode_core::schema::ColumnType;
@@ -169,6 +169,19 @@ pub struct Draft {
     /// `edits`/`attrs` for the same reason: one base, one state, one
     /// `len()`, one `revert`.
     pub rows: BTreeMap<String, RowEdit>,
+    /// The same-ex-date GROUP each edited label belonged to, and how many
+    /// rows that group held, in the base document (market-data spec §2's
+    /// rebase guard, amendment 4). A minted id like `2026-09-18#2` is an
+    /// ORDINAL among same-date rows, so an edit keyed by it is only safe
+    /// to carry across a rebase while that date's row count is unchanged
+    /// — a different count means the ordinals shifted and `#2` may now
+    /// name a different dividend. Captured by [`Draft::capture_groups`],
+    /// never by [`Draft::set`] (which has no model to read a count from),
+    /// at every point the tile has a model of the draft's own base in
+    /// hand; empty on a draft restored from a session that predates this
+    /// guard, which is exactly "apply no guard" (there is nothing to
+    /// compare a rebase's new count against).
+    pub groups: BTreeMap<String, usize>,
     pub state: DraftState,
     /// (row label, column label) per edited cell. Private because it must
     /// never drift from `edits`: every door that writes one writes both.
@@ -501,6 +514,7 @@ impl Draft {
         self.labels.clear();
         self.attrs.clear();
         self.rows.clear();
+        self.groups.clear();
         self.base = None;
         self.state = DraftState::Clean;
         n
@@ -602,6 +616,38 @@ impl Draft {
         }
     }
 
+    /// Snapshot the same-date group sizes a rebase will need to guard
+    /// (spec §2's rebase guard, amendment 4): `base` must be a CLEAN model
+    /// (`Draft::default()`) of the document this draft's edits are
+    /// currently painted against — the tile calls this wherever the
+    /// painted model IS the draft's base, which `capture_groups`' own
+    /// caller decides, never this method.
+    ///
+    /// Restricted to the groups that hold a touched label — a cell edit's
+    /// row (via `labels`) or a `Deleted` mark's row — because an untouched
+    /// group's size is nobody's business here: only a touched label's
+    /// ordinal can land on the wrong row. Recomputing this way, rather
+    /// than merging into whatever `groups` already held, is what keeps a
+    /// second edit added to an already-guarded group from leaving a STALE
+    /// count behind for the first one's group after `rebase` calls this
+    /// again on the newer document (see `rebase`'s own tail).
+    pub fn capture_groups(&mut self, base: &MatrixModel) {
+        let now = group_sizes(base);
+        let mut touched: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (row_label, _col_label) in self.labels.values() {
+            touched.insert(group_of(row_label).to_string());
+        }
+        for (label, edit) in &self.rows {
+            if matches!(edit, RowEdit::Deleted) {
+                touched.insert(group_of(label).to_string());
+            }
+        }
+        self.groups = now
+            .into_iter()
+            .filter(|(g, _)| touched.contains(g))
+            .collect();
+    }
+
     /// Re-apply the edits onto a newer generation's model, by label.
     ///
     /// Answers how many were kept and the labels of those dropped —
@@ -638,6 +684,15 @@ impl Draft {
             .map(|(ci, column)| (column.as_ref(), ci))
             .collect();
 
+        // Same-date group sizes in the NEWER document, read once — the
+        // rebase guard (spec §2, amendment 4) checks every touched
+        // label's group against this before resolving that label's own
+        // edit or `Deleted` mark, never after: a label whose group
+        // changed size is refused outright, with no fallback to "the row
+        // still resolves by name" (it might resolve, onto the wrong
+        // dividend).
+        let now = group_sizes(model_of_newer);
+
         let mut edits = BTreeMap::new();
         let mut labels = BTreeMap::new();
         let mut dropped = Vec::new();
@@ -649,6 +704,30 @@ impl Draft {
                 dropped.push((format!("row {}", cell.0), format!("column {}", cell.1)));
                 continue;
             };
+            // A same-date group this draft captured a size for, whose
+            // size in the newer document differs — but only while the
+            // group still has SOME row in the newer document: a group
+            // gone to zero means `row_label` cannot resolve either way,
+            // and the ordinary "no target" branch below already reports
+            // that (by column, the more specific of the two, e.g. a lone
+            // node dropped from a term that otherwise survives — see
+            // `rebase_moves_an_edit_to_its_new_index_by_label_and_reports_a_dropped_one`).
+            // A NONZERO size that differs is the real hazard: the
+            // group's ordinals shifted, so `row_label` may now name a
+            // DIFFERENT row than the one this edit was made against.
+            // Checked before the label even looks for a target cell, and
+            // named rather than silently carried onto whatever
+            // `row_label` resolves to.
+            if let Some(&was) = self.groups.get(group_of(row_label)) {
+                let size_now = now.get(group_of(row_label)).copied().unwrap_or(0);
+                if size_now != 0 && was != size_now {
+                    dropped.push((
+                        row_label.clone(),
+                        format!("row (same-day rows changed: {was} → {size_now})"),
+                    ));
+                    continue;
+                }
+            }
             let target = rows
                 .get(row_label.as_str())
                 .zip(columns.get(col_label.as_str()))
@@ -717,6 +796,23 @@ impl Draft {
                 // dropped the row itself: there is nothing left to
                 // delete, so the edit is dropped and named.
                 RowEdit::Deleted => {
+                    // Same guard as a cell edit's, above, and for the
+                    // same reason and the same zero exception: `label` is
+                    // what the newer document is checked against just
+                    // below, and a NONZERO same-date group size that
+                    // moved means this label may no longer name the row
+                    // the trader marked deleted; a group gone to zero
+                    // leaves that check below to report it plainly.
+                    if let Some(&was) = self.groups.get(group_of(&label)) {
+                        let size_now = now.get(group_of(&label)).copied().unwrap_or(0);
+                        if size_now != 0 && was != size_now {
+                            dropped.push((
+                                label,
+                                format!("row (same-day rows changed: {was} → {size_now})"),
+                            ));
+                            continue;
+                        }
+                    }
                     if rows.contains_key(label.as_str()) {
                         rows_out.insert(label, RowEdit::Deleted);
                     } else {
@@ -748,6 +844,12 @@ impl Draft {
             }
         }
         self.rows = rows_out;
+
+        // The newer document is the new base: its own group sizes,
+        // restricted to whatever survived above, are what the NEXT
+        // rebase must compare against — not the sizes this one started
+        // with, which describe a document no longer on screen.
+        self.capture_groups(model_of_newer);
 
         self.base = model_of_newer.source_time.clone();
         self.state = if self.is_empty() {
@@ -858,6 +960,13 @@ impl Draft {
             }
             table.insert("rows".into(), toml::Value::Table(rows));
         }
+        if !self.groups.is_empty() {
+            let mut groups = toml::Table::new();
+            for (group, size) in &self.groups {
+                groups.insert(group.clone(), toml::Value::Integer(*size as i64));
+            }
+            table.insert("groups".into(), toml::Value::Table(groups));
+        }
         table
     }
 
@@ -952,6 +1061,19 @@ impl Draft {
                 row_edits.insert(label.clone(), RowEdit::Inserted { after, cells });
             }
         }
+        // Absent (a session written before this guard existed, or one
+        // with no groups worth recording) reads back empty, which is
+        // exactly the "apply no guard" behaviour amendment 4 asks for —
+        // no special-casing needed here beyond the ordinary absent-table
+        // default every other optional section already follows.
+        let mut groups = BTreeMap::new();
+        if let Some(toml::Value::Table(groups_table)) = t.get("groups") {
+            for (group, size) in groups_table {
+                if let Some(size) = size.as_integer() {
+                    groups.insert(group.clone(), size as usize);
+                }
+            }
+        }
         let state = if edits.is_empty() && attrs.is_empty() && row_edits.is_empty() {
             DraftState::Clean
         } else {
@@ -962,6 +1084,7 @@ impl Draft {
             edits,
             attrs,
             rows: row_edits,
+            groups,
             state,
             labels,
         }
@@ -1042,6 +1165,36 @@ pub fn bumped(current: f64, delta: f64, ty: ColumnType, column: &str) -> Result<
         ColumnType::I64 => Err(format!("bump: {column} takes whole numbers")),
         other => Err(format!("bump: {column} is not numeric ({other:?})")),
     }
+}
+
+/// The same-ex-date group a minted row label belongs to (spec §2's rebase
+/// guard): the label up to its first `#`, or the whole label when it
+/// carries no ordinal at all — a group of one, the common case. `#` never
+/// appears in a date itself, so this is unambiguous for every id
+/// `mint_ids` produces (`<date>`, `<date>#2`, `<date>#3`, …).
+pub fn group_of(label: &str) -> &str {
+    match label.split_once('#') {
+        Some((group, _)) => group,
+        None => label,
+    }
+}
+
+/// How many rows each same-date group holds in `model`, counting a row
+/// exactly once whether the document carries it as-is
+/// ([`RowState::Document`]) or a draft has marked it deleted
+/// ([`RowState::Deleted`], still laid out until a rebase or an upload
+/// drops it) — both are rows upstream's own generation still accounts
+/// for. An [`RowState::Inserted`] row has no upstream ordinal to guard
+/// and is never counted; the guard's caller passes a CLEAN model
+/// (`Draft::default()`) precisely so none exists here regardless.
+pub fn group_sizes(model: &MatrixModel) -> BTreeMap<String, usize> {
+    let mut sizes = BTreeMap::new();
+    for row in &model.rows {
+        if matches!(row.state, RowState::Document | RowState::Deleted) {
+            *sizes.entry(group_of(&row.label).to_string()).or_insert(0) += 1;
+        }
+    }
+    sizes
 }
 
 /// Parse a typed NUMERIC cell to the number a document holds.
@@ -1343,6 +1496,70 @@ mod tests {
         assert_eq!(dropped, vec![pair("T_a", "-20")]);
         assert_eq!(draft.state, DraftState::Clean);
         assert!(draft.edits.is_empty());
+    }
+
+    #[test]
+    fn rebase_refuses_edits_in_a_same_day_group_that_changed_size() {
+        let base =
+            crate::core::test_fixtures::flat_model(&["2026-09-18", "2026-09-18#2", "2026-12-18"]);
+        let newer = crate::core::test_fixtures::flat_model(&[
+            "2026-09-18",
+            "2026-09-18#2",
+            "2026-09-18#3",
+            "2026-12-18",
+        ]);
+        let mut draft = Draft::default();
+        draft.set(
+            (1, 3),
+            ("2026-09-18#2".into(), "amount".into()),
+            Value::F64(1.0),
+            "t0",
+        );
+        draft.set(
+            (2, 3),
+            ("2026-12-18".into(), "amount".into()),
+            Value::F64(2.0),
+            "t0",
+        );
+        draft.capture_groups(&base);
+        let (_, dropped) = draft.rebase(&newer);
+        assert!(
+            dropped
+                .iter()
+                .any(|(l, why)| l == "2026-09-18#2" && why.contains("2 → 3")),
+            "{dropped:?}"
+        );
+        assert_eq!(draft.edits.len(), 1, "the 2026-12-18 edit survives");
+    }
+
+    #[test]
+    fn rebase_without_captured_groups_applies_no_guard() {
+        let newer =
+            crate::core::test_fixtures::flat_model(&["2026-09-18", "2026-09-18#2", "2026-09-18#3"]);
+        let mut draft = Draft::default();
+        draft.set(
+            (1, 3),
+            ("2026-09-18#2".into(), "amount".into()),
+            Value::F64(1.0),
+            "t0",
+        );
+        let (_, dropped) = draft.rebase(&newer);
+        assert!(dropped.is_empty(), "{dropped:?}");
+    }
+
+    #[test]
+    fn captured_groups_round_trip_through_the_session() {
+        let base = crate::core::test_fixtures::flat_model(&["2026-09-18", "2026-09-18#2"]);
+        let mut draft = Draft::default();
+        draft.set(
+            (1, 3),
+            ("2026-09-18#2".into(), "amount".into()),
+            Value::F64(1.0),
+            "t0",
+        );
+        draft.capture_groups(&base);
+        let back = Draft::from_toml(&draft.to_toml());
+        assert_eq!(back.groups, draft.groups);
     }
 
     #[test]
