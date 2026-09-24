@@ -1,13 +1,10 @@
-//! Arrow-key nudging of the text in an open editor (2026-09-17): one
-//! unit of the painted precision per step. Pure — text in, text out — so
-//! the tile only decides WHICH type and precision the open target carries
-//! and writes the answer back into its `Input`. Nothing here commits:
-//! `enter` still commits and `escape` still cancels. A `Date` attribute
-//! no longer opens a text editor at all (2026-09-19): the segmented
-//! [`crate::core::DateTimeField`] owns dates, and its own `step` is the
-//! arithmetic there.
+//! Arrow-key nudging of the text in an open numeric editor: one unit of a
+//! precision per step. Pure — text in, text out — so a module decides
+//! which type and precision its open field carries and writes the answer
+//! back into its input. Nothing here commits. Shared by the market-data
+//! panel and the line pricer, which may not depend on each other.
 
-use geode_core::schema::ColumnType;
+use crate::schema::ColumnType;
 
 /// Step the number spelled by `text` by `steps` units.
 ///
