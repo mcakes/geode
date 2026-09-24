@@ -14927,6 +14927,41 @@ run_mutation "tile: a typed text label commits through parse_attr" \
   '                    Ok(_) => text.trim().to_string(),' \
   geode-marketdata o_on_an_integer_axis_opens_the_text_label_editor
 
+# ---- Upload assembly and the echo (egress spec §6, §7) -----------------
+
+# A row marked deleted is struck through on screen but must not be sent.
+# Mutated to keep every row, the deleted dividend goes upstream anyway.
+run_mutation "upload: assembly drops deleted rows" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '        .filter(|r| r.state != RowState::Deleted)' \
+  '        .filter(|_| true)' \
+  geode-marketdata a_dividend_draft_assembles_edits_deletes_and_inserts_in_painted_order
+
+# Every value goes at its declared type. Mutated to ignore a refused
+# push, a text edit in an f64 column assembles "successfully" into a
+# short column instead of being refused naming the row.
+run_mutation "upload: assembly checks the declared type" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '    if !push(column, value) {' \
+  '    if !push(column, value) && false {' \
+  geode-marketdata assembly_refuses_an_empty_cell_and_a_wrong_tag_naming_the_row
+
+# The minted id is Geode's, not the wire's: the echo arrives re-minted.
+# Mutated to compare it, every echo of a minted document differs.
+run_mutation "upload: echo ignores the minted label" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '    let minted = spec.rows.identity == RowIdentity::Minted;' \
+  '    let minted = false;' \
+  geode-marketdata echo_ignores_the_minted_label_and_counts_differing_rows
+
+# One ULP is a wire round trip; two is a different number. Mutated to
+# two, a changed value confirms the upload.
+run_mutation "upload: echo tolerates one ulp only" \
+  crates/geode-marketdata/src/core/upload.rs \
+  'const ULPS: u64 = 1;' \
+  'const ULPS: u64 = 2;' \
+  geode-marketdata echo_accepts_one_ulp_and_refuses_two
+
 # ---- Hidden row label (2026-09-20): dividend_id is not displayed ----
 
 # The delegate's one flag. Mutated to always show, a `RowLabel::Hidden`

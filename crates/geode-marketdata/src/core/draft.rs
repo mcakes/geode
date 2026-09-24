@@ -1340,6 +1340,7 @@ mod tests {
             source_time: Some(source_time.to_string()),
             header: Vec::new(),
             slice_columns: 0,
+            column_values: Vec::new(),
             // `rebase` never reads a column's `CellKind` — only its label
             // — so an empty vec here is honest, not a shortcut.
             column_kinds: Vec::new(),

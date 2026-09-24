@@ -482,3 +482,142 @@ pub(crate) fn mixed_snapshot(rows: &[(&str, f64, i64)]) -> Snapshot {
         provenance(BASE),
     )
 }
+
+/// A snapshot in the shape `compile_document` delivers `doc` in —
+/// `document_columns()` order (key, axes, values, document-level
+/// attributes), each value `DeterminedNonAdditive` and every label column
+/// `Additive`, every attribute repeated on every row — so an upload test
+/// can compare what `assemble` rebuilds with the very `DocumentRows` the
+/// snapshot came from (the round trip compares like with like). The key
+/// column is `underlying_ref`, the one both shipped datasets declare.
+pub(crate) fn snapshot_of(spec: &PanelSpec, doc: &geode_core::document::DocumentRows) -> Snapshot {
+    use geode_core::document::{Column, Value};
+    let n = doc.rows();
+    let column = |col: &Column| match col {
+        Column::F64(v) => TestColumn::F64(v.iter().map(|x| Some(*x)).collect()),
+        Column::I64(v) => TestColumn::I64(v.clone()),
+        Column::Utf8(v) => TestColumn::Dict(v.iter().map(|s| Some(s.clone())).collect()),
+        Column::Date(v) => TestColumn::Date(v.iter().map(|d| Some(*d)).collect()),
+    };
+    let repeated = |value: &Value| match value {
+        Value::F64(x) => TestColumn::F64(vec![Some(*x); n]),
+        Value::I64(x) => TestColumn::I64(vec![*x; n]),
+        Value::Utf8(s) => TestColumn::Dict(vec![Some(s.clone()); n]),
+        Value::Date(d) => TestColumn::Date(vec![Some(*d); n]),
+    };
+    let mut columns = vec![(
+        meta("underlying_ref", Attribution::Additive),
+        TestColumn::Dict(vec![Some(doc.key.join("/")); n]),
+    )];
+    columns.extend(
+        doc.axes
+            .iter()
+            .map(|(name, col)| (meta(name, Attribution::Additive), column(col))),
+    );
+    columns.extend(
+        doc.values
+            .iter()
+            .map(|(name, col)| (meta(name, Attribution::DeterminedNonAdditive), column(col))),
+    );
+    columns.extend(
+        doc.attributes
+            .iter()
+            .map(|(name, value)| (meta(name, Attribution::Additive), repeated(value))),
+    );
+    Snapshot::for_tests_with_provenance(
+        columns,
+        0,
+        Provenance {
+            datasets: vec![Freshness {
+                dataset: spec.dataset.into(),
+                as_of: Some(BASE.into()),
+                generation: 7,
+            }],
+            as_of_request: None,
+        },
+    )
+}
+
+/// The CVI terms and nodes [`fixture_cvi_rows`] lays out, term-major.
+pub(crate) const CVI_TERMS: [&str; 2] = ["2026-10-16", "2026-11-20"];
+pub(crate) const CVI_NODES: [f64; 3] = [-20.0, -1.0, 3.5];
+
+/// A [`crate::core::CVI`] document in the kind's own long form: two terms
+/// × three nodes, term-major, `param` running 0.1 … 0.6, each term's
+/// `forward`/`atm`/`skew` repeated on every node row of its slice, and the
+/// dataset's own value (`param, forward, atm, skew`) and attribute
+/// (`anchor_date, spot_ref`) orders.
+pub(crate) fn fixture_cvi_rows() -> geode_core::document::DocumentRows {
+    use geode_core::document::{Column, DocumentRows, Value};
+    let slices = [(4512.3, 0.182, -1.1), (4530.75, 0.19, -0.95)];
+    let (mut terms, mut nodes, mut params) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut fwd, mut atm, mut skew) = (Vec::new(), Vec::new(), Vec::new());
+    for (t, term) in CVI_TERMS.iter().enumerate() {
+        for (n, node) in CVI_NODES.iter().enumerate() {
+            terms.push(chrono::NaiveDate::parse_from_str(term, "%Y-%m-%d").unwrap());
+            nodes.push(*node);
+            params.push((t * CVI_NODES.len() + n + 1) as f64 / 10.0);
+            fwd.push(slices[t].0);
+            atm.push(slices[t].1);
+            skew.push(slices[t].2);
+        }
+    }
+    DocumentRows {
+        key: vec!["SPX.Z".into()],
+        attributes: vec![
+            ("anchor_date".into(), Value::Date(date(2026, 9, 12))),
+            ("spot_ref".into(), Value::F64(5000.0)),
+        ],
+        axes: vec![
+            ("term".into(), Column::Date(terms)),
+            ("node".into(), Column::F64(nodes)),
+        ],
+        values: vec![
+            ("param".into(), Column::F64(params)),
+            ("forward".into(), Column::F64(fwd)),
+            ("atm".into(), Column::F64(atm)),
+            ("skew".into(), Column::F64(skew)),
+        ],
+    }
+}
+
+/// A [`DIVIDEND`] document of three rows labelled `A`, `B`, `C`, in the
+/// dataset's own value (`ex_date, announced_date, pay_date, amount,
+/// status`) and attribute (`currency, schedule_date`) orders.
+pub(crate) fn fixture_dividend_rows() -> geode_core::document::DocumentRows {
+    use geode_core::document::{Column, DocumentRows, Value};
+    DocumentRows {
+        key: vec!["SPX.Z".into()],
+        attributes: vec![
+            ("currency".into(), Value::Utf8("USD".into())),
+            ("schedule_date".into(), Value::Date(date(2026, 9, 1))),
+        ],
+        axes: vec![(
+            "dividend_id".into(),
+            Column::Utf8(vec!["A".into(), "B".into(), "C".into()]),
+        )],
+        values: vec![
+            (
+                "ex_date".into(),
+                Column::Date(vec![
+                    date(2026, 9, 18),
+                    date(2026, 12, 18),
+                    date(2027, 3, 19),
+                ]),
+            ),
+            (
+                "announced_date".into(),
+                Column::Date(vec![date(2026, 8, 1), date(2026, 11, 1), date(2027, 2, 1)]),
+            ),
+            (
+                "pay_date".into(),
+                Column::Date(vec![date(2026, 10, 1), date(2027, 1, 4), date(2027, 4, 1)]),
+            ),
+            ("amount".into(), Column::F64(vec![1.25, 1.3, 1.35])),
+            (
+                "status".into(),
+                Column::Utf8(vec!["paid".into(), "declared".into(), "estimated".into()]),
+            ),
+        ],
+    }
+}

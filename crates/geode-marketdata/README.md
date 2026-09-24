@@ -14,7 +14,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | The pure half, no element, entity or window: `spec` (what a panel is), `matrix` (`MatrixModel::build`, the prepared grid a frame paints from, built once per delivery or edit), `draft` (edits keyed by cell and resolved across generations by row and column label), `cursor`, `menu` (the action list's rows and why each is or is not pickable), `nudge` (arrow-key stepping of an open editor's text), and `datefield` (the segmented date editor). |
+| `core` | The pure half, no element, entity or window: `spec` (what a panel is), `matrix` (`MatrixModel::build`, the prepared grid a frame paints from, built once per delivery or edit), `draft` (edits keyed by cell and resolved across generations by row and column label), `cursor`, `menu` (the action list's rows and why each is or is not pickable), `nudge` (arrow-key stepping of an open editor's text), `upload` (`assemble`: the base generation plus the draft as the `DocumentRows` an upload sends, every value at its declared type; `echo_differs`: rows differing between what was sent and a delivered echo, ignoring a minted row label, `f64` within one ULP), and `datefield` (the segmented date editor). |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload` and the rest, parsed to data. |
 | `header` | The header row, prepared once per change by `HeaderModel::prepare` and painted with no formatting of its own. |
 | `tile` | `MarketDataTile`: requests one document by key through `DataHandle`, stages under the barrier, owns the cursor, the editor, the draft and the parked drafts per underlying. |
