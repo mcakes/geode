@@ -315,17 +315,17 @@ const DIVIDEND_FORMAT: ColumnFormat = ColumnFormat {
 /// every `Value::Date` as `%Y-%m-%d` regardless of what the column's
 /// format says — the same reason `status`, also `Utf8`, uses it too.
 ///
-/// Only `ex_date`, `amount` and `status` are `required`
+/// Every column is `required`
 /// ([`Draft::incomplete_rows`](crate::core::draft::Draft::incomplete_rows)'s
-/// gate on when an inserted row counts as complete, spec §5.2): a
-/// dividend can be scheduled the moment its ex-date, amount and status
-/// are known — an `estimated` row, `STATUSES`' own first word — while
-/// `announced_date` and `pay_date` are facts the issuer discloses later,
-/// once the dividend is formally declared. An inserted row must not be
-/// held incomplete waiting on information that does not exist yet.
-/// `status` is the one column with a closed vocabulary (`choices`),
-/// stepped in place exactly as a config dialog's `Choice` field is (spec
-/// §4.4).
+/// gate on when an inserted row counts as complete, spec §5.2), including
+/// `announced_date` and `pay_date` (ruling 2026-09-23): an undeclared
+/// dividend still carries an ISSUER-ESTIMATED announce and pay date on the
+/// wire, so a trader inserting a row ahead of the formal declaration types
+/// the estimate the desk is already working from rather than leaving the
+/// row incomplete for dates that in fact already exist, just not yet as
+/// facts the issuer has confirmed. `status` is the one column with a
+/// closed vocabulary (`choices`), stepped in place exactly as a config
+/// dialog's `Choice` field is (spec §4.4).
 pub const DIVIDEND: PanelSpec = PanelSpec {
     kind: "dividend",
     title: "Dividend",
@@ -351,7 +351,7 @@ pub const DIVIDEND: PanelSpec = PanelSpec {
             ty: ColumnType::Date,
             format: ColumnFormat::TEXT,
             choices: None,
-            required: false,
+            required: true,
         },
         ValueColumn {
             column: "pay_date",
@@ -359,7 +359,7 @@ pub const DIVIDEND: PanelSpec = PanelSpec {
             ty: ColumnType::Date,
             format: ColumnFormat::TEXT,
             choices: None,
-            required: false,
+            required: true,
         },
         ValueColumn {
             column: "amount",
@@ -527,18 +527,17 @@ mod tests {
         assert!(DIVIDEND.slice_values.is_empty());
     }
 
-    /// Only `ex_date`, `amount` and `status` are required (see
-    /// [`DIVIDEND`]'s own doc comment for why `announced`/`pay` are
-    /// not), and `status` alone carries a closed vocabulary — the one
-    /// [`STATUSES`] this crate must keep in step with
-    /// `geode_documents::dividend::STATUSES` (checked in `geode-app`,
-    /// the one crate where both are visible).
+    /// Every column is required (see [`DIVIDEND`]'s own doc comment for
+    /// why `announced`/`pay` are, ruling 2026-09-23), and `status` alone
+    /// carries a closed vocabulary — the one [`STATUSES`] this crate must
+    /// keep in step with `geode_documents::dividend::STATUSES` (checked
+    /// in `geode-app`, the one crate where both are visible).
     #[test]
-    fn the_dividend_spec_requires_ex_date_amount_and_status_only() {
+    fn the_dividend_spec_requires_every_column() {
         let required = |label: &str| DIVIDEND.value_column(label).unwrap().required;
         assert!(required("ex_date"));
-        assert!(!required("announced_date"));
-        assert!(!required("pay_date"));
+        assert!(required("announced_date"));
+        assert!(required("pay_date"));
         assert!(required("amount"));
         assert!(required("status"));
         assert_eq!(
@@ -546,5 +545,15 @@ mod tests {
             Some(&STATUSES[..])
         );
         assert_eq!(STATUSES, ["estimated", "declared", "paid", "cancelled"]);
+    }
+
+    #[test]
+    fn dividend_dates_are_required() {
+        let Columns::Values(cols) = DIVIDEND.columns else {
+            panic!()
+        };
+        for c in ["announced_date", "pay_date", "ex_date", "amount", "status"] {
+            assert!(cols.iter().find(|v| v.column == c).unwrap().required, "{c}");
+        }
     }
 }

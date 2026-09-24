@@ -11911,7 +11911,7 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                             skipped += 1;
                             return None;
                         }
-                        numeric_value(r.state, cell).map(|v| ((row, ci), v))
+                        numeric_value(r.state, cell).map(|v| ((row, ci), v, ty_of(ci)))
                     })
                     .collect()
             }' \
@@ -11925,7 +11925,7 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                     r.cells
                         .get(col)
                         .and_then(|cell| numeric_value(r.state, cell))
-                        .map(|v| ((ri, col), v))
+                        .map(|v| ((ri, col), v, ty_of(col)))
                 })
                 .collect(),' \
   geode-marketdata \
@@ -14830,6 +14830,22 @@ run_mutation "draft: rename_row re-hangs followers" \
   '        self.rehang_followers(Some(from), Some(to.to_string()));' \
   '        let _ = (from, to);' \
   geode-marketdata rename_row_rehangs_its_followers
+
+# A cell written on an inserted row after an upload is unsent work.
+# Mutated to leave `Sent`, a matching echo clears the draft and loses it.
+run_mutation "draft: set_row_cell leaves Sent" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {' \
+  '                if false {' \
+  geode-marketdata set_row_cell_moves_a_sent_draft_back_to_editing
+
+# An I64 column's bump lands I64. Mutated to F64, egress refuses the
+# type mismatch the first time an integer column is bumped.
+run_mutation "draft: bump lands the declared integer type" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
+  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::F64(current + delta)),' \
+  geode-marketdata bump_lands_the_declared_type
 
 # `o` on a row that already has a follower re-hangs that follower onto
 # the NEW row (Task 8's review), so the new row sits immediately below

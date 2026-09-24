@@ -35,8 +35,10 @@ pub enum DraftState {
     /// `Editing` — see [`Draft::on_delivered`].
     Behind { newer: String },
     /// An upload succeeded; the edits are kept and painted as sent until
-    /// the echo clears them (§9.4, Part 4).
-    Sent,
+    /// the echo clears them (§9.4, Part 4). `at` is the upload's own RFC
+    /// 3339 time — the header's `sent HH:MM` (Part 4) names WHEN it went,
+    /// the same shape `Behind`'s `newer` already carries.
+    Sent { at: String },
 }
 
 /// What the header says about the draft at a glance (spec 2026-09-14 §4):
@@ -48,7 +50,7 @@ pub enum DraftBadge {
     Clean,
     Dirty,
     Behind { newer: String },
-    Sent,
+    Sent { at: String },
 }
 
 /// What a panel does when a DIFFERENT generation is delivered while its
@@ -208,7 +210,7 @@ impl Draft {
     }
 
     pub fn is_sent(&self) -> bool {
-        self.state == DraftState::Sent
+        matches!(self.state, DraftState::Sent { .. })
     }
 
     pub fn is_behind(&self) -> bool {
@@ -234,7 +236,7 @@ impl Draft {
         // `Behind` survives an edit: the panel is still painting the base
         // generation, so a further edit is against the same document.
         // `Sent` does not — the draft no longer matches what was sent.
-        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+        if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
         }
     }
@@ -263,7 +265,7 @@ impl Draft {
             self.base = Some(base.to_string());
         }
         self.attrs.insert(column.to_string(), value);
-        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+        if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
         }
     }
@@ -284,7 +286,7 @@ impl Draft {
                 cells: BTreeMap::new(),
             },
         );
-        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+        if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
         }
     }
@@ -305,7 +307,7 @@ impl Draft {
         if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
         }
-        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+        if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
         }
         let result = match self.rows.get(label) {
@@ -344,10 +346,18 @@ impl Draft {
     /// `Deleted` one) or a label with no row edit at all — since a cell
     /// edit on a row the draft did not insert belongs in `Draft::set`
     /// against the model's own grid index, not here.
+    ///
+    /// The same `Sent`-clears-on-a-further-edit rule `set` follows: a cell
+    /// written into an inserted row after an upload is unsent work the
+    /// echo has not seen, so the draft must not still read as sent once it
+    /// exists.
     pub fn set_row_cell(&mut self, label: &str, column_label: &str, value: Value) -> bool {
         match self.rows.get_mut(label) {
             Some(RowEdit::Inserted { cells, .. }) => {
                 cells.insert(column_label.to_string(), value);
+                if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
+                    self.state = DraftState::Editing;
+                }
                 true
             }
             _ => false,
@@ -497,7 +507,11 @@ impl Draft {
     }
 
     /// Add `delta` to each given cell's current value, answering how many
-    /// cells were written.
+    /// cells were written — or the first typing refusal, with NOTHING
+    /// written (spec 2026-09-23 amendment): `:bump 0.5` across a ladder
+    /// that mixes an `F64` node with an `I64` one must not land the F64
+    /// cells and then stop, since that is a partial bump the trader never
+    /// asked for and cannot see as partial from the header alone.
     ///
     /// The caller passes each cell's *current* value — what the model is
     /// painting, which is the draft's own value where one exists — so that
@@ -509,21 +523,30 @@ impl Draft {
     /// tile) reads each candidate cell's [`CellKind`] through
     /// [`MatrixModel::kind_of`] and passes only the `Number` ones —
     /// exactly the same door `f64_at`-vs-`display_at` reading in
-    /// `matrix::cell_of` decides by. A bumped cell always lands as
-    /// [`Value::F64`]: `delta` is itself an `f64`, and preserving an
-    /// `I64` cell's own type through a bump is not this slice's problem.
+    /// `matrix::cell_of` decides by. Each cell also carries its own
+    /// declared [`ColumnType`], read by the caller off the spec (or the
+    /// model's `value_type`), and [`bumped`] is the one rule for what
+    /// TYPE the result lands as.
     pub fn bump(
         &mut self,
-        cells: impl Iterator<Item = ((usize, usize), (String, String), f64)>,
+        cells: impl Iterator<Item = ((usize, usize), (String, String), f64, ColumnType)>,
         delta: f64,
         base: &str,
-    ) -> usize {
-        let mut n = 0;
-        for (cell, labels, current) in cells {
-            self.set(cell, labels, Value::F64(current + delta), base);
-            n += 1;
+    ) -> Result<usize, String> {
+        // Every cell's result is computed before anything is written —
+        // the collect below is the boundary between "checking" and
+        // "writing" — so a refusal partway through leaves the draft
+        // exactly as it was.
+        let mut writes = Vec::new();
+        for (cell, labels, current, ty) in cells {
+            let value = bumped(current, delta, ty, &labels.1)?;
+            writes.push((cell, labels, value));
         }
-        n
+        let n = writes.len();
+        for (cell, labels, value) in writes {
+            self.set(cell, labels, value, base);
+        }
+        Ok(n)
     }
 
     /// A generation was delivered. Answers whether the state changed, so
@@ -746,7 +769,7 @@ impl Draft {
             DraftState::Behind { newer } => DraftBadge::Behind {
                 newer: newer.clone(),
             },
-            DraftState::Sent => DraftBadge::Sent,
+            DraftState::Sent { at } => DraftBadge::Sent { at: at.clone() },
         }
     }
 
@@ -1003,6 +1026,21 @@ pub(crate) fn local_hhmm(rfc3339: &str, clock: geode_core::clock::Clock) -> Stri
     match chrono::DateTime::parse_from_rfc3339(rfc3339) {
         Ok(t) => clock.hm(t.to_utc()),
         Err(_) => rfc3339.to_string(),
+    }
+}
+
+/// `:bump`'s one typing rule: the result lands the column's declared type.
+/// An `I64` column takes whole-number deltas only; anything else is refused
+/// rather than rounded, since a rounded bump is a value the trader did not
+/// ask for. `column` is the label the caller's cell came from, named in the
+/// refusal because a ROW bump's own notice would otherwise say nothing
+/// about which node in the ladder objected.
+pub fn bumped(current: f64, delta: f64, ty: ColumnType, column: &str) -> Result<Value, String> {
+    match ty {
+        ColumnType::F64 => Ok(Value::F64(current + delta)),
+        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),
+        ColumnType::I64 => Err(format!("bump: {column} takes whole numbers")),
+        other => Err(format!("bump: {column} is not numeric ({other:?})")),
     }
 }
 
@@ -1335,18 +1373,66 @@ mod tests {
     fn bump_adds_the_delta_to_each_cells_current_value() {
         let mut draft = Draft::default();
         let cells = vec![
-            ((0, 0), pair("T1", "-20"), 1.0),
-            ((0, 1), pair("T1", "-1"), 2.5),
+            ((0, 0), pair("T1", "-20"), 1.0, ColumnType::F64),
+            ((0, 1), pair("T1", "-1"), 2.5, ColumnType::F64),
         ];
-        assert_eq!(draft.bump(cells.into_iter(), 0.5, BASE), 2);
+        assert_eq!(draft.bump(cells.into_iter(), 0.5, BASE), Ok(2));
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.5)));
         assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(3.0)));
         assert_eq!(draft.state, DraftState::Editing);
         // Bumping again reads the caller's *current* value, which is the
         // draft's own by then — the tile passes what the model paints.
-        let again = vec![((0, 0), pair("T1", "-20"), 1.5)];
-        assert_eq!(draft.bump(again.into_iter(), 0.5, BASE), 1);
+        let again = vec![((0, 0), pair("T1", "-20"), 1.5, ColumnType::F64)];
+        assert_eq!(draft.bump(again.into_iter(), 0.5, BASE), Ok(1));
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
+    }
+
+    #[test]
+    fn bump_lands_the_declared_type() {
+        let mut draft = Draft::default();
+        let n = draft
+            .bump(
+                [
+                    ((0, 0), ("a".into(), "x".into()), 1.5, ColumnType::F64),
+                    ((0, 1), ("a".into(), "y".into()), 3.0, ColumnType::I64),
+                ]
+                .into_iter(),
+                2.0,
+                "t0",
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(draft.edits[&(0, 0)], Value::F64(3.5));
+        assert_eq!(draft.edits[&(0, 1)], Value::I64(5));
+    }
+
+    #[test]
+    fn bump_refuses_a_fractional_delta_on_an_integer_column_before_writing() {
+        let mut draft = Draft::default();
+        let err = draft
+            .bump(
+                [
+                    ((0, 0), ("a".into(), "x".into()), 1.5, ColumnType::F64),
+                    ((0, 1), ("a".into(), "y".into()), 3.0, ColumnType::I64),
+                ]
+                .into_iter(),
+                0.5,
+                "t0",
+            )
+            .unwrap_err();
+        assert!(err.contains("whole numbers") && err.contains("y"), "{err}");
+        assert!(draft.is_empty(), "no cell written on a refusal");
+    }
+
+    #[test]
+    fn set_row_cell_moves_a_sent_draft_back_to_editing() {
+        let mut draft = Draft::default();
+        draft.insert_row("new-1".into(), None, "t0");
+        draft.state = DraftState::Sent {
+            at: "2026-09-24T09:00:00Z".into(),
+        };
+        assert!(draft.set_row_cell("new-1", "amount", Value::F64(1.0)));
+        assert_eq!(draft.state, DraftState::Editing);
     }
 
     /// `:bump` only ever reaches a `Number` cell — the tile decides that
@@ -1385,8 +1471,15 @@ mod tests {
         draft.set((1, 1), pair("T2", "-1"), Value::F64(1.0), BASE);
         assert_eq!(draft.count_phrase(), "3 cells");
 
-        draft.state = DraftState::Sent;
-        assert_eq!(draft.badge(), DraftBadge::Sent);
+        draft.state = DraftState::Sent {
+            at: BASE.to_string(),
+        };
+        assert_eq!(
+            draft.badge(),
+            DraftBadge::Sent {
+                at: BASE.to_string()
+            }
+        );
 
         draft.state = DraftState::Behind {
             newer: NEWER.to_string(),

@@ -1607,7 +1607,9 @@ mod tests {
             Value::F64(0.5),
             BASE,
         );
-        draft.state = DraftState::Sent;
+        draft.state = DraftState::Sent {
+            at: "2026-09-12T14:05:00Z".into(),
+        };
         let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
         assert!(model.rows[1].cells[3].sent);
         assert!(model.rows[1].cells[3].edited);

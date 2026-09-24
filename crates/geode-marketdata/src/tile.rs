@@ -50,7 +50,7 @@
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
-use crate::core::draft::{RowDelete, RowEdit, local_hhmm};
+use crate::core::draft::{RowDelete, RowEdit, bumped, local_hhmm};
 use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
@@ -246,7 +246,7 @@ const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
 /// One cell a `:bump` writes: where it is, the labels that make the edit
 /// portable across generations, and the value being added to — the shape
 /// [`Draft::bump`] consumes.
-type BumpCell = ((usize, usize), (String, String), f64);
+type BumpCell = ((usize, usize), (String, String), f64, ColumnType);
 
 /// The open cell or attribute editor (spec §8.6/§5.2): the input the
 /// trader is typing into, and what it was opened on.
@@ -3484,9 +3484,30 @@ impl MarketDataTile {
                 Some(Value::Utf8(_) | Value::Date(_)) | None => None,
             })
         };
+        // Each cell's own declared type — `Draft::bumped`'s one typing
+        // rule, read off the spec rather than guessed from the painted
+        // value: `Columns::Values` names each column's own type by its
+        // grid position (`column_required`'s own convention — a flat
+        // model's columns are built from `flat_columns()` in that exact
+        // order); `Columns::Axis` gives every ladder cell the spec's
+        // `value_type`, except a leading slice-value cell, which is
+        // always `F64` regardless (`SliceValue`'s own doc comment: a
+        // slice value is f64 only).
+        let ty_of = |ci: usize| -> ColumnType {
+            match self.spec.columns {
+                Columns::Values(_) => self
+                    .spec
+                    .flat_columns()
+                    .get(ci)
+                    .map(|vc| vc.ty)
+                    .unwrap_or(self.spec.value_type),
+                Columns::Axis(_) if ci < self.model.slice_columns => ColumnType::F64,
+                Columns::Axis(_) => self.spec.value_type,
+            }
+        };
         let mut skipped = 0usize;
-        // Each cell to bump as (model cell, its current value).
-        let values: Vec<((usize, usize), f64)> = match axis {
+        // Each cell to bump as (model cell, its current value, its declared type).
+        let values: Vec<((usize, usize), f64, ColumnType)> = match axis {
             // A row bump walks the LADDER: the leading `slice_columns`
             // cells are the term's own forward/atm/skew, and bumping a
             // term's vols must not move its forward with them. A column
@@ -3503,7 +3524,7 @@ impl MarketDataTile {
                             skipped += 1;
                             return None;
                         }
-                        numeric_value(r.state, cell).map(|v| ((row, ci), v))
+                        numeric_value(r.state, cell).map(|v| ((row, ci), v, ty_of(ci)))
                     })
                     .collect()
             }
@@ -3511,6 +3532,7 @@ impl MarketDataTile {
                 if !matches!(self.model.kind_of(col), Some(CellKind::Number(_))) {
                     return Err("not a numeric column".to_string());
                 }
+                let ty = ty_of(col);
                 self.model
                     .rows
                     .iter()
@@ -3520,7 +3542,7 @@ impl MarketDataTile {
                         r.cells
                             .get(col)
                             .and_then(|cell| numeric_value(r.state, cell))
-                            .map(|v| ((ri, col), v))
+                            .map(|v| ((ri, col), v, ty))
                     })
                     .collect()
             }
@@ -3541,22 +3563,22 @@ impl MarketDataTile {
         // an inserted row's goes to its `RowEdit.cells` by label instead,
         // with the same arithmetic.
         let mut document: Vec<BumpCell> = Vec::with_capacity(values.len());
-        let mut inserted: Vec<((String, String), f64)> = Vec::new();
-        for (cell, value) in values {
+        let mut inserted: Vec<((String, String), f64, ColumnType)> = Vec::new();
+        for (cell, value, ty) in values {
             let labels = self.model.label_of(cell);
             let labels = (labels.0.to_string(), labels.1.to_string());
             let r = &self.model.rows[cell.0];
             match r.state {
-                RowState::Inserted => inserted.push((labels, value)),
+                RowState::Inserted => inserted.push((labels, value, ty)),
                 RowState::Document | RowState::Deleted => {
-                    document.push((r.cells[cell.1].cell_ref, labels, value));
+                    document.push((r.cells[cell.1].cell_ref, labels, value, ty));
                 }
             }
         }
-        self.draft.bump(document.into_iter(), delta, &base);
-        for ((row_label, col_label), value) in inserted {
-            self.draft
-                .set_row_cell(&row_label, &col_label, Value::F64(value + delta));
+        self.draft.bump(document.into_iter(), delta, &base)?;
+        for ((row_label, col_label), value, ty) in inserted {
+            let value = bumped(value, delta, ty, &col_label)?;
+            self.draft.set_row_cell(&row_label, &col_label, value);
         }
         self.rebuild_model(cx);
         self.changed(cx);

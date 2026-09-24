@@ -244,7 +244,13 @@ impl HeaderModel {
                     Tone::Warn,
                 )),
             ),
-            DraftBadge::Sent => (false, Some(("sent".into(), Tone::Time))),
+            DraftBadge::Sent { at } => (
+                false,
+                Some((
+                    format!("sent {}", local_hhmm(at, i.clock)).into(),
+                    Tone::Time,
+                )),
+            ),
         };
         if i.key.is_some() && i.model.rows.is_empty() {
             state = Some(if i.unresolved_restore && dirty {
@@ -722,6 +728,32 @@ mod tests {
                 .as_ref()
                 .map(|(t, tone)| (t.to_string(), *tone)),
             Some((expected, Tone::Warn))
+        );
+    }
+
+    /// `Sent { at }` (Part 4) reads `sent HH:MM` through the same
+    /// `local_hhmm` `Behind`'s `update HH:MM` does, and paints in
+    /// `Tone::Time` rather than `Tone::Warn` — a sent draft is not a
+    /// problem the way a behind one is — and carries no dirty dot: the
+    /// edits are no longer unsent work as far as the header's glance goes.
+    #[test]
+    fn sent_reads_sent_hhmm_and_carries_no_dirty_dot() {
+        let model = model_with_rows();
+        let key = vec!["SPX.Z".to_string()];
+        let at = chrono::Utc::now().to_rfc3339();
+        let sent = HeaderModel::prepare(inputs(
+            &model,
+            Some(&key),
+            DraftBadge::Sent { at: at.clone() },
+        ));
+        let expected = format!(
+            "sent {}",
+            Clock::utc().hm(chrono::DateTime::parse_from_rfc3339(&at).unwrap().to_utc())
+        );
+        assert!(!sent.dirty);
+        assert_eq!(
+            sent.state.as_ref().map(|(t, tone)| (t.to_string(), *tone)),
+            Some((expected, Tone::Time))
         );
     }
 
