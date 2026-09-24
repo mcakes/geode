@@ -28,6 +28,7 @@ use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::tiling::TileId;
+use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, SharedString, Window, div};
 use gpui_component::table::{DataTable, TableEvent, TableState};
@@ -35,6 +36,21 @@ use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 use std::rc::Rc;
 
 pub(crate) const LOADING: &str = "loading…";
+
+/// `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b` steps — `vimnav`'s fixed ±5
+/// and ±10, the market-data panel's own constants, times the count.
+pub(crate) const HALF_PAGE: usize = 5;
+pub(crate) const FULL_PAGE: usize = 10;
+
+/// `/` over the tree column's text (spec §8.5): the vim jump model — a
+/// sheet's rows are the trader's own order, so find moves the cursor and
+/// never narrows.
+struct FindState {
+    /// Where `/` opened; `escape` returns here.
+    origin: Cursor,
+    /// The last committed query, for `n`/`N`.
+    committed: Option<String>,
+}
 
 /// The cursor by line identity (planning decision 10): an edit elsewhere,
 /// a delivery or an expansion never moves it. `last_row` is where it was,
@@ -79,6 +95,9 @@ pub struct PricerTile {
     title: SharedString,
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
+    /// What `p`/`shift+p` put (Task 11): the last `y y` or `d d`.
+    pub(crate) register: Option<crate::core::RowSpec>,
+    find: Option<FindState>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -251,6 +270,8 @@ impl PricerTile {
             title: SharedString::default(),
             stack: None,
             clock: app_clock(cx),
+            register: None,
+            find: None,
         };
         this.resolve_plan();
         this.rebuild(cx);
@@ -304,9 +325,54 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// Task 7 fills this in.
+    /// `/` (spec §8.5): every keystroke searches from the ORIGIN, so a
+    /// lengthening query walks forward and a shortened one walks back
+    /// (vim's incsearch); `escape` returns to the origin.
     pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = (event, window, cx);
+        let _ = window;
+        match event {
+            FindEvent::Changed(query) => {
+                let origin = match &self.find {
+                    Some(f) => f.origin,
+                    None => {
+                        self.find = Some(FindState {
+                            origin: self.cursor,
+                            committed: None,
+                        });
+                        self.cursor
+                    }
+                };
+                let from = origin
+                    .line
+                    .and_then(|id| self.model.grid_row_of(id))
+                    .unwrap_or(0);
+                if let Some(row) =
+                    find_match(&self.row_labels(), from, FindDirection::Forward, &query)
+                {
+                    self.set_cursor_row(row);
+                }
+            }
+            FindEvent::Committed(query) => {
+                if let Some(f) = self.find.as_mut()
+                    && !query.is_empty()
+                {
+                    f.committed = Some(query);
+                } else if !query.is_empty() {
+                    self.find = Some(FindState {
+                        origin: self.cursor,
+                        committed: Some(query),
+                    });
+                }
+            }
+            FindEvent::Cancelled => {
+                if let Some(f) = self.find.take() {
+                    self.cursor = f.origin;
+                }
+            }
+        }
+        self.sync_cursor(cx);
+        self.rebuild_chrome();
+        cx.notify();
     }
 
     /// Task 8 fills this in.
@@ -365,10 +431,71 @@ impl PricerTile {
         let Some(verb) = action.0.strip_prefix("pricer::") else {
             return false;
         };
-        let _ = (count, window);
+        let _ = window;
+        let n = count.unwrap_or(1).max(1) as usize;
+        self.footer = None;
         match verb {
+            "down" => self.step_rows(n as isize),
+            "up" => self.step_rows(-(n as isize)),
+            "page_down" => self.step_rows((HALF_PAGE * n) as isize),
+            "page_up" => self.step_rows(-((HALF_PAGE * n) as isize)),
+            "page_down_full" => self.step_rows((FULL_PAGE * n) as isize),
+            "page_up_full" => self.step_rows(-((FULL_PAGE * n) as isize)),
+            "top" => self.jump_row(count.map(|c| c as usize).unwrap_or(1)),
+            "bottom" => self.jump_row(count.map(|c| c as usize).unwrap_or(usize::MAX)),
+            "left" => self.cursor.col = self.cursor.col.saturating_sub(n),
+            "right" => {
+                let last = self.plan.columns.len().saturating_sub(1);
+                self.cursor.col = (self.cursor.col + n).min(last);
+            }
+            "first_col" => self.cursor.col = 0,
+            "last_col" => self.cursor.col = self.plan.columns.len().saturating_sub(1),
+            "toggle" => return self.tree_verb(None, cx),
+            "expand" => return self.tree_verb(Some(true), cx),
+            "collapse" => return self.tree_verb(Some(false), cx),
+            "expand_all" | "collapse_all" => {
+                if verb == "expand_all" {
+                    self.expansion.open_all(&self.sheet);
+                } else {
+                    // Off a leg, the cursor lands on its package (it is
+                    // about to disappear).
+                    if let Some(p) = self.cursor_sheet_row().and_then(|r| self.sheet.parent(r)) {
+                        self.cursor.line = Some(self.sheet.id(p));
+                    }
+                    self.expansion.close_all();
+                }
+                self.rebuild(cx);
+                return true;
+            }
+            "yank_row" => {
+                if let Some(row) = self.cursor_sheet_row() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                        self.sheet.shorthand(row),
+                    ));
+                    self.register = Some(crate::core::clip::spec_of(&self.sheet, row));
+                }
+            }
+            "yank_col" => {
+                let col = self.cursor.col;
+                let text = self
+                    .model
+                    .rows
+                    .iter()
+                    .filter(|r| r.kind != GridRowKind::Entry)
+                    .map(|r| {
+                        r.cells
+                            .get(col)
+                            .map(|c| c.text.to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+            "find_next" => self.repeat_find(FindDirection::Forward, n),
+            "find_prev" => self.repeat_find(FindDirection::Backward, n),
             "escape" => {
-                self.footer = None;
+                self.find = None;
                 self.notice = None;
             }
             _ => return false,
@@ -377,6 +504,94 @@ impl PricerTile {
         self.rebuild_chrome();
         cx.notify();
         true
+    }
+
+    /// The sheet row under the cursor.
+    pub(crate) fn cursor_sheet_row(&self) -> Option<usize> {
+        self.cursor_row().and_then(|r| self.model.rows[r].row)
+    }
+
+    fn step_rows(&mut self, delta: isize) {
+        let rows: Vec<usize> = self.cursor_rows().collect();
+        if rows.is_empty() {
+            return;
+        }
+        let pos = self
+            .cursor_row()
+            .and_then(|r| rows.iter().position(|x| *x == r))
+            .unwrap_or(0) as isize;
+        let to = (pos + delta).clamp(0, rows.len() as isize - 1) as usize;
+        self.set_cursor_row(rows[to]);
+    }
+
+    /// `g g` / `shift+g`: the first/last row, or the `count`th (1-based).
+    fn jump_row(&mut self, nth: usize) {
+        let rows: Vec<usize> = self.cursor_rows().collect();
+        if let Some(r) = rows.get(nth.saturating_sub(1).min(rows.len().saturating_sub(1))) {
+            self.set_cursor_row(*r);
+        }
+    }
+
+    /// `space`/`z a` (`None`), `z o`, `z c` on the cursor's package — on a
+    /// leg, its package; closing from a leg lands the cursor on the
+    /// package, the blotter's `z c` rule. A line with no package does
+    /// nothing.
+    fn tree_verb(&mut self, open: Option<bool>, cx: &mut Context<Self>) -> bool {
+        let Some(row) = self.cursor_sheet_row() else {
+            return true;
+        };
+        let package = if self.sheet.is_package(row) {
+            row
+        } else if let Some(p) = self.sheet.parent(row) {
+            p
+        } else {
+            return true;
+        };
+        let id = self.sheet.id(package);
+        let now_open = match open {
+            Some(o) => {
+                self.expansion.set(id, o);
+                o
+            }
+            None => self.expansion.toggle(id),
+        };
+        if !now_open {
+            self.cursor.line = Some(id);
+        }
+        self.rebuild(cx);
+        true
+    }
+
+    /// The chevron at grid row `row` (spec §8.2: its click is `space`).
+    pub(crate) fn toggle_grid_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.set_cursor_row(row);
+        self.tree_verb(None, cx);
+    }
+
+    fn row_labels(&self) -> Vec<String> {
+        self.model.rows.iter().map(|r| r.tree.to_string()).collect()
+    }
+
+    fn repeat_find(&mut self, dir: FindDirection, count: usize) {
+        let Some(query) = self.find.as_ref().and_then(|f| f.committed.clone()) else {
+            return;
+        };
+        let labels = self.row_labels();
+        if labels.is_empty() {
+            return;
+        }
+        let mut at = self.cursor_row().unwrap_or(0);
+        for _ in 0..count {
+            let start = match dir {
+                FindDirection::Forward => (at + 1) % labels.len(),
+                FindDirection::Backward => (at + labels.len() - 1) % labels.len(),
+            };
+            match find_match(&labels, start, dir, &query) {
+                Some(row) => at = row,
+                None => return,
+            }
+        }
+        self.set_cursor_row(at);
     }
 
     pub fn command(
@@ -580,11 +795,6 @@ impl PricerTile {
         }
         // `SelectRow`/`SelectColumn` are what `sync_cursor` itself emits:
         // deliberately unmatched. Task 10 adds `DoubleClickedCell`.
-    }
-
-    /// Task 7's tree verbs; the chevron click lands here.
-    pub(crate) fn toggle_grid_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        let _ = (row, cx);
     }
 }
 
@@ -1139,5 +1349,202 @@ pub(crate) mod tests {
             title
         });
         assert_eq!(title, "pricer · untitled-1");
+    }
+
+    pub(crate) fn centre_of(
+        vcx: &mut VisualTestContext,
+        selector: &str,
+    ) -> gpui::Point<gpui::Pixels> {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        // `debug_bounds` wants a `&'static str`: leaked, a test-only cost.
+        let selector: &'static str = Box::leak(selector.to_string().into_boxed_str());
+        vcx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is painted"))
+            .center()
+    }
+
+    /// A left mouse-down/up pair carrying `click_count` (gpui's own
+    /// `simulate_click` hardwires 1).
+    pub(crate) fn click_at(
+        vcx: &mut VisualTestContext,
+        at: gpui::Point<gpui::Pixels>,
+        click_count: usize,
+    ) {
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+        });
+    }
+
+    /// [A, P(L1, L2), B] with P closed: grid rows A=0, P=1, B=2.
+    const BOOK: [&str; 3] = [
+        "SPX Z26 5000 C",
+        "-5 SPX Z26 4800/5200 CS",
+        "SPX Z26 4000 P",
+    ];
+
+    // ---- Task 7 ----
+
+    #[gpui::test]
+    fn motions_move_the_cursor_and_never_into_the_tree_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(
+            h.cursor(&vcx),
+            Some((0, 0)),
+            "a restore with no cursor lands on the first row"
+        );
+        h.dispatch(&mut vcx, "down", Some(2));
+        assert_eq!(h.cursor(&vcx), Some((2, 0)));
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(h.cursor(&vcx), Some((2, 0)), "clamped at the last row");
+        h.dispatch(&mut vcx, "top", None);
+        assert_eq!(h.cursor(&vcx), Some((0, 0)));
+        h.dispatch(&mut vcx, "bottom", None);
+        assert_eq!(h.cursor(&vcx), Some((2, 0)));
+        h.dispatch(&mut vcx, "left", None);
+        assert_eq!(
+            h.cursor(&vcx),
+            Some((2, 0)),
+            "column 0 is the first plan column; the tree is not a target"
+        );
+        h.dispatch(&mut vcx, "right", Some(3));
+        assert_eq!(h.cursor(&vcx), Some((2, 3)));
+        h.dispatch(&mut vcx, "last_col", None);
+        let last = h.columns(&vcx).len() - 1;
+        assert_eq!(h.cursor(&vcx), Some((2, last)));
+        h.dispatch(&mut vcx, "first_col", None);
+        assert_eq!(h.cursor(&vcx), Some((2, 0)));
+        h.dispatch(&mut vcx, "page_up", None);
+        assert_eq!(
+            h.cursor(&vcx),
+            Some((0, 0)),
+            "half a page (5) clamps at the top"
+        );
+    }
+
+    #[gpui::test]
+    fn tree_verbs_open_and_close_packages_and_a_leg_collapses_to_its_package(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "toggle", None);
+        assert_eq!(
+            h.tree(&vcx).len(),
+            5,
+            "space opens the package under the cursor"
+        );
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2), "on the first leg");
+        h.dispatch(&mut vcx, "collapse", None);
+        assert_eq!(h.tree(&vcx).len(), 3);
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(1),
+            "z c on a leg closes its package and lands on it"
+        );
+        h.dispatch(&mut vcx, "expand", None);
+        assert_eq!(h.tree(&vcx).len(), 5);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "collapse_all", None);
+        assert_eq!(h.tree(&vcx).len(), 3);
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(1),
+            "z M off a leg lands on its package"
+        );
+        h.dispatch(&mut vcx, "expand_all", None);
+        assert_eq!(h.tree(&vcx).len(), 5);
+        let r = crate::session::Record::from_table(&h.serialize(&mut vcx));
+        assert_eq!(
+            r.expanded,
+            vec![crate::core::LineId(2)],
+            "the session carries the open package"
+        );
+    }
+
+    #[gpui::test]
+    fn a_chevron_click_toggles_once_even_on_a_double_click(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let at = centre_of(&mut vcx, "pricer-chevron-1");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 5);
+        let at = centre_of(&mut vcx, "pricer-chevron-1");
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(
+            h.tree(&vcx).len(),
+            3,
+            "the second press of a double-click is ignored"
+        );
+    }
+
+    #[gpui::test]
+    fn a_cell_click_moves_the_cursor_to_that_cell(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let at = centre_of(&mut vcx, "pricer-cell-2-3");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(
+            h.cursor(&vcx),
+            Some((2, 2)),
+            "table column 3 is plan column 2"
+        );
+    }
+
+    #[gpui::test]
+    fn yy_yanks_the_rows_shorthand_and_yc_the_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "yank_row", None);
+        let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(clip.as_deref(), Some("-5 SPX Z26 4800/5200 CS"));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.register.is_some()),
+            "p puts what y y yanked"
+        );
+        h.dispatch(&mut vcx, "right", Some(3)); // strike
+        h.dispatch(&mut vcx, "yank_col", None);
+        let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(
+            clip.as_deref(),
+            Some("5000\n\n4000"),
+            "the package's strike is blank"
+        );
+    }
+
+    #[gpui::test]
+    fn find_jumps_from_its_origin_repeats_with_n_and_escape_returns(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let find = |vcx: &mut VisualTestContext, e: FindEvent| {
+            vcx.update(|window, cx| h.content.find(e, window, cx));
+        };
+        find(&mut vcx, FindEvent::Changed("4000".into()));
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2));
+        find(&mut vcx, FindEvent::Committed("spx".into()));
+        h.dispatch(&mut vcx, "find_next", None);
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0), "wraps");
+        h.dispatch(&mut vcx, "find_prev", None);
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2));
+        find(&mut vcx, FindEvent::Changed("cs".into()));
+        find(&mut vcx, FindEvent::Cancelled);
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(0),
+            "escape returns to where `/` opened"
+        );
     }
 }
