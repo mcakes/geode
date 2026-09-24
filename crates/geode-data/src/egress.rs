@@ -428,6 +428,16 @@ mod tests {
             }
         );
         assert_silent(&rx);
+
+        // A two-part document key joins with '/' in the address, same as
+        // EgressSpec::address itself.
+        let mut two_part = params(4, TARGET, DIVIDEND, "A");
+        two_part.rows.key = vec!["A".to_string(), "B".to_string()];
+        workers.upload(two_part, &documents());
+        let m = bus_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(m.topic.as_str(), "marketdata/dividend/A/B");
+        assert_eq!(next_upload(&rx).result, Ok(()));
+        assert_silent(&rx);
     }
 
     #[test]

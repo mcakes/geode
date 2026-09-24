@@ -250,7 +250,10 @@ pub trait Adapter: Send + Sync {
     /// touches another. `None` if this adapter cannot subscribe at all.
     fn subscription(&self) -> Option<Box<dyn Subscription>>;
 
-    /// The upload side, or `None` if this adapter has none.
+    /// The upload side, or `None` if this adapter has none. Each call
+    /// returns a FRESH handle, like `subscription`: `resolve` probes one to
+    /// check availability and discards it, then `EgressWorkers::spawn` takes
+    /// another to own for the life of the worker thread.
     fn egress(&self) -> Option<Box<dyn Egress>>;
 
     /// On-demand history capability. The default returns None for adapters that

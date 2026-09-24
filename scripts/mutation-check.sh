@@ -1435,6 +1435,13 @@ run_mutation "egress: resolve drops an adapter without egress" \
   geode-data \
   resolve_drops_an_unknown_adapter_and_one_without_egress
 
+run_mutation "events: an upload outcome keys on (tile, tag), not the tile alone" \
+  crates/geode-app/src/events.rs \
+  '        DataEvent::Upload(o) => Key::Upload(o.key, o.tag),' \
+  '        DataEvent::Upload(o) => Key::Upload(o.key, 0),' \
+  geode-app \
+  two_upload_outcomes_for_the_same_tile_are_both_delivered
+
 # ---- discovery scheduler (Phase 3 §5.3)
 
 run_mutation "scheduler: every source is polled immediately at start" \
