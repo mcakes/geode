@@ -2653,6 +2653,12 @@ dependencies = [
  "chrono",
  "criterion",
  "geode-core",
+ "geode-data",
+ "geode-shell",
+ "gpui-component",
+ "gpui-pre",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
