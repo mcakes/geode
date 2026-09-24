@@ -1481,6 +1481,11 @@ pub(crate) mod tests {
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
         assert_eq!(h.tree(&vcx).len(), 5);
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(1),
+            "the chevron click also moves the tile cursor onto the package"
+        );
         let at = centre_of(&mut vcx, "pricer-chevron-1");
         click_at(&mut vcx, at, 1);
         click_at(&mut vcx, at, 2);
@@ -1489,6 +1494,11 @@ pub(crate) mod tests {
             h.tree(&vcx).len(),
             3,
             "the second press of a double-click is ignored"
+        );
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(1),
+            "closing from the chevron lands the cursor back on the package"
         );
     }
 
