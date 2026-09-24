@@ -16,7 +16,7 @@ use crate::core::edit::{Edit, EditError, Undo};
 use crate::core::entry::{history, next_place, place_for};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
-use crate::core::storage::from_rows;
+use crate::core::storage::{from_rows, to_rows};
 use crate::core::template::Template;
 use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
@@ -60,6 +60,12 @@ pub(crate) const LOADING: &str = "loading…";
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(1);
 pub(crate) const REFUSED: &str =
     "pricing request refused: the data service is busy or gone; retrying";
+
+/// Spec §7.3: how long a change waits before the write-behind save fires.
+/// A change inside the window re-arms it (replacing the task drops the
+/// old one), so a burst saves once.
+pub(crate) const SAVE_IDLE: Duration = Duration::from_secs(1);
+pub(crate) const NOT_SAVED: &str = "sheet not saved: the store refused it; the next edit retries";
 
 /// `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b` steps — `vimnav`'s fixed ±5
 /// and ±10, the market-data panel's own constants, times the count.
@@ -189,6 +195,9 @@ pub struct PricerTile {
     pub(crate) undo: UndoStack,
     refresh_task: Option<Task<()>>,
     retry_task: Option<Task<()>>,
+    /// The write-behind idle timer (spec §7.3): armed by every change,
+    /// re-armed by the next one, flushed by `on_release`.
+    save_task: Option<Task<()>>,
     /// The open entry field (spec §8.4): `o`/`shift+o` open it, `enter`
     /// parses and inserts through `apply_edit`, `escape` or a click drops
     /// it. `None` in normal mode.
@@ -348,6 +357,11 @@ impl PricerTile {
         // A closed tile gives its name back (spec §7.4's open set). Tasks
         // 8 and 12 add the cancel and the final save here.
         cx.on_release(|this: &mut PricerTile, _cx| {
+            // Spec §7.3: the sheet is not lost until the tile is — a save
+            // still waiting on its idle timer runs now.
+            if this.save_task.take().is_some() {
+                this.save_now();
+            }
             this.data.cancel(QueryKey(this.id.0));
             this.shared.open.borrow_mut().remove(&this.sheet.name);
         })
@@ -387,6 +401,7 @@ impl PricerTile {
             undo: UndoStack::default(),
             refresh_task: None,
             retry_task: None,
+            save_task: None,
             entry: None,
             editor: None,
             menu: None,
@@ -923,6 +938,46 @@ impl PricerTile {
         self.submit(cx);
         if self.refresh_task.is_none() {
             self.restart_timer(cx);
+        }
+        self.arm_save(cx);
+    }
+
+    /// Spec §7.3: every change arms a one-second idle timer; a change
+    /// inside the window re-arms it (replacing the task drops the old
+    /// one). A pending load owns the sheet until `loaded` swaps it in, so
+    /// the empty fallback is never armed to save over it.
+    fn arm_save(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_IDLE).await;
+            let _ = this.update(cx, |t, cx| {
+                t.save_task = None;
+                t.save_now();
+                t.rebuild_chrome();
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The whole sheet, once. An empty sheet publishes nothing (the last
+    /// non-empty generation stays as history, spec §7.2); a refusal paints
+    /// the header notice and the next burst retries.
+    pub(crate) fn save_now(&mut self) {
+        let Some(rows) = to_rows(&self.sheet) else {
+            return;
+        };
+        if self.shared.store.save(&self.sheet.name, rows) {
+            if self
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.as_ref() == NOT_SAVED)
+            {
+                self.notice = None;
+            }
+        } else {
+            self.notice = Some(NOT_SAVED.into());
         }
     }
 
@@ -1694,6 +1749,7 @@ impl PricerTile {
                 self.restart_timer(cx);
                 self.rebuild_chrome();
                 cx.notify();
+                self.arm_save(cx);
                 Ok(())
             }
             // These four edit the sheet (Shift/Spot through `apply_edit`
@@ -1747,6 +1803,7 @@ impl PricerTile {
         self.sheet.view = name.to_string();
         self.resolve_plan();
         self.rebuild(cx);
+        self.arm_save(cx);
         Ok(())
     }
 
@@ -3736,6 +3793,117 @@ pub(crate) mod tests {
             h.prices()[0].lines.len(),
             4,
             "Price all reached the tile, not the table underneath it"
+        );
+    }
+
+    // ---- Task 12 ----
+
+    fn settle(vcx: &mut VisualTestContext, d: std::time::Duration) {
+        vcx.executor().advance_clock(d);
+        vcx.run_until_parked();
+    }
+
+    fn stored(h: &Harness) -> Sheet {
+        crate::core::from_rows("book", &h.store.get("book").expect("a document")).unwrap()
+    }
+
+    #[gpui::test]
+    fn an_edit_burst_saves_once_after_a_second_of_quiet(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let base = h.store.save_count();
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        settle(&mut vcx, std::time::Duration::from_millis(500));
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 3 });
+        settle(&mut vcx, std::time::Duration::from_millis(500));
+        assert_eq!(
+            h.store.save_count(),
+            base,
+            "a second edit inside the window re-arms it"
+        );
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.store.save_count(), base + 1, "one save for the burst");
+        assert_eq!(stored(&h).qty(0), 3);
+    }
+
+    #[gpui::test]
+    fn an_emptied_sheet_publishes_nothing_and_the_last_document_stays(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+        let base = h.store.save_count();
+        h.dispatch(&mut vcx, "delete", None);
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(
+            h.store.save_count(),
+            base,
+            "a zero-row document is never published (spec §7.2)"
+        );
+        assert_eq!(stored(&h).len(), 1);
+    }
+
+    #[gpui::test]
+    fn a_refused_save_notices_and_the_next_burst_retries(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.store.set_refusing(true);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(NOT_SAVED));
+        h.store.set_refusing(false);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 4 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.notice(&vcx), None);
+        assert_eq!(stored(&h).qty(0), 4);
+    }
+
+    #[gpui::test]
+    fn view_and_refresh_changes_are_saved_with_the_sheet(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.command(&mut vcx, "view barrier").unwrap();
+        h.command(&mut vcx, "refresh off").unwrap();
+        settle(&mut vcx, SAVE_IDLE);
+        let s = stored(&h);
+        assert_eq!(s.view, "barrier");
+        assert_eq!(s.refresh, crate::core::Refresh::Off);
+    }
+
+    #[gpui::test]
+    fn closing_flushes_a_pending_save_and_the_next_tile_reopens_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 9 });
+        let (store, factory, frame, diagnostics) = (
+            h.store.clone(),
+            h.factory.clone(),
+            h.frame.clone(),
+            h.diagnostics.clone(),
+        );
+        drop(h);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        drop(vcx);
+        let saved = crate::core::from_rows("book", &store.get("book").unwrap()).unwrap();
+        assert_eq!(saved.qty(0), 9, "the pending save ran on close");
+        let mut record = toml::Table::new();
+        record.insert("sheet".into(), "book".into());
+        let title = cx.update(|cx| {
+            let mut title = String::new();
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let o = factory.create(
+                    TileId(TILE + 3),
+                    Some(&record),
+                    frame.clone(),
+                    diagnostics.clone(),
+                    window,
+                    cx,
+                );
+                title = o.content.title(cx).to_string();
+                cx.new(|cx| gpui_component::Root::new(o.view, window, cx))
+            })
+            .unwrap();
+            title
+        });
+        assert_eq!(
+            title, "pricer · book",
+            "the name was given back, so it opens under it"
         );
     }
 }
