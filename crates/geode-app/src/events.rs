@@ -20,6 +20,7 @@ enum Key {
     Distinct(QueryKey),
     Catalog(QueryKey),
     Price(QueryKey),
+    Upload(QueryKey),
     Published(String, String),
     Fetched(String, String, bool),
     Load,
@@ -35,6 +36,7 @@ fn key(event: &DataEvent) -> Key {
         DataEvent::Distinct(o) => Key::Distinct(o.key),
         DataEvent::Catalog(o) => Key::Catalog(o.key),
         DataEvent::Price(o) => Key::Price(o.key),
+        DataEvent::Upload(o) => Key::Upload(o.key),
         DataEvent::Published { dataset, batch, .. } => {
             Key::Published(dataset.clone(), batch.clone())
         }
@@ -57,6 +59,7 @@ fn tag(event: &DataEvent) -> Option<u64> {
         DataEvent::Distinct(o) => Some(o.tag),
         DataEvent::Catalog(o) => Some(o.tag),
         DataEvent::Price(o) => Some(o.tag),
+        DataEvent::Upload(o) => Some(o.tag),
         _ => None,
     }
 }

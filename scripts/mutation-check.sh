@@ -1405,6 +1405,36 @@ run_mutation "egress config: {key} is substituted" \
   geode-core \
   address_substitutes_key_when_present_and_is_unchanged_without_it
 
+# ---- egress workers (market-data egress, Task 7)
+
+run_mutation "egress: a write error answers Err" \
+  crates/geode-data/src/egress.rs \
+  '            Err(e) => return refuse(e.to_string()),' \
+  '            Err(_) => Vec::new(),' \
+  geode-data \
+  a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
+
+run_mutation "egress: an adapter error answers Err naming the target" \
+  crates/geode-data/src/egress.rs \
+  '            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));' \
+  '            .map_err(|e| e.to_string());' \
+  geode-data \
+  a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
+
+run_mutation "egress: queue full answers Err" \
+  crates/geode-data/src/egress.rs \
+  '            Err(TrySendError::Full(_)) => Some("queue full"),' \
+  '            Err(TrySendError::Full(_)) => None,' \
+  geode-data \
+  a_full_queue_answers_err_at_once_and_the_queued_uploads_still_run
+
+run_mutation "egress: resolve drops an adapter without egress" \
+  crates/geode-data/src/egress.rs \
+  '            Some(adapter) if adapter.egress().is_none() => {' \
+  '            Some(adapter) if adapter.egress().is_none() && false => {' \
+  geode-data \
+  resolve_drops_an_unknown_adapter_and_one_without_egress
+
 # ---- discovery scheduler (Phase 3 §5.3)
 
 run_mutation "scheduler: every source is polled immediately at start" \

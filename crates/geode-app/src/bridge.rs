@@ -128,6 +128,9 @@ pub fn data_setup(
                 documents
             },
             pricer,
+            // `egress.toml` is not read yet; every upload answers "unknown
+            // target" until the app resolves its targets here.
+            egress: Vec::new(),
         },
         views,
         dimensions,
@@ -527,6 +530,18 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     });
                 }
                 match event {
+                    // Not routed yet: no tile submits an upload. Delivering
+                    // it to the requesting tile is the panel's `:upload`.
+                    DataEvent::Upload(outcome) => {
+                        tracing::debug!(
+                            target: "geode::query",
+                            "upload outcome for {:?} (tag {}) to '{}': {:?}",
+                            outcome.key,
+                            outcome.tag,
+                            outcome.target,
+                            outcome.result
+                        );
+                    }
                     DataEvent::Query(outcome) => {
                         shell.update(cx, |s, cx| {
                             s.deliver(Delivery::Query(outcome), window, cx)

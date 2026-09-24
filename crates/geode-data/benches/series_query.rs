@@ -103,6 +103,7 @@ fn service() -> (
         sources: Vec::new(),
         adapters: Default::default(),
         documents: Default::default(),
+        egress: Vec::new(),
         pricer: PricerConfig::default(),
     })
     .unwrap();

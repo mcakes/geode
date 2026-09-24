@@ -228,6 +228,7 @@ fn service(
         sources: Vec::new(),
         adapters: Default::default(),
         documents: Default::default(),
+        egress: Vec::new(),
         pricer: Default::default(),
     })
     .unwrap();
@@ -256,6 +257,7 @@ fn reopen(
         sources: Vec::new(),
         adapters: Default::default(),
         documents: Default::default(),
+        egress: Vec::new(),
         pricer: Default::default(),
     })
     .unwrap()
@@ -354,6 +356,7 @@ fn service_with_history(
         sources: Vec::new(),
         adapters: Default::default(),
         documents: Default::default(),
+        egress: Vec::new(),
         pricer: Default::default(),
     })
     .unwrap();
